@@ -1,0 +1,24 @@
+/target
+/dist
+/node_modules
+**/*.rs.bk
+.DS_Store
+.vscode/
+.idea/
+
+# Local SQLite databases and runtime data. These never belong in the repo;
+# the container mounts /data as a volume.
+/data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# VAPID and any local keypairs. Real secrets stay in _shared/keys/ on the
+# internal deployment; the public repo never sees them.
+/keys/
+*.pem
+*.p12
+*.pfx
+
+# mdBook output (Phase 14)
+/book

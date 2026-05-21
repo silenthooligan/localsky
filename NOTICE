@@ -1,0 +1,34 @@
+LocalSky
+Copyright 2026 Erik Skean (silenthooligan)
+
+This product includes software developed at LocalSky
+(https://github.com/silenthooligan/localsky).
+
+Portions of the irrigation engine are informed by:
+
+  * FAO Irrigation and Drainage Paper No. 56 (Allen et al., 1998).
+    Crop evapotranspiration: Guidelines for computing crop water
+    requirements. Food and Agriculture Organization of the United Nations.
+
+  * ASCE-EWRI Standardized Reference Evapotranspiration Equation (2005).
+    American Society of Civil Engineers.
+
+  * UF/IFAS Extension publications on Florida turfgrass species, including
+    ENH6 (Bahia), ENH8 (Centipede), ENH11 (Zoysia), ENH19 (Bermuda),
+    ENH62 (St. Augustine), and ENH1115 (ornamental plant irrigation).
+    University of Florida Institute of Food and Agricultural Sciences.
+
+  * USDA NRCS Part 652 (National Irrigation Guide), soil infiltration and
+    available-water tables.
+
+  * The Home Assistant Smart Irrigation integration
+    (https://github.com/jeroenterheerdt/HAsmartirrigation) and the
+    Irrigation Unlimited integration
+    (https://github.com/rgc99/irrigation_unlimited), both of which served
+    as prior art for the LocalSky native engine.
+
+This product uses (but does not redistribute the source of):
+
+  * Open-Meteo (https://open-meteo.com/) for forecast data.
+  * RainViewer (https://www.rainviewer.com/api.html) for radar tiles.
+  * Leaflet (https://leafletjs.com/) for map rendering.

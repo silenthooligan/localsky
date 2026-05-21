@@ -1,0 +1,100 @@
+# Changelog
+
+All notable changes to LocalSky are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+The v2 burndown. Lays a ports-and-adapters foundation underneath the existing v0.1 deployment without changing observable behavior, plus the standalone, UI, and ops work to make LocalSky a viable open-source product.
+
+### Added
+
+#### Engine (was SI + IU, now native)
+
+- FAO-56 Penman-Monteith reference ET0 with ASCE-EWRI 2005 simplified variant and Hargreaves-Samani 1985 fallback when only temp range + lat + DOY are available
+- Single-bucket soil water balance with TAW/RAW/MAD per zone; depletion-driven scheduling
+- Infiltration-aware cycle-and-soak splitter that respects per-soil + per-slope infiltration rates
+- 12-species grass catalog with monthly Kc piecewise curves and UF/IFAS citations (St. Augustine, Bermuda, Zoysia, Bahia, Centipede, KBG, TTTF, PRG, plus ornamental shrubs, vegetable garden, drip / xeriscape)
+- 7-class USDA soil texture catalog (FAO-56 Table 19 + USDA NRCS Part 652) with FC, WP, AW, and slope-graded infiltration
+- 17-rule skip ladder extracted to `engine::skip_rules`; v0.1 hardcoded constants exposed as `SkipRuleParams` config fields whose defaults preserve previous verdicts exactly
+- 7-day verdict strip and water-budget projections derived from native engine
+
+#### Configuration
+
+- Full TOML schema (deployment, features, sources, controllers, zones, llm, notifications, engine params, mqtt, webpush)
+- `${VAR}` env interpolation; `env_compat` layer synthesizes a v2 Config from legacy env vars so existing deployments boot unchanged
+- Versioned migrations between schema revisions
+- Atomic writes (tmp + fsync + rename) with snapshot-before-write into `config_snapshots` (20-version retention) and always-reachable `/api/config/rollback`
+- Recursive secret redaction with sentinel + unredact roundtrip on PUT so `/api/config` never leaks tokens (4 unit tests)
+- Validation: target_min < saturation, area > 0, precip in (0, 200], no whitespace in ids, lat/lon ranges; structured error responses
+
+#### First-run wizard + settings UI
+
+- 8-step first-run wizard: Welcome -> Location -> Sources -> Controllers -> Zones -> LLM -> Notifications -> Review + Apply
+- Wizard REST endpoints (`/api/wizard/draft`, `/apply`, `/test_source`, `/test_controller`, `/scan_zones`, `/geocode`)
+- Settings UI under `/settings/*` with editors for location, sources (list + add/remove/test), controllers (list + add/remove/test), zones (list + per-zone form), LLM, notifications, advanced/engine
+- `<SetupGate/>` redirects to `/setup/welcome` until `/data/localsky.toml` exists
+
+#### Persistence
+
+- Hand-rolled migration runner with versioned SQL files and `assert_monotonic()` per-PR unit test
+- `runs` evolved to v2 (status, controller_id, source, et0_mm, etc) via table-rebuild migration; DB-backed in-flight run state (no in-memory loss across restarts)
+- `sensor_history` time-series store with `(epoch, source_id, key)` PK and per-source freshness query
+- `verdict_history` with `inputs_json` for engine replay against historical conditions
+- `config_snapshots` retention trigger; `push_subscriptions` moved out of `push/store.rs` into persistence layer
+
+#### Controllers HAL
+
+- `IrrigationController` port with three adapters at launch: DryRun (demo + tests), OpenSprinklerDirect (HTTP API, MD5 auth), HaServiceCall (legacy continuity)
+- Arc-swap controller registry; hot-reload swaps the default mid-session without interrupting in-flight runs
+- `ControllerCaps` declared per adapter (flow_meter, rain_sensor, master_valve, multi_zone_parallel, history_query, remote_program_upload)
+- mDNS discovery hook in wizard for `_opensprinkler._tcp` and `_esphomelib._tcp`
+
+#### Sources + standalone sensors
+
+- `WeatherSource` port + `MergedSnapshot` with per-field provenance `{value, source_id, observed_at}`
+- Per-field merge policies (max for rain/wind, min for low temp, configurable priority for ET0)
+- DemoReplay synthetic source; TempestUdp (LAN); OpenMeteo (with `et0_fao_evapotranspiration` query)
+- **Standalone sensor paths** (no HA required):
+  - **MQTT subscribe source**: connects to any broker, wildcards + JSON path + scale/offset; pairs cleanly with the outbound publisher
+  - **Ecowitt local source**: POST receiver at `/ingest/ecowitt` for GW1100/GW2000 gateways
+  - **HTTP webhook source**: generic JSON POST at `/ingest/webhook/<id>` for ESPHome, custom integrations, scripts
+
+#### LLM (replaces internal Aperture router)
+
+- `LlmProvider` port with two adapters: OllamaProvider (native `/api/chat`) and OpenaiCompatProvider (`/v1/chat/completions`, covers OpenAI, Anthropic-compat shims, vLLM, LM Studio, llama.cpp `/v1`, and any private gateway)
+- Boot-time `auto_detect` probes `localhost:11434`, `:8080`, `:1234`; first success wins
+- `Advisor` accepts `Arc<dyn LlmProvider>`; TTL cache and prompts unchanged; cache key includes model so swap invalidates cleanly
+
+#### HA bridge (optional, not required)
+
+- MQTT discovery publisher: HA users get auto-created `sensor.localsky_*`, `binary_sensor.localsky_zone_*_running`, `switch.localsky_zone_*_run_now` without LocalSky reading HA
+- Outbound publish skips entities tagged `attribution = "LocalSky"` on inbound MQTT to prevent feedback cycles
+- Legacy `HaServiceCall` controller for v0.1 continuity
+
+#### Health, observability, demo
+
+- `/api/health` reports per-source freshness (fresh/stale/offline) + per-controller summary + DB + LLM
+- `LOCALSKY_DEMO=1`: synthetic data feeder populates TempestStore, IrrigationStore, ForecastStore so the dashboard renders fully without any real hardware; cycling verdicts; 7-day forecast variety; 4 demo zones
+
+#### UI
+
+- Mobile parity polish: zone math reveal + 14-day daily-totals sparkline on `/irrigation/zone/:slug`
+- Design system primitives (`<Panel/>`, `<Card/>`, `<Sheet/>`, `<Toggle/>`, `<Slider/>`, `<SegmentedControl/>`, `<FormField/>`, `<EmptyState/>`)
+- `<Sheet/>` is viewport-aware (bottom-sheet mobile, centered modal desktop)
+
+#### Open-source readiness
+
+- Apache-2.0 license, NOTICE with citations, `.env.example`, expanded `.gitignore`
+- Public README, CONTRIBUTING, SECURITY, CODE_OF_CONDUCT, this CHANGELOG
+- Docs site under `docs/` covering getting-started, standalone, controllers, sensors, irrigation-engine, grass-species, soil-textures, skip-rules, configuration, api, ux-journey, hacs, migration
+- `scripts/sanitize-for-public.sh` codifies the internal-to-public scrub
+
+### Internal
+
+- 157 unit tests covering engine math, persistence migrations, controllers, sources, LLM providers, config redaction, and engine inputs
+- `cargo check --features ssr`: zero warnings; `cargo check --features hydrate --target wasm32-unknown-unknown`: zero warnings
+- All v0.1 behavior paths still work; v2 modules are additive
+
+## [0.1.0] - Internal release
+
+Initial homelab deployment. Tempest UDP weather, Open-Meteo forecast, Home Assistant Smart Irrigation + Irrigation Unlimited integration, OpenAI-compatible LLM advisor, four hardcoded zones, glass-morphism PWA UI. Never publicly released.

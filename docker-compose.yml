@@ -1,0 +1,49 @@
+# LocalSky — local-first weather + irrigation PWA.
+#
+# Run with:   docker compose up -d
+# Demo mode:  docker compose --profile demo up -d   (no hardware required)
+#
+# Port 8090 serves the web UI.
+# Port 50222 UDP receives Tempest WeatherFlow broadcasts on the LAN.
+#
+# All configuration after first-run lives in /data/localsky.toml (managed
+# via the /setup wizard + /settings UI). The env vars below cover boot
+# defaults; everything is overridable through the running app.
+
+services:
+  localsky:
+    image: ${LOCALSKY_IMAGE:-ghcr.io/silenthooligan/localsky:latest}
+    container_name: localsky
+    restart: unless-stopped
+    # network_mode: host lets the container receive Tempest UDP broadcasts
+    # without a bridge that drops broadcast traffic. Drop this line if you
+    # have no Tempest hub on the LAN; you can still use Open-Meteo + NWS
+    # forecasts and any cloud or HTTP-POST sensor source.
+    network_mode: host
+    environment:
+      - TZ=${TZ:-Etc/UTC}
+      - RUST_LOG=${RUST_LOG:-info}
+      - LEPTOS_SITE_ADDR=0.0.0.0:8090
+      - LEPTOS_SITE_ROOT=site
+      - HISTORY_DB_PATH=/data/irrigation.db
+      # Optional Home Assistant peer (REST + MQTT discovery). LocalSky
+      # works fine without these — see docs/standalone.md.
+      - HA_URL=${HA_URL:-}
+      - HA_TOKEN=${HA_TOKEN:-}
+      # Optional LLM advisor. Any OpenAI-compatible endpoint works:
+      # Ollama, llama.cpp, LM Studio, vLLM, OpenAI, Anthropic, etc.
+      - LLM_BASE_URL=${LLM_BASE_URL:-}
+      - LLM_ADVISOR_MODEL=${LLM_ADVISOR_MODEL:-}
+      - LLM_ADVISOR_DISABLED=${LLM_ADVISOR_DISABLED:-}
+      # Optional Web Push notifications. Generate a VAPID keypair with
+      # the web-push CLI and mount the private key as /keys/vapid-private.pem.
+      - VAPID_PUBLIC_KEY=${VAPID_PUBLIC_KEY:-}
+      - VAPID_PRIVATE_KEY_PATH=${VAPID_PRIVATE_KEY_PATH:-/keys/vapid-private.pem}
+      - VAPID_SUBJECT=${VAPID_SUBJECT:-}
+    volumes:
+      - localsky-data:/data
+      # Mount your VAPID keys directory read-only here if you use Web Push.
+      # - ./keys:/keys:ro
+
+volumes:
+  localsky-data:

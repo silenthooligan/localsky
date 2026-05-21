@@ -1,0 +1,6 @@
+# Runtime image directory.
+# The container serves /grass-species/* from this folder.
+# Image files (st_augustine.jpg, bermuda.jpg, etc.) live in
+# docs/assets/grass-species/ in the repo; the docker build copies
+# them here. See docs/assets/grass-species/README.md for the
+# convention.
