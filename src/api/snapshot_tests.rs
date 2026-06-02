@@ -1,0 +1,111 @@
+// Snapshot tests on /api/v1/* response shapes.
+//
+// These tests don't exercise the HTTP routing or live data; they
+// serialize a default-state instance of each response type and lock the
+// rendered JSON via `insta::assert_json_snapshot!`. The point is to
+// catch silent breaking changes to the public API contract:
+//
+//   - field rename     -> snapshot diff
+//   - field removed    -> snapshot diff
+//   - field type change-> snapshot diff
+//   - default value change -> snapshot diff
+//
+// On an intentional API change, run `cargo insta review` to accept the
+// new shape and bump the `api_version` constant in src/api/info.rs.
+//
+// The /api/v1 prefix is documented as stable in docs/src/api.md:
+//   MAJOR: breaking shape change (field removed, renamed, retyped)
+//   MINOR: additive (new optional field, new endpoint)
+//   PATCH: bug fix that does not alter the contract
+//
+// Snapshots live alongside the test in src/api/snapshots/.
+
+#[cfg(test)]
+mod tests {
+    use crate::forecast::snapshot::ForecastSnapshot;
+    use crate::ha::snapshot::IrrigationSnapshot;
+    use crate::tempest::state::Snapshot as TempestSnapshot;
+    use insta::assert_json_snapshot;
+    use serde::Serialize;
+    use serde_json::json;
+
+    /// `/api/v1/info` shape. Locked separately from the test in info.rs
+    /// (which validates SemVer format) because that one doesn't catch
+    /// added or renamed fields.
+    #[derive(Serialize)]
+    struct InfoFixture {
+        service: &'static str,
+        service_version: &'static str,
+        api_version: &'static str,
+    }
+
+    #[test]
+    fn info_v1_shape() {
+        let fixture = InfoFixture {
+            service: "localsky",
+            service_version: "0.2.0-alpha.1",
+            api_version: super::super::info::API_VERSION,
+        };
+        assert_json_snapshot!("info_v1", fixture);
+    }
+
+    /// `/api/v1/snapshot` (Tempest weather). Default-state instance so
+    /// every field renders with a deterministic value (numeric 0,
+    /// empty string / vec, None as null).
+    #[test]
+    fn tempest_v1_shape() {
+        assert_json_snapshot!("tempest_v1", TempestSnapshot::default());
+    }
+
+    /// `/api/v1/irrigation/snapshot`.
+    #[test]
+    fn irrigation_v1_shape() {
+        assert_json_snapshot!("irrigation_v1", IrrigationSnapshot::default());
+    }
+
+    /// `/api/v1/forecast/snapshot`.
+    #[test]
+    fn forecast_v1_shape() {
+        assert_json_snapshot!("forecast_v1", ForecastSnapshot::default());
+    }
+
+    /// Sanity-check the action POST envelope (the HACS integration's
+    /// run_zone / stop_all services write JSON matching this shape).
+    #[test]
+    fn irrigation_action_envelope() {
+        let envelope = json!({
+            "kind": "run",
+            "zone": "back_yard",
+            "seconds": 600,
+        });
+        assert_json_snapshot!("irrigation_action_run", envelope);
+    }
+
+    /// `/api/v1/forecast/bias` shape. Locked at the identity model so
+    /// the rendered JSON is deterministic (every month, multiplier 1.0,
+    /// samples 0); the actual bias values are integration-side and
+    /// vary per deployment.
+    #[test]
+    fn forecast_bias_v1_shape() {
+        use crate::engine::forecast_bias::{BiasModel, DEFAULT_WINDOW_DAYS, MIN_OBSERVATIONS};
+        let model = BiasModel::identity();
+        let months: Vec<_> = (1..=12u32)
+            .map(|m| {
+                json!({
+                    "month": m,
+                    "multiplier": model.multiplier_for(m),
+                    "samples": model.sample_count_for(m),
+                    "description": model.describe_month(m),
+                })
+            })
+            .collect();
+        let body = json!({
+            "current_month_multiplier": 1.0,
+            "current_month": 1,
+            "min_observations_required": MIN_OBSERVATIONS,
+            "window_days": DEFAULT_WINDOW_DAYS,
+            "months": months,
+        });
+        assert_json_snapshot!("forecast_bias_v1", body);
+    }
+}

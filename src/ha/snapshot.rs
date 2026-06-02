@@ -21,9 +21,16 @@ pub struct ZoneState {
     /// all four zones. Kept on the zone for symmetry with the binary
     /// sensor entity IDs (`garage_door_opener_<hex>_*`).
     pub hex: String,
-    /// True when the matching `binary_sensor.aperture_sprinklers_<slug>_station_running`
+    /// True when the matching `binary_sensor.<prefix>_<slug>_station_running`
     /// is `on`.
     pub running: bool,
+    /// Whether `running` is a trusted readback. HA path: always true
+    /// (from the binary_sensor). Native path: true only when the zone's
+    /// controller can report station state (OpenSprinkler/Rachio);
+    /// fire-and-forget controllers (MQTT) report false here so the UI can
+    /// show "running state unknown" rather than implying a confirmed off.
+    #[serde(default = "default_true_running_known")]
+    pub running_known: bool,
     /// Today's accumulated run-minutes for this zone. Sums every
     /// recorded run that started since local midnight. Populated from
     /// the SQLite history layer once Phase 3 ingest lands; zero in
@@ -55,6 +62,13 @@ pub struct ZoneState {
     /// `/site/photos/back_yard.jpg` or an off-site `https://...` link).
     #[serde(default)]
     pub photo_url: Option<String>,
+
+    /// This zone's own watering verdict for the upcoming run. `None`
+    /// before the first refresh or for weather-only deployments. Lets the
+    /// dashboard show that one zone is skipping (e.g. soil-saturated)
+    /// while others run.
+    #[serde(default)]
+    pub verdict: Option<ZoneVerdict>,
 }
 
 /// Per-zone flex-math breakdown for the math-transparency tile. All
@@ -373,11 +387,21 @@ pub struct IrrigationSnapshot {
     /// True when the most recent poll completed without error.
     pub ha_reachable: bool,
 
+    /// UTC epoch of the most recent Tempest UDP packet (or 0). The
+    /// dashboard strip header surfaces this so a stalled local-radio
+    /// path is visible without a separate /api/health round-trip.
+    #[serde(default)]
+    pub tempest_last_seen_epoch: i64,
+    /// UTC epoch of the most recent Open-Meteo refresh (or 0). Same
+    /// observability purpose as `tempest_last_seen_epoch`.
+    #[serde(default)]
+    pub forecast_last_seen_epoch: i64,
+
     /// IU sequence's next scheduled fire time. UTC epoch.
     pub next_run_epoch: i64,
     /// Total minutes the next sequence will run if not skipped.
     pub next_run_total_minutes: f64,
-    /// Master controller enable (`switch.aperture_sprinklers_enabled`).
+    /// Master controller enable (`switch.<prefix>_enabled`).
     pub master_enable: bool,
     /// IU sequence enabled in YAML.
     pub iu_enabled: bool,
@@ -431,4 +455,119 @@ pub struct IrrigationSnapshot {
     /// instead of failing silently when the user taps them.
     #[serde(default)]
     pub override_helpers_present: bool,
+
+    /// Structured provenance for today's morning skip decision: every rule
+    /// the ladder walked, what it saw, and which one fired. Computed
+    /// alongside `skip_check` by the refresher (same Inputs). Powers the
+    /// Rule Lab UI. None until the first successful refresh.
+    #[serde(default)]
+    pub decision_trace: Option<DecisionTrace>,
+
+    /// Per-zone watering verdicts for the upcoming run. One entry per
+    /// configured zone (empty before the first refresh / weather-only
+    /// deployments). Global gates bind every zone; per-zone soil + custom
+    /// condition rules let zones diverge. Produced by `decide_per_zone`.
+    #[serde(default)]
+    pub zone_verdicts: Vec<ZoneVerdict>,
+}
+
+/// One rule's evaluation in a decision trace. Lives here (the shared
+/// both-features serde contract) rather than in `engine` (ssr-only) so the
+/// hydrate-side Rule Lab UI can deserialize + render it. `engine::skip_rules::decide_traced`
+/// produces these.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RuleEval {
+    /// Stable id (e.g. "rain_now").
+    pub id: String,
+    /// Human label shown in the ladder.
+    pub label: String,
+    /// safety | weather | soil | heat | control
+    pub category: String,
+    /// The data values the rule saw, vs its threshold.
+    pub detail: String,
+    /// fired | passed | skipped | not_reached
+    pub outcome: String,
+    /// Verdict produced if this rule fired.
+    pub verdict: Option<String>,
+}
+
+/// Full structured trace of a morning skip decision.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DecisionTrace {
+    pub verdict: String,
+    pub reason: String,
+    pub rules: Vec<RuleEval>,
+}
+
+fn one_f64() -> f64 {
+    1.0
+}
+
+fn default_true_running_known() -> bool {
+    true
+}
+
+/// Per-zone watering verdict. Unlike the aggregate `skip_check` (one
+/// verdict for the whole run), this is computed per zone so a saturated
+/// zone can skip while a dry zone runs. Global safety/weather gates bind
+/// every zone (`source = "global"`); per-zone soil + custom condition
+/// rules are layered on top. Produced by `engine::skip_rules::decide_per_zone`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ZoneVerdict {
+    pub zone_slug: String,
+    pub zone_name: String,
+    /// "skip" | "run" | "run_extended"
+    pub verdict: String,
+    pub reason: String,
+    /// Which layer decided: "global" | "soil_saturation" | "condition" | "default"
+    pub source: String,
+    /// Applied watering multiplier from custom AdjustMultiplier rules,
+    /// clamped to [0.5, 1.5]. 1.0 = unchanged.
+    #[serde(default = "one_f64")]
+    pub multiplier: f64,
+}
+
+impl Default for ZoneVerdict {
+    fn default() -> Self {
+        Self {
+            zone_slug: String::new(),
+            zone_name: String::new(),
+            verdict: "run".into(),
+            reason: String::new(),
+            source: "default".into(),
+            multiplier: 1.0,
+        }
+    }
+}
+
+/// What-If overrides for the Simulator. Every field is an absolute value
+/// (None = leave today's reading unchanged). The server seeds baseline
+/// Inputs from the live SkipCheck, overrides the Some fields, and re-runs
+/// the exact production ladder.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SimRequest {
+    pub temp_now_f: Option<f64>,
+    pub humidity_now_pct: Option<f64>,
+    pub wind_now_mph: Option<f64>,
+    pub rain_today_in: Option<f64>,
+    pub rain_intensity_now_in_hr: Option<f64>,
+    pub forecast_in: Option<f64>,
+    pub rain_tomorrow_prob_pct: Option<u32>,
+    pub rain_next_4h_in: Option<f64>,
+    pub wind_max_today_mph: Option<f64>,
+    pub temp_max_3day_f: Option<f64>,
+    pub rain_3day_weighted_in: Option<f64>,
+    /// Optional ad-hoc Rhai skip rule to test against the hypothetical
+    /// inputs (author + preview a rule before adding it to config). Applied
+    /// augment-only: only consulted when the built-in verdict is "run".
+    #[serde(default)]
+    pub test_script: Option<String>,
+}
+
+/// Simulator response: today's real decision vs the hypothetical, both as
+/// full traces so the UI can diff which rules changed.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SimResult {
+    pub baseline: DecisionTrace,
+    pub hypothetical: DecisionTrace,
 }

@@ -1,49 +1,101 @@
-# LocalSky — local-first weather + irrigation PWA.
-#
-# Run with:   docker compose up -d
-# Demo mode:  docker compose --profile demo up -d   (no hardware required)
-#
-# Port 8090 serves the web UI.
-# Port 50222 UDP receives Tempest WeatherFlow broadcasts on the LAN.
-#
-# All configuration after first-run lives in /data/localsky.toml (managed
-# via the /setup wizard + /settings UI). The env vars below cover boot
-# defaults; everything is overridable through the running app.
+# LocalSky — Leptos full-stack weather + irrigation app.
+# Tempest UDP (50222) + Ecowitt discovery use broadcast, so a multi-homed
+# host should run network_mode: host to share every interface (one NIC for
+# outbound APIs, another on the sensor subnet, for example).
 
 services:
   localsky:
-    image: ${LOCALSKY_IMAGE:-ghcr.io/silenthooligan/localsky:latest}
+    image: ghcr.io/silenthooligan/localsky:latest
     container_name: localsky
     restart: unless-stopped
-    # network_mode: host lets the container receive Tempest UDP broadcasts
-    # without a bridge that drops broadcast traffic. Drop this line if you
-    # have no Tempest hub on the LAN; you can still use Open-Meteo + NWS
-    # forecasts and any cloud or HTTP-POST sensor source.
     network_mode: host
+    # Temporary: image defaults to uid 10001 since the 2026-05-21 hardening pass.
+    # /mnt/docker/localsky and _shared/keys are still root-owned on container.
+    # To drop this override: pct exec 281 chown -R 10001:10001 /mnt/docker/localsky
+    # and ensure 10001 can read /mnt/docker/komodo/_shared/keys/vapid-private.pem.
+    user: "0:0"
     environment:
-      - TZ=${TZ:-Etc/UTC}
-      - RUST_LOG=${RUST_LOG:-info}
-      - LEPTOS_SITE_ADDR=0.0.0.0:8090
+      - TZ=${TZ}
+      - RUST_LOG=info
+      - LEPTOS_SITE_ADDR=0.0.0.0:${LOCALSKY_PORT_1_INT}
       - LEPTOS_SITE_ROOT=site
+      - WEATHER_APP_LAT=${WEATHER_APP_LAT}
+      - WEATHER_APP_LON=${WEATHER_APP_LON}
+      - WEATHER_APP_ZOOM=${WEATHER_APP_ZOOM}
+      # HA REST poll for irrigation snapshot. Long-lived token shared with
+      # Alloy and the weather-app predecessor.
+      - HA_TOKEN=${HA_LONG_LIVED_TOKEN}
+      - HA_URL=http://${HA_URL:-http://homeassistant.local:8123}
+      # Shadow mode: build the native (no-HA) snapshot alongside the HA one
+      # each tick so it can be compared at /api/v1/irrigation/shadow/diff
+      # before native is ever trusted with a valve. Never drives dispatch.
+      # Remove once native is validated + made authoritative.
+      - LOCALSKY_SHADOW_NATIVE=1
+      # SQLite-backed irrigation history (365-day Gantt + utilization heatmap).
       - HISTORY_DB_PATH=/data/irrigation.db
-      # Optional Home Assistant peer (REST + MQTT discovery). LocalSky
-      # works fine without these — see docs/standalone.md.
-      - HA_URL=${HA_URL:-}
-      - HA_TOKEN=${HA_TOKEN:-}
-      # Optional LLM advisor. Any OpenAI-compatible endpoint works:
-      # Ollama, llama.cpp, LM Studio, vLLM, OpenAI, Anthropic, etc.
-      - LLM_BASE_URL=${LLM_BASE_URL:-}
-      - LLM_ADVISOR_MODEL=${LLM_ADVISOR_MODEL:-}
-      - LLM_ADVISOR_DISABLED=${LLM_ADVISOR_DISABLED:-}
-      # Optional Web Push notifications. Generate a VAPID keypair with
-      # the web-push CLI and mount the private key as /keys/vapid-private.pem.
+      # LLM advisor (Phase F). Talks to the configured OpenAI-compatible LLM endpoint over its
+      # OpenAI-compatible endpoint. Set LLM_ADVISOR_DISABLED=1 to kill
+      # advisor calls fleet-wide without redeploying.
+      - LLM_BASE_URL=${LLM_BASE_URL:-${OMEGA_ROUTER_URL}}
+      - LLM_ADVISOR_MODEL=${LLM_ADVISOR_MODEL}
+      - LLM_ADVISOR_DISABLED=${LLM_ADVISOR_DISABLED}
+      # Web Push (Phase PWA-5). VAPID keypair for signing notifications.
+      # If unset, the dispatcher logs once and silently drops every event;
+      # the rest of the app keeps running. Generate keys with the
+      # web-push CLI or openssl, see .agent/agent.md for the recipe.
       - VAPID_PUBLIC_KEY=${VAPID_PUBLIC_KEY:-}
       - VAPID_PRIVATE_KEY_PATH=${VAPID_PRIVATE_KEY_PATH:-/keys/vapid-private.pem}
-      - VAPID_SUBJECT=${VAPID_SUBJECT:-}
+      - VAPID_SUBJECT=${VAPID_SUBJECT:-mailto:erik.skean@gmail.com}
     volumes:
-      - localsky-data:/data
-      # Mount your VAPID keys directory read-only here if you use Web Push.
-      # - ./keys:/keys:ro
+      - /mnt/docker/localsky:/data
+      # _shared/keys lives on the host's syncthing volume; the VAPID
+      # private key is checked into _shared/keys/ (per the
+      # 'feedback_track_creds.md' convention) and mounted read-only.
+      - /mnt/docker/komodo/_shared/keys:/keys:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+        tag: "localsky"
 
-volumes:
-  localsky-data:
+  # Demo sidecar. Same image as prod (`:latest`); only the env vars differ
+  # (LOCALSKY_DEMO=1 + verbose RUST_LOG). Post-cutover there's no longer a
+  # separate v2 image to maintain, and the build workflow only refreshes
+  # `:latest` + `:${sha}` on push so pinning `:v2` here would freeze the
+  # demo at whatever was last tagged. Synthetic data, no HA, no LLM, no
+  # real hardware: used to capture screenshots + smoke-test changes.
+  localsky-v2:
+    image: ghcr.io/silenthooligan/localsky:latest
+    container_name: localsky-v2
+    restart: unless-stopped
+    ports:
+      - "8091:8091"
+    # See note above; same transition condition.
+    user: "0:0"
+    environment:
+      - TZ=${TZ}
+      # Verbose logging for the v2 test bed. The library namespaces
+      # (`localsky=debug`) bubble up engine + source + controller chatter
+      # without flooding from tower/hyper transport layers.
+      - RUST_LOG=info,localsky=debug,tower_http=info,axum=info
+      - LEPTOS_SITE_ADDR=0.0.0.0:8091
+      - LEPTOS_SITE_ROOT=site
+      - LOCALSKY_DEMO=1
+      - HISTORY_DB_PATH=/data/irrigation.db
+    volumes:
+      - /mnt/docker/localsky-v2:/data
+    # The image HEALTHCHECK targets 8090 (the prod port). Override for the
+    # demo sidecar since it binds 8091.
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--max-time", "4", "http://127.0.0.1:8091/api/v1/info"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+        tag: "localsky-v2"

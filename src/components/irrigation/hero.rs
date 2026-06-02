@@ -61,12 +61,36 @@ pub fn NextRunHero(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         if !s.ha_reachable {
             "Refresher offline".to_string()
         } else if let Some(z) = s.zones.iter().find(|z| z.running) {
-            format!("{} • {} of {} planned", z.name, "running", s.zones.len())
+            let running_count = s.zones.iter().filter(|z| z.running).count();
+            if running_count > 1 {
+                format!(
+                    "{} running, {} of {} zones active",
+                    z.name,
+                    running_count,
+                    s.zones.len()
+                )
+            } else {
+                format!("{} running", z.name)
+            }
         } else if s.skip_check.will_skip {
-            format!("SKIPPED · {}", s.skip_check.reason.to_uppercase())
+            // Plain-English: drop the SHOUTY case and lead with "Skipping".
+            // The reason string itself is already a complete short sentence.
+            format!("Skipping: {}", s.skip_check.reason)
         } else {
+            // The "next morning run" headline reads tomorrow's epoch from
+            // IU's next_start. If the engine's per-day verdict strip says
+            // tomorrow is a skip (Phase C restriction blocks the weekday
+            // or the seasonal window), surface that here so the user
+            // doesn't see a confident "tomorrow 4:14 AM" while a
+            // regulatory rule actually forbids it.
+            let tomorrow = s.seven_day_verdicts.iter().find(|v| v.day_offset == 1);
+            if let Some(t) = tomorrow {
+                if t.verdict == "skip" {
+                    return format!("Tomorrow skipped: {}", t.reason);
+                }
+            }
             format!(
-                "SCHEDULED · {} ZONES · {:.0} MIN TOTAL",
+                "Watering {} zones for {:.0} min total",
                 s.zones.len(),
                 s.next_run_total_minutes
             )

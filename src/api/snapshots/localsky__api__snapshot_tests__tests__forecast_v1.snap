@@ -1,0 +1,12 @@
+---
+source: src/api/snapshot_tests.rs
+expression: "ForecastSnapshot::default()"
+---
+{
+  "last_refresh_epoch": 0,
+  "source_reachable": false,
+  "timezone": "",
+  "daily": [],
+  "past_daily": [],
+  "hourly": []
+}

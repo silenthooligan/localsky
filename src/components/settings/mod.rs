@@ -16,10 +16,13 @@
 
 pub mod advanced;
 pub mod controllers;
+pub mod devices;
 pub mod home;
 pub mod llm;
 pub mod location;
 pub mod notifications;
+pub mod restrictions;
+pub mod schedules;
 pub mod skip_rules;
 pub mod sources;
 pub mod theme;
@@ -28,10 +31,13 @@ pub mod zones;
 
 pub use advanced::SettingsAdvanced;
 pub use controllers::SettingsControllers;
+pub use devices::SettingsDevices;
 pub use home::SettingsHome;
 pub use llm::SettingsLlm;
 pub use location::SettingsLocation;
 pub use notifications::SettingsNotifications;
+pub use restrictions::SettingsRestrictions;
+pub use schedules::SettingsSchedules;
 pub use skip_rules::SettingsSkipRules;
 pub use sources::SettingsSources;
 pub use theme::SettingsTheme;

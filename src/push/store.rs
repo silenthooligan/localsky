@@ -49,8 +49,7 @@ pub async fn delete_endpoint(conn: Arc<Mutex<Connection>>, endpoint: String) -> 
 pub async fn list_all(conn: Arc<Mutex<Connection>>) -> Result<Vec<StoredSubscription>> {
     tokio::task::spawn_blocking(move || -> Result<Vec<StoredSubscription>> {
         let conn = conn.blocking_lock();
-        let mut stmt =
-            conn.prepare("SELECT endpoint, p256dh, auth FROM push_subscriptions")?;
+        let mut stmt = conn.prepare("SELECT endpoint, p256dh, auth FROM push_subscriptions")?;
         let rows = stmt
             .query_map([], |row| {
                 Ok(StoredSubscription {

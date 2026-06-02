@@ -149,7 +149,11 @@ impl TempestStore {
         // Trim pressure buffer to last 6 hours.
         let now = obs.time_epoch;
         let six_hours_ago = now - 6 * 3600;
-        while roll.pressure.front().map_or(false, |(t, _)| *t < six_hours_ago) {
+        while roll
+            .pressure
+            .front()
+            .map_or(false, |(t, _)| *t < six_hours_ago)
+        {
             roll.pressure.pop_front();
         }
         let pressure_inhg = obs.pressure_mb * 0.02953;
@@ -166,7 +170,11 @@ impl TempestStore {
 
         // Trim strike buffer to last hour.
         let one_hour_ago = now - 3600;
-        while roll.strikes.front().map_or(false, |s| s.time_epoch < one_hour_ago) {
+        while roll
+            .strikes
+            .front()
+            .map_or(false, |s| s.time_epoch < one_hour_ago)
+        {
             roll.strikes.pop_front();
         }
         let last = roll.strikes.back().cloned();
@@ -239,7 +247,11 @@ impl TempestStore {
             roll.strikes.push_back(evt.clone());
             // trim to last hour
             let one_hour_ago = evt.time_epoch - 3600;
-            while roll.strikes.front().map_or(false, |s| s.time_epoch < one_hour_ago) {
+            while roll
+                .strikes
+                .front()
+                .map_or(false, |s| s.time_epoch < one_hour_ago)
+            {
                 roll.strikes.pop_front();
             }
         }
@@ -284,9 +296,7 @@ fn dew_point_c(t_c: f64, rh: f64) -> f64 {
 #[cfg(feature = "ssr")]
 fn wet_bulb_c(t_c: f64, rh: f64) -> f64 {
     let rh = rh.max(1.0);
-    t_c * (0.151_977 * (rh + 8.313_659).sqrt()).atan()
-        + (t_c + rh).atan()
-        - (rh - 1.676_331).atan()
+    t_c * (0.151_977 * (rh + 8.313_659).sqrt()).atan() + (t_c + rh).atan() - (rh - 1.676_331).atan()
         + 0.003_918_38 * rh.powf(1.5) * (0.023_101 * rh).atan()
         - 4.686_035
 }
@@ -305,8 +315,7 @@ fn feels_like_f(t_f: f64, rh: f64, wind_mph: f64) -> f64 {
             - 0.000_001_99 * t_f * t_f * rh * rh;
         hi
     } else if t_f <= 50.0 && wind_mph >= 3.0 {
-        35.74 + 0.6215 * t_f - 35.75 * wind_mph.powf(0.16)
-            + 0.4275 * t_f * wind_mph.powf(0.16)
+        35.74 + 0.6215 * t_f - 35.75 * wind_mph.powf(0.16) + 0.4275 * t_f * wind_mph.powf(0.16)
     } else {
         t_f
     }

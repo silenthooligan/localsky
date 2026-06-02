@@ -1,13 +1,13 @@
 {
   "name": "LocalSky",
   "short_name": "LocalSky",
-  "description": "Tempest weather + OpenSprinkler irrigation control",
-  "start_url": "/irrigation",
+  "description": "Hyperlocal weather dashboard with optional smart irrigation. Local-first, no cloud.",
+  "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#07090f",
-  "theme_color": "#07090f",
+  "background_color": "#0b1220",
+  "theme_color": "#0b1220",
   "icons": [
     {
       "src": "/icons/icon-192.png",

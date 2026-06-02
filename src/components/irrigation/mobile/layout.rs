@@ -6,7 +6,9 @@
 // by the parent IrrigationPage above the dispatcher, so it persists across
 // tab swaps.
 
-use crate::components::irrigation::mobile::{now::MobileNow, schedule::MobileSchedule, zones::MobileZones};
+use crate::components::irrigation::mobile::{
+    now::MobileNow, schedule::MobileSchedule, zones::MobileZones,
+};
 use crate::ha::snapshot::IrrigationSnapshot;
 use leptos::prelude::*;
 use leptos_router::hooks::use_query_map;

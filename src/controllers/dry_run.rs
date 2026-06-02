@@ -16,8 +16,8 @@ use tracing::info;
 use crate::config::schema::DryRunConfig;
 use crate::persistence::{NewRun, RunsStore};
 use crate::ports::irrigation_controller::{
-    ControllerCaps, ControllerResult, ControllerStatus, IrrigationController, RunHandle,
-    RunRecord, ZoneRuntimeStatus,
+    ControllerCaps, ControllerResult, ControllerStatus, IrrigationController, RunHandle, RunRecord,
+    ZoneRuntimeStatus,
 };
 
 pub struct DryRunController {
@@ -99,13 +99,20 @@ impl IrrigationController for DryRunController {
     }
 
     async fn stop_zone(&self, slug: &str) -> ControllerResult<()> {
-        info!(controller = self.id, zone = slug, "dry_run: would have stopped zone");
+        info!(
+            controller = self.id,
+            zone = slug,
+            "dry_run: would have stopped zone"
+        );
         self.pretend_running.lock().await.remove(slug);
         Ok(())
     }
 
     async fn stop_all(&self) -> ControllerResult<()> {
-        info!(controller = self.id, "dry_run: would have stopped all zones");
+        info!(
+            controller = self.id,
+            "dry_run: would have stopped all zones"
+        );
         self.pretend_running.lock().await.clear();
         Ok(())
     }
@@ -167,7 +174,10 @@ mod tests {
         c.run_zone("back_yard", 600).await.unwrap();
         let s = c.status().await.unwrap();
         assert!(s.reachable);
-        assert!(s.zone_states.iter().any(|z| z.slug == "back_yard" && z.running));
+        assert!(s
+            .zone_states
+            .iter()
+            .any(|z| z.slug == "back_yard" && z.running));
     }
 
     #[tokio::test]

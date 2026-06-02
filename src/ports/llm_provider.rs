@@ -46,11 +46,6 @@ pub struct HealthReport {
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     fn id(&self) -> &str;
-    async fn chat(
-        &self,
-        system: &str,
-        user: &str,
-        opts: ChatOpts,
-    ) -> Result<String, LlmError>;
+    async fn chat(&self, system: &str, user: &str, opts: ChatOpts) -> Result<String, LlmError>;
     async fn health(&self) -> Result<HealthReport, LlmError>;
 }

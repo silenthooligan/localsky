@@ -120,10 +120,7 @@ impl HaMqttPublisher {
 
     /// Publish discovery for one zone. Issues four entities per zone:
     /// bucket_mm, et_today_mm, planned_seconds, running.
-    pub async fn publish_zone_discovery(
-        &self,
-        zone_slug: &str,
-    ) -> Result<(), MqttPublishError> {
+    pub async fn publish_zone_discovery(&self, zone_slug: &str) -> Result<(), MqttPublishError> {
         let device = self.device();
         let entities: Vec<(&str, String, DiscoveryEntity)> = vec![
             (
@@ -132,8 +129,7 @@ impl HaMqttPublisher {
                 DiscoveryEntity {
                     name: format!("{zone_slug} bucket"),
                     unique_id: format!("{}_zone_{zone_slug}_bucket_mm", self.node_id),
-                    state_topic: self
-                        .state_topic("sensor", &format!("zone_{zone_slug}_bucket_mm")),
+                    state_topic: self.state_topic("sensor", &format!("zone_{zone_slug}_bucket_mm")),
                     unit_of_measurement: Some("mm".into()),
                     device_class: None,
                     state_class: Some("measurement".into()),
@@ -245,8 +241,7 @@ impl HaMqttPublisher {
                 .await?;
         }
         if let Some(v) = planned_seconds {
-            let topic =
-                self.state_topic("sensor", &format!("zone_{zone_slug}_planned_seconds"));
+            let topic = self.state_topic("sensor", &format!("zone_{zone_slug}_planned_seconds"));
             self.client
                 .publish(topic, QoS::AtLeastOnce, true, format!("{v}"))
                 .await?;

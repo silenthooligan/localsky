@@ -81,8 +81,7 @@ impl LlmClient {
     /// circuits every call; LLM_MODEL (or legacy LLM_ADVISOR_MODEL)
     /// names the model.
     pub fn from_env() -> Result<Self> {
-        let base_url = std::env::var("LLM_BASE_URL")
-            .unwrap_or_default();
+        let base_url = std::env::var("LLM_BASE_URL").unwrap_or_default();
         let model = std::env::var("LLM_MODEL")
             .or_else(|_| std::env::var("LLM_ADVISOR_MODEL"))
             .unwrap_or_default();
@@ -119,7 +118,10 @@ impl LlmClient {
         if self.disabled {
             return Err(ClientError::Disabled);
         }
-        let url = format!("{}/v1/chat/completions", self.base_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/v1/chat/completions",
+            self.base_url.trim_end_matches('/')
+        );
         let body = ChatRequest {
             model: &self.model,
             messages: vec![

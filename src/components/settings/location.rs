@@ -7,7 +7,8 @@
 
 use leptos::prelude::*;
 
-use crate::components::ui::{FormField, Panel};
+use crate::components::settings_ui::SettingsResult;
+use crate::components::ui::{FormField, HelpHint, Panel};
 
 #[component]
 pub fn SettingsLocation() -> impl IntoView {
@@ -50,7 +51,9 @@ pub fn SettingsLocation() -> impl IntoView {
     let lon_err: Signal<Option<String>> = Signal::derive(move || {
         let v = lon.get();
         if !(-180.0..=180.0).contains(&v) {
-            Some(format!("Longitude must be between -180 and 180 (got {v:.4})"))
+            Some(format!(
+                "Longitude must be between -180 and 180 (got {v:.4})"
+            ))
         } else {
             None
         }
@@ -108,6 +111,8 @@ pub fn SettingsLocation() -> impl IntoView {
             </header>
 
             <Panel title="Coordinates".to_string()>
+                <HelpHint topic="location"/>
+                <div class="grid settings-field-grid">
                 <FormField
                     label="Latitude".to_string()
                     helptext="Decimal degrees (positive north).".to_string()
@@ -161,9 +166,12 @@ pub fn SettingsLocation() -> impl IntoView {
                         }
                     />
                 </FormField>
+                </div>
             </Panel>
 
             <Panel title="Identity".to_string()>
+                <HelpHint topic="location"/>
+                <div class="grid settings-field-grid">
                 <FormField
                     label="Deployment name".to_string()
                     helptext="Surfaces in the MQTT discovery node_id and the dashboard title. Slugified for topic safety.".to_string()
@@ -191,27 +199,21 @@ pub fn SettingsLocation() -> impl IntoView {
                         on:input=move |ev| tz.set(event_target_value(&ev))
                     />
                 </FormField>
+                </div>
             </Panel>
 
-            <button
-                type="button"
-                class="setup-apply-btn"
-                disabled=move || !can_save() || saving.get()
-                on:click=on_save
-            >
-                {move || if saving.get() { "Saving…" } else { "Save changes" }}
-            </button>
-
-            <Show when=move || !result_msg.get().is_empty()>
-                <p
-                    class="setup-result"
-                    class:setup-result--ok=move || result_ok.get()
-                    class:setup-result--err=move || !result_ok.get()
-                    role="status"
+            <div class="settings-actions">
+                <button
+                    type="button"
+                    class="setup-footer__btn setup-footer__btn--primary"
+                    disabled=move || !can_save() || saving.get()
+                    on:click=on_save
                 >
-                    {move || result_msg.get()}
-                </p>
-            </Show>
+                    {move || if saving.get() { "Saving…" } else { "Save changes" }}
+                </button>
+            </div>
+
+            <SettingsResult result_msg=result_msg result_ok=result_ok/>
 
             <Show when=move || !loaded.get()>
                 <p class="settings-page__subtitle" style="margin-top: 1rem">

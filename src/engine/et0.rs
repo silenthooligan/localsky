@@ -116,9 +116,13 @@ fn has_full_pm_inputs(inputs: &Et0Inputs) -> bool {
 // G ≈ 0 for daily computation over grass.
 
 pub fn penman_monteith(inputs: &Et0Inputs) -> Et0Result {
-    let t_mean = inputs.t_mean_c.unwrap_or((inputs.t_max_c + inputs.t_min_c) / 2.0);
+    let t_mean = inputs
+        .t_mean_c
+        .unwrap_or((inputs.t_max_c + inputs.t_min_c) / 2.0);
     let elev = inputs.elevation_m;
-    let p = inputs.pressure_kpa.unwrap_or_else(|| pressure_from_elevation(elev));
+    let p = inputs
+        .pressure_kpa
+        .unwrap_or_else(|| pressure_from_elevation(elev));
     let gamma = psychrometric_constant(p);
 
     let es_tmax = saturation_vapor_pressure(inputs.t_max_c);
@@ -129,7 +133,9 @@ pub fn penman_monteith(inputs: &Et0Inputs) -> Et0Result {
     let delta = slope_vapor_pressure_curve(t_mean);
 
     let ra = extraterrestrial_radiation(inputs.latitude_deg, inputs.doy);
-    let rs = inputs.solar_rad_mj_m2_day.unwrap_or_else(|| 0.16 * (inputs.t_max_c - inputs.t_min_c).max(0.0).sqrt() * ra);
+    let rs = inputs
+        .solar_rad_mj_m2_day
+        .unwrap_or_else(|| 0.16 * (inputs.t_max_c - inputs.t_min_c).max(0.0).sqrt() * ra);
     let rso = clear_sky_radiation(ra, elev);
     let rns = (1.0 - 0.23) * rs; // albedo 0.23 for short grass (FAO-56)
     let rnl = net_longwave_radiation(inputs.t_max_c, inputs.t_min_c, ea, rs, rso);
@@ -139,7 +145,11 @@ pub fn penman_monteith(inputs: &Et0Inputs) -> Et0Result {
 
     let numerator = 0.408 * delta * rn + gamma * (900.0 / (t_mean + 273.0)) * u2 * (es - ea);
     let denominator = delta + gamma * (1.0 + 0.34 * u2);
-    let et0 = if denominator > 0.0 { numerator / denominator } else { 0.0 };
+    let et0 = if denominator > 0.0 {
+        numerator / denominator
+    } else {
+        0.0
+    };
     let et0 = et0.max(0.0);
 
     Et0Result {
@@ -160,7 +170,9 @@ pub fn penman_monteith(inputs: &Et0Inputs) -> Et0Result {
 // ----- Hargreaves-Samani 1985 -----
 
 pub fn hargreaves_samani(inputs: &Et0Inputs) -> Et0Result {
-    let t_mean = inputs.t_mean_c.unwrap_or((inputs.t_max_c + inputs.t_min_c) / 2.0);
+    let t_mean = inputs
+        .t_mean_c
+        .unwrap_or((inputs.t_max_c + inputs.t_min_c) / 2.0);
     let ra_mj = extraterrestrial_radiation(inputs.latitude_deg, inputs.doy);
     // Convert Ra from MJ/m²/day to "equivalent depth of water" mm/day by
     // dividing by the latent heat of vaporization (2.45 MJ/kg) which is
@@ -365,7 +377,10 @@ mod tests {
         };
         let t = penman_monteith(&temperate).et0_mm_day;
         let r = penman_monteith(&tropical).et0_mm_day;
-        assert!(r > t * 1.3, "tropical {r:.2} should exceed temperate {t:.2} by >30%");
+        assert!(
+            r > t * 1.3,
+            "tropical {r:.2} should exceed temperate {t:.2} by >30%"
+        );
         // Sanity ceiling: ETo over short grass rarely exceeds 9 mm/day even in extreme heat.
         assert!(r < 9.0, "tropical case unexpectedly high: {r:.2}");
         // Sanity floor: should be well above 4 mm/day.

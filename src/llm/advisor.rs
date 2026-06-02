@@ -8,9 +8,7 @@
 use crate::ha::snapshot::IrrigationSnapshot;
 use crate::llm::cache::TtlCache;
 use crate::llm::client::{ClientError, LlmClient};
-use crate::llm::prompts::{
-    ANOMALY_SYSTEM, ANOMALY_VERSION, EXPLAINER_SYSTEM, EXPLAINER_VERSION,
-};
+use crate::llm::prompts::{ANOMALY_SYSTEM, ANOMALY_VERSION, EXPLAINER_SYSTEM, EXPLAINER_VERSION};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -79,10 +77,7 @@ impl AdvisorState {
     /// current snapshot. Returns Err(AdvisorError) when the LLM is
     /// unreachable or disabled — the dashboard hides the tile in that
     /// case rather than showing a stale value.
-    pub async fn explain_today(
-        &self,
-        snap: &IrrigationSnapshot,
-    ) -> Result<String, AdvisorError> {
+    pub async fn explain_today(&self, snap: &IrrigationSnapshot) -> Result<String, AdvisorError> {
         let key = explain_cache_key(snap);
         if let Some(cached) = self.inner.explanations.get(&key) {
             return cached;
@@ -114,7 +109,9 @@ impl AdvisorState {
                     ClientError::Disabled => Err(AdvisorError::Disabled),
                     _ => Err(AdvisorError::Offline),
                 };
-                self.inner.explanations.put(key, err.clone(), OFFLINE_TTL_SECS);
+                self.inner
+                    .explanations
+                    .put(key, err.clone(), OFFLINE_TTL_SECS);
                 err
             }
         }
@@ -133,9 +130,7 @@ impl AdvisorState {
         }
         if self.inner.client.disabled() {
             let err = Err(AdvisorError::Disabled);
-            self.inner
-                .anomalies
-                .put(key, err.clone(), OFFLINE_TTL_SECS);
+            self.inner.anomalies.put(key, err.clone(), OFFLINE_TTL_SECS);
             return err;
         }
         let prompt = build_anomaly_prompt(snap);
@@ -250,7 +245,11 @@ fn build_explainer_prompt(s: &IrrigationSnapshot) -> String {
          Write a 1-2 sentence explanation a homeowner would find useful. \
          Don't repeat 'Reason' verbatim — add concrete context from the data.",
         verdict = sk.verdict,
-        reason = if sk.reason.is_empty() { "running normally" } else { &sk.reason },
+        reason = if sk.reason.is_empty() {
+            "running normally"
+        } else {
+            &sk.reason
+        },
         tnow = sk.temp_now_f,
         wnow = sk.wind_now_mph,
         wmax = sk.wind_max_today_mph,
@@ -319,7 +318,11 @@ fn build_anomaly_prompt(s: &IrrigationSnapshot) -> String {
         hi3 = sk.heat_index_max_3day_f,
         days = f.days_since_significant_rain,
         verdict = sk.verdict,
-        reason = if sk.reason.is_empty() { "running normally" } else { &sk.reason },
+        reason = if sk.reason.is_empty() {
+            "running normally"
+        } else {
+            &sk.reason
+        },
     )
 }
 

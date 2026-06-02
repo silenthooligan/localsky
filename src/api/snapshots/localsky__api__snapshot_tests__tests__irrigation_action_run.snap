@@ -1,0 +1,9 @@
+---
+source: src/api/snapshot_tests.rs
+expression: envelope
+---
+{
+  "kind": "run",
+  "seconds": 600,
+  "zone": "back_yard"
+}

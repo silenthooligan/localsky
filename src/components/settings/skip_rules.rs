@@ -9,7 +9,8 @@
 
 use leptos::prelude::*;
 
-use crate::components::ui::{FormField, Panel};
+use crate::components::settings_ui::SettingsResult;
+use crate::components::ui::{FormField, HelpHint, Panel, Slider};
 
 #[component]
 pub fn SettingsSkipRules() -> impl IntoView {
@@ -127,118 +128,127 @@ pub fn SettingsSkipRules() -> impl IntoView {
             </header>
 
             <Panel title="Rain skips".to_string()>
-                <FormField
-                    label="Already-wet threshold (in)".to_string()
-                    helptext="If rain_today is at or above this, skip tonight - the soil is presumed saturated. Default: 0.05".to_string()
-                    error=Signal::derive(|| None::<String>)
-                >
-                    {numeric_input("already_wet_in", already_wet_in, 0.01)}
-                </FormField>
-                <FormField
-                    label="Rain-now intensity (in/hr)".to_string()
-                    helptext="Skip if the live rain rate exceeds this when the evening verdict is computed. Default: 0.01".to_string()
-                    error=Signal::derive(|| None::<String>)
-                >
-                    {numeric_input("rain_now_in_hr", rain_now_in_hr, 0.001)}
-                </FormField>
-                <FormField
-                    label="Rain in next 4 h (in)".to_string()
-                    helptext="Forecasted accumulation in the next 4 hours. At or above means skip. Default: 0.10".to_string()
-                    error=Signal::derive(|| None::<String>)
-                >
-                    {numeric_input("rain_next_4h_skip_in", rain_next_4h_skip_in, 0.01)}
-                </FormField>
-                <FormField
-                    label="3-day rollup factor".to_string()
-                    helptext="Multiplier applied to your rain_skip_in for the probability-weighted 3-day total. Default: 1.5".to_string()
-                    error=Signal::derive(|| None::<String>)
-                >
-                    {numeric_input("rain_3day_factor", rain_3day_factor, 0.1)}
-                </FormField>
-                <FormField
-                    label="Rain skip threshold (in)".to_string()
-                    helptext="Your personal 'how much rain is enough' threshold. Used in the 3-day rollup and the morning override. Default: 0.25".to_string()
-                    error=Signal::derive(|| None::<String>)
-                >
-                    {numeric_input("rain_skip_in", rain_skip_in, 0.05)}
-                </FormField>
+                <HelpHint topic="skip-breakdown"/>
+                <div class="grid settings-field-grid">
+                    <FormField
+                        label="Already-wet threshold (in)".to_string()
+                        helptext="If rain_today is at or above this, skip tonight - the soil is presumed saturated. Default: 0.05".to_string()
+                        error=Signal::derive(|| None::<String>)
+                    >
+                        {numeric_input("already_wet_in", already_wet_in, 0.01)}
+                    </FormField>
+                    <FormField
+                        label="Rain-now intensity (in/hr)".to_string()
+                        helptext="Skip if the live rain rate exceeds this when the evening verdict is computed. Default: 0.01".to_string()
+                        error=Signal::derive(|| None::<String>)
+                    >
+                        {numeric_input("rain_now_in_hr", rain_now_in_hr, 0.001)}
+                    </FormField>
+                    <FormField
+                        label="Rain in next 4 h (in)".to_string()
+                        helptext="Forecasted accumulation in the next 4 hours. At or above means skip. Default: 0.10".to_string()
+                        error=Signal::derive(|| None::<String>)
+                    >
+                        {numeric_input("rain_next_4h_skip_in", rain_next_4h_skip_in, 0.01)}
+                    </FormField>
+                    <FormField
+                        label="3-day rollup factor".to_string()
+                        helptext="Multiplier applied to your rain_skip_in for the probability-weighted 3-day total. Default: 1.5".to_string()
+                        error=Signal::derive(|| None::<String>)
+                    >
+                        {numeric_input("rain_3day_factor", rain_3day_factor, 0.1)}
+                    </FormField>
+                    <FormField
+                        label="Rain skip threshold (in)".to_string()
+                        helptext="Your personal 'how much rain is enough' threshold. Used in the 3-day rollup and the morning override. Default: 0.25".to_string()
+                        error=Signal::derive(|| None::<String>)
+                    >
+                        {numeric_input("rain_skip_in", rain_skip_in, 0.05)}
+                    </FormField>
+                </div>
             </Panel>
 
             <Panel title="Wind + temperature".to_string()>
-                <FormField
-                    label="Max wind (mph)".to_string()
-                    helptext="Skip when sustained wind is at or above this. Default: 15.0".to_string()
-                    error=Signal::derive(|| None::<String>)
-                >
-                    {numeric_input("max_wind_mph", max_wind_mph, 1.0)}
-                </FormField>
-                <FormField
-                    label="Wind forecast slack (mph)".to_string()
-                    helptext="Added to max_wind_mph when evaluating forecast wind so a brief gust doesn't shut down the night. Default: 5.0".to_string()
-                    error=Signal::derive(|| None::<String>)
-                >
-                    {numeric_input("wind_forecast_slack_mph", wind_forecast_slack_mph, 1.0)}
-                </FormField>
-                <FormField
-                    label="Min temperature (\u{00b0}F)".to_string()
-                    helptext="Skip when air temp drops below this overnight. Default: 40.0".to_string()
-                    error=Signal::derive(|| None::<String>)
-                >
-                    {numeric_input("min_temp_f", min_temp_f, 1.0)}
-                </FormField>
-                <FormField
-                    label="Soil frost threshold (\u{00b0}F)".to_string()
-                    helptext="Skip when yard-wide soil temp drops below this. Requires a soil sensor source. Default: 38.0".to_string()
-                    error=Signal::derive(|| None::<String>)
-                >
-                    {numeric_input("frost_skip_soil_f", frost_skip_soil_f, 1.0)}
-                </FormField>
+                <HelpHint topic="skip-breakdown"/>
+                <div class="grid settings-field-grid">
+                    <FormField
+                        label="Max wind (mph)".to_string()
+                        helptext="Skip when sustained wind is at or above this. Default: 15".to_string()
+                        error=Signal::derive(|| None::<String>)
+                    >
+                        <Slider value=max_wind_mph min=0.0 max=40.0 step=1.0 suffix=" mph".to_string()/>
+                    </FormField>
+                    <FormField
+                        label="Wind forecast slack (mph)".to_string()
+                        helptext="Added to max_wind_mph when evaluating forecast wind so a brief gust doesn't shut down the night. Default: 5".to_string()
+                        error=Signal::derive(|| None::<String>)
+                    >
+                        <Slider value=wind_forecast_slack_mph min=0.0 max=20.0 step=1.0 suffix=" mph".to_string()/>
+                    </FormField>
+                    <FormField
+                        label="Min temperature (\u{00b0}F)".to_string()
+                        helptext="Skip when air temp drops below this overnight. Default: 40".to_string()
+                        error=Signal::derive(|| None::<String>)
+                    >
+                        <Slider value=min_temp_f min=20.0 max=70.0 step=1.0 suffix=" \u{00b0}F".to_string()/>
+                    </FormField>
+                    <FormField
+                        label="Soil frost threshold (\u{00b0}F)".to_string()
+                        helptext="Skip when yard-wide soil temp drops below this. Requires a soil sensor source. Default: 38".to_string()
+                        error=Signal::derive(|| None::<String>)
+                    >
+                        <Slider value=frost_skip_soil_f min=28.0 max=50.0 step=1.0 suffix=" \u{00b0}F".to_string()/>
+                    </FormField>
+                </div>
             </Panel>
 
             <Panel title="Heat advisory (run-extended trigger)".to_string()>
+                <HelpHint topic="skip-breakdown"/>
                 <p class="settings-page__subtitle" style="margin: 0 0 0.6rem">
                     "When ALL three conditions are met, the verdict flips to "
                     "run-extended and the engine applies the Steadman heat "
                     "multiplier to the watering duration."
                 </p>
-                <FormField
-                    label="Heat advisory temp (\u{00b0}F)".to_string()
-                    helptext="Daily high at or above this. Default: 95.0".to_string()
-                    error=Signal::derive(|| None::<String>)
-                >
-                    {numeric_input("heat_advisory_temp_f", heat_advisory_temp_f, 1.0)}
-                </FormField>
-                <FormField
-                    label="Heat advisory humidity (%)".to_string()
-                    helptext="Afternoon RH at or above this. Default: 60.0".to_string()
-                    error=Signal::derive(|| None::<String>)
-                >
-                    {numeric_input("heat_advisory_humidity_pct", heat_advisory_humidity_pct, 5.0)}
-                </FormField>
-                <FormField
-                    label="Heat advisory dry days".to_string()
-                    helptext="Consecutive dry days required before heat advisory triggers. Default: 2".to_string()
-                    error=Signal::derive(|| None::<String>)
-                >
-                    <input
-                        type="number"
-                        step="1"
-                        min="0"
-                        class="ui-input"
-                        prop:value=move || heat_advisory_dry_days.get() as f64
-                        on:input=move |ev| {
-                            if let Ok(v) = event_target_value(&ev).parse::<u32>() {
-                                heat_advisory_dry_days.set(v);
+                <div class="grid settings-field-grid">
+                    <FormField
+                        label="Heat advisory temp (\u{00b0}F)".to_string()
+                        helptext="Daily high at or above this. Default: 95".to_string()
+                        error=Signal::derive(|| None::<String>)
+                    >
+                        <Slider value=heat_advisory_temp_f min=85.0 max=120.0 step=1.0 suffix=" \u{00b0}F".to_string()/>
+                    </FormField>
+                    <FormField
+                        label="Heat advisory humidity (%)".to_string()
+                        helptext="Afternoon RH at or above this. Default: 60".to_string()
+                        error=Signal::derive(|| None::<String>)
+                    >
+                        <Slider value=heat_advisory_humidity_pct min=0.0 max=100.0 step=5.0 suffix="%".to_string()/>
+                    </FormField>
+                    <FormField
+                        label="Heat advisory dry days".to_string()
+                        helptext="Consecutive dry days required before heat advisory triggers. Default: 2".to_string()
+                        error=Signal::derive(|| None::<String>)
+                    >
+                        <input
+                            type="number"
+                            step="1"
+                            min="0"
+                            class="ui-input"
+                            prop:value=move || heat_advisory_dry_days.get() as f64
+                            on:input=move |ev| {
+                                if let Ok(v) = event_target_value(&ev).parse::<u32>() {
+                                    heat_advisory_dry_days.set(v);
+                                }
                             }
-                        }
-                    />
-                </FormField>
+                        />
+                    </FormField>
+                </div>
             </Panel>
 
-            <div style="display: flex; gap: 0.6rem; flex-wrap: wrap">
+            <div class="settings-actions">
                 <button
                     type="button"
-                    class="setup-apply-btn"
+                    class="setup-footer__btn setup-footer__btn--primary"
                     disabled=move || saving.get()
                     on:click=on_save
                 >
@@ -246,24 +256,14 @@ pub fn SettingsSkipRules() -> impl IntoView {
                 </button>
                 <button
                     type="button"
-                    class="btn-clay"
-                    style="padding: 0.6rem 1rem"
+                    class="setup-footer__btn setup-footer__btn--ghost"
                     on:click=on_reset
                 >
                     "Reset to defaults"
                 </button>
             </div>
 
-            <Show when=move || !result_msg.get().is_empty()>
-                <p
-                    class="setup-result"
-                    class:setup-result--ok=move || result_ok.get()
-                    class:setup-result--err=move || !result_ok.get()
-                    role="status"
-                >
-                    {move || result_msg.get()}
-                </p>
-            </Show>
+            <SettingsResult result_msg=result_msg result_ok=result_ok/>
 
             <Show when=move || !loaded.get()>
                 <p class="settings-page__subtitle" style="margin-top: 1rem">

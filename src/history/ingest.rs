@@ -45,11 +45,7 @@ impl IngestState {
     /// Inspect a freshly-built snapshot, write any completed runs and
     /// verdict transitions. `db` is the SQLite handle; `snapshot` is the
     /// in-memory state from the refresher's last successful poll.
-    pub async fn observe(
-        &mut self,
-        db: &Arc<Mutex<Connection>>,
-        snapshot: &IrrigationSnapshot,
-    ) {
+    pub async fn observe(&mut self, db: &Arc<Mutex<Connection>>, snapshot: &IrrigationSnapshot) {
         let now = snapshot.last_refresh_epoch;
         for zone in &snapshot.zones {
             let was_running = self.seen_running.contains_key(&zone.slug);
@@ -58,10 +54,7 @@ impl IngestState {
                 self.seen_running.insert(zone.slug.clone(), now);
             } else if !zone.running && was_running {
                 // End of a run — emit the row.
-                let start = self
-                    .seen_running
-                    .remove(&zone.slug)
-                    .unwrap_or(now);
+                let start = self.seen_running.remove(&zone.slug).unwrap_or(now);
                 let duration = (now - start).max(0);
                 let rec = RunRecord {
                     zone: zone.slug.clone(),
@@ -97,8 +90,16 @@ impl IngestState {
                 epoch: now,
                 verdict: v,
                 reason: r,
+                trace: None,
             };
-            if let Err(e) = record_decision(db.clone(), rec).await {
+            // Persist the structured trace captured at decision time so the
+            // Rule Lab can replay why this day decided the way it did.
+            let trace_json = snapshot
+                .decision_trace
+                .as_ref()
+                .and_then(|t| serde_json::to_string(t).ok())
+                .unwrap_or_default();
+            if let Err(e) = record_decision(db.clone(), rec, trace_json).await {
                 tracing::warn!("decision insert failed: {e:#}");
             }
         }

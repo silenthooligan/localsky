@@ -1,8 +1,11 @@
 // /api/config router. Reads + writes /data/localsky.toml via FileConfigStore.
 //
 // Endpoints:
-//   GET  /api/config              -> current Config (TODO: secret redaction)
-//   PUT  /api/config              -> validate + save; returns ConfigVersion
+//   GET  /api/config              -> current Config, secrets replaced with
+//                                    SECRET_REDACTED_SENTINEL by redact_secrets()
+//   PUT  /api/config              -> validate + save; restores any field still
+//                                    set to the sentinel from the stored value
+//                                    via unredact_secrets() so partial edits work
 //   GET  /api/config/schema       -> JsonSchema for the settings UI forms
 //   POST /api/config/preview      -> dry-run validation against a candidate
 //   POST /api/config/rollback?to=<v> -> restore a snapshot (Phase 4)
@@ -34,7 +37,87 @@ pub fn router(state: ConfigApiState) -> Router {
         .route("/schema", get(get_schema))
         .route("/preview", post(preview_config))
         .route("/rollback", post(post_rollback))
+        .route("/raw", get(get_raw_toml).put(put_raw_toml))
         .with_state(state)
+}
+
+/// Return the raw TOML bytes of /data/localsky.toml as text/plain so the
+/// Advanced settings page can render a textarea editor. Secrets are NOT
+/// redacted here (unlike GET /); this endpoint is operator-only and
+/// gated behind the existing app auth surface. Empty 200 when the file
+/// hasn't been written yet so the wizard can pre-populate via PUT.
+async fn get_raw_toml(State(store): State<ConfigApiState>) -> impl IntoResponse {
+    match tokio::fs::read_to_string(store.path()).await {
+        Ok(s) => (
+            StatusCode::OK,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
+            s,
+        )
+            .into_response(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
+            StatusCode::OK,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
+            String::new(),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: "raw_read_failed".into(),
+                detail: Some(e.to_string()),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+/// Replace /data/localsky.toml with the supplied TOML body verbatim,
+/// after a round-trip validation that the text parses to a Config
+/// matching the schema invariants. On success the FileConfigStore's
+/// in-memory cache is invalidated by the next load() call.
+async fn put_raw_toml(State(store): State<ConfigApiState>, body: String) -> impl IntoResponse {
+    // Validate by parsing through the same path as the loader. Reuses
+    // the Validate step in src/config/loader.rs::validate.
+    let parsed: Config = match toml::from_str(&body) {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ApiError {
+                    error: "toml_parse_error".into(),
+                    detail: Some(e.to_string()),
+                }),
+            )
+                .into_response();
+        }
+    };
+    if let Err(e) = crate::config::loader::validate(&parsed) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ApiError {
+                error: "config_validation_error".into(),
+                detail: Some(format!("{e}")),
+            }),
+        )
+            .into_response();
+    }
+    if let Err(e) = tokio::fs::write(store.path(), body.as_bytes()).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: "raw_write_failed".into(),
+                detail: Some(e.to_string()),
+            }),
+        )
+            .into_response();
+    }
+    Json(serde_json::json!({ "ok": true, "bytes": body.len() })).into_response()
 }
 
 #[derive(Debug, Serialize)]
@@ -329,13 +412,25 @@ mod tests {
         assert!(!s.contains("supersecret_ha_token_xyz"), "HA bearer leaked");
         assert!(!s.contains("mqtt_password_123"), "MQTT password leaked");
         assert!(!s.contains("abc123md5hash"), "OS password_md5 leaked");
-        assert!(!s.contains("sk-proj-very-real-looking-key"), "API key leaked");
-        assert!(!s.contains("hooks.slack.com/services/SECRET"), "Slack webhook leaked");
-        assert!(!s.contains("/keys/vapid-private.pem"), "VAPID private path leaked");
+        assert!(
+            !s.contains("sk-proj-very-real-looking-key"),
+            "API key leaked"
+        );
+        assert!(
+            !s.contains("hooks.slack.com/services/SECRET"),
+            "Slack webhook leaked"
+        );
+        assert!(
+            !s.contains("/keys/vapid-private.pem"),
+            "VAPID private path leaked"
+        );
         // Sentinel should appear
         assert!(s.contains(SECRET_REDACTED_SENTINEL));
         // Non-secret fields should remain
-        assert!(s.contains("ha.local:8123"), "base_url unexpectedly redacted");
+        assert!(
+            s.contains("ha.local:8123"),
+            "base_url unexpectedly redacted"
+        );
         assert!(s.contains("os_main"), "controller id unexpectedly redacted");
         assert!(s.contains("28.5"), "lat unexpectedly redacted");
     }

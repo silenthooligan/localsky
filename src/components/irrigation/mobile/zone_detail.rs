@@ -78,7 +78,7 @@ pub fn MobileZoneDetail(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     let on_back = move |ev: leptos::ev::MouseEvent| {
         ev.prevent_default();
         log_nav("zone-detail back");
-        navigate("/irrigation?tab=zones", NavigateOptions::default());
+        navigate("/zones", NavigateOptions::default());
     };
 
     move || {
@@ -87,7 +87,7 @@ pub fn MobileZoneDetail(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             None => {
                 return view! {
                     <div class="mobile-stack">
-                        <a href="/irrigation?tab=zones" class="mobile-back-link" on:click=on_back.clone()>"‹ Zones"</a>
+                        <a href="/zones" class="mobile-back-link" on:click=on_back.clone()>"‹ Zones"</a>
                         <div class="mobile-zone-detail-empty">"Loading zone..."</div>
                     </div>
                 }.into_any();
@@ -128,7 +128,7 @@ pub fn MobileZoneDetail(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 .into_iter()
                 .filter(|r| r.zone == zslug_history)
                 .collect();
-            runs.sort_by(|a, b| b.start_epoch.cmp(&a.start_epoch));
+            runs.sort_by_key(|r| std::cmp::Reverse(r.start_epoch));
             runs.into_iter().take(14).collect::<Vec<_>>()
         };
 
@@ -164,7 +164,7 @@ pub fn MobileZoneDetail(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
 
         view! {
             <div class="mobile-stack mobile-zone-detail">
-                <a href="/irrigation?tab=zones" class="mobile-back-link" on:click=on_back.clone()>"‹ Zones"</a>
+                <a href="/zones" class="mobile-back-link" on:click=on_back.clone()>"‹ Zones"</a>
 
                 <header class="mobile-zone-header">
                     <h2 class="mobile-zone-title">{zname}</h2>
@@ -298,8 +298,7 @@ fn MobileZoneMathRows(m: ZoneMath) -> impl IntoView {
     };
     let raw = format_seconds_pretty(m.raw_seconds);
     let cap_row = if m.cap_binding {
-        let pct = ((m.raw_seconds - m.max_duration_seconds) as f64
-            / m.raw_seconds.max(1) as f64
+        let pct = ((m.raw_seconds - m.max_duration_seconds) as f64 / m.raw_seconds.max(1) as f64
             * 100.0)
             .round() as i64;
         format!(
@@ -377,7 +376,10 @@ fn HistoryRow(run: RunRecord) -> impl IntoView {
 }
 
 fn epoch_to_local(epoch: i64) -> DateTime<Local> {
-    Local.timestamp_opt(epoch, 0).single().unwrap_or_else(|| Local.timestamp_opt(0, 0).unwrap())
+    Local
+        .timestamp_opt(epoch, 0)
+        .single()
+        .unwrap_or_else(|| Local.timestamp_opt(0, 0).unwrap())
 }
 
 fn format_relative_past(epoch: i64) -> String {
@@ -393,5 +395,9 @@ fn format_relative_past(epoch: i64) -> String {
         return format!("{}h ago", diff / 3600);
     }
     let days = diff / 86_400;
-    if days == 1 { "yesterday".to_string() } else { format!("{days}d ago") }
+    if days == 1 {
+        "yesterday".to_string()
+    } else {
+        format!("{days}d ago")
+    }
 }

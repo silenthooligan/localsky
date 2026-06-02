@@ -7,6 +7,7 @@
 // All math is recomputed every snapshot tick (10s) so the dashboard
 // reflects current rain forecast + last-run epoch instantly.
 
+use crate::components::ui::HelpHint;
 use crate::ha::snapshot::{IrrigationSnapshot, WaterBudget};
 use chrono::{Local, TimeZone, Utc};
 use leptos::prelude::*;
@@ -21,12 +22,14 @@ pub fn WaterBudgetPanel(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
 
     view! {
         <section class="water-budget">
-            <h2 class="water-budget-title">"Weekly water budget"</h2>
+            <h2 class="water-budget-title">
+                "Weekly water budget"
+                <HelpHint topic="water-budget"/>
+            </h2>
             <p class="water-budget-sub">
-                "Phase H — deep + infrequent. Allocates the weekly water target across "
-                "N sessions, subtracts forecast rain, defers when rain is incoming or "
-                "the zone ran recently. When mode is "<strong>"on"</strong>" for a zone, the HA "
-                "budget-override at 23:30:25 replaces SI's daily flex with this plan."
+                "Deep + infrequent. Allocates the weekly water target across "
+                "N sessions, subtracts forecast rain, and defers when rain is "
+                "incoming or the zone ran recently."
             </p>
             <div class="water-budget-grid">
                 {view! { <WaterBudgetTile zone=zone0/> }.into_any()}
@@ -65,10 +68,7 @@ fn WaterBudgetTile(zone: Signal<WaterBudget>) -> impl IntoView {
     let today_value = move || {
         let z = zone.get();
         if z.today_seconds > 0 {
-            format!(
-                "{} min",
-                ((z.today_seconds as f64) / 60.0).round() as u32
-            )
+            format!("{} min", ((z.today_seconds as f64) / 60.0).round() as u32)
         } else {
             "\u{2014}".to_string()
         }

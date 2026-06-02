@@ -63,7 +63,8 @@ pub fn InstallPrompt() -> impl IntoView {
         mode.set(Mode::Hidden);
     };
 
-    move || match mode.get() {
+    move || {
+        match mode.get() {
         Mode::Hidden => ().into_any(),
         Mode::Native => view! {
             <div class="install-prompt" role="region" aria-label="Install LocalSky">
@@ -86,6 +87,7 @@ pub fn InstallPrompt() -> impl IntoView {
                 <button class="install-prompt-close" aria-label="Dismiss" on:click=on_dismiss>"\u{2715}"</button>
             </div>
         }.into_any(),
+    }
     }
 }
 
@@ -126,7 +128,8 @@ fn init_install_detection(mode: RwSignal<Mode>) {
         }
         mode_for_evt.set(Mode::Native);
     });
-    let _ = win.add_event_listener_with_callback("beforeinstallprompt", cb.as_ref().unchecked_ref());
+    let _ =
+        win.add_event_listener_with_callback("beforeinstallprompt", cb.as_ref().unchecked_ref());
     cb.forget();
 
     // Hide on appinstalled. This fires after the install completes so we
@@ -134,8 +137,8 @@ fn init_install_detection(mode: RwSignal<Mode>) {
     let cb_installed = Closure::<dyn FnMut(_)>::new(move |_ev: web_sys::Event| {
         mode.set(Mode::Hidden);
     });
-    let _ = win
-        .add_event_listener_with_callback("appinstalled", cb_installed.as_ref().unchecked_ref());
+    let _ =
+        win.add_event_listener_with_callback("appinstalled", cb_installed.as_ref().unchecked_ref());
     cb_installed.forget();
 
     // iOS Safari: detect by UA + lack of beforeinstallprompt firing.
@@ -191,7 +194,9 @@ fn trigger_native_install(mode: RwSignal<Mode>) {
 
 #[cfg(feature = "hydrate")]
 fn is_standalone() -> bool {
-    let Some(win) = web_sys::window() else { return false };
+    let Some(win) = web_sys::window() else {
+        return false;
+    };
     if let Ok(Some(mql)) = win.match_media("(display-mode: standalone)") {
         if mql.matches() {
             return true;
@@ -207,7 +212,9 @@ fn is_standalone() -> bool {
 
 #[cfg(feature = "hydrate")]
 fn is_ios_safari() -> bool {
-    let Some(win) = web_sys::window() else { return false };
+    let Some(win) = web_sys::window() else {
+        return false;
+    };
     let ua = win.navigator().user_agent().unwrap_or_default();
     let is_ios = ua.contains("iPhone") || ua.contains("iPad") || ua.contains("iPod");
     // Safari has Safari/ but not CriOS (Chrome) / FxiOS (Firefox) / EdgiOS.

@@ -1,8 +1,7 @@
-// Runtime composition root. The single place where all the v2 modules
+// Runtime composition root. The single place where all the modules
 // are assembled into a running system. main.rs calls Runtime::boot()
-// (when /data/localsky.toml exists or LOCALSKY_V2=1 is set) and
-// receives a fully-wired Runtime that exposes the Axum router state
-// plus a handle to the spawned background tasks.
+// unconditionally and receives a fully-wired Runtime that exposes the
+// Axum router state plus a handle to the spawned background tasks.
 //
 // Boot sequence:
 //   1. Load Config: try /data/localsky.toml first, fall back to
@@ -35,7 +34,10 @@ use tracing::{info, warn};
 use crate::config::env_compat;
 use crate::config::schema::{Config, ControllerKind, LlmProviderKind, SourceKind};
 use crate::config::FileConfigStore;
-use crate::controllers::{ControllerRegistry, DryRunController, HaServiceCall, OpenSprinklerDirect};
+use crate::controllers::{
+    Bhyve, ControllerRegistry, DryRunController, HaServiceCall, Hydrawise, MqttCommand,
+    OpenSprinklerDirect, Rachio, Rainbird,
+};
 use crate::llm::providers::{
     auto_detect::{default_probe_targets, detect, ProbeKind, ProbeTarget},
     OllamaProvider, OpenaiCompatProvider,
@@ -48,7 +50,11 @@ use crate::ports::config_store::ConfigStore;
 use crate::ports::irrigation_controller::IrrigationController;
 use crate::ports::llm_provider::LlmProvider;
 use crate::ports::weather_source::{SourceEvent, WeatherSource};
-use crate::sources::{DemoReplay, EcowittLocal, HttpWebhook, MqttSubscribe, SourceRegistry};
+use crate::sources::{
+    AmbientWeather, DavisWll, DemoReplay, EcowittLocal, HaPassthrough, HttpWebhook, Lacrosse,
+    MetNorway, MqttSubscribe, Netatmo, Nws, OpenWeather, PirateWeather, SourceRegistry, TempestWs,
+    TuyaCloud, Yolink,
+};
 
 pub struct Runtime {
     pub config: Arc<ArcSwap<Config>>,
@@ -72,20 +78,16 @@ impl Runtime {
     /// Compose every module from config + persistence. Returns a Runtime
     /// ready to spawn background tasks against. Does not block on
     /// network probes for the LLM (auto-detect runs in a spawn).
-    pub async fn boot(
-        config_path: PathBuf,
-        db_path: PathBuf,
-    ) -> anyhow::Result<Self> {
+    pub async fn boot(config_path: PathBuf, db_path: PathBuf) -> anyhow::Result<Self> {
         // ----- Step 1: persistence -----
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        let mut conn = Connection::open(&db_path)
-            .with_context(|| format!("open sqlite at {db_path:?}"))?;
+        let mut conn =
+            Connection::open(&db_path).with_context(|| format!("open sqlite at {db_path:?}"))?;
         conn.pragma_update(None, "journal_mode", "WAL").ok();
         conn.pragma_update(None, "synchronous", "NORMAL").ok();
-        let applied = migration_runner::run(&mut conn)
-            .with_context(|| "run migrations")?;
+        let applied = migration_runner::run(&mut conn).with_context(|| "run migrations")?;
         if !applied.is_empty() {
             info!(applied = ?applied, "applied schema migrations");
         }
@@ -115,6 +117,20 @@ impl Runtime {
         let sensor_history = SensorHistoryStore::new(db.clone());
         let verdict_history = VerdictHistoryStore::new(db.clone());
         let config_snapshots = ConfigSnapshotStore::new(db.clone());
+
+        // ----- Step 3a: reconcile interrupted runs -----
+        // Any row still marked 'running' or 'intended' represents an
+        // irrigation that was in flight when the process previously
+        // exited (kill -9, deploy, OOM, host reboot). Mark them aborted
+        // before anything else reads the runs table, otherwise the
+        // dashboard renders zombie active runs and history shows runs
+        // that never ended.
+        let now_epoch = chrono::Utc::now().timestamp();
+        match runs.reconcile_in_flight(now_epoch).await {
+            Ok(0) => {}
+            Ok(n) => info!(reconciled = n, "marked interrupted runs as aborted"),
+            Err(e) => warn!(error = %e, "in-flight run reconciliation failed"),
+        }
 
         // ----- Step 4: registries -----
         let sources = SourceRegistry::new();
@@ -230,8 +246,38 @@ fn build_sources(cfg: &Config) -> Vec<Arc<dyn WeatherSource>> {
             SourceKind::DemoReplay(c) => {
                 Some(Arc::new(DemoReplay::new(entry.id.clone(), c.clone())))
             }
-            SourceKind::Mqtt(c) => {
-                Some(Arc::new(MqttSubscribe::new(entry.id.clone(), c.clone())))
+            SourceKind::Mqtt(c) => Some(Arc::new(MqttSubscribe::new(entry.id.clone(), c.clone()))),
+            SourceKind::Nws(c) => Some(Arc::new(Nws::new(
+                entry.id.clone(),
+                c.clone(),
+                cfg.deployment.location.clone(),
+            ))),
+            SourceKind::MetNorway(c) => Some(Arc::new(MetNorway::new(
+                entry.id.clone(),
+                c.clone(),
+                cfg.deployment.location.clone(),
+            ))),
+            SourceKind::OpenWeather(c) => Some(Arc::new(OpenWeather::new(
+                entry.id.clone(),
+                c.clone(),
+                cfg.deployment.location.clone(),
+            ))),
+            SourceKind::PirateWeather(c) => Some(Arc::new(PirateWeather::new(
+                entry.id.clone(),
+                c.clone(),
+                cfg.deployment.location.clone(),
+            ))),
+            SourceKind::AmbientWeather(c) => {
+                Some(Arc::new(AmbientWeather::new(entry.id.clone(), c.clone())))
+            }
+            SourceKind::Netatmo(c) => Some(Arc::new(Netatmo::new(entry.id.clone(), c.clone()))),
+            SourceKind::DavisWll(c) => Some(Arc::new(DavisWll::new(entry.id.clone(), c.clone()))),
+            SourceKind::TempestWs(c) => Some(Arc::new(TempestWs::new(entry.id.clone(), c.clone()))),
+            SourceKind::Yolink(c) => Some(Arc::new(Yolink::new(entry.id.clone(), c.clone()))),
+            SourceKind::Lacrosse(c) => Some(Arc::new(Lacrosse::new(entry.id.clone(), c.clone()))),
+            SourceKind::TuyaCloud(c) => Some(Arc::new(TuyaCloud::new(entry.id.clone(), c.clone()))),
+            SourceKind::HaPassthrough(c) => {
+                Some(Arc::new(HaPassthrough::new(entry.id.clone(), c.clone())))
             }
             // EcowittLocal + HttpWebhook are constructed in
             // build_receiver_sources() because their POST handlers
@@ -239,11 +285,14 @@ fn build_sources(cfg: &Config) -> Vec<Arc<dyn WeatherSource>> {
             // through the run-loop pattern. main.rs mounts the Axum
             // routes against those instances.
             SourceKind::EcowittLocal(_) | SourceKind::HttpWebhook(_) => None,
-            // Other adapters (tempest_udp, open_meteo, nws, openweather,
-            // pirate_weather, met_norway, ambient_weather, ha_passthrough,
-            // tempest_ws) live in v0.1 paths today; they will be
-            // promoted to WeatherSource in follow-up iterations.
-            _ => None,
+            // EcowittGwPoll is a standalone sensor_history poller (not a
+            // WeatherSource); main.rs spawns it directly. Skip here.
+            SourceKind::EcowittGwPoll(_) => None,
+            // Already-wired v0.1 paths: TempestUdp + OpenMeteo run as
+            // their own tasks in main.rs; they are not yet expressed
+            // via WeatherSource. Silent skip is correct.
+            SourceKind::TempestUdp(_) | SourceKind::OpenMeteo(_) => None,
+            // All schema source kinds now have implementations.
         };
         if let Some(s) = constructed {
             out.push(s);
@@ -252,7 +301,32 @@ fn build_sources(cfg: &Config) -> Vec<Arc<dyn WeatherSource>> {
     out
 }
 
-fn build_controllers(
+/// Stringify a SourceKind for log lines without exposing config bodies.
+fn source_kind_name(s: &SourceKind) -> &'static str {
+    match s {
+        SourceKind::TempestUdp(_) => "tempest_udp",
+        SourceKind::TempestWs(_) => "tempest_ws",
+        SourceKind::OpenMeteo(_) => "open_meteo",
+        SourceKind::EcowittLocal(_) => "ecowitt_local",
+        SourceKind::EcowittGwPoll(_) => "ecowitt_gw_poll",
+        SourceKind::Nws(_) => "nws",
+        SourceKind::OpenWeather(_) => "openweather",
+        SourceKind::PirateWeather(_) => "pirate_weather",
+        SourceKind::MetNorway(_) => "met_norway",
+        SourceKind::AmbientWeather(_) => "ambient_weather",
+        SourceKind::Netatmo(_) => "netatmo",
+        SourceKind::Yolink(_) => "yolink",
+        SourceKind::Lacrosse(_) => "lacrosse",
+        SourceKind::TuyaCloud(_) => "tuya_cloud",
+        SourceKind::DavisWll(_) => "davis_wll",
+        SourceKind::HaPassthrough(_) => "ha_passthrough",
+        SourceKind::Mqtt(_) => "mqtt",
+        SourceKind::HttpWebhook(_) => "http_webhook",
+        SourceKind::DemoReplay(_) => "demo_replay",
+    }
+}
+
+pub fn build_controllers(
     cfg: &Config,
     runs: RunsStore,
 ) -> Vec<(Arc<dyn IrrigationController>, bool)> {
@@ -260,6 +334,20 @@ fn build_controllers(
     for entry in &cfg.controllers {
         if !entry.enabled {
             continue;
+        }
+        // Each adapter's new() is fallible (typically the reqwest
+        // Client builder rejecting on TLS root loading), and a single
+        // bad controller must not take the whole runtime down. On Err
+        // we log with the controller id and the failure reason, then
+        // drop the entry from the active set so the rest of the
+        // irrigation stack stays up.
+        fn skip<E: std::fmt::Display>(
+            id: &str,
+            kind: &'static str,
+            e: E,
+        ) -> Option<Arc<dyn IrrigationController>> {
+            warn!(controller = id, kind = kind, error = %e, "controller init failed; skipping");
+            None
         }
         let constructed: Option<Arc<dyn IrrigationController>> = match &entry.controller {
             ControllerKind::DryRun(c) => Some(Arc::new(DryRunController::new(
@@ -276,21 +364,49 @@ fn build_controllers(
                         continue;
                     }
                     if let Ok(s) = zone.controller_station.parse::<u32>() {
-                        zone_to_station.insert(slug.clone(), s);
+                        // Normalize to underscore slugs so the map matches
+                        // zones::configured() + the snapshot + the schedulers
+                        // (config keys may be hyphenated, e.g. "back-yard").
+                        // Without this, status() readback AND native dispatch
+                        // (run_zone) miss with a slug mismatch.
+                        zone_to_station.insert(slug.replace('-', "_"), s);
                     }
                 }
-                Some(Arc::new(OpenSprinklerDirect::new(
-                    entry.id.clone(),
-                    c.clone(),
-                    zone_to_station,
-                )))
+                match OpenSprinklerDirect::new(entry.id.clone(), c.clone(), zone_to_station) {
+                    Ok(ctl) => Some(Arc::new(ctl)),
+                    Err(e) => skip(&entry.id, "opensprinkler_direct", e),
+                }
             }
             ControllerKind::HaServiceCall(c) => {
-                Some(Arc::new(HaServiceCall::new(entry.id.clone(), c.clone())))
+                match HaServiceCall::new(entry.id.clone(), c.clone()) {
+                    Ok(ctl) => Some(Arc::new(ctl)),
+                    Err(e) => skip(&entry.id, "ha_service_call", e),
+                }
             }
-            ControllerKind::EsphomeNative(_) | ControllerKind::Rachio(_) => {
-                // Community/planned adapters; not yet built.
-                warn!(controller = %entry.id, "unsupported controller kind in current build; skipping");
+            ControllerKind::Rachio(c) => match Rachio::new(entry.id.clone(), c.clone()) {
+                Ok(ctl) => Some(Arc::new(ctl)),
+                Err(e) => skip(&entry.id, "rachio", e),
+            },
+            ControllerKind::Hydrawise(c) => match Hydrawise::new(entry.id.clone(), c.clone()) {
+                Ok(ctl) => Some(Arc::new(ctl)),
+                Err(e) => skip(&entry.id, "hydrawise", e),
+            },
+            ControllerKind::Bhyve(c) => match Bhyve::new(entry.id.clone(), c.clone()) {
+                Ok(ctl) => Some(Arc::new(ctl)),
+                Err(e) => skip(&entry.id, "bhyve", e),
+            },
+            ControllerKind::Rainbird(c) => match Rainbird::new(entry.id.clone(), c.clone()) {
+                Ok(ctl) => Some(Arc::new(ctl)),
+                Err(e) => skip(&entry.id, "rainbird", e),
+            },
+            ControllerKind::MqttCommand(c) => {
+                Some(Arc::new(MqttCommand::new(entry.id.clone(), c.clone())))
+            }
+            ControllerKind::EsphomeNative(_) => {
+                // Deferred: ESPHome native API uses a custom binary
+                // protocol; needs a dedicated crate or hand-rolled
+                // implementation. Tracked separately.
+                warn!(controller = %entry.id, "ESPHome native controller not yet built; skipping");
                 None
             }
         };
@@ -299,6 +415,40 @@ fn build_controllers(
         }
     }
     out
+}
+
+/// Build a single controller adapter for the wizard's test/scan endpoints.
+/// No RunsStore and an empty zone map — these endpoints only need device
+/// reachability (`status()`) and zone enumeration (`discover_zones()`),
+/// neither of which depends on the zone mapping. Returns Err for kinds
+/// that can't be probed (fire-and-forget / HA-mediated / not-yet-built).
+pub fn build_test_controller(
+    entry: &crate::config::schema::ControllerEntry,
+) -> Result<Arc<dyn IrrigationController>, String> {
+    let c: Arc<dyn IrrigationController> = match &entry.controller {
+        ControllerKind::OpensprinklerDirect(c) => Arc::new(
+            OpenSprinklerDirect::new(entry.id.clone(), c.clone(), Default::default())
+                .map_err(|e| e.to_string())?,
+        ),
+        ControllerKind::Rachio(c) => {
+            Arc::new(Rachio::new(entry.id.clone(), c.clone()).map_err(|e| e.to_string())?)
+        }
+        ControllerKind::Hydrawise(c) => {
+            Arc::new(Hydrawise::new(entry.id.clone(), c.clone()).map_err(|e| e.to_string())?)
+        }
+        ControllerKind::Bhyve(c) => {
+            Arc::new(Bhyve::new(entry.id.clone(), c.clone()).map_err(|e| e.to_string())?)
+        }
+        ControllerKind::Rainbird(c) => {
+            Arc::new(Rainbird::new(entry.id.clone(), c.clone()).map_err(|e| e.to_string())?)
+        }
+        _ => {
+            return Err(
+                "this controller kind can't be probed (fire-and-forget or HA-mediated)".into(),
+            )
+        }
+    };
+    Ok(c)
 }
 
 async fn build_llm(cfg: &Config) -> Option<Arc<dyn LlmProvider>> {
@@ -322,13 +472,10 @@ async fn build_llm(cfg: &Config) -> Option<Arc<dyn LlmProvider>> {
                     .collect()
             };
             // Time-box the probe so a slow boot doesn't block the runtime.
-            tokio::time::timeout(
-                Duration::from_secs(10),
-                detect(targets, String::new()),
-            )
-            .await
-            .ok()
-            .flatten()
+            tokio::time::timeout(Duration::from_secs(10), detect(targets, String::new()))
+                .await
+                .ok()
+                .flatten()
         }
         LlmProviderKind::Ollama(c) => Some(Arc::new(OllamaProvider::new(
             "ollama",

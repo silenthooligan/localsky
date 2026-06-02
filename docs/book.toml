@@ -1,0 +1,35 @@
+[book]
+title = "LocalSky"
+authors = ["silenthooligan"]
+description = "Documentation for LocalSky: local-first weather and irrigation control."
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "ayu"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/silenthooligan/localsky"
+edit-url-template = "https://github.com/silenthooligan/localsky/edit/main/docs/src/{path}"
+site-url = "/"
+additional-css = ["theme/css/custom.css"]
+additional-js = ["theme/js/umami.js"]
+no-section-label = false
+mathjax-support = false
+
+[output.html.search]
+enable = true
+limit-results = 20
+use-boolean-and = true
+boost-title = 2
+boost-hierarchy = 1
+boost-paragraph = 1
+heading-split-level = 3
+
+[output.html.fold]
+enable = false
+
+[output.html.print]
+enable = true
+
+[preprocessor.links]
+[preprocessor.index]

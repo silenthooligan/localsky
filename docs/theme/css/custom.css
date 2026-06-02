@@ -1,0 +1,121 @@
+/*
+ * LocalSky mdBook theme overlay.
+ *
+ * Overrides the default Ayu palette to match the LocalSky dashboard:
+ * deep navy background, cyan accent, glass-panel sidebar, JetBrains Mono
+ * code blocks. Token names mirror src/style/main.scss in the main repo
+ * so an update there is a paste away.
+ */
+
+:root {
+  --ls-bg-deep:       #07090f;
+  --ls-bg-panel:      #0f131c;
+  --ls-bg-panel-soft: #161b27;
+  --ls-border:        #232a3a;
+  --ls-text:          #e6ecf5;
+  --ls-text-dim:      #94a0b6;
+  --ls-text-faint:    #6f7c95;
+  --ls-accent:        #5ec8ff;
+  --ls-accent-warm:   #ffb84a;
+  --ls-accent-good:   #7ed957;
+}
+
+/* Override the Ayu palette mdBook applies. */
+.ayu {
+  --bg:               var(--ls-bg-deep);
+  --fg:               var(--ls-text);
+  --sidebar-bg:       var(--ls-bg-panel);
+  --sidebar-fg:       var(--ls-text-dim);
+  --sidebar-non-existant: var(--ls-text-faint);
+  --sidebar-active:   var(--ls-accent);
+  --sidebar-spacer:   var(--ls-border);
+  --scrollbar:        var(--ls-border);
+  --icons:            var(--ls-text-dim);
+  --icons-hover:      var(--ls-accent);
+  --links:            var(--ls-accent);
+  --inline-code-color:#5ec8ff;
+  --theme-popup-bg:   var(--ls-bg-panel);
+  --theme-popup-border: var(--ls-border);
+  --theme-hover:      rgba(94, 200, 255, 0.10);
+  --quote-bg:         rgba(94, 200, 255, 0.05);
+  --quote-border:     var(--ls-accent);
+  --table-border-color: var(--ls-border);
+  --table-header-bg:  var(--ls-bg-panel-soft);
+  --table-alternate-bg: rgba(255, 255, 255, 0.02);
+  --searchbar-border-color: var(--ls-border);
+  --searchbar-bg:     var(--ls-bg-panel);
+  --searchbar-fg:     var(--ls-text);
+  --searchbar-shadow-color: rgba(0, 0, 0, 0.5);
+  --searchresults-header-fg: var(--ls-text-dim);
+  --searchresults-border-color: var(--ls-border);
+  --searchresults-li-bg: rgba(94, 200, 255, 0.06);
+  --search-mark-bg:   rgba(94, 200, 255, 0.30);
+}
+
+/* Page background gets a subtle gradient from deep to slightly lighter. */
+.ayu body {
+  background:
+    radial-gradient(ellipse at top left,  rgba(94, 200, 255, 0.05), transparent 60%),
+    radial-gradient(ellipse at top right, rgba(125, 90, 220, 0.05), transparent 60%),
+    var(--ls-bg-deep);
+}
+
+/* Sidebar: glassy panel feel. */
+.ayu .sidebar {
+  background: var(--ls-bg-panel);
+  border-right: 1px solid var(--ls-border);
+}
+
+/* Chapter title font in the sidebar. */
+.ayu .chapter li.chapter-item {
+  color: var(--ls-text-dim);
+}
+.ayu .chapter li.chapter-item.expanded > a,
+.ayu .chapter li.chapter-item > a:hover {
+  color: var(--ls-accent);
+}
+
+/* Code blocks: tinted panel + monospace stack matching the app. */
+.ayu pre,
+.ayu pre > code.hljs {
+  background: var(--ls-bg-panel-soft) !important;
+  border: 1px solid var(--ls-border);
+  border-radius: 6px;
+}
+.ayu code {
+  font-family: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+}
+.ayu :not(pre) > code {
+  color: #6db5ff;
+  background: rgba(94, 200, 255, 0.08);
+  border-radius: 3px;
+  padding: 0.05em 0.4em;
+}
+
+/* Headings: accent color for h1, slightly muted for subheads. */
+.ayu h1 { color: var(--ls-text); }
+.ayu h2 { color: var(--ls-text); border-bottom: 1px solid var(--ls-border); padding-bottom: 0.3em; }
+.ayu h3, .ayu h4 { color: var(--ls-text); }
+
+/* Body text: comfortable line-height + dim quotes. */
+.ayu .content { color: var(--ls-text); }
+.ayu blockquote {
+  background: rgba(94, 200, 255, 0.04);
+  border-left: 3px solid var(--ls-accent);
+  color: var(--ls-text-dim);
+}
+
+/* Tables: panel header + alternating row tint. */
+.ayu table thead {
+  background: var(--ls-bg-panel-soft);
+  color: var(--ls-text);
+}
+.ayu table tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+/* Print theme: minor fixups for high-contrast paper output. */
+@media print {
+  .ayu body { background: white; color: black; }
+  .ayu pre { background: #f6f8fa !important; }
+}

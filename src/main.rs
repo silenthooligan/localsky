@@ -3,16 +3,25 @@
 // listener, and read by the API endpoints + the SSR pass for the Leptos
 // app (via `provide_context`).
 
+// THIS is the recursion_limit the release build actually needs. The
+// overflow ("queries overflow the depth limit!") happens while compiling
+// the `localsky` BINARY, where leptos_axum's generate_route_list +
+// LeptosRoutes + the SSR shell monomorphize the whole component tree in
+// one place. recursion_limit is per-crate, so the copy in lib.rs does NOT
+// cover this crate root — the bin needs its own. (Three release builds
+// failed before this was caught, because the attribute was only in lib.rs.)
+// Compile-time query budget only, no runtime cost.
+#![recursion_limit = "512"]
+
 #[cfg(feature = "ssr")]
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
+    use anyhow::Context;
+    use axum::http::{header, HeaderValue};
+    use axum::routing::get;
     use axum::Router;
     use leptos::prelude::*;
     use leptos_axum::{generate_route_list, LeptosRoutes};
-    use std::sync::Arc;
-    use tracing_subscriber::EnvFilter;
-    use axum::http::{header, HeaderValue};
-    use tower_http::set_header::SetResponseHeaderLayer;
     use localsky::{
         api,
         app::{shell, App},
@@ -22,11 +31,12 @@ async fn main() {
         history::HistoryDb,
         llm::AdvisorState,
         ports::config_store::ConfigStore,
-        push, runtime_helpers,
-        sw,
+        push, runtime_helpers, sw,
         tempest::{listener::spawn_listener, state::TempestStore},
     };
-    use axum::routing::get;
+    use std::sync::Arc;
+    use tower_http::set_header::SetResponseHeaderLayer;
+    use tracing_subscriber::EnvFilter;
 
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
@@ -46,8 +56,8 @@ async fn main() {
     // SQLite-backed run history. Optional — if /data isn't mounted
     // or the file can't be opened, we log and run without history
     // (the rest of the irrigation page works fine).
-    let history_path = std::env::var("HISTORY_DB_PATH")
-        .unwrap_or_else(|_| "/data/irrigation.db".to_string());
+    let history_path =
+        std::env::var("HISTORY_DB_PATH").unwrap_or_else(|_| "/data/irrigation.db".to_string());
     let history_db = match HistoryDb::open(history_path.clone().into()) {
         Ok(db) => Some(db),
         Err(e) => {
@@ -58,6 +68,13 @@ async fn main() {
         }
     };
     let history_conn = history_db.as_ref().map(|db| db.handle());
+
+    // Sample the live Tempest snapshot into sensor_history so the Weather
+    // home telemetry strip has real trend sparklines (and /api/health has
+    // freshness). Spawned in demo too — the demo feeder fills the store.
+    if let Some(hc) = history_conn.clone() {
+        localsky::persistence::spawn_weather_sampler(hc, tempest_store.clone());
+    }
 
     let forecast_store = Arc::new(ForecastStore::new());
     if !demo_mode {
@@ -70,15 +87,186 @@ async fn main() {
     // drops every event, so the rest of the app keeps running.
     let push_dispatcher = push::spawn_dispatcher(history_conn.clone());
 
+    // Resolve per-zone runtime info from the config file once at boot so
+    // the refresher computes throughput from operator-owned config rather
+    // than reading stale Smart Irrigation entity attributes. Empty map on
+    // fresh installs; the refresher falls back to the rotor catalog default
+    // per zone in that case.
+    let boot_config_path =
+        std::env::var("CONFIG_PATH").unwrap_or_else(|_| "/data/localsky.toml".to_string());
+    // Load cfg once and derive both per-zone runtime + watering policy
+    // from it. Empty defaults if the toml hasn't been written yet.
+    let boot_cfg = {
+        let store = FileConfigStore::new(&boot_config_path);
+        store.load().await.ok()
+    };
+
+    let zone_runtime = match boot_cfg.as_ref() {
+        Some(cfg) => {
+            let mut m = std::collections::HashMap::new();
+            for (slug, z) in cfg.zones.iter() {
+                let throughput = localsky::engine::effective_precip_rate_mm_hr(
+                    z.sprinkler_type,
+                    z.precip_rate_mm_hr,
+                );
+                // The refresher enumerates zones via crate::zones::configured()
+                // which underscore-normalizes slugs ("back-yard" -> "back_yard");
+                // mirror that here so the lookup hits.
+                m.insert(
+                    slug.replace('-', "_"),
+                    localsky::ha::ZoneRuntime {
+                        throughput_mm_hr: throughput,
+                        max_duration_s: 3600,
+                    },
+                );
+            }
+            m
+        }
+        None => std::collections::HashMap::new(),
+    };
+
+    let watering_policy = match boot_cfg.as_ref() {
+        Some(cfg) => localsky::ha::WateringPolicy {
+            restrictions: cfg.engine.watering_restrictions.clone(),
+            address_parity: cfg.deployment.address_parity,
+            manual_schedules: cfg.manual_schedules.clone(),
+            location: (cfg.deployment.location.lat, cfg.deployment.location.lon),
+            // Per-zone soil config: each zone's assigned sensor + thresholds.
+            // Slugs underscore-normalized to match the refresher's zone list.
+            soil_zones: cfg
+                .zones
+                .iter()
+                .map(|(slug, z)| localsky::ha::ZoneSoilCfg {
+                    slug: slug.replace('-', "_"),
+                    name: z.display_name.clone(),
+                    soil_sensor_id: z.soil_sensor_id.clone(),
+                    saturation_pct: z.saturation_pct_soil,
+                    target_min_pct: z.target_min_pct_soil,
+                })
+                .collect(),
+            condition_rules: cfg.conditions.rules.clone(),
+            skip_rules: cfg.engine.skip_rules.clone(),
+            // Per-zone weekly-budget config for the standalone allocator
+            // (A5b). Slugs underscore-normalized to match the refresher's
+            // zone list, same as soil_zones above.
+            budget_zones: cfg
+                .zones
+                .iter()
+                .map(|(slug, z)| localsky::ha::ZoneBudgetCfg {
+                    slug: slug.replace('-', "_"),
+                    name: z.display_name.clone(),
+                    weekly_budget_in: z.weekly_budget_in,
+                    sessions_per_week: z.sessions_per_week,
+                })
+                .collect(),
+            ha_sprinkler_prefix: cfg.deployment.ha_sprinkler_prefix.clone(),
+        },
+        None => localsky::ha::WateringPolicy::default(),
+    };
+
+    // Compile user-defined Rhai skip rules from the boot config. Augment-
+    // only: applied as a post-pass on a "run" verdict, never clearing a
+    // safety gate. Deploy-time contract (recompiled on container restart).
+    let user_scripts = boot_cfg
+        .as_ref()
+        .map(|cfg| localsky::engine::scripting::CompiledScripts::compile(&cfg.scripting.skip_rules))
+        .unwrap_or_default();
+
     let irrigation_store = Arc::new(IrrigationStore::new());
     if !demo_mode {
+        // Snapshot source: HA vs native (standalone). Auto picks native
+        // only when no HA env is configured, so an existing HA deploy is
+        // unaffected. Built up front because the native builder needs the
+        // controller registry.
+        let snapshot_source = localsky::ha::resolve_snapshot_source(
+            boot_cfg
+                .as_ref()
+                .map(|c| c.deployment.mode)
+                .unwrap_or_default(),
+        );
+        let runs_store = history_conn
+            .as_ref()
+            .map(|hc| localsky::persistence::runs::RunsStore::new(hc.clone()));
+        let registry = localsky::controllers::registry::ControllerRegistry::new();
+        if let (Some(cfg), Some(rs)) = (boot_cfg.as_ref(), runs_store.as_ref()) {
+            registry.set(localsky::runtime::build_controllers(cfg, rs.clone()));
+        }
+
+        // Shadow mode: when authoritative source is HA and shadow_native is
+        // on, build the native snapshot alongside it for comparison via
+        // /api/v1/irrigation/shadow/*. Never drives dispatch.
+        let shadow_enabled = std::env::var("LOCALSKY_SHADOW_NATIVE").ok().as_deref() == Some("1")
+            || boot_cfg
+                .as_ref()
+                .map(|c| c.deployment.shadow_native)
+                .unwrap_or(false);
+        let shadow_store =
+            if shadow_enabled && snapshot_source == localsky::ha::SnapshotSource::HomeAssistant {
+                let ss = Arc::new(IrrigationStore::new());
+                localsky::api::irrigation::set_shadow_store(ss.clone());
+                tracing::info!("shadow_native enabled: native snapshot will run alongside HA");
+                Some(ss)
+            } else {
+                None
+            };
+
+        // Native control surface (A6): vacation pause + one-day override
+        // persisted in SQLite (M0008). Read each tick by the refresher so a
+        // standalone deploy can be paused; written by POST /action. Absent
+        // when no persistence DB is mounted (control then falls back to
+        // "no pause / auto override").
+        let control_store = history_conn
+            .clone()
+            .map(localsky::persistence::IrrigationControlStore::new);
+
         spawn_refresher(
             irrigation_store.clone(),
             forecast_store.clone(),
             tempest_store.clone(),
             history_conn.clone(),
             push_dispatcher.clone(),
+            zone_runtime,
+            watering_policy.clone(),
+            user_scripts,
+            snapshot_source,
+            registry.clone(),
+            shadow_store,
+            control_store,
         );
+
+        // Manual schedule dispatcher + smart-morning dispatcher.
+        //
+        // Manual scheduler fires operator-defined weekday/time slots. No-op
+        // when no schedules are configured.
+        //
+        // Smart-morning is the LocalSky-native replacement for IU's nightly
+        // sequence: computes today's sunrise, dispatches at sunrise-15 -
+        // total_sequence_length so the morning run finishes 15 min before
+        // sunrise. Spawned unconditionally (the dispatcher itself checks
+        // skip_check + planned_seconds; nothing fires if everything is
+        // zero). Honors LOCALSKY_SMART_DRY_RUN=1 for the safety-net
+        // verification window before flipping IU's master switch off.
+        if let (Some(cfg), Some(runs_store)) = (boot_cfg.as_ref(), runs_store) {
+            if !cfg.manual_schedules.is_empty() {
+                localsky::scheduler::manual::spawn(
+                    cfg.manual_schedules.clone(),
+                    watering_policy.clone(),
+                    registry.clone(),
+                    Some(runs_store.clone()),
+                );
+            }
+            let dry_run = std::env::var("LOCALSKY_SMART_DRY_RUN").ok().as_deref() == Some("1");
+            localsky::scheduler::smart_morning::spawn(
+                irrigation_store.clone(),
+                watering_policy.clone(),
+                registry,
+                Some(runs_store),
+                (cfg.deployment.location.lat, cfg.deployment.location.lon),
+                Some(std::sync::Arc::new(cfg.clone())),
+                Some(push_dispatcher.clone()),
+                dry_run,
+            );
+        }
     } else {
         localsky::demo_data::spawn(
             tempest_store.clone(),
@@ -88,7 +276,8 @@ async fn main() {
         tracing::info!("LOCALSKY_DEMO=1: live data paths disabled; demo feeder active");
     }
 
-    let conf = get_configuration(None).unwrap();
+    let conf = get_configuration(None)
+        .context("read Leptos configuration (check Cargo.toml [package.metadata.leptos] and LEPTOS_* env vars)")?;
     let leptos_options = conf.leptos_options;
     let addr = leptos_options.site_addr;
     let routes = generate_route_list(App);
@@ -99,95 +288,164 @@ async fn main() {
     // Set LLM_ADVISOR_DISABLED=1 to short-circuit (tile reads "disabled").
     let advisor = AdvisorState::from_env();
 
+    // Snapshot source again at router scope (the one above is scoped to the
+    // refresher block). The POST /action handler uses it to route the
+    // vacation pause + one-day override to local state (native) vs HA
+    // helpers (HA). Pure + idempotent, so recomputing is fine.
+    let router_source = localsky::ha::resolve_snapshot_source(
+        boot_cfg
+            .as_ref()
+            .map(|c| c.deployment.mode)
+            .unwrap_or_default(),
+    );
+
+    // Device topology (Phase D): derived from the configured sources +
+    // controllers so /api/v1/devices shows the MA-style gateway/controller
+    // view. Rebuilt on config hot-reload alongside the other registries.
+    let device_registry = localsky::devices::DeviceRegistry::new();
+    if let Some(cfg) = boot_cfg.as_ref() {
+        device_registry.set(localsky::devices::build_devices(cfg));
+    }
+
+    // HA controller entity prefix for the POST /action handler (config-driven;
+    // default "opensprinkler" so the HA path works for any operator's naming).
+    let router_prefix = boot_cfg
+        .as_ref()
+        .map(|c| c.deployment.ha_sprinkler_prefix.clone())
+        .unwrap_or_else(|| "opensprinkler".to_string());
+
+    // Build the API router twice and mount at both /api (legacy) and
+    // /api/v1 (canonical). New clients (HACS integration, third-party
+    // automations) target /api/v1; the bare /api/* aliases stay until
+    // we cut the legacy paths in a major release. State is Arc-shared
+    // so cloning is cheap.
     let api_router = api::router(
+        tempest_store.clone(),
+        irrigation_store.clone(),
+        forecast_store.clone(),
+        advisor.clone(),
+        history_conn.clone(),
+        router_source,
+        device_registry.clone(),
+        router_prefix.clone(),
+    );
+    let api_router_v1 = api::router(
         tempest_store.clone(),
         irrigation_store.clone(),
         forecast_store.clone(),
         advisor,
         history_conn.clone(),
+        router_source,
+        device_registry.clone(),
+        router_prefix.clone(),
     );
 
-    // v2 opt-in. Set LOCALSKY_V2=1 (or place a /data/localsky.toml file)
-    // to mount /api/config + /api/wizard + /api/health + /ingest/*
-    // alongside the v0.1 routes. These endpoints power the settings UI,
-    // first-run wizard, health probes, and the HTTP-receiver sensor
-    // sources (Ecowitt local + generic webhook). They never interact
-    // with the legacy irrigation refresher, so toggling them on is safe
-    // for the existing deployment.
-    let config_path = std::env::var("CONFIG_PATH")
-        .unwrap_or_else(|_| "/data/localsky.toml".to_string());
-    let v2_enabled = std::env::var("LOCALSKY_V2").ok().as_deref() == Some("1")
-        || std::path::Path::new(&config_path).exists();
-    let (v2_config_router, v2_wizard_router, v2_health_router, v2_ingest_router) = if v2_enabled {
-        let cfg_store = Arc::new(FileConfigStore::new(&config_path));
-        let draft_path = format!("{config_path}.draft");
-        let draft_store = Arc::new(WizardStore::new(&draft_path));
+    // Settings + wizard + health + ingest routes are always mounted.
+    // The wizard writes /data/localsky.toml on apply; until the file
+    // exists, config endpoints return the env_compat-synthesized
+    // baseline so /api/v1/health stays useful on a fresh install.
+    let config_path =
+        std::env::var("CONFIG_PATH").unwrap_or_else(|_| "/data/localsky.toml".to_string());
+    let cfg_store = Arc::new(FileConfigStore::new(&config_path));
+    let draft_path = format!("{config_path}.draft");
 
-        // Construct receiver sources from the loaded Config so their
-        // POST handlers have somewhere to emit observations.
-        let (receiver_bus_tx, _rx) = tokio::sync::broadcast::channel(256);
-        let (ecowitt_sources, webhook_sources) = match cfg_store.load().await {
-            Ok(cfg) => runtime_helpers::build_receiver_sources(&cfg, receiver_bus_tx.clone()),
-            Err(e) => {
-                tracing::warn!(
-                    config = %config_path,
-                    error = %e,
-                    "could not load config for receiver sources; /ingest/* will return 503"
-                );
-                (Vec::new(), Vec::new())
-            }
-        };
-
-        tracing::info!(
-            config = %config_path,
-            ecowitt_receivers = ecowitt_sources.len(),
-            webhook_receivers = webhook_sources.len(),
-            "v2 endpoints enabled: /api/config + /api/wizard + /api/health + /ingest/* mounted"
+    // Zone photos directory. Uploaded files land here and are served
+    // back at /site/photos/<filename>. Configurable so a deployment
+    // can point the static-serve route at e.g. an NFS share.
+    let photos_dir = std::env::var("LOCALSKY_PHOTOS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("/data/site/photos"));
+    if let Err(e) = std::fs::create_dir_all(&photos_dir) {
+        tracing::warn!(
+            ?e,
+            "could not create photos dir {}; uploads will fail until the path exists",
+            photos_dir.display()
         );
+    }
+    let draft_store = Arc::new(WizardStore::new(&draft_path));
 
-        // Per-source freshness needs the SensorHistoryStore. Open the
-        // SQLite at HISTORY_DB_PATH (defaults to /data/irrigation.db,
-        // same as the legacy refresher's path); if it doesn't open
-        // cleanly, health still works but the sources[] field stays
-        // empty.
-        let sensor_history = match rusqlite::Connection::open(&history_path) {
-            Ok(c) => {
-                Some(localsky::persistence::SensorHistoryStore::new(Arc::new(
-                    tokio::sync::Mutex::new(c),
-                )))
-            }
-            Err(e) => {
-                tracing::warn!(
-                    history = %history_path,
-                    error = %e,
-                    "could not open sensor history for /api/health; freshness unavailable"
-                );
-                None
-            }
-        };
+    // Receiver sources (Ecowitt local POST + generic HTTP webhook).
+    // Loaded from the config file if present; absent on fresh installs.
+    let (receiver_bus_tx, _rx) = tokio::sync::broadcast::channel(256);
+    let (ecowitt_sources, webhook_sources) = match cfg_store.load().await {
+        Ok(cfg) => runtime_helpers::build_receiver_sources(&cfg, receiver_bus_tx.clone()),
+        Err(_) => {
+            tracing::info!(
+                config = %config_path,
+                "no localsky.toml yet; receiver sources idle, /ingest/* returns 503 until the wizard writes one"
+            );
+            (Vec::new(), Vec::new())
+        }
+    };
+    tracing::info!(
+        config = %config_path,
+        ecowitt_receivers = ecowitt_sources.len(),
+        webhook_receivers = webhook_sources.len(),
+        "settings/wizard/health/ingest routes mounted"
+    );
 
-        let health_router = axum::Router::new()
+    let sensor_history = match rusqlite::Connection::open(&history_path) {
+        Ok(c) => Some(localsky::persistence::SensorHistoryStore::new(Arc::new(
+            tokio::sync::Mutex::new(c),
+        ))),
+        Err(e) => {
+            tracing::warn!(
+                history = %history_path,
+                error = %e,
+                "could not open sensor history for /api/health; freshness unavailable"
+            );
+            None
+        }
+    };
+
+    // Ecowitt gateway pollers (Phase E1). For each configured ecowitt_gw_poll
+    // source, spawn a task that polls the gateway's local /get_livedata_info
+    // and writes the readings into the same sensor_history the push ingest +
+    // resolve_soil_pct use. Coexists with HA's push integration. Gated on
+    // !demo_mode so the demo feeder owns the data.
+    if !demo_mode {
+        if let Some(cfg) = boot_cfg.as_ref() {
+            for entry in cfg.sources.iter().filter(|s| s.enabled) {
+                if let localsky::config::schema::SourceKind::EcowittGwPoll(c) = &entry.source {
+                    localsky::sources::ecowitt_gw_poll::spawn(
+                        entry.id.clone(),
+                        c.clone(),
+                        sensor_history.clone(),
+                    );
+                }
+            }
+        }
+    }
+
+    let mk_health = || {
+        axum::Router::new()
             .route("/", axum::routing::get(api::health::health))
             .with_state(api::health::HealthState {
                 config_store: Some(cfg_store.clone()),
-                sensor_history,
-            });
-        let ingest_router = api::ingest::router(api::ingest::IngestState {
-            ecowitt: ecowitt_sources,
-            webhooks: webhook_sources,
-        });
-
-        (
-            Some(api::config::router(cfg_store.clone())),
-            Some(api::wizard::router(api::wizard::WizardApiState {
-                draft_store,
-                config_store: cfg_store,
-            })),
-            Some(health_router),
-            Some(ingest_router),
-        )
-    } else {
-        (None, None, None, None)
+                sensor_history: sensor_history.clone(),
+                tempest_store: Some(tempest_store.clone()),
+                forecast_store: Some(forecast_store.clone()),
+                irrigation_store: Some(irrigation_store.clone()),
+            })
+    };
+    let mk_ingest = || {
+        api::ingest::router(api::ingest::IngestState {
+            ecowitt: ecowitt_sources.clone(),
+            webhooks: webhook_sources.clone(),
+            sensor_history: sensor_history.clone(),
+        })
+    };
+    let mk_config = || api::config::router(cfg_store.clone());
+    let mk_location = || api::location::router(cfg_store.clone());
+    let mk_wizard = || {
+        api::wizard::router(api::wizard::WizardApiState {
+            draft_store: draft_store.clone(),
+            config_store: cfg_store.clone(),
+        })
+    };
+    let mk_photos = {
+        let photos_dir = photos_dir.clone();
+        move || api::photos::router(photos_dir.clone())
     };
 
     let app = Router::new()
@@ -198,10 +456,12 @@ async fn main() {
                 let tempest = tempest_store.clone();
                 let irrigation = irrigation_store.clone();
                 let forecast = forecast_store.clone();
+                let cfg = cfg_store.clone();
                 move || {
                     provide_context(tempest.clone());
                     provide_context(irrigation.clone());
                     provide_context(forecast.clone());
+                    provide_context(cfg.clone());
                 }
             },
             {
@@ -216,30 +476,49 @@ async fn main() {
         // handler interpolates SW_VERSION at request time so every deploy
         // forces install -> waiting -> activate and old caches get nuked.
         .route("/sw.js", get(sw::sw_js))
-        // Mount the snapshot + SSE endpoints at /api/*. `merge` would put
-        // them at the root, where Leptos's fallback would never be reached
-        // anyway — but the radar.js client expects `/api/snapshot` and
-        // `/api/stream` explicitly. Irrigation lives under /api/irrigation.
+        // Mount the snapshot + SSE endpoints at /api/* (legacy) and
+        // /api/v1/* (canonical). New clients should target /api/v1.
+        // The bare /api/* paths stay until a major release cuts them so
+        // the in-app radar.js + the homelab v0.1 push subscribers don't
+        // break across upgrade.
         .nest("/api", api_router)
-        // Web Push subscribe/unsubscribe + vapid-key. Lives under /api/push.
+        .nest("/api/v1", api_router_v1)
+        // Web Push subscribe/unsubscribe + vapid-key. Aliased under
+        // both /api/push and /api/v1/push using independent state.
         .nest(
             "/api/push",
             push::router(push::api::PushState {
                 history_conn: history_conn.clone(),
             }),
+        )
+        .nest(
+            "/api/v1/push",
+            push::router(push::api::PushState {
+                history_conn: history_conn.clone(),
+            }),
         );
 
-    // v2 endpoints. Mount only when LOCALSKY_V2=1 or /data/localsky.toml
-    // exists. Either gives the operator a way to opt into the new
-    // settings/wizard surface without restarting on the legacy path.
-    let app = match (v2_config_router, v2_wizard_router, v2_health_router, v2_ingest_router) {
-        (Some(c), Some(w), Some(h), Some(i)) => app
-            .nest("/api/config", c)
-            .nest("/api/wizard", w)
-            .nest("/api/health", h)
-            .nest("/ingest", i),
-        _ => app,
-    }
+    // Settings + wizard + health + ingest endpoints. Mounted at both
+    // /api/* (legacy) and /api/v1/* (canonical) so clients on either
+    // prefix work.
+    let app = app
+        .nest("/api/location", mk_location())
+        .nest("/api/v1/location", mk_location())
+        .nest("/api/config", mk_config())
+        .nest("/api/wizard", mk_wizard())
+        .nest("/api/health", mk_health())
+        .nest("/ingest", mk_ingest())
+        .nest("/api/zones", mk_photos())
+        .nest("/api/v1/config", mk_config())
+        .nest("/api/v1/wizard", mk_wizard())
+        .nest("/api/v1/health", mk_health())
+        .nest("/api/v1/ingest", mk_ingest())
+        .nest("/api/v1/zones", mk_photos())
+        // Serve uploaded zone photos as static files at /site/photos/*.
+        .nest_service(
+            "/site/photos",
+            tower_http::services::ServeDir::new(&photos_dir),
+        )
         // Force revalidation on every request. Without this, browsers
         // (notably mobile Chrome) apply heuristic caching to /pkg/*.css
         // and serve a stale stylesheet from a previous deploy. With
@@ -253,10 +532,13 @@ async fn main() {
         ));
 
     tracing::info!("localsky listening on http://{addr}");
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .with_context(|| format!("bind {addr}: is another service holding this port?"))?;
     axum::serve(listener, app.into_make_service())
         .await
-        .unwrap();
+        .context("axum serve loop exited unexpectedly")?;
+    Ok(())
 }
 
 #[cfg(not(feature = "ssr"))]

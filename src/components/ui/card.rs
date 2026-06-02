@@ -15,7 +15,11 @@ pub fn Card(
     compact: bool,
     children: Children,
 ) -> impl IntoView {
-    let base_class = if compact { "card card--compact" } else { "card" };
+    let base_class = if compact {
+        "card card--compact"
+    } else {
+        "card"
+    };
     view! {
         <div class=base_class>
             {children()}

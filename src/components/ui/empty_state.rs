@@ -14,8 +14,7 @@ pub fn EmptyState(
     /// CTA label + href. Renders a primary button-styled link.
     #[prop(into)]
     cta_label: String,
-    #[prop(into)]
-    cta_href: String,
+    #[prop(into)] cta_href: String,
     /// Optional emoji or icon glyph shown above the title. Decorative.
     #[prop(into, optional)]
     icon: String,

@@ -1,8 +1,8 @@
 <h1 align="center">LocalSky</h1>
 
 <p align="center">
-  <strong>Local-first weather and irrigation for hyperlocal homes.</strong><br>
-  Tempest, Ecowitt, OpenSprinkler, Home Assistant. No cloud required.
+  <strong>Hyperlocal weather on your hardware. Smart irrigation when you want it.</strong><br>
+  Self-hosted, open source, no cloud, no subscription, no account.
 </p>
 
 <p align="center">
@@ -13,26 +13,24 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/screenshots/dashboard-desktop.png" alt="LocalSky desktop dashboard" width="92%">
+  <img src="docs/assets/screenshots/dashboard-desktop.png" alt="LocalSky weather dashboard" width="92%">
 </p>
 
-LocalSky is a single-binary, single-image, full-stack PWA that combines hyperlocal weather observations, FAO-56 reference evapotranspiration, grass- and soil-aware irrigation scheduling, and an optional local LLM advisor.
+LocalSky is two products in one Docker container.
 
-## Two ways to run it
+**A self-hosted weather dashboard** that reads your Tempest or Ecowitt station over the LAN, merges in Open-Meteo and NWS forecasts with per-field provenance, and renders the result in a fast, installable PWA with built-in NEXRAD radar and lightning rings. Useful on its own, even if you never irrigate anything.
 
-LocalSky is designed to work well in either configuration:
+**A smart irrigation engine** that pairs the same weather data with peer-reviewed agronomy (FAO-56 reference ET, USDA soil textures, species-aware Kc curves, a 17-rule skip ladder) and drives OpenSprinkler, ESPHome, or Home Assistant. Optional. Off until you wire a controller.
 
-- **Standalone.** A self-contained service that talks directly to your weather sensors and irrigation controller. Add sensors over MQTT, Ecowitt LAN POST, or HTTP webhooks. See [docs/standalone.md](docs/standalone.md).
-- **Alongside Home Assistant.** An outbound MQTT discovery publisher auto-creates `sensor.localsky_*` entities in HA. A passthrough adapter is also available for existing Smart Irrigation + Irrigation Unlimited setups. Both modes are first-class; pick the one that fits your stack.
+Home Assistant is supported as a peer, never required. Everything runs on your own hardware. Open-Meteo is the only optional outbound network call, and it can be swapped for NWS or any other compatible source.
 
-Everything runs on your own hardware. Open-Meteo is the only optional outbound call, and it can be swapped for NWS or any other compatible forecast source.
+## Why LocalSky
+
+Most hyperlocal weather products are cloud tethered. Tempest's web app, Ambient Weather Network, Weather Underground, all of them want an account, an internet connection, and an indefinite right to your station's data. LocalSky reads the same hardware over UDP or LAN, persists every observation locally, and renders the dashboard from your own browser, all without phoning home.
+
+Most home irrigation systems are either dumb timers or cloud tethered too. The cloud ones see weather radar but not your sprinkler's actual flow rate, your soil texture, your grass species, or the specific shade your back fence throws across the side yard at 3 p.m. in August. LocalSky is built around the assumption that *you* know your yard, and the software's job is to listen to your live sensors, apply published meteorological and soil science, and give you a clear answer to "should I water tonight?"
 
 ## Screenshots
-
-<p align="center">
-  <img src="docs/assets/screenshots/irrigation-desktop.png" alt="Irrigation dashboard with 7-day verdict strip, next-run card, and live forecast intelligence" width="92%"><br>
-  <em>Irrigation page: 7-day verdict strip, next-run card, full skip-rule breakdown, water budget, and live forecast intelligence</em>
-</p>
 
 <p align="center">
   <img src="docs/assets/screenshots/radar-desktop.png" alt="Live radar with RainViewer precipitation, NEXRAD reflectivity, satellite IR, and Tempest lightning rings" width="92%"><br>
@@ -40,7 +38,12 @@ Everything runs on your own hardware. Open-Meteo is the only optional outbound c
 </p>
 
 <p align="center">
-  <img src="docs/assets/screenshots/zone-controls-desktop.png" alt="Manual zone controls with idle/running badges and 10/30/60-minute run buttons per zone" width="92%"><br>
+  <img src="docs/assets/screenshots/irrigation-desktop.png" alt="Irrigation dashboard with 7-day verdict strip, next-run card, and live forecast intelligence" width="92%"><br>
+  <em>Irrigation page (optional): 7-day verdict strip, next-run card, full skip-rule breakdown, water budget, and live forecast intelligence</em>
+</p>
+
+<p align="center">
+  <img src="docs/assets/screenshots/zone-controls-desktop.png" alt="Manual zone controls with idle and running badges and 10/30/60-minute run buttons per zone" width="92%"><br>
   <em>Manual zone controls: idle / running badge per zone, planned / today / bucket readouts, and 10 / 30 / 60-minute quick-run buttons. Running zones swap to a single red STOP.</em>
 </p>
 
@@ -72,7 +75,16 @@ Everything runs on your own hardware. Open-Meteo is the only optional outbound c
 
 ## Features
 
-### Engine
+### Weather dashboard
+
+- **Live station observations** from Tempest WeatherFlow over UDP 50222 (rapid wind, obs, lightning, battery)
+- **Ecowitt LAN ingestion** for the GW1100 / GW2000 family and any attached WH51 / WH52 soil probes
+- **Multi-source forecast merge** with per-field provenance (Open-Meteo, NWS roadmap, plus generic MQTT subscribe and HTTP webhook for custom sources)
+- **Live radar** with RainViewer precipitation playback, IEM NEXRAD reflectivity, satellite IR, and Tempest lightning rings
+- **Hourly + daily forecast** with rain probability, wind, dew point, apparent temperature, solar irradiance, UV index
+- **Historical persistence** via local SQLite, with the verdict-history table replayable through the current engine
+
+### Irrigation engine (optional)
 
 - **Native FAO-56 Penman-Monteith** reference ET with ASCE-EWRI 2005 simplified and Hargreaves-Samani 1985 fallbacks
 - **Single-bucket water balance** with TAW / RAW / MAD per zone; depletion-driven scheduling
@@ -80,15 +92,14 @@ Everything runs on your own hardware. Open-Meteo is the only optional outbound c
 - **12-species grass catalog** with monthly Kc curves (St. Augustine, Bermuda, Zoysia, Bahia, Centipede, KBG, TTTF, PRG, plus ornamental shrubs, vegetable garden, drip / xeriscape)
 - **7-class USDA soil texture catalog** with field capacity, wilting point, available water, and slope-graded infiltration
 - **17-rule skip ladder** with configurable thresholds: rain now, rain next 4 h, probability-weighted 3-day and 7-day rollups, freeze, soil saturation, soil frost, heat advisory, high wind
-- **7-day forward verdict strip** - the same engine that decides today, projected forward
+- **7-day forward verdict strip**, the same engine that decides today, projected forward
 
-### Sources, controllers, and integrations
+### Controllers and integrations
 
-- **Multi-source weather merge** with per-field provenance (Tempest UDP local, Open-Meteo, NWS, Ecowitt LAN, plus generic MQTT subscribe and HTTP webhook sources)
 - **Multi-controller HAL**: OpenSprinkler direct, HA service call, ESPHome native (community), Rachio cloud (planned), DryRun for demo and tests
 - **Home Assistant optional**: outbound MQTT discovery auto-creates `sensor.localsky_*` entities; inbound passthrough is opt-in
 - **Standalone sensor paths** (no HA needed): MQTT subscribe with JSON-path extraction, Ecowitt gateway local POST, and a generic HTTP webhook ingester for ESPHome or custom scripts
-- **Local LLM advisor**: Ollama auto-detect, llama.cpp, OpenAI-compatible (LM Studio, vLLM, any private gateway)
+- **Local LLM advisor**: Ollama auto-detect, llama.cpp, OpenAI-compatible (LM Studio, vLLM, any private gateway). Optional, never required.
 
 ### UI and operability
 
@@ -98,7 +109,7 @@ Everything runs on your own hardware. Open-Meteo is the only optional outbound c
 - **Atomic config writes** with snapshot-before-write retention and always-reachable rollback endpoint
 - **Versioned SQLite migrations** with engine-replay history (stored verdict inputs replay through the current rules)
 - **Demo mode** (`LOCALSKY_DEMO=1`) ships with synthetic Tempest / forecast / irrigation streams so the UI is fully populated out of the box
-- **Dark glass-morphism design** with claymorphic accents - full mobile + desktop parity
+- **Dark glass-morphism design** with claymorphic accents, full mobile + desktop parity
 
 ## Quick start
 
@@ -113,7 +124,9 @@ docker run -d \
 
 Visit <http://localhost:8090>. The `LOCALSKY_DEMO=1` flag boots with simulated data so you can explore the UI before connecting any hardware.
 
-For a real install, drop `LOCALSKY_DEMO`, mount your config volume, and visit `/setup` - the first-run wizard walks you through location, weather sources, controllers, and zones. See [docs/getting-started.md](docs/getting-started.md) for a full walkthrough.
+For a real install, drop `LOCALSKY_DEMO`, mount your config volume, and visit `/setup`. The first-run wizard walks you through location, weather sources, controllers, and zones. See [docs/getting-started.md](docs/getting-started.md) for a full walkthrough.
+
+If you only want the weather dashboard, leave the controllers list empty in the wizard. LocalSky will skip the irrigation surfaces entirely and run as a pure weather product.
 
 ## Hardware compatibility
 
@@ -122,7 +135,7 @@ For a real install, drop `LOCALSKY_DEMO`, mount your config volume, and visit `/
 | Weather | Tempest WeatherFlow (UDP LAN) | Tested |
 | Weather | Open-Meteo / NWS | Tested |
 | Weather | Tempest Cloud WebSocket | Planned |
-| Weather | Ecowitt GW1100 / GW2000 LAN | Planned |
+| Weather | Ecowitt GW1100 / GW2000 LAN (push, local-API poll, UDP autodiscovery) | Tested |
 | Soil | Ecowitt WH51 / WH52 (via GW1x00) | Tested |
 | Soil | Any MQTT-published soil sensor | Tested |
 | Controller | OpenSprinkler firmware 2.1.9+ | Tested |
@@ -143,25 +156,25 @@ Promote to **Tested** only when CI fixture or maintainer-confirmed run exists.
 
 Full docs live in [`docs/`](docs/) and are built into an mdBook for online viewing. Start here:
 
-- [Getting started](docs/getting-started.md) - install, prerequisites, and first-run walkthrough
-- [Standalone mode](docs/standalone.md) - the full no-Home-Assistant path
-- [Controllers](docs/controllers.md) - OpenSprinkler deep-dive plus alternatives
-- [Sensors](docs/sensors.md) - what each sensor type unlocks
-- [Configuration reference](docs/configuration.md) - every `localsky.toml` field
-- [API reference](docs/api.md) - REST + SSE endpoints, JSON shapes
-- [Irrigation engine](docs/irrigation-engine.md) - FAO-56 walkthrough with citations
+- [Getting started](docs/getting-started.md), install, prerequisites, and first-run walkthrough
+- [Standalone mode](docs/standalone.md), the full no-Home-Assistant path
+- [Controllers](docs/controllers.md), OpenSprinkler deep-dive plus alternatives
+- [Sensors](docs/sensors.md), what each sensor type unlocks
+- [Configuration reference](docs/configuration.md), every `localsky.toml` field
+- [API reference](docs/api.md), REST + SSE endpoints, JSON shapes
+- [Irrigation engine](docs/irrigation-engine.md), FAO-56 walkthrough with citations
 - [Grass species](docs/grass-species.md) and [soil textures](docs/soil-textures.md)
-- [Skip rules](docs/skip-rules.md) - every rule in the ladder, explained
-- [HACS integration](docs/hacs.md) - Home Assistant Community Store roadmap
-- [UX journey](docs/ux-journey.md) - first-run, upgrades, hardware changes, config changes
-- [Launch checklist](docs/launch-checklist.md) - gating criteria for the 0.1.0 cut
+- [Skip rules](docs/skip-rules.md), every rule in the ladder, explained
+- [HACS integration](docs/hacs.md), Home Assistant Community Store roadmap
+- [UX journey](docs/ux-journey.md), first-run, upgrades, hardware changes, config changes
+- [Launch checklist](docs/launch-checklist.md), gating criteria for the 0.1.0 cut
 
 ## Architecture at a glance
 
 LocalSky is a Rust + Leptos full-stack PWA. The SSR server is a single statically-linked binary; the WASM client hydrates the streamed HTML. The internal layout follows a ports-and-adapters shape so every external system is swappable.
 
 ```
-engine/        FAO-56 ET0, water balance, cycle-and-soak, skip rules - pure functions, no I/O
+engine/        FAO-56 ET0, water balance, cycle-and-soak, skip rules (pure functions, no I/O)
 ports/         WeatherSource, IrrigationController, LlmProvider, NotificationSink, ConfigStore
 sources/       Tempest UDP, Open-Meteo, Ecowitt LAN, MQTT subscribe, HTTP webhook, demo replay
 controllers/   OpenSprinkler direct, HA service call, DryRun
@@ -174,9 +187,9 @@ components/    Leptos UI primitives plus the irrigation, forecast, weather, and 
 
 ## Roadmap
 
-**0.1** (initial public release): demo mode, OpenSprinkler direct, Tempest UDP, Open-Meteo, MQTT subscribe, Ecowitt local, Ollama and OpenAI-compatible LLM, first-run wizard, full settings UI, mobile parity.
+**0.1** (initial public release): demo mode, full weather dashboard (Tempest UDP + Open-Meteo + radar), OpenSprinkler direct irrigation, MQTT subscribe, Ecowitt local, Ollama and OpenAI-compatible LLM, first-run wizard, full settings UI, mobile parity.
 
-**0.2**: ESPHome sprinkler controller, Tempest cloud WebSocket source, NWS source, Ambient Weather source, ntfy + Slack notification sinks, hosted demo site.
+**0.2**: NWS source, Ambient Weather source, Tempest cloud WebSocket source, ESPHome sprinkler controller, ntfy + Slack notification sinks, hosted demo site.
 
 **0.3**: Rachio cloud controller, Pirate Weather source, MET Norway source, HACS publishing for the inbound HA integration, telemetry opt-in.
 
@@ -188,7 +201,7 @@ LocalSky stands on the shoulders of decades of agronomy and meteorology research
 - ASCE-EWRI Standardized Reference Evapotranspiration (2005)
 - UF/IFAS Extension publications on Florida turfgrass species (ENH6, ENH8, ENH11, ENH19, ENH62, ENH1115)
 - USDA NRCS National Irrigation Guide (Part 652)
-- The Home Assistant Smart Irrigation and Irrigation Unlimited integrations, whose deployments helped shape this engine
+- The Home Assistant Smart Irrigation and Irrigation Unlimited integrations (prior art that inspired this clean-room rewrite)
 - Open-Meteo, RainViewer, Leaflet, Leptos, rumqttc, Axum, tokio
 
 ## Contributing

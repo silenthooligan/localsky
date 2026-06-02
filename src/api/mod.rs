@@ -1,20 +1,53 @@
-// HTTP API mounted at /api on the SSR server.
+// HTTP API mounted at /api and /api/v1 on the SSR server.
 //
-// /api/snapshot              — JSON of the current TempestStore snapshot.
-// /api/stream                — Server-Sent Events feed; one event per
-//                              tempest state mutation.
-// /api/irrigation/snapshot   — JSON of the current IrrigationStore snapshot.
-// /api/irrigation/stream     — SSE feed for irrigation state changes.
+// /api/v1 is the canonical, stable contract. The bare /api/* aliases are
+// kept for backwards-compat with v0.1 clients and the in-app radar/dashboard
+// fetches; new clients (e.g. the HACS integration) should use /api/v1/*.
+//
+// Endpoints (under /api/v1):
+//   GET  /info                       service + API version
+//   GET  /snapshot                   current Tempest snapshot
+//   GET  /stream                     SSE feed of Tempest snapshots
+//   GET  /irrigation/snapshot        current irrigation snapshot
+//   GET  /irrigation/stream          SSE feed of irrigation snapshots
+//   GET  /irrigation/history         365-day SQLite history
+//   POST /irrigation/action          run/stop/pause/skip a zone
+//   GET  /forecast/snapshot          current Open-Meteo forecast snapshot
+//   GET  /forecast/stream            SSE feed of forecast snapshots
+//   GET  /weather/history            observed-weather series (24h sparklines)
+//   GET  /llm/explanation            LLM advisor verdict-explanation
+//   GET  /llm/anomalies              LLM advisor anomaly summary
+//   GET  /me/prefs                   per-device preferences (theme, units, etc.)
+//   PUT  /me/prefs                   write per-device preferences
+//   GET  /config                     read current localsky.toml (secrets redacted)
+//   PUT  /config                     write localsky.toml
+//   POST /config/rollback?to=<v>     restore a prior config snapshot
+//   GET  /config/schema              JSON Schema for tooling
+//   GET  /wizard/draft               first-run wizard draft state
+//   PUT  /wizard/draft               update draft
+//   POST /wizard/apply               write the draft as the live config
+//   GET  /health                     per-source freshness + controller summary
+//   GET  /sensors/manifest           declarative entity inventory for HACS
 
 pub mod config;
+pub mod devices;
 pub mod forecast;
 pub mod health;
+pub mod info;
 pub mod ingest;
 pub mod irrigation;
+pub mod location;
+pub mod manifest;
+pub mod photos;
+pub mod sensors;
+pub mod weather;
 pub mod wizard;
 
+#[cfg(test)]
+mod snapshot_tests;
+
 use crate::forecast::ForecastStore;
-use crate::ha::IrrigationStore;
+use crate::ha::{IrrigationStore, SnapshotSource};
 use crate::llm::AdvisorState;
 use crate::tempest::state::TempestStore;
 use axum::{
@@ -39,20 +72,54 @@ pub fn router(
     forecast_store: Arc<ForecastStore>,
     advisor: AdvisorState,
     history: Option<Arc<Mutex<Connection>>>,
+    // Snapshot source: routes the POST /action vacation-pause + one-day
+    // override to local state (native) vs HA helpers (HA).
+    source: SnapshotSource,
+    // Device topology (gateways/controllers + their sensors/zones) for the
+    // MA-style /devices view.
+    devices: crate::devices::DeviceRegistry,
+    // HA controller entity prefix for the POST /action handler.
+    sprinkler_prefix: String,
 ) -> Router {
     let tempest_routes = Router::new()
         .route("/snapshot", get(snapshot))
         .route("/stream", get(stream))
         .with_state(tempest);
 
-    tempest_routes
-        .nest("/irrigation", irrigation::router(irrigation, advisor, history))
-        .nest("/forecast", forecast::router(forecast_store))
+    // Manifest needs the live irrigation snapshot to enumerate per-zone
+    // entities, so it borrows the IrrigationStore Arc before we hand it
+    // off to the irrigation routes' nested router.
+    let manifest_router = manifest::router(irrigation.clone());
+
+    let mut router = tempest_routes
+        .nest(
+            "/irrigation",
+            irrigation::router(
+                irrigation,
+                advisor,
+                history.clone(),
+                source,
+                sprinkler_prefix,
+            ),
+        )
+        .nest(
+            "/forecast",
+            forecast::router(forecast_store, history.clone()),
+        )
+        .nest("/devices", devices::router(devices))
+        .merge(info::router())
+        .merge(manifest_router);
+
+    // Observed-weather history (sparklines) — only when persistence is mounted.
+    if let Some(h) = history {
+        router = router
+            .nest("/weather", weather::router(h.clone()))
+            .nest("/sensors", sensors::router(h));
+    }
+    router
 }
 
-async fn snapshot(
-    State(store): State<Arc<TempestStore>>,
-) -> Json<crate::tempest::state::Snapshot> {
+async fn snapshot(State(store): State<Arc<TempestStore>>) -> Json<crate::tempest::state::Snapshot> {
     let s = store.snapshot();
     Json((*s).clone())
 }

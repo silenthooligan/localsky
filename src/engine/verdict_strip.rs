@@ -16,11 +16,7 @@ use crate::ha::snapshot::DayVerdict;
 /// threshold values + override + pause state; the synthetic per-day
 /// Inputs reset live signals (wind_now, rain_intensity_now, etc.) since
 /// the strip projects conditions rather than replaying live data.
-pub fn compute(
-    fc: &ForecastSnapshot,
-    today: &Inputs,
-    params: &SkipRuleParams,
-) -> Vec<DayVerdict> {
+pub fn compute(fc: &ForecastSnapshot, today: &Inputs, params: &SkipRuleParams) -> Vec<DayVerdict> {
     if fc.daily.is_empty() {
         return Vec::new();
     }
@@ -111,24 +107,31 @@ pub fn compute(
             min_temp_f: today.min_temp_f,
             rain_skip_in: today.rain_skip_in,
 
-            soil_back_yard_pct: None,
-            soil_front_yard_pct: None,
-            soil_side_yard_pct: None,
-            soil_back_yard_shrubs_pct: None,
+            // The 7-day forward strip models weather only, not per-zone
+            // soil (we have no soil forecast per future day).
+            soil_zones: Vec::new(),
             soil_temp_yard_min_f: None,
             soil_temp_yard_max_f: None,
             frost_skip_soil_f: today.frost_skip_soil_f,
-            saturation_back_yard_pct: today.saturation_back_yard_pct,
-            saturation_front_yard_pct: today.saturation_front_yard_pct,
-            saturation_side_yard_pct: today.saturation_side_yard_pct,
-            saturation_back_yard_shrubs_pct: today.saturation_back_yard_shrubs_pct,
             is_paused: today.is_paused,
             is_dry_run: false,
 
             pause_until_epoch: today.pause_until_epoch,
-            now_epoch: today.now_epoch,
+            // Each day's synthetic Inputs has to carry that day's epoch so
+            // the restriction evaluator (which converts now_epoch ->
+            // DateTime<Local> -> .weekday() / .month()) gates the right
+            // weekday for the right cell. Reusing today's epoch made the
+            // 7-day strip evaluate every day as if it were today, so a
+            // restriction that blocked Wed never showed up on Wed's cell
+            // unless today was already Wed.
+            now_epoch: d.time_epoch,
             override_tomorrow: today.override_tomorrow.clone(),
             is_tomorrow: day_idx == 1,
+
+            // Phase C: forward-project the restriction set; address parity
+            // is a deployment property that doesn't change day-to-day.
+            watering_restrictions: today.watering_restrictions.clone(),
+            address_parity: today.address_parity,
         };
         let s = evaluate_with(&inputs, params);
 

@@ -67,21 +67,26 @@ pub fn default_policy(field: WeatherField) -> MergePolicy {
 /// Apply `policy` to a slice of candidate FieldValues and pick a winner.
 /// Caller passes priorities alongside each candidate so HighestPriority
 /// can break ties.
-pub fn merge_field(
-    candidates: &[(FieldValue, i32)],
-    policy: MergePolicy,
-) -> Option<FieldValue> {
+pub fn merge_field(candidates: &[(FieldValue, i32)], policy: MergePolicy) -> Option<FieldValue> {
     if candidates.is_empty() {
         return None;
     }
     match policy {
         MergePolicy::Max => candidates
             .iter()
-            .max_by(|a, b| a.0.value.partial_cmp(&b.0.value).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| {
+                a.0.value
+                    .partial_cmp(&b.0.value)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|(v, _)| v.clone()),
         MergePolicy::Min => candidates
             .iter()
-            .min_by(|a, b| a.0.value.partial_cmp(&b.0.value).unwrap_or(std::cmp::Ordering::Equal))
+            .min_by(|a, b| {
+                a.0.value
+                    .partial_cmp(&b.0.value)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|(v, _)| v.clone()),
         MergePolicy::HighestPriority => candidates
             .iter()
@@ -118,10 +123,7 @@ mod tests {
 
     #[test]
     fn priority_tie_breaks_by_recency() {
-        let candidates = vec![
-            (fv("a", 21.0, 100), 50),
-            (fv("b", 22.0, 200), 50),
-        ];
+        let candidates = vec![(fv("a", 21.0, 100), 50), (fv("b", 22.0, 200), 50)];
         let w = merge_field(&candidates, MergePolicy::HighestPriority).unwrap();
         assert_eq!(w.source_id, "b");
     }
@@ -139,10 +141,7 @@ mod tests {
 
     #[test]
     fn min_policy_picks_smallest() {
-        let candidates = vec![
-            (fv("a", 38.0, 100), 100),
-            (fv("b", 32.0, 100), 50),
-        ];
+        let candidates = vec![(fv("a", 38.0, 100), 100), (fv("b", 32.0, 100), 50)];
         let w = merge_field(&candidates, MergePolicy::Min).unwrap();
         assert!((w.value - 32.0).abs() < 1e-9);
     }

@@ -38,6 +38,11 @@ pub struct DecisionRecord {
     pub verdict: String,
     /// Human-readable reason from skip_logic::evaluate. Empty when verdict == "run".
     pub reason: String,
+    /// Full structured skip-ladder trace captured at decision time, if one
+    /// was stored (M0007+). None for legacy rows. Powers the Rule Lab's
+    /// historical view.
+    #[serde(default)]
+    pub trace: Option<crate::ha::snapshot::DecisionTrace>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -47,4 +52,17 @@ pub struct DecisionWindow {
     /// End of the window in UTC epoch (exclusive).
     pub to_epoch: i64,
     pub decisions: Vec<DecisionRecord>,
+}
+
+/// Recent observed weather series (oldest -> newest), one Vec per field.
+/// Served by GET /api/v1/weather/history and consumed by the Weather home
+/// telemetry strip for its sparklines.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WeatherHistory {
+    pub air_temp_f: Vec<f64>,
+    pub rh_pct: Vec<f64>,
+    pub wind_avg_mph: Vec<f64>,
+    pub pressure_inhg: Vec<f64>,
+    pub solar_w_m2: Vec<f64>,
+    pub uv_index: Vec<f64>,
 }

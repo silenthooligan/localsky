@@ -6,8 +6,20 @@
 
 pub fn weather_code_glyph(code: u32, is_day: bool) -> (&'static str, &'static str) {
     match code {
-        0 => if is_day { ("☀️", "Clear") } else { ("🌙", "Clear") },
-        1 => if is_day { ("🌤", "Mostly clear") } else { ("🌙", "Mostly clear") },
+        0 => {
+            if is_day {
+                ("☀️", "Clear")
+            } else {
+                ("🌙", "Clear")
+            }
+        }
+        1 => {
+            if is_day {
+                ("🌤", "Mostly clear")
+            } else {
+                ("🌙", "Mostly clear")
+            }
+        }
         2 => ("⛅", "Partly cloudy"),
         3 => ("☁️", "Overcast"),
         45 | 48 => ("🌫", "Fog"),

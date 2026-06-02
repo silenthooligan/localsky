@@ -61,6 +61,19 @@ fn RainBlock(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     let tempest_used = move || tempest_in() >= om_in();
     let om_used = move || !tempest_used();
     let sheltered = move || om_in() - tempest_in() > 0.05;
+    // Hover/aria-label text spelling out what "sheltered" means and
+    // what the user can do about it. Surfacing this inline addresses
+    // the feedback that the badge was opaque jargon with no path to
+    // act on the insight.
+    let sheltered_explain = move || {
+        format!(
+            "Open-Meteo is reading {:.2}\" more rain than your Tempest. \
+             Local gauge may be blocked by tree cover or roof overhang. \
+             Skip-check uses the max of both, so you're still protected. \
+             Tap to review weather sources.",
+            (om_in() - tempest_in()).max(0.0)
+        )
+    };
 
     view! {
         <div class="forecast-block">
@@ -73,11 +86,19 @@ fn RainBlock(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                     </div>
                     <div class="rain-card-hint">
                         {move || if sheltered() {
-                            "sheltered · trust OM".to_string()
+                            view! {
+                                <a class="rain-card-hint-link"
+                                    href="/settings/sources"
+                                    title=sheltered_explain
+                                    aria-label=sheltered_explain>
+                                    "sheltered · trust OM "
+                                    <span class="rain-card-hint-glyph" aria-hidden="true">"?"</span>
+                                </a>
+                            }.into_any()
                         } else if tempest_used() {
-                            "used by skip-check".to_string()
+                            view! { <span>"used by skip-check"</span> }.into_any()
                         } else {
-                            String::new()
+                            view! { <span></span> }.into_any()
                         }}
                     </div>
                 </div>
@@ -87,10 +108,17 @@ fn RainBlock(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                         {move || format!("{:.2}\"", om_in())}
                     </div>
                     <div class="rain-card-hint">
-                        {move || if om_used() { "used by skip-check".to_string() } else { String::new() }}
+                        {move || if om_used() {
+                            view! { <span>"used by skip-check"</span> }.into_any()
+                        } else {
+                            view! { <span></span> }.into_any()
+                        }}
                     </div>
                 </div>
             </div>
+            <a class="rain-block-config-link" href="/settings/sources">
+                "Configure rain sources \u{2192}"
+            </a>
             <div class="rain-row">
                 <RainBar
                     label="Today (used)"
@@ -161,7 +189,7 @@ fn RainBar(
 #[component]
 fn MultiDayRainBlock(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     view! {
-        <div class="forecast-block">
+        <div class="forecast-block nerd-only">
             <div class="forecast-block-title">"Forecast intelligence"</div>
             <div class="rain-row">
                 <RainBar
@@ -296,7 +324,7 @@ fn BalanceBlock(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     };
     let net = move || rain_today_mm() - eto_today();
     view! {
-        <div class="forecast-block">
+        <div class="forecast-block nerd-only">
             <div class="forecast-block-title">"Water budget"</div>
             <div class="kv-grid">
                 <div class="kv">
@@ -334,7 +362,7 @@ fn BalanceBlock(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
 #[component]
 fn DayBlock(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     view! {
-        <div class="forecast-block">
+        <div class="forecast-block nerd-only">
             <div class="forecast-block-title">"Today"</div>
             <div class="kv-grid">
                 <div class="kv">

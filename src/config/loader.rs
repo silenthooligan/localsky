@@ -21,7 +21,9 @@ pub enum LoadError {
     UnsetEnvVar(String),
     #[error("validation failed: {0}")]
     Validation(String),
-    #[error("schema_version {found} > known {known}; refusing to load a config newer than this binary")]
+    #[error(
+        "schema_version {found} > known {known}; refusing to load a config newer than this binary"
+    )]
     SchemaTooNew { found: u32, known: u32 },
 }
 
@@ -40,6 +42,14 @@ pub fn load_from_path(path: &Path) -> Result<Config, LoadError> {
 
 /// `${VAR}` interpolation. Single pass; nested refs not supported.
 /// Escape with `$${VAR}` for a literal dollar.
+///
+/// UTF-8 SAFETY: the previous implementation iterated `src.as_bytes()`
+/// and pushed `byte as char` for every non-marker byte. That treats
+/// each UTF-8 continuation byte as a standalone Latin-1 codepoint, so
+/// every multi-byte char in the source (em-dashes, accented letters,
+/// any non-ASCII string in the TOML) got silently corrupted on load.
+/// The fix: byte-scan only for the ASCII `$` markers, but push proper
+/// chars from the source string for everything else.
 fn interpolate_env(src: &str) -> Result<String, LoadError> {
     let mut out = String::with_capacity(src.len());
     let bytes = src.as_bytes();
@@ -61,13 +71,21 @@ fn interpolate_env(src: &str) -> Result<String, LoadError> {
                 })?;
             let var_name = std::str::from_utf8(&bytes[i + 2..i + 2 + close])
                 .map_err(|_| LoadError::Validation("invalid utf8 in env ref".to_string()))?;
-            let val = env::var(var_name).map_err(|_| LoadError::UnsetEnvVar(var_name.to_string()))?;
+            let val =
+                env::var(var_name).map_err(|_| LoadError::UnsetEnvVar(var_name.to_string()))?;
             out.push_str(&val);
             i += 2 + close + 1;
             continue;
         }
-        out.push(c as char);
-        i += 1;
+        // Non-marker: grab the proper UTF-8 char starting at byte index i,
+        // push it whole, advance i by its byte length. This preserves
+        // multi-byte sequences (em-dashes, accented letters, etc.).
+        let ch = src[i..]
+            .chars()
+            .next()
+            .expect("byte index i is a valid char boundary");
+        out.push(ch);
+        i += ch.len_utf8();
     }
     Ok(out)
 }
@@ -179,7 +197,9 @@ pub fn validate(cfg: &Config) -> Result<(), LoadError> {
     }
     for ctrl in &cfg.controllers {
         if ctrl.id.is_empty() {
-            return Err(LoadError::Validation("controller id may not be empty".into()));
+            return Err(LoadError::Validation(
+                "controller id may not be empty".into(),
+            ));
         }
         if ctrl.id.contains(char::is_whitespace) || ctrl.id.contains('/') {
             return Err(LoadError::Validation(format!(
@@ -192,10 +212,14 @@ pub fn validate(cfg: &Config) -> Result<(), LoadError> {
     // Lat/lon sanity (engine catches degenerate values too, but flag early).
     let (lat, lon) = (cfg.deployment.location.lat, cfg.deployment.location.lon);
     if !(-90.0..=90.0).contains(&lat) {
-        return Err(LoadError::Validation(format!("latitude out of range: {lat}")));
+        return Err(LoadError::Validation(format!(
+            "latitude out of range: {lat}"
+        )));
     }
     if !(-180.0..=180.0).contains(&lon) {
-        return Err(LoadError::Validation(format!("longitude out of range: {lon}")));
+        return Err(LoadError::Validation(format!(
+            "longitude out of range: {lon}"
+        )));
     }
 
     Ok(())
@@ -225,16 +249,40 @@ mod tests {
     }
 
     #[test]
+    fn env_interpolation_preserves_multibyte_utf8() {
+        // Regression: the previous implementation iterated src.as_bytes()
+        // and did `byte as char`, which split every multi-byte UTF-8
+        // sequence into Latin-1 codepoints. A toml with an em-dash got
+        // loaded as three codepoints (U+00E2 U+0080 U+0094) instead of
+        // the single U+2014 character. Visible to operators as `â`
+        // (U+00E2) on the dashboard.
+        let src = "name = \"St. Johns RWMD \u{2014} Daylight saving\"";
+        let out = interpolate_env(src).unwrap();
+        assert_eq!(
+            out, src,
+            "interpolate_env must round-trip non-ASCII chars unchanged"
+        );
+        assert!(
+            out.contains('\u{2014}'),
+            "em-dash should survive the interpolation pass"
+        );
+        // Also verify a few common accents + a Cyrillic char for good measure.
+        let src2 = "city = \"São Paulo · 春日\"";
+        assert_eq!(interpolate_env(src2).unwrap(), src2);
+    }
+
+    #[test]
     fn validates_zone_target_band_ordering() {
         let mut cfg = Config::default();
         cfg.deployment.location.lat = 28.5;
         cfg.deployment.location.lon = -81.4;
-        cfg.controllers.push(crate::config::schema::ControllerEntry {
-            id: "c1".into(),
-            default: true,
-            enabled: true,
-            controller: crate::config::schema::ControllerKind::DryRun(Default::default()),
-        });
+        cfg.controllers
+            .push(crate::config::schema::ControllerEntry {
+                id: "c1".into(),
+                default: true,
+                enabled: true,
+                controller: crate::config::schema::ControllerKind::DryRun(Default::default()),
+            });
         use crate::config::schema::*;
         cfg.zones.insert(
             "bad".into(),
@@ -253,9 +301,11 @@ mod tests {
                 controller_id: "c1".into(),
                 controller_station: "1".into(),
                 soil_sensor_id: None,
-                target_min_pct_soil: 80.0,    // backwards!
-                saturation_pct_soil: 60.0,    // less than min
+                target_min_pct_soil: 80.0, // backwards!
+                saturation_pct_soil: 60.0, // less than min
                 photo_url: None,
+                weekly_budget_in: None,
+                sessions_per_week: None,
             },
         );
         let err = validate(&cfg).unwrap_err();
@@ -269,12 +319,13 @@ mod tests {
         let mut cfg = Config::default();
         cfg.deployment.location.lat = 28.5;
         cfg.deployment.location.lon = -81.4;
-        cfg.controllers.push(crate::config::schema::ControllerEntry {
-            id: "c1".into(),
-            default: true,
-            enabled: true,
-            controller: crate::config::schema::ControllerKind::DryRun(Default::default()),
-        });
+        cfg.controllers
+            .push(crate::config::schema::ControllerEntry {
+                id: "c1".into(),
+                default: true,
+                enabled: true,
+                controller: crate::config::schema::ControllerKind::DryRun(Default::default()),
+            });
         use crate::config::schema::*;
         cfg.zones.insert(
             "bad".into(),
@@ -296,6 +347,8 @@ mod tests {
                 target_min_pct_soil: 30.0,
                 saturation_pct_soil: 70.0,
                 photo_url: None,
+                weekly_budget_in: None,
+                sessions_per_week: None,
             },
         );
         let err = validate(&cfg).unwrap_err();
@@ -308,12 +361,13 @@ mod tests {
         let mut cfg = Config::default();
         cfg.deployment.location.lat = 28.5;
         cfg.deployment.location.lon = -81.4;
-        cfg.controllers.push(crate::config::schema::ControllerEntry {
-            id: "c1".into(),
-            default: true,
-            enabled: true,
-            controller: crate::config::schema::ControllerKind::DryRun(Default::default()),
-        });
+        cfg.controllers
+            .push(crate::config::schema::ControllerEntry {
+                id: "c1".into(),
+                default: true,
+                enabled: true,
+                controller: crate::config::schema::ControllerKind::DryRun(Default::default()),
+            });
         use crate::config::schema::*;
         cfg.zones.insert(
             "bad".into(),
@@ -325,7 +379,7 @@ mod tests {
                 slope_pct: 0.0,
                 sun_exposure: SunExposure::Full,
                 sprinkler_type: SprinklerType::Rotor,
-                precip_rate_mm_hr: Some(500.0),    // implausible
+                precip_rate_mm_hr: Some(500.0), // implausible
                 precip_rate_source: PrecipRateSource::Measured,
                 root_depth_mm: None,
                 mad_pct_override: None,
@@ -335,6 +389,8 @@ mod tests {
                 target_min_pct_soil: 30.0,
                 saturation_pct_soil: 70.0,
                 photo_url: None,
+                weekly_budget_in: None,
+                sessions_per_week: None,
             },
         );
         let err = validate(&cfg).unwrap_err();
@@ -348,7 +404,7 @@ mod tests {
         cfg.deployment.location.lat = 28.5;
         cfg.deployment.location.lon = -81.4;
         cfg.sources.push(crate::config::schema::SourceEntry {
-            id: "has space".into(),  // invalid
+            id: "has space".into(), // invalid
             priority: 50,
             enabled: true,
             source: crate::config::schema::SourceKind::DemoReplay(Default::default()),

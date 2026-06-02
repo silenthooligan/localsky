@@ -42,7 +42,9 @@ fn MobileZoneRow(zone: ZoneState) -> impl IntoView {
     let on_row = move |ev: leptos::ev::MouseEvent| {
         // Don't navigate if the user tapped the inline action button — those
         // call stopPropagation themselves but be defensive.
-        if ev.ctrl_key() || ev.meta_key() || ev.shift_key() || ev.button() != 0 { return; }
+        if ev.ctrl_key() || ev.meta_key() || ev.shift_key() || ev.button() != 0 {
+            return;
+        }
         ev.prevent_default();
         log_nav(format!("zone-row tap: {}", &slug_for_nav));
         navigate(
@@ -65,7 +67,11 @@ fn MobileZoneRow(zone: ZoneState) -> impl IntoView {
         post_action(json!({"kind": "stop", "zone": slug}));
     };
 
-    let badge_class = if zone_running { "zone-row-badge zone-row-badge-running" } else { "zone-row-badge" };
+    let badge_class = if zone_running {
+        "zone-row-badge zone-row-badge-running"
+    } else {
+        "zone-row-badge"
+    };
     let badge_text = if zone_running { "RUNNING" } else { "IDLE" };
 
     view! {

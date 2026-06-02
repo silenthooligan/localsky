@@ -1,0 +1,84 @@
+---
+source: src/api/snapshot_tests.rs
+expression: body
+---
+{
+  "current_month": 1,
+  "current_month_multiplier": 1.0,
+  "min_observations_required": 5,
+  "months": [
+    {
+      "description": "no correction (need 5 days; have 0)",
+      "month": 1,
+      "multiplier": 1.0,
+      "samples": 0
+    },
+    {
+      "description": "no correction (need 5 days; have 0)",
+      "month": 2,
+      "multiplier": 1.0,
+      "samples": 0
+    },
+    {
+      "description": "no correction (need 5 days; have 0)",
+      "month": 3,
+      "multiplier": 1.0,
+      "samples": 0
+    },
+    {
+      "description": "no correction (need 5 days; have 0)",
+      "month": 4,
+      "multiplier": 1.0,
+      "samples": 0
+    },
+    {
+      "description": "no correction (need 5 days; have 0)",
+      "month": 5,
+      "multiplier": 1.0,
+      "samples": 0
+    },
+    {
+      "description": "no correction (need 5 days; have 0)",
+      "month": 6,
+      "multiplier": 1.0,
+      "samples": 0
+    },
+    {
+      "description": "no correction (need 5 days; have 0)",
+      "month": 7,
+      "multiplier": 1.0,
+      "samples": 0
+    },
+    {
+      "description": "no correction (need 5 days; have 0)",
+      "month": 8,
+      "multiplier": 1.0,
+      "samples": 0
+    },
+    {
+      "description": "no correction (need 5 days; have 0)",
+      "month": 9,
+      "multiplier": 1.0,
+      "samples": 0
+    },
+    {
+      "description": "no correction (need 5 days; have 0)",
+      "month": 10,
+      "multiplier": 1.0,
+      "samples": 0
+    },
+    {
+      "description": "no correction (need 5 days; have 0)",
+      "month": 11,
+      "multiplier": 1.0,
+      "samples": 0
+    },
+    {
+      "description": "no correction (need 5 days; have 0)",
+      "month": 12,
+      "multiplier": 1.0,
+      "samples": 0
+    }
+  ],
+  "window_days": 90
+}

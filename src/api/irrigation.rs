@@ -7,9 +7,10 @@
 // Mounted at /api/irrigation/* by api::router.
 
 use crate::ha::rest::HaClient;
-use crate::ha::IrrigationStore;
+use crate::ha::{IrrigationStore, SnapshotSource};
 use crate::history::db;
 use crate::llm::{AdvisorError, AdvisorState};
+use crate::persistence::IrrigationControlStore;
 use axum::{
     extract::{Query, State},
     http::StatusCode,
@@ -29,15 +30,41 @@ use tokio::sync::Mutex;
 use tokio_stream::wrappers::WatchStream;
 use tokio_stream::StreamExt;
 
+/// Optional shadow store: when shadow mode is on, the native snapshot
+/// builder writes here each tick (alongside the authoritative HA store) so
+/// it can be compared without ever driving dispatch. Set once at boot.
+static SHADOW_STORE: std::sync::OnceLock<Arc<IrrigationStore>> = std::sync::OnceLock::new();
+
+/// Register the shadow store (called from main at boot when shadow_native).
+pub fn set_shadow_store(s: Arc<IrrigationStore>) {
+    let _ = SHADOW_STORE.set(s);
+}
+
 pub fn router(
     store: Arc<IrrigationStore>,
     advisor: AdvisorState,
     history: Option<Arc<Mutex<Connection>>>,
+    source: SnapshotSource,
+    sprinkler_prefix: String,
 ) -> Router {
+    // POST /action needs the snapshot source + (for native) the local
+    // control store, so it lives in its own sub-router with that state.
+    let action_router = Router::new()
+        .route("/action", post(action))
+        .with_state(ActionState {
+            source,
+            control: history.clone().map(IrrigationControlStore::new),
+            sprinkler_prefix,
+        });
+
     let read_routes = Router::new()
         .route("/snapshot", get(snapshot))
         .route("/stream", get(stream))
-        .route("/action", post(action))
+        .route("/simulate", post(simulate))
+        // Shadow mode: the native (standalone) snapshot built alongside the
+        // HA one for comparison. Empty unless shadow_native is enabled.
+        .route("/shadow/snapshot", get(shadow_snapshot))
+        .route("/shadow/diff", get(shadow_diff))
         .with_state(store.clone());
 
     let advisor_routes = Router::new()
@@ -48,7 +75,7 @@ pub fn router(
             advisor,
         });
 
-    let merged = read_routes.merge(advisor_routes);
+    let merged = read_routes.merge(advisor_routes).merge(action_router);
 
     if let Some(h) = history {
         merged.merge(
@@ -86,20 +113,26 @@ struct AdvisorEnvelope<T: Serialize> {
 
 impl<T: Serialize> AdvisorEnvelope<T> {
     fn ok(data: T) -> Self {
-        Self { status: "ok", data: Some(data), error: None }
+        Self {
+            status: "ok",
+            data: Some(data),
+            error: None,
+        }
     }
     fn from_err(e: AdvisorError) -> Self {
         let (status, error) = match e {
             AdvisorError::Disabled => ("disabled", "disabled"),
             AdvisorError::Offline => ("offline", "offline"),
         };
-        Self { status, data: None, error: Some(error) }
+        Self {
+            status,
+            data: None,
+            error: Some(error),
+        }
     }
 }
 
-async fn explanation(
-    State(state): State<AdvisorRouterState>,
-) -> impl IntoResponse {
+async fn explanation(State(state): State<AdvisorRouterState>) -> impl IntoResponse {
     let snap = (*state.store.snapshot()).clone();
     match state.advisor.explain_today(&snap).await {
         Ok(text) => (
@@ -113,9 +146,7 @@ async fn explanation(
     }
 }
 
-async fn anomalies(
-    State(state): State<AdvisorRouterState>,
-) -> impl IntoResponse {
+async fn anomalies(State(state): State<AdvisorRouterState>) -> impl IntoResponse {
     let snap = (*state.store.snapshot()).clone();
     match state.advisor.detect_anomalies(&snap).await {
         Ok(list) => (
@@ -124,7 +155,10 @@ async fn anomalies(
         ),
         Err(e) => (
             StatusCode::OK,
-            Json(serde_json::to_value(AdvisorEnvelope::<Vec<crate::llm::Anomaly>>::from_err(e)).unwrap()),
+            Json(
+                serde_json::to_value(AdvisorEnvelope::<Vec<crate::llm::Anomaly>>::from_err(e))
+                    .unwrap(),
+            ),
         ),
     }
 }
@@ -134,6 +168,140 @@ async fn snapshot(
 ) -> Json<crate::ha::snapshot::IrrigationSnapshot> {
     let s = store.snapshot();
     Json((*s).clone())
+}
+
+/// The native (standalone) snapshot built in shadow alongside HA. Returns
+/// `{"shadow":"disabled"}` when shadow mode is off.
+async fn shadow_snapshot() -> Json<Value> {
+    match SHADOW_STORE.get() {
+        Some(s) => Json(serde_json::to_value(&*s.snapshot()).unwrap_or(Value::Null)),
+        None => Json(json!({ "shadow": "disabled" })),
+    }
+}
+
+/// Side-by-side diff of the authoritative (HA) snapshot vs the native
+/// shadow: the aggregate verdict, and per-zone running + planned-seconds.
+/// The planned-seconds delta is expected (native budget vs SI bucket) and
+/// is shown for both so it can be judged; verdict + running mismatches are
+/// the signal that native isn't yet equivalent.
+async fn shadow_diff(State(live): State<Arc<IrrigationStore>>) -> Json<Value> {
+    let Some(shadow) = SHADOW_STORE.get() else {
+        return Json(json!({ "shadow": "disabled" }));
+    };
+    let h = live.snapshot();
+    let n = shadow.snapshot();
+    let zones: Vec<Value> = h
+        .zones
+        .iter()
+        .map(|hz| {
+            let nz = n.zones.iter().find(|z| z.slug == hz.slug);
+            json!({
+                "slug": hz.slug,
+                "ha_running": hz.running,
+                "native_running": nz.map(|z| z.running),
+                "native_running_known": nz.map(|z| z.running_known),
+                "ha_planned_s": hz.planned_run_seconds,
+                "native_planned_s": nz.map(|z| z.planned_run_seconds),
+                "ha_verdict": hz.verdict.as_ref().map(|v| v.verdict.clone()),
+                "native_verdict": nz.and_then(|z| z.verdict.as_ref().map(|v| v.verdict.clone())),
+            })
+        })
+        .collect();
+    Json(json!({
+        "ha_verdict": h.skip_check.verdict,
+        "native_verdict": n.skip_check.verdict,
+        "verdict_match": h.skip_check.verdict == n.skip_check.verdict,
+        "ha_reason": h.skip_check.reason,
+        "native_reason": n.skip_check.reason,
+        "ha_master_enable": h.master_enable,
+        "native_master_enable": n.master_enable,
+        "zones": zones,
+    }))
+}
+
+/// What-If: seed engine Inputs from the live SkipCheck, override the
+/// Some fields from the request, re-run the EXACT production ladder
+/// (`decide_traced`) on baseline + hypothetical, return both traces.
+/// Pure read — writes nothing.
+async fn simulate(
+    State(store): State<Arc<IrrigationStore>>,
+    Json(req): Json<crate::ha::snapshot::SimRequest>,
+) -> Json<crate::ha::snapshot::SimResult> {
+    use crate::config::schema::SkipRuleParams;
+    use crate::engine::skip_rules::{decide_traced, inputs_from_skipcheck};
+
+    let snap = store.snapshot();
+    let base = inputs_from_skipcheck(&snap.skip_check);
+    let mut hypo = base.clone();
+    if let Some(v) = req.temp_now_f {
+        hypo.temp_now_f = v;
+    }
+    if let Some(v) = req.humidity_now_pct {
+        hypo.humidity_now_pct = v;
+    }
+    if let Some(v) = req.wind_now_mph {
+        hypo.wind_now_mph = v;
+    }
+    if let Some(v) = req.rain_today_in {
+        hypo.rain_today_in = v;
+    }
+    if let Some(v) = req.rain_intensity_now_in_hr {
+        hypo.rain_intensity_now_in_hr = v;
+    }
+    if let Some(v) = req.forecast_in {
+        hypo.forecast_in = v;
+    }
+    if let Some(v) = req.rain_tomorrow_prob_pct {
+        hypo.rain_tomorrow_prob_pct = v;
+    }
+    if let Some(v) = req.rain_next_4h_in {
+        hypo.rain_next_4h_in = v;
+    }
+    if let Some(v) = req.wind_max_today_mph {
+        hypo.wind_max_today_mph = v;
+    }
+    if let Some(v) = req.temp_max_3day_f {
+        hypo.temp_max_3day_f = v;
+    }
+    if let Some(v) = req.rain_3day_weighted_in {
+        hypo.rain_3day_weighted_in = v;
+    }
+
+    let p = SkipRuleParams::default();
+    let baseline = decide_traced(&base, &p);
+    let mut hypothetical = decide_traced(&hypo, &p);
+
+    // Optional ad-hoc script test: augment-only, same boundary as the
+    // live engine — only consulted when the hypothetical verdict is "run".
+    if let Some(src) = req.test_script.as_ref().filter(|s| !s.trim().is_empty()) {
+        if hypothetical.verdict == "run" {
+            use crate::config::schema::ScriptRule;
+            use crate::engine::scripting::CompiledScripts;
+            let scripts = CompiledScripts::compile(&[ScriptRule {
+                id: "test".into(),
+                name: "Custom rule".into(),
+                enabled: true,
+                script: src.clone(),
+            }]);
+            if let Some(us) = scripts.apply_user_skip(&hypo) {
+                hypothetical.verdict = "skip".into();
+                hypothetical.reason = us.reason.clone();
+                hypothetical.rules.push(crate::ha::snapshot::RuleEval {
+                    id: us.id,
+                    label: us.name,
+                    category: "script".into(),
+                    detail: "your test rule".into(),
+                    outcome: "fired".into(),
+                    verdict: Some("skip".into()),
+                });
+            }
+        }
+    }
+
+    Json(crate::ha::snapshot::SimResult {
+        baseline,
+        hypothetical,
+    })
 }
 
 async fn stream(
@@ -192,13 +360,19 @@ pub enum Action {
 /// that opensprinkler / script.os_zone_toggle expects. Anchored to
 /// the four physical stations; unknown slugs return None and the
 /// handler returns 400.
-fn running_sensor(zone: &str) -> Option<String> {
-    match zone {
-        "back_yard" | "front_yard" | "side_yard" | "back_yard_shrubs" => {
-            Some(format!("binary_sensor.aperture_sprinklers_{zone}_station_running"))
-        }
-        _ => None,
+fn running_sensor(zone: &str, prefix: &str) -> Option<String> {
+    // Accept any safe slug (lowercase alnum + underscore) so the endpoint
+    // works for any configured zone set, while still rejecting arbitrary
+    // entity-id injection. `prefix` is the operator's controller entity
+    // prefix (config-driven; default "opensprinkler").
+    if zone.is_empty()
+        || !zone
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    {
+        return None;
     }
+    Some(format!("binary_sensor.{prefix}_{zone}_station_running"))
 }
 
 /// Map a threshold key to the input_number entity ID. Restricts to
@@ -217,9 +391,7 @@ fn threshold_entity(key: &str) -> Option<String> {
 /// allow-list shape.
 fn toggle_entity(key: &str) -> Option<String> {
     match key {
-        "irrigation_pause" | "irrigation_dry_run" => {
-            Some(format!("input_boolean.{key}"))
-        }
+        "irrigation_pause" | "irrigation_dry_run" => Some(format!("input_boolean.{key}")),
         _ => None,
     }
 }
@@ -239,10 +411,88 @@ const OVERRIDE_ENTITY: &str = "input_select.irrigation_override_tomorrow";
 /// IU sequence binary_sensor used as the target for run_now.
 const IU_SEQUENCE_ENTITY: &str = "binary_sensor.irrigation_unlimited_c1_s1";
 
-async fn action(
-    State(_store): State<Arc<IrrigationStore>>,
-    Json(body): Json<Action>,
-) -> impl IntoResponse {
+/// State for the POST /action handler. The vacation pause + one-day
+/// override are routed to local persisted state on a native (standalone)
+/// deploy and to HA helpers on an HA deploy; everything else is HA-only.
+#[derive(Clone)]
+struct ActionState {
+    source: SnapshotSource,
+    /// Native control store. `None` when no persistence DB is mounted; a
+    /// native pause/override write then returns 503 rather than silently
+    /// dropping (a dropped pause = unexpected watering).
+    control: Option<IrrigationControlStore>,
+    /// HA controller entity prefix (config-driven; default "opensprinkler").
+    sprinkler_prefix: String,
+}
+
+/// Handle the native (no-HA) vacation pause + one-day override by writing
+/// local persisted state instead of calling HA helpers. Only reached for
+/// the three control actions on a native deploy; all other actions stay on
+/// the HA path.
+async fn native_control_action(
+    control: &Option<IrrigationControlStore>,
+    body: Action,
+) -> (StatusCode, Json<Value>) {
+    let Some(cs) = control else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "control state unavailable (no persistence DB mounted)" })),
+        );
+    };
+    let result: Result<Value, String> = match body {
+        Action::SetPauseUntil { epoch } => {
+            let epoch = epoch.max(0);
+            cs.set_pause_until(epoch)
+                .await
+                .map(|_| json!({ "ok": true, "source": "native", "pause_until_epoch": epoch }))
+                .map_err(|e| e.to_string())
+        }
+        Action::ClearPauseUntil => cs
+            .set_pause_until(0)
+            .await
+            .map(|_| json!({ "ok": true, "source": "native", "cleared": true }))
+            .map_err(|e| e.to_string()),
+        Action::SetOverrideTomorrow { mode } => match mode.as_str() {
+            "none" | "skip" | "run" => cs
+                .set_override_tomorrow(mode.clone())
+                .await
+                .map(|_| json!({ "ok": true, "source": "native", "mode": mode }))
+                .map_err(|e| e.to_string()),
+            _ => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": format!("invalid override mode: {mode}") })),
+                );
+            }
+        },
+        // native_control_action is only called for the three control
+        // variants; any other variant is a programming error.
+        _ => unreachable!("native_control_action called with non-control action"),
+    };
+    match result {
+        Ok(v) => (StatusCode::OK, Json(v)),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e })),
+        ),
+    }
+}
+
+async fn action(State(st): State<ActionState>, Json(body): Json<Action>) -> impl IntoResponse {
+    // Native deploys have no HA helpers; the vacation pause + one-day
+    // override live in local state. Route those three actions there. Every
+    // other action (zone run/stop, thresholds, IU) stays HA-only.
+    if st.source == SnapshotSource::Native
+        && matches!(
+            body,
+            Action::SetPauseUntil { .. }
+                | Action::ClearPauseUntil
+                | Action::SetOverrideTomorrow { .. }
+        )
+    {
+        return native_control_action(&st.control, body).await;
+    }
+
     let client = match HaClient::from_env() {
         Ok(c) => c,
         Err(e) => {
@@ -255,7 +505,7 @@ async fn action(
 
     let result: Result<Value, String> = match body {
         Action::Run { zone, seconds } => {
-            let Some(eid) = running_sensor(&zone) else {
+            let Some(eid) = running_sensor(&zone, &st.sprinkler_prefix) else {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(json!({ "error": format!("unknown zone: {zone}") })),
@@ -265,7 +515,9 @@ async fn action(
             if clamped != seconds {
                 tracing::warn!(
                     "irrigation::Run clamped seconds {} -> {} (max {})",
-                    seconds, clamped, RUN_SECONDS_MAX
+                    seconds,
+                    clamped,
+                    RUN_SECONDS_MAX
                 );
             }
             client
@@ -279,7 +531,7 @@ async fn action(
                 .map_err(|e| e.to_string())
         }
         Action::Stop { zone } => {
-            let Some(eid) = running_sensor(&zone) else {
+            let Some(eid) = running_sensor(&zone, &st.sprinkler_prefix) else {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(json!({ "error": format!("unknown zone: {zone}") })),
@@ -395,10 +647,7 @@ async fn action(
 
     match result {
         Ok(v) => (StatusCode::OK, Json(v)),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": e })),
-        ),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))),
     }
 }
 
@@ -422,7 +671,10 @@ async fn history_window(
     let now = chrono::Utc::now().timestamp();
     let from = now - (days as i64) * 86400;
     match db::window(conn, from, now).await {
-        Ok(w) => (StatusCode::OK, Json(serde_json::to_value(w).unwrap_or_default())),
+        Ok(w) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(w).unwrap_or_default()),
+        ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -438,7 +690,10 @@ async fn decisions_window(
     let now = chrono::Utc::now().timestamp();
     let from = now - (days as i64) * 86400;
     match db::decisions_window(conn, from, now).await {
-        Ok(w) => (StatusCode::OK, Json(serde_json::to_value(w).unwrap_or_default())),
+        Ok(w) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(w).unwrap_or_default()),
+        ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),

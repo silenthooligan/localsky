@@ -91,7 +91,10 @@ mod tests {
     fn ids_sorted() {
         let r = SourceRegistry::new();
         r.set(vec![demo("z"), demo("a"), demo("m")]);
-        assert_eq!(r.ids(), vec!["a".to_string(), "m".to_string(), "z".to_string()]);
+        assert_eq!(
+            r.ids(),
+            vec!["a".to_string(), "m".to_string(), "z".to_string()]
+        );
     }
 
     #[test]

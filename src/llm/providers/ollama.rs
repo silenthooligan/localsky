@@ -96,12 +96,7 @@ impl LlmProvider for OllamaProvider {
         &self.id
     }
 
-    async fn chat(
-        &self,
-        system: &str,
-        user: &str,
-        opts: ChatOpts,
-    ) -> Result<String, LlmError> {
+    async fn chat(&self, system: &str, user: &str, opts: ChatOpts) -> Result<String, LlmError> {
         let body = ChatRequest {
             model: &self.model,
             messages: vec![

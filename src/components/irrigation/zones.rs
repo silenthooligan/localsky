@@ -105,7 +105,13 @@ fn ZoneCard(zone: Signal<ZoneState>) -> impl IntoView {
         if z.running {
             "RUNNING"
         } else if z.planned_run_seconds == 0 {
-            "DISABLED"
+            // ZoneState exposes no config-disabled flag, so this branch
+            // covers every "no run planned tonight" reason: engine
+            // chose to skip (watering restriction, rain, wind, frost),
+            // or the schedule simply doesn't fire on this day. Label
+            // as SKIP so it matches the page-level "SKIPPING:" verdict
+            // and stops implying the operator turned the zone off.
+            "SKIP"
         } else {
             "IDLE"
         }

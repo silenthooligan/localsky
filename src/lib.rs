@@ -3,8 +3,17 @@
 // and the WASM client (compiled with feature `hydrate`, attaches to the
 // HTML the server already streamed).
 
+// Matching budget for the lib crate. The release overflow actually hits the
+// BINARY crate (see the load-bearing copy + full explanation in src/main.rs);
+// recursion_limit is per-crate, so the bin needs its own and this one alone
+// is NOT sufficient. Kept here as a safeguard since the lib hosts the deep
+// component trees and could approach the budget on its own as they grow.
+// Compile-time query budget only, no runtime cost.
+#![recursion_limit = "512"]
+
 pub mod app;
 pub mod components;
+pub mod docs;
 pub mod forecast;
 pub mod ha;
 pub mod history;
@@ -21,6 +30,12 @@ pub mod config;
 #[cfg(feature = "ssr")]
 pub mod controllers;
 #[cfg(feature = "ssr")]
+pub mod demo_data;
+#[cfg(feature = "ssr")]
+pub mod devices;
+#[cfg(feature = "ssr")]
+pub mod discovery;
+#[cfg(feature = "ssr")]
 pub mod engine;
 #[cfg(feature = "ssr")]
 pub mod llm;
@@ -33,8 +48,6 @@ pub mod ports;
 #[cfg(feature = "ssr")]
 pub mod push;
 #[cfg(feature = "ssr")]
-pub mod demo_data;
-#[cfg(feature = "ssr")]
 pub mod runtime;
 #[cfg(feature = "ssr")]
 pub mod runtime_helpers;
@@ -44,6 +57,8 @@ pub mod scheduler;
 pub mod sources;
 #[cfg(feature = "ssr")]
 pub mod sw;
+#[cfg(feature = "ssr")]
+pub mod zones;
 
 #[cfg(feature = "hydrate")]
 #[wasm_bindgen::prelude::wasm_bindgen]
@@ -91,8 +106,8 @@ fn register_service_worker() {
     let messages_cb = Closure::<dyn FnMut(_)>::new(move |_e: web_sys::MessageEvent| {
         log_nav("sw: postMessage from SW");
     });
-    let _ = container
-        .add_event_listener_with_callback("message", messages_cb.as_ref().unchecked_ref());
+    let _ =
+        container.add_event_listener_with_callback("message", messages_cb.as_ref().unchecked_ref());
     messages_cb.forget();
 
     // Kick the registration. The Promise resolves to a ServiceWorkerRegistration;

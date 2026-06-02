@@ -21,9 +21,7 @@ use gloo_net::http::Request;
 use serde_json::json;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{
-    js_sys, PushSubscription, PushSubscriptionOptionsInit,
-};
+use web_sys::{js_sys, PushSubscription, PushSubscriptionOptionsInit};
 
 fn err_to_string(v: &wasm_bindgen::JsValue) -> String {
     v.as_string()
@@ -42,29 +40,32 @@ pub fn permission_state() -> Result<String, String> {
     // Notification.permission is a static property on the Notification
     // constructor, accessed via Reflect because web-sys doesn't expose
     // a static accessor consistently across versions.
-    let notif = js_sys::Reflect::get(&win, &"Notification".into())
-        .map_err(|e| err_to_string(&e))?;
+    let notif =
+        js_sys::Reflect::get(&win, &"Notification".into()).map_err(|e| err_to_string(&e))?;
     if notif.is_undefined() || notif.is_null() {
         return Err("Notifications API unavailable".into());
     }
-    let perm = js_sys::Reflect::get(&notif, &"permission".into())
-        .map_err(|e| err_to_string(&e))?;
+    let perm = js_sys::Reflect::get(&notif, &"permission".into()).map_err(|e| err_to_string(&e))?;
     Ok(perm.as_string().unwrap_or_else(|| "default".to_string()))
 }
 
 pub async fn request_permission() -> Result<String, String> {
     let win = web_sys::window().ok_or("no window")?;
-    let notif = js_sys::Reflect::get(&win, &"Notification".into())
-        .map_err(|e| err_to_string(&e))?;
-    let req_fn = js_sys::Reflect::get(&notif, &"requestPermission".into())
-        .map_err(|e| err_to_string(&e))?;
-    let func: js_sys::Function = req_fn.dyn_into().map_err(|_| "requestPermission not a function")?;
+    let notif =
+        js_sys::Reflect::get(&win, &"Notification".into()).map_err(|e| err_to_string(&e))?;
+    let req_fn =
+        js_sys::Reflect::get(&notif, &"requestPermission".into()).map_err(|e| err_to_string(&e))?;
+    let func: js_sys::Function = req_fn
+        .dyn_into()
+        .map_err(|_| "requestPermission not a function")?;
     let promise: js_sys::Promise = func
         .call0(&notif)
         .map_err(|e| err_to_string(&e))?
         .dyn_into()
         .map_err(|_| "requestPermission did not return Promise")?;
-    let result = JsFuture::from(promise).await.map_err(|e| err_to_string(&e))?;
+    let result = JsFuture::from(promise)
+        .await
+        .map_err(|e| err_to_string(&e))?;
     Ok(result.as_string().unwrap_or_else(|| "default".to_string()))
 }
 
@@ -146,11 +147,14 @@ pub async fn subscribe() -> Result<(), String> {
     opts.set_application_server_key(&key_array);
 
     let sub = JsFuture::from(
-        pm.subscribe_with_options(&opts).map_err(|e| err_to_string(&e))?,
+        pm.subscribe_with_options(&opts)
+            .map_err(|e| err_to_string(&e))?,
     )
     .await
     .map_err(|e| err_to_string(&e))?;
-    let sub: PushSubscription = sub.dyn_into().map_err(|_| "subscribe returned non-PushSubscription")?;
+    let sub: PushSubscription = sub
+        .dyn_into()
+        .map_err(|_| "subscribe returned non-PushSubscription")?;
 
     let endpoint = sub.endpoint();
     let p256dh = b64u(extract_key(&sub, web_sys::PushEncryptionKeyName::P256dh)?)?;
@@ -198,7 +202,10 @@ pub async fn unsubscribe() -> Result<(), String> {
     Ok(())
 }
 
-fn extract_key(sub: &PushSubscription, kind: web_sys::PushEncryptionKeyName) -> Result<Vec<u8>, String> {
+fn extract_key(
+    sub: &PushSubscription,
+    kind: web_sys::PushEncryptionKeyName,
+) -> Result<Vec<u8>, String> {
     let buf = sub.get_key(kind).map_err(|e| err_to_string(&e))?;
     let buf = match buf {
         Some(b) => b,

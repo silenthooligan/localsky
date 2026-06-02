@@ -95,12 +95,7 @@ impl LlmProvider for OpenaiCompatProvider {
         &self.id
     }
 
-    async fn chat(
-        &self,
-        system: &str,
-        user: &str,
-        opts: ChatOpts,
-    ) -> Result<String, LlmError> {
+    async fn chat(&self, system: &str, user: &str, opts: ChatOpts) -> Result<String, LlmError> {
         let body = ChatRequest {
             model: &self.model,
             messages: vec![
@@ -115,7 +110,9 @@ impl LlmProvider for OpenaiCompatProvider {
             ],
             temperature: opts.temperature,
             max_tokens: opts.max_tokens,
-            response_format: opts.json_mode.then_some(ResponseFormat { kind: "json_object" }),
+            response_format: opts.json_mode.then_some(ResponseFormat {
+                kind: "json_object",
+            }),
             stream: false,
         };
 

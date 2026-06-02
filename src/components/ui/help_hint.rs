@@ -1,0 +1,77 @@
+// HelpHint. A tiny ? glyph that reveals a 1-2 sentence explanation of
+// the dashboard panel it sits next to. Implemented as a native
+// <details>/<summary> disclosure widget so it works without JavaScript,
+// announces correctly to screen readers, and toggles consistently on
+// touch + mouse.
+//
+// Topics are looked up from a static table; the topic string is part of
+// the component API so misspellings show up as a "(no help topic
+// configured)" placeholder rather than a silent miss.
+
+use crate::docs::doc_url;
+use leptos::prelude::*;
+
+#[component]
+pub fn HelpHint(
+    /// Topic key from the static lookup table in help_topic. Also
+    /// used as the slug for the "Read full doc" link to localsky.io
+    /// (e.g. topic="verdict-strip" -> localsky.io/docs/verdict-strip).
+    /// Docs pages are still being authored; the link is a wired
+    /// placeholder so the URL contract is in place across the UI.
+    #[prop(into)]
+    topic: String,
+) -> impl IntoView {
+    let body = help_topic(&topic);
+    let url = doc_url(&topic);
+    view! {
+        <details class="help-hint">
+            <summary
+                class="help-hint__trigger"
+                aria-label="Show help for this panel"
+            >
+                "?"
+            </summary>
+            <div class="help-hint__body">
+                <p class="help-hint__text">{body}</p>
+                <a
+                    class="help-hint__doc-link"
+                    href=url
+                    target="_blank"
+                    rel="noopener noreferrer"
+                >
+                    "Read full doc \u{2192}"
+                </a>
+            </div>
+        </details>
+    }
+}
+
+/// Lookup table for panel help text. Keep entries under ~160 characters
+/// so the popover doesn't dominate the panel it explains.
+pub fn help_topic(topic: &str) -> &'static str {
+    match topic {
+        "verdict-strip" =>
+            "Forecast-driven view of whether each of the next 7 days will water, skip, or run extended, using the same skip-check that fires every morning.",
+        "water-budget" =>
+            "How much water this week's rain + irrigation has put down vs. what the engine thinks the lawn needed. Negative means the lawn ran short.",
+        "zone-math" =>
+            "Step-by-step math for the next planned run: ET from the day's weather, multiplied by species Kc, capped at the controller's max duration.",
+        "soil-sensors" =>
+            "Live soil-moisture percentages from each zone's probe. The engine skips entirely when every zone is at or above its saturation threshold.",
+        "forecast" =>
+            "Next-rain probability, expected amounts, and the heat-stress + wind metrics the skip rules check. Live, refreshed every 30 minutes.",
+        "skip-breakdown" =>
+            "Each row shows one skip-rule input next to its threshold. A red bar means that input is currently outside its allowed range and will trip a skip.",
+        "advisor" =>
+            "Optional LLM advisor. Reads the same inputs the engine uses and explains the verdict in plain English. Off by default; configure under Settings -> LLM.",
+        "location" =>
+            "Where this deployment sits. Latitude, longitude, and elevation feed the solar + ET math; the timezone sets when the nightly verdict runs.",
+        "llm" =>
+            "Connect an optional LLM provider (Ollama, llama.cpp, or any OpenAI-compatible endpoint) so the advisor can explain verdicts. Leave blank to keep it off.",
+        "notifications" =>
+            "Outbound channels for run/skip alerts: Web Push, MQTT discovery, ntfy, and Slack. Each is independent; fill in only the ones you use.",
+        "history" =>
+            "What actually happened: completed runs and skipped evenings over the selected window. The timeline plots every run per zone; per-zone cards break down minutes, cadence, and recent events.",
+        _ => "(no help topic configured)",
+    }
+}

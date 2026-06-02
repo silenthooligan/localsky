@@ -41,17 +41,17 @@ impl OpenSprinklerDirect {
         id: impl Into<String>,
         config: OpenSprinklerDirectConfig,
         zone_to_station: std::collections::HashMap<String, u32>,
-    ) -> Self {
+    ) -> Result<Self, ControllerError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
-            .expect("reqwest client construction");
-        Self {
+            .map_err(|e| ControllerError::Init(format!("reqwest client: {e}")))?;
+        Ok(Self {
             id: id.into(),
             config,
             client,
             zone_to_station: Arc::new(zone_to_station),
-        }
+        })
     }
 
     fn base_url(&self) -> String {
@@ -72,7 +72,12 @@ impl OpenSprinklerDirect {
     ) -> Result<T, ControllerError> {
         // Build the URL manually so we don't depend on reqwest's query()
         // helper being available across feature flag combinations.
-        let mut url = format!("{}{}?pw={}", self.base_url(), path, self.config.password_md5);
+        let mut url = format!(
+            "{}{}?pw={}",
+            self.base_url(),
+            path,
+            self.config.password_md5
+        );
         for (k, v) in extra_query {
             url.push('&');
             url.push_str(k);
@@ -115,6 +120,18 @@ struct JcResponse {
     /// Firmware version string.
     #[serde(default)]
     fwv: Option<u32>,
+    /// Live flow click rate (clicks/min) from a flow sensor wired to the
+    /// FLOW input. Convert to GPM via the configured K-factor (fpr0/fpr1
+    /// from /jo). Present only when flow sensor is enabled (sn1t=2).
+    #[serde(default)]
+    flcrt: Option<u64>,
+    /// Flow pulse rate, gallons-per-click (fpr0 in units of 0.01).
+    /// OS firmware 2.1.9+ surfaces this on /jc when flow sensing is on.
+    #[serde(default)]
+    fpr0: Option<u64>,
+    /// Same pulse rate, integer-divided part (fpr1).
+    #[serde(default)]
+    fpr1: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -176,19 +193,14 @@ impl IrrigationController for OpenSprinklerDirect {
         let _: CmResponse = self
             .get_json(
                 "/cm",
-                &[
-                    ("sid", zero_indexed.to_string()),
-                    ("en", "0".to_string()),
-                ],
+                &[("sid", zero_indexed.to_string()), ("en", "0".to_string())],
             )
             .await?;
         Ok(())
     }
 
     async fn stop_all(&self) -> ControllerResult<()> {
-        let _: CmResponse = self
-            .get_json("/cv", &[("rsn", "1".to_string())])
-            .await?;
+        let _: CmResponse = self.get_json("/cv", &[("rsn", "1".to_string())]).await?;
         Ok(())
     }
 
@@ -216,6 +228,20 @@ impl IrrigationController for OpenSprinklerDirect {
                 last_run_epoch: None,
             });
         }
+        // Flow: OS reports click rate in clicks/minute; convert to GPM
+        // via the K-factor stored as gallons-per-click. The K-factor on
+        // /jc is encoded as (fpr1 * 100 + fpr0) hundredths of a gallon.
+        // E.g. fpr1=0, fpr0=50 -> 0.50 gal/click. With flcrt clicks/min,
+        // gpm = flcrt * k_gal_per_click. flcrt=0 (no flow) -> Some(0.0)
+        // rather than None so the engine can distinguish "meter present,
+        // zero flow" from "no meter".
+        let flow_gpm = match (r.flcrt, r.fpr0, r.fpr1) {
+            (Some(rate), Some(p0), Some(p1)) => {
+                let k = (p1 as f64 * 100.0 + p0 as f64) / 100.0;
+                Some(rate as f64 * k)
+            }
+            _ => None,
+        };
         Ok(ControllerStatus {
             reachable: true,
             master_enabled: Some(r.en == 1),
@@ -223,7 +249,7 @@ impl IrrigationController for OpenSprinklerDirect {
             rain_sensor_tripped: Some(r.rs == 1),
             current_program: None,
             zone_states,
-            flow_gpm: None,
+            flow_gpm,
             firmware: r.fwv.map(|v| v.to_string()),
         })
     }
@@ -261,6 +287,38 @@ impl IrrigationController for OpenSprinklerDirect {
         }
         Ok(out)
     }
+
+    async fn discover_zones(
+        &self,
+    ) -> ControllerResult<Vec<crate::ports::irrigation_controller::DiscoveredZone>> {
+        use crate::ports::irrigation_controller::DiscoveredZone;
+        #[derive(Deserialize, Default)]
+        struct JnResponse {
+            #[serde(default)]
+            snames: Vec<String>,
+        }
+        let r: JnResponse = self.get_json("/jn", &[]).await?;
+        let out = r
+            .snames
+            .into_iter()
+            .enumerate()
+            // Skip OpenSprinkler's default "Disabled" name for unused
+            // stations so onboarding only offers real zones.
+            .filter(|(_, name)| !name.trim().eq_ignore_ascii_case("disabled"))
+            .map(|(i, name)| {
+                let station = i + 1; // OpenSprinkler stations are 1-based.
+                DiscoveredZone {
+                    station_id: station.to_string(),
+                    name: if name.trim().is_empty() {
+                        format!("Station {station}")
+                    } else {
+                        name
+                    },
+                }
+            })
+            .collect();
+        Ok(out)
+    }
 }
 
 fn now_epoch() -> i64 {
@@ -288,7 +346,8 @@ mod tests {
                 poll_interval_s: 10,
             },
             map,
-        );
+        )
+        .unwrap();
         assert_eq!(c.station_for("back_yard").unwrap(), 1);
         assert_eq!(c.station_for("front_yard").unwrap(), 2);
     }
@@ -304,7 +363,8 @@ mod tests {
                 poll_interval_s: 10,
             },
             std::collections::HashMap::new(),
-        );
+        )
+        .unwrap();
         let err = c.station_for("nope").unwrap_err();
         assert!(matches!(err, ControllerError::ZoneUnknown(_)));
     }
@@ -314,13 +374,14 @@ mod tests {
         let c = OpenSprinklerDirect::new(
             "os1",
             OpenSprinklerDirectConfig {
-                host: "opensprinkler.local".into(),
+                host: "192.0.2.5".into(),
                 port: 8080,
                 password_md5: "abc".into(),
                 poll_interval_s: 10,
             },
             std::collections::HashMap::new(),
-        );
-        assert_eq!(c.base_url(), "http://opensprinkler.local:8080");
+        )
+        .unwrap();
+        assert_eq!(c.base_url(), "http://192.0.2.5:8080");
     }
 }

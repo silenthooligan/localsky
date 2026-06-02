@@ -21,11 +21,10 @@ pub fn ReviewStep() -> impl IntoView {
                 match call_apply().await {
                     Ok(()) => {
                         result_ok.set(true);
-                        result_msg.set("Configuration saved. Redirecting to dashboard…".to_string());
+                        result_msg
+                            .set("Configuration saved. Redirecting to dashboard…".to_string());
                         if let Some(win) = web_sys::window() {
-                            let _ = win
-                                .location()
-                                .set_href("/");
+                            let _ = win.location().set_href("/");
                         }
                     }
                     Err(e) => {

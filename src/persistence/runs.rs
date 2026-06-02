@@ -45,7 +45,7 @@ pub struct RunRow {
 pub struct NewRun {
     pub zone_slug: String,
     pub start_epoch: i64,
-    pub source: String,         // "scheduler" | "manual" | "ha_external" | "controller_external"
+    pub source: String, // "scheduler" | "manual" | "ha_external" | "controller_external"
     pub controller_id: String,
     pub planned_duration_s: u32, // becomes duration_s on completion
     pub skip_reason: Option<String>,
@@ -77,6 +77,18 @@ impl RunsStore {
         self.insert_with_status(n, "running", None).await
     }
 
+    /// Mark a run as skipped before dispatch (used when a regulatory
+    /// watering restriction or another gate blocks a scheduled run).
+    /// `skip_reason` should be human-readable since it surfaces in the
+    /// history Gantt + per-zone history strip. The `end_epoch` matches
+    /// `start_epoch` so the strip renders a zero-width skip marker.
+    pub async fn insert_skipped(&self, n: NewRun, skip_reason: String) -> Result<i64, RunsError> {
+        let mut n = n;
+        let start = n.start_epoch;
+        n.skip_reason = Some(skip_reason);
+        self.insert_with_status(n, "skipped", Some(start)).await
+    }
+
     /// Mark a run as already completed (used by backfill).
     pub async fn insert_completed(
         &self,
@@ -99,8 +111,18 @@ impl RunsStore {
                      applied_mm, cycle_index, cycle_count)
                  VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?)",
                 params![
-                    zone, n.start_epoch, end_epoch, actual_duration_s, src,
-                    ctrl, reason, n.et0_mm, n.etc_mm, applied_mm, n.cycle_index, n.cycle_count
+                    zone,
+                    n.start_epoch,
+                    end_epoch,
+                    actual_duration_s,
+                    src,
+                    ctrl,
+                    reason,
+                    n.et0_mm,
+                    n.etc_mm,
+                    applied_mm,
+                    n.cycle_index,
+                    n.cycle_count
                 ],
             )?;
             Ok(conn.last_insert_rowid())
@@ -210,6 +232,35 @@ impl RunsStore {
         Ok(())
     }
 
+    /// On-boot reconciliation: any run still flagged 'running' or
+    /// 'intended' must have been interrupted by a container restart, OOM,
+    /// or host reboot, since the in-process scheduler is the only writer
+    /// for those states. Mark them aborted in one transaction, stamp
+    /// end_epoch = now, and tag skip_reason so the Gantt and history
+    /// surface the cause.
+    ///
+    /// Returns the number of rows reconciled.
+    pub async fn reconcile_in_flight(&self, now_epoch: i64) -> Result<usize, RunsError> {
+        let c = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
+            let mut conn = c.blocking_lock();
+            let tx = conn.transaction()?;
+            let n = tx.execute(
+                "UPDATE runs
+                 SET status = 'aborted',
+                     end_epoch = COALESCE(end_epoch, ?1),
+                     skip_reason = COALESCE(skip_reason, 'container_restart')
+                 WHERE status IN ('running', 'intended')",
+                params![now_epoch],
+            )?;
+            tx.commit()?;
+            Ok(n)
+        })
+        .await
+        .map_err(|e| RunsError::Sqlite(format!("join: {e}")))?
+        .map_err(|e| RunsError::Sqlite(e.to_string()))
+    }
+
     /// All currently-in-flight runs (status = 'running' or 'intended').
     /// The scheduler queries this on boot to reconcile with the
     /// controllers; entries older than the controller's grace window are
@@ -225,7 +276,9 @@ impl RunsStore {
                  FROM runs WHERE status IN ('running', 'intended')
                  ORDER BY start_epoch ASC",
             )?;
-            let rows = stmt.query_map([], row_to_run)?.collect::<rusqlite::Result<Vec<_>>>()?;
+            let rows = stmt
+                .query_map([], row_to_run)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(rows)
         })
         .await
@@ -234,11 +287,7 @@ impl RunsStore {
     }
 
     /// All runs in [from_epoch, to_epoch). Used by the Gantt history.
-    pub async fn window(
-        &self,
-        from_epoch: i64,
-        to_epoch: i64,
-    ) -> Result<Vec<RunRow>, RunsError> {
+    pub async fn window(&self, from_epoch: i64, to_epoch: i64) -> Result<Vec<RunRow>, RunsError> {
         let c = self.conn.clone();
         tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<RunRow>> {
             let conn = c.blocking_lock();
@@ -308,14 +357,19 @@ mod tests {
     #[tokio::test]
     async fn intended_then_running_then_completed() {
         let s = fresh_store().await;
-        let id = s.insert_intended(new_run("back_yard", 1700000000)).await.unwrap();
+        let id = s
+            .insert_intended(new_run("back_yard", 1700000000))
+            .await
+            .unwrap();
         s.mark_running(id).await.unwrap();
 
         let in_flight = s.in_flight().await.unwrap();
         assert_eq!(in_flight.len(), 1);
         assert_eq!(in_flight[0].status, "running");
 
-        s.mark_completed(id, 1700000600, 600, Some(7.0)).await.unwrap();
+        s.mark_completed(id, 1700000600, 600, Some(7.0))
+            .await
+            .unwrap();
         let in_flight = s.in_flight().await.unwrap();
         assert!(in_flight.is_empty());
     }
@@ -323,7 +377,10 @@ mod tests {
     #[tokio::test]
     async fn mark_aborted_clears_in_flight() {
         let s = fresh_store().await;
-        let id = s.insert_running(new_run("front_yard", 1700001000)).await.unwrap();
+        let id = s
+            .insert_running(new_run("front_yard", 1700001000))
+            .await
+            .unwrap();
         s.mark_aborted(id, 1700001100).await.unwrap();
         let in_flight = s.in_flight().await.unwrap();
         assert!(in_flight.is_empty());
@@ -332,9 +389,15 @@ mod tests {
     #[tokio::test]
     async fn window_queries() {
         let s = fresh_store().await;
-        s.insert_completed(new_run("a", 1000), 1600, 600, Some(3.0)).await.unwrap();
-        s.insert_completed(new_run("a", 2000), 2300, 300, Some(2.0)).await.unwrap();
-        s.insert_completed(new_run("a", 3000), 3300, 300, Some(2.0)).await.unwrap();
+        s.insert_completed(new_run("a", 1000), 1600, 600, Some(3.0))
+            .await
+            .unwrap();
+        s.insert_completed(new_run("a", 2000), 2300, 300, Some(2.0))
+            .await
+            .unwrap();
+        s.insert_completed(new_run("a", 3000), 3300, 300, Some(2.0))
+            .await
+            .unwrap();
         let win = s.window(1500, 2500).await.unwrap();
         assert_eq!(win.len(), 1);
         assert_eq!(win[0].start_epoch, 2000);

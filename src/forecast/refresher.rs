@@ -17,6 +17,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(30 * 60);
+/// Backoff ceiling for upstream failures. 16 doublings of the base
+/// interval would overshoot the refresh cadence; cap at 30 minutes so
+/// the refresher never sleeps longer than the happy-path interval.
+const BACKOFF_MAX: Duration = Duration::from_secs(30 * 60);
 
 pub fn spawn_forecast_refresher(store: Arc<ForecastStore>) {
     tokio::spawn(async move {
@@ -40,19 +44,64 @@ pub fn spawn_forecast_refresher(store: Arc<ForecastStore>) {
             }
         };
 
+        // Circuit-breaker state: count consecutive failures, double the
+        // sleep on each, and emit one degraded-mode / recovered log per
+        // state transition rather than per failure.
+        let mut consecutive_failures: u32 = 0;
+        let mut degraded: bool = false;
+
         loop {
-            match refresh_once(&client, lat, lon).await {
-                Ok(snap) => store.store(snap),
+            let sleep_for = match refresh_once(&client, lat, lon).await {
+                Ok(snap) => {
+                    store.store(snap);
+                    if degraded {
+                        tracing::info!(consecutive_failures, "forecast source recovered");
+                        degraded = false;
+                    }
+                    consecutive_failures = 0;
+                    REFRESH_INTERVAL
+                }
                 Err(e) => {
-                    tracing::warn!("forecast refresh failed: {e:#}");
+                    consecutive_failures = consecutive_failures.saturating_add(1);
                     let mut prev = (*store.snapshot()).clone();
                     prev.source_reachable = false;
                     store.store(prev);
+                    if !degraded {
+                        tracing::warn!(
+                            error = %format!("{e:#}"),
+                            "forecast source unreachable; entering degraded mode"
+                        );
+                        degraded = true;
+                    } else {
+                        tracing::debug!(
+                            consecutive_failures,
+                            error = %format!("{e:#}"),
+                            "forecast still unreachable"
+                        );
+                    }
+                    backoff(consecutive_failures)
                 }
-            }
-            tokio::time::sleep(REFRESH_INTERVAL).await;
+            };
+            tokio::time::sleep(sleep_for).await;
         }
     });
+}
+
+/// Exponential backoff with jitter, capped at BACKOFF_MAX. base = 30s,
+/// doubling each consecutive failure (60s, 120s, 240s, ...).
+fn backoff(n: u32) -> Duration {
+    let base = 30u64;
+    let mult = 1u64.checked_shl(n.min(16)).unwrap_or(u64::MAX);
+    let secs = base.saturating_mul(mult).min(BACKOFF_MAX.as_secs());
+    // Lightweight jitter so a fleet of restarting LocalSkys doesn't
+    // synchronize their retries at upstream.
+    let jitter = (secs / 10).max(1);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    let off = nanos % (2 * jitter + 1);
+    Duration::from_secs(secs.saturating_sub(jitter).saturating_add(off))
 }
 
 /// Number of past days to fetch alongside the 7-day forecast. Used by
@@ -157,8 +206,7 @@ impl Raw {
                 temp_f: pick(&self.hourly.temperature_2m, i),
                 apparent_temp_f: pick(&self.hourly.apparent_temperature, i),
                 precip_in: pick(&self.hourly.precipitation, i),
-                precip_probability: pick(&self.hourly.precipitation_probability, i)
-                    .unwrap_or(0),
+                precip_probability: pick(&self.hourly.precipitation_probability, i).unwrap_or(0),
                 wind_mph: pick(&self.hourly.wind_speed_10m, i),
                 wind_dir_deg: pick(&self.hourly.wind_direction_10m, i),
                 humidity_pct: pick(&self.hourly.relative_humidity_2m, i),
@@ -183,18 +231,66 @@ fn pick<T: Clone + Default>(v: &[T], i: usize) -> T {
 
 /// Parse Open-Meteo's "2026-05-09T06:32" or "2026-05-09" into a UTC
 /// epoch. Open-Meteo emits times in the requested timezone with no
-/// offset suffix; for daily windows we treat them as local-midnight.
-/// We just convert via DateTime parsing to UTC (best-effort — daily
-/// window starts will be off by ~one timezone offset, but the
-/// browser converts back to Local for display so the visual day
-/// boundary is correct).
+/// offset suffix.
+///
+/// For date-only entries (daily windows), anchor at NOON UTC of that
+/// calendar date. Anchoring at midnight UTC would push the resulting
+/// instant onto the previous local day in any UTC-X timezone
+/// (e.g. "2026-05-26" -> 00:00 UTC -> 2026-05-25 20:00 EDT, weekday
+/// Mon). The 7-day verdict strip and the restriction-weekday check
+/// both consume time_epoch via `Local.timestamp_opt(..)`, so a date
+/// that drifts onto the previous local day breaks the entire weekday
+/// gate: every cell evaluates against yesterday's weekday and SJRWMD
+/// "even = Thu+Sun" ends up rejecting every day of the week.
+/// Anchoring at noon UTC keeps the local date stable for any timezone
+/// inside +/- 11 hours of UTC.
 fn parse_om_local(s: &str) -> i64 {
     if s.is_empty() {
         return 0;
     }
-    // Try datetime first (hourly + sunrise/sunset).
-    let with_z = if s.contains('T') { format!("{s}:00Z") } else { format!("{s}T00:00:00Z") };
+    let with_z = if s.contains('T') {
+        format!("{s}:00Z")
+    } else {
+        format!("{s}T12:00:00Z")
+    };
     DateTime::parse_from_rfc3339(&with_z)
         .map(|d| d.timestamp())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{FixedOffset, TimeZone};
+
+    #[test]
+    fn date_only_anchors_at_noon_utc_stays_on_local_day() {
+        // "2026-05-26" should land on May 26 in any timezone within
+        // +/- 11h. Midnight-UTC anchoring would push it onto May 25 in
+        // the western hemisphere; noon-UTC keeps it stable.
+        let epoch = parse_om_local("2026-05-26");
+        for offset_h in -11..=11 {
+            let tz = FixedOffset::east_opt(offset_h * 3600).unwrap();
+            let dt = tz.timestamp_opt(epoch, 0).single().unwrap();
+            assert_eq!(
+                dt.format("%Y-%m-%d").to_string(),
+                "2026-05-26",
+                "tz offset {offset_h}h drifted off the expected local date"
+            );
+        }
+    }
+
+    #[test]
+    fn datetime_pass_through_preserves_clock() {
+        // Hourly entries already include a clock; preserve them
+        // verbatim (treated as UTC, same as before the fix).
+        let epoch = parse_om_local("2026-05-26T14:30");
+        let utc = chrono::DateTime::<chrono::Utc>::from_timestamp(epoch, 0).expect("valid epoch");
+        assert_eq!(utc.format("%Y-%m-%dT%H:%M").to_string(), "2026-05-26T14:30");
+    }
+
+    #[test]
+    fn empty_string_returns_zero() {
+        assert_eq!(parse_om_local(""), 0);
+    }
 }

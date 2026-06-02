@@ -83,10 +83,7 @@ pub fn compute_zone(
     };
 
     let (today_seconds, today_reason) = if !zone.mode_active {
-        (
-            0u32,
-            "budget mode off -- SI/manual daily flex owns this zone".to_string(),
-        )
+        (0u32, "budget mode off (zone paused)".to_string())
     } else if next_24h_rain_in >= g.session_rain_defer_in {
         (
             0,

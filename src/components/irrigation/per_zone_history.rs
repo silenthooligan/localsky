@@ -1,85 +1,85 @@
-// Per-zone history visualization. The existing HistoryPanel renders a
-// system-wide Gantt + aggregate compliance row; this is the per-zone
-// view that answers "how is each zone individually being watered?"
+// Per-zone history. The HistoryPanel above renders the system-wide
+// timeline + headline KPIs; this is the per-zone breakdown that answers
+// "how is each zone individually being watered?"
 //
-// Three components stacked vertically:
-//   1. PerZoneSummary    — 4 tiles in a row (count, total min, last run, avg duration; trailing 7 days)
-//   2. PerZoneRunsList   — collapsible per-zone list of last 10 events
-//   3. PerZoneDailyBars  — 2x2 grid of mini bar charts (last 14 days, daily total minutes per zone)
+// One card per zone, in a responsive grid. Each card unifies what used
+// to be three separate stacked grids (summary tiles, daily-bar charts,
+// recent-run lists) so everything about a single zone reads in one
+// place instead of forcing the eye across three sections. A card shows,
+// always: 7-day stats + a 14-day daily-minutes sparkline. Recent runs
+// expand on demand so the grid stays compact for multi-zone deployments.
 //
-// All three share a single /api/irrigation/history?days=30 fetch and
-// aggregate client-side. The schema is already per-zone (zone column
-// in the `runs` SQLite table) so no backend changes are needed.
+// Zone list comes from the live irrigation snapshot, so multi-zone
+// deployments work without recompiling. All cards share one
+// /api/irrigation/history?days=30 fetch and aggregate client-side; the
+// `runs` table is already per-zone so no backend change is needed.
 
+use crate::ha::snapshot::IrrigationSnapshot;
 use crate::history::types::{HistoryWindow, RunRecord};
 use chrono::{Local, TimeZone, Utc};
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
 
-const ZONE_SLUGS: [(&str, &str); 4] = [
-    ("back_yard", "Back Yard"),
-    ("front_yard", "Front Yard"),
-    ("side_yard", "Side Yard"),
-    ("back_yard_shrubs", "Back Yard Shrubs"),
-];
+/// Pull the (slug, display_name) list from the live snapshot. Falls back
+/// to the legacy four zones when the snapshot hasn't loaded so SSR has
+/// something to render.
+fn zone_list(snap: ReadSignal<IrrigationSnapshot>) -> Vec<(String, String)> {
+    let s = snap.get();
+    if s.zones.is_empty() {
+        vec![
+            ("back_yard".to_string(), "Back Yard".to_string()),
+            ("front_yard".to_string(), "Front Yard".to_string()),
+            ("side_yard".to_string(), "Side Yard".to_string()),
+            (
+                "back_yard_shrubs".to_string(),
+                "Back Yard Shrubs".to_string(),
+            ),
+        ]
+    } else {
+        s.zones
+            .iter()
+            .map(|z| (z.slug.clone(), z.name.clone()))
+            .collect()
+    }
+}
 
 #[component]
-pub fn PerZoneHistory() -> impl IntoView {
-    // Shared fetch: 30 days of runs, filtered client-side per zone.
-    let (window, set_window) = signal::<HistoryWindow>(HistoryWindow::default());
-    #[cfg(not(feature = "hydrate"))]
-    let _ = set_window;
-
-    #[cfg(feature = "hydrate")]
-    {
-        Effect::new(move |_| {
-            leptos::task::spawn_local(async move {
-                let url = "/api/irrigation/history?days=30";
-                if let Ok(resp) = gloo_net::http::Request::get(url).send().await {
-                    if let Ok(w) = resp.json::<HistoryWindow>().await {
-                        set_window.set(w);
-                    }
-                }
-            });
-        });
-    }
-
+pub fn PerZoneHistory(
+    snap: ReadSignal<IrrigationSnapshot>,
+    /// Shared window data fetched by the page (mirrors the
+    /// range selector at the top of `HistoryPanel`). The cards
+    /// derive their 7-day stats and 14-day buckets from this so
+    /// switching 30D / 90D / 1Y updates both views together.
+    window: ReadSignal<HistoryWindow>,
+) -> impl IntoView {
     view! {
         <section class="per-zone-history">
-            <h2 class="per-zone-history-title">"Per-zone history"</h2>
-            <p class="per-zone-history-sub">
-                "Last 7 days at a glance, the most recent runs per zone, and "
-                "daily watered-minutes over the last 14 days."
-            </p>
-            <PerZoneSummary window/>
-            <PerZoneDailyBars window/>
-            <PerZoneRunsList window/>
+            <header class="per-zone-history-head">
+                <h2 class="per-zone-history-title">"Per-zone history"</h2>
+                <p class="per-zone-history-sub">
+                    "Each zone's last 7 days of activity and 14-day daily-minutes "
+                    "trend. Expand a card for its most recent runs and skips."
+                </p>
+            </header>
+            <div class="zone-card-grid">
+                {move || zone_list(snap).into_iter().map(|(slug, name)| {
+                    view! { <PerZoneCard slug=slug name=name window/> }.into_any()
+                }).collect::<Vec<_>>()}
+            </div>
         </section>
     }
 }
 
-// ── Summary tiles (last 7 days) ─────────────────────────────────────
-
 #[component]
-fn PerZoneSummary(window: ReadSignal<HistoryWindow>) -> impl IntoView {
-    view! {
-        <div class="per-zone-summary-grid">
-            {ZONE_SLUGS.iter().map(|(slug, name)| {
-                let s = *slug;
-                let n = *name;
-                view! { <PerZoneSummaryTile slug=s name=n window/> }.into_any()
-            }).collect::<Vec<_>>()}
-        </div>
-    }
-}
+fn PerZoneCard(slug: String, name: String, window: ReadSignal<HistoryWindow>) -> impl IntoView {
+    let stats_slug = slug.clone();
+    let bars_slug = slug.clone();
+    let runs_slug = slug.clone();
 
-#[component]
-fn PerZoneSummaryTile(
-    slug: &'static str,
-    name: &'static str,
-    window: ReadSignal<HistoryWindow>,
-) -> impl IntoView {
-    // All stats derived over the last 7 days (604800 epoch seconds).
+    // 7-day headline stats: run count, total minutes, average per run,
+    // and the timestamp of the most recent real run (scanned across the
+    // whole window, not just 7 days, so it stays meaningful when a zone
+    // has been quiet).
     let stats = Memo::new(move |_| {
         let w = window.get();
         let now = Utc::now().timestamp();
@@ -87,17 +87,19 @@ fn PerZoneSummaryTile(
         let runs: Vec<&RunRecord> = w
             .runs
             .iter()
-            .filter(|r| r.skip_reason.is_none() && r.zone == slug && r.start_epoch >= cutoff)
+            .filter(|r| r.skip_reason.is_none() && r.zone == stats_slug && r.start_epoch >= cutoff)
             .collect();
         let count = runs.len();
         let total_sec: i64 = runs.iter().map(|r| r.duration_s).sum();
-        let avg_sec = if count > 0 { total_sec / count as i64 } else { 0 };
-        // last_run: scan all entries (not just last 7 days) so the tile
-        // shows the last real run even if it was longer ago.
+        let avg_sec = if count > 0 {
+            total_sec / count as i64
+        } else {
+            0
+        };
         let last_run_epoch = w
             .runs
             .iter()
-            .filter(|r| r.skip_reason.is_none() && r.zone == slug)
+            .filter(|r| r.skip_reason.is_none() && r.zone == stats_slug)
             .map(|r| r.start_epoch)
             .max()
             .unwrap_or(0);
@@ -105,13 +107,13 @@ fn PerZoneSummaryTile(
     });
 
     let count_str = move || stats.get().0.to_string();
-    let total_str = move || format!("{} min", (stats.get().1 as f64 / 60.0).round() as i64);
+    let total_str = move || format!("{}", (stats.get().1 as f64 / 60.0).round() as i64);
     let avg_str = move || {
         let s = stats.get().2;
         if s == 0 {
             "\u{2014}".to_string()
         } else {
-            format!("{} min", (s as f64 / 60.0).round() as i64)
+            format!("{}", (s as f64 / 60.0).round() as i64)
         }
     };
     let last_run_str = move || {
@@ -119,50 +121,11 @@ fn PerZoneSummaryTile(
         if e == 0 {
             "no runs yet".to_string()
         } else {
-            format_relative_then_clock(e)
+            format!("last {}", format_relative_then_clock(e))
         }
     };
 
-    view! {
-        <article class="per-zone-summary-tile">
-            <header class="per-zone-summary-head">
-                <h3 class="per-zone-summary-name">{name}</h3>
-            </header>
-            <dl class="per-zone-summary-stats">
-                <div class="kv"><dt class="k">"runs (7d)"</dt><dd class="v">{count_str}</dd></div>
-                <div class="kv"><dt class="k">"total"</dt><dd class="v">{total_str}</dd></div>
-                <div class="kv"><dt class="k">"avg/run"</dt><dd class="v">{avg_str}</dd></div>
-                <div class="kv"><dt class="k">"last run"</dt><dd class="v">{last_run_str}</dd></div>
-            </dl>
-        </article>
-    }
-}
-
-// ── Daily-minutes bar chart (last 14 days) ──────────────────────────
-
-#[component]
-fn PerZoneDailyBars(window: ReadSignal<HistoryWindow>) -> impl IntoView {
-    view! {
-        <div class="per-zone-daily-bars-grid">
-            {ZONE_SLUGS.iter().map(|(slug, name)| {
-                let s = *slug;
-                let n = *name;
-                view! { <PerZoneDailyBarsTile slug=s name=n window/> }.into_any()
-            }).collect::<Vec<_>>()}
-        </div>
-    }
-}
-
-#[component]
-fn PerZoneDailyBarsTile(
-    slug: &'static str,
-    name: &'static str,
-    window: ReadSignal<HistoryWindow>,
-) -> impl IntoView {
-    // Bucketize this zone's runs into the last 14 local days. The
-    // bucket index 0 = today, 13 = 13 days ago. We render the bars
-    // left-to-right as oldest-to-newest so the visual reads "today is
-    // on the right" like every other timeseries on the dashboard.
+    // 14-day daily-minutes buckets, oldest -> newest left-to-right.
     let buckets = Memo::new(move |_| {
         let w = window.get();
         let now = Local::now();
@@ -173,137 +136,159 @@ fn PerZoneDailyBarsTile(
             .unwrap_or(now)
             .timestamp();
         let mut buckets = vec![0i64; 14];
-        for r in w.runs.iter().filter(|r| r.skip_reason.is_none() && r.zone == slug) {
+        for r in w
+            .runs
+            .iter()
+            .filter(|r| r.skip_reason.is_none() && r.zone == bars_slug)
+        {
             let days_back = ((today_midnight - r.start_epoch) / 86400).max(0);
             if (0..14).contains(&days_back) {
                 buckets[days_back as usize] += r.duration_s;
             }
         }
-        // Render oldest -> newest left-to-right.
         buckets.reverse();
         buckets
     });
-
     let max_minutes = Memo::new(move |_| {
         buckets
             .get()
             .iter()
             .map(|s| *s as f64 / 60.0)
             .fold(0.0_f64, f64::max)
-            .max(1.0) // avoid div-by-zero; 1 min minimum scale
+            .max(1.0)
     });
 
-    view! {
-        <article class="per-zone-daily-bars-tile">
-            <header class="per-zone-daily-bars-head">
-                <h3 class="per-zone-daily-bars-name">{name}</h3>
-                <span class="per-zone-daily-bars-scale">
-                    {move || format!("scale: {:.0} min", max_minutes.get())}
-                </span>
-            </header>
-            <svg
-                class="per-zone-daily-bars-svg"
-                viewBox="0 0 280 80"
-                preserveAspectRatio="none"
-                role="img"
-                aria-label="Daily watered minutes, last 14 days"
-            >
-                {move || {
-                    let bs = buckets.get();
-                    let mx = max_minutes.get();
-                    let n = bs.len() as f64;
-                    let w = 280.0 / n;
-                    let bar_w = (w - 2.0).max(2.0);
-                    bs.iter().enumerate().map(|(i, sec)| {
-                        let mins = *sec as f64 / 60.0;
-                        let h = (mins / mx * 76.0).max(if mins > 0.0 { 1.0 } else { 0.0 });
-                        let x = i as f64 * w + (w - bar_w) / 2.0;
-                        let y = 80.0 - h;
-                        let cls = if i == 13 { "per-zone-daily-bar per-zone-daily-bar-today" } else { "per-zone-daily-bar" };
-                        view! {
-                            <rect
-                                class=cls
-                                x=format!("{:.1}", x)
-                                y=format!("{:.1}", y)
-                                width=format!("{:.1}", bar_w)
-                                height=format!("{:.1}", h)
-                            >
-                                <title>{format!("{} min", mins.round() as i64)}</title>
-                            </rect>
-                        }.into_any()
-                    }).collect::<Vec<_>>()
-                }}
-            </svg>
-        </article>
-    }
-}
-
-// ── Recent runs list (last 10 per zone) ─────────────────────────────
-
-#[component]
-fn PerZoneRunsList(window: ReadSignal<HistoryWindow>) -> impl IntoView {
-    view! {
-        <div class="per-zone-runs-grid">
-            {ZONE_SLUGS.iter().map(|(slug, name)| {
-                let s = *slug;
-                let n = *name;
-                view! { <PerZoneRunsTile slug=s name=n window/> }.into_any()
-            }).collect::<Vec<_>>()}
-        </div>
-    }
-}
-
-#[component]
-fn PerZoneRunsTile(
-    slug: &'static str,
-    name: &'static str,
-    window: ReadSignal<HistoryWindow>,
-) -> impl IntoView {
+    // Recent events (runs + skips), newest first, capped at 10.
     let runs = Memo::new(move |_| {
         let w = window.get();
         let mut filtered: Vec<RunRecord> = w
             .runs
             .iter()
-            .filter(|r| r.zone == slug)
+            .filter(|r| r.zone == runs_slug)
             .cloned()
             .collect();
-        // Newest first.
         filtered.sort_by(|a, b| b.start_epoch.cmp(&a.start_epoch));
         filtered.truncate(10);
         filtered
     });
 
+    let expanded = RwSignal::new(false);
+    let toggle = move |_| expanded.update(|v| *v = !*v);
+    let card_class = move || {
+        if expanded.get() {
+            "zone-card is-expanded"
+        } else {
+            "zone-card"
+        }
+    };
+    let chevron_class = move || {
+        if expanded.get() {
+            "zone-card__chev is-open"
+        } else {
+            "zone-card__chev"
+        }
+    };
+    let runs_count = move || runs.get().len();
+
     view! {
-        <article class="per-zone-runs-tile">
-            <header class="per-zone-runs-head">
-                <h3 class="per-zone-runs-name">{name}</h3>
-                <span class="per-zone-runs-count">
-                    {move || format!("{} recent", runs.get().len())}
-                </span>
+        <article class=card_class>
+            <header class="zone-card__head">
+                <h3 class="zone-card__name">{name}</h3>
+                <span class="zone-card__last">{last_run_str}</span>
             </header>
-            <ul class="per-zone-runs-list">
-                {move || {
-                    let rs = runs.get();
-                    if rs.is_empty() {
-                        return vec![view! { <li class="per-zone-runs-empty">"no history yet"</li> }.into_any()];
-                    }
-                    rs.into_iter().map(|r| {
-                        let when = format_relative_then_clock(r.start_epoch);
-                        let (kind_class, kind_label, detail) = if let Some(reason) = &r.skip_reason {
-                            ("per-zone-run-skipped", "skip", reason.clone())
-                        } else {
-                            ("per-zone-run-ok", "ran", format!("{} min", (r.duration_s as f64 / 60.0).round() as i64))
-                        };
-                        view! {
-                            <li class=format!("per-zone-run {}", kind_class)>
-                                <span class="per-zone-run-when">{when}</span>
-                                <span class="per-zone-run-kind">{kind_label}</span>
-                                <span class="per-zone-run-detail">{detail}</span>
-                            </li>
-                        }.into_any()
-                    }).collect::<Vec<_>>()
-                }}
-            </ul>
+
+            <dl class="zone-card__stats">
+                <div class="zone-stat">
+                    <dd class="zone-stat__v">{count_str}</dd>
+                    <dt class="zone-stat__k">"runs · 7d"</dt>
+                </div>
+                <div class="zone-stat">
+                    <dd class="zone-stat__v">{total_str}<span class="zone-stat__u">"m"</span></dd>
+                    <dt class="zone-stat__k">"total"</dt>
+                </div>
+                <div class="zone-stat">
+                    <dd class="zone-stat__v">{avg_str}<span class="zone-stat__u">"m"</span></dd>
+                    <dt class="zone-stat__k">"avg/run"</dt>
+                </div>
+            </dl>
+
+            <div class="zone-card__spark">
+                <div class="zone-card__spark-head">
+                    <span class="zone-card__spark-label">"14-day minutes"</span>
+                    <span class="zone-card__spark-scale">
+                        {move || format!("peak {:.0}m", max_minutes.get())}
+                    </span>
+                </div>
+                <svg
+                    class="per-zone-daily-bars-svg"
+                    viewBox="0 0 280 80"
+                    preserveAspectRatio="none"
+                    role="img"
+                    aria-label="Daily watered minutes, last 14 days"
+                >
+                    {move || {
+                        let bs = buckets.get();
+                        let mx = max_minutes.get();
+                        let n = bs.len() as f64;
+                        let w = 280.0 / n;
+                        let bar_w = (w - 2.0).max(2.0);
+                        bs.iter().enumerate().map(|(i, sec)| {
+                            let mins = *sec as f64 / 60.0;
+                            let h = (mins / mx * 76.0).max(if mins > 0.0 { 1.0 } else { 0.0 });
+                            let x = i as f64 * w + (w - bar_w) / 2.0;
+                            let y = 80.0 - h;
+                            let cls = if i == 13 { "per-zone-daily-bar per-zone-daily-bar-today" } else { "per-zone-daily-bar" };
+                            view! {
+                                <rect
+                                    class=cls
+                                    x=format!("{:.1}", x)
+                                    y=format!("{:.1}", y)
+                                    width=format!("{:.1}", bar_w)
+                                    height=format!("{:.1}", h)
+                                >
+                                    <title>{format!("{} min", mins.round() as i64)}</title>
+                                </rect>
+                            }.into_any()
+                        }).collect::<Vec<_>>()
+                    }}
+                </svg>
+            </div>
+
+            <button
+                type="button"
+                class="zone-card__toggle"
+                aria-expanded=move || if expanded.get() { "true" } else { "false" }
+                on:click=toggle
+            >
+                <span>{move || format!("Recent runs ({})", runs_count())}</span>
+                <span class=chevron_class aria-hidden="true">"\u{203A}"</span>
+            </button>
+
+            <Show when=move || expanded.get()>
+                <ul class="per-zone-runs-list zone-card__runs">
+                    {move || {
+                        let rs = runs.get();
+                        if rs.is_empty() {
+                            return vec![view! { <li class="per-zone-runs-empty">"no history yet"</li> }.into_any()];
+                        }
+                        rs.into_iter().map(|r| {
+                            let when = format_relative_then_clock(r.start_epoch);
+                            let (kind_class, kind_label, detail) = if let Some(reason) = &r.skip_reason {
+                                ("per-zone-run-skipped", "skip", reason.clone())
+                            } else {
+                                ("per-zone-run-ok", "ran", format!("{} min", (r.duration_s as f64 / 60.0).round() as i64))
+                            };
+                            view! {
+                                <li class=format!("per-zone-run {}", kind_class)>
+                                    <span class="per-zone-run-when">{when}</span>
+                                    <span class="per-zone-run-kind">{kind_label}</span>
+                                    <span class="per-zone-run-detail">{detail}</span>
+                                </li>
+                            }.into_any()
+                        }).collect::<Vec<_>>()
+                    }}
+                </ul>
+            </Show>
         </article>
     }
 }
@@ -311,7 +296,7 @@ fn PerZoneRunsTile(
 // ── helpers ─────────────────────────────────────────────────────────
 
 /// Format an epoch as "Wed 5:42 AM" if within the last 7 days, else
-/// "May 12, 5:42 AM". Compact for at-a-glance tile reads.
+/// "May 12, 5:42 AM". Compact for at-a-glance reads.
 fn format_relative_then_clock(epoch: i64) -> String {
     if epoch == 0 {
         return "\u{2014}".to_string();
@@ -331,4 +316,3 @@ fn format_relative_then_clock(epoch: i64) -> String {
         None => format!("epoch {epoch}"),
     }
 }
-

@@ -29,6 +29,15 @@ pub enum WeatherField {
     LightningCount,
     LightningDistanceMi,
     Et0Today,
+    /// Flow rate in US gallons per minute. Sourced from a flow meter
+    /// attached to an irrigation controller (Hunter HC, Rachio Wireless
+    /// Flow Meter, OpenSprinkler flow sensor, Davis WLL flow port) OR
+    /// from a standalone pulse-output meter wired to MQTT/ESPHome.
+    FlowGpm,
+    /// Cumulative flow today in US gallons. Same sources as FlowGpm;
+    /// useful for leak detection (engine watches dGal/dt while no zone
+    /// is scheduled to run).
+    FlowTotalGalToday,
     ForecastDaily,
     ForecastHourly,
     Pop,
@@ -69,9 +78,5 @@ pub trait WeatherSource: Send + Sync {
     /// Per-field merge priority. Higher wins. Sources unable to produce the
     /// field return i32::MIN.
     fn priority(&self, field: WeatherField) -> i32;
-    async fn run(
-        self: Arc<Self>,
-        bus: SourceBus,
-        shutdown: ShutdownSignal,
-    ) -> anyhow::Result<()>;
+    async fn run(self: Arc<Self>, bus: SourceBus, shutdown: ShutdownSignal) -> anyhow::Result<()>;
 }

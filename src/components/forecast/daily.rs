@@ -56,7 +56,11 @@ fn DailyCard(entry: DailyEntry, is_today: bool) -> impl IntoView {
         .single()
         .map(|d: DateTime<Local>| d.format("%-m/%-d").to_string())
         .unwrap_or_default();
-    let class = if is_today { "daily-card daily-card-today" } else { "daily-card" };
+    let class = if is_today {
+        "daily-card daily-card-today"
+    } else {
+        "daily-card"
+    };
 
     view! {
         <article class=class>

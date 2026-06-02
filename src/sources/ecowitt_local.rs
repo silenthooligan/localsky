@@ -69,7 +69,10 @@ impl EcowittLocal {
                 .or_else(|| form.get("passkey"))
                 .or_else(|| form.get("key"));
             if got.map(|v| v.as_str()) != Some(expected.as_str()) {
-                debug!(source = self.id, "ecowitt post rejected: shared secret mismatch");
+                debug!(
+                    source = self.id,
+                    "ecowitt post rejected: shared secret mismatch"
+                );
                 return;
             }
         }
@@ -182,7 +185,11 @@ impl WeatherSource for EcowittLocal {
     ) -> anyhow::Result<()> {
         // No long-running loop; the POST handler does the work. Park
         // here until shutdown so the join-handle pattern still works.
-        info!(source = self.id, path = self.config.path, "ecowitt receiver mounted");
+        info!(
+            source = self.id,
+            path = self.config.path,
+            "ecowitt receiver mounted"
+        );
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(60)) => {
@@ -250,7 +257,10 @@ mod tests {
         s.handle_post(&form);
 
         let event = rx.try_recv().unwrap();
-        let SourceEvent::Observation { source_id, fields, .. } = event else {
+        let SourceEvent::Observation {
+            source_id, fields, ..
+        } = event
+        else {
             panic!("expected Observation");
         };
         assert_eq!(source_id, "ecowitt_test");
@@ -284,7 +294,10 @@ mod tests {
         form.insert("PASSKEY".into(), "wrongkey".into());
         s.handle_post(&form);
 
-        assert!(rx.try_recv().is_err(), "should not have emitted any observation");
+        assert!(
+            rx.try_recv().is_err(),
+            "should not have emitted any observation"
+        );
     }
 
     #[test]

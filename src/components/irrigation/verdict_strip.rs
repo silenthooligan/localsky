@@ -8,6 +8,7 @@
 // conditions matched that day's forecast.
 
 use crate::components::forecast::glyph::weather_code_glyph;
+use crate::components::ui::HelpHint;
 use crate::ha::snapshot::{DayVerdict, IrrigationSnapshot};
 use chrono::{DateTime, Local, TimeZone};
 use leptos::prelude::*;
@@ -18,10 +19,14 @@ pub fn VerdictStrip(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     view! {
         <section class="verdict-strip">
             <header class="verdict-strip-head">
-                <h3 class="verdict-strip-title">"7-Day Verdict"</h3>
+                <h3 class="verdict-strip-title">
+                    "7-Day Verdict"
+                    <HelpHint topic="verdict-strip"/>
+                </h3>
                 <span class="verdict-strip-subtitle">
                     "Predicted skip / run for today + 6 days, same engine as the morning check"
                 </span>
+                <SourceFreshnessPill snap/>
             </header>
             <div class="verdict-strip-cells" role="region" aria-live="polite" aria-label="7-day irrigation verdict">
                 {move || {
@@ -58,19 +63,89 @@ fn VerdictCell(v: DayVerdict) -> impl IntoView {
     let tooltip = if v.reason.is_empty() {
         format!("{weekday}: run")
     } else {
-        format!("{weekday}: {} — {}", v.verdict, v.reason)
+        format!("{weekday}: {} - {}", v.verdict, v.reason)
     };
     let temp_str = format!("{:.0}°/{:.0}°", v.temp_max_f, v.temp_min_f);
     let rain_str = format!("{:.2}″ · {}%", v.precip_in, v.precip_probability_max);
     let tag = verdict_short_label(&v);
+    // Full-narration label for screen readers. Color + tag carry the
+    // same intent visually; the aria-label folds the temp + rain
+    // context into a single sentence so a non-sighted user gets the
+    // same at-a-glance summary.
+    let aria = format!(
+        "{weekday}: {tag_lower}, {rain_str}, high {temp_max:.0}, low {temp_min:.0}",
+        tag_lower = tag.to_lowercase(),
+        temp_max = v.temp_max_f,
+        temp_min = v.temp_min_f,
+    );
     view! {
-        <div class=cls title=tooltip>
+        <div class=cls title=tooltip role="group" aria-label=aria>
             <div class="verdict-cell-day">{weekday}</div>
-            <div class="verdict-cell-glyph">{glyph}</div>
-            <div class="verdict-cell-temp">{temp_str}</div>
-            <div class="verdict-cell-rain">{rain_str}</div>
-            <div class="verdict-cell-tag">{tag}</div>
+            <div class="verdict-cell-glyph" aria-hidden="true">{glyph}</div>
+            <div class="verdict-cell-temp" aria-hidden="true">{temp_str}</div>
+            <div class="verdict-cell-rain" aria-hidden="true">{rain_str}</div>
+            <div class="verdict-cell-tag" aria-hidden="true">{tag}</div>
         </div>
+    }
+}
+
+/// Inline pill that surfaces stale weather sources in the strip header.
+/// "fresh" when all three known inputs (HA, Tempest, Open-Meteo) have
+/// reported within the last 15 minutes; flags anything older.
+#[component]
+fn SourceFreshnessPill(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
+    let status = move || {
+        let s = snap.get();
+        let now = chrono::Utc::now().timestamp();
+        let stale =
+            |epoch: i64, max_age_s: i64| -> bool { epoch == 0 || (now - epoch) > max_age_s };
+        let mut bad: Vec<&'static str> = Vec::new();
+        // HA refresher: 60s cadence, so flag if older than 5 min.
+        if stale(s.last_refresh_epoch, 5 * 60) {
+            bad.push("HA");
+        }
+        // Tempest UDP: every minute under normal conditions; flag at 10 min.
+        if stale(s.tempest_last_seen_epoch, 10 * 60) {
+            bad.push("Tempest");
+        }
+        // Open-Meteo: 4h refresh interval, flag past 5h.
+        if stale(s.forecast_last_seen_epoch, 5 * 3600) {
+            bad.push("Open-Meteo");
+        }
+        bad
+    };
+    view! {
+        <span
+            class="verdict-strip-freshness"
+            class:verdict-strip-freshness-stale=move || !status().is_empty()
+            title=move || {
+                let bad = status();
+                if bad.is_empty() {
+                    "All weather inputs fresh".to_string()
+                } else {
+                    format!("Stale source(s): {}", bad.join(", "))
+                }
+            }
+            aria-label=move || {
+                let bad = status();
+                if bad.is_empty() {
+                    "All weather sources fresh".to_string()
+                } else {
+                    format!("{} weather source(s) stale: {}", bad.len(), bad.join(", "))
+                }
+            }
+        >
+            {move || {
+                let bad = status();
+                if bad.is_empty() {
+                    "● sources fresh".to_string()
+                } else if bad.len() == 1 {
+                    format!("● {} stale", bad[0])
+                } else {
+                    format!("● {} sources stale", bad.len())
+                }
+            }}
+        </span>
     }
 }
 

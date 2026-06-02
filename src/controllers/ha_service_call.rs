@@ -30,16 +30,19 @@ pub struct HaServiceCall {
 }
 
 impl HaServiceCall {
-    pub fn new(id: impl Into<String>, config: HaServiceCallConfig) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        config: HaServiceCallConfig,
+    ) -> Result<Self, ControllerError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(15))
             .build()
-            .expect("reqwest client construction");
-        Self {
+            .map_err(|e| ControllerError::Init(format!("reqwest client: {e}")))?;
+        Ok(Self {
             id: id.into(),
             config,
             client,
-        }
+        })
     }
 
     fn entity_for(&self, slug: &str) -> Result<String, ControllerError> {
@@ -50,17 +53,12 @@ impl HaServiceCall {
             .ok_or_else(|| ControllerError::ZoneUnknown(slug.to_string()))
     }
 
-    async fn call_service(
-        &self,
-        service_dotted: &str,
-        data: Value,
-    ) -> Result<(), ControllerError> {
-        let (domain, service) =
-            service_dotted
-                .split_once('.')
-                .ok_or_else(|| ControllerError::Remote(format!(
-                    "service '{service_dotted}' must be 'domain.action'"
-                )))?;
+    async fn call_service(&self, service_dotted: &str, data: Value) -> Result<(), ControllerError> {
+        let (domain, service) = service_dotted.split_once('.').ok_or_else(|| {
+            ControllerError::Remote(format!(
+                "service '{service_dotted}' must be 'domain.action'"
+            ))
+        })?;
         let url = format!(
             "{}/api/services/{}/{}",
             self.config.base_url.trim_end_matches('/'),
@@ -122,7 +120,8 @@ impl IrrigationController for HaServiceCall {
             // present).
             "minutes": (duration_s as f64 / 60.0),
         });
-        self.call_service(&self.config.start_service, payload).await?;
+        self.call_service(&self.config.start_service, payload)
+            .await?;
         Ok(RunHandle {
             controller_id: self.id.clone(),
             zone_slug: slug.to_string(),
@@ -142,7 +141,8 @@ impl IrrigationController for HaServiceCall {
         // Call the configured stop_service without an entity_id to mean
         // "all". Receivers that don't support this should be wired with
         // a discrete stop_all_service in a future config field.
-        self.call_service(&self.config.stop_service, json!({})).await
+        self.call_service(&self.config.stop_service, json!({}))
+            .await
     }
 
     async fn status(&self) -> ControllerResult<ControllerStatus> {
@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn entity_resolves_for_mapped_zone() {
-        let c = HaServiceCall::new("ha1", cfg());
+        let c = HaServiceCall::new("ha1", cfg()).unwrap();
         assert_eq!(
             c.entity_for("back_yard").unwrap(),
             "switch.back_yard_zone".to_string()
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn entity_unknown_zone_errors() {
-        let c = HaServiceCall::new("ha1", cfg());
+        let c = HaServiceCall::new("ha1", cfg()).unwrap();
         assert!(matches!(
             c.entity_for("nonexistent"),
             Err(ControllerError::ZoneUnknown(_))
@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn caps_are_conservative() {
-        let c = HaServiceCall::new("ha1", cfg());
+        let c = HaServiceCall::new("ha1", cfg()).unwrap();
         let caps = c.supports();
         assert!(!caps.flow_meter);
         assert!(!caps.history_query);

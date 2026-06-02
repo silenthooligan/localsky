@@ -104,7 +104,11 @@ impl WeatherSource for DemoReplay {
         bus: SourceBus,
         mut shutdown: ShutdownSignal,
     ) -> anyhow::Result<()> {
-        info!(source = self.id, rate = self.config.rate, "demo_replay starting");
+        info!(
+            source = self.id,
+            rate = self.config.rate,
+            "demo_replay starting"
+        );
         let mut ticker = interval(Duration::from_secs(3));
         let started_real = now_epoch();
         loop {
@@ -186,7 +190,10 @@ mod tests {
                 .find(|(k, _)| *k == WeatherField::RhPct)
                 .map(|(_, v)| *v)
                 .unwrap();
-            assert!(h >= 0.0 && h <= 100.0, "humidity out of range: {h} at t={t}");
+            assert!(
+                h >= 0.0 && h <= 100.0,
+                "humidity out of range: {h} at t={t}"
+            );
         }
     }
 

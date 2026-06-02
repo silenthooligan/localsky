@@ -26,7 +26,8 @@ pub fn StopAllPanel(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
 
     let is_mobile = use_context::<RwSignal<bool>>();
     let any_running = move || snap.get().zones.iter().any(|z| z.running);
-    let running_count = Signal::derive(move || snap.get().zones.iter().filter(|z| z.running).count());
+    let running_count =
+        Signal::derive(move || snap.get().zones.iter().filter(|z| z.running).count());
 
     let confirm_open: RwSignal<bool> = RwSignal::new(false);
 
@@ -215,11 +216,7 @@ fn ThresholdControl(
 }
 
 #[component]
-fn ToggleControl(
-    key: &'static str,
-    label: &'static str,
-    current: Signal<bool>,
-) -> impl IntoView {
+fn ToggleControl(key: &'static str, label: &'static str, current: Signal<bool>) -> impl IntoView {
     let (is_on, set_is_on) = signal(current.get_untracked());
     let user_touched = RwSignal::new(false);
 
@@ -257,7 +254,7 @@ fn ToggleControl(
 /// itself); on the client it spawns a local task and ignores the
 /// response (the next 10s refresher cycle reflects the new state).
 #[cfg(feature = "hydrate")]
-pub(super) fn post_action(body: serde_json::Value) {
+pub(crate) fn post_action(body: serde_json::Value) {
     use leptos::task::spawn_local;
     spawn_local(async move {
         let payload = body.to_string();
@@ -273,7 +270,7 @@ pub(super) fn post_action(body: serde_json::Value) {
 
 #[cfg(not(feature = "hydrate"))]
 #[allow(dead_code)]
-pub(super) fn post_action(_body: serde_json::Value) {}
+pub(crate) fn post_action(_body: serde_json::Value) {}
 
 // `event_target_value` comes in from `leptos::prelude::*`. It's
 // defined on both ssr and hydrate builds (SSR returns empty since the

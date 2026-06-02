@@ -165,4 +165,3 @@ fn format_local_hour(epoch: i64) -> String {
         .map(|d: DateTime<Local>| d.format("%a %-I%p").to_string())
         .unwrap_or_default()
 }
-

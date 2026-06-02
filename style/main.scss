@@ -19,54 +19,316 @@
 // colors past this block.
 
 :root {
-  --bg-deep: #07090f;
+  // ─────────────────────────────────────────────────────────────────
+  // LocalSky brand palette
+  // ─────────────────────────────────────────────────────────────────
+  // Anchored at the hexes extracted from docs/assets/brand/reference.jpg
+  // via PIL color histograms (see docs/assets/brand/build_logo.py).
+  // Each brand color is laid out on a 50..900 lightness scale so
+  // components have proper tinted/shaded variants for borders, hover,
+  // background washes, etc — without anyone reaching for raw hex.
+  //
+  // Scale convention (Tailwind-style):
+  //   *-50  = nearly-bg tint
+  //   *-100 = subtle wash (faint panel)
+  //   *-300 = strong tint (badge, chip)
+  //   *-500 = canonical brand color (button, link, focus)
+  //   *-700 = darker shade (active state)
+  //   *-900 = deep shadow / inverse surface
+  // ─────────────────────────────────────────────────────────────────
+
+  // Brand blue — the wifi waves, infinity loops, water drop, "SKY" wordmark.
+  --brand-blue-50:  #e9f3fc;
+  --brand-blue-100: #c8e1f7;
+  --brand-blue-200: #93c5ee;
+  --brand-blue-300: #5fb4ff;   // hover-lighter
+  --brand-blue-400: #36a3ec;
+  --brand-blue-500: #1490dc;   // ★ canonical
+  --brand-blue-600: #0e7ab8;
+  --brand-blue-700: #0a6195;
+  --brand-blue-800: #074a73;
+  --brand-blue-900: #053758;
+
+  // Brand teal — the cloud outline on dark variant, pin V frame.
+  --brand-teal-50:  #e6f6f4;
+  --brand-teal-100: #c6ebe6;
+  --brand-teal-200: #8edcd2;
+  --brand-teal-300: #67d1bb;
+  --brand-teal-400: #2eb3a4;
+  --brand-teal-500: #149c92;   // ★ canonical
+  --brand-teal-600: #0f8076;
+  --brand-teal-700: #0c655d;
+  --brand-teal-800: #094c46;
+  --brand-teal-900: #073833;
+
+  // Brand ink — the cloud outline on light variant + the dark surface
+  // (these are visually identical; the design uses the SAME color for
+  // both, which is a clever piece of identity work in the reference).
+  --brand-ink-50:  #f3f5f7;
+  --brand-ink-100: #e0e4e9;
+  --brand-ink-200: #b6bec9;
+  --brand-ink-300: #8b95a3;
+  --brand-ink-400: #5d6878;
+  --brand-ink-500: #3e4853;
+  --brand-ink-600: #353e48;
+  --brand-ink-700: #2f3740;
+  --brand-ink-800: #2a3139;   // ★ canonical
+  --brand-ink-900: #1f262d;
+
+  // Brand navy — deeper backdrop layer that sits below ink. This is
+  // the PWA splash + the deepest layer of the dark variant.
+  --brand-navy-700: #1a2236;
+  --brand-navy-800: #122036;
+  --brand-navy-900: #0b1220;   // ★ canonical
+
+  // Brand snow — the light variant surface tones.
+  --brand-snow-50:  #f6f9ff;   // ★ canonical
+  --brand-snow-100: #eef2fa;
+  --brand-snow-200: #e0e6f1;
+
+  // ─────────────────────────────────────────────────────────────────
+  // Semantic tokens (default = dark variant)
+  // ─────────────────────────────────────────────────────────────────
+  // Every component reads these. Theme-switching just rewrites them.
+
+  // Surfaces.
+  --bg-deep: var(--brand-navy-900);
   --bg-panel: #0f131c;
   --bg-panel-soft: #161b27;
-  --border: #232a3a;
+  // Theme-aware top-of-page radial wash. MUST be remapped per theme
+  // (light/hc redefine it) — a hardcoded navy here is what made light
+  // mode read as dark.
+  --bg-wash: var(--brand-navy-800);
+
+  // Text.
   --text: #e6ecf5;
+  --text-bright: #ffffff;
   --text-dim: #94a0b6;
   --text-faint: #6f7c95;
-  --accent: #5ec8ff;
-  --accent-warm: #ffb84a;
-  --accent-hot: #ff5a5a;
-  --accent-cool: #6db5ff;
-  --accent-rain: #4dd2ff;
-  --accent-lightning: #ffe066;
-  --accent-good: #7ed957;
-  --accent-danger: #ff6b6b;
 
+  // Borders.
+  --border: #232a3a;
+  --border-strong: #2f3a52;
+
+  // Accents — brand-aligned. The dark warm/hot/lightning accents stay
+  // saturated because they read against the navy backdrop; the cool +
+  // good + rain + danger accents all pull from the brand scale.
+  --accent: var(--brand-blue-500);
+  --accent-strong: var(--brand-blue-600);
+  --accent-cool: var(--brand-blue-300);
+  --accent-rain: var(--brand-blue-400);
+  --accent-good: var(--brand-teal-400);
+  --accent-warm: #ffb84a;
+  --accent-warn: #f0a83a;            // also used by skip-check banners
+  --accent-hot:  #ff5a5a;
+  --accent-danger: #ff6b6b;
+  --accent-lightning: #ffe066;
+  --accent-water: var(--brand-blue-300);
+
+  // Geometry.
   --radius: 14px;
   --radius-lg: 20px;
-  --shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+  --radius-sm: 8px;
+  // Legacy shadow aliases → v2 ramp (defined below). Keeps old call
+  // sites consistent with the new elevation shadows.
+  --shadow: var(--shadow-2);
+  --shadow-lg: var(--shadow-3);
+
+  // ─────────────────────────────────────────────────────────────────
+  // Spacing scale (4px base). Every component-internal spacing must
+  // pull from this so vertical + horizontal rhythm stays consistent
+  // across surfaces. No raw px / rem outside this block.
+  // ─────────────────────────────────────────────────────────────────
+  --space-0:  0;
+  --space-1:  0.25rem;   //  4px — tight stacked items (icon+label)
+  --space-2:  0.5rem;    //  8px — within a row, between two label parts
+  --space-3:  0.75rem;   // 12px — compact card padding, list item gap
+  --space-4:  1rem;      // 16px — default card padding, between rows
+  --space-5:  1.25rem;   // 20px — standard panel padding
+  --space-6:  1.5rem;    // 24px — section gap, between panels
+  --space-7:  2rem;      // 32px — page-level vertical rhythm
+  --space-8:  3rem;      // 48px — major page sections
+  --space-9:  4rem;      // 64px — rarely; only above/below the hero
+
+  // ─────────────────────────────────────────────────────────────────
+  // Type scale. Names map to role, not to size — so a size change
+  // doesn't fan out to a name change. Sizes use clamp() where the
+  // role needs to scale across viewport widths.
+  //
+  //   display  → only the very largest number on the page (hero temp)
+  //   h1       → page title
+  //   h2       → section title (panel-title)
+  //   h3       → sub-section
+  //   body     → default reading text
+  //   body-sm  → secondary reading text + dense lists
+  //   meta     → labels, eyebrow text, micro-stats
+  //   mono     → tabular data + code
+  //
+  // Bumped one notch up from v1 so data reads at glance distance —
+  // dashboard usage is "look from across the room", not "lean in to
+  // read a recipe".
+  // ─────────────────────────────────────────────────────────────────
+  --text-display: clamp(2.75rem, 7vw, 4.5rem);
+  --text-h1:      clamp(1.6rem, 2.6vw, 2.1rem);
+  --text-h2:      1.2rem;
+  --text-h3:      1.05rem;
+  --text-body:    1rem;
+  --text-body-sm: 0.92rem;
+  --text-data:    1.1rem;       // tabular numerics (hero strip, panel metrics)
+  --text-meta:    0.78rem;
+  --text-micro:   0.68rem;
+  // Letter-spacing for the eyebrow / meta caps style.
+  --tracking-eyebrow: 0.16em;
+  --tracking-tabular: 0.02em;
+  --tracking-tight: -0.02em;
+  // Line-heights.
+  --leading-tight: 1;
+  --leading-snug: 1.15;
+  --leading-normal: 1.45;
+
+  // Type.
   --font-mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
   --font-sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto,
     "Helvetica Neue", Arial, sans-serif;
+  --font-display: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 
-  // Hybrid design system tokens. Used by .panel (liquid glass) and the
-  // .clay-* family (claymorphism). Numbers tuned against the existing
-  // dark backdrop so the glass actually has something to refract and
-  // the clay surfaces sit a half-step lifted off it.
-  --glass-bg: rgba(15, 19, 28, 0.55);
-  --glass-border: rgba(255, 255, 255, 0.08);
-  --glass-highlight: rgba(255, 255, 255, 0.04);
-  --glass-blur: blur(24px) saturate(160%);
+  // ─────────────────────────────────────────────────────────────────
+  // Surface tier definitions — the "where does the eye land?" rules.
+  //
+  //   tier-1  → primary surface. ONE per route (hero, biggest card).
+  //             Brand gradient accent stripe on top. Largest text.
+  //   tier-2  → key panels with prominent numbers (wind, rain).
+  //             Standard glass surface. Big-number focal point.
+  //   tier-3  → supporting panels with dense data or sparklines.
+  //             Compact density.
+  //   tier-4  → tertiary lists, forms, controls.
+  //             No focal accent; subdued borders.
+  //
+  // Components consume these via .panel--tier-N modifiers below.
+  // ─────────────────────────────────────────────────────────────────
 
-  --clay-surface: #1a2236;
-  --clay-shadow-light: rgba(255, 255, 255, 0.06);
-  --clay-shadow-dark: rgba(0, 0, 0, 0.45);
-  --clay-shadow:
-    inset 1px 1px 2px var(--clay-shadow-light),
-    inset -2px -2px 6px var(--clay-shadow-dark),
-    4px 4px 12px var(--clay-shadow-dark),
-    -2px -2px 8px var(--clay-shadow-light);
-  --clay-shadow-pressed:
-    inset 2px 2px 6px var(--clay-shadow-dark),
-    inset -1px -1px 2px var(--clay-shadow-light);
+  // ─────────────────────────────────────────────────────────────────
+  // Legacy glass + clay tokens — now ALIASED onto the v2 elevation
+  // system so the older Weather/Irrigation/Settings surfaces adopt the
+  // flat, crisp v2 look without a component-by-component rewrite. The
+  // frosted-glass blur and claymorphic inset shadows are retired; these
+  // names stay only as a compatibility shim for components that still
+  // reference them. (Migrate call sites to --elev-* / --shadow-N over
+  // time, then delete this block.)
+  // ─────────────────────────────────────────────────────────────────
+  --glass-bg: var(--elev-1);
+  --glass-border: var(--elev-border);
+  --glass-highlight: transparent;
+  --glass-blur: none;
 
-  // Focus ring used by every interactive element. Phase 13 a11y pass
-  // ensures every <button>/<a>/<input> picks this up via :focus-visible.
+  // Sticky overlay bars (mobile app bar, toolbar, running banner,
+  // drawer) — use the highest elevation so they read as solid above
+  // scrolling content.
+  --surface-frosted: var(--elev-2);
+  --surface-frosted-strong: var(--elev-3);
+
+  // Subtle white wash used on focused list items + chip tints.
+  --surface-soft: rgba(255, 255, 255, 0.04);
+  --surface-softer: rgba(255, 255, 255, 0.02);
+
+  --clay-surface: var(--elev-2);
+  --clay-surface-raised: var(--elev-2);
+  --clay-surface-on: linear-gradient(180deg,
+      color-mix(in oklab, var(--accent-good) 22%, var(--elev-2)) 0%,
+      color-mix(in oklab, var(--accent-good) 14%, var(--elev-2)) 100%);
+  --clay-shadow-light: var(--elev-line);
+  --clay-shadow-dark: rgba(0, 0, 0, 0.35);
+  --clay-shadow: var(--shadow-1);
+  --clay-shadow-pressed: inset 0 1px 2px rgba(0, 0, 0, 0.3);
+
+  // ─────────────────────────────────────────────────────────────────
+  // Brand gradients (reusable across hero, panels, badges)
+  // ─────────────────────────────────────────────────────────────────
+  // The "data flow" gradient is the signature blue-to-teal sweep — the
+  // visual that ties the logomark's wifi (blue) to its cloud outline
+  // (teal). Use sparingly on headers + CTAs.
+  --grad-flow: linear-gradient(135deg, var(--brand-blue-500) 0%, var(--brand-teal-500) 100%);
+  --grad-sky: linear-gradient(180deg, var(--brand-blue-700) 0%, var(--brand-navy-900) 100%);
+  --grad-rain: linear-gradient(180deg, var(--brand-blue-400) 0%, var(--brand-blue-700) 100%);
+  --grad-hero: linear-gradient(135deg, var(--brand-navy-800) 0%, var(--brand-navy-900) 100%);
+
+  // ─────────────────────────────────────────────────────────────────
+  // Focus ring (a11y) — brand blue, 2px solid, with a subtle outer halo
+  // ─────────────────────────────────────────────────────────────────
   --focus-ring: 2px solid var(--accent);
   --focus-ring-offset: 2px;
+  --focus-halo: 0 0 0 4px rgba(20, 144, 220, 0.25);
+
+  // Compass face tokens (consumed by the inline SVG gradient stops in
+  // src/components/wind.rs). The dark scheme reads as a deep navy
+  // dome with a brushed-ink needle tail; light overrides come from
+  // the localsky-light-tokens mixin.
+  --compass-bg-top: var(--brand-navy-700);
+  --compass-bg-bot: #050a14;
+  --compass-needle-s-top: var(--brand-ink-400);
+  --compass-needle-s-bot: var(--brand-ink-700);
+  --compass-hub-top: var(--brand-ink-300);
+  --compass-hub-bot: var(--brand-ink-800);
+
+  // ═════════════════════════════════════════════════════════════════
+  // v2 EVOLVED SURFACE SYSTEM — single coherent elevation model.
+  // ═════════════════════════════════════════════════════════════════
+  // Replaces the glass+clay duality and the importance/material-
+  // conflated 4-tier system with ONE elevation ramp (0..3) applied
+  // uniformly. Material is one treatment, importance is type-size +
+  // accent, never the surface itself.
+  //
+  // Crucially: DARK separates surfaces by FILL LIGHTNESS, LIGHT
+  // separates by SHADOW DEPTH. Each mode uses the contrast mechanism
+  // that actually works on its background — this is what makes both
+  // themes first-class instead of light-as-afterthought.
+  //
+  //   elev-0  → app background (deepest)
+  //   elev-1  → resting panel
+  //   elev-2  → raised panel (hover, hero, active)
+  //   elev-3  → overlay (sheet, popover, menu, toast)
+  // ─────────────────────────────────────────────────────────────────
+  --elev-0: var(--brand-navy-900);
+  --elev-1: #11161f;
+  --elev-2: #161c28;
+  --elev-3: #1d2433;
+  --elev-line: rgba(255, 255, 255, 0.06);          // hairline divider
+  --elev-border: rgba(255, 255, 255, 0.09);         // panel border
+  --elev-border-strong: rgba(255, 255, 255, 0.16);  // focused/active
+
+  // One shadow ramp tied to elevation (supersedes --shadow/-lg + clay).
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.30), 0 1px 1px rgba(0, 0, 0, 0.20);
+  --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.35), 0 2px 4px rgba(0, 0, 0, 0.25);
+  --shadow-3: 0 16px 40px rgba(0, 0, 0, 0.45), 0 4px 12px rgba(0, 0, 0, 0.30);
+  // The one signature "lit edge" — used on the hero + primary buttons.
+  --specular: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+
+  // ─────────────────────────────────────────────────────────────────
+  // Verdict tokens — the shared decision vocabulary. The verdict strip,
+  // Rule Lab, History, Simulator, and the zone canvas all render the
+  // SAME color for the same decision so the language is consistent.
+  // ─────────────────────────────────────────────────────────────────
+  --verdict-run:    var(--accent-good);     // watering recommended
+  --verdict-skip:   var(--accent-rain);     // skipped (rain / already wet)
+  --verdict-freeze: var(--accent-cool);     // skipped (freeze gate)
+  --verdict-wind:   var(--accent-warn);     // skipped (wind gate)
+  --verdict-extend: var(--accent-warm);     // extended run (heat)
+  --verdict-off:    var(--text-faint);      // disabled / no zone
+
+  // ─────────────────────────────────────────────────────────────────
+  // Motion language. Durations + easings as tokens so micro-interactions
+  // feel systemic, not ad-hoc. The global prefers-reduced-motion guard
+  // above neutralizes all of these.
+  // ─────────────────────────────────────────────────────────────────
+  --motion-fast: 120ms;
+  --motion-base: 200ms;
+  --motion-slow: 320ms;
+  --ease-out:    cubic-bezier(0.2, 0, 0, 1);          // entrances
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);   // the overshoot feel
+
+  // Stat-tile primary number + tightened display tracking (v2 dashboards).
+  --text-stat: clamp(1.4rem, 2.2vw, 1.9rem);
+  --tracking-display: -0.025em;
 }
 
 // ----- A11y primitives -----
@@ -113,87 +375,189 @@
   }
 }
 
-// ----- Light theme. Hand-tuned, NOT auto-inverted. -----
+// ─────────────────────────────────────────────────────────────────────
+// Light theme. Hand-tuned, NOT auto-inverted.
+// ─────────────────────────────────────────────────────────────────────
+// The light variant mirrors the brand reference's light-side artwork:
+// snow surface, ink text, brand-blue + brand-teal accents (slightly
+// darkened for AA contrast against a near-white backdrop). The
+// gradients darken so the data-flow accent still reads on white.
 
-[data-theme="light"] {
-  --bg-deep: #f4f6fa;
+// Light tokens defined ONCE as a @mixin so both [data-theme="light"]
+// (always-light) and [data-theme="auto"] inside @media
+// (prefers-color-scheme: light) can @include them.
+//
+// Why @mixin and not @extend %placeholder: Dart Sass forbids
+// `@extend selector` across media queries (the placeholder lives at
+// the top level; the @media auto-branch is inside a media query;
+// extending the same placeholder from both produces an error). Mixin
+// inclusion is duplication-by-design and works in any context.
+@mixin localsky-light-tokens {
+  --bg-deep: var(--brand-snow-50);
   --bg-panel: #ffffff;
-  --bg-panel-soft: #eef1f7;
-  --border: #d8dce5;
-  --text: #0f1525;
-  --text-dim: #4a5572;
-  --text-faint: #6e7891;
-  --accent: #1c8ad8;
+  --bg-panel-soft: var(--brand-snow-100);
+  // Light page wash: a faint cool snow tint, not dark navy.
+  --bg-wash: var(--brand-snow-100);
+
+  --text: var(--brand-ink-800);
+  --text-bright: var(--brand-ink-900);
+  // Light-mode dim/faint are intentionally deeper than the dark-mode
+  // equivalents: at 96–98% L backgrounds the mid-gray inks read as
+  // washed-out, so anchor body-secondary on ink-700 and eyebrows on
+  // ink-600 for the contrast the dark scheme gets for free.
+  --text-dim: var(--brand-ink-700);
+  --text-faint: var(--brand-ink-600);
+
+  --border: var(--brand-snow-200);
+  --border-strong: var(--brand-ink-200);
+
+  --accent: var(--brand-blue-600);
+  --accent-strong: var(--brand-blue-700);
+  --accent-cool: var(--brand-blue-500);
+  --accent-rain: var(--brand-blue-500);
+  --accent-good: var(--brand-teal-600);
   --accent-warm: #d97a00;
-  --accent-hot: #d63838;
-  --accent-cool: #2876c9;
-  --accent-rain: #1a9fd1;
-  --accent-lightning: #c69400;
-  --accent-good: #2a9d3e;
+  --accent-warn: #c97a00;
+  --accent-hot:  #d63838;
   --accent-danger: #c43b3b;
+  --accent-lightning: #c69400;
+  --accent-water: var(--brand-blue-500);
 
-  --shadow: 0 4px 18px rgba(15, 21, 37, 0.10);
+  // Legacy aliases → v2 elevation (light). Light separates by shadow,
+  // so glass/clay surfaces become white cards with the v2 shadow ramp.
+  --shadow: var(--shadow-2);
+  --shadow-lg: var(--shadow-3);
 
-  --glass-bg: rgba(255, 255, 255, 0.72);
-  --glass-border: rgba(15, 21, 37, 0.08);
-  --glass-highlight: rgba(255, 255, 255, 0.50);
-  --glass-blur: blur(20px) saturate(140%);
+  --glass-bg: var(--elev-1);
+  --glass-border: var(--elev-border);
+  --glass-highlight: transparent;
+  --glass-blur: none;
 
-  --clay-surface: #e8ecf3;
+  --clay-surface: var(--elev-2);
+  --clay-surface-raised: var(--elev-2);
+  --clay-surface-on: linear-gradient(180deg,
+      color-mix(in oklab, var(--accent-good) 22%, #ffffff) 0%,
+      color-mix(in oklab, var(--accent-good) 12%, #ffffff) 100%);
   --clay-shadow-light: rgba(255, 255, 255, 0.85);
   --clay-shadow-dark: rgba(15, 21, 37, 0.12);
+
+  --surface-frosted: var(--elev-2);
+  --surface-frosted-strong: var(--elev-3);
+  --surface-soft: rgba(15, 21, 37, 0.04);
+  --surface-softer: rgba(15, 21, 37, 0.02);
+
+  // .water-budget-tile / .soil-tile read these via `var(--bento-bg, …)`
+  // with a white-overlay fallback that vanishes on a light backdrop.
+  // On light mode, push the tile fill all the way up to a near-solid
+  // white so each tile reads as its own card alongside the
+  // glass-bg panels, with a real ink-tinted border instead of a
+  // transparent-white one.
+  --bento-bg: rgba(255, 255, 255, 0.92);
+  --bento-border: rgba(15, 21, 37, 0.10);
+
+  // Compass tokens — light variant. Disc is a near-white dome with a
+  // pale snow shadow; the south needle pulls from the ink scale so it
+  // still reads as a real tail (not invisible) on the bright disc.
+  --compass-bg-top: #ffffff;
+  --compass-bg-bot: var(--brand-snow-200);
+  --compass-needle-s-top: var(--brand-ink-200);
+  --compass-needle-s-bot: var(--brand-ink-500);
+  --compass-hub-top: #ffffff;
+  --compass-hub-bot: var(--brand-ink-300);
+
+  // Light-mode gradients pull from the brand scale's deeper end so the
+  // sweep is still visible on near-white panels.
+  --grad-flow: linear-gradient(135deg, var(--brand-blue-600) 0%, var(--brand-teal-600) 100%);
+  --grad-sky: linear-gradient(180deg, var(--brand-blue-100) 0%, var(--brand-snow-50) 100%);
+  --grad-rain: linear-gradient(180deg, var(--brand-blue-400) 0%, var(--brand-blue-700) 100%);
+  --grad-hero: linear-gradient(135deg, var(--brand-snow-50) 0%, #ffffff 100%);
+
+  --focus-halo: 0 0 0 4px rgba(20, 144, 220, 0.22);
+
+  // v2 elevation — LIGHT separates surfaces by SHADOW DEPTH, not fill,
+  // so the elev fills stay near-white and the shadow ramp does the work.
+  --elev-0: var(--brand-snow-50);
+  --elev-1: #ffffff;
+  --elev-2: #ffffff;
+  --elev-3: #ffffff;
+  --elev-line: rgba(15, 21, 37, 0.07);
+  --elev-border: rgba(15, 21, 37, 0.10);
+  --elev-border-strong: rgba(15, 21, 37, 0.18);
+  --shadow-1: 0 1px 2px rgba(15, 21, 37, 0.06);
+  --shadow-2: 0 4px 14px rgba(15, 21, 37, 0.10);
+  --shadow-3: 0 16px 40px rgba(15, 21, 37, 0.16);
+  --specular: inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }
 
-// Follow system preference when user picks "auto". Without data-theme,
-// the dark defaults apply; the explicit `auto` opt-in mirrors light.
+[data-theme="light"] { @include localsky-light-tokens; }
+
+// Follow system preference when user picks "auto". The explicit `auto`
+// opt-in mirrors light when the OS is in light mode; otherwise dark
+// defaults apply.
 @media (prefers-color-scheme: light) {
-  [data-theme="auto"] {
-    --bg-deep: #f4f6fa;
-    --bg-panel: #ffffff;
-    --bg-panel-soft: #eef1f7;
-    --border: #d8dce5;
-    --text: #0f1525;
-    --text-dim: #4a5572;
-    --text-faint: #6e7891;
-    --accent: #1c8ad8;
-    --accent-warm: #d97a00;
-    --accent-hot: #d63838;
-    --accent-cool: #2876c9;
-    --accent-rain: #1a9fd1;
-    --accent-lightning: #c69400;
-    --accent-good: #2a9d3e;
-    --accent-danger: #c43b3b;
-    --shadow: 0 4px 18px rgba(15, 21, 37, 0.10);
-    --glass-bg: rgba(255, 255, 255, 0.72);
-    --glass-border: rgba(15, 21, 37, 0.08);
-    --glass-highlight: rgba(255, 255, 255, 0.50);
-    --glass-blur: blur(20px) saturate(140%);
-    --clay-surface: #e8ecf3;
-    --clay-shadow-light: rgba(255, 255, 255, 0.85);
-    --clay-shadow-dark: rgba(15, 21, 37, 0.12);
-  }
+  [data-theme="auto"] { @include localsky-light-tokens; }
 }
 
-// ----- High-contrast theme. Glass blur disabled; solid surfaces. -----
+// Per-selector overrides for the dark-only `rgba(255, 255, 255, X)` text
+// and border colors sprinkled through the stylesheet. On a light backdrop
+// they paint white-on-white and disappear; remap to ink-tinted overlays
+// so the affected widgets keep their structure in light mode.
+@mixin localsky-light-element-overrides {
+  // Zone-math row caption text was hard-coded white at 55% — invisible
+  // on a near-white panel. Use the ink-equivalent tint.
+  .zone-math-row-cap > dd { color: rgba(15, 21, 37, 0.62); }
+  // Status-keyed left borders that ride the brand at higher alphas
+  // need an ink tint when there's no status to convey ("off"/"no data").
+  .water-budget-tile-off { border-left-color: rgba(15, 21, 37, 0.22); }
+  .soil-tile-no-data { border-left-color: rgba(15, 21, 37, 0.22); }
+  // Tiny mono pills with a 5% white fill end up looking unframed on
+  // light; swap to the same alpha of ink.
+  .water-budget-tile-eyebrow,
+  .soil-tile-eyebrow {
+    background: rgba(15, 21, 37, 0.05);
+  }
+  .uv-bar { background: rgba(15, 21, 37, 0.08); }
+}
+[data-theme="light"] { @include localsky-light-element-overrides; }
+@media (prefers-color-scheme: light) {
+  [data-theme="auto"] { @include localsky-light-element-overrides; }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// High-contrast theme. Glass blur disabled; solid surfaces.
+// ─────────────────────────────────────────────────────────────────────
+// Brand-hinted: accent uses brand-blue-300 (the lighter shade) which
+// hits ~9:1 contrast on pure black. accent-good uses brand-teal-200 for
+// similar reasons. text-bright stays pure white; borders stay pure white.
 
 [data-theme="hc"] {
   --bg-deep: #000000;
   --bg-panel: #000000;
   --bg-panel-soft: #0a0a0a;
-  --border: #ffffff;
+  --bg-wash: #000000;
+
   --text: #ffffff;
+  --text-bright: #ffffff;
   --text-dim: #ffffff;
   --text-faint: #cccccc;
-  --accent: #00d4ff;
+
+  --border: #ffffff;
+  --border-strong: #ffffff;
+
+  --accent: var(--brand-blue-300);          // 9:1 contrast on black
+  --accent-strong: var(--brand-blue-200);
+  --accent-cool: var(--brand-blue-300);
+  --accent-rain: var(--brand-blue-300);
+  --accent-good: var(--brand-teal-200);     // 9:1 contrast on black
   --accent-warm: #ffcc00;
-  --accent-hot: #ff4040;
-  --accent-cool: #00d4ff;
-  --accent-rain: #00d4ff;
-  --accent-lightning: #ffff00;
-  --accent-good: #00ff66;
+  --accent-warn: #ffcc00;
+  --accent-hot:  #ff4040;
   --accent-danger: #ff4040;
+  --accent-lightning: #ffff00;
+  --accent-water: var(--brand-blue-300);
 
   --shadow: 0 0 0 2px #ffffff;
+  --shadow-lg: 0 0 0 3px #ffffff;
 
   --glass-bg: #000000;
   --glass-border: #ffffff;
@@ -205,6 +569,28 @@
   --clay-shadow-dark: #ffffff;
   --clay-shadow: 0 0 0 2px #ffffff;
   --clay-shadow-pressed: 0 0 0 3px #ffffff inset;
+
+  // Disable brand gradients in HC — solid colors only.
+  --grad-flow: var(--brand-blue-300);
+  --grad-sky: #000000;
+  --grad-rain: var(--brand-blue-300);
+  --grad-hero: #000000;
+
+  --focus-halo: 0 0 0 4px #ffffff;
+
+  // v2 elevation in HC — solid black surfaces, white hairline borders,
+  // no shadow blur (2px solid rings stand in).
+  --elev-0: #000000;
+  --elev-1: #000000;
+  --elev-2: #0a0a0a;
+  --elev-3: #121212;
+  --elev-line: #ffffff;
+  --elev-border: #ffffff;
+  --elev-border-strong: #ffffff;
+  --shadow-1: 0 0 0 1px #ffffff;
+  --shadow-2: 0 0 0 2px #ffffff;
+  --shadow-3: 0 0 0 2px #ffffff;
+  --specular: none;
 }
 
 * { box-sizing: border-box; }
@@ -212,7 +598,11 @@
 html, body {
   margin: 0;
   padding: 0;
-  background: radial-gradient(ellipse at 30% 0%, #0d1322, var(--bg-deep) 60%);
+  // Subtle radial wash above the deep backdrop — gives the surface a
+  // sense of depth without a heavy gradient. The tint pulls from the
+  // brand navy-800 so it harmonizes with the brand reference's dark
+  // panel color.
+  background: radial-gradient(ellipse at 30% 0%, var(--bg-wash), var(--bg-deep) 60%);
   color: var(--text);
   font-family: var(--font-sans);
   min-height: 100vh;
@@ -223,6 +613,52 @@ body {
   background-attachment: fixed;
   position: relative;
   overflow-x: hidden;
+}
+
+// Mode banners. app.rs sets data-dry-run / data-demo on <html> after
+// fetching /api/v1/info on hydrate; these banners are pure CSS from
+// there. Without them, an operator who left LOCALSKY_SMART_DRY_RUN=1
+// after a test cycle sees "nothing happened this morning" and assumes
+// a regression, when in fact the scheduler is logging the dispatch
+// and silently doing nothing. body::before/after are taken by the
+// aurora backdrop, so the banners ride on html::before / html::after.
+html[data-dry-run="true"]::before,
+html[data-demo="true"]::after {
+  display: block;
+  position: fixed;
+  left: 0;
+  right: 0;
+  z-index: 1000;
+  padding: 0.45rem 1rem;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: center;
+  color: #0f1518;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+}
+html[data-dry-run="true"]::before {
+  content: "Dry-run mode — irrigation dispatch is silenced (LOCALSKY_SMART_DRY_RUN=1)";
+  top: 0;
+  background: var(--accent-warm, #f5a623);
+}
+html[data-demo="true"]::after {
+  content: "Demo mode — synthetic weather, controllers in record-only mode";
+  top: 0;
+  background: var(--accent, #4dd2ff);
+}
+// Stack demo below dry-run when both are active.
+html[data-dry-run="true"][data-demo="true"]::after {
+  top: 2.2rem;
+}
+// Push the app shell down so the first banner doesn't cover content.
+html[data-dry-run="true"] body,
+html[data-demo="true"] body {
+  padding-top: 2.2rem;
+}
+html[data-dry-run="true"][data-demo="true"] body {
+  padding-top: 4.4rem;
 }
 
 // Aurora backdrop. Two slow-drifting low-opacity color washes give the
@@ -238,20 +674,22 @@ body::after {
   pointer-events: none;
   z-index: 0;
   filter: blur(60px);
-  opacity: 0.55;
+  // Quieter in v2: a faint, strictly on-brand blue+teal ambient wash that
+  // sits behind the flat elevation surfaces (the purple/green/amber washes
+  // and the heavy 0.55 opacity belonged to the retired glass aesthetic).
+  opacity: 0.3;
 }
 
 body::before {
   background:
-    radial-gradient(40rem 28rem at 18% 22%, rgba(94, 200, 255, 0.22), transparent 60%),
-    radial-gradient(36rem 30rem at 82% 78%, rgba(125, 90, 220, 0.20), transparent 60%);
+    radial-gradient(40rem 28rem at 18% 22%, rgba(94, 200, 255, 0.18), transparent 60%),
+    radial-gradient(36rem 30rem at 82% 78%, rgba(46, 179, 164, 0.14), transparent 60%);
   animation: aurora-drift-a 48s ease-in-out infinite alternate;
 }
 
 body::after {
   background:
-    radial-gradient(30rem 22rem at 75% 18%, rgba(255, 184, 74, 0.14), transparent 60%),
-    radial-gradient(34rem 24rem at 22% 80%, rgba(126, 217, 87, 0.14), transparent 60%);
+    radial-gradient(30rem 22rem at 75% 18%, rgba(20, 144, 220, 0.12), transparent 60%);
   animation: aurora-drift-b 64s ease-in-out infinite alternate;
 }
 
@@ -274,15 +712,357 @@ body::after {
   }
 }
 
-// Page content sits above the aurora backdrop.
-.page {
+// App shell: sidebar (~240px) on the left, main page column on the right.
+// On mobile the sidebar collapses to a slide-in drawer behind the
+// .mobile-app-bar's hamburger.
+.app-shell {
   position: relative;
   z-index: 1;
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  min-height: 100vh;
+}
+
+// ============================================================
+// Sidebar nav
+// ============================================================
+
+.sidebar {
+  flex: 0 0 232px;
+  width: 232px;
+  position: sticky;
+  top: 0;
+  align-self: flex-start;
+  height: 100vh;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+  padding: var(--space-5) var(--space-3) var(--space-4);
+  background: color-mix(in oklab, var(--brand-navy-900) 72%, transparent);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  backdrop-filter: blur(18px) saturate(150%);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  z-index: 20;
+
+  // The sidebar background is intentionally dark in every theme for
+  // hierarchy, so re-pin the text tokens to their dark-theme values
+  // inside the sidebar. Without this, light-mode's dark inks render
+  // dark-on-dark and the nav labels disappear.
+  --text: #e6ecf5;
+  --text-bright: #ffffff;
+  --text-dim: #94a0b6;
+  --text-faint: #8693ac;
+  --border: rgba(255, 255, 255, 0.08);
+}
+
+.sidebar-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0 0.5rem 0.6rem;
+  font-family: var(--font-display);
+  font-weight: 800;
+  letter-spacing: -0.005em;
+  font-size: 1.55rem;
+  color: var(--text);
+  text-decoration: none;
+
+  &-mark {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    color: var(--accent-good);   // teal cloud outline
+    > svg, > img { width: 100%; height: 100%; display: block; }
+  }
+  &-name { display: inline-flex; align-items: baseline; }
+
+  // Back-compat for older markup still using span.bolt.
+  .bolt {
+    color: var(--accent);
+    display: inline-flex;
+    align-items: center;
+  }
+}
+
+.sidebar-section { display: flex; flex-direction: column; gap: var(--space-1); }
+
+// Compact section. Used for Settings so the 12 set-once configuration
+// entries don't visually compete with the two live products (Weather,
+// Irrigation) sitting above them. Smaller link text + tighter padding
+// + dimmer section title; same icons, same hit targets large enough
+// for touch.
+.sidebar-section--compact {
+  margin-top: var(--space-3);
+  .sidebar-section-title {
+    color: color-mix(in oklab, var(--text-faint) 75%, transparent);
+  }
+  .sidebar-link {
+    font-size: var(--text-body-sm);
+    padding-top: 0.32rem;
+    padding-bottom: 0.32rem;
+    color: color-mix(in oklab, var(--text-dim) 88%, transparent);
+  }
+}
+
+.sidebar-section-title {
+  padding: var(--space-1) var(--space-3) 2px;
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  font-weight: 600;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--text-faint);
+  // Subtle gradient underline on the section header pulls the eye to
+  // group breaks without a hard divider line.
+  position: relative;
+  margin-bottom: var(--space-1);
+  &::after {
+    content: "";
+    position: absolute;
+    left: var(--space-3);
+    right: var(--space-3);
+    bottom: -2px;
+    height: 1px;
+    background: linear-gradient(90deg,
+      color-mix(in oklab, var(--accent) 40%, transparent),
+      transparent);
+    opacity: 0.6;
+  }
+}
+
+.sidebar-nav {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+// Indented sub-link under a parent NavLink. Used by Irrigation's
+// children, which only render when the current route is /irrigation*.
+.sidebar-link--sub {
+  padding-left: calc(var(--space-7) - 2px);
+  font-size: var(--text-body-sm);
+  padding-top: 0.32rem;
+  padding-bottom: 0.32rem;
+  .sidebar-link-icon { opacity: 0.65; transform: scale(0.9); }
+}
+
+.sidebar-link {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0.42rem var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-body);
+  font-weight: 500;
+  color: var(--text-dim);
+  text-decoration: none;
+  position: relative;
+  transition: color 80ms ease, background 120ms ease;
+
+  &:hover {
+    color: var(--text);
+    background: color-mix(in oklab, var(--accent) 7%, transparent);
+    text-decoration: none;
+    .sidebar-link-icon { color: var(--text); opacity: 1; }
+  }
+
+  // Active link: brand-accent tint background + left rail accent.
+  // The 2px brand-blue rail aligns with the section underline gradient
+  // for visual rhythm.
+  &.is-active {
+    color: var(--text-bright);
+    background: color-mix(in oklab, var(--accent) 12%, transparent);
+    .sidebar-link-icon { color: var(--accent); opacity: 1; }
+    &::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0.32rem;
+      bottom: 0.32rem;
+      width: 2px;
+      border-radius: 2px;
+      background: var(--accent);
+    }
+  }
+}
+.sidebar-link-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.15rem;
+  height: 1.15rem;
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+.sidebar-link-label { flex: 1; }
+
+.sidebar-footer {
+  margin-top: auto;
+  padding: var(--space-3) var(--space-3) var(--space-1);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-top: 1px solid var(--border);
+}
+.sidebar-footer-link {
+  color: var(--text-faint);
+  font-size: var(--text-body-sm);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 0.32rem var(--space-2);
+  border-radius: var(--radius-sm);
+  transition: color 80ms ease, background 120ms ease;
+  &:hover {
+    color: var(--text);
+    background: color-mix(in oklab, var(--accent) 6%, transparent);
+  }
+  .sidebar-footer-glyph {
+    display: inline-flex;
+    align-items: center;
+    opacity: 0.6;
+  }
+}
+
+// ------------------------------------------------------------
+// Mobile drawer + top app bar (≤760px)
+// ------------------------------------------------------------
+
+.mobile-app-bar {
+  display: none;
+}
+.sidebar-hamburger {
+  display: inline-flex;
+  flex-direction: column;
+  justify-content: space-between;
+  width: 28px;
+  height: 22px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+}
+.hamburger-bar {
+  display: block;
+  width: 100%;
+  height: 2px;
+  background: var(--text);
+  border-radius: 1px;
+}
+
+.sidebar-backdrop {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .app-shell { flex-direction: column; }
+
+  .mobile-app-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+    padding: 0.85rem 1rem;
+    background: var(--surface-frosted);
+    -webkit-backdrop-filter: blur(18px) saturate(150%);
+    backdrop-filter: blur(18px) saturate(150%);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 18;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 280px;
+    flex: 0 0 280px;
+    height: 100vh;
+    transform: translateX(-100%);
+    transition: transform 240ms cubic-bezier(0.2, 0, 0, 1);
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55);
+    z-index: 30;
+    &.is-open { transform: translateX(0); }
+  }
+
+  .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 220ms ease;
+    z-index: 25;
+    &.is-visible {
+      opacity: 1;
+      pointer-events: auto;
+    }
+  }
+
+  // Hide the .header that the in-page WeatherHome / IrrigationPage may
+  // still render. Mobile uses the .mobile-app-bar now; the old header
+  // pill toggle is gone.
+  .header { display: none; }
+}
+
+// ------------------------------------------------------------
+// Raw TOML editor (Advanced settings page)
+// ------------------------------------------------------------
+.raw-toml-textarea {
+  width: 100%;
+  min-height: 28rem;
+  padding: 0.85rem 1rem;
+  background: var(--bg-panel-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  line-height: 1.45;
+  color: var(--text);
+  resize: vertical;
+  white-space: pre;
+  overflow: auto;
+  tab-size: 2;
+  &:focus {
+    outline: none;
+    border-color: rgba(94, 200, 255, 0.45);
+    box-shadow: 0 0 0 2px rgba(94, 200, 255, 0.18);
+  }
+}
+.raw-toml-actions {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 0.75rem;
+}
+.raw-toml-status {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  &.is-ok { color: var(--accent-good); }
+  &.is-err { color: var(--accent-danger); }
 }
 
 a { color: var(--accent); }
 
+// .page is now the right column inside the shell. Keeps its centered
+// content max-width tiers; the flex layout fills whatever the sidebar
+// leaves available, so the existing wide-screen rules still work.
 .page {
+  flex: 1 1 auto;
+  min-width: 0;
   max-width: 1280px;
   margin: 0 auto;
   padding: 1.5rem 1.25rem 4rem;
@@ -291,7 +1071,196 @@ a { color: var(--accent); }
   gap: 1.25rem;
 }
 
-// ---------------- Header ----------------
+// Global page header. Always-visible band above the route content
+// hosting cross-cutting controls (today: just the Nerd mode pill).
+// Sits above the route's own toolbars (irrigation tab strip, history
+// range selector) so it never overlaps them and never scrolls away
+// from the user's reach the way the buried Advanced toggle did.
+.page-header {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: -0.25rem;
+  min-height: 2rem;
+}
+
+// Mode toggle (segmented control). Two-segment pill with both
+// "Simple" and "Nerd" labels always visible so the user reads it as
+// a choice between modes, not a single flag that flips. The active
+// segment carries the accent fill; the other is dimmed. Clicking
+// either segment moves the highlight; the same global NerdMode
+// signal drives the Advanced settings toggle and the CSS gating.
+.mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.mode-toggle__label {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.mode-toggle__seg {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.32rem 0.85rem;
+  background: color-mix(in oklab, var(--text-bright) 4%, transparent);
+  border: 1px solid var(--glass-border);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color 80ms ease, background 120ms ease, border-color 120ms ease;
+
+  &:first-of-type {
+    border-radius: 999px 0 0 999px;
+    border-right: 0;
+  }
+  &:last-of-type {
+    border-radius: 0 999px 999px 0;
+  }
+
+  &:hover:not(.is-active) {
+    color: var(--text-bright);
+    background: color-mix(in oklab, #f7ff3a 7%, transparent);
+  }
+
+  &:focus-visible {
+    outline: 2px solid #f7ff3a;
+    outline-offset: 2px;
+    z-index: 1;
+  }
+
+  // Neon-yellow active segment: bright lit-from-within feel so the
+  // mode toggle reads at a glance from across the page. Dark tinted
+  // fill keeps the contrast with the inactive segment; the glow is
+  // what carries the "neon" character.
+  &.is-active {
+    --mode-neon: #f7ff3a;
+    color: var(--mode-neon);
+    background: linear-gradient(180deg,
+      color-mix(in oklab, var(--mode-neon) 22%, var(--clay-surface)) 0%,
+      color-mix(in oklab, var(--mode-neon) 12%, var(--clay-surface)) 100%);
+    border-color: var(--mode-neon);
+    box-shadow:
+      inset 0 0 0 1px color-mix(in oklab, var(--mode-neon) 65%, transparent),
+      0 0 10px color-mix(in oklab, var(--mode-neon) 50%, transparent),
+      0 0 22px color-mix(in oklab, var(--mode-neon) 25%, transparent);
+    text-shadow: 0 0 6px color-mix(in oklab, var(--mode-neon) 55%, transparent);
+  }
+}
+
+// Light mode: neon-yellow text on a yellow-tinted near-white background
+// disappears. Flip the active segment to a saturated amber fill with
+// dark ink text so it still pops while staying legible on near-white.
+@mixin localsky-mode-toggle-light {
+  .mode-toggle__seg.is-active {
+    --mode-amber: #f5b800;
+    color: var(--brand-ink-900);
+    background: linear-gradient(180deg, #ffd400 0%, #f5b800 100%);
+    border-color: var(--mode-amber);
+    box-shadow:
+      inset 0 0 0 1px color-mix(in oklab, var(--mode-amber) 70%, transparent),
+      0 0 8px color-mix(in oklab, var(--mode-amber) 45%, transparent);
+    text-shadow: none;
+  }
+}
+[data-theme="light"] { @include localsky-mode-toggle-light; }
+@media (prefers-color-scheme: light) {
+  [data-theme="auto"] { @include localsky-mode-toggle-light; }
+}
+
+// Wide-screen tiers. The weather page's .grid (auto-fit minmax(320px, 1fr))
+// reflows to 4 then 5 columns once the container cap loosens; the irrigation
+// page's .bento-irrigation gets matching 3- and 4-column area definitions
+// below. Mobile + tablet behavior (≤ 760px / 1280px default) is unchanged.
+@media (min-width: 1440px) {
+  .page { max-width: 1400px; }
+}
+@media (min-width: 1920px) {
+  .page { max-width: 1760px; }
+}
+@media (min-width: 2400px) {
+  .page { max-width: 2200px; }
+}
+@media (min-width: 3000px) {
+  // Ultrawide / 4K. Use viewport-relative max-width so the dashboard fills
+  // the screen rather than sitting in a centered column with dead space.
+  .page { max-width: min(2800px, 95vw); }
+}
+
+// Two-giant-columns weather layout. Below 1400px every wrapper is
+// `display: contents` so the historical flex-column flow holds. At 1400px+
+// the layout becomes: left column = hero + 5-card panels + hourly + daily;
+// right column = radar map filling the column's full height.
+.weather-layout,
+.weather-main,
+.weather-side {
+  display: contents;
+}
+
+@media (min-width: 1400px) {
+  .weather-layout {
+    display: grid;
+    grid-template-columns: 1.5fr 1fr;
+    gap: 1.25rem;
+    align-items: stretch;
+  }
+  .weather-main {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    min-width: 0;
+  }
+  .weather-side {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  // Radar tile stretches to match the left column's height. The internal
+  // .radar-map has a 480px fixed height by default; here we let flex grow
+  // it to fill whatever the row gives us.
+  .weather-side > .radar {
+    margin-top: 0;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+  }
+  .weather-side > .radar > .radar-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+  }
+  .weather-side > .radar .radar-map {
+    flex: 1;
+    height: auto;
+    min-height: 480px;
+  }
+
+  // 5 weather cards reflow inside the left column as 3 + 2: wind / rain /
+  // lightning on row 2, pressure / sun on row 3. Each gets the full row
+  // width split evenly, so the larger panels (pressure trend chart, solar
+  // dial) breathe instead of clipping their data.
+  .weather-main > .grid {
+    grid-template-columns: repeat(6, 1fr);
+  }
+  .weather-main > .grid > *               { grid-column: span 2; }
+  .weather-main > .grid > *:nth-child(4),
+  .weather-main > .grid > *:nth-child(5)  { grid-column: span 3; }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Header / brand identity
+// ─────────────────────────────────────────────────────────────────────
 
 .header {
   display: flex;
@@ -301,17 +1270,39 @@ a { color: var(--accent); }
   border-bottom: 1px solid var(--border);
 }
 
+// .header-brand renders the LOCALSKY wordmark. "LOCAL" inherits text
+// color (so it flips white/ink across themes); "SKY" pulls the brand
+// blue. Optional .header-brand__mark slot for an inline logomark SVG
+// to the left of the wordmark.
 .header-brand {
-  font-family: var(--font-mono);
-  font-size: 0.95rem;
-  letter-spacing: 0.05em;
-  color: var(--text-dim);
-  display: flex;
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  display: inline-flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.55rem;
+  text-decoration: none;
+
+  &__mark {
+    display: inline-flex;
+    align-items: center;
+    width: 28px;
+    height: 28px;
+    flex-shrink: 0;
+    // Inline SVG inside; let it scale to the parent.
+    > svg, > img { width: 100%; height: 100%; display: block; }
+  }
+  &__local { color: inherit; }
+  &__sky   { color: var(--accent); }
+
+  // .bolt kept as a back-compat alias so any lingering markup still
+  // renders, but it now picks the brand blue instead of the lightning
+  // yellow.
   .bolt {
-    color: var(--accent-lightning);
-    filter: drop-shadow(0 0 6px rgba(255, 224, 102, 0.4));
+    color: var(--accent);
+    filter: drop-shadow(0 0 6px rgba(20, 144, 220, 0.35));
   }
 }
 
@@ -338,93 +1329,140 @@ a { color: var(--accent); }
   50% { opacity: 0.55; transform: scale(0.85); }
 }
 
-// ---------------- Hero ----------------
+// ─────────────────────────────────────────────────────────────────────
+// Hero — dense data strip (the tier-1 surface for the weather route)
+// ─────────────────────────────────────────────────────────────────────
+//
+// Compose:
+//   .hero (panel + is-tier-1)
+//     ├─ .hero-focal     ← row 1: glyph + temp + condition + callouts
+//     └─ .hero-strip     ← row 2: telemetry stats, single horizontal line
+//
+// Target footprint: ~140px tall on desktop, ~180px on mobile (2 rows
+// for the strip). No internal dead space.
 
-// Hero shares the Liquid Glass aesthetic but with a slightly warmer
-// gradient mixed into the translucent fill so the headline temperature
-// reads as the focal point rather than the panels behind it.
 .hero {
-  position: relative;
+  // Hero IS a tier-1 panel — extends the .panel base, so we inherit
+  // the glass surface and the brand gradient accent stripe.
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+}
+
+// Row 1: focal info. Grid columns: glyph (auto), headline (1fr), callouts (auto).
+.hero-focal {
   display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 1.5rem;
+  grid-template-columns: auto 1fr auto;
+  gap: var(--space-4);
   align-items: center;
-  padding: 2rem 1.75rem;
-  background:
-    linear-gradient(135deg, rgba(18, 32, 54, 0.55) 0%, rgba(13, 21, 37, 0.55) 100%),
-    var(--glass-bg);
-  -webkit-backdrop-filter: var(--glass-blur);
-  backdrop-filter: var(--glass-blur);
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--glass-border);
-  box-shadow:
-    var(--shadow),
-    inset 0 1px 0 var(--glass-highlight);
-  isolation: isolate;
-  overflow: hidden;
-}
-
-.hero::before {
-  content: "";
-  position: absolute;
-  inset: 0 0 auto 0;
-  height: 60%;
-  background: radial-gradient(
-    ellipse at 30% 0%,
-    rgba(255, 255, 255, 0.07),
-    transparent 70%
-  );
-  pointer-events: none;
-  z-index: -1;
-}
-
-@supports not (backdrop-filter: blur(1px)) {
-  .hero {
-    background: linear-gradient(135deg, #122036 0%, #0d1525 100%);
-  }
 }
 
 .hero-glyph {
-  font-size: clamp(4rem, 10vw, 7rem);
+  font-size: clamp(2.5rem, 5vw, 3.5rem);
   line-height: 1;
-  filter: drop-shadow(0 4px 14px rgba(94, 200, 255, 0.25));
+  filter: drop-shadow(0 2px 8px rgba(20, 144, 220, 0.25));
+}
+
+.hero-headline {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;       // allow ellipsis on overflow
 }
 
 .hero-temp {
   font-family: var(--font-mono);
   font-weight: 700;
-  font-size: clamp(4rem, 12vw, 7.5rem);
-  line-height: 1;
-  letter-spacing: -0.04em;
-  color: var(--text);
-  text-shadow: 0 0 30px rgba(94, 200, 255, 0.15);
+  font-size: var(--text-display);
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-tight);
+  color: var(--text-bright);
+  text-shadow: 0 0 30px color-mix(in oklab, var(--accent) 18%, transparent);
 }
 
-.hero-tag {
-  margin-top: 0.4rem;
-  font-size: 1.1rem;
-  color: var(--accent);
-  letter-spacing: 0.08em;
+.hero-condition {
+  font-family: var(--font-mono);
+  font-size: var(--text-meta);
+  letter-spacing: var(--tracking-eyebrow);
   text-transform: uppercase;
+  color: var(--accent);
+  font-weight: 600;
 }
 
-.hero-secondary {
-  margin-top: 0.85rem;
+.hero-callouts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-family: var(--font-mono);
+  font-size: var(--text-body-sm);
+  text-align: right;
+  align-self: start;
+  margin-top: var(--space-1);
+}
+
+.hero-callout {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  justify-content: flex-end;
+  &__k {
+    color: var(--text-faint);
+    text-transform: uppercase;
+    font-size: var(--text-micro);
+    letter-spacing: var(--tracking-eyebrow);
+  }
+  &__v {
+    color: var(--text);
+    font-weight: 700;
+  }
+}
+
+// Row 2: telemetry strip. Inline-flex with wrap; each .hero-stat is a
+// {k}{v} pair. Separators between stats render as a thin vertical bar
+// using a border on the right of every item but the last.
+.hero-strip {
   display: flex;
   flex-wrap: wrap;
-  gap: 1.2rem;
+  align-items: baseline;
+  gap: var(--space-2) var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
   font-family: var(--font-mono);
-  font-size: 0.95rem;
-  .kv .k {
+  font-size: var(--text-body-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.hero-stat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  &__k {
     color: var(--text-faint);
-    margin-right: 0.35rem;
     text-transform: uppercase;
-    font-size: 0.72rem;
-    letter-spacing: 0.08em;
+    font-size: var(--text-micro);
+    letter-spacing: var(--tracking-eyebrow);
   }
-  .kv .v {
+  &__v {
     color: var(--text);
     font-weight: 600;
+  }
+}
+
+// Mobile: stack callouts under the headline; strip wraps freely.
+@media (max-width: 600px) {
+  .hero-focal {
+    grid-template-columns: auto 1fr;
+  }
+  .hero-callouts {
+    grid-column: 1 / -1;
+    flex-direction: row;
+    text-align: left;
+    justify-content: space-between;
+    margin-top: 0;
+  }
+  .hero-temp {
+    font-size: clamp(2.5rem, 12vw, 3.5rem);
   }
 }
 
@@ -504,6 +1542,171 @@ a { color: var(--accent); }
   margin-left: 0.2em;
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Panel variants (the "where does the eye land?" design language)
+// ─────────────────────────────────────────────────────────────────────
+// .panel is the default surface. Variants below tune density + accent:
+//
+//   .panel.is-tier-1   primary surface — brand gradient accent stripe
+//                      at the top, slightly larger inner spacing.
+//                      Use ONCE per route.
+//   .panel--metric     big-number focused; tight gap; big-number
+//                      always lives on top, supporting rows below.
+//   .panel--data       table-style dense data; smaller body-sm text,
+//                      compact gap between rows.
+//   .panel--control    interactive controls + forms; comfortable gap,
+//                      no accent treatment.
+//   .panel--compact    shrunk padding (use sparingly — for tertiary
+//                      sidebar-ish panels).
+//
+// All variants share the .panel base glass + radius. Variants only
+// modify padding, gap, type scale, and the optional accent stripe.
+
+// Tier-1: primary surface with the signature brand gradient accent.
+// The ::after stripe is a 3-pixel-tall blue→teal sweep at the top
+// edge — the visual signature that ties the panel to the brand mark.
+.panel.is-tier-1 {
+  padding: var(--space-5) var(--space-6) var(--space-6);
+}
+.panel.is-tier-1::after {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 3px;
+  background: var(--grad-flow);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  pointer-events: none;
+  z-index: 1;
+}
+
+// Tier-2: standard panel with a subtle accent on the title row.
+// (The .panel-title naturally gets the brand-faint eyebrow color.)
+
+// Metric panel: big-number focused. Body lays out as:
+//   <h2 panel-title>
+//   <div panel__metric>     ← big number + unit
+//   <div panel__trend>      ← optional sparkline or chips
+.panel--metric {
+  padding: var(--space-4) var(--space-5) var(--space-5);
+  gap: var(--space-3);
+  .panel__metric {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    font-family: var(--font-mono);
+    font-weight: 700;
+    letter-spacing: var(--tracking-tight);
+    line-height: var(--leading-tight);
+    color: var(--text-bright);
+    .panel__metric-num { font-size: clamp(2.2rem, 4.5vw, 3rem); }
+    .panel__metric-unit {
+      font-size: 0.75em;
+      color: var(--text-dim);
+      letter-spacing: 0;
+    }
+  }
+  .panel__trend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    font-family: var(--font-mono);
+    font-size: var(--text-body-sm);
+    color: var(--text-dim);
+  }
+}
+
+// Data panel: dense list / table. body rows use body-sm + tabular nums.
+.panel--data {
+  padding: var(--space-4) var(--space-5);
+  gap: var(--space-2);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-body-sm);
+}
+
+// Control panel: settings forms. Comfortable rhythm.
+.panel--control {
+  padding: var(--space-5) var(--space-6);
+  gap: var(--space-4);
+}
+
+// Compact: tight everything.
+.panel--compact {
+  padding: var(--space-3) var(--space-4);
+  gap: var(--space-2);
+}
+
+// Standardized panel header row — title on the left, optional action
+// chip or eyebrow on the right. Replaces the inline-style of putting
+// the title in an h2 with no flex container.
+.panel__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+.panel__eyebrow {
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+// Status pill — used by reachability badges, condition tags, etc.
+// .pill (base) + .pill--good / .pill--warn / .pill--hot / .pill--info
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  border: 1px solid var(--border);
+  background: var(--bg-panel-soft);
+  color: var(--text-dim);
+  font-weight: 600;
+  white-space: nowrap;
+
+  &--good {
+    color: var(--accent-good);
+    border-color: color-mix(in oklab, var(--accent-good) 35%, transparent);
+    background: color-mix(in oklab, var(--accent-good) 12%, transparent);
+  }
+  &--info {
+    color: var(--accent);
+    border-color: color-mix(in oklab, var(--accent) 35%, transparent);
+    background: color-mix(in oklab, var(--accent) 12%, transparent);
+  }
+  &--warn {
+    color: var(--accent-warn);
+    border-color: color-mix(in oklab, var(--accent-warn) 35%, transparent);
+    background: color-mix(in oklab, var(--accent-warn) 14%, transparent);
+  }
+  &--hot {
+    color: var(--accent-hot);
+    border-color: color-mix(in oklab, var(--accent-hot) 35%, transparent);
+    background: color-mix(in oklab, var(--accent-hot) 14%, transparent);
+  }
+}
+
+// Trend arrow chip — paired with metric panels. Use ↑ / ↓ / → as
+// content and apply a class for the color.
+.trend {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-family: var(--font-mono);
+  font-size: var(--text-meta);
+
+  &--up   { color: var(--accent-good); }
+  &--down { color: var(--accent-rain); }
+  &--flat { color: var(--text-faint); }
+}
+
 .kv {
   display: flex;
   align-items: baseline;
@@ -538,35 +1741,74 @@ a { color: var(--accent); }
   position: relative;
   width: 200px;
   height: 200px;
+  filter: drop-shadow(0 8px 18px rgba(0, 0, 0, 0.32));
 }
 
-.compass-svg { width: 100%; height: 100%; }
+.compass-svg { width: 100%; height: 100%; overflow: visible; }
 
-.compass-ring {
-  fill: rgba(20, 28, 45, 0.85);
-  stroke: var(--border);
+// Disc backdrop. Outer border is the ring; inner ring + ticks paint
+// over it for depth.
+.compass-disc-border {
+  stroke: var(--border-strong);
   stroke-width: 1;
+}
+.compass-inner-ring {
+  stroke: color-mix(in oklab, var(--text-bright) 8%, transparent);
+  stroke-width: 1;
+}
+
+// 16 rose-of-the-winds ticks. Cardinal four are thicker + brighter
+// so the orientation reads at a glance even when the needle is moving.
+.compass-tick {
+  stroke: var(--text-faint);
+  stroke-width: 1;
+  stroke-linecap: round;
+  opacity: 0.75;
+}
+.compass-tick--cardinal {
+  stroke: var(--text-dim);
+  stroke-width: 2;
+  opacity: 1;
 }
 
 .compass-mark {
   text-anchor: middle;
+  dominant-baseline: central;
   font-family: var(--font-mono);
-  font-size: 7px;
-  fill: var(--text-faint);
-  letter-spacing: 0.05em;
+  font-size: 14px;
+  font-weight: 700;
+  fill: var(--text);
+  letter-spacing: 0.04em;
+}
+.compass-mark--n {
+  fill: var(--accent);
 }
 
+// Needle. Two-tone: the N half is the brand accent (this is where the
+// wind is coming from), the S half is a muted ink tail so it reads as a
+// pointer, not a balanced compass needle.
 .compass-needle {
-  transform-origin: 50px 50px;
+  transform-origin: 100px 100px;
   transition: transform 0.6s cubic-bezier(0.25, 1.5, 0.5, 1);
 }
-
-.needle-shaft {
-  fill: var(--accent-cool);
-  filter: drop-shadow(0 0 4px rgba(109, 181, 255, 0.45));
+.compass-needle-n {
+  filter: drop-shadow(0 0 6px color-mix(in oklab, var(--accent) 55%, transparent));
+}
+.compass-needle-s {
+  opacity: 0.85;
 }
 
-.needle-hub { fill: var(--text); }
+// Hub. A jeweled center for visual depth — outer rim, mid disc with
+// a soft inset gradient, then a small jewel dot of the brand accent.
+.compass-hub-rim {
+  fill: var(--bg-deep);
+  stroke: color-mix(in oklab, var(--text-bright) 25%, transparent);
+  stroke-width: 1;
+}
+.compass-hub-jewel {
+  fill: var(--accent);
+  filter: drop-shadow(0 0 3px color-mix(in oklab, var(--accent) 70%, transparent));
+}
 
 .compass-readout {
   position: absolute;
@@ -838,9 +2080,18 @@ a { color: var(--accent); }
 .radar-map {
   width: 100%;
   height: 480px;
-  background: #050a14;
+  background: var(--bg-deep);
   position: relative;
   z-index: 1;
+}
+
+// Leaflet's bundled stylesheet sets .leaflet-container background to #ddd
+// (light gray) by default. On wide screens where the map is in a flex
+// column it can briefly paint that gray strip below the tiles before
+// invalidateSize() repaints. Force the deep-navy app background so any
+// transient gap is invisible.
+.leaflet-container {
+  background: var(--bg-deep);
 }
 
 .radar-controls {
@@ -867,7 +2118,7 @@ a { color: var(--accent); }
   transition:
     transform 120ms ease,
     box-shadow 160ms ease;
-  &:hover { background: #1f2942; }
+  &:hover { background: color-mix(in oklab, var(--accent) 14%, var(--clay-surface)); }
   &:active {
     transform: scale(0.97);
     box-shadow: var(--clay-shadow-pressed);
@@ -902,7 +2153,7 @@ a { color: var(--accent); }
     transform 140ms cubic-bezier(0.2, 0.8, 0.3, 1),
     box-shadow 180ms ease,
     background 200ms ease;
-  &:hover { background: #1f2942; }
+  &:hover { background: color-mix(in oklab, var(--accent) 14%, var(--clay-surface)); }
   &:active, &.is-pressed {
     transform: scale(0.97);
     box-shadow: var(--clay-shadow-pressed);
@@ -913,23 +2164,32 @@ a { color: var(--accent); }
     transform: none;
   }
 
-  // Tonal variants. Each tints the surface and shifts the active
-  // shadow accent without touching the depth shape.
+  // Tonal variants. Each tints the surface via color-mix from the
+  // brand palette + accent token, so they auto-flip in light mode
+  // without per-variant overrides.
   &.btn-clay-good {
-    background: linear-gradient(180deg, #1d3324 0%, #16261c 100%);
+    background: linear-gradient(180deg,
+      color-mix(in oklab, var(--accent-good) 18%, var(--clay-surface)) 0%,
+      color-mix(in oklab, var(--accent-good) 10%, var(--clay-surface)) 100%);
     color: var(--accent-good);
   }
   &.btn-clay-rain {
-    background: linear-gradient(180deg, #15324a 0%, #102538 100%);
+    background: linear-gradient(180deg,
+      color-mix(in oklab, var(--accent-rain) 22%, var(--clay-surface)) 0%,
+      color-mix(in oklab, var(--accent-rain) 12%, var(--clay-surface)) 100%);
     color: var(--accent-rain);
   }
   &.btn-clay-warm {
-    background: linear-gradient(180deg, #3a2e16 0%, #2a200d 100%);
+    background: linear-gradient(180deg,
+      color-mix(in oklab, var(--accent-warm) 20%, var(--clay-surface)) 0%,
+      color-mix(in oklab, var(--accent-warm) 10%, var(--clay-surface)) 100%);
     color: var(--accent-warm);
   }
   &.btn-clay-hot {
-    background: linear-gradient(180deg, #4a1c1c 0%, #2f0e0e 100%);
-    color: #ff8585;
+    background: linear-gradient(180deg,
+      color-mix(in oklab, var(--accent-hot) 22%, var(--clay-surface)) 0%,
+      color-mix(in oklab, var(--accent-hot) 12%, var(--clay-surface)) 100%);
+    color: var(--accent-hot);
   }
 }
 
@@ -954,7 +2214,7 @@ a { color: var(--accent); }
     width: calc(var(--toggle-h) - 6px);
     height: calc(var(--toggle-h) - 6px);
     border-radius: 50%;
-    background: linear-gradient(180deg, #2c3650 0%, #1a2236 100%);
+    background: var(--clay-surface-raised);
     box-shadow:
       1px 1px 3px var(--clay-shadow-dark),
       -1px -1px 2px var(--clay-shadow-light);
@@ -962,7 +2222,7 @@ a { color: var(--accent); }
   }
 
   &.is-on {
-    background: linear-gradient(180deg, #1d3324 0%, #16261c 100%);
+    background: var(--clay-surface-on);
     &::after {
       transform: translateX(calc(var(--toggle-w) - var(--toggle-h)));
       background: linear-gradient(180deg, #a3e7b4 0%, var(--accent-good) 100%);
@@ -986,7 +2246,7 @@ a { color: var(--accent); }
     width: 22px;
     height: 22px;
     border-radius: 50%;
-    background: linear-gradient(180deg, #2c3650 0%, #1a2236 100%);
+    background: var(--clay-surface-raised);
     box-shadow:
       2px 2px 6px var(--clay-shadow-dark),
       -2px -2px 4px var(--clay-shadow-light);
@@ -999,7 +2259,7 @@ a { color: var(--accent); }
     width: 22px;
     height: 22px;
     border-radius: 50%;
-    background: linear-gradient(180deg, #2c3650 0%, #1a2236 100%);
+    background: var(--clay-surface-raised);
     box-shadow:
       2px 2px 6px var(--clay-shadow-dark),
       -2px -2px 4px var(--clay-shadow-light);
@@ -1018,6 +2278,7 @@ a { color: var(--accent); }
 .bento {
   display: grid;
   gap: 1.5rem;
+  align-items: start;
 }
 
 @media (max-width: 760px) {
@@ -1069,7 +2330,7 @@ a { color: var(--accent); }
 
     &.is-on {
       color: var(--text);
-      background: linear-gradient(180deg, #2c3650 0%, #1a2236 100%);
+      background: var(--clay-surface-raised);
       box-shadow:
         2px 2px 6px var(--clay-shadow-dark),
         -2px -2px 4px var(--clay-shadow-light),
@@ -1134,6 +2395,140 @@ a { color: var(--accent); }
   }
 }
 
+// Wide-screen mosaic: pack the right-hand summary panels side-by-side so the
+// page is shorter and the irrigation summary fits above the fold on a 1920×1200
+// capture. Verdict, zones, history rows stay full-width because each renders
+// its own horizontal flow internally.
+@media (min-width: 1440px) {
+  .bento-irrigation {
+    grid-template-columns: repeat(3, 1fr);
+    grid-template-areas:
+      "verdict        verdict        verdict"
+      "hero           forecast       zone-math"
+      "zones          zones          zones"
+      "water-budget   soil           thresholds"
+      "stop           history        history"
+      "zone-history   zone-history   zone-history";
+  }
+}
+
+@media (min-width: 1920px) {
+  .bento-irrigation {
+    grid-template-columns: repeat(4, 1fr);
+    grid-template-areas:
+      "verdict        verdict        verdict        verdict"
+      "hero           hero           forecast       zone-math"
+      "zones          zones          zones          zones"
+      "water-budget   soil           stop           thresholds"
+      "history        history        zone-history   zone-history";
+  }
+}
+
+// Stack containers for the irrigation sub-routes. Replaces the dense
+// 11-cell bento with simple vertical flow per page; each sub-route
+// only renders 2-4 panels so the eye has room to land.
+.ir-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+// Two-column irrigation layout. v2: hero shrinks to ~38% of the row,
+// forecast/data takes the larger ~62%. The data column is where the
+// reading lives (today's verdict, hourly forecast, threshold callouts),
+// so it deserves more horizontal real estate than the hero card.
+.ir-two-col {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-5);
+}
+@media (min-width: 1024px) {
+  .ir-two-col {
+    grid-template-columns: minmax(320px, 1fr) 1.6fr;
+    align-items: start;
+  }
+}
+
+// Stacked hero column — hero on top, Stop All pill underneath. Stop
+// All keeps its left alignment because it sits inside this flex
+// container, which lets the pill be narrower than the column.
+.ir-hero-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  align-items: stretch;
+}
+
+// Tab nav for the irrigation sub-routes. Sits below the running banner
+.irrigation-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 9;
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.85rem;
+  margin: 0.25rem 0 1rem;
+  background: var(--surface-frosted);
+  backdrop-filter: blur(18px) saturate(150%);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.irrigation-toolbar::-webkit-scrollbar { display: none; }
+
+.irrigation-toolbar-chip {
+  flex: 0 0 auto;
+  padding: 0.42rem 0.95rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 80ms ease, background 120ms ease, border-color 120ms ease;
+}
+.irrigation-toolbar-chip:hover {
+  color: var(--text);
+  background: rgba(94, 200, 255, 0.06);
+  text-decoration: none;
+}
+.irrigation-toolbar-chip.is-active {
+  color: var(--accent);
+  background: rgba(94, 200, 255, 0.10);
+  border-color: rgba(94, 200, 255, 0.35);
+}
+
+// Anchor jump targets sit inside the bento; offset the scroll landing
+// so the section's top edge clears the sticky toolbar plus a small
+// breathing gap. Applied to the cells that carry the chip IDs.
+#ir-today,
+#ir-zones,
+#ir-water-budget,
+#ir-controls,
+#ir-history {
+  scroll-margin-top: 5rem;
+}
+
+// Smooth scroll project-wide is a one-line win for any anchor jump,
+// not just the toolbar. Safe to apply to html since no other surface
+// currently relies on instant-snap.
+html { scroll-behavior: smooth; }
+
+// Mobile breakpoint matches the rest of the app. The mobile irrigation
+// surface (.mobile-irrigation) doesn't render the bento, so the toolbar
+// has nothing to scroll to.
+@media (max-width: 760px) {
+  .irrigation-toolbar { display: none; }
+}
+
 // Advisor explanation tile under the hero (Phase F). Lazy-fetched on
 // hydrate from /api/irrigation/explanation. Quiet states (offline /
 // disabled / running normally) render as a small inline badge so the
@@ -1155,7 +2550,7 @@ a { color: var(--accent); }
   font-size: 0.6rem;
   letter-spacing: 0.18em;
   text-transform: uppercase;
-  color: var(--accent-water, #9bc2f4);
+  color: var(--accent-water);
   padding-top: 0.1rem;
   flex-shrink: 0;
 }
@@ -1376,7 +2771,15 @@ a { color: var(--accent); }
 .water-budget-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: 0.55rem;
+  gap: 0.75rem;
+}
+
+// At 1440+ flow to 4 columns so the per-zone tiles stop spanning
+// 1000+ px on ultrawide. Labels and values land within a comfortable
+// scan distance of each other rather than being pushed to opposite
+// edges of a card half the screen wide.
+@media (min-width: 1440px) {
+  .water-budget-grid { grid-template-columns: repeat(4, 1fr); }
 }
 
 @media (max-width: 760px) {
@@ -1476,13 +2879,18 @@ a { color: var(--accent); }
   padding-top: 0.4rem;
 }
 
+// Two-column grid keeps the label-value pair within a tight visual
+// rhythm: label hugs the left, value sits in its own right-aligned
+// column. The previous flex+space-between pushed them to opposite
+// edges of the card, which on a 1000px-wide tile looked broken
+// rather than tabular.
 .water-budget-row {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(4.5em, auto) 1fr;
   align-items: baseline;
-  gap: 0.5rem;
+  gap: 0.75rem;
   font-family: var(--font-mono);
-  font-size: 0.7rem;
+  font-size: 0.72rem;
 }
 
 .water-budget-row > dt {
@@ -1490,8 +2898,7 @@ a { color: var(--accent); }
   margin: 0;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  font-size: 0.6rem;
-  min-width: 4.5em;
+  font-size: 0.62rem;
 }
 
 .water-budget-row > dd {
@@ -1499,7 +2906,6 @@ a { color: var(--accent); }
   font-variant-numeric: tabular-nums;
   text-align: right;
   margin: 0;
-  flex: 1;
 }
 
 // ------------------------------------------------------------------
@@ -1528,6 +2934,139 @@ a { color: var(--accent); }
   color: var(--text-faint);
   margin: 0 0 0.3rem 0;
 }
+.per-zone-history-head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  margin-bottom: 0.4rem;
+}
+
+// ── Unified per-zone cards ──────────────────────────────────────────
+// One card per zone combining 7-day stats, a 14-day sparkline, and an
+// expand-to-reveal recent-runs list. auto-fit (not auto-fill) so the
+// cards stretch to fill the row instead of leaving empty tracks — a
+// 4-zone deployment lands 4-up on a wide screen rather than 3 + a
+// stranded card.
+.zone-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: var(--space-4);
+}
+
+.zone-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  padding: var(--space-4) var(--space-4) var(--space-2);
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow), inset 0 1px 0 var(--glass-highlight);
+}
+.zone-card__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.zone-card__name {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0;
+  color: var(--text-bright);
+}
+.zone-card__last {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.zone-card__stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.4rem;
+  margin: 0;
+}
+.zone-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.45rem 0.55rem;
+  background: color-mix(in oklab, var(--text-bright) 2%, transparent);
+  border: 1px solid color-mix(in oklab, var(--text-bright) 5%, transparent);
+  border-radius: var(--radius-sm);
+}
+.zone-stat__v {
+  font-family: var(--font-mono);
+  font-size: 1.25rem;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--text-bright);
+  font-variant-numeric: tabular-nums;
+  margin: 0;
+}
+.zone-stat__u {
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--text-dim);
+  margin-left: 1px;
+}
+.zone-stat__k {
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+}
+
+.zone-card__spark {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.zone-card__spark-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.zone-card__spark-label {
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+}
+.zone-card__spark-scale {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  color: var(--text-dim);
+}
+
+.zone-card__toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.45rem 0.1rem 0.3rem;
+  background: none;
+  border: none;
+  border-top: 1px solid var(--glass-border);
+  color: var(--text-dim);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.zone-card__toggle:hover { color: var(--text); }
+.zone-card__chev {
+  display: inline-block;
+  transition: transform 0.15s ease;
+}
+.zone-card__chev.is-open {
+  transform: rotate(90deg);
+  color: var(--accent);
+}
+.zone-card__runs { margin-top: 0.1rem; }
 
 // Summary tiles row (4 wide on desktop).
 .per-zone-summary-grid {
@@ -1629,15 +3168,16 @@ a { color: var(--accent); }
   width: 100%;
   height: 80px;
   display: block;
+  border-bottom: 1px solid var(--glass-border);
 }
 
 .per-zone-daily-bar {
-  fill: rgba(180, 215, 255, 0.7);
+  fill: rgba(77, 210, 255, 0.5);
   rx: 1;
 }
 
 .per-zone-daily-bar-today {
-  fill: rgba(120, 200, 255, 0.95);
+  fill: rgba(77, 210, 255, 0.95);
 }
 
 // Recent-runs list grid (2x2).
@@ -1721,7 +3261,7 @@ a { color: var(--accent); }
 
 .per-zone-run-ok      .per-zone-run-kind { color: rgba(80, 200, 120, 0.95); }
 .per-zone-run-skipped {
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--surface-softer);
 }
 .per-zone-run-skipped .per-zone-run-kind { color: rgba(240, 170, 80, 0.95); }
 .per-zone-run-skipped .per-zone-run-detail { color: var(--text-faint); font-style: italic; }
@@ -1916,6 +3456,21 @@ a { color: var(--accent); }
   letter-spacing: 0.04em;
 }
 
+.verdict-strip-freshness {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  cursor: help;
+  white-space: nowrap;
+}
+
+.verdict-strip-freshness-stale {
+  color: var(--accent-warn);
+  font-weight: 600;
+}
+
 .verdict-strip-cells {
   display: grid;
   grid-template-columns: repeat(7, minmax(0, 1fr));
@@ -1936,7 +3491,7 @@ a { color: var(--accent); }
   padding: 0.7rem 0.5rem 0.6rem;
   border-radius: var(--radius);
   border: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--surface-softer);
   font-family: var(--font-mono);
   text-align: center;
   transition: background 240ms ease, border-color 240ms ease, box-shadow 240ms ease;
@@ -1967,7 +3522,7 @@ a { color: var(--accent); }
     letter-spacing: 0.16em;
     padding: 0.15rem 0.45rem;
     border-radius: 999px;
-    background: rgba(255, 255, 255, 0.04);
+    background: var(--surface-soft);
     color: var(--text-faint);
     border: 1px solid rgba(255, 255, 255, 0.06);
   }
@@ -1995,7 +3550,7 @@ a { color: var(--accent); }
   &-skip-rain {
     border-color: rgba(120, 170, 240, 0.35);
     .verdict-cell-tag {
-      color: #9bc2f4;
+      color: var(--accent-water);
       background: rgba(120, 170, 240, 0.12);
       border-color: rgba(120, 170, 240, 0.45);
     }
@@ -2075,7 +3630,7 @@ a { color: var(--accent); }
   gap: 0.45rem;
   padding: 0.35rem 0.75rem;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--surface-softer);
   border: 1px solid rgba(255, 255, 255, 0.04);
   color: var(--text-faint);
   font-family: var(--font-mono);
@@ -2144,7 +3699,7 @@ a { color: var(--accent); }
   border-radius: 999px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   color: var(--text-faint);
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--surface-softer);
   transition: color 240ms ease, background 240ms ease, border-color 240ms ease;
 
   &.is-on {
@@ -2163,7 +3718,7 @@ a { color: var(--accent); }
 
 .rain-card {
   padding: 0.85rem 1rem;
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--surface-softer);
   border: 1px solid rgba(255, 255, 255, 0.04);
   border-radius: var(--radius);
   display: flex;
@@ -2200,6 +3755,55 @@ a { color: var(--accent); }
   color: var(--accent-rain);
   letter-spacing: 0.04em;
   min-height: 1em; // keep card heights aligned even when hint is empty
+}
+
+// "sheltered" link inside the hint. Surfacing the explanation as a
+// tap-target (title for desktop hover, aria-label for screen readers)
+// and routing through to /settings/sources gives users a path to act
+// on the insight instead of reading opaque jargon and bouncing.
+.rain-card-hint-link {
+  color: var(--accent-warm);
+  text-decoration: none;
+  border-bottom: 1px dashed color-mix(in oklab, var(--accent-warm) 50%, transparent);
+  &:hover {
+    color: var(--text-bright);
+    border-bottom-color: var(--accent-warm);
+    text-decoration: none;
+  }
+}
+
+.rain-card-hint-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1em;
+  height: 1em;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  font-size: 0.55rem;
+  font-weight: 700;
+  margin-left: 0.2em;
+  vertical-align: middle;
+}
+
+// Inline link below the rain cards pointing the user at where source
+// priority + the "treat Tempest as authoritative for rain" toggle live.
+// Small, dimmed; not screaming for attention, but always reachable from
+// the place where the question forms.
+.rain-block-config-link {
+  align-self: flex-end;
+  margin-top: 0.25rem;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  text-decoration: none;
+  border-bottom: 1px dashed transparent;
+  transition: color 80ms ease, border-color 120ms ease;
+  &:hover {
+    color: var(--accent);
+    border-bottom-color: color-mix(in oklab, var(--accent) 50%, transparent);
+  }
 }
 
 .rain-row {
@@ -2376,7 +3980,7 @@ a { color: var(--accent); }
   align-items: center;
   gap: 0.35rem;
   padding: 0.85rem 0.5rem 0.95rem;
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--surface-softer);
   border: 1px solid rgba(255, 255, 255, 0.04);
   border-radius: var(--radius);
   text-align: center;
@@ -2551,7 +4155,7 @@ a { color: var(--accent); }
 // ------------------------------------------------------------------
 
 .radar-legend {
-  background: rgba(15, 19, 28, 0.85);
+  background: var(--surface-frosted);
   -webkit-backdrop-filter: blur(10px) saturate(140%);
   backdrop-filter: blur(10px) saturate(140%);
   border: 1px solid var(--glass-border);
@@ -2662,7 +4266,7 @@ a { color: var(--accent); }
 
 // Style the layer-control too so it matches the legend aesthetically.
 .leaflet-control-layers {
-  background: rgba(15, 19, 28, 0.85) !important;
+  background: var(--surface-frosted) !important;
   -webkit-backdrop-filter: blur(10px) saturate(140%);
   backdrop-filter: blur(10px) saturate(140%);
   border: 1px solid var(--glass-border) !important;
@@ -2686,7 +4290,7 @@ a { color: var(--accent); }
 
 .history-panel {
   position: relative;
-  padding: 1.5rem 1.5rem 1.6rem;
+  padding: var(--space-5);
   background: var(--glass-bg);
   -webkit-backdrop-filter: var(--glass-blur);
   backdrop-filter: var(--glass-blur);
@@ -2697,9 +4301,13 @@ a { color: var(--accent); }
     inset 0 1px 0 var(--glass-highlight);
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: var(--space-4);
   isolation: isolate;
-  overflow: hidden;
+  // overflow:hidden hid the Gantt's horizontal scroll on narrow
+  // viewports; switch to overflow-x:auto so the Gantt scrolls within
+  // the panel instead of clipping.
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .history-head {
@@ -2708,12 +4316,18 @@ a { color: var(--accent); }
   justify-content: space-between;
   gap: 0.85rem;
 }
+.history-head__right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
 
 .history-title {
   margin: 0;
-  font-size: 0.78rem;
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
   font-weight: 600;
-  letter-spacing: 0.16em;
+  letter-spacing: var(--tracking-eyebrow);
   text-transform: uppercase;
   color: var(--text-faint);
 }
@@ -2730,40 +4344,55 @@ a { color: var(--accent); }
 
   .range-btn.is-on {
     color: var(--accent);
-    background: linear-gradient(180deg, #1a2440 0%, #131c30 100%);
+    background: linear-gradient(180deg,
+      color-mix(in oklab, var(--accent) 18%, var(--clay-surface)) 0%,
+      color-mix(in oklab, var(--accent) 10%, var(--clay-surface)) 100%);
   }
 }
 
+// Compliance row — three KPI cards. v3: three equal columns spanning
+// the full panel width, so the row's visual weight matches the Gantt
+// strip directly below it. v2 had auto-fit with a 240px cap that
+// clumped the cards to the left of the panel with empty space to the
+// right, which read as broken layout on wide screens.
 .compliance-row {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 1rem;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+@media (max-width: 720px) {
+  .compliance-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 .compliance-cell {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
-  padding: 0.85rem 1rem;
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid rgba(255, 255, 255, 0.04);
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 0.1rem;
+  padding: 0.7rem 0.9rem;
+  background: color-mix(in oklab, var(--text-bright) 2.5%, transparent);
+  border: 1px solid color-mix(in oklab, var(--text-bright) 5%, transparent);
   border-radius: var(--radius);
-}
-
-.compliance-label {
-  font-family: var(--font-mono);
-  font-size: 0.65rem;
-  color: var(--text-faint);
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
 }
 
 .compliance-value {
   font-family: var(--font-mono);
-  font-size: clamp(1.5rem, 3vw, 2rem);
-  color: var(--text);
+  font-size: clamp(1.7rem, 2.4vw, 2.3rem);
+  line-height: 1.05;
+  color: var(--accent);
   font-weight: 700;
-  letter-spacing: -0.01em;
+  letter-spacing: var(--tracking-tight);
+  font-variant-numeric: tabular-nums;
+}
+
+.compliance-label {
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-eyebrow);
 }
 
 .gantt-wrap {
@@ -2774,7 +4403,7 @@ a { color: var(--accent); }
 
 .gantt {
   width: 100%;
-  height: 130px;
+  height: auto;
   display: block;
 }
 
@@ -2795,6 +4424,287 @@ a { color: var(--accent); }
   fill: var(--accent-rain);
   filter: drop-shadow(0 0 4px rgba(77, 210, 255, 0.4));
   opacity: 0.85;
+  transition: opacity 0.12s ease;
+}
+.gantt-bar:hover { opacity: 1; }
+// Skipped evening — thin amber tick so a dry stretch reads as a marked
+// decision, not just an empty gap in the row.
+.gantt-skip {
+  fill: rgba(240, 170, 80, 0.7);
+  cursor: help;
+}
+.gantt-skip:hover { fill: rgba(240, 170, 80, 1); }
+// Date axis under the track (start / middle / end of the window).
+.gantt-axis {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  fill: var(--text-dim);
+  letter-spacing: 0.04em;
+}
+
+// ── HTML activity timeline ──────────────────────────────────────────
+// Fixed-height rows so labels + row height stay constant at any width;
+// the track stretches to fill. Replaces the single SVG that scaled
+// everything up on ultrawide.
+.timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.timeline__rows {
+  display: flex;
+  flex-direction: column;
+}
+.timeline__row {
+  display: grid;
+  grid-template-columns: 132px 1fr;
+  align-items: center;
+  height: 36px;
+}
+.timeline__label {
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-right: 0.7rem;
+}
+.timeline__track {
+  position: relative;
+  height: 24px;
+  border-radius: 7px;
+  background-color: color-mix(in oklab, var(--text-bright) 2.5%, transparent);
+  // vertical gridlines are layered in via an inline repeating-gradient
+  // background-image (cadence depends on the selected window).
+}
+.timeline__bar {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 14px;
+  min-width: 5px;
+  border-radius: 4px;
+  background: linear-gradient(180deg, #8ce6ff, #2ba6df);
+  box-shadow: 0 0 6px rgba(77, 210, 255, 0.45);
+  cursor: help;
+  transition: filter 0.12s ease;
+}
+.timeline__bar:hover {
+  filter: brightness(1.18);
+}
+.timeline__skip {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  width: 3px;
+  transform: translateX(-50%);
+  border-radius: 2px;
+  background: rgba(240, 170, 80, 0.85);
+  cursor: help;
+}
+.timeline__skip:hover {
+  background: rgba(240, 170, 80, 1);
+}
+.timeline__today {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  right: 0;
+  width: 2px;
+  border-radius: 1px;
+  background: rgba(140, 230, 255, 0.55);
+}
+.timeline__axis {
+  display: grid;
+  grid-template-columns: 132px 1fr;
+}
+.timeline__axis-track {
+  position: relative;
+  height: 1rem;
+}
+.timeline__tick {
+  position: absolute;
+  top: 0;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+// ── Multi-line activity chart ───────────────────────────────────────
+// One colored line per zone, x = day, y = minutes watered that day.
+// SVG holds the paths only (preserveAspectRatio=none + non-scaling
+// stroke), HTML wraps it with the legend, axes, and today marker so
+// type and stroke weight stay crisp at any width.
+.line-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+.line-chart__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+}
+.line-chart__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.1rem;
+}
+.line-chart__legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.3rem 0.55rem;
+  font: inherit;
+  font-size: 0.78rem;
+  color: var(--text);
+  background: color-mix(in oklab, var(--text-bright) 3%, transparent);
+  border: 1px solid color-mix(in oklab, var(--text-bright) 6%, transparent);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
+}
+.line-chart__legend-item:hover {
+  background: color-mix(in oklab, var(--text-bright) 6%, transparent);
+  border-color: color-mix(in oklab, var(--text-bright) 12%, transparent);
+}
+.line-chart__legend-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.line-chart__legend-item.is-off {
+  opacity: 0.45;
+  text-decoration: line-through;
+  text-decoration-color: var(--text-dim);
+}
+.line-chart__legend-item.is-off .line-chart__legend-dot {
+  box-shadow: none;
+  filter: grayscale(0.6) brightness(0.7);
+}
+.line-chart__legend-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  box-shadow: 0 0 6px currentColor;
+}
+.line-chart__scale {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+}
+
+.line-chart__body {
+  display: grid;
+  grid-template-columns: 48px 1fr;
+  height: 240px;
+  gap: 0.4rem;
+}
+.line-chart__yaxis {
+  position: relative;
+}
+.line-chart__ytick {
+  position: absolute;
+  right: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+// Align each label to its gridline: top label hangs below the line,
+// middle is centered, bottom rides above the baseline.
+.line-chart__yaxis .line-chart__ytick:nth-child(1) {
+  transform: translateY(-1px);
+}
+.line-chart__yaxis .line-chart__ytick:nth-child(2) {
+  transform: translateY(-50%);
+}
+.line-chart__yaxis .line-chart__ytick:nth-child(3) {
+  transform: translateY(calc(-100% + 1px));
+}
+
+.line-chart__plot {
+  position: relative;
+  border-bottom: 1px solid var(--glass-border);
+  border-left: 1px solid var(--glass-border);
+}
+.line-chart__svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  overflow: visible;
+}
+.line-chart__grid {
+  stroke: rgba(255, 255, 255, 0.07);
+  stroke-width: 1;
+}
+.line-chart__line {
+  filter: drop-shadow(0 0 5px currentColor);
+  opacity: 0.9;
+  transition: opacity 0.12s ease;
+}
+.line-chart__line:hover {
+  opacity: 1;
+}
+.line-chart__today {
+  position: absolute;
+  top: -2px;
+  bottom: 0;
+  right: 0;
+  width: 2px;
+  background: rgba(140, 230, 255, 0.6);
+  border-radius: 1px;
+  pointer-events: none;
+}
+.line-chart__skips {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -4px;
+  height: 8px;
+  pointer-events: none;
+}
+.line-chart__skip {
+  position: absolute;
+  bottom: 0;
+  transform: translateX(-50%);
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(240, 170, 80, 0.9);
+  box-shadow: 0 0 4px rgba(240, 170, 80, 0.55);
+  cursor: help;
+  pointer-events: auto;
+}
+.line-chart__skip:hover {
+  background: rgba(240, 170, 80, 1);
+}
+
+.line-chart__xaxis {
+  display: grid;
+  grid-template-columns: 48px 1fr;
+  gap: 0.4rem;
+  margin-top: 0.25rem;
+}
+.line-chart__xaxis-spacer {
+  display: block;
+}
+.line-chart__xaxis-track {
+  position: relative;
+  height: 1rem;
+}
+.line-chart__xtick {
+  position: absolute;
+  top: 0;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  color: var(--text-dim);
+  white-space: nowrap;
 }
 
 // ------------------------------------------------------------------
@@ -2802,15 +4712,27 @@ a { color: var(--accent); }
 // .hero (weather), plus a per-state accent glow.
 // ------------------------------------------------------------------
 
+// Irrigation hero — tier-1 surface. v4 design:
+//   - v3's 220px min-height + clamp(3.5rem, 6vw, 5.5rem) glyph read
+//     as cramped next to the wide forecast panel on ultrawide; v4
+//     pushes both up. The hero should anchor the page, not compete
+//     with the data panels next to it for visual weight.
+//   - Glyph: clamp(4rem, 7vw, 7rem). Headline: clamp(2.4rem, 4vw,
+//     3.4rem). Padding: space-6/space-7 (24/32px).
+//   - min-height: 300px on desktop (was 220), cleared on phones.
+//   - Brand gradient accent stripe via the .is-tier-1 token block.
 .next-run-hero {
   position: relative;
   display: grid;
   grid-template-columns: auto 1fr;
-  gap: 1.5rem;
+  gap: var(--space-6);
   align-items: center;
-  padding: 2rem 1.75rem;
+  padding: var(--space-6) var(--space-7);
+  min-height: 300px;
   background:
-    linear-gradient(135deg, rgba(18, 32, 54, 0.55) 0%, rgba(13, 21, 37, 0.55) 100%),
+    linear-gradient(135deg,
+      color-mix(in oklab, var(--accent) 12%, transparent) 0%,
+      transparent 60%),
     var(--glass-bg);
   -webkit-backdrop-filter: var(--glass-blur);
   backdrop-filter: var(--glass-blur);
@@ -2821,57 +4743,63 @@ a { color: var(--accent); }
     inset 0 1px 0 var(--glass-highlight);
   isolation: isolate;
   overflow: hidden;
-  height: 100%;
-  min-height: 280px;
 }
 
 .next-run-hero::before {
   content: "";
   position: absolute;
   inset: 0 0 auto 0;
-  height: 60%;
-  background: radial-gradient(
-    ellipse at 30% 0%,
-    rgba(255, 255, 255, 0.07),
-    transparent 70%
-  );
+  height: 3px;
+  background: var(--grad-flow);
   pointer-events: none;
-  z-index: -1;
+  z-index: 1;
+}
+
+// On phone-sized viewports the 220px floor adds empty space below
+// short hero content (e.g. "Running now" with no skip breakdown).
+// Let the card collapse to fit its content there; the floor is only
+// meaningful when the hero sits next to a wider stop-all panel.
+@media (max-width: 760px) {
+  .next-run-hero {
+    min-height: 0;
+    padding: var(--space-4) var(--space-5);
+    gap: var(--space-4);
+  }
 }
 
 .next-run-glyph {
-  font-size: clamp(4rem, 9vw, 6.5rem);
+  font-size: clamp(4rem, 7vw, 7rem);
   line-height: 1;
-  filter: drop-shadow(0 4px 14px rgba(94, 200, 255, 0.25));
+  filter: drop-shadow(0 2px 8px color-mix(in oklab, var(--accent) 24%, transparent));
 }
 
 .next-run-body {
   display: flex;
   flex-direction: column;
-  gap: 0.6rem;
+  gap: var(--space-1);
 }
 
 .next-run-eyebrow {
   font-family: var(--font-mono);
-  letter-spacing: 0.18em;
+  letter-spacing: var(--tracking-eyebrow);
   text-transform: uppercase;
   color: var(--text-faint);
-  font-size: 0.72rem;
+  font-size: var(--text-micro);
 }
 
 .next-run-headline {
   margin: 0;
   font-family: var(--font-mono);
-  font-size: clamp(2.4rem, 6vw, 3.6rem);
+  font-size: clamp(2.4rem, 4vw, 3.4rem);
   font-weight: 700;
-  letter-spacing: -0.02em;
-  line-height: 1.05;
-  text-shadow: 0 0 30px rgba(94, 200, 255, 0.12);
+  letter-spacing: var(--tracking-tight);
+  line-height: var(--leading-tight);
+  color: var(--text-bright);
 }
 
 .next-run-tag {
   font-family: var(--font-mono);
-  font-size: 0.85rem;
+  font-size: var(--text-body-sm);
   letter-spacing: 0.06em;
   color: var(--accent);
   text-transform: uppercase;
@@ -2922,6 +4850,27 @@ a { color: var(--accent); }
     .sk-mark { color: var(--accent-warm); }
     .sk-value { color: var(--accent-warm); }
   }
+}
+
+// ------------------------------------------------------------------
+// Nerd mode reveal. The Advanced > Nerd mode toggle sets
+// data-nerd="true" on <html>. Two effects:
+//   1. `.nerd-only` blocks (forecast-intelligence, water-budget,
+//      day-block on the irrigation Today panel) are hidden by default
+//      and revealed in nerd mode.
+//   2. In the skip breakdown, simple mode shows only rows that
+//      actually tripped the check; nerd mode shows all 9 inputs.
+//      When nothing trips and nerd is off the breakdown container
+//      itself collapses, so the hero doesn't carry empty margin.
+// ------------------------------------------------------------------
+.nerd-only { display: none; }
+html[data-nerd="true"] .nerd-only { display: revert; }
+
+html:not([data-nerd="true"]) .skip-breakdown .sk-row:not(.sk-row-tripped) {
+  display: none;
+}
+html:not([data-nerd="true"]) .skip-breakdown:not(:has(.sk-row-tripped)) {
+  display: none;
 }
 
 // ------------------------------------------------------------------
@@ -2988,9 +4937,16 @@ a { color: var(--accent); }
   }
 
   &.zone-card-disabled {
-    opacity: 0.55;
+    // Mute the content, not the tile itself. The previous
+    // `opacity: 0.55` on the card faded its background-fill too, so on
+    // light mode the white card surface vanished into the page bg.
+    // Applying opacity to direct children keeps the white card visible.
+    > * {
+      opacity: 0.55;
+    }
     .zone-card-badge {
       color: var(--text-faint);
+      opacity: 0.8;
     }
   }
 }
@@ -3096,51 +5052,94 @@ a { color: var(--accent); }
 // it's visually unmistakable. Disabled (faded) when no zones run.
 // ------------------------------------------------------------------
 
+// ─────────────────────────────────────────────────────────────────────
+// Emergency Stop — compact inline pill, NOT a full-width glass panel.
+// Sits directly under the hero, anchored left so it doesn't span the
+// page. Uses solid danger red when armed (any zone running) so it's
+// genuinely unmistakable. When no zones are running it grays out.
+// ─────────────────────────────────────────────────────────────────────
+
 .stop-all {
-  position: relative;
-  padding: 1.5rem 1.5rem 1.6rem;
-  background: var(--glass-bg);
-  -webkit-backdrop-filter: var(--glass-blur);
-  backdrop-filter: var(--glass-blur);
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-lg);
-  box-shadow:
-    var(--shadow),
-    inset 0 1px 0 var(--glass-highlight);
-  display: flex;
-  flex-direction: column;
-  gap: 0.85rem;
-  height: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  align-self: flex-start;
+  padding: var(--space-2) var(--space-3) var(--space-2) var(--space-4);
+  background: color-mix(in oklab, var(--accent-danger) 14%, var(--bg-panel));
+  border: 1px solid color-mix(in oklab, var(--accent-danger) 45%, transparent);
+  border-radius: 999px;
+  box-shadow: 0 4px 18px color-mix(in oklab, var(--accent-danger) 22%, transparent);
   isolation: isolate;
-  overflow: hidden;
 }
 
 .stop-all-title {
   margin: 0;
-  font-size: 0.78rem;
-  font-weight: 600;
-  letter-spacing: 0.16em;
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  font-weight: 700;
+  letter-spacing: var(--tracking-eyebrow);
   text-transform: uppercase;
-  color: var(--text-faint);
+  color: var(--accent-danger);
 }
 
 .stop-all-help {
   margin: 0;
-  font-size: 0.85rem;
+  font-size: var(--text-body-sm);
   color: var(--text-dim);
-  line-height: 1.4;
+  line-height: var(--leading-snug);
+  flex: 1;
+  min-width: 0;
 }
 
+// Actually-red button. Solid danger fill (not the faint clay tint the
+// .btn-clay-hot variant was producing). White text, sharp red glow on
+// hover, scales-down press feedback.
 .stop-all-btn {
-  margin-top: auto;
-  font-size: 1rem;
-  padding: 1rem 1.2rem;
-  letter-spacing: 0.16em;
+  flex-shrink: 0;
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-body);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #ffffff;
+  background: var(--accent-danger);
+  border: 1px solid color-mix(in oklab, var(--accent-danger) 70%, #000);
+  border-radius: 999px;
+  padding: 0.55rem 1.1rem;
+  cursor: pointer;
+  box-shadow:
+    0 2px 0 color-mix(in oklab, var(--accent-danger) 50%, #000),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  transition: transform 80ms ease, box-shadow 120ms ease, background 120ms ease;
 
-  &:disabled, &[aria-disabled="true"] {
-    opacity: 0.4;
-    cursor: not-allowed;
+  &:hover {
+    background: color-mix(in oklab, var(--accent-danger) 88%, #fff);
+    box-shadow:
+      0 4px 16px color-mix(in oklab, var(--accent-danger) 50%, transparent),
+      0 2px 0 color-mix(in oklab, var(--accent-danger) 50%, #000),
+      inset 0 1px 0 rgba(255, 255, 255, 0.22);
   }
+  &:active { transform: translateY(1px); box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.35); }
+
+  // Disarmed state — gray + faint. Not loud when there's nothing to stop.
+  &:disabled, &[aria-disabled="true"] {
+    background: var(--bg-panel-soft);
+    color: var(--text-faint);
+    border-color: var(--border);
+    box-shadow: none;
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+}
+
+// Disarmed state on the parent pill — tones the whole thing down so
+// the disabled button doesn't look like a partially-active warning.
+.stop-all:has(.stop-all-btn:disabled) {
+  background: var(--bg-panel-soft);
+  border-color: var(--border);
+  box-shadow: none;
+  .stop-all-title { color: var(--text-faint); }
 }
 
 // ------------------------------------------------------------------
@@ -3259,7 +5258,7 @@ a { color: var(--accent); }
   justify-content: space-between;
   gap: 0.85rem;
   padding: 0.6rem 0.85rem;
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--surface-softer);
   border: 1px solid rgba(255, 255, 255, 0.04);
   border-radius: var(--radius);
 
@@ -3287,7 +5286,7 @@ a { color: var(--accent); }
 
 // Re-skin Leaflet's stock layer control to match the dark panel.
 .leaflet-control-layers {
-  background: rgba(15, 19, 28, 0.92) !important;
+  background: var(--surface-frosted-strong) !important;
   color: var(--text);
   border: 1px solid var(--border) !important;
   border-radius: 10px !important;
@@ -3794,7 +5793,7 @@ a { color: var(--accent); }
   padding: 0.55rem 0.75rem;
   border-radius: 10px;
   border: 1px solid var(--glass-border);
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--surface-softer);
 }
 
 .mobile-history-row.is-skip {
@@ -3955,7 +5954,7 @@ a { color: var(--accent); }
 }
 
 .mobile-zone-math-row-cap.is-binding > dd {
-  color: var(--accent-warn, #e6a44b);
+  color: var(--accent-warn);
 }
 
 .mobile-zone-math-row-final {
@@ -4026,7 +6025,7 @@ a { color: var(--accent); }
   padding-bottom: calc(1rem + env(safe-area-inset-bottom));
   border-top-left-radius: 20px;
   border-top-right-radius: 20px;
-  background: rgba(15, 19, 28, 0.95);
+  background: var(--surface-frosted-strong);
   -webkit-backdrop-filter: blur(20px) saturate(180%);
   backdrop-filter: blur(20px) saturate(180%);
   border-top: 1px solid var(--glass-border);
@@ -4091,7 +6090,7 @@ a { color: var(--accent); }
 .duration-chip {
   appearance: none;
   border: 1px solid var(--glass-border);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--surface-soft);
   color: var(--text-bright);
   border-radius: 999px;
   padding: 0.55rem 0.25rem;
@@ -4299,7 +6298,7 @@ a { color: var(--accent); }
 .radar-map .leaflet-bar a,
 .radar-map .leaflet-control-layers,
 .radar-map .leaflet-control-attribution {
-  background: rgba(15, 19, 28, 0.88);
+  background: var(--surface-frosted-strong);
   -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
   color: var(--text-bright);
@@ -4318,12 +6317,12 @@ a { color: var(--accent); }
 }
 
 .radar-map .leaflet-bar a.leaflet-disabled {
-  background: rgba(15, 19, 28, 0.55);
+  background: var(--glass-bg);
   color: var(--text-dim);
 }
 
 .radar-map .leaflet-control-layers-toggle {
-  background-color: rgba(15, 19, 28, 0.88);
+  background-color: var(--surface-frosted-strong);
   // Default Leaflet ships a layers-icon background-image on the toggle;
   // keep that and just darken the surrounding chip.
 }
@@ -4376,7 +6375,7 @@ a { color: var(--accent); }
   padding: 0.45rem 0.85rem;
   border-radius: 999px;
   border: 1px solid var(--glass-border);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--surface-soft);
   color: var(--text-dim);
   font-family: var(--font-mono);
   font-size: 0.78rem;
@@ -4480,7 +6479,7 @@ a { color: var(--accent); }
   padding: 0.65rem 0.75rem;
   border-radius: 10px;
   border: 1px solid var(--glass-border);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--surface-soft);
   color: var(--text-bright);
   color-scheme: dark; // hint to the calendar/time pickers on iOS/Chrome
 }
@@ -4680,39 +6679,82 @@ a { color: var(--accent); }
   border: 2px solid var(--bg-deep);
   cursor: pointer;
 }
-.ui-slider__value {
+// Editable value box sitting to the right of the range track. The
+// number input is the manual-entry counterpart to dragging the slider;
+// both drive the same signal. Suffix (unit) renders verbatim beside it.
+.ui-slider__entry {
+  display: flex;
+  align-items: baseline;
+  flex: none;
+}
+.ui-slider__num {
   font-family: var(--font-mono);
   color: var(--accent);
-  min-width: 64px;
+  width: 4.5em;
   text-align: right;
+  background: var(--bg-panel-soft);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  padding: 0.25rem 0.4rem;
+  -moz-appearance: textfield;
+}
+.ui-slider__num::-webkit-outer-spin-button,
+.ui-slider__num::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.ui-slider__num:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.ui-slider__suffix {
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  white-space: pre;
+  margin-left: 0.15rem;
 }
 
 // ---- .ui-segmented ----
+//
+// Wraps to multiple rows when the option set is too wide for the
+// container. Buttons keep their label on a single line (white-space:
+// nowrap) so we never get the "B-/hyve" / "Rain/ Bird" hyphenation
+// shown in the v1 controllers page. The control fills its parent
+// inline-flex so we use the full width of a settings panel.
 .ui-segmented {
-  display: inline-flex;
+  display: flex;
+  flex-wrap: wrap;
+  align-self: stretch;
   background: var(--bg-panel-soft);
   border: 1px solid var(--border);
   border-radius: 10px;
-  padding: 3px;
+  padding: 4px;
   gap: 2px;
 }
 .ui-segmented__option {
+  flex: 1 1 auto;
   background: transparent;
   border: none;
   color: var(--text-dim);
-  padding: 0.5rem 0.95rem;
+  padding: 0.55rem 0.85rem;
   border-radius: 7px;
-  font-size: 0.9rem;
+  font-size: var(--text-body-sm);
+  font-weight: 500;
+  white-space: nowrap;
   cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease;
-  min-height: 36px;
+  min-height: 38px;
+  text-align: center;
 }
 .ui-segmented__option--active {
   background: var(--accent);
-  color: var(--bg-deep);
+  color: #ffffff;
   font-weight: 600;
 }
-.ui-segmented__option:hover:not(.ui-segmented__option--active) { color: var(--text); }
+.ui-segmented__option:hover:not(.ui-segmented__option--active) {
+  color: var(--text);
+  background: color-mix(in oklab, var(--accent) 8%, transparent);
+}
 
 // ---- .ui-form-field ----
 .ui-form-field {
@@ -4754,21 +6796,126 @@ a { color: var(--accent); }
 
 // ---- Settings UI ----
 .settings-page {
-  max-width: 720px;
+  // Use available width up to a wide-enough cap to comfortably show a
+  // segmented control with 8 options + a populated form column without
+  // hyphenating button labels. Below 1280px we use whatever's there;
+  // 60ch caps apply per-element (subtitle, helptext) to keep paragraphs
+  // readable without starving form widgets of horizontal space.
+  max-width: 1280px;
   margin: 0 auto;
-  padding: 1.25rem 1rem 5rem;
+  padding: var(--space-5) var(--space-6) var(--space-9);
+  // Stack header + panels with breathing room so each section reads as
+  // its own block instead of a continuous slab of glass. Per-element
+  // margin-bottom on the header is reset below so this gap is the only
+  // source of vertical rhythm here.
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
 }
-.settings-page__header { margin-bottom: 1.5rem; }
+.settings-page > .settings-page__header {
+  margin-bottom: 0;
+}
+
+// Section anchors inside settings panels. The default <h2> + a tiny
+// eyebrow felt the same across every panel; bumping the title weight
+// and pulling a faint hairline under the header anchors each section
+// so the page reads as distinct blocks at a glance.
+.settings-page .panel__title {
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  color: var(--text-bright);
+  line-height: 1.2;
+  margin: 0;
+}
+.settings-page .panel__header {
+  padding-bottom: var(--space-3);
+  margin-bottom: var(--space-1);
+  border-bottom: 1px solid color-mix(in oklab, var(--text-bright) 6%, transparent);
+}
+// When the edit form is open, give its panel a faint accent tint on
+// the left edge so it reads as an active editing surface vs the
+// surrounding read-only panels.
+.settings-page [id$="-form-panel"] > .panel {
+  border-left: 2px solid color-mix(in oklab, var(--accent) 55%, transparent);
+  box-shadow:
+    var(--shadow),
+    inset 0 1px 0 var(--glass-highlight),
+    inset 2px 0 0 0 color-mix(in oklab, var(--accent) 18%, transparent);
+}
+
+// Field grid for the single-form settings pages. Denser than the
+// default .grid (240px vs 320px min) so short threshold fields pack
+// 3-4 per row inside the 1280px page cap instead of stretching one
+// wide field per line — the tall-skinny-column problem on wide screens.
+.settings-field-grid {
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--space-4) var(--space-5);
+}
+
+// Action row at the bottom of a settings form (Save / Reset).
+.settings-actions {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-top: var(--space-6);
+}
+.settings-page__header { margin-bottom: var(--space-6); }
 .settings-page__back {
   display: inline-block;
   color: var(--accent);
   text-decoration: none;
-  font-size: 0.95rem;
-  margin-bottom: 0.5rem;
+  font-size: var(--text-body);
+  margin-bottom: var(--space-2);
+  &:hover { text-decoration: underline; }
 }
-.settings-page__back:hover { text-decoration: underline; }
-.settings-page__title { margin: 0.25rem 0 0.5rem; color: var(--text); }
-.settings-page__subtitle { color: var(--text-dim); font-size: 0.95rem; line-height: 1.55; max-width: 60ch; }
+.settings-page__title {
+  margin: var(--space-1) 0 var(--space-2);
+  color: var(--text-bright);
+  font-size: var(--text-h1);
+  font-weight: 700;
+  letter-spacing: var(--tracking-tight);
+}
+.settings-page__subtitle {
+  color: var(--text-dim);
+  font-size: var(--text-body);
+  line-height: var(--leading-normal);
+  max-width: 60ch;
+}
+
+// Two-up grouped layout — Hardware, Logic, App side by side at desktop
+// widths; stacks to single column under 760px. Each group is a panel,
+// keeping the surface system consistent with the rest of the app.
+.settings-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--space-5);
+}
+
+// (legacy .settings-group padding removed — the v2 SettingsShell defines
+// .settings-group as a flush flex column below; the stale 16px top padding
+// here was pushing the left column's group headers down out of alignment
+// with the detail pane's "Configuration" header.)
+
+.settings-group__header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: 0 var(--space-2);
+}
+.settings-group__title {
+  margin: 0;
+  font-size: var(--text-h2);
+  color: var(--text-bright);
+  font-weight: 700;
+  letter-spacing: var(--tracking-tight);
+}
+.settings-group__subtitle {
+  margin: 0;
+  font-size: var(--text-body-sm);
+  color: var(--text-dim);
+  line-height: var(--leading-normal);
+}
 
 .settings-list {
   list-style: none;
@@ -4776,29 +6923,340 @@ a { color: var(--accent); }
   margin: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 2px;
 }
 .settings-list__item {
   display: flex;
   align-items: center;
-  gap: 1rem;
-  padding: 0.85rem 0.75rem;
-  border-radius: 10px;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-2);
+  border-radius: var(--radius-sm);
   text-decoration: none;
   color: var(--text);
-  min-height: 60px;
+  min-height: 56px;
+  transition: background 120ms ease, color 80ms ease;
+  position: relative;
+
+  &:hover {
+    background: color-mix(in oklab, var(--accent) 7%, transparent);
+    .settings-list__chevron { color: var(--accent); transform: translateX(2px); }
+    .settings-list__icon { transform: scale(1.05); }
+  }
+  &:focus-visible {
+    background: color-mix(in oklab, var(--accent) 10%, transparent);
+  }
 }
-.settings-list__item:hover { background: var(--bg-panel-soft); }
 .settings-list__icon {
   font-size: 1.4rem;
   width: 32px;
   text-align: center;
   flex-shrink: 0;
+  transition: transform 200ms cubic-bezier(0.2, 0.8, 0.3, 1);
 }
-.settings-list__text { display: flex; flex-direction: column; flex: 1; gap: 0.15rem; }
-.settings-list__label { color: var(--text); font-weight: 500; }
-.settings-list__helptext { color: var(--text-dim); font-size: 0.85rem; }
-.settings-list__chevron { color: var(--text-faint); font-size: 1.4rem; }
+.settings-list__text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+}
+.settings-list__label {
+  color: var(--text-bright);
+  font-weight: 600;
+  font-size: var(--text-body);
+}
+.settings-list__helptext {
+  color: var(--text-dim);
+  font-size: var(--text-body-sm);
+  line-height: var(--leading-snug);
+  // Truncate long helptext lines on very narrow viewports so the
+  // list-row height stays steady.
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.settings-list__chevron {
+  color: var(--text-faint);
+  font-size: 1.4rem;
+  transition: color 80ms ease, transform 180ms ease;
+}
+
+// ============================================================
+// Settings UI kit — polished list items for the configuration
+// pages. SettingsCard / SettingsBadge / SettingsKv components in
+// src/components/settings_ui.rs render against these classes.
+//
+// Goals (driven by user feedback that the old list-item-with-edit
+// pattern "looked cheap and felt cheap"):
+//   - Click row to expand details inline, no edit mode required.
+//   - Status visible at a glance via color-coded badges.
+//   - Edit / Delete / Make-default sit alongside the read-only
+//     view, not behind a separate edit button.
+//   - Glass surface + per-state accent stripe for visual rhythm
+//     matching the rest of the app.
+// ============================================================
+
+.settings-card-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+// Devices panel (Phase D). Section intro + the per-device child list.
+.settings-section-head {
+  margin-bottom: var(--space-4);
+}
+.settings-section-head__title {
+  margin: 0 0 var(--space-1);
+}
+.settings-section-head__sub {
+  margin: 0;
+  color: var(--text-dim);
+  max-width: 70ch;
+}
+.settings-empty {
+  color: var(--text-dim);
+  padding: var(--space-4) 0;
+}
+.device-child-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.device-child {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-1) 0;
+  border-bottom: 1px solid var(--glass-border);
+
+  &:last-child {
+    border-bottom: none;
+  }
+}
+.device-child__meta {
+  color: var(--text-dim);
+  font-size: 0.85em;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+.device-child-empty {
+  color: var(--text-dim);
+  margin: 0;
+}
+
+.settings-card {
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  transition: border-color 120ms ease, box-shadow 200ms ease;
+
+  &:hover {
+    border-color: color-mix(in oklab, var(--accent) 32%, var(--glass-border));
+  }
+
+  &.is-expanded {
+    border-color: color-mix(in oklab, var(--accent) 48%, var(--glass-border));
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+  }
+}
+
+.settings-card__header {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  background: transparent;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+
+  &:hover {
+    background: color-mix(in oklab, var(--accent) 5%, transparent);
+  }
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+}
+
+.settings-card__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-sm);
+  font-size: 1.2rem;
+  background: color-mix(in oklab, var(--text-bright) 4%, transparent);
+  color: var(--accent);
+}
+
+.settings-card__head-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.settings-card__title {
+  color: var(--text-bright);
+  font-weight: 600;
+  font-size: var(--text-body);
+  font-family: var(--font-mono);
+  letter-spacing: var(--tracking-tight);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-card__subtitle {
+  color: var(--text-dim);
+  font-size: var(--text-body-sm);
+  font-family: var(--font-mono);
+  letter-spacing: 0.02em;
+}
+
+.settings-card__badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.settings-card__chevron {
+  color: var(--text-faint);
+  font-size: 1.4rem;
+  transition: color 80ms ease, transform 180ms cubic-bezier(0.2, 0.8, 0.3, 1);
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+
+  &.is-open {
+    color: var(--accent);
+    transform: rotate(90deg);
+  }
+}
+
+.settings-card__body {
+  // CSS-only collapse. The body has two direct children (the KV grid
+  // and the action row); the earlier grid-template-rows trick was
+  // single-row and let the action row leak through in implicit row 2,
+  // and the multi-row variant resolved both rows to 0 in the open
+  // state. Using max-height + opacity clips both children uniformly
+  // when collapsed and reveals them together when expanded.
+  max-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: max-height 260ms ease, opacity 200ms ease;
+}
+
+.settings-card.is-expanded .settings-card__body {
+  // Cap is intentionally generous so any realistic card (long KV
+  // list + several action buttons) fits without being clipped.
+  max-height: 1600px;
+  opacity: 1;
+}
+
+.settings-card__kvs {
+  margin: 0;
+  padding: var(--space-2) var(--space-4) var(--space-4);
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-2) var(--space-5);
+  border-top: 1px solid color-mix(in oklab, var(--text-bright) 6%, transparent);
+}
+
+.settings-kv {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.settings-kv__label {
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin: 0;
+}
+
+.settings-kv__value {
+  font-family: var(--font-mono);
+  font-size: var(--text-body-sm);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  margin: 0;
+  word-break: break-word;
+}
+
+.settings-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: 0 var(--space-4) var(--space-4);
+  &:empty { display: none; }
+}
+
+// Semantic status pills. Same tokens used by .source-status-pill etc.
+// but with the polished card-internal sizing.
+.settings-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.18rem 0.55rem;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--text-bright) 6%, transparent);
+  color: var(--text-dim);
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.settings-badge--accent {
+  color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 14%, transparent);
+  border-color: color-mix(in oklab, var(--accent) 35%, transparent);
+}
+.settings-badge--good {
+  color: var(--accent-good);
+  background: color-mix(in oklab, var(--accent-good) 14%, transparent);
+  border-color: color-mix(in oklab, var(--accent-good) 35%, transparent);
+}
+.settings-badge--muted {
+  color: var(--text-faint);
+}
+.settings-badge--warm {
+  color: var(--accent-warm);
+  background: color-mix(in oklab, var(--accent-warm) 14%, transparent);
+  border-color: color-mix(in oklab, var(--accent-warm) 35%, transparent);
+}
+.settings-badge--danger {
+  color: #ff7373;
+  background: color-mix(in oklab, #ff7373 14%, transparent);
+  border-color: color-mix(in oklab, #ff7373 35%, transparent);
+}
 
 // ---- Theme picker grid ----
 .theme-grid {
@@ -4994,6 +7452,172 @@ a { color: var(--accent); }
   font-weight: 600;
 }
 .setup-footer__btn--primary:hover { filter: brightness(1.08); }
+// Destructive action (Delete). Red-tinted ghost button so the action
+// reads as dangerous at a glance without dominating the row visually.
+.setup-footer__btn--danger {
+  color: #ff7676;
+  background: color-mix(in oklab, #ff7676 8%, transparent);
+  border: 1px solid color-mix(in oklab, #ff7676 45%, transparent);
+}
+.setup-footer__btn--danger:hover {
+  color: #ffd0d0;
+  background: color-mix(in oklab, #ff7676 22%, transparent);
+  border-color: #ff7676;
+  box-shadow: 0 0 0 1px color-mix(in oklab, #ff7676 25%, transparent),
+              0 0 12px color-mix(in oklab, #ff7676 35%, transparent);
+}
+.setup-footer__btn--danger:focus-visible {
+  outline: 2px solid #ff7676;
+  outline-offset: 1px;
+}
+
+// Action row at the bottom of a settings *form panel* (add/edit form).
+// Cancel sits on the left, the primary commit (Add to list / Save X
+// changes) on the right, paired so the user does not have to scroll
+// up to reach Cancel as they did when the only Cancel lived in the
+// top toggle.
+.settings-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-top: var(--space-4);
+}
+// Cancel/Save sit next to each other on the right of the row. The
+// global `.setup-footer__btn--primary` rule has `margin-left:auto`
+// for the setup-wizard footer layout, which here would push Save to
+// the far right edge and leave Cancel stranded on the left. Reset it
+// in this context so the gap between them is just the row's gap.
+.settings-form-actions .setup-footer__btn--primary {
+  margin-left: 0;
+}
+
+// ── PhotoField ──────────────────────────────────────────────────────
+// Drop-zone + browse button + URL text fallback, used by the zone form.
+.photo-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.photo-field__drop {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 180px;
+  padding: 1rem;
+  border: 1.5px dashed color-mix(in oklab, var(--text-bright) 18%, transparent);
+  border-radius: var(--radius);
+  background: color-mix(in oklab, var(--text-bright) 2%, transparent);
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.photo-field__drop:hover {
+  border-color: color-mix(in oklab, var(--accent) 50%, transparent);
+}
+.photo-field__drop.is-drag {
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 10%, transparent);
+}
+.photo-field__drop.has-image {
+  padding: 0;
+  border-style: solid;
+  border-color: color-mix(in oklab, var(--text-bright) 10%, transparent);
+  background: var(--bg-deep);
+}
+
+.photo-field__hint {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  text-align: center;
+  pointer-events: none;
+}
+.photo-field__hint > * {
+  pointer-events: auto;
+}
+.photo-field__hint-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--accent) 18%, transparent);
+  color: var(--accent);
+  font-size: 1.4rem;
+  font-weight: 600;
+  line-height: 1;
+}
+.photo-field__hint-text {
+  color: var(--text);
+  font-size: 0.92rem;
+}
+.photo-field__hint-meta {
+  color: var(--text-faint);
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+}
+.photo-field__browse-link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.photo-field__browse-link:hover {
+  color: var(--text-bright);
+}
+
+.photo-field__preview {
+  display: block;
+  max-width: 100%;
+  max-height: 320px;
+  border-radius: calc(var(--radius) - 1px);
+  object-fit: contain;
+}
+.photo-field__clear {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid var(--glass-border);
+  background: color-mix(in oklab, #000 50%, transparent);
+  color: var(--text-bright);
+  font-size: 1.1rem;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.photo-field__clear:hover {
+  background: rgba(255, 118, 118, 0.4);
+  border-color: #ff7676;
+  color: #ffd0d0;
+}
+
+.photo-field__status {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+.photo-field__error {
+  margin: 0;
+  font-size: 0.78rem;
+  color: #ff9696;
+}
+.photo-field__url {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+}
 
 // shared input style used inside setup + settings forms
 .ui-input {
@@ -5072,3 +7696,1235 @@ a { color: var(--accent); }
 .setup-source-list li:last-child { border-bottom: none; }
 .setup-source-list li strong { color: var(--text); margin-right: 0.4rem; }
 .setup-source-list__planned { color: var(--text-faint); font-style: italic; }
+
+/* ── Kiosk / read-only mode ──────────────────────────────────────────
+   Set via Settings -> Advanced -> "Kiosk mode" (stored in
+   localStorage.readonly). The app.rs boot script applies
+   data-readonly="true" to <html> synchronously before first paint, so
+   destructive controls are hidden before any tap is possible.
+
+   We hide the buttons rather than disable them: a tap on a hidden
+   element is impossible, whereas a tap on a disabled button still
+   surfaces the hit area on touch devices. Status displays (running
+   zones, verdict, history) stay fully visible. */
+html[data-readonly="true"] .stop-all,
+html[data-readonly="true"] .stop-all-btn,
+html[data-readonly="true"] .zone-actions,
+html[data-readonly="true"] .zone-stop-btn,
+html[data-readonly="true"] .mobile-zone-actions,
+html[data-readonly="true"] .thresholds-panel,
+html[data-readonly="true"] .vacation-pause-row,
+html[data-readonly="true"] .override-tomorrow-row,
+html[data-readonly="true"] .run-sequence-now-row {
+  display: none !important;
+}
+/* Subtle banner cue so kiosk users know controls are locked. */
+html[data-readonly="true"] body::before {
+  content: "kiosk mode · controls hidden";
+  display: block;
+  text-align: center;
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  background: var(--bg-panel-soft);
+  border-bottom: 1px solid var(--border);
+  padding: 0.35rem 0.5rem;
+}
+
+/* ── Source freshness (Settings -> Advanced) ─────────────────────────
+   Compact row per source with a pill that lights up green/yellow/red
+   depending on reachability and age. */
+.source-status-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.source-status-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.55rem 0.7rem;
+  border-radius: var(--radius);
+  background: var(--bg-panel-soft);
+  border: 1px solid var(--border);
+  font-size: 0.92rem;
+}
+.source-status-label {
+  color: var(--text);
+}
+.source-status-age {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+.source-status-pill {
+  display: inline-block;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0.18rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}
+.source-status-pill-fresh {
+  color: var(--accent-good);
+  background: rgba(126, 217, 87, 0.12);
+  border-color: rgba(126, 217, 87, 0.4);
+}
+.source-status-pill-stale {
+  color: var(--accent-warm);
+  background: rgba(255, 184, 74, 0.12);
+  border-color: rgba(255, 184, 74, 0.4);
+}
+.source-status-pill-offline {
+  color: var(--accent-hot);
+  background: rgba(255, 90, 90, 0.12);
+  border-color: rgba(255, 90, 90, 0.4);
+}
+.source-status-pill-waiting {
+  color: var(--text-faint);
+  background: rgba(255, 255, 255, 0.05);
+  border-color: var(--border);
+}
+
+/* ── Help hint disclosure (UI primitive) ─────────────────────────────
+   Native <details>/<summary> styled as a small circular "?". Open
+   reveals a one-paragraph explanation. */
+.help-hint {
+  display: inline-block;
+  vertical-align: middle;
+  margin-left: 0.4rem;
+}
+.help-hint__trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.35rem;
+  height: 1.35rem;
+  border-radius: 50%;
+  border: 1px solid var(--glass-border, rgba(255, 255, 255, 0.12));
+  background: var(--glass-bg, rgba(15, 19, 28, 0.55));
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.help-hint__trigger::-webkit-details-marker { display: none; }
+.help-hint__trigger::marker { content: ""; }
+.help-hint__trigger:hover { color: var(--text); border-color: rgba(94, 200, 255, 0.4); }
+.help-hint[open] .help-hint__trigger { color: var(--text); border-color: rgba(94, 200, 255, 0.5); }
+.help-hint__body {
+  margin: 0.55rem 0 0;
+  padding: 0.7rem 0.85rem;
+  background: var(--bg-panel-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  font-size: 0.86rem;
+  line-height: 1.55;
+  max-width: 36rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.help-hint__text {
+  margin: 0;
+}
+
+.help-hint__doc-link {
+  align-self: flex-start;
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px dashed color-mix(in oklab, var(--accent) 40%, transparent);
+  &:hover {
+    color: var(--text-bright);
+    border-bottom-color: var(--accent);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// v2 UI PRIMITIVE KIT
+// ═══════════════════════════════════════════════════════════════════════
+// Styles for the evolved component kit (Button, StatTile, Sparkline,
+// LineChart, Stepper, ListItem, Toast). These read the v2 elevation /
+// motion / verdict tokens and work across dark / light / hc unchanged.
+
+// ── Button ─────────────────────────────────────────────────────────────
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  position: relative;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-sans);
+  font-weight: 600;
+  line-height: 1;
+  text-decoration: none;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    transform var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out);
+
+  &:active { transform: translateY(1px); }
+  &:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+  .btn__icon { display: inline-flex; }
+  .btn__label { display: inline-flex; align-items: center; }
+  .btn__spinner { display: none; }
+}
+.btn--sm { padding: 0.4rem 0.7rem; font-size: var(--text-meta); }
+.btn--md { padding: 0.55rem 0.95rem; font-size: var(--text-body-sm); }
+.btn--lg { padding: 0.75rem 1.25rem; font-size: var(--text-body); }
+.btn--block { display: flex; width: 100%; }
+
+.btn--primary {
+  background: var(--grad-flow);
+  color: #fff;
+  box-shadow: var(--specular), var(--shadow-1);
+  &:hover:not(:disabled) { box-shadow: var(--specular), var(--shadow-2); filter: brightness(1.06); }
+}
+.btn--secondary {
+  background: var(--elev-2);
+  color: var(--text);
+  border-color: var(--elev-border);
+  &:hover:not(:disabled) { border-color: var(--elev-border-strong); background: var(--elev-3); }
+}
+.btn--ghost {
+  background: transparent;
+  color: var(--text-dim);
+  &:hover:not(:disabled) { background: var(--surface-soft); color: var(--text); }
+}
+.btn--danger {
+  background: color-mix(in oklab, var(--accent-danger) 16%, var(--elev-2));
+  color: var(--accent-danger);
+  border-color: color-mix(in oklab, var(--accent-danger) 35%, transparent);
+  &:hover:not(:disabled) { background: color-mix(in oklab, var(--accent-danger) 26%, var(--elev-2)); }
+}
+
+.btn--loading {
+  .btn__label, .btn__icon { visibility: hidden; }
+  .btn__spinner {
+    display: block;
+    position: absolute;
+    width: 1em; height: 1em;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: btn-spin 0.7s linear infinite;
+  }
+}
+@keyframes btn-spin { to { transform: rotate(360deg); } }
+
+// ── StatTile ───────────────────────────────────────────────────────────
+.stat-tile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  background: var(--elev-1);
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-1);
+  min-width: 0;
+}
+.stat-tile__head { display: flex; align-items: center; gap: var(--space-2); }
+.stat-tile__icon { display: inline-flex; }
+.stat-tile__label {
+  font-size: var(--text-meta);
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-weight: 600;
+}
+.stat-tile__value-row { display: flex; align-items: baseline; gap: 0.35rem; flex-wrap: wrap; }
+.stat-tile__value {
+  font-family: var(--font-mono);
+  font-size: var(--text-stat);
+  font-weight: 700;
+  letter-spacing: var(--tracking-tight);
+  color: var(--text-bright);
+  line-height: var(--leading-tight);
+}
+.stat-tile__unit { font-size: var(--text-body-sm); color: var(--text-dim); }
+.stat-tile__delta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.1rem;
+  margin-left: auto;
+  font-size: var(--text-meta);
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+}
+.stat-tile__delta--good { color: var(--accent-good); }
+.stat-tile__delta--bad { color: var(--accent-hot); }
+.stat-tile__spark { margin-top: auto; }
+
+// ── Sparkline ──────────────────────────────────────────────────────────
+.ui-sparkline {
+  display: block;
+  width: 100%;
+  overflow: visible;
+  .ui-sparkline__line {
+    fill: none;
+    stroke: var(--spark-accent);
+    stroke-width: 1.6;
+    vector-effect: non-scaling-stroke;
+  }
+  .ui-sparkline__area {
+    fill: var(--spark-accent);
+    opacity: 0.12;
+    stroke: none;
+  }
+}
+
+// ── LineChart ──────────────────────────────────────────────────────────
+.ui-line-chart { display: flex; flex-direction: column; gap: var(--space-3); }
+.ui-line-chart__plot { position: relative; width: 100%; }
+.ui-line-chart__svg { display: block; width: 100%; overflow: visible; }
+.ui-line-chart__grid { stroke: var(--elev-line); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.ui-line-chart__line {
+  fill: none;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.ui-line-chart__line--dashed { opacity: 0.55; stroke-dasharray: 4 4; }
+.ui-line-chart__yaxis {
+  position: absolute;
+  top: 0; right: 0; bottom: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 2px 4px;
+  pointer-events: none;
+  span { font-family: var(--font-mono); font-size: var(--text-micro); color: var(--text-faint); }
+}
+.ui-line-chart__legend { display: flex; flex-wrap: wrap; gap: var(--space-4); }
+.ui-line-chart__legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-meta);
+  color: var(--text-dim);
+}
+.ui-line-chart__swatch { width: 14px; height: 3px; border-radius: 2px; }
+.ui-line-chart__swatch--dashed { opacity: 0.55; }
+
+// ── Stepper ────────────────────────────────────────────────────────────
+.ui-stepper {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--elev-1);
+}
+.ui-stepper__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.2rem;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-out);
+  &:hover { background: var(--surface-soft); color: var(--text); }
+}
+.ui-stepper__value {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.2rem;
+  min-width: 3rem;
+  padding: 0.4rem 0.5rem;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--text-bright);
+  border-left: 1px solid var(--elev-line);
+  border-right: 1px solid var(--elev-line);
+}
+.ui-stepper__suffix { font-size: var(--text-micro); color: var(--text-faint); font-weight: 500; }
+
+// ── ListItem ───────────────────────────────────────────────────────────
+.ui-list-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--elev-line);
+  color: var(--text);
+  text-decoration: none;
+  &:last-child { border-bottom: none; }
+}
+.ui-list-item--link {
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-out);
+  &:hover { background: var(--surface-soft); }
+}
+.ui-list-item__icon { display: inline-flex; color: var(--text-dim); flex: 0 0 auto; }
+.ui-list-item__text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.ui-list-item__title { font-weight: 600; color: var(--text-bright); }
+.ui-list-item__subtitle { font-size: var(--text-meta); color: var(--text-faint); }
+.ui-list-item__trail {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+  color: var(--text-dim);
+}
+
+// ── Toast ──────────────────────────────────────────────────────────────
+.ui-toast-viewport {
+  position: fixed;
+  bottom: var(--space-5);
+  right: var(--space-5);
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  pointer-events: none;
+  max-width: min(92vw, 360px);
+}
+.ui-toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--elev-3);
+  border: 1px solid var(--elev-border);
+  border-left-width: 3px;
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-3);
+  color: var(--text);
+  animation: toast-in var(--motion-base) var(--ease-spring);
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+.ui-toast__icon { display: inline-flex; flex: 0 0 auto; }
+.ui-toast__msg { font-size: var(--text-body-sm); flex: 1; }
+.ui-toast__close {
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  display: inline-flex;
+  padding: 2px;
+  &:hover { color: var(--text); }
+}
+.ui-toast--info { border-left-color: var(--accent); .ui-toast__icon { color: var(--accent); } }
+.ui-toast--success { border-left-color: var(--accent-good); .ui-toast__icon { color: var(--accent-good); } }
+.ui-toast--warn { border-left-color: var(--accent-warn); .ui-toast__icon { color: var(--accent-warn); } }
+.ui-toast--error { border-left-color: var(--accent-danger); .ui-toast__icon { color: var(--accent-danger); } }
+
+@media (max-width: 760px) {
+  .ui-toast-viewport { left: var(--space-4); right: var(--space-4); bottom: calc(var(--space-4) + 64px); max-width: none; }
+}
+
+// ── Feature stub (placeholder marquee screens) ─────────────────────────
+.feature-stub {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: var(--space-3);
+  max-width: 32rem;
+  margin: var(--space-9) auto;
+  padding: var(--space-7);
+}
+.feature-stub__badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border-radius: var(--radius);
+  color: #fff;
+  background: var(--grad-flow);
+  box-shadow: var(--specular), var(--shadow-2);
+  margin-bottom: var(--space-2);
+}
+.feature-stub__eyebrow {
+  margin: 0;
+  font-size: var(--text-meta);
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--accent);
+  font-weight: 700;
+}
+.feature-stub__title {
+  margin: 0;
+  font-size: var(--text-h1);
+  letter-spacing: var(--tracking-display);
+  color: var(--text-bright);
+}
+.feature-stub__blurb { margin: 0; color: var(--text-dim); line-height: var(--leading-normal); }
+.feature-stub__note {
+  margin-top: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-meta);
+  color: var(--text-faint);
+}
+
+// ── Mobile "More" overflow sheet ───────────────────────────────────────
+// Reset the MoreTab <button> so it matches the anchor tabs exactly.
+button.mobile-tab {
+  background: none;
+  border: none;
+  font: inherit;
+  cursor: pointer;
+}
+.mobile-more { display: flex; flex-direction: column; }
+.mobile-more__link {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  color: var(--text);
+  text-decoration: none;
+  border-bottom: 1px solid var(--elev-line);
+  &:last-child { border-bottom: none; }
+  &:active { background: var(--surface-soft); }
+}
+.mobile-more__icon { display: inline-flex; color: var(--text-dim); }
+.mobile-more__label { flex: 1; font-weight: 600; }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Zones — KPI summary + rich card grid (marquee feature 3)
+// ═══════════════════════════════════════════════════════════════════════
+.zones-page { display: flex; flex-direction: column; gap: var(--space-6); }
+.zones-page__header { display: flex; flex-direction: column; gap: 2px; }
+.zones-page__eyebrow {
+  margin: 0; font-size: var(--text-meta); letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase; color: var(--accent); font-weight: 700;
+}
+.zones-page__title { margin: 0; font-size: var(--text-h1); letter-spacing: var(--tracking-display); color: var(--text-bright); }
+.zones-page__sub { margin: 0; color: var(--text-dim); }
+
+.zones-kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--space-4); }
+.zones-empty {
+  color: var(--text-faint); padding: var(--space-7); text-align: center;
+  background: var(--elev-1); border: 1px dashed var(--elev-border); border-radius: var(--radius-lg);
+}
+
+// Master-detail: cards column (left) + detail pane (right).
+.zones-shell {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  gap: var(--space-6);
+  align-items: start;
+}
+.zones-cards { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+.zones-detail { min-width: 0; position: sticky; top: var(--space-5); }
+@media (max-width: 900px) {
+  .zones-shell { grid-template-columns: 1fr; }
+  .zones-detail { position: static; }
+}
+
+.zone-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--elev-1);
+  border: 1px solid var(--elev-border);
+  border-left: 3px solid var(--zc);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-1);
+  overflow: hidden;
+  cursor: pointer;
+  transition: box-shadow var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out);
+  &:hover { box-shadow: var(--shadow-2); transform: translateY(-1px); }
+}
+.zone-card.is-selected { box-shadow: var(--shadow-2), inset 0 0 0 1px var(--zc); border-left-width: 4px; }
+.zone-card--running { box-shadow: var(--shadow-1), 0 0 0 1px color-mix(in oklab, var(--zc) 40%, transparent); }
+.zone-card__photo {
+  height: 84px;
+  background-size: cover;
+  background-position: center;
+  border-bottom: 1px solid var(--elev-line);
+}
+.zone-card__body { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-4); flex: 1; }
+.zone-card__head { display: flex; align-items: center; gap: var(--space-2); }
+.zone-card__dot { width: 9px; height: 9px; border-radius: 50%; background: var(--zc); flex: 0 0 auto; }
+.zone-card--running .zone-card__dot { animation: zone-pulse 1.6s var(--ease-out) infinite; }
+@keyframes zone-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+.zone-card__name { flex: 1; font-weight: 700; color: var(--text-bright); min-width: 0; }
+.zone-card__pill {
+  font-family: var(--font-mono); font-size: var(--text-micro); font-weight: 800; letter-spacing: 0.06em;
+  color: var(--zc); padding: 2px 7px; border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--zc) 16%, transparent); white-space: nowrap;
+}
+.zone-card__verdict {
+  font-family: var(--font-mono); font-size: var(--text-micro); font-weight: 800; letter-spacing: 0.06em;
+  color: var(--vc); padding: 2px 7px; border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--vc) 16%, transparent); white-space: nowrap; margin-left: auto;
+}
+.zone-card__reason {
+  font-size: var(--text-meta); color: var(--text-faint); line-height: 1.3;
+  margin: calc(-1 * var(--space-1)) 0 var(--space-1);
+}
+.zone-card__stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-2); }
+.zone-card__stat { display: flex; flex-direction: column; gap: 1px; }
+.zone-card__k { font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); }
+.zone-card__v { font-family: var(--font-mono); font-weight: 700; color: var(--text-bright); }
+.zone-card__v small { font-weight: 500; color: var(--text-faint); }
+.zone-card__foot { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-3); margin-top: auto; }
+.zone-card__stop {
+  display: inline-flex; align-items: center; gap: 4px; margin-right: auto;
+  font: inherit; font-size: var(--text-meta); font-weight: 600;
+  color: var(--accent-danger);
+  background: color-mix(in oklab, var(--accent-danger) 14%, transparent);
+  border: 1px solid color-mix(in oklab, var(--accent-danger) 30%, transparent);
+  border-radius: var(--radius-sm); padding: 0.3rem 0.6rem; cursor: pointer;
+  &:hover { background: color-mix(in oklab, var(--accent-danger) 24%, transparent); }
+}
+.zone-card__more {
+  display: inline-flex; align-items: center; gap: 2px;
+  color: var(--accent); text-decoration: none; font-weight: 600; font-size: var(--text-body-sm);
+  &:hover { text-decoration: underline; }
+}
+
+@media (max-width: 760px) {
+  .zones-kpis { grid-template-columns: repeat(2, 1fr); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Sensors page
+// ═══════════════════════════════════════════════════════════════════════
+.sensors-page { display: flex; flex-direction: column; gap: var(--space-7); max-width: 1000px; }
+.sensors-page__header { display: flex; flex-direction: column; gap: 2px; }
+.sensors-page__eyebrow {
+  margin: 0; font-size: var(--text-meta); letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase; color: var(--accent); font-weight: 700;
+}
+.sensors-page__title { margin: 0; font-size: var(--text-h1); letter-spacing: var(--tracking-display); color: var(--text-bright); }
+.sensors-page__sub { margin: 0; color: var(--text-dim); max-width: 70ch; }
+.sensors-howto { max-width: 80ch; border: 1px solid var(--elev-border); border-radius: var(--radius-md); background: var(--elev-1); }
+.sensors-howto summary { cursor: pointer; padding: var(--space-2) var(--space-3); font-weight: 600; color: var(--accent); }
+.sensors-howto__body { padding: 0 var(--space-3) var(--space-3); display: flex; flex-direction: column; gap: var(--space-2); }
+.sensors-howto__body p { margin: 0; color: var(--text-dim); font-size: var(--text-meta); line-height: 1.5; }
+.sensors-howto__body a { color: var(--accent); }
+.sensors-discovered { max-width: 80ch; border: 1px solid var(--elev-border); border-radius: var(--radius-md); background: var(--elev-1); }
+.sensors-discovered summary { cursor: pointer; padding: var(--space-2) var(--space-3); font-weight: 600; color: var(--accent); }
+.sensors-discovered__body { padding: 0 var(--space-3) var(--space-3); display: flex; flex-direction: column; gap: var(--space-3); }
+.sensors-discovered__group { display: flex; flex-direction: column; gap: 2px; }
+.sensors-discovered__role { margin: 0 0 var(--space-1); font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint); }
+.sensors-discovered__row { display: flex; justify-content: space-between; gap: var(--space-3); padding: 2px 0; font-size: var(--text-meta); }
+.sensors-discovered__name { color: var(--text-bright); }
+.sensors-discovered__val { color: var(--text-dim); font-family: var(--font-mono); }
+.sensors-page__heading { display: flex; flex-direction: column; gap: 2px; }
+.sensors-page__actions { margin-top: var(--space-1); }
+
+.sensors-section { display: flex; flex-direction: column; gap: var(--space-3); }
+.sensors-section__title { margin: 0; font-size: var(--text-h2); color: var(--text-bright); }
+.sensors-section__hint { margin: 0; font-size: var(--text-meta); color: var(--text-faint); a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; } }
+.sensors-empty {
+  color: var(--text-faint); padding: var(--space-5); line-height: var(--leading-normal);
+  background: var(--elev-1); border: 1px dashed var(--elev-border); border-radius: var(--radius);
+}
+
+// Soil moisture cards.
+.soil-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: var(--space-4); }
+.soil-card {
+  display: flex; flex-direction: column; gap: var(--space-2);
+  background: var(--elev-1); border: 1px solid var(--elev-border);
+  border-left: 3px solid var(--sc); border-radius: var(--radius);
+  box-shadow: var(--shadow-1); padding: var(--space-4);
+}
+.soil-card__head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.soil-card__name { font-weight: 700; color: var(--text-bright); }
+.soil-card__pill {
+  font-family: var(--font-mono); font-size: var(--text-micro); font-weight: 800; letter-spacing: 0.06em;
+  color: var(--sc); padding: 2px 7px; border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--sc) 16%, transparent); white-space: nowrap;
+}
+.soil-card__value { font-family: var(--font-mono); font-size: var(--text-stat); font-weight: 700; color: var(--text-bright); }
+.soil-card__bar { position: relative; height: 8px; border-radius: 4px; background: var(--elev-3); overflow: hidden; }
+.soil-card__band { position: absolute; top: 0; bottom: 0; background: color-mix(in oklab, var(--verdict-run) 30%, transparent); }
+.soil-card__marker { position: absolute; top: -2px; width: 3px; height: 12px; border-radius: 2px; background: var(--sc); transform: translateX(-1px); }
+.soil-card__scale { display: flex; justify-content: space-between; font-size: var(--text-micro); color: var(--text-faint); }
+
+// Weather readouts.
+.sensor-readouts { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: var(--space-3); }
+.sensor-readout {
+  display: flex; flex-direction: column; gap: 2px;
+  background: var(--elev-1); border: 1px solid var(--elev-border); border-radius: var(--radius-sm);
+  padding: var(--space-3);
+}
+.sensor-readout__k { font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); }
+.sensor-readout__v { font-family: var(--font-mono); font-weight: 700; color: var(--text-bright); }
+
+// Integration health list.
+.sensors-sources {
+  display: flex; flex-direction: column;
+  background: var(--elev-1); border: 1px solid var(--elev-border); border-radius: var(--radius); overflow: hidden;
+}
+.source-health {
+  display: grid; grid-template-columns: auto 1fr auto auto; align-items: center; gap: var(--space-3);
+  padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--elev-line);
+  &:last-child { border-bottom: none; }
+  &.is-disabled { opacity: 0.5; }
+}
+.source-health__dot { width: 9px; height: 9px; border-radius: 50%; }
+.source-health__id { font-weight: 600; color: var(--text-bright); }
+.source-health__kind { font-family: var(--font-mono); font-size: var(--text-meta); color: var(--text-faint); }
+.source-health__status { font-size: var(--text-meta); color: var(--text-dim); white-space: nowrap; }
+
+// Sensors master-detail explorer (list left, live data right).
+.sensors-shell {
+  display: grid;
+  grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
+  gap: var(--space-6);
+  align-items: start;
+}
+.sensors-list {
+  display: flex; flex-direction: column; gap: 2px;
+  background: var(--elev-1); border: 1px solid var(--elev-border);
+  border-radius: var(--radius-lg); padding: var(--space-3);
+  position: sticky; top: var(--space-5);
+}
+.sensors-list__group {
+  margin: var(--space-2) var(--space-2) 2px;
+  font-size: var(--text-micro); text-transform: uppercase; letter-spacing: var(--tracking-eyebrow);
+  color: var(--text-faint); font-weight: 700;
+}
+.sensor-row {
+  display: flex; align-items: center; gap: var(--space-3);
+  text-align: left; background: none; border: 0; border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3); cursor: pointer; color: var(--text);
+  transition: background var(--motion-fast) var(--ease-out);
+  &:hover { background: var(--surface-soft); }
+  &.is-active { background: color-mix(in oklab, var(--accent) 14%, transparent); box-shadow: inset 3px 0 0 var(--accent); }
+}
+.sensor-row__dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
+.sensor-row__text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.sensor-row__title { font-weight: 600; color: var(--text-bright); }
+.sensor-row__sub { font-size: var(--text-meta); color: var(--text-faint); font-family: var(--font-mono); }
+
+.sensors-detail { min-width: 0; }
+.sensor-detail-card {
+  background: var(--elev-1); border: 1px solid var(--elev-border);
+  border-radius: var(--radius-lg); box-shadow: var(--shadow-1);
+  padding: var(--space-5); display: flex; flex-direction: column; gap: var(--space-4);
+}
+.sensor-detail-card__head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.sensor-detail-card__head h2 { margin: 0; font-size: var(--text-h2); color: var(--text-bright); }
+.sensor-detail-card__meta { font-size: var(--text-meta); color: var(--text-faint); font-family: var(--font-mono); }
+.sensor-detail-card__status { display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--text-meta); color: var(--text-dim); }
+.sensor-detail-card__actions { display: flex; gap: var(--space-2); margin: var(--space-2) 0 var(--space-4); }
+.source-editor { display: flex; flex-direction: column; gap: var(--space-3); }
+.source-editor__title { margin: 0 0 var(--space-2); font-size: var(--text-h2); color: var(--text-bright); }
+.source-editor__error { margin: 0; color: var(--verdict-skip); font-size: var(--text-meta); }
+.sensor-detail-card__big { font-family: var(--font-mono); font-size: var(--text-display); font-weight: 700; letter-spacing: var(--tracking-display); color: var(--sc, var(--text-bright)); line-height: 1; }
+
+.sensor-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-5); }
+.sensor-group { display: flex; flex-direction: column; gap: var(--space-2); }
+.sensor-group__title { margin: 0; font-size: var(--text-meta); text-transform: uppercase; letter-spacing: var(--tracking-eyebrow); color: var(--accent); font-weight: 700; }
+.sensor-group__fields { margin: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.sensor-field { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); border-bottom: 1px solid var(--elev-line); padding-bottom: var(--space-2); }
+.sensor-field:last-child { border-bottom: none; padding-bottom: 0; }
+.sensor-field dt { margin: 0; color: var(--text-dim); }
+.sensor-field dd { margin: 0; font-family: var(--font-mono); color: var(--text-bright); text-align: right; }
+
+@media (max-width: 860px) {
+  .sensors-shell { grid-template-columns: 1fr; }
+  .sensors-list { position: static; }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Shared responsive zone detail (/zones/:slug).
+.zone-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  max-width: 820px;
+}
+.zone-detail__back {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  align-self: flex-start;
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 600;
+  &:hover { text-decoration: underline; }
+}
+.zone-detail__back-icon { transform: rotate(180deg); }
+.zone-detail__empty { color: var(--text-faint); padding: var(--space-7); text-align: center; }
+.zone-detail__head { display: flex; align-items: center; gap: var(--space-3); }
+.zone-detail__name { margin: 0; font-size: var(--text-h1); letter-spacing: var(--tracking-display); color: var(--text-bright); }
+.zone-detail__verdict {
+  font-family: var(--font-mono); font-size: var(--text-micro); font-weight: 800; letter-spacing: 0.06em;
+  color: var(--vc); padding: 3px 8px; border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--vc) 16%, transparent); white-space: nowrap;
+}
+.zone-detail__verdict-reason { margin: calc(-1 * var(--space-2)) 0 0; color: var(--text-soft); font-size: var(--text-meta); }
+.zone-detail__status {
+  font-family: var(--font-mono); font-size: var(--text-micro); font-weight: 700;
+  letter-spacing: 0.08em; padding: 4px 9px; border-radius: var(--radius-sm); white-space: nowrap;
+}
+.zone-detail__status--running { color: var(--verdict-run); background: color-mix(in oklab, var(--verdict-run) 16%, transparent); }
+.zone-detail__status--scheduled { color: var(--accent); background: color-mix(in oklab, var(--accent) 16%, transparent); }
+.zone-detail__status--idle { color: var(--text-faint); background: var(--surface-soft); }
+.zone-detail__stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--space-3); }
+.zone-detail__panel {
+  background: var(--elev-1); border: 1px solid var(--elev-border);
+  border-radius: var(--radius-lg); padding: var(--space-5); box-shadow: var(--shadow-1);
+  display: flex; flex-direction: column; gap: var(--space-4);
+}
+.zone-detail__panel-title { margin: 0; font-size: var(--text-h3); color: var(--text-bright); }
+.zone-detail__actions { flex-direction: row; align-items: center; }
+.zone-detail__run { display: flex; align-items: center; gap: var(--space-3); }
+.zone-detail__math { margin: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.zone-detail__math > div { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); }
+.zone-detail__math dt { color: var(--text-dim); margin: 0; }
+.zone-detail__math dd { margin: 0; font-family: var(--font-mono); color: var(--text-bright); }
+.zone-detail__math-final { border-top: 1px solid var(--elev-line); padding-top: var(--space-2); dd { color: var(--accent); font-weight: 700; } }
+
+@media (max-width: 700px) {
+  .zone-detail__stats { grid-template-columns: repeat(2, 1fr); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Rule Lab (marquee feature 2)
+// ═══════════════════════════════════════════════════════════════════════
+.rulelab-page { display: flex; flex-direction: column; gap: var(--space-5); }
+.rulelab-tabs { display: flex; gap: var(--space-1); border-bottom: 1px solid var(--elev-border); }
+.rulelab-tab {
+  appearance: none; background: none; border: none; cursor: pointer;
+  padding: var(--space-3) var(--space-4); font: inherit; font-weight: 600; color: var(--text-dim);
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.rulelab-tab:hover { color: var(--text-bright); }
+.rulelab-tab.is-active { color: var(--accent); border-bottom-color: var(--accent); }
+.rulelab-gates { border: 1px solid var(--elev-border); border-radius: var(--radius-md); background: var(--elev-1); }
+.rulelab-gates summary { cursor: pointer; padding: var(--space-3); font-weight: 600; color: var(--text-dim); }
+.rulelab-gates__body { padding: 0 var(--space-3) var(--space-3); display: flex; flex-direction: column; gap: var(--space-1); }
+.rulelab-gates__row { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-1) 0; }
+.rulelab-gates__cat { font-family: var(--font-mono); font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.05em; padding: 1px 6px; border-radius: var(--radius-sm); background: var(--surface-soft); color: var(--text-faint); min-width: 5.5rem; text-align: center; }
+.rulelab-gates__cat--safety { color: var(--verdict-skip); background: color-mix(in oklab, var(--verdict-skip) 14%, transparent); }
+.rulelab-gates__cat--weather { color: var(--accent); background: color-mix(in oklab, var(--accent) 14%, transparent); }
+.rulelab-gates__label { color: var(--text-bright); }
+
+// ── Condition builder ──
+.rulelab-conditions { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-5); background: var(--elev-1); border: 1px solid var(--elev-border); border-radius: var(--radius-lg); box-shadow: var(--shadow-1); }
+.rulelab-conditions__head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.rulelab__section-title { margin: 0; font-size: var(--text-h2); color: var(--text-bright); }
+.cond-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.cond-row { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3); background: var(--elev-2); border: 1px solid var(--elev-border); border-radius: var(--radius-md); }
+.cond-row__dot { width: 8px; height: 8px; border-radius: 50%; background: var(--verdict-run); flex: none; }
+.cond-row__dot.is-off { background: var(--verdict-off); }
+.cond-row__text { display: flex; flex-direction: column; gap: 1px; margin-right: auto; min-width: 0; }
+.cond-row__name { font-weight: 700; color: var(--text-bright); }
+.cond-row__sum { font-size: var(--text-meta); color: var(--text-faint); font-family: var(--font-mono); }
+.cond-editor { display: flex; flex-direction: column; gap: var(--space-3); margin-top: var(--space-4); padding: var(--space-4); background: var(--elev-2); border: 1px solid var(--elev-border-strong); border-radius: var(--radius-md); }
+.cond-editor__field { display: flex; flex-direction: column; gap: var(--space-1); }
+.cond-editor__field span { font-size: var(--text-meta); color: var(--text-dim); }
+.cond-editor__check { display: flex; align-items: center; gap: var(--space-2); }
+.cond-editor__match { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; font-size: var(--text-meta); color: var(--text-dim); }
+.cond-rows { display: flex; flex-direction: column; gap: var(--space-2); }
+.cond-rows__row { display: flex; align-items: center; gap: var(--space-2); }
+.cond-rows__op { max-width: 4rem; }
+.cond-rows__val { max-width: 6rem; }
+.cond-rows__del { border: none; background: none; color: var(--text-faint); font-size: 1.2rem; cursor: pointer; padding: 0 var(--space-2); }
+.cond-rows__del:hover { color: var(--verdict-skip); }
+.ui-input--inline { display: inline-block; width: auto; }
+.cond-editor__preview { margin-top: var(--space-1); }
+.cond-fire { font-size: var(--text-meta); font-weight: 700; font-family: var(--font-mono); color: var(--text-faint); }
+.cond-fire--yes { color: var(--verdict-skip); }
+.cond-fire--no { color: var(--verdict-run); }
+
+.rulelab-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 720px);
+  gap: var(--space-6);
+  justify-content: start;
+  align-items: start;
+}
+.rulelab-history {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  background: var(--elev-1);
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-3);
+  position: sticky;
+  top: var(--space-5);
+}
+.rulelab-history__item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-auto-rows: min-content;
+  gap: 2px var(--space-2);
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  cursor: pointer;
+  color: var(--text);
+  transition: background var(--motion-fast) var(--ease-out);
+  &:hover { background: var(--surface-soft); }
+  &.is-active { background: color-mix(in oklab, var(--accent) 14%, transparent); box-shadow: inset 3px 0 0 var(--accent); }
+}
+.rulelab-history__day { font-weight: 600; color: var(--text-bright); }
+.rulelab-history__pill {
+  justify-self: end;
+  font-family: var(--font-mono); font-size: var(--text-micro); font-weight: 800;
+  color: var(--v); padding: 2px 6px; border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--v) 16%, transparent);
+}
+.rulelab-history__reason { grid-column: 1 / -1; font-size: var(--text-meta); color: var(--text-faint); }
+.rulelab-main { min-width: 0; }
+@media (max-width: 920px) {
+  .rulelab-layout { grid-template-columns: 1fr; }
+  .rulelab-history { position: static; flex-direction: row; flex-wrap: wrap; }
+  .rulelab-history__item { flex: 1 1 200px; }
+}
+.rulelab-page__header { display: flex; flex-direction: column; gap: 2px; }
+.rulelab-page__eyebrow {
+  margin: 0; font-size: var(--text-meta); letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase; color: var(--accent); font-weight: 700;
+}
+.rulelab-page__title { margin: 0; font-size: var(--text-h1); letter-spacing: var(--tracking-display); color: var(--text-bright); }
+.rulelab-page__sub { margin: 0; color: var(--text-dim); }
+.rulelab-empty {
+  color: var(--text-faint); padding: var(--space-7); text-align: center;
+  background: var(--elev-1); border: 1px dashed var(--elev-border); border-radius: var(--radius);
+}
+
+.rulelab { display: flex; flex-direction: column; gap: var(--space-4); }
+.rulelab-verdict {
+  display: flex; align-items: center; gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  background: color-mix(in oklab, var(--v) 12%, var(--elev-1));
+  border: 1px solid var(--elev-border);
+  border-left: 4px solid var(--v);
+  border-radius: var(--radius);
+}
+.rulelab-verdict__pill {
+  font-family: var(--font-mono); font-weight: 800; letter-spacing: 0.06em;
+  color: var(--v); padding: 4px 10px; border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--v) 18%, transparent); white-space: nowrap;
+}
+.rulelab-verdict__reason { color: var(--text-bright); font-weight: 600; }
+
+.rulelab-ladder { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); counter-reset: rule; }
+.rule-row {
+  display: flex; align-items: center; gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--elev-1);
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius);
+  border-left: 3px solid transparent;
+}
+.rule-row.is-fired { border-left-color: var(--accent-row); background: color-mix(in oklab, var(--accent-row) 8%, var(--elev-1)); }
+.rule-row.is-muted { opacity: 0.5; }
+.rule-row__cat {
+  font-family: var(--font-mono); font-size: var(--text-micro); text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--text-faint);
+  width: 4.5rem; flex: 0 0 auto;
+}
+.rule-row__cat[data-cat="safety"] { color: var(--accent-hot); }
+.rule-row__cat[data-cat="weather"] { color: var(--accent-rain); }
+.rule-row__cat[data-cat="soil"] { color: var(--accent-good); }
+.rule-row__cat[data-cat="heat"] { color: var(--accent-warm); }
+.rule-row__body { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
+.rule-row__label { font-weight: 600; color: var(--text-bright); }
+.rule-row__detail { font-family: var(--font-mono); font-size: var(--text-meta); color: var(--text-dim); }
+.rule-row__badge {
+  font-family: var(--font-mono); font-size: var(--text-micro); font-weight: 800;
+  letter-spacing: 0.06em; padding: 3px 8px; border-radius: var(--radius-sm);
+  white-space: nowrap; flex: 0 0 auto;
+}
+.rule-row__badge--fired { color: var(--accent-row); background: color-mix(in oklab, var(--accent-row) 18%, transparent); }
+.rule-row__badge--passed { color: var(--accent-good); background: color-mix(in oklab, var(--accent-good) 14%, transparent); }
+.rule-row__badge--skipped { color: var(--text-faint); background: var(--surface-soft); }
+
+@media (max-width: 600px) {
+  .rule-row { flex-wrap: wrap; }
+  .rule-row__cat { width: auto; }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Simulator (marquee feature 1)
+// ═══════════════════════════════════════════════════════════════════════
+.sim-page { display: flex; flex-direction: column; gap: var(--space-6); }
+.sim-page__header { display: flex; flex-direction: column; gap: 2px; }
+.sim-page__eyebrow {
+  margin: 0; font-size: var(--text-meta); letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase; color: var(--accent); font-weight: 700;
+}
+.sim-page__title { margin: 0; font-size: var(--text-h1); letter-spacing: var(--tracking-display); color: var(--text-bright); }
+.sim-page__sub { margin: 0; color: var(--text-dim); }
+
+.sim-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: var(--space-6); align-items: start; }
+
+.sim-inputs {
+  display: flex; flex-direction: column; gap: var(--space-4);
+  background: var(--elev-1); border: 1px solid var(--elev-border);
+  border-radius: var(--radius-lg); padding: var(--space-5); box-shadow: var(--shadow-1);
+}
+.sim-slider { display: flex; flex-direction: column; gap: var(--space-2); }
+.sim-script { display: flex; flex-direction: column; gap: var(--space-2); border-top: 1px solid var(--elev-line); padding-top: var(--space-4); }
+.sim-script__input {
+  width: 100%;
+  min-height: 4.5rem;
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: var(--text-body-sm);
+  color: var(--text-bright);
+  background: var(--elev-0);
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  &:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
+}
+.sim-script__hint { margin: 0; font-size: var(--text-meta); color: var(--text-faint); code { font-family: var(--font-mono); color: var(--accent); } }
+.sim-slider__label { font-size: var(--text-meta); letter-spacing: var(--tracking-eyebrow); text-transform: uppercase; color: var(--text-faint); font-weight: 600; }
+.sim-inputs__reset { margin-top: var(--space-2); }
+
+.sim-result { position: sticky; top: var(--space-5); }
+.sim-result__empty {
+  color: var(--text-faint); padding: var(--space-7); text-align: center;
+  background: var(--elev-1); border: 1px dashed var(--elev-border); border-radius: var(--radius);
+}
+.sim-verdict {
+  display: flex; flex-direction: column; gap: var(--space-4);
+  background: var(--elev-1); border: 1px solid var(--elev-border);
+  border-radius: var(--radius-lg); padding: var(--space-5); box-shadow: var(--shadow-1);
+}
+.sim-verdict__transition { display: flex; align-items: center; justify-content: center; gap: var(--space-4); }
+.sim-verdict__pill {
+  font-family: var(--font-mono); font-weight: 800; font-size: var(--text-h2);
+  letter-spacing: 0.04em; color: var(--v);
+  padding: 8px 16px; border-radius: var(--radius);
+  background: color-mix(in oklab, var(--v) 16%, transparent);
+}
+.sim-verdict__arrow { font-size: var(--text-h1); color: var(--text-faint); }
+.sim-verdict__arrow.is-changed { color: var(--accent); animation: toast-in var(--motion-base) var(--ease-spring); }
+.sim-verdict__reason { margin: 0; text-align: center; color: var(--text-bright); font-weight: 600; }
+
+.sim-diff { border-top: 1px solid var(--elev-line); padding-top: var(--space-4); }
+.sim-diff__title { margin: 0 0 var(--space-2); font-size: var(--text-meta); text-transform: uppercase; letter-spacing: var(--tracking-eyebrow); color: var(--text-faint); }
+.sim-diff__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.sim-diff__row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.sim-diff__label { color: var(--text); }
+.sim-diff__change { font-family: var(--font-mono); font-size: var(--text-meta); color: var(--accent); }
+.sim-verdict__link { align-self: center; color: var(--accent); text-decoration: none; font-weight: 600; font-size: var(--text-body-sm); }
+.sim-verdict__link:hover { text-decoration: underline; }
+
+@media (max-width: 980px) {
+  .sim-layout { grid-template-columns: 1fr; }
+  .sim-result { position: static; }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// History (marquee feature 4)
+// ═══════════════════════════════════════════════════════════════════════
+.hist-page { display: flex; flex-direction: column; gap: var(--space-6); }
+.hist-page__header { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap; }
+.hist-page__eyebrow {
+  margin: 0; font-size: var(--text-meta); letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase; color: var(--accent); font-weight: 700;
+}
+.hist-page__title { margin: 0; font-size: var(--text-h1); letter-spacing: var(--tracking-display); color: var(--text-bright); }
+.hist-page__tools { display: flex; align-items: center; gap: var(--space-2); }
+.hist-range {
+  font-family: var(--font-mono); font-weight: 700; font-size: var(--text-meta);
+  padding: 0.45rem 0.7rem; border-radius: var(--radius-sm);
+  background: var(--elev-1); border: 1px solid var(--elev-border); color: var(--text-dim);
+  cursor: pointer; transition: all var(--motion-fast) var(--ease-out);
+  &:hover { color: var(--text); border-color: var(--elev-border-strong); }
+  &.is-on { background: var(--grad-flow); color: #fff; border-color: transparent; }
+}
+.hist-kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--space-4); }
+.hist-panel {
+  background: var(--elev-1); border: 1px solid var(--elev-border);
+  border-radius: var(--radius-lg); padding: var(--space-5); box-shadow: var(--shadow-1);
+  display: flex; flex-direction: column; gap: var(--space-4);
+}
+.hist-panel__title { margin: 0; font-size: var(--text-h2); color: var(--text-bright); }
+.hist-empty { color: var(--text-faint); padding: var(--space-5); text-align: center; }
+.hist-zone-row {
+  display: grid; grid-template-columns: 9rem 1fr auto; align-items: center; gap: var(--space-4);
+  padding: var(--space-2) 0; border-bottom: 1px solid var(--elev-line);
+  &:last-child { border-bottom: none; }
+}
+.hist-zone-row__name { font-weight: 600; color: var(--text-bright); }
+.hist-zone-row__spark { min-width: 0; }
+.hist-zone-row__total { font-family: var(--font-mono); color: var(--text-dim); }
+
+@media (max-width: 760px) {
+  .hist-kpis { grid-template-columns: repeat(2, 1fr); }
+  .hist-zone-row { grid-template-columns: 6rem 1fr auto; gap: var(--space-3); }
+}
+
+// Weather home telemetry strip (live value + 24h sparkline per metric).
+.wx-telemetry {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: var(--space-3);
+}
+@media (max-width: 1100px) { .wx-telemetry { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 560px) { .wx-telemetry { grid-template-columns: repeat(2, 1fr); } }
+
+// Settings hub (v2 ListItem-based section groups).
+.settings-hub {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  max-width: 760px;
+}
+.settings-hub__header { display: flex; flex-direction: column; gap: 2px; }
+.settings-hub__eyebrow {
+  margin: 0; font-size: var(--text-meta); letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase; color: var(--accent); font-weight: 700;
+}
+.settings-hub__title { margin: 0; font-size: var(--text-h1); letter-spacing: var(--tracking-display); color: var(--text-bright); }
+.settings-hub__sub { margin: 0; color: var(--text-dim); max-width: 60ch; }
+.settings-group { display: flex; flex-direction: column; gap: var(--space-3); }
+.settings-group__head { display: flex; flex-direction: column; gap: 1px; }
+.settings-group__title { margin: 0; font-size: var(--text-h3); color: var(--text-bright); }
+.settings-group__sub { margin: 0; font-size: var(--text-meta); color: var(--text-faint); }
+.settings-card {
+  background: var(--elev-1);
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
+  overflow: hidden;
+}
+
+// Full-width page header above the two columns so the list and the detail
+// pane both start on the same line (top-aligned), not offset by the header.
+.settings-page-wrap { display: flex; flex-direction: column; gap: var(--space-6); }
+
+// Master-detail shell: list (left) + slide-in section editor (right).
+// Both columns are width-capped and the grid is packed to the start, so on
+// a wide monitor the cards stay sized to their data instead of stretching
+// across the screen (less mouse travel, easier to track). Columns are
+// top-aligned; the pane sizes to its content.
+.settings-shell {
+  display: grid;
+  grid-template-columns: minmax(300px, 360px) minmax(440px, 720px);
+  gap: var(--space-6);
+  justify-content: start;
+  align-items: start;
+}
+.settings-shell__list { display: flex; flex-direction: column; gap: var(--space-6); min-width: 0; }
+.settings-shell__detail { min-width: 0; display: flex; flex-direction: column; gap: var(--space-3); }
+
+// Clickable section rows are <button>s reusing the ListItem look.
+.settings-row {
+  width: 100%;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--elev-line);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  &:last-child { border-bottom: none; }
+  &.is-selected {
+    background: color-mix(in oklab, var(--accent) 12%, transparent);
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+}
+
+.settings-shell__placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  min-height: 280px;
+  color: var(--text-faint);
+  background: var(--elev-1);
+  border: 1px dashed var(--elev-border);
+  border-radius: var(--radius-lg);
+  p { margin: 0; }
+}
+// The pane is a card sized to its content (no viewport pinning / inner
+// scroll); the page scrolls if a long editor needs it.
+.settings-shell__pane {
+  display: flex;
+  flex-direction: column;
+  background: var(--elev-1);
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
+  padding: var(--space-3) var(--space-5) var(--space-5);
+}
+.settings-shell__pane-body {
+  // The embedded section pages bring their own .settings-page <main>; let
+  // it fill the pane instead of centering with its standalone max-width.
+  .settings-page { max-width: none; padding: 0; }
+  // The section's own "← Settings" link is redundant inside the pane (we
+  // provide Back, and on desktop the list is right there). It stays for
+  // standalone /settings/:section deep links.
+  .settings-page__back { display: none; }
+}
+.settings-shell__back {
+  display: none; // desktop: both panes visible, no back needed
+  align-items: center;
+  gap: var(--space-1);
+  background: none;
+  border: 0;
+  color: var(--text-dim);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  padding: var(--space-2) 0;
+  &:hover { color: var(--text); }
+}
+.settings-shell__back-icon { transform: rotate(180deg); }
+
+@media (max-width: 980px) {
+  // Single column: show list OR detail, never both.
+  .settings-shell { grid-template-columns: 1fr; gap: var(--space-5); }
+  .settings-shell__detail { display: none; }
+  .settings-shell.has-detail .settings-shell__list { display: none; }
+  .settings-shell.has-detail .settings-shell__detail { display: block; }
+  .settings-shell__back { display: inline-flex; }
+}
+
+// Irrigation "Today" KPI strip (v2 primitives on the daily home).
+.ir-kpis {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-4);
+}
+@media (max-width: 760px) {
+  .ir-kpis { grid-template-columns: repeat(2, 1fr); }
+}
+
+// Print: turn the History page into a clean seasonal report. Hide all the
+// app chrome so window.print() yields just the data.
+@media print {
+  .sidebar, .mobile-app-bar, .mobile-tab-bar, .sidebar-backdrop,
+  .page-header, .install-prompt, .hist-page__tools, .ui-toast-viewport {
+    display: none !important;
+  }
+  .page { margin: 0 !important; }
+  .hist-panel, .stat-tile { box-shadow: none !important; border-color: #ccc !important; }
+  body { background: #fff !important; }
+}

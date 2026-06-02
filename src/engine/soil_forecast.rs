@@ -63,8 +63,7 @@ pub fn project_zone(
     // Day 0 = today (current reading); deltas start at day 1 using
     // daily[N]'s rain projection.
     for d in fc.daily.iter().take(n_days).skip(1) {
-        let rain_effective_mm =
-            d.precip_sum_in * 25.4 * (d.precip_probability_max as f64) / 100.0;
+        let rain_effective_mm = d.precip_sum_in * 25.4 * (d.precip_probability_max as f64) / 100.0;
         let captured_mm = rain_effective_mm * capture_efficiency;
         let et_loss_mm = daily_et_mm * zone.kc;
         let delta_mm = captured_mm - et_loss_mm;

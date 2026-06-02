@@ -16,6 +16,7 @@ use crate::components::irrigation::verdict_strip::VerdictStrip;
 use crate::components::irrigation::water_budget::WaterBudgetPanel;
 use crate::components::irrigation::zone_math::ZoneMathPanel;
 use crate::ha::snapshot::IrrigationSnapshot;
+use crate::history::types::HistoryWindow;
 use chrono::{DateTime, Local, TimeZone, Utc};
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
@@ -23,6 +24,26 @@ use serde_json::json;
 
 #[component]
 pub fn MobileSchedule(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
+    // Shared window state so the per-zone block and the History panel
+    // below it stay in sync with one fetch; mirrors the desktop page.
+    let (days, set_days) = signal(30u32);
+    let (window, set_window) = signal::<HistoryWindow>(HistoryWindow::default());
+    #[cfg(not(feature = "hydrate"))]
+    let _ = set_window;
+    #[cfg(feature = "hydrate")]
+    {
+        Effect::new(move |_| {
+            let d = days.get();
+            leptos::task::spawn_local(async move {
+                let url = format!("/api/irrigation/history?days={d}");
+                if let Ok(resp) = gloo_net::http::Request::get(&url).send().await {
+                    if let Ok(w) = resp.json::<HistoryWindow>().await {
+                        set_window.set(w);
+                    }
+                }
+            });
+        });
+    }
     view! {
         <div class="mobile-stack">
             <h2 class="mobile-section-title">"7-day outlook"</h2>
@@ -38,7 +59,7 @@ pub fn MobileSchedule(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             {view! { <WaterBudgetPanel snap/> }.into_any()}
 
             <h2 class="mobile-section-title">"Per-zone history"</h2>
-            {view! { <PerZoneHistory/> }.into_any()}
+            {view! { <PerZoneHistory snap window/> }.into_any()}
 
             <h2 class="mobile-section-title">"Controls"</h2>
             <VacationPauseRow snap/>
@@ -49,7 +70,7 @@ pub fn MobileSchedule(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             {view! { <ThresholdsPanel snap/> }.into_any()}
 
             <h2 class="mobile-section-title">"History"</h2>
-            {view! { <HistoryPanel/> }.into_any()}
+            {view! { <HistoryPanel days set_days window/> }.into_any()}
 
             <h2 class="mobile-section-title">"Notifications"</h2>
             <NotificationsCard/>
@@ -223,7 +244,8 @@ fn VacationPauseRow(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                         <div class="mobile-settings-hint">"(HA helper not configured)"</div>
                     </div>
                 </div>
-            }.into_any();
+            }
+            .into_any();
         }
 
         let active_now = active();
@@ -284,11 +306,16 @@ fn OverrideTomorrowRow(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                         <div class="mobile-settings-hint">"(HA helper not configured)"</div>
                     </div>
                 </div>
-            }.into_any();
+            }
+            .into_any();
         }
         let cur = current();
         let cls = move |target: &'static str| {
-            if cur == target { "mobile-segment is-on" } else { "mobile-segment" }
+            if cur == target {
+                "mobile-segment is-on"
+            } else {
+                "mobile-segment"
+            }
         };
         view! {
             <div class="mobile-control-card">

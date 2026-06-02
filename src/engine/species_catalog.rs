@@ -209,20 +209,38 @@ pub fn shift_doy_for_hemisphere(doy: u16, latitude_deg: f64) -> u16 {
 fn kc_at_doy_curve(curve: &[f64; 12], doy: u16) -> f64 {
     // Mid-month anchor day-of-year (non-leap; good enough for Kc smoothing).
     const MID_MONTH_DOY: [f64; 12] = [
-        15.0, 46.0, 74.0, 105.0, 135.0, 166.0,  // Jan-Jun
+        15.0, 46.0, 74.0, 105.0, 135.0, 166.0, // Jan-Jun
         196.0, 227.0, 258.0, 288.0, 319.0, 349.0, // Jul-Dec
     ];
     let d = doy.clamp(1, 366) as f64;
     // Locate the bracket. Wraps Dec 15 <-> Jan 15.
     if d <= MID_MONTH_DOY[0] {
-        return interp(d + 365.0, MID_MONTH_DOY[11], curve[11], MID_MONTH_DOY[0] + 365.0, curve[0]);
+        return interp(
+            d + 365.0,
+            MID_MONTH_DOY[11],
+            curve[11],
+            MID_MONTH_DOY[0] + 365.0,
+            curve[0],
+        );
     }
     if d >= MID_MONTH_DOY[11] {
-        return interp(d, MID_MONTH_DOY[11], curve[11], MID_MONTH_DOY[0] + 365.0, curve[0]);
+        return interp(
+            d,
+            MID_MONTH_DOY[11],
+            curve[11],
+            MID_MONTH_DOY[0] + 365.0,
+            curve[0],
+        );
     }
     for i in 0..11 {
         if d >= MID_MONTH_DOY[i] && d <= MID_MONTH_DOY[i + 1] {
-            return interp(d, MID_MONTH_DOY[i], curve[i], MID_MONTH_DOY[i + 1], curve[i + 1]);
+            return interp(
+                d,
+                MID_MONTH_DOY[i],
+                curve[i],
+                MID_MONTH_DOY[i + 1],
+                curve[i + 1],
+            );
         }
     }
     curve[5] // unreachable; defensive
@@ -237,20 +255,66 @@ fn interp(x: f64, x0: f64, y0: f64, x1: f64, y1: f64) -> f64 {
 mod tests {
     use super::*;
 
+    /// Every species enum variant must have a matching photo at
+    /// public/grass-species/<slug>.jpg. The wizard's onerror handler
+    /// hides missing photos silently, so visual drift is invisible at
+    /// runtime; this test catches it at build time instead.
+    #[test]
+    fn every_species_has_a_photo() {
+        use std::path::Path;
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("public/grass-species");
+        let expected = [
+            ("st_augustine", GrassSpecies::StAugustine),
+            ("bermuda", GrassSpecies::Bermuda),
+            ("zoysia", GrassSpecies::Zoysia),
+            ("bahia", GrassSpecies::Bahia),
+            ("centipede", GrassSpecies::Centipede),
+            ("kentucky_bluegrass", GrassSpecies::KentuckyBluegrass),
+            ("tall_fescue", GrassSpecies::TallFescue),
+            ("perennial_ryegrass", GrassSpecies::PerennialRyegrass),
+            ("ornamental_shrubs", GrassSpecies::OrnamentalShrubs),
+            ("vegetable_garden", GrassSpecies::VegetableGarden),
+            ("drip_xeriscape", GrassSpecies::DripXeriscape),
+            ("other", GrassSpecies::Other),
+        ];
+        let mut missing = Vec::new();
+        for (slug, _sp) in expected {
+            if !dir.join(format!("{slug}.jpg")).exists() {
+                missing.push(slug);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "missing grass-species photos: {missing:?}"
+        );
+    }
+
     #[test]
     fn st_augustine_peaks_in_summer() {
         let jan = kc_at_doy(GrassSpecies::StAugustine, 15);
         let jul = kc_at_doy(GrassSpecies::StAugustine, 196);
-        assert!(jul > jan, "expected summer Kc > winter Kc, got {jul} vs {jan}");
-        assert!((jul - 1.00).abs() < 0.01, "St. Aug Jul peak ~1.00, got {jul}");
-        assert!((jan - 0.55).abs() < 0.01, "St. Aug Jan low ~0.55, got {jan}");
+        assert!(
+            jul > jan,
+            "expected summer Kc > winter Kc, got {jul} vs {jan}"
+        );
+        assert!(
+            (jul - 1.00).abs() < 0.01,
+            "St. Aug Jul peak ~1.00, got {jul}"
+        );
+        assert!(
+            (jan - 0.55).abs() < 0.01,
+            "St. Aug Jan low ~0.55, got {jan}"
+        );
     }
 
     #[test]
     fn xeriscape_stays_low_year_round() {
         for doy in (15..=349).step_by(30) {
             let kc = kc_at_doy(GrassSpecies::DripXeriscape, doy);
-            assert!(kc < 0.40, "drip xeriscape Kc should stay <0.40, got {kc} at doy {doy}");
+            assert!(
+                kc < 0.40,
+                "drip xeriscape Kc should stay <0.40, got {kc} at doy {doy}"
+            );
         }
     }
 
@@ -272,7 +336,10 @@ mod tests {
     fn cool_season_dips_in_summer() {
         let apr = kc_at_doy(GrassSpecies::KentuckyBluegrass, 105);
         let jul = kc_at_doy(GrassSpecies::KentuckyBluegrass, 196);
-        assert!(apr > jul, "cool-season should dip in summer heat ({apr} vs {jul})");
+        assert!(
+            apr > jul,
+            "cool-season should dip in summer heat ({apr} vs {jul})"
+        );
     }
 
     #[test]
@@ -289,7 +356,10 @@ mod tests {
         // And the Southern-Jan reading should equal the Northern-Jul reading
         // (within interpolation noise), since the DOY shift of 182 lines up
         // the two anchors.
-        assert!((jan_s - jul_n).abs() < 0.05, "S Jan {jan_s} should ~= N Jul {jul_n}");
+        assert!(
+            (jan_s - jul_n).abs() < 0.05,
+            "S Jan {jan_s} should ~= N Jul {jul_n}"
+        );
     }
 
     #[test]

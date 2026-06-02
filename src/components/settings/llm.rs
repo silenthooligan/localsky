@@ -2,7 +2,8 @@
 
 use leptos::prelude::*;
 
-use crate::components::ui::{FormField, Panel, SegmentedControl};
+use crate::components::settings_ui::SettingsResult;
+use crate::components::ui::{FormField, HelpHint, Panel, SegmentedControl};
 
 #[component]
 pub fn SettingsLlm() -> impl IntoView {
@@ -31,14 +32,18 @@ pub fn SettingsLlm() -> impl IntoView {
         });
     }
 
-    let show_url = move || matches!(
-        provider.get().as_str(),
-        "openai_compat" | "ollama" | "llamacpp"
-    );
-    let show_model = move || matches!(
-        provider.get().as_str(),
-        "ollama" | "openai_compat" | "llamacpp"
-    );
+    let show_url = move || {
+        matches!(
+            provider.get().as_str(),
+            "openai_compat" | "ollama" | "llamacpp"
+        )
+    };
+    let show_model = move || {
+        matches!(
+            provider.get().as_str(),
+            "ollama" | "openai_compat" | "llamacpp"
+        )
+    };
     let show_key = move || provider.get() == "openai_compat";
 
     let on_save = move |_| {
@@ -91,6 +96,7 @@ pub fn SettingsLlm() -> impl IntoView {
             </header>
 
             <Panel title="Provider".to_string()>
+                <HelpHint topic="llm"/>
                 <SegmentedControl
                     value=provider
                     options=vec![
@@ -106,70 +112,66 @@ pub fn SettingsLlm() -> impl IntoView {
 
             <Show when=show_url>
                 <Panel title="Endpoint".to_string()>
-                    <FormField
-                        label="Base URL".to_string()
-                        helptext="e.g. http://localhost:11434 (Ollama), http://localhost:8080 (llama.cpp), https://api.openai.com".to_string()
-                        error=Signal::derive(|| None::<String>)
-                    >
-                        <input
-                            type="url"
-                            class="ui-input"
-                            prop:value=move || base_url.get()
-                            on:input=move |ev| base_url.set(event_target_value(&ev))
-                        />
-                    </FormField>
-
-                    <Show when=show_model>
+                    <HelpHint topic="llm"/>
+                    <div class="grid settings-field-grid">
                         <FormField
-                            label="Model".to_string()
-                            helptext="e.g. llama3.2:3b-instruct, gpt-4o-mini".to_string()
+                            label="Base URL".to_string()
+                            helptext="e.g. http://localhost:11434 (Ollama), http://localhost:8080 (llama.cpp), https://api.openai.com".to_string()
                             error=Signal::derive(|| None::<String>)
                         >
                             <input
-                                type="text"
+                                type="url"
                                 class="ui-input"
-                                prop:value=move || model.get()
-                                on:input=move |ev| model.set(event_target_value(&ev))
+                                prop:value=move || base_url.get()
+                                on:input=move |ev| base_url.set(event_target_value(&ev))
                             />
                         </FormField>
-                    </Show>
 
-                    <Show when=show_key>
-                        <FormField
-                            label="API key".to_string()
-                            helptext="Required by OpenAI; leave blank for local providers.".to_string()
-                            error=Signal::derive(|| None::<String>)
-                        >
-                            <input
-                                type="password"
-                                class="ui-input"
-                                prop:value=move || api_key.get()
-                                on:input=move |ev| api_key.set(event_target_value(&ev))
-                            />
-                        </FormField>
-                    </Show>
+                        <Show when=show_model>
+                            <FormField
+                                label="Model".to_string()
+                                helptext="e.g. llama3.2:3b-instruct, gpt-4o-mini".to_string()
+                                error=Signal::derive(|| None::<String>)
+                            >
+                                <input
+                                    type="text"
+                                    class="ui-input"
+                                    prop:value=move || model.get()
+                                    on:input=move |ev| model.set(event_target_value(&ev))
+                                />
+                            </FormField>
+                        </Show>
+
+                        <Show when=show_key>
+                            <FormField
+                                label="API key".to_string()
+                                helptext="Required by OpenAI; leave blank for local providers.".to_string()
+                                error=Signal::derive(|| None::<String>)
+                            >
+                                <input
+                                    type="password"
+                                    class="ui-input"
+                                    prop:value=move || api_key.get()
+                                    on:input=move |ev| api_key.set(event_target_value(&ev))
+                                />
+                            </FormField>
+                        </Show>
+                    </div>
                 </Panel>
             </Show>
 
-            <button
-                type="button"
-                class="setup-apply-btn"
-                disabled=move || saving.get()
-                on:click=on_save
-            >
-                {move || if saving.get() { "Saving…" } else { "Save changes" }}
-            </button>
-
-            <Show when=move || !result_msg.get().is_empty()>
-                <p
-                    class="setup-result"
-                    class:setup-result--ok=move || result_ok.get()
-                    class:setup-result--err=move || !result_ok.get()
-                    role="status"
+            <div class="settings-actions">
+                <button
+                    type="button"
+                    class="setup-footer__btn setup-footer__btn--primary"
+                    disabled=move || saving.get()
+                    on:click=on_save
                 >
-                    {move || result_msg.get()}
-                </p>
-            </Show>
+                    {move || if saving.get() { "Saving…" } else { "Save changes" }}
+                </button>
+            </div>
+
+            <SettingsResult result_msg=result_msg result_ok=result_ok/>
         </main>
     }
 }
@@ -198,7 +200,10 @@ async fn fetch_llm() -> Result<LlmDraft, String> {
         .and_then(|v| v.as_str())
         .unwrap_or("auto")
         .to_string();
-    let config = llm.get("config").cloned().unwrap_or(serde_json::Value::Null);
+    let config = llm
+        .get("config")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     Ok(LlmDraft {
         provider,
         base_url: config
@@ -216,10 +221,7 @@ async fn fetch_llm() -> Result<LlmDraft, String> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
-        timeout_s: llm
-            .get("timeout_s")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(20) as u32,
+        timeout_s: llm.get("timeout_s").and_then(|v| v.as_u64()).unwrap_or(20) as u32,
     })
 }
 

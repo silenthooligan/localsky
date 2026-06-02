@@ -145,39 +145,85 @@ struct TestSourceBody {
 
 async fn post_test_source(
     State(_s): State<WizardApiState>,
-    Json(_body): Json<TestSourceBody>,
+    Json(body): Json<TestSourceBody>,
 ) -> impl IntoResponse {
-    not_yet_implemented("source adapters land in Phase 6")
+    // The config deserialized into a typed SourceEntry, so it's structurally
+    // valid. Receiver sources (Ecowitt LAN, webhook) confirm by live readings
+    // on the Sensors hub once the device posts; polled sources confirm within
+    // one cycle after apply. A live probe per kind is a follow-up.
+    serde_json::json!({
+        "ok": true,
+        "id": body.source.id,
+        "note": "config valid; confirm live readings on the Sensors hub after applying",
+    })
+    .to_string()
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct TestControllerBody {
     pub controller: crate::config::schema::ControllerEntry,
 }
 
 async fn post_test_controller(
     State(_s): State<WizardApiState>,
-    Json(_body): Json<TestControllerBody>,
+    Json(body): Json<TestControllerBody>,
 ) -> impl IntoResponse {
-    not_yet_implemented("controller adapters land in Phase 5")
+    match crate::runtime::build_test_controller(&body.controller) {
+        Ok(c) => match c.status().await {
+            Ok(st) => Json(serde_json::json!({
+                "ok": true,
+                "reachable": st.reachable,
+                "master_enabled": st.master_enabled,
+                "water_level_pct": st.water_level_pct,
+                "zone_count": st.zone_states.len(),
+                "firmware": st.firmware,
+            }))
+            .into_response(),
+            Err(e) => (
+                StatusCode::BAD_GATEWAY,
+                Json(ApiError {
+                    error: "controller_unreachable".into(),
+                    detail: Some(e.to_string()),
+                }),
+            )
+                .into_response(),
+        },
+        Err(e) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ApiError {
+                error: "controller_unsupported".into(),
+                detail: Some(e),
+            }),
+        )
+            .into_response(),
+    }
 }
 
 async fn post_scan_zones(
     State(_s): State<WizardApiState>,
-    Json(_body): Json<TestControllerBody>,
+    Json(body): Json<TestControllerBody>,
 ) -> impl IntoResponse {
-    not_yet_implemented("zone discovery lands with the controllers HAL in Phase 5")
-}
-
-fn not_yet_implemented(why: &str) -> (StatusCode, Json<ApiError>) {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(ApiError {
-            error: "not_yet_implemented".into(),
-            detail: Some(why.into()),
-        }),
-    )
+    match crate::runtime::build_test_controller(&body.controller) {
+        Ok(c) => match c.discover_zones().await {
+            Ok(zones) => Json(serde_json::json!({ "zones": zones })).into_response(),
+            Err(e) => (
+                StatusCode::BAD_GATEWAY,
+                Json(ApiError {
+                    error: "zone_scan_failed".into(),
+                    detail: Some(e.to_string()),
+                }),
+            )
+                .into_response(),
+        },
+        Err(e) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ApiError {
+                error: "controller_unsupported".into(),
+                detail: Some(e),
+            }),
+        )
+            .into_response(),
+    }
 }
 
 // ---- Geocode proxy. Lets the location step do address -> lat/lon. ----

@@ -54,10 +54,7 @@ pub fn default_probe_targets() -> Vec<ProbeTarget> {
 /// `model` is the model name to use with whichever provider wins. The
 /// detected provider gets `id = "auto:<kind>:<base_url>"` so logs are
 /// traceable to the actual endpoint.
-pub async fn detect(
-    targets: Vec<ProbeTarget>,
-    model: String,
-) -> Option<Arc<dyn LlmProvider>> {
+pub async fn detect(targets: Vec<ProbeTarget>, model: String) -> Option<Arc<dyn LlmProvider>> {
     let client = Client::builder()
         .timeout(Duration::from_secs(3))
         .build()

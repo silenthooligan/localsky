@@ -27,14 +27,15 @@ pub fn LocationStep() -> impl IntoView {
     let lon_err: Signal<Option<String>> = Signal::derive(move || {
         let v = lon.get();
         if !(-180.0..=180.0).contains(&v) {
-            Some(format!("Longitude must be between -180 and 180 (got {v:.4})"))
+            Some(format!(
+                "Longitude must be between -180 and 180 (got {v:.4})"
+            ))
         } else {
             None
         }
     });
 
-    let can_advance =
-        move || lat_err.get().is_none() && lon_err.get().is_none();
+    let can_advance = move || lat_err.get().is_none() && lon_err.get().is_none();
 
     let next_href = move || {
         if can_advance() {

@@ -40,6 +40,18 @@ pub struct Config {
     pub notifications: Notifications,
     #[serde(default)]
     pub engine: EngineParams,
+    /// Operator-defined cron-style schedules that fire zone runs at
+    /// fixed weekdays + times, optionally overriding the smart engine
+    /// for the matching zone. See `ManualSchedule` for semantics.
+    #[serde(default)]
+    pub manual_schedules: Vec<ManualSchedule>,
+    /// User-defined Rhai skip rules (augment-only). See `ScriptingConfig`.
+    #[serde(default)]
+    pub scripting: ScriptingConfig,
+    /// Structured, user-configurable per-zone trigger rules (augment-only).
+    /// A no-code complement to `scripting`. See `ConditionsConfig`.
+    #[serde(default)]
+    pub conditions: ConditionsConfig,
 }
 
 impl Default for Config {
@@ -54,8 +66,122 @@ impl Default for Config {
             llm: None,
             notifications: Notifications::default(),
             engine: EngineParams::default(),
+            manual_schedules: Vec::new(),
+            scripting: ScriptingConfig::default(),
+            conditions: ConditionsConfig::default(),
         }
     }
+}
+
+// ----- Structured trigger rules (no-code) -----
+//
+// A complement to Rhai `scripting`: the same augment-only safety boundary,
+// expressed as serde data the UI builds with dropdowns. The rule model +
+// evaluator live in `crate::engine::conditions`; this is just the config
+// container so every existing localsky.toml (which has no `[conditions]`
+// block) still parses via `#[serde(default)]`.
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct ConditionsConfig {
+    #[serde(default)]
+    pub rules: Vec<crate::engine::conditions::ConditionRule>,
+}
+
+// ----- User scripting (Rhai) -----
+//
+// Augment-only custom skip rules. The engine consults these ONLY when the
+// built-in deterministic ladder already returned "run", so a script can
+// add a skip but can never clear a freeze / wind / restriction gate. A
+// rule returns `true` (skip with its name as the reason) or a non-empty
+// string (skip with that reason); anything else (false, errors, invalid
+// syntax) is a no-op (fail-safe). Scripts are sandboxed: no I/O, no
+// imports, bounded operation count.
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct ScriptingConfig {
+    #[serde(default)]
+    pub skip_rules: Vec<ScriptRule>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ScriptRule {
+    /// snake_case id; shows in the Rule Lab trace.
+    pub id: String,
+    /// Display label (defaults to `id` if blank).
+    #[serde(default)]
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Rhai script. Reads the current decision inputs as variables:
+    /// temp_now_f, wind_now_mph, rain_today_in, rain_intensity_now_in_hr,
+    /// humidity_now_pct, forecast_in, rain_tomorrow_prob_pct,
+    /// rain_next_4h_in, wind_max_today_mph, temp_min_24h_f, temp_max_3day_f,
+    /// days_since_significant_rain. Return `true` to skip, or a non-empty
+    /// string for a custom skip reason.
+    pub script: String,
+}
+
+// ----- Manual schedules -----
+//
+// Smart-irrigation auto-mode is the default, but operators can also
+// define explicit per-zone schedules that fire at fixed weekday-and-
+// time slots. Schedules respect Phase C watering restrictions exactly
+// like smart-irrigation runs do: if a restriction would block the
+// dispatch (wrong weekday, forbidden hour), the run is skipped with a
+// reason logged to the runs table.
+//
+// `ManualMode::Override` is the default: smart-irrigation dispatch is
+// suppressed for any zone with an enabled override schedule today.
+// Smart math still computes for nerd visibility. `Floor` runs both —
+// useful for "minimum coverage" patterns where smart adds extra when
+// the deficit grows large.
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ManualSchedule {
+    /// Operator-set unique identifier (snake_case). Used by the
+    /// scheduler dedupe key + the runs table source column.
+    pub id: String,
+    /// Display label. Defaults to `id` if blank.
+    #[serde(default)]
+    pub name: String,
+    /// Zone slug this schedule fires. References a key in `Config.zones`.
+    pub zone_slug: String,
+    /// Disable to retain the entry but skip evaluation.
+    #[serde(default = "default_true_schedule")]
+    pub enabled: bool,
+    /// Weekdays the schedule fires (`chrono::Weekday::num_days_from_sunday`:
+    /// 0=Sun..6=Sat). Empty = never (effectively disabled).
+    #[serde(default)]
+    pub weekdays: Vec<u8>,
+    /// Local-time hour (0..23) the schedule fires.
+    pub start_hour: u8,
+    /// Local-time minute (0..59) the schedule fires.
+    pub start_minute: u8,
+    /// Per-dispatch duration in whole minutes. Tightened further if a
+    /// Phase C restriction caps run length for the zone.
+    pub duration_minutes: u32,
+    /// Override vs Floor; see module-level note above.
+    #[serde(default)]
+    pub mode: ManualMode,
+}
+
+fn default_true_schedule() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualMode {
+    /// Default: smart-irrigation dispatch for this zone is suppressed
+    /// whenever an enabled Override schedule applies today. The smart
+    /// engine's daily verdict + math still compute for visibility.
+    #[default]
+    Override,
+    /// Schedule fires AND smart-irrigation may add additional runs if
+    /// its deficit math justifies it. Useful for minimum-coverage
+    /// patterns; risks overwatering if the smart deficit is already
+    /// satisfied by the scheduled run.
+    Floor,
 }
 
 // ----- Deployment -----
@@ -69,6 +195,58 @@ pub struct Deployment {
     pub timezone: Option<String>,
     #[serde(default = "default_display_name")]
     pub display_name: String,
+    /// House-address parity for jurisdictions that gate watering days
+    /// by odd vs even address (e.g. St. Johns River WMD in Florida).
+    /// Defaults to `NotApplicable`, which makes weekday-restriction
+    /// gates a no-op even when configured.
+    #[serde(default)]
+    pub address_parity: AddressParity,
+    /// Where the irrigation snapshot is sourced from. `Auto` (default)
+    /// uses Home Assistant when HA env is configured, else builds the
+    /// snapshot natively (standalone). `HomeAssistant`/`Standalone` force
+    /// a path. See `resolve_snapshot_source`.
+    #[serde(default)]
+    pub mode: DeploymentMode,
+    /// When true (and HA is authoritative), also run the native snapshot
+    /// builder in shadow and expose its output + a diff for comparison,
+    /// without it ever driving dispatch. Env: `LOCALSKY_SHADOW_NATIVE=1`.
+    #[serde(default)]
+    pub shadow_native: bool,
+    /// HA-mode only: the entity-id prefix of the OpenSprinkler (or other)
+    /// controller integration in Home Assistant. The snapshot builder reads
+    /// `switch.<prefix>_enabled`, `sensor.<prefix>_water_level`, and
+    /// `binary_sensor.<prefix>_<zone>_station_running` from it. Set this to
+    /// match how the controller's device is named in your HA. Standalone
+    /// mode ignores it (controllers are read directly).
+    #[serde(default = "default_ha_sprinkler_prefix")]
+    pub ha_sprinkler_prefix: String,
+}
+
+fn default_ha_sprinkler_prefix() -> String {
+    "opensprinkler".to_string()
+}
+
+/// Snapshot-source mode. Standalone needs no Home Assistant; HA is one
+/// optional source among many.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeploymentMode {
+    /// Native when no HA env is configured, otherwise Home Assistant.
+    #[default]
+    Auto,
+    /// Always build the snapshot from Home Assistant (legacy path).
+    HomeAssistant,
+    /// Always build the snapshot natively (no HA required).
+    Standalone,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AddressParity {
+    #[default]
+    NotApplicable,
+    Odd,
+    Even,
 }
 
 fn default_display_name() -> String {
@@ -155,11 +333,19 @@ pub enum SourceKind {
     TempestWs(TempestWsConfig),
     OpenMeteo(OpenMeteoConfig),
     EcowittLocal(EcowittLocalConfig),
+    /// Ecowitt gateway local-API poller (E1). Reads /get_livedata_info on
+    /// the LAN; coexists with HA's push integration.
+    EcowittGwPoll(EcowittGwPollConfig),
+    DavisWll(DavisWllConfig),
     Nws(NwsConfig),
     OpenWeather(OpenWeatherConfig),
     PirateWeather(PirateWeatherConfig),
     MetNorway(MetNorwayConfig),
     AmbientWeather(AmbientWeatherConfig),
+    Netatmo(NetatmoConfig),
+    Yolink(YolinkConfig),
+    Lacrosse(LacrosseConfig),
+    TuyaCloud(TuyaCloudConfig),
     HaPassthrough(HaPassthroughConfig),
     /// Subscribe to MQTT topics from any publisher (Tasmota, ESPHome,
     /// Zigbee2MQTT, raw MQTT publishers). Works standalone (no HA
@@ -229,6 +415,28 @@ fn default_ecowitt_path() -> String {
     "/ingest/ecowitt".to_string()
 }
 
+/// Native Ecowitt gateway POLLER (E1). Unlike `EcowittLocal` (which receives
+/// the gateway's push), this polls the gateway's local HTTP API
+/// `GET http://<host>/get_livedata_info` on the LAN and records every
+/// reading (soil channels, temp/humidity, rain, wind) into sensor_history,
+/// keyed the same way the push path keys them (soilmoisture1.., tempf, ...).
+/// It coexists with Home Assistant's own Ecowitt integration because polling
+/// the local API doesn't contend for the gateway's single push destination.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct EcowittGwPollConfig {
+    /// Gateway IP or hostname on the LAN (e.g. "192.0.2.12"). Found via
+    /// native discovery (Phase E2) or entered manually.
+    pub host: String,
+    /// Poll cadence in seconds. The gateway samples roughly every 16s; 30s
+    /// is plenty for irrigation and easy on the device.
+    #[serde(default = "default_ecowitt_poll_s")]
+    pub poll_interval_s: u32,
+}
+
+fn default_ecowitt_poll_s() -> u32 {
+    30
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct NwsConfig {
     /// Required by api.weather.gov. Plain ASCII, identifies the operator
@@ -252,11 +460,166 @@ pub struct MetNorwayConfig {
     pub user_agent: String,
 }
 
+/// Davis WeatherLink Live (WLL) LAN gateway. Polls the WLL's local
+/// HTTP endpoint `http://{host}/v1/current_conditions` (no auth) on
+/// the configured interval. Compatible with Vantage Pro 2 + Vantage
+/// Vue + EnviroMonitor connected to a WLL hub.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DavisWllConfig {
+    /// IP or hostname of the WLL device on the LAN.
+    pub host: String,
+    /// Transmitter ID (txid) of the ISS to read. Defaults to 1
+    /// (the most common single-ISS install). Multi-station households
+    /// should set this to the appropriate transmitter id.
+    #[serde(default = "default_davis_wll_txid")]
+    pub txid: u32,
+}
+
+fn default_davis_wll_txid() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AmbientWeatherConfig {
     pub app_key: String,
     pub api_key: String,
     pub mac_address: String,
+}
+
+/// YoLink (YoSmart) cloud sensor ecosystem at api.yosmart.com.
+/// YoLink ships LoRa-based sensors that report via a B-LAN/M-LAN hub
+/// up to YoSmart cloud. Auth is OAuth2 client_credentials (`UAID` +
+/// `Secret Key` from the YoLink app developer portal).
+///
+/// Each entry in `device_field_map` maps a (LocalSky WeatherField name)
+/// -> (yolink device_id + device_type + json path into its state). The
+/// adapter polls each mapped device's state at the configured cadence
+/// and emits an Observation per mapped field.
+///
+/// Most-relevant YoLink device types for LocalSky:
+///   - THSensor (YS8003-UC outdoor temp/RH)
+///   - LeakSensor (YS7903-UC) — binary; map to a custom field via HA bridge if needed
+///   - WaterMeterController — flow + total volume reads via state.waterFlow / state.waterReading
+///   - GarageDoor / Hub / Switch — not weather/irrigation, skip
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct YolinkConfig {
+    /// UAID from the YoLink app developer settings.
+    pub client_id: String,
+    /// Secret key paired with the UAID. Treat like a password.
+    pub client_secret: String,
+    /// Map LocalSky WeatherField name -> YoLink device + state path.
+    #[serde(default)]
+    pub device_field_map: Vec<YolinkFieldMap>,
+    /// Optional base URL override; default api.yosmart.com.
+    #[serde(default = "default_yolink_base_url")]
+    pub base_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct YolinkFieldMap {
+    /// WeatherField variant name (CamelCase or snake_case accepted).
+    pub field: String,
+    /// YoLink device id (deviceId from /api Home.getDeviceList).
+    pub device_id: String,
+    /// YoLink device type, used to compose the {Type}.getState method.
+    /// Examples: "THSensor", "WaterMeterController", "LeakSensor".
+    pub device_type: String,
+    /// Dot-separated JSON path into the device's state object. The path
+    /// is rooted at `data.state` of the API response. e.g. for THSensor
+    /// the live temperature lives at `temperature`. For WaterMeter the
+    /// rate lives at `waterFlow`, totalizer at `waterReading`.
+    pub state_path: String,
+    /// Linear scaling: out = raw * scale + offset. Defaults to identity.
+    #[serde(default = "default_one")]
+    pub scale: f64,
+    #[serde(default)]
+    pub offset: f64,
+}
+
+fn default_yolink_base_url() -> String {
+    "https://api.yosmart.com".to_string()
+}
+
+fn default_one() -> f64 {
+    1.0
+}
+
+/// Tuya cloud (openapi.tuya{us|eu|cn|in}.com) — the OEM ecosystem behind
+/// RainPoint, Smart Life-branded irrigation timers, dozens of consumer
+/// soil moisture / leak / temperature sensors, and most cheap WiFi
+/// flow meters. Auth is HMAC-SHA256 signed requests with an access_id
+/// (client_id) + access_secret obtained from the Tuya IoT Platform.
+///
+/// User must:
+///   1. Create a Cloud project at iot.tuya.com (free tier OK)
+///   2. Link their Tuya/Smart Life app account ("Link Tuya App Account")
+///   3. Copy access_id + access_secret into the wizard
+///   4. Grab device_ids from the project's "Devices" tab
+///
+/// Same per-device-mapping shape as YoLink: list of WeatherField ->
+/// (device_id + status code) pairs with linear scale + offset.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TuyaCloudConfig {
+    pub client_id: String,
+    pub client_secret: String,
+    /// Regional base URL. Defaults to US (openapi.tuyaus.com); EU users
+    /// switch to openapi.tuyaeu.com, China to openapi.tuyacn.com, India
+    /// to openapi.tuyain.com.
+    #[serde(default = "default_tuya_base_url")]
+    pub base_url: String,
+    /// Map LocalSky WeatherField -> Tuya (device_id, status_code) pair.
+    #[serde(default)]
+    pub device_field_map: Vec<TuyaFieldMap>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TuyaFieldMap {
+    pub field: String,
+    pub device_id: String,
+    /// Tuya status code (DP code). Examples: "temp_current", "humi_current",
+    /// "water_total", "water_current", "battery_percentage".
+    pub status_code: String,
+    #[serde(default = "default_one_tuya")]
+    pub scale: f64,
+    #[serde(default)]
+    pub offset: f64,
+}
+
+fn default_tuya_base_url() -> String {
+    "https://openapi.tuyaus.com".to_string()
+}
+fn default_one_tuya() -> f64 {
+    1.0
+}
+
+/// LaCrosse "View" cloud (lacrossealerts.com / lacrosseview.com).
+/// LaCrosse stations with the Gateway / View hub upload to the LaCrosse
+/// cloud; the mobile + web apps read from a documented REST endpoint
+/// (community-mapped by ha-lacrosseview and homeassistant-lacrosseview).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct LacrosseConfig {
+    pub email: String,
+    pub password: String,
+    /// Optional device id ("LTV-WSDTH04" etc). When set, only the
+    /// matching device's sensors are emitted. When None, the first
+    /// active device under the account is used.
+    #[serde(default)]
+    pub device_id: Option<String>,
+}
+
+/// Netatmo Weather Station cloud. Uses the OAuth2 refresh_token grant
+/// (one-time browser auth + paste the refresh_token in the wizard;
+/// the adapter handles access_token rotation internally). Each MAC
+/// addresses a single station; the adapter walks all modules under
+/// that station and merges their readings.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct NetatmoConfig {
+    pub client_id: String,
+    pub client_secret: String,
+    pub refresh_token: String,
+    /// MAC of the main station (e.g. "70:ee:50:00:11:22"). Required;
+    /// the GET /api/getstationsdata response is filtered to this MAC.
+    pub device_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -385,6 +748,10 @@ pub enum ControllerKind {
     HaServiceCall(HaServiceCallConfig),
     EsphomeNative(EsphomeNativeConfig),
     Rachio(RachioConfig),
+    Hydrawise(HydrawiseConfig),
+    Bhyve(BhyveConfig),
+    Rainbird(RainbirdConfig),
+    MqttCommand(MqttCommandConfig),
     DryRun(DryRunConfig),
 }
 
@@ -457,6 +824,110 @@ pub struct RachioConfig {
     pub zone_uuid_map: BTreeMap<String, String>,
 }
 
+/// Hunter Hydrawise cloud controller. The HC v3 / HPC v6 / Pro-C
+/// upgrade module all report through app.hydrawise.com. Auth is a
+/// per-account API key (Account > Settings > API in the customer
+/// portal). The "Restful API" docs at app.hydrawise.com/config/api
+/// are the source of truth.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct HydrawiseConfig {
+    pub api_key: String,
+    /// Controller serial / id. Used to scope status + commands when an
+    /// account has multiple controllers.
+    pub controller_id: i64,
+    /// Map LocalSky zone slug -> Hydrawise relay_id.
+    #[serde(default)]
+    pub zone_relay_map: BTreeMap<String, i64>,
+}
+
+/// Orbit B-hyve cloud controller. WiFi Timer / Smart Indoor Timer /
+/// XR + XD models. Uses the orbit API at api.orbitbhyve.com with a
+/// token-based auth (email + password -> session token). The session
+/// token is rotated by the adapter; users provide email + password.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BhyveConfig {
+    pub email: String,
+    pub password: String,
+    /// Device id from /v1/devices response. Required to scope commands.
+    pub device_id: String,
+    /// Map LocalSky zone slug -> B-hyve station number (1-based).
+    #[serde(default)]
+    pub zone_station_map: BTreeMap<String, u32>,
+}
+
+/// Rain Bird LNK2 controller via cloud REST. The LNK2 is the WiFi
+/// module bolted onto ESP-Me / ARC8 / ESP-RZXe controllers; this
+/// adapter targets the rdz-rest.rainbird.com cloud (the same endpoint
+/// the official Rain Bird mobile app uses).
+///
+/// The LAN-direct path (AES-encrypted JSON-RPC on port 80, documented
+/// by the pyrainbird community) is a future wave — requires bringing in
+/// aes + cbc + pbkdf2 deps. Until then, HA users can wire HA's existing
+/// RainBird LAN integration through `ha_service_call` instead.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RainbirdConfig {
+    /// Account email registered with the Rain Bird app.
+    pub email: String,
+    pub password: String,
+    /// Controller serial / id. Pulled from /v1/userControllers.
+    pub controller_id: String,
+    /// Map LocalSky zone slug -> Rain Bird station number (1-based).
+    #[serde(default)]
+    pub zone_station_map: BTreeMap<String, u32>,
+    /// Optional base URL override. Defaults to the production endpoint;
+    /// useful if Rain Bird ever rotates hosts again.
+    #[serde(default = "default_rainbird_base_url")]
+    pub base_url: String,
+}
+
+fn default_rainbird_base_url() -> String {
+    "https://rdz-rest.rainbird.com".to_string()
+}
+
+/// Generic MQTT command-sink controller. Publishes start/stop messages
+/// to per-zone topics. Compatible with ESPHome `mqtt:` switches, Tasmota
+/// relays, Sonoff/Shelly devices in MQTT mode, OpenSprinkler MQTT plug-in,
+/// and any DIY relay board that subscribes to MQTT. No state subscription;
+/// commands are fire-and-forget. Use ESPHome native or HaServiceCall when
+/// you need confirmed state.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct MqttCommandConfig {
+    pub broker_host: String,
+    #[serde(default = "default_mqtt_broker_port")]
+    pub broker_port: u16,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    /// MQTT client id. Defaults to "localsky-controller-<id>".
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// Map LocalSky zone slug -> command spec. Each entry specifies the
+    /// command topic and the on/off payloads to publish.
+    #[serde(default)]
+    pub zone_command_map: BTreeMap<String, MqttZoneCommand>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct MqttZoneCommand {
+    /// Topic to publish the on/off command to.
+    pub topic: String,
+    /// Payload to publish to start the zone. Defaults to "ON".
+    #[serde(default = "default_mqtt_on_payload")]
+    pub on_payload: String,
+    /// Payload to publish to stop the zone. Defaults to "OFF".
+    #[serde(default = "default_mqtt_off_payload")]
+    pub off_payload: String,
+    /// Optional retain flag on published messages.
+    #[serde(default)]
+    pub retain: bool,
+}
+
+fn default_mqtt_on_payload() -> String {
+    "ON".to_string()
+}
+fn default_mqtt_off_payload() -> String {
+    "OFF".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct DryRunConfig {
     /// When true, every `run_zone` call ALSO writes a synthetic ran-X-min
@@ -509,6 +980,18 @@ pub struct ZoneConfig {
     /// Optional photo URL for the zone card (Phase 10 wizard upload).
     #[serde(default)]
     pub photo_url: Option<String>,
+    /// Weekly water target (inches) for the standalone budget allocator.
+    /// `None` = use the agronomic default inferred from the zone slug
+    /// (turf 1.0", shrub/garden/bed 0.5"). On the HA path the live
+    /// `input_number.irrigation_<slug>_weekly_budget_in` helper still wins
+    /// when present; this is the native (no-HA) source + the HA fallback.
+    #[serde(default)]
+    pub weekly_budget_in: Option<f64>,
+    /// Irrigation sessions per week for the budget allocator. `None` = use
+    /// the agronomic default (turf 2, shrub/garden/bed 1). Same HA-helper
+    /// precedence as `weekly_budget_in`.
+    #[serde(default)]
+    pub sessions_per_week: Option<u32>,
 }
 
 fn default_target_min_pct() -> f64 {
@@ -738,6 +1221,11 @@ pub struct EngineParams {
     /// the inputs; fall back to ASCE simplified, then Hargreaves-Samani.
     #[serde(default)]
     pub et0_method: Et0Method,
+    /// Jurisdictional watering restrictions (e.g. St. Johns River WMD).
+    /// Empty = no restrictions enforced. Evaluated in engine::restrictions
+    /// and gated inside skip_rules::decide() before weather checks.
+    #[serde(default)]
+    pub watering_restrictions: Vec<WateringRestriction>,
 }
 
 impl Default for EngineParams {
@@ -748,8 +1236,64 @@ impl Default for EngineParams {
             session_rain_defer_in: default_session_rain_defer_in(),
             soak_minutes: default_soak_minutes(),
             et0_method: Et0Method::default(),
+            watering_restrictions: Vec::new(),
         }
     }
+}
+
+/// A single regulatory or HOA watering restriction. Multiple may stack;
+/// the engine ANDs every enabled, in-effective-window restriction.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WateringRestriction {
+    /// Stable id (`sjrwmd_dst`, `sjrwmd_est`, `hoa`, ...). Used for
+    /// dedupe and as a primary key in the settings UI.
+    pub id: String,
+    /// Human label shown in skip reasons and the settings list.
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Which dates this restriction applies on. The engine evaluates the
+    /// window against `now.date_naive()`.
+    pub effective: EffectiveWindow,
+    /// Weekdays the operator is allowed to water when their address is
+    /// odd-numbered. `0 = Sun .. 6 = Sat` (chrono's `num_days_from_sunday`).
+    /// Empty = no parity restriction.
+    #[serde(default)]
+    pub allowed_weekdays_odd: Vec<u8>,
+    /// Same for even-numbered addresses.
+    #[serde(default)]
+    pub allowed_weekdays_even: Vec<u8>,
+    /// Inclusive start hour (0..23) of the forbidden window. `None` =
+    /// no hour gate. SJRWMD uses 10 (10am).
+    #[serde(default)]
+    pub forbidden_hour_start: Option<u8>,
+    /// Exclusive end hour. SJRWMD uses 16 (4pm).
+    #[serde(default)]
+    pub forbidden_hour_end: Option<u8>,
+    /// Hard cap per zone per session (minutes). Min-of-active wins when
+    /// multiple restrictions specify a cap.
+    #[serde(default)]
+    pub max_minutes_per_zone: Option<u32>,
+}
+
+/// When a `WateringRestriction` applies. DST/Standard windows handle
+/// the typical Florida split between summer (DST) and winter (EST)
+/// restrictions. `DateRange` lets HOA / city rules name an arbitrary
+/// MM-DD..MM-DD range, including wraparound (e.g. Nov-15..Feb-28).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EffectiveWindow {
+    AllYear,
+    /// 2nd Sunday of March → 1st Sunday of November (US DST rules).
+    DstOnly,
+    /// Complement of `DstOnly`.
+    StandardOnly,
+    DateRange {
+        start_month: u8,
+        start_day: u8,
+        end_month: u8,
+        end_day: u8,
+    },
 }
 
 fn default_capture_eff() -> f64 {

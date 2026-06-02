@@ -16,7 +16,7 @@
 //   here. Touching them with respondWith() will buffer the stream and break
 //   real-time updates.
 // - Navigations are network-first. We refuse to cache redirected/opaqueredirect
-//   responses because Caddy 302s to the auth proxy on session expiry, and the
+//   responses because a reverse proxy 302s to an auth provider on session expiry, and the
 //   *worst* PWA failure mode is a SW that caches the auth-redirect HTML and
 //   serves it forever.
 // - /pkg/* and /icons/* are stale-while-revalidate so the app boots fast on

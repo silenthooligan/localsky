@@ -75,7 +75,11 @@ pub fn split(
     for i in 0..cycle_count {
         // Distribute the remainder across the first few cycles so the
         // sum exactly equals total_seconds.
-        let run = if i < remainder { per_cycle + 1 } else { per_cycle };
+        let run = if i < remainder {
+            per_cycle + 1
+        } else {
+            per_cycle
+        };
         let soak = if i + 1 < cycle_count { soak_s } else { 0 };
         out.push(CycleSegment {
             run_seconds: run,

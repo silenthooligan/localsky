@@ -13,6 +13,7 @@
 // (current_pct is None) the tile collapses to a "(probe offline)"
 // state so the rest of the dashboard isn't dragged into a dead chart.
 
+use crate::components::ui::HelpHint;
 use crate::ha::snapshot::{IrrigationSnapshot, SoilForecast};
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
@@ -28,7 +29,10 @@ pub fn SoilSensors(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
 
     view! {
         <section class="soil-grid">
-            <h2 class="soil-grid-title">"Soil Sensors · 7-day projection"</h2>
+            <h2 class="soil-grid-title">
+                "Soil Sensors · 7-day projection"
+                <HelpHint topic="soil-sensors"/>
+            </h2>
             <p class="soil-grid-sub">
                 "If no irrigation runs this week, here\u{2019}s where each zone lands. \
                  Green band is the healthy range (target min \u{2192} saturation). \

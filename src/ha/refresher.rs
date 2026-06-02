@@ -2,15 +2,20 @@
 // snapshot on each cycle. One spawn per process; failures back off and
 // keep going (we'd rather show stale data than crash the whole app).
 
+use crate::controllers::registry::ControllerRegistry;
+use crate::engine::scripting::CompiledScripts;
+use crate::engine::skip_rules::ZoneSoil;
 use crate::forecast::snapshot::ForecastSnapshot;
 use crate::forecast::ForecastStore;
 use crate::ha::rest::HaClient;
 use crate::ha::skip_logic::{self, et_heat_multiplier, heat_index_f, Inputs};
-use crate::ha::snapshot::{DayVerdict, Forecast, IrrigationSnapshot, SoilForecast, WaterBudget, ZoneState};
+use crate::ha::snapshot::{
+    DayVerdict, Forecast, IrrigationSnapshot, RuleEval, SoilForecast, WaterBudget, ZoneState,
+};
 use crate::ha::store::IrrigationStore;
 use crate::history::IngestState;
 use crate::tempest::state::TempestStore;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use rusqlite::Connection;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -18,43 +23,255 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
-/// Stations 1-4 on the Aperture controller, in IU sequence order. Used
-/// by both the snapshot builder and (in Phase 3) the SQLite ingest.
-pub const ZONE_SLUGS: [&str; 4] = ["back_yard", "front_yard", "side_yard", "back_yard_shrubs"];
+// Zone list is resolved at refresher spawn time via crate::zones::configured()
+// (LOCALSKY_ZONES env var, falling back to the legacy 4-zone default).
+// Snapshot zones are computed by iterating the resolved list rather than
+// a compile-time constant; operators with more or fewer zones can override
+// without recompiling.
 
-/// Friendly names for each slug. The HA device registry overrides
-/// these per-device via `name_by_user`, but we don't read that today;
-/// the slug-derived mapping below tracks the user's actual labels in
-/// the dashboard's lovelace YAML.
-fn zone_display_name(slug: &str) -> &'static str {
-    match slug {
-        "back_yard" => "Back Yard",
-        "front_yard" => "Front Yard",
-        "side_yard" => "Side Yard",
-        "back_yard_shrubs" => "Back Yard Shrubs",
-        _ => "?",
+/// Which builder fills the IrrigationSnapshot store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotSource {
+    /// Poll Home Assistant `/api/states` (the legacy path).
+    HomeAssistant,
+    /// Build natively from local stores + controllers + the engine (no HA).
+    Native,
+}
+
+/// Decide whether to source the snapshot from HA or natively. The
+/// `LOCALSKY_STANDALONE=1` env override wins; otherwise `Auto` picks
+/// native only when no HA env is configured, so an existing HA deploy is
+/// unaffected by default.
+pub fn resolve_snapshot_source(mode: crate::config::schema::DeploymentMode) -> SnapshotSource {
+    use crate::config::schema::DeploymentMode;
+    if std::env::var("LOCALSKY_STANDALONE").ok().as_deref() == Some("1") {
+        return SnapshotSource::Native;
+    }
+    let ha_present = std::env::var("HA_URL").is_ok()
+        && (std::env::var("HA_TOKEN").is_ok() || std::env::var("HA_LONG_LIVED_TOKEN").is_ok());
+    match mode {
+        DeploymentMode::HomeAssistant => SnapshotSource::HomeAssistant,
+        DeploymentMode::Standalone => SnapshotSource::Native,
+        DeploymentMode::Auto => {
+            if ha_present {
+                SnapshotSource::HomeAssistant
+            } else {
+                SnapshotSource::Native
+            }
+        }
     }
 }
 
 /// Default poll interval. Irrigation state is low-frequency so 10s is
 /// plenty; manual zone runs surface within a tap-of-an-eyeblink.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+/// Backoff ceiling so a long HA outage never sleeps the refresher
+/// longer than its happy-path cadence by more than ~3 minutes.
+const BACKOFF_MAX: Duration = Duration::from_secs(180);
 
+/// Per-zone runtime parameters resolved at boot from localsky.toml.
+/// The refresher uses these to size run durations instead of reading
+/// stale Smart Irrigation entity attributes.
+#[derive(Debug, Clone, Copy)]
+pub struct ZoneRuntime {
+    /// Precipitation rate in mm/hr; either the zone's measured override
+    /// or the catalog default for its sprinkler_type. See
+    /// engine::effective_precip_rate_mm_hr.
+    pub throughput_mm_hr: f64,
+    /// Safety cap on a single dispatch (seconds). Engine refuses to
+    /// queue runs longer than this even if the deficit would justify
+    /// it. Default 3600 (60min) per zone.
+    pub max_duration_s: u32,
+}
+
+impl ZoneRuntime {
+    /// Conservative fallback when a zone is enumerated (via env var or
+    /// legacy default) but absent from the loaded config file. Treat
+    /// the zone as a rotor at 10 mm/hr with a 60-minute safety cap.
+    pub fn fallback() -> Self {
+        Self {
+            throughput_mm_hr: 10.0,
+            max_duration_s: 3600,
+        }
+    }
+}
+
+/// Watering policy snapshot resolved at boot from localsky.toml. The
+/// refresher evaluates this against the current wall clock every tick:
+///   - `restrictions` + `address_parity` feed the skip-rule ladder and
+///     the per-zone `max_duration_s` cap (Phase C).
+///   - `manual_schedules` are checked per zone via
+///     `crate::scheduler::manual::override_active_today`. When an enabled
+///     Override schedule applies today for a zone, the refresher zeros
+///     `scheduled_seconds` so smart-irrigation doesn't dispatch on top
+///     of the operator's manual run; math still computes for visibility.
+///     The actual manual dispatch fires from `scheduler::manual::spawn`.
+#[derive(Debug, Clone, Default)]
+pub struct WateringPolicy {
+    pub restrictions: Vec<crate::config::schema::WateringRestriction>,
+    pub address_parity: crate::config::schema::AddressParity,
+    pub manual_schedules: Vec<crate::config::schema::ManualSchedule>,
+    /// (lat, lon) — used by the refresher to compute the LocalSky-native
+    /// next_run_epoch from sunrise + sequence_total. (0.0, 0.0) keeps the
+    /// pre-cutover semantics: next_run_epoch stays at whatever upstream
+    /// produced (legacy IU path before strip; 0 after).
+    pub location: (f64, f64),
+    /// Per-zone soil config resolved from localsky.toml zones. Each zone's
+    /// assigned sensor (`ha:` entity or `source:<id>:<key>` channel) +
+    /// per-zone thresholds. Empty = no config (fall back to the legacy
+    /// hardcoded soil reads).
+    pub soil_zones: Vec<ZoneSoilCfg>,
+    /// User-defined structured trigger rules (augment-only), from
+    /// `config.conditions.rules`. Empty = none.
+    pub condition_rules: Vec<crate::engine::conditions::ConditionRule>,
+    /// Engine skip-rule thresholds from `cfg.engine.skip_rules`. The HA
+    /// path still prefers the live `input_number` helpers when present and
+    /// only falls back to these; the native (empty-map) path has no helpers
+    /// so these config values are what the engine actually uses. Defaults
+    /// equal the historical hardcoded literals (10 mph / 38F / 0.25in /
+    /// 35F), so an HA deploy on default config is unchanged.
+    pub skip_rules: crate::config::schema::SkipRuleParams,
+    /// Per-zone weekly-budget config from `cfg.zones` (A5b). Drives the
+    /// standalone water-budget allocator so any configured zone (not just
+    /// the legacy four) gets a run-time. Empty = no config; the allocator
+    /// falls back to its legacy hardcoded four-zone defaults.
+    pub budget_zones: Vec<ZoneBudgetCfg>,
+    /// HA-mode controller entity prefix (from `cfg.deployment.ha_sprinkler_prefix`):
+    /// the snapshot reads `switch.<prefix>_enabled`, `sensor.<prefix>_water_level`,
+    /// and `binary_sensor.<prefix>_<zone>_station_running`. Empty (the Default)
+    /// is treated as "opensprinkler" by the reader, so the HA path works for
+    /// any operator's controller naming.
+    pub ha_sprinkler_prefix: String,
+}
+
+/// Resolve the HA controller entity prefix, falling back to a sensible
+/// default when unset (the WateringPolicy::default / env-compat path).
+fn sprinkler_prefix(policy: &WateringPolicy) -> &str {
+    if policy.ha_sprinkler_prefix.is_empty() {
+        "opensprinkler"
+    } else {
+        &policy.ha_sprinkler_prefix
+    }
+}
+
+/// One zone's weekly-budget configuration for the standalone allocator.
+/// `weekly_budget_in` / `sessions_per_week` are `None` when the operator
+/// hasn't set them, in which case the allocator uses an agronomic default
+/// inferred from the slug (turf 1.0"/2 sessions, shrub/garden/bed 0.5"/1).
+#[derive(Debug, Clone)]
+pub struct ZoneBudgetCfg {
+    pub slug: String,
+    pub name: String,
+    pub weekly_budget_in: Option<f64>,
+    pub sessions_per_week: Option<u32>,
+}
+
+/// One zone's soil configuration resolved at boot from `ZoneConfig`. The
+/// refresher resolves `soil_sensor_id` to a live % each tick and pairs it
+/// with the per-zone thresholds to build the engine's `ZoneSoil`.
+#[derive(Debug, Clone)]
+pub struct ZoneSoilCfg {
+    pub slug: String,
+    pub name: String,
+    pub soil_sensor_id: Option<String>,
+    pub saturation_pct: f64,
+    pub target_min_pct: f64,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_refresher(
     store: Arc<IrrigationStore>,
     forecast_store: Arc<ForecastStore>,
     tempest_store: Arc<TempestStore>,
     history_conn: Option<Arc<Mutex<Connection>>>,
     push: crate::push::PushDispatcher,
+    zone_runtime: HashMap<String, ZoneRuntime>,
+    watering_policy: WateringPolicy,
+    scripts: CompiledScripts,
+    source: SnapshotSource,
+    controllers: ControllerRegistry,
+    // When set (HA source + shadow_native), the native snapshot is built
+    // each tick and written here for comparison — never drives dispatch.
+    shadow_store: Option<Arc<IrrigationStore>>,
+    // Locally persisted pause + one-day override (A6). Read each tick so a
+    // native build (and the shadow build) honors operator pauses. `None`
+    // only when no persistence DB is mounted.
+    control_store: Option<crate::persistence::IrrigationControlStore>,
 ) {
     tokio::spawn(async move {
-        let client = match HaClient::from_env() {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!("ha_client init failed: {e:#}");
-                return;
-            }
+        // HA client only when sourcing from Home Assistant. Native builds
+        // the snapshot from local stores + controllers and needs no HA.
+        let client = match source {
+            SnapshotSource::HomeAssistant => match HaClient::from_env() {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    tracing::error!("ha_client init failed: {e:#}");
+                    return;
+                }
+            },
+            SnapshotSource::Native => None,
         };
+        tracing::info!(?source, "irrigation refresher snapshot source");
+
+        // Resolve the active zone list once at spawn time. Changing
+        // LOCALSKY_ZONES requires a container restart, which is the same
+        // contract every other deploy-time env var has.
+        let zones = crate::zones::configured();
+        tracing::info!(
+            zone_count = zones.len(),
+            zones = ?zones.iter().map(|z| z.slug.as_str()).collect::<Vec<_>>(),
+            "ha refresher resolved zone list"
+        );
+
+        // Forecast-bias ingest: each refresh, record today's
+        // (predicted, observed) rain pair. The first write of each day
+        // captures the morning prediction; subsequent writes update
+        // observed_in as the day's total accumulates. The bias engine
+        // reads these rows to compute a per-month correction
+        // multiplier (engine::forecast_bias).
+        //
+        // The forecast_observations table is created by M0006, which
+        // runs only on the v2 boot path. On a v1-only install the
+        // table is absent; we probe once at spawn time and skip the
+        // ingest rather than logging a debug error every refresh.
+        let forecast_obs_store = match history_conn.as_ref() {
+            Some(c) => {
+                // `c` is an Arc<tokio::sync::Mutex<rusqlite::Connection>>; calling
+                // blocking_lock() from inside a tokio task panics ("Cannot block
+                // the current thread from within a runtime"). The table-existence
+                // probe is a one-shot at spawn time, so await the async lock
+                // instead. rusqlite's query_row is synchronous and briefly blocks
+                // the worker thread, which is acceptable for a single SELECT.
+                let exists = {
+                    let conn = c.lock().await;
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='forecast_observations'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map(|n| n > 0)
+                    .unwrap_or(false)
+                };
+                if exists {
+                    Some(crate::persistence::ForecastObservationsStore::new(
+                        c.clone(),
+                    ))
+                } else {
+                    tracing::info!(
+                        "forecast_observations table absent (v1 schema); skipping bias ingest"
+                    );
+                    None
+                }
+            }
+            None => None,
+        };
+
+        // Sensor-history handle for resolving `source:<id>:<key>` soil
+        // sensors (Ecowitt etc. recorded by the ingest path). HA-entity
+        // sensors don't need it. None on a v1-only install without history.
+        let sensor_history = history_conn
+            .as_ref()
+            .map(|c| crate::persistence::SensorHistoryStore::new(c.clone()));
 
         let mut ingest = IngestState::new();
         // Edge-detection state for push events. Tracks per-zone running
@@ -67,12 +284,95 @@ pub fn spawn_refresher(
         // Daily verdict push fires once per local-day; the date string
         // is the dedupe key.
         let mut last_verdict_day: Option<String> = None;
+        // Circuit-breaker state. Single warn on first failure ("entering
+        // degraded mode"), single info on recovery ("recovered"), with
+        // exponential backoff between attempts while degraded.
+        let mut consecutive_failures: u32 = 0;
+        let mut degraded: bool = false;
 
         loop {
-            match refresh_once(&client, &forecast_store, &tempest_store).await {
+            // Read the local control surface (vacation pause + one-day
+            // override) once per tick. Used by the native builder and, when
+            // shadowing, the shadow build too. Cheap single-row select.
+            let control = match control_store.as_ref() {
+                Some(cs) => Some(cs.get().await),
+                None => None,
+            };
+            let result = match source {
+                SnapshotSource::HomeAssistant => {
+                    refresh_once(
+                        client.as_ref().expect("HA client present for HA source"),
+                        &forecast_store,
+                        &tempest_store,
+                        &zones,
+                        &zone_runtime,
+                        &watering_policy,
+                        &scripts,
+                        sensor_history.as_ref(),
+                    )
+                    .await
+                }
+                SnapshotSource::Native => Ok(refresh_once_native(
+                    &forecast_store,
+                    &tempest_store,
+                    &zones,
+                    &zone_runtime,
+                    &watering_policy,
+                    &scripts,
+                    sensor_history.as_ref(),
+                    &controllers,
+                    control.as_ref(),
+                )
+                .await),
+            };
+            let sleep_for = match result {
                 Ok(snap) => {
+                    // Shadow: build the native snapshot alongside HA for
+                    // side-by-side comparison. Never drives dispatch.
+                    if let Some(ss) = &shadow_store {
+                        let native = refresh_once_native(
+                            &forecast_store,
+                            &tempest_store,
+                            &zones,
+                            &zone_runtime,
+                            &watering_policy,
+                            &scripts,
+                            sensor_history.as_ref(),
+                            &controllers,
+                            control.as_ref(),
+                        )
+                        .await;
+                        ss.store(native);
+                    }
                     if let Some(db) = history_conn.as_ref() {
                         ingest.observe(db, &snap).await;
+                    }
+                    // Forecast-bias daily ingest. Today's predicted rain
+                    // comes from the forecast store's daily[0]; today's
+                    // observed rain comes from the snapshot's
+                    // forecast.rain_today_in (which the refresher itself
+                    // populated from Tempest / HA). UPSERT semantics
+                    // preserve the morning prediction across the day.
+                    if let Some(obs_store) = forecast_obs_store.as_ref() {
+                        let today = chrono::Local::now().date_naive();
+                        let predicted_in = forecast_store
+                            .snapshot()
+                            .daily
+                            .first()
+                            .map(|d| d.precip_sum_in)
+                            .unwrap_or(0.0);
+                        let observed_in = snap.skip_check.rain_today_in;
+                        let store_handle = obs_store.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) =
+                                store_handle.upsert(today, predicted_in, observed_in).await
+                            {
+                                tracing::debug!(
+                                    error = %e,
+                                    "forecast observation upsert failed"
+                                );
+                            }
+                        });
                     }
                     emit_push_events(
                         &push,
@@ -82,20 +382,55 @@ pub fn spawn_refresher(
                         &mut last_verdict_day,
                     );
                     store.store(snap);
+                    if degraded {
+                        tracing::info!(consecutive_failures, "ha source recovered");
+                        degraded = false;
+                    }
+                    consecutive_failures = 0;
+                    REFRESH_INTERVAL
                 }
                 Err(e) => {
-                    tracing::warn!("ha refresh failed: {e:#}");
+                    consecutive_failures = consecutive_failures.saturating_add(1);
                     // Mark the existing snapshot as stale rather than
                     // overwriting it with empty data; the UI shows the
                     // last good values with an "HA unreachable" badge.
                     let mut prev = (*store.snapshot()).clone();
                     prev.ha_reachable = false;
                     store.store(prev);
+                    if !degraded {
+                        tracing::warn!(
+                            error = %format!("{e:#}"),
+                            "ha source unreachable; entering degraded mode"
+                        );
+                        degraded = true;
+                    } else {
+                        tracing::debug!(
+                            consecutive_failures,
+                            error = %format!("{e:#}"),
+                            "ha still unreachable"
+                        );
+                    }
+                    backoff(consecutive_failures)
                 }
-            }
-            tokio::time::sleep(REFRESH_INTERVAL).await;
+            };
+            tokio::time::sleep(sleep_for).await;
         }
     });
+}
+
+/// Exponential backoff for the HA refresher. Base 10s, doubling each
+/// consecutive failure, jittered ~10%, capped at BACKOFF_MAX.
+fn backoff(n: u32) -> Duration {
+    let base = 10u64;
+    let mult = 1u64.checked_shl(n.min(16)).unwrap_or(u64::MAX);
+    let secs = base.saturating_mul(mult).min(BACKOFF_MAX.as_secs());
+    let jitter = (secs / 10).max(1);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    let off = nanos % (2 * jitter + 1);
+    Duration::from_secs(secs.saturating_sub(jitter).saturating_add(off))
 }
 
 /// Walk the snapshot and emit push events on edge transitions:
@@ -150,11 +485,17 @@ fn emit_push_events(
 
 /// Pull /api/states once, blend with the in-process forecast + tempest
 /// stores, and build the snapshot. Pure read-only with respect to HA
-/// (we don't mutate any HA state from here).
+/// (we don't mutate any HA state from here). `zones` is the resolved
+/// active zone list (LOCALSKY_ZONES env var or legacy default).
 async fn refresh_once(
     client: &HaClient,
     forecast_store: &ForecastStore,
     tempest_store: &TempestStore,
+    zones: &[crate::zones::ZoneIdent],
+    zone_runtime: &HashMap<String, ZoneRuntime>,
+    watering_policy: &WateringPolicy,
+    scripts: &CompiledScripts,
+    sensor_history: Option<&crate::persistence::SensorHistoryStore>,
 ) -> anyhow::Result<IrrigationSnapshot> {
     let states = client.states().await?;
     let map: HashMap<String, Value> = states
@@ -165,61 +506,114 @@ async fn refresh_once(
                 .map(|id| (id.to_string(), v.clone()))
         })
         .collect();
+    Ok(build_from_map(
+        map,
+        forecast_store,
+        tempest_store,
+        zones,
+        zone_runtime,
+        watering_policy,
+        scripts,
+        sensor_history,
+        None,
+    )
+    .await)
+}
 
+/// Build the `IrrigationSnapshot` from a pre-fetched entity `map` plus the
+/// native stores/config. The HA path passes HA `/api/states`; the native
+/// (standalone) path passes an empty map and then overrides the HA-only
+/// fields (running-state, run-times, control surfaces). All the
+/// store-preferred reads (weather from ForecastStore/TempestStore, soil via
+/// `source:` channels) work identically either way. Decision logic is the
+/// shared `apply_engine`, so the verdict never depends on the source.
+#[allow(clippy::too_many_arguments)]
+async fn build_from_map(
+    map: HashMap<String, Value>,
+    forecast_store: &ForecastStore,
+    tempest_store: &TempestStore,
+    zones: &[crate::zones::ZoneIdent],
+    zone_runtime: &HashMap<String, ZoneRuntime>,
+    watering_policy: &WateringPolicy,
+    scripts: &CompiledScripts,
+    sensor_history: Option<&crate::persistence::SensorHistoryStore>,
+    // Native control surface. `Some` (standalone path) overrides the
+    // HA-helper-derived pause/override below with locally persisted state;
+    // `None` (HA path) reads them from the entity map as before.
+    control: Option<&crate::persistence::IrrigationControlState>,
+) -> IrrigationSnapshot {
     let mut snap = IrrigationSnapshot {
         last_refresh_epoch: Utc::now().timestamp(),
         ha_reachable: true,
+        tempest_last_seen_epoch: tempest_store.snapshot().last_packet_epoch,
+        forecast_last_seen_epoch: forecast_store.snapshot().last_refresh_epoch,
         ..Default::default()
     };
 
-    // IU sequence: next start, enabled/suspended. Total minutes is
-    // computed below from per-zone Smart Irrigation values, NOT from
-    // IU's zones array, because IU's per-zone duration stays at the
-    // YAML placeholder (1 min) until SI's nightly sync at 23:30
-    // overwrites it. Summing SI gives the actual minutes the morning
-    // run will produce, matching what the dashboard should advertise.
-    if let Some(s) = map.get("binary_sensor.irrigation_unlimited_c1_s1") {
-        let attrs = s.get("attributes").cloned().unwrap_or(Value::Null);
-        snap.iu_enabled = attrs
-            .get("enabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        // suspended is null when the sequence is armed, a string when
-        // currently suspended (and absent only on a malformed payload).
-        snap.iu_suspended = !matches!(
-            attrs.get("suspended"),
-            Some(Value::Null) | None
-        );
-        if let Some(next_start) = attrs.get("next_start").and_then(Value::as_str) {
-            if let Ok(dt) = DateTime::parse_from_rfc3339(next_start) {
-                snap.next_run_epoch = dt.timestamp();
-            }
-        }
-    }
+    // Evaluate watering restrictions once per refresh. The verdict feeds
+    // skip-logic via Inputs.watering_restrictions below; the cap (when
+    // a rule limits run length) tightens each zone's max_duration_s at
+    // the two compute sites further down.
+    let now_local = chrono::Local::now();
+    let restriction_verdict = crate::engine::restrictions::evaluate(
+        now_local,
+        &watering_policy.restrictions,
+        watering_policy.address_parity,
+    );
+    let restriction_cap_seconds: Option<u32> = restriction_verdict
+        .max_minutes_cap
+        .map(|m| m.saturating_mul(60));
+    // Today's weekday (Sun=0..Sat=6 per chrono::Weekday::num_days_from_sunday)
+    // for per-zone manual-override gating below.
+    let today_weekday: u8 = {
+        use chrono::Datelike;
+        now_local.weekday().num_days_from_sunday() as u8
+    };
 
-    // Master enable + water level.
-    snap.master_enable = state_eq(&map, "switch.aperture_sprinklers_enabled", "on");
-    snap.water_level_pct =
-        state_f64(&map, "sensor.aperture_sprinklers_water_level").unwrap_or(0.0);
+    // next_run_epoch is computed below (after the per-zone planned
+    // durations are known) from LocalSky's own smart-morning anchor
+    // (sunrise - 15min - sequence_total). The IU bridge was the prior
+    // source; it was stripped in the 2026-05-26 cutover.
+    snap.iu_enabled = false;
+    snap.iu_suspended = false;
+
+    // Master enable + water level, from the operator's controller integration
+    // in HA (entity prefix configurable; default "opensprinkler").
+    let sp = sprinkler_prefix(watering_policy);
+    snap.master_enable = state_eq(&map, &format!("switch.{sp}_enabled"), "on");
+    snap.water_level_pct = state_f64(&map, &format!("sensor.{sp}_water_level")).unwrap_or(0.0);
 
     // Vacation pause + one-day override helpers. Both are user-created
     // HA helpers (input_datetime + input_select). When missing, the snapshot
     // exposes override_helpers_present=false so the mobile UI can disable
     // the controls with a "(HA helper not configured)" hint rather than
     // letting the action POST fail with a 502 on tap.
-    let pause_state = map.get("input_datetime.irrigation_pause_until");
-    let override_state = map.get("input_select.irrigation_override_tomorrow");
-    snap.override_helpers_present = pause_state.is_some() && override_state.is_some();
-    snap.pause_until_epoch = pause_state
-        .and_then(|s| s.get("attributes"))
-        .and_then(|a| a.get("timestamp"))
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-    snap.override_tomorrow = override_state
-        .and_then(|s| s.get("state"))
-        .and_then(Value::as_str)
-        .unwrap_or("none")
-        .to_string();
+    match control {
+        // Native (standalone) path: the control surface lives in local
+        // persisted state, not HA helpers. The controls always "exist"
+        // (the UI is fully functional without HA), so present = true.
+        Some(c) => {
+            snap.override_helpers_present = true;
+            snap.pause_until_epoch = c.pause_until_epoch;
+            snap.override_tomorrow = c.override_tomorrow.clone();
+        }
+        // HA path: read both from the entity map exactly as before.
+        None => {
+            let pause_state = map.get("input_datetime.irrigation_pause_until");
+            let override_state = map.get("input_select.irrigation_override_tomorrow");
+            snap.override_helpers_present = pause_state.is_some() && override_state.is_some();
+            snap.pause_until_epoch = pause_state
+                .and_then(|s| s.get("attributes"))
+                .and_then(|a| a.get("timestamp"))
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            snap.override_tomorrow = override_state
+                .and_then(|s| s.get("state"))
+                .and_then(Value::as_str)
+                .unwrap_or("none")
+                .to_string();
+        }
+    }
 
     // Pre-compute the heat multiplier here (the snapshot.forecast struct
     // also recomputes this later — the dupe is intentional because the
@@ -241,10 +635,11 @@ async fn refresh_once(
     // global forecast multiplier (same one SI multiplies into ET via
     // the Phase C HA automation); capture_efficiency is the constant
     // LocalSky uses in the Phase E water-balance projection.
-    snap.zones = ZONE_SLUGS
+    snap.zones = zones
         .iter()
-        .map(|slug| {
-            let running_id = format!("binary_sensor.aperture_sprinklers_{slug}_station_running");
+        .map(|zone| {
+            let slug = zone.slug.as_str();
+            let running_id = format!("binary_sensor.{sp}_{slug}_station_running");
             let si_id = format!("sensor.smart_irrigation_{slug}");
             let attrs = map.get(&si_id).and_then(|s| s.get("attributes"));
             let bucket_mm = attrs
@@ -255,23 +650,48 @@ async fn refresh_once(
                 .and_then(|a| a.get("multiplier"))
                 .and_then(Value::as_f64)
                 .unwrap_or(1.0);
-            let throughput_mm_hr = attrs
-                .and_then(|a| a.get("throughput"))
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0);
-            let max_dur = attrs
-                .and_then(|a| a.get("maximum_duration"))
-                .and_then(Value::as_f64)
-                .unwrap_or(3600.0) as u32;
-            let planned = state_f64(&map, &si_id).unwrap_or(0.0) as u32;
-            // SI's flex math (matches custom_components/smart_irrigation):
+            // Throughput + max-duration resolve from LocalSky's config
+            // (localsky.toml zone block -> sprinkler_catalog default by
+            // sprinkler_type, or precip_rate_mm_hr override when measured),
+            // NOT from SI entity attributes. SI's `throughput` and
+            // `maximum_duration` attrs are ignored; SI's `bucket` +
+            // `multiplier` are still consumed as a transitional bridge
+            // until the v2 water-balance loop owns them too.
+            let rt = zone_runtime
+                .get(slug)
+                .copied()
+                .unwrap_or_else(ZoneRuntime::fallback);
+            let throughput_mm_hr = rt.throughput_mm_hr;
+            // Apply the active watering restriction cap (if any) on top of
+            // the per-zone safety ceiling. The tighter of the two wins so
+            // a regulatory "no more than 60 min per zone" rule overrides a
+            // bigger operator-set ceiling.
+            let max_dur = match restriction_cap_seconds {
+                Some(c) => rt.max_duration_s.min(c),
+                None => rt.max_duration_s,
+            };
+            // Per-zone session sizing:
             //   seconds = (|bucket_mm| / throughput_mm_hr) * 3600 * multiplier
-            // Then capped at maximum_duration.
+            // Then capped at max_duration_s to keep a single dispatch from
+            // running away on a misconfigured throughput.
             let raw_seconds = if throughput_mm_hr > 0.0 && bucket_mm < 0.0 {
                 (bucket_mm.abs() / throughput_mm_hr * 3600.0 * kc) as u32
             } else {
                 0
             };
+            // Scheduled run uses the engine's own computation, capped at the
+            // safety ceiling. If an Override-mode manual schedule applies
+            // today for this zone, zero the scheduled dispatch so smart
+            // doesn't run on top of the operator's planned manual run; the
+            // smart math chain (raw_seconds, cap_binding) still computes
+            // for nerd visibility.
+            let raw_planned = raw_seconds.min(max_dur);
+            let override_active = crate::scheduler::manual::override_active_today(
+                &watering_policy.manual_schedules,
+                slug,
+                today_weekday,
+            );
+            let planned = if override_active { 0 } else { raw_planned };
             let math = Some(crate::ha::snapshot::ZoneMath {
                 bucket_mm,
                 kc,
@@ -284,10 +704,13 @@ async fn refresh_once(
                 cap_binding: raw_seconds > max_dur,
             });
             ZoneState {
-                name: zone_display_name(slug).to_string(),
-                slug: (*slug).to_string(),
+                name: zone.display_name.clone(),
+                slug: zone.slug.clone(),
                 hex: String::new(), // Populated in Phase 3 from device_registry if needed.
                 running: state_eq(&map, &running_id, "on"),
+                // HA path reads running from a binary_sensor — always a
+                // trusted readback. Native may override to false.
+                running_known: true,
                 today_run_minutes: 0.0, // Populated by SQLite history in Phase 3.
                 bucket_mm,
                 planned_run_seconds: planned,
@@ -297,6 +720,9 @@ async fn refresh_once(
                 // mount and joined to each zone by slug. Kept None here so
                 // the snapshot remains a pure runtime-state object.
                 photo_url: None,
+                // Per-zone verdict is back-filled after decide_per_zone runs
+                // (a follow-up commit); None until then.
+                verdict: None,
             }
         })
         .collect();
@@ -307,6 +733,11 @@ async fn refresh_once(
         .sum::<f64>()
         / 60.0;
 
+    // LocalSky-native next_run_epoch. Compute target_start for today;
+    // if today's window has already passed, advance to tomorrow.
+    // sequence_total = sum(planned_run_seconds) + 2s inter-zone preamble.
+    snap.next_run_epoch = compute_next_run_epoch(watering_policy.location, &snap.zones);
+
     // Forecast block. Aggregates Tempest live + Open-Meteo regional
     // forecast into one struct the UI can render directly. The
     // Tempest precipitation entity reports in inches in this HA
@@ -316,7 +747,8 @@ async fn refresh_once(
     let rain_today_om = state_f64(&map, "sensor.open_meteo_rain_today")
         .map(|mm| mm / 25.4)
         .unwrap_or(0.0);
-    let rain_intensity = state_f64(&map, "sensor.st_00206451_precipitation_intensity").unwrap_or(0.0);
+    let rain_intensity =
+        state_f64(&map, "sensor.st_00206451_precipitation_intensity").unwrap_or(0.0);
     let rain_type = map
         .get("sensor.st_00206451_precipitation_type")
         .and_then(|s| s.get("state"))
@@ -388,7 +820,8 @@ async fn refresh_once(
         temp_max_today_f: state_f64(&map, "sensor.open_meteo_temp_max_today").unwrap_or(0.0),
         temp_min_today_f: state_f64(&map, "sensor.open_meteo_temp_min_today").unwrap_or(0.0),
         wind_max_today_mph: wind_max_today,
-        humidity_mean_today_pct: state_f64(&map, "sensor.open_meteo_humidity_mean_today").unwrap_or(0.0),
+        humidity_mean_today_pct: state_f64(&map, "sensor.open_meteo_humidity_mean_today")
+            .unwrap_or(0.0),
 
         rain_3day_weighted_in: rain_3day_weighted,
         rain_7day_weighted_in: rain_7day_weighted,
@@ -420,24 +853,28 @@ async fn refresh_once(
         temp_max_3day_f: temp_max_3day,
         days_since_significant_rain: days_since_rain,
 
-        max_wind_mph: state_f64(&map, "input_number.irrigation_max_wind_mph").unwrap_or(10.0),
-        min_temp_f: state_f64(&map, "input_number.irrigation_min_temp_f").unwrap_or(38.0),
-        rain_skip_in: state_f64(&map, "input_number.irrigation_rain_skip_in").unwrap_or(0.25),
+        max_wind_mph: state_f64(&map, "input_number.irrigation_max_wind_mph")
+            .unwrap_or(watering_policy.skip_rules.max_wind_mph),
+        min_temp_f: state_f64(&map, "input_number.irrigation_min_temp_f")
+            .unwrap_or(watering_policy.skip_rules.min_temp_f),
+        rain_skip_in: state_f64(&map, "input_number.irrigation_rain_skip_in")
+            .unwrap_or(watering_policy.skip_rules.rain_skip_in),
 
-        // Phase E: soil sensor inputs (WH52 via ecowitt2mqtt + HA template).
-        // None when the underlying entity is unavailable; the skip-logic
-        // rules silently no-op so missing data falls back to weather-only.
-        soil_back_yard_pct: state_f64(&map, "sensor.back_yard_soil_moisture"),
-        soil_front_yard_pct: state_f64(&map, "sensor.front_yard_soil_moisture"),
-        soil_side_yard_pct: state_f64(&map, "sensor.side_yard_soil_moisture"),
-        soil_back_yard_shrubs_pct: state_f64(&map, "sensor.back_yard_shrubs_soil_moisture"),
+        // Per-zone soil readings + thresholds. Resolved from each zone's
+        // assigned sensor (`ha:` entity or `source:<id>:<key>` channel) +
+        // ZoneConfig thresholds. Falls back to the legacy hardcoded reads
+        // when no zone config is present. None when a sensor is offline;
+        // the skip-logic rules silently no-op so missing data falls back
+        // to weather-only.
+        soil_zones: if watering_policy.soil_zones.is_empty() {
+            build_legacy_soil_zones(&map)
+        } else {
+            resolve_soil_zones(&watering_policy.soil_zones, &map, sensor_history).await
+        },
         soil_temp_yard_min_f: state_f64(&map, "sensor.soil_temp_yard_now_min"),
         soil_temp_yard_max_f: state_f64(&map, "sensor.soil_temp_yard_now_max"),
-        frost_skip_soil_f: state_f64(&map, "input_number.irrigation_frost_skip_f").unwrap_or(35.0),
-        saturation_back_yard_pct: state_f64(&map, "input_number.irrigation_back_yard_saturation_pct").unwrap_or(70.0),
-        saturation_front_yard_pct: state_f64(&map, "input_number.irrigation_front_yard_saturation_pct").unwrap_or(70.0),
-        saturation_side_yard_pct: state_f64(&map, "input_number.irrigation_side_yard_saturation_pct").unwrap_or(70.0),
-        saturation_back_yard_shrubs_pct: state_f64(&map, "input_number.irrigation_back_yard_shrubs_saturation_pct").unwrap_or(85.0),
+        frost_skip_soil_f: state_f64(&map, "input_number.irrigation_frost_skip_f")
+            .unwrap_or(watering_policy.skip_rules.frost_skip_soil_f),
 
         is_paused: state_eq(&map, "input_boolean.irrigation_pause", "on"),
         is_dry_run: state_eq(&map, "input_boolean.irrigation_dry_run", "on"),
@@ -449,14 +886,221 @@ async fn refresh_once(
         now_epoch: Utc::now().timestamp(),
         override_tomorrow: snap.override_tomorrow.clone(),
         is_tomorrow: false,
+
+        // Watering restrictions resolved at boot from localsky.toml and
+        // plumbed through spawn_refresher. The skip-rule ladder uses
+        // these to short-circuit the live verdict with reason
+        // "Watering restriction: <name>" when an active rule blocks
+        // today. The seven-day strip path (verdict_strip.rs) gets its
+        // own copies from `today`.
+        watering_restrictions: watering_policy.restrictions.clone(),
+        address_parity: watering_policy.address_parity,
     };
-    snap.skip_check = skip_logic::evaluate(&inputs);
+    apply_engine(
+        &mut snap,
+        &inputs,
+        scripts,
+        &watering_policy.condition_rules,
+    );
+
     snap.forecast = forecast;
     snap.seven_day_verdicts = compute_seven_day_verdicts(&fc, &inputs);
-    snap.soil_forecasts = compute_soil_forecasts(&fc, &inputs, &map);
-    snap.water_budgets = compute_water_budgets(&fc, &inputs, &map, &snap.zones);
+    snap.soil_forecasts = compute_soil_forecasts(
+        &fc,
+        &inputs,
+        &map,
+        &watering_policy.soil_zones,
+        sensor_history,
+    )
+    .await;
+    snap.water_budgets = compute_water_budgets(
+        &fc,
+        &inputs,
+        &map,
+        &snap.zones,
+        zone_runtime,
+        restriction_cap_seconds,
+        &watering_policy.budget_zones,
+    );
 
-    Ok(snap)
+    snap
+}
+
+/// Native (no-Home-Assistant) snapshot builder. Reuses `build_from_map`
+/// with an EMPTY entity map so every store-preferred read works (weather
+/// from ForecastStore/TempestStore; soil via `source:` channels), then
+/// overrides the genuinely HA-only fields. Running-state, run-times, and
+/// control surfaces are filled by follow-up increments (A4-A6); until then
+/// they hold safe defaults (running=false, planned=0 -> nothing waters,
+/// master off), so a partially-built native path can never mis-water.
+#[allow(clippy::too_many_arguments)]
+async fn refresh_once_native(
+    forecast_store: &ForecastStore,
+    tempest_store: &TempestStore,
+    zones: &[crate::zones::ZoneIdent],
+    zone_runtime: &HashMap<String, ZoneRuntime>,
+    watering_policy: &WateringPolicy,
+    scripts: &CompiledScripts,
+    sensor_history: Option<&crate::persistence::SensorHistoryStore>,
+    controllers: &ControllerRegistry,
+    // Locally persisted pause + one-day override (A6). `None` only when no
+    // persistence DB is mounted, in which case the snapshot falls back to
+    // "no pause / auto override" (and the API rejects pause writes).
+    control: Option<&crate::persistence::IrrigationControlState>,
+) -> IrrigationSnapshot {
+    let map: HashMap<String, Value> = HashMap::new();
+    let mut snap = build_from_map(
+        map,
+        forecast_store,
+        tempest_store,
+        zones,
+        zone_runtime,
+        watering_policy,
+        scripts,
+        sensor_history,
+        control,
+    )
+    .await;
+    // Native builds have no remote dependency; the engine is always reachable.
+    snap.ha_reachable = true;
+
+    // A4: per-zone running-state + master/water_level from the controllers
+    // directly (no HA binary_sensors). Best-effort: a controller that can't
+    // report leaves running=false + running_known=false; a status() error
+    // is swallowed so a flaky controller never stalls the refresh.
+    let (running, master, water) = native_controller_state(controllers).await;
+    for z in snap.zones.iter_mut() {
+        match running.get(&z.slug) {
+            Some(r) => {
+                z.running = *r;
+                z.running_known = true;
+            }
+            None => {
+                z.running = false;
+                z.running_known = false;
+            }
+        }
+    }
+    // Default to enabled / full when no controller reports, so a missing
+    // readback never silently suppresses watering.
+    snap.master_enable = master.unwrap_or(true);
+    snap.water_level_pct = water.unwrap_or(100.0);
+
+    // A5: native run-times. Without HA there's no Smart Irrigation bucket,
+    // so size each zone's run from LocalSky's own weekly-budget allocator
+    // (`compute_water_budgets` already ran inside build_from_map and is in
+    // `snap.water_budgets`; its `today_seconds` is the capped per-zone
+    // recommendation — rain-defer, session spacing, and max-duration all
+    // applied). A manual Override schedule for today still zeroes the smart
+    // dispatch so it doesn't run on top of the operator's planned run.
+    let planned_by_slug: HashMap<String, u32> = snap
+        .water_budgets
+        .iter()
+        .map(|b| (b.zone_slug.clone(), b.today_seconds))
+        .collect();
+    let today_weekday: u8 = {
+        use chrono::Datelike;
+        chrono::Local::now().weekday().num_days_from_sunday() as u8
+    };
+    for z in snap.zones.iter_mut() {
+        let budget_seconds = planned_by_slug.get(&z.slug).copied().unwrap_or(0);
+        let override_active = crate::scheduler::manual::override_active_today(
+            &watering_policy.manual_schedules,
+            &z.slug,
+            today_weekday,
+        );
+        z.planned_run_seconds = if override_active { 0 } else { budget_seconds };
+        if let Some(m) = z.math.as_mut() {
+            m.scheduled_seconds = z.planned_run_seconds;
+        }
+    }
+    snap.next_run_total_minutes = snap
+        .zones
+        .iter()
+        .map(|z| z.planned_run_seconds as f64)
+        .sum::<f64>()
+        / 60.0;
+    snap.next_run_epoch = compute_next_run_epoch(watering_policy.location, &snap.zones);
+
+    // A6: pause / override come from `control` (threaded into build_from_map
+    // above); thresholds come from cfg.engine.skip_rules via watering_policy.
+    snap
+}
+
+/// Query every configured controller once for live state and merge it:
+/// per-zone running (by slug), plus the first reported master-enable +
+/// water-level. Errors are swallowed (best-effort, never fails a refresh).
+async fn native_controller_state(
+    controllers: &ControllerRegistry,
+) -> (HashMap<String, bool>, Option<bool>, Option<f64>) {
+    let mut running: HashMap<String, bool> = HashMap::new();
+    let mut master: Option<bool> = None;
+    let mut water: Option<f64> = None;
+    for id in controllers.ids() {
+        let Some(c) = controllers.get(&id) else {
+            continue;
+        };
+        if let Ok(st) = c.status().await {
+            for z in st.zone_states {
+                running.insert(z.slug, z.running);
+            }
+            if master.is_none() {
+                master = st.master_enabled;
+            }
+            if water.is_none() {
+                water = st.water_level_pct;
+            }
+        }
+    }
+    (running, master, water)
+}
+
+/// Run the decision engine against `inputs` and write the results into the
+/// snapshot: aggregate skip_check + decision_trace, the augment-only Rhai
+/// script pass, and per-zone verdicts (back-filled onto each ZoneState).
+/// Shared by the HA and native snapshot builders so the watering decision
+/// is byte-identical regardless of how the inputs were gathered.
+fn apply_engine(
+    snap: &mut IrrigationSnapshot,
+    inputs: &Inputs,
+    scripts: &CompiledScripts,
+    condition_rules: &[crate::engine::conditions::ConditionRule],
+) {
+    let params = crate::config::schema::SkipRuleParams::default();
+    snap.skip_check = skip_logic::evaluate(inputs);
+    // Structured provenance for the same decision (powers Rule Lab).
+    snap.decision_trace = Some(crate::engine::skip_rules::decide_traced(inputs, &params));
+
+    // Augment-only user scripts: consulted ONLY when the deterministic
+    // ladder said "run", so a script can ADD a skip but can never clear a
+    // freeze / wind / restriction gate. Fail-safe: errors are no-ops.
+    if !scripts.is_empty() && snap.skip_check.verdict == "run" {
+        if let Some(us) = scripts.apply_user_skip(inputs) {
+            snap.skip_check.verdict = "skip".to_string();
+            snap.skip_check.will_skip = true;
+            snap.skip_check.reason = us.reason.clone();
+            if let Some(t) = snap.decision_trace.as_mut() {
+                t.verdict = "skip".to_string();
+                t.reason = us.reason.clone();
+                t.rules.push(RuleEval {
+                    id: us.id,
+                    label: us.name,
+                    category: "script".to_string(),
+                    detail: "user Rhai rule".to_string(),
+                    outcome: "fired".to_string(),
+                    verdict: Some("skip".to_string()),
+                });
+            }
+        }
+    }
+
+    // Per-zone verdicts: global gates bind every zone, then per-zone soil
+    // saturation + user condition rules let zones diverge. Augment-only.
+    let verdicts = crate::engine::skip_rules::decide_per_zone(inputs, &params, condition_rules);
+    for z in snap.zones.iter_mut() {
+        z.verdict = verdicts.iter().find(|v| v.zone_slug == z.slug).cloned();
+    }
+    snap.zone_verdicts = verdicts;
 }
 
 /// Phase H — weekly water-budget plan per zone. Replaces SI's daily-bucket
@@ -474,15 +1118,38 @@ fn compute_water_budgets(
     today_inputs: &Inputs,
     map: &HashMap<String, Value>,
     zones: &[ZoneState],
+    zone_runtime: &HashMap<String, ZoneRuntime>,
+    restriction_cap_seconds: Option<u32>,
+    // A5b: per-zone budget config from cfg.zones. Drives which zones the
+    // allocator plans for (so any configured zone gets a run-time, not just
+    // the legacy four). Empty = no config -> fall back to the legacy four.
+    budget_zones: &[ZoneBudgetCfg],
 ) -> Vec<WaterBudget> {
-    // Per-zone agronomic defaults (matches docs/MANUAL.md St. Augustine
-    // FL guidance). Override via HA input_numbers per zone.
-    let zone_defaults: [(&str, &str, f64, u32); 4] = [
-        ("back_yard",        "Back Yard",         1.00, 2),
-        ("front_yard",       "Front Yard",        1.00, 2),
-        ("side_yard",        "Side Yard",         1.00, 2),
-        ("back_yard_shrubs", "Back Yard Shrubs",  0.50, 1),
+    // Iteration list. With config present, plan every configured zone (A5b);
+    // otherwise the legacy four (matches docs/MANUAL.md St. Augustine FL
+    // guidance). Per-zone budget/sessions are None here and resolved below
+    // from HA input_number -> config -> agronomic slug default, so the
+    // legacy slugs reproduce their historical 1.0"/2 (turf) and 0.5"/1
+    // (shrubs) values byte-for-byte.
+    const LEGACY_ZONES: [(&str, &str); 4] = [
+        ("back_yard", "Back Yard"),
+        ("front_yard", "Front Yard"),
+        ("side_yard", "Side Yard"),
+        ("back_yard_shrubs", "Back Yard Shrubs"),
     ];
+    let iter_zones: Vec<ZoneBudgetCfg> = if budget_zones.is_empty() {
+        LEGACY_ZONES
+            .iter()
+            .map(|(slug, name)| ZoneBudgetCfg {
+                slug: slug.to_string(),
+                name: name.to_string(),
+                weekly_budget_in: None,
+                sessions_per_week: None,
+            })
+            .collect()
+    } else {
+        budget_zones.to_vec()
+    };
     const CAPTURE_EFFICIENCY: f64 = 0.7;
     const SESSION_RAIN_DEFER_IN: f64 = 0.10; // ≥0.10" forecast next 24h → defer
 
@@ -504,29 +1171,58 @@ fn compute_water_budgets(
         .map(|d| d.precip_sum_in * (d.precip_probability_max as f64) / 100.0)
         .sum();
 
-    let mut out = Vec::with_capacity(zone_defaults.len());
-    for (slug, name, default_budget_in, default_sessions) in zone_defaults.iter() {
-        // Operator-tunable HA helpers (no initial: per the established
-        // convention so recorder restore_state preserves edits).
-        let weekly_budget_in = state_f64(map, &format!("input_number.irrigation_{slug}_weekly_budget_in"))
-            .unwrap_or(*default_budget_in);
-        let sessions_per_week = state_f64(map, &format!("input_number.irrigation_{slug}_sessions_per_week"))
-            .map(|v| v.round() as u32)
-            .unwrap_or(*default_sessions)
-            .max(1);
-        let mode_active = state_eq(map, &format!("input_boolean.irrigation_{slug}_weekly_budget_mode"), "on");
+    let mut out = Vec::with_capacity(iter_zones.len());
+    for zone_cfg in iter_zones.iter() {
+        let slug = zone_cfg.slug.as_str();
+        let name = zone_cfg.name.as_str();
+        let (default_budget_in, default_sessions) = agronomic_budget_default(slug);
+        // Precedence: live HA input_number helper (HA path, unchanged) ->
+        // per-zone config value (native + HA fallback, A5b) -> agronomic
+        // slug default. (HA helpers carry no initial: per the established
+        // convention so recorder restore_state preserves operator edits.)
+        let weekly_budget_in = state_f64(
+            map,
+            &format!("input_number.irrigation_{slug}_weekly_budget_in"),
+        )
+        .or(zone_cfg.weekly_budget_in)
+        .unwrap_or(default_budget_in);
+        let sessions_per_week = state_f64(
+            map,
+            &format!("input_number.irrigation_{slug}_sessions_per_week"),
+        )
+        .map(|v| v.round() as u32)
+        .or(zone_cfg.sessions_per_week)
+        .unwrap_or(default_sessions)
+        .max(1);
+        // Budget mode used to be a per-zone HA toggle while the SI -> LocalSky
+        // cutover was in progress (off = SI owned the zone's daily flex, on =
+        // LocalSky's weekly budget did). Post-cutover LocalSky is the only
+        // source of truth, so the toggle is force-on regardless of the HA
+        // helper's state. The off-mode branch below is kept as a defensive
+        // fallback only.
+        let mode_active = true;
+        let _ = state_eq(
+            map,
+            &format!("input_boolean.irrigation_{slug}_weekly_budget_mode"),
+            "on",
+        );
 
-        // Per-zone SI inputs we need: throughput + maximum_duration.
-        let si_id = format!("sensor.smart_irrigation_{slug}");
-        let attrs = map.get(&si_id).and_then(|s| s.get("attributes"));
-        let throughput_mm_hr = attrs
-            .and_then(|a| a.get("throughput"))
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0);
-        let max_dur_s = attrs
-            .and_then(|a| a.get("maximum_duration"))
-            .and_then(Value::as_f64)
-            .unwrap_or(3600.0) as u32;
+        // Throughput + max-duration come from LocalSky's zone config
+        // (catalog default by sprinkler_type, optional precip_rate_mm_hr
+        // override). SI's `throughput` and `maximum_duration` attrs are
+        // ignored so the budget allocator no longer drifts when SI is
+        // paused or its zone is misconfigured.
+        let rt = zone_runtime
+            .get(slug)
+            .copied()
+            .unwrap_or_else(ZoneRuntime::fallback);
+        let throughput_mm_hr = rt.throughput_mm_hr;
+        // Active watering restriction cap (if any) tightens the budget-path
+        // ceiling too. Same min-of-two rule as the daily-bucket path above.
+        let max_dur_s = match restriction_cap_seconds {
+            Some(c) => rt.max_duration_s.min(c),
+            None => rt.max_duration_s,
+        };
 
         // Water-balance math: weekly budget, minus expected captured rain.
         let weekly_budget_mm = weekly_budget_in * 25.4;
@@ -538,7 +1234,8 @@ fn compute_water_budgets(
             // (same Kc-style bias SI applies). Divide by CAPTURE_EFFICIENCY
             // so that the *root-zone* depth matches mm_per_session after
             // runoff/canopy losses.
-            ((mm_per_session / throughput_mm_hr) * 3600.0 * heat_mult_eff / CAPTURE_EFFICIENCY) as u32
+            ((mm_per_session / throughput_mm_hr) * 3600.0 * heat_mult_eff / CAPTURE_EFFICIENCY)
+                as u32
         } else {
             0
         };
@@ -549,7 +1246,7 @@ fn compute_water_budgets(
         // history ingest populates) so we don't have to round-trip SQLite.
         let last_run_epoch = zones
             .iter()
-            .find(|z| z.slug == *slug)
+            .find(|z| z.slug == slug)
             .map(|z| z.last_run_epoch)
             .unwrap_or(0);
 
@@ -561,10 +1258,9 @@ fn compute_water_budgets(
             i64::MAX / 2
         };
         let (today_seconds, today_reason) = if !mode_active {
-            (
-                0u32,
-                "budget mode off — SI's daily flex owns this zone".to_string(),
-            )
+            // Defensive only — `mode_active` is hard-coded above. Kept for
+            // future re-introduction of a per-zone pause toggle.
+            (0u32, "budget mode off".to_string())
         } else if next_24h_rain_in >= SESSION_RAIN_DEFER_IN {
             (
                 0,
@@ -640,20 +1336,92 @@ fn compute_water_budgets(
 ///   - Rain capture efficiency 0.7 — empirical, accounts for runoff,
 ///     slope, and canopy interception. Knock-down values not modeled.
 ///   - Probe placement at root depth (operator's responsibility).
-fn compute_soil_forecasts(
+/// Effective Kc + root-zone depth (mm) for a zone, inferred from its slug.
+/// Turf has shallower active roots than mulched shrubs/beds so equivalent
+/// ET drops its moisture % faster. Heuristic so config-driven zones get
+/// sensible projection tuning without extra config fields.
+fn kc_depth_for(slug: &str) -> (f64, f64) {
+    if slug.contains("shrub") || slug.contains("garden") || slug.contains("bed") {
+        (0.50, 200.0)
+    } else {
+        (1.08, 150.0)
+    }
+}
+
+/// Agronomic weekly-budget default `(weekly_budget_in, sessions_per_week)`
+/// for a zone, inferred from its slug when neither an HA helper nor config
+/// sets one (A5b). Mirrors the same shrub/garden/bed heuristic as
+/// `kc_depth_for`: mulched beds need less water, less often than turf.
+/// The values reproduce the legacy hardcoded compute_water_budgets defaults
+/// (turf 1.0"/2 sessions, shrub/garden/bed 0.5"/1) so existing zones are
+/// unchanged.
+fn agronomic_budget_default(slug: &str) -> (f64, u32) {
+    if slug.contains("shrub") || slug.contains("garden") || slug.contains("bed") {
+        (0.50, 1)
+    } else {
+        (1.00, 2)
+    }
+}
+
+/// One zone's soil-forecast inputs, resolved from config (or the legacy
+/// hardcoded 4 when no zone config is present).
+struct ForecastZone {
+    slug: String,
+    name: String,
+    sensor: Option<String>,
+    target_min: f64,
+    target_max: f64,
+    kc: f64,
+    depth: f64,
+}
+
+async fn compute_soil_forecasts(
     fc: &ForecastSnapshot,
     today: &Inputs,
     map: &HashMap<String, Value>,
+    zone_cfg: &[ZoneSoilCfg],
+    history: Option<&crate::persistence::SensorHistoryStore>,
 ) -> Vec<SoilForecast> {
-    // Per-zone tuning. Slug + display name + Kc + effective root-zone
-    // depth (mm) — turf has shallower active roots than mulched shrubs
-    // so equivalent ET drops moisture % faster.
-    let zones: [(&str, &str, f64, f64); 4] = [
-        ("back_yard",         "Back Yard",          1.08, 150.0),
-        ("front_yard",        "Front Yard",         1.08, 150.0),
-        ("side_yard",         "Side Yard",          1.08, 150.0),
-        ("back_yard_shrubs",  "Back Yard Shrubs",   0.50, 200.0),
-    ];
+    // Build the working zone list from config; fall back to the legacy
+    // four (reading their hardcoded HA entities) when no zones configured.
+    let zones: Vec<ForecastZone> = if zone_cfg.is_empty() {
+        [
+            ("back_yard", "Back Yard", 70.0, 30.0),
+            ("front_yard", "Front Yard", 70.0, 30.0),
+            ("side_yard", "Side Yard", 70.0, 30.0),
+            ("back_yard_shrubs", "Back Yard Shrubs", 85.0, 25.0),
+        ]
+        .into_iter()
+        .map(|(slug, name, sat, tmin)| {
+            let (kc, depth) = kc_depth_for(slug);
+            ForecastZone {
+                slug: slug.into(),
+                name: name.into(),
+                sensor: Some(format!("ha:sensor.{slug}_soil_moisture")),
+                target_min: tmin,
+                target_max: sat,
+                kc,
+                depth,
+            }
+        })
+        .collect()
+    } else {
+        zone_cfg
+            .iter()
+            .map(|z| {
+                let (kc, depth) = kc_depth_for(&z.slug);
+                ForecastZone {
+                    slug: z.slug.clone(),
+                    name: z.name.clone(),
+                    sensor: z.soil_sensor_id.clone(),
+                    target_min: z.target_min_pct,
+                    target_max: z.saturation_pct,
+                    kc,
+                    depth,
+                }
+            })
+            .collect()
+    };
     const CAPTURE_EFFICIENCY: f64 = 0.7;
 
     // Daily ET, mm. Today's value carries across the window. heat_multiplier
@@ -664,20 +1432,15 @@ fn compute_soil_forecasts(
     let n_days = fc.daily.len().min(7).max(1);
     let mut out = Vec::with_capacity(zones.len());
 
-    for (slug, name, kc, soil_depth_mm) in zones.iter() {
-        // Pull this zone's live + threshold state. Defaults match the HA
-        // input_number initials so a missing helper doesn't break the math.
-        let current = state_f64(map, &format!("sensor.{slug}_soil_moisture"));
-        let target_min = state_f64(
-            map,
-            &format!("input_number.irrigation_{slug}_target_min_pct"),
-        )
-        .unwrap_or(if *slug == "back_yard_shrubs" { 25.0 } else { 30.0 });
-        let target_max = state_f64(
-            map,
-            &format!("input_number.irrigation_{slug}_saturation_pct"),
-        )
-        .unwrap_or(if *slug == "back_yard_shrubs" { 85.0 } else { 70.0 });
+    for z in zones.iter() {
+        let slug = &z.slug;
+        let name = &z.name;
+        let kc = z.kc;
+        let soil_depth_mm = z.depth;
+        let target_min = z.target_min;
+        let target_max = z.target_max;
+        // Resolve this zone's live reading via its assigned sensor.
+        let current = resolve_soil_pct(z.sensor.as_deref(), map, history).await;
 
         // No probe data → emit a no_data entry the dashboard renders as
         // a grey "(probe offline)" tile rather than rendering a flat zero.
@@ -788,9 +1551,50 @@ fn fc_heat_multiplier(today: &Inputs) -> f64 {
 ///   - rain_intensity_now/wind_now/temp_now: 0 / forecast_wind / temp_min
 ///     respectively (so the live-only rules don't fire on a forecast day).
 fn compute_seven_day_verdicts(fc: &ForecastSnapshot, today: &Inputs) -> Vec<DayVerdict> {
-    crate::engine::compute_verdict_strip(fc, today, &crate::config::schema::SkipRuleParams::default())
+    crate::engine::compute_verdict_strip(
+        fc,
+        today,
+        &crate::config::schema::SkipRuleParams::default(),
+    )
 }
 
+/// Smart-morning target_start epoch for the next morning that hasn't
+/// already passed. Returns 0 when location is unset or sunrise can't be
+/// computed (polar latitudes on the date in question), matching the
+/// snapshot's default sentinel.
+fn compute_next_run_epoch(location: (f64, f64), zones: &[crate::ha::snapshot::ZoneState]) -> i64 {
+    use crate::engine::sunrise::smart_morning_target_start;
+    const INTER_ZONE_PREAMBLE_S: u64 = 2;
+
+    let (lat, lon) = location;
+    if lat == 0.0 && lon == 0.0 {
+        return 0;
+    }
+    let total_dispatch_s: u64 = zones
+        .iter()
+        .map(|z| z.planned_run_seconds.max(0) as u64)
+        .sum();
+    let zones_to_run = zones.iter().filter(|z| z.planned_run_seconds > 0).count();
+    let sequence_total_s =
+        total_dispatch_s + INTER_ZONE_PREAMBLE_S * (zones_to_run.saturating_sub(1)) as u64;
+
+    let now = chrono::Local::now();
+    let today_local = now.date_naive();
+
+    if let Some(today_target) = smart_morning_target_start(today_local, lat, lon, sequence_total_s)
+    {
+        if today_target > now.with_timezone(&chrono::Utc) {
+            return today_target.timestamp();
+        }
+    }
+    // Today's window already passed; advance to tomorrow.
+    if let Some(tomorrow) = today_local.succ_opt() {
+        if let Some(t) = smart_morning_target_start(tomorrow, lat, lon, sequence_total_s) {
+            return t.timestamp();
+        }
+    }
+    0
+}
 
 fn state_eq(map: &HashMap<String, Value>, eid: &str, expected: &str) -> bool {
     map.get(eid)
@@ -807,3 +1611,104 @@ fn state_f64(map: &HashMap<String, Value>, eid: &str) -> Option<f64> {
         .and_then(|s| s.parse::<f64>().ok())
 }
 
+/// Resolve a zone's assigned soil sensor to a live %. Supports three
+/// address forms:
+///   - `ha:sensor.x`        → HA entity state
+///   - `source:<id>:<key>`  → latest sensor_history reading for that
+///                            source channel (Ecowitt etc.)
+///   - bare `sensor.x`      → HA entity (legacy / back-compat)
+/// `None` when unassigned or the reading is unavailable.
+async fn resolve_soil_pct(
+    spec: Option<&str>,
+    map: &HashMap<String, Value>,
+    history: Option<&crate::persistence::SensorHistoryStore>,
+) -> Option<f64> {
+    let spec = spec?;
+    if let Some(entity) = spec.strip_prefix("ha:") {
+        return state_f64(map, entity);
+    }
+    if let Some(rest) = spec.strip_prefix("source:") {
+        let (sid, key) = rest.split_once(':')?;
+        let h = history?;
+        return h
+            .last_value(sid.to_string(), key.to_string())
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.value);
+    }
+    // Bare string: treat as an HA entity id (legacy configs).
+    state_f64(map, spec)
+}
+
+/// Build the engine's per-zone soil list from the boot-resolved zone
+/// config, pulling each zone's live reading via `resolve_soil_pct`.
+async fn resolve_soil_zones(
+    cfg: &[ZoneSoilCfg],
+    map: &HashMap<String, Value>,
+    history: Option<&crate::persistence::SensorHistoryStore>,
+) -> Vec<ZoneSoil> {
+    let mut out = Vec::with_capacity(cfg.len());
+    for z in cfg {
+        let pct = resolve_soil_pct(z.soil_sensor_id.as_deref(), map, history).await;
+        out.push(ZoneSoil {
+            slug: z.slug.clone(),
+            name: z.name.clone(),
+            pct,
+            saturation_pct: z.saturation_pct,
+            target_min_pct: z.target_min_pct,
+        });
+    }
+    out
+}
+
+/// Build the legacy four soil zones from their hardcoded HA entities +
+/// input_number thresholds. Fallback when no zone config is present.
+fn build_legacy_soil_zones(map: &HashMap<String, Value>) -> Vec<ZoneSoil> {
+    [
+        ("back_yard", "back yard", 70.0, 30.0),
+        ("front_yard", "front yard", 70.0, 30.0),
+        ("side_yard", "side yard", 70.0, 30.0),
+        ("back_yard_shrubs", "back yard shrubs", 85.0, 25.0),
+    ]
+    .into_iter()
+    .map(|(slug, name, sat_default, target_min)| ZoneSoil {
+        slug: slug.into(),
+        name: name.into(),
+        pct: state_f64(map, &format!("sensor.{slug}_soil_moisture")),
+        saturation_pct: state_f64(
+            map,
+            &format!("input_number.irrigation_{slug}_saturation_pct"),
+        )
+        .unwrap_or(sat_default),
+        target_min_pct: target_min,
+    })
+    .collect()
+}
+
+#[cfg(test)]
+mod budget_default_tests {
+    use super::agronomic_budget_default;
+
+    #[test]
+    fn turf_slugs_get_legacy_one_inch_two_sessions() {
+        for slug in ["back_yard", "front_yard", "side_yard", "lawn"] {
+            assert_eq!(
+                agronomic_budget_default(slug),
+                (1.00, 2),
+                "turf slug {slug} must reproduce the legacy 1.0\"/2 default"
+            );
+        }
+    }
+
+    #[test]
+    fn bed_slugs_get_legacy_half_inch_one_session() {
+        for slug in ["back_yard_shrubs", "front_garden", "flower_bed"] {
+            assert_eq!(
+                agronomic_budget_default(slug),
+                (0.50, 1),
+                "shrub/garden/bed slug {slug} must reproduce the legacy 0.5\"/1 default"
+            );
+        }
+    }
+}

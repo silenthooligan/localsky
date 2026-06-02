@@ -41,8 +41,7 @@ pub fn synthesize() -> Config {
         priority: 100,
         enabled: true,
         source: SourceKind::TempestUdp(TempestUdpConfig {
-            bind_addr: env::var("TEMPEST_BIND_ADDR")
-                .unwrap_or_else(|_| "0.0.0.0:50222".into()),
+            bind_addr: env::var("TEMPEST_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:50222".into()),
             hub_serial: env::var("TEMPEST_HUB_SERIAL").ok(),
         }),
     });
@@ -156,7 +155,10 @@ pub fn synthesize() -> Config {
 
     // ----- Demo mode -----
     if env::var("LOCALSKY_DEMO").ok().as_deref() == Some("1") {
-        log_lines.push("LOCALSKY_DEMO=1; switching to demo mode (DryRun controller + DemoReplay source)".into());
+        log_lines.push(
+            "LOCALSKY_DEMO=1; switching to demo mode (DryRun controller + DemoReplay source)"
+                .into(),
+        );
         cfg.features.demo_mode = true;
         cfg.sources.push(SourceEntry {
             id: "demo_replay".into(),
@@ -264,6 +266,10 @@ fn seed_legacy_zones(cfg: &mut Config) {
         target_min_pct_soil: 30.0,
         saturation_pct_soil: 70.0,
         photo_url: None,
+        // None = agronomic default by slug (turf 1.0"/2, shrub 0.5"/1),
+        // matching the historical hardcoded compute_water_budgets defaults.
+        weekly_budget_in: None,
+        sessions_per_week: None,
     };
     cfg.zones.insert("back_yard".into(), turf("Back Yard", 1));
     cfg.zones.insert("front_yard".into(), turf("Front Yard", 2));

@@ -22,3 +22,7 @@
 
 # mdBook output (Phase 14)
 /book
+
+# Never commit real secrets
+.env
+*.pem

@@ -22,24 +22,24 @@ const PRESETS: &[ThemePreset] = &[
         id: "dark",
         label: "Dark",
         helptext: "House theme. Glass over deep blue.",
-        swatch_bg: "#07090f",
-        swatch_accent: "#5ec8ff",
+        swatch_bg: "#0b1220",
+        swatch_accent: "#1490dc",
         swatch_text: "#e6ecf5",
     },
     ThemePreset {
         id: "light",
         label: "Light",
         helptext: "Hand-tuned. Same panels, lifted.",
-        swatch_bg: "#f4f6fa",
-        swatch_accent: "#1c8ad8",
-        swatch_text: "#0f1525",
+        swatch_bg: "#f6f9ff",
+        swatch_accent: "#1490dc",
+        swatch_text: "#0b1220",
     },
     ThemePreset {
         id: "auto",
         label: "Auto",
         helptext: "Follow OS preference.",
-        swatch_bg: "linear-gradient(135deg, #07090f 50%, #f4f6fa 50%)",
-        swatch_accent: "#5ec8ff",
+        swatch_bg: "linear-gradient(135deg, #0b1220 50%, #f6f9ff 50%)",
+        swatch_accent: "#1490dc",
         swatch_text: "#e6ecf5",
     },
     ThemePreset {
@@ -47,7 +47,7 @@ const PRESETS: &[ThemePreset] = &[
         label: "High contrast",
         helptext: "Pure black + pure white. No glass.",
         swatch_bg: "#000000",
-        swatch_accent: "#00d4ff",
+        swatch_accent: "#5fb4ff",
         swatch_text: "#ffffff",
     },
 ];
@@ -139,4 +139,3 @@ pub fn SettingsTheme() -> impl IntoView {
         </main>
     }
 }
-

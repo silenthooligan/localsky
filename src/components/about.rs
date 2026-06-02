@@ -3,6 +3,7 @@
 use leptos::prelude::*;
 
 use crate::components::ui::Panel;
+use crate::docs::{doc_url, ISSUES_URL, REPO_URL, SITE_BASE};
 
 #[component]
 pub fn AboutPage() -> impl IntoView {
@@ -29,12 +30,23 @@ pub fn AboutPage() -> impl IntoView {
                     <li>
                         <strong>"Source: "</strong>
                         <a
-                            href="https://github.com/silenthooligan/localsky"
+                            href=REPO_URL
                             target="_blank"
                             rel="noopener noreferrer"
                             style="color: var(--accent)"
                         >
                             "github.com/silenthooligan/localsky"
+                        </a>
+                    </li>
+                    <li>
+                        <strong>"Documentation: "</strong>
+                        <a
+                            href=SITE_BASE
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style="color: var(--accent)"
+                        >
+                            "localsky.io"
                         </a>
                     </li>
                 </ul>
@@ -82,7 +94,7 @@ pub fn AboutPage() -> impl IntoView {
                     </li>
                     <li>
                         <a
-                            href="https://github.com/silenthooligan/localsky/blob/main/docs/getting-started.md"
+                            href=doc_url("getting-started")
                             target="_blank"
                             rel="noopener noreferrer"
                             style="color: var(--accent)"
@@ -92,7 +104,7 @@ pub fn AboutPage() -> impl IntoView {
                     </li>
                     <li>
                         <a
-                            href="https://github.com/silenthooligan/localsky/issues"
+                            href=ISSUES_URL
                             target="_blank"
                             rel="noopener noreferrer"
                             style="color: var(--accent)"

@@ -44,6 +44,21 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "verdict_history",
         sql: include_str!("migrations/M0005_verdict_history.sql"),
     },
+    Migration {
+        version: "M0006",
+        name: "forecast_observations",
+        sql: include_str!("migrations/M0006_forecast_observations.sql"),
+    },
+    Migration {
+        version: "M0007",
+        name: "decision_trace",
+        sql: include_str!("migrations/M0007_decision_trace.sql"),
+    },
+    Migration {
+        version: "M0008",
+        name: "irrigation_control",
+        sql: include_str!("migrations/M0008_irrigation_control.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]
@@ -113,10 +128,11 @@ pub fn run(conn: &mut Connection) -> Result<Vec<String>, MigrationError> {
 }
 
 fn apply(tx: &Transaction, m: &Migration) -> Result<(), MigrationError> {
-    tx.execute_batch(m.sql).map_err(|e| MigrationError::Failed {
-        version: m.version.to_string(),
-        detail: e.to_string(),
-    })?;
+    tx.execute_batch(m.sql)
+        .map_err(|e| MigrationError::Failed {
+            version: m.version.to_string(),
+            detail: e.to_string(),
+        })?;
     tx.execute(
         "INSERT OR REPLACE INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
         params![m.version, m.name, now_epoch()],
@@ -199,6 +215,9 @@ mod tests {
                 "M0003".to_string(),
                 "M0004".to_string(),
                 "M0005".to_string(),
+                "M0006".to_string(),
+                "M0007".to_string(),
+                "M0008".to_string(),
             ]
         );
     }
@@ -208,7 +227,11 @@ mod tests {
         let mut c = fresh_conn();
         run(&mut c).unwrap();
         let again = run(&mut c).unwrap();
-        assert!(again.is_empty(), "second run should be no-op, got {:?}", again);
+        assert!(
+            again.is_empty(),
+            "second run should be no-op, got {:?}",
+            again
+        );
     }
 
     #[test]
@@ -229,10 +252,8 @@ mod tests {
     #[test]
     fn legacy_push_subscriptions_table_backfilled() {
         let mut c = fresh_conn();
-        c.execute_batch(
-            "CREATE TABLE push_subscriptions (endpoint TEXT, auth TEXT, p256dh TEXT);",
-        )
-        .unwrap();
+        c.execute_batch("CREATE TABLE push_subscriptions (endpoint TEXT, auth TEXT, p256dh TEXT);")
+            .unwrap();
         run(&mut c).unwrap();
         let versions: Vec<String> = c
             .prepare("SELECT version FROM schema_migrations")

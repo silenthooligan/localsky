@@ -9,7 +9,6 @@ use crate::components::ui::Toggle;
 #[component]
 pub fn WelcomeStep() -> impl IntoView {
     let license_accepted = RwSignal::new(false);
-    let telemetry = RwSignal::new(false);
 
     let can_advance = move || license_accepted.get();
     let next_href = move || {
@@ -37,11 +36,11 @@ pub fn WelcomeStep() -> impl IntoView {
                 helptext="LocalSky is open source under Apache-2.0. The full text lives in LICENSE.".to_string()
             />
 
-            <Toggle
-                checked=telemetry
-                label="Send anonymous telemetry".to_string()
-                helptext="Off by default. When enabled, LocalSky reports version + OS family + enabled controller types so the maintainers can prioritize fixes. No coordinates, no tokens, no zone data.".to_string()
-            />
+            <p class="setup-step__body">
+                "LocalSky does not send telemetry. There is no analytics ping, no "
+                "anonymous-usage report, no account, no email signup. If that changes "
+                "in a future release it will be opt-in and disclosed here."
+            </p>
 
             <SetupFooter prev=None next=Signal::derive(next_href).get_untracked()/>
             <p class="setup-step__hint" class:setup-step__hint--visible=move || !can_advance()>

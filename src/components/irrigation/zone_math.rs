@@ -7,6 +7,7 @@
 // ZoneState.math). No new math here — the formula is restated as labels
 // alongside the live values, matching SI's internal compute.
 
+use crate::components::ui::HelpHint;
 use crate::ha::snapshot::{IrrigationSnapshot, ZoneState};
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
@@ -20,12 +21,17 @@ pub fn ZoneMathPanel(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
 
     view! {
         <section class="zone-math">
-            <h2 class="zone-math-title">"Why this duration?"</h2>
+            <h2 class="zone-math-title">
+                "Why this duration?"
+                <HelpHint topic="zone-math"/>
+            </h2>
             <p class="zone-math-sub">
-                "Smart Irrigation's flex math per zone. Bucket is the soil-water "
-                "deficit in mm; throughput is the head\u{2019}s precipitation rate. "
-                "raw = ( |bucket| / throughput ) \u{00d7} 3600 \u{00d7} Kc, then capped at "
-                "maximum_duration. If the cap row turns amber, the zone is being shorted."
+                "The engine's water-balance math per zone. Bucket is the soil-water "
+                "deficit in mm; throughput is the head\u{2019}s precipitation rate "
+                "(catalog default from the zone\u{2019}s sprinkler type, or your measured "
+                "value). raw = ( |bucket| / throughput ) \u{00d7} 3600 \u{00d7} Kc, then "
+                "capped at the safety ceiling. If the cap row turns amber, the zone is "
+                "being shorted by the ceiling and needs a longer ceiling or a faster head."
             </p>
             <div class="zone-math-grid">
                 {view! { <ZoneMathTile zone=zone0/> }.into_any()}
@@ -124,7 +130,10 @@ fn MathRows(zone: Signal<ZoneState>) -> impl IntoView {
                     .round() as i64
             )
         } else {
-            format!("under cap ({} ceiling)", format_seconds_pretty(m.max_duration_seconds))
+            format!(
+                "under cap ({} ceiling)",
+                format_seconds_pretty(m.max_duration_seconds)
+            )
         }
     };
     let fmt_final = move || {

@@ -19,9 +19,32 @@ pub enum ControllerError {
     Remote(String),
     #[error("transport error: {0}")]
     Transport(String),
+    /// Adapter construction failed before any network call (typically
+    /// the HTTP client builder rejected the config, e.g. TLS root
+    /// loading failure). Distinct from Transport so operators can tell
+    /// "I never got to make the request" apart from "the request
+    /// failed." Returned from controller new() functions; runtime
+    /// composition logs and skips the controller rather than panicking
+    /// the whole container.
+    #[error("init failed: {0}")]
+    Init(String),
+    /// The adapter doesn't support this operation (e.g. zone discovery on
+    /// a fire-and-forget MQTT controller).
+    #[error("unsupported: {0}")]
+    Unsupported(String),
 }
 
 pub type ControllerResult<T> = Result<T, ControllerError>;
+
+/// A zone/station enumerated from a controller during onboarding (the
+/// wizard's "scan zones"). `station_id` is the controller-native id to
+/// store in `ZoneConfig.controller_station` (OpenSprinkler: 1-based
+/// station number as a string; Rachio: zone uuid).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DiscoveredZone {
+    pub station_id: String,
+    pub name: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControllerCaps {
@@ -84,4 +107,11 @@ pub trait IrrigationController: Send + Sync {
     /// Backfill from the controller's own history if it supports the query.
     /// Adapters that can't query history return an empty Vec.
     async fn run_history(&self, since_epoch: i64) -> ControllerResult<Vec<RunRecord>>;
+
+    /// Enumerate the controller's zones/stations for onboarding (the
+    /// wizard's "scan zones" — auto-populates ZoneConfig). Adapters that
+    /// can't enumerate (MQTT/ESPHome/HA) return `Unsupported` by default.
+    async fn discover_zones(&self) -> ControllerResult<Vec<DiscoveredZone>> {
+        Err(ControllerError::Unsupported("zone discovery".into()))
+    }
 }

@@ -70,7 +70,11 @@ impl HttpWebhook {
                 continue;
             };
             let Some(field) = parse_weather_field(&mapping.field) else {
-                debug!(source = self.id, field = mapping.field, "unknown field name");
+                debug!(
+                    source = self.id,
+                    field = mapping.field,
+                    "unknown field name"
+                );
                 continue;
             };
             let value = raw * mapping.scale + mapping.offset;
@@ -123,7 +127,11 @@ impl WeatherSource for HttpWebhook {
         _bus: SourceBus,
         mut shutdown: ShutdownSignal,
     ) -> anyhow::Result<()> {
-        info!(source = self.id, path = self.config.path, "http webhook mounted");
+        info!(
+            source = self.id,
+            path = self.config.path,
+            "http webhook mounted"
+        );
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(60)) => {}
@@ -150,7 +158,10 @@ mod tests {
     use super::*;
     use crate::config::schema::{HttpWebhookConfig, HttpWebhookField};
 
-    fn build(token: Option<&str>, fields: Vec<HttpWebhookField>) -> (HttpWebhook, broadcast::Receiver<SourceEvent>) {
+    fn build(
+        token: Option<&str>,
+        fields: Vec<HttpWebhookField>,
+    ) -> (HttpWebhook, broadcast::Receiver<SourceEvent>) {
         let (tx, rx) = broadcast::channel::<SourceEvent>(8);
         let s = HttpWebhook::new(
             "webhook_test",
@@ -175,10 +186,13 @@ mod tests {
 
     #[test]
     fn parses_json_payload() {
-        let (s, mut rx) = build(None, vec![
-            f("air_temp_f", Some("temperature"), 1.0),
-            f("rh_pct", Some("humidity"), 1.0),
-        ]);
+        let (s, mut rx) = build(
+            None,
+            vec![
+                f("air_temp_f", Some("temperature"), 1.0),
+                f("rh_pct", Some("humidity"), 1.0),
+            ],
+        );
         let body = br#"{"temperature": 72.5, "humidity": 65.0}"#;
         assert!(s.handle_post(body, None));
         let SourceEvent::Observation { fields, .. } = rx.try_recv().unwrap() else {
@@ -206,14 +220,15 @@ mod tests {
     #[test]
     fn applies_scale() {
         // Sensor publishes Celsius; map to F via scale=1.8, offset=32
-        let (s, mut rx) = build(None, vec![
-            HttpWebhookField {
+        let (s, mut rx) = build(
+            None,
+            vec![HttpWebhookField {
                 field: "air_temp_f".to_string(),
                 json_path: None,
                 scale: 1.8,
                 offset: 32.0,
-            },
-        ]);
+            }],
+        );
         let ok = s.handle_post(b"20.0", None);
         assert!(ok);
         let SourceEvent::Observation { fields, .. } = rx.try_recv().unwrap() else {

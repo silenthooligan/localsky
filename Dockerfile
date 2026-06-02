@@ -2,7 +2,7 @@
 # Stage 1 compiles the SSR binary + WASM client via cargo-leptos.
 # Stage 2 ships only the binary, the static `site/` bundle, and CA roots.
 
-FROM rust:slim-bookworm AS builder
+FROM rust:slim-bookworm@sha256:b5f842fac1e3b4ff718a652a8e0173b62d9403ec826ef4998880b9347db30684 AS builder
 
 RUN apt-get update && apt-get install -y \
         pkg-config libssl-dev curl wget build-essential \
@@ -37,20 +37,35 @@ COPY public ./public
 RUN cargo leptos build --release
 
 # ── Runtime ──
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb
 
 RUN apt-get update && apt-get install -y \
-        ca-certificates libssl3 \
-    && rm -rf /var/lib/apt/lists/*
+        ca-certificates libssl3 curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 10001 localsky \
+    && useradd --system --uid 10001 --gid 10001 --home-dir /app --shell /usr/sbin/nologin localsky
 
 WORKDIR /app
-COPY --from=builder /build/target/release/localsky /app/localsky
-COPY --from=builder /build/target/site /app/site
+COPY --from=builder --chown=10001:10001 /build/target/release/localsky /app/localsky
+COPY --from=builder --chown=10001:10001 /build/target/site /app/site
+
+# /data and /keys are volume mounts; document the uid the container expects.
+# Bind-mount hosts should chown 10001:10001 or pass --user 0:0 to override.
+RUN mkdir -p /data /keys && chown -R 10001:10001 /data /keys
 
 ENV LEPTOS_SITE_ADDR="0.0.0.0:8090"
 ENV LEPTOS_SITE_ROOT="site"
 ENV RUST_LOG="info"
 
+USER 10001:10001
 EXPOSE 8090
 EXPOSE 50222/udp
+
+# /api/v1/info is the cheapest stable endpoint; returns service +
+# api_version metadata. start-period gives the SSR boot + initial source
+# warmup time before the first failure counts.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl --fail --silent --show-error --max-time 4 \
+        http://127.0.0.1:8090/api/v1/info > /dev/null || exit 1
+
 CMD ["/app/localsky"]

@@ -21,7 +21,7 @@ leptos_meta = { version = "0.8" }
 leptos_axum = { version = "0.8", optional = true }
 
 # SSR side
-axum = { version = "0.8", features = ["macros"], optional = true }
+axum = { version = "0.8", features = ["macros", "multipart"], optional = true }
 tower = { version = "0.5", optional = true }
 tower-http = { version = "0.6", features = ["fs", "compression-gzip", "set-header"], optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
@@ -41,6 +41,15 @@ chrono = { version = "0.4", features = ["serde", "wasmbind"] }
 
 # Concurrent state — small, lock-free for read-heavy snapshot
 arc-swap = { version = "1", optional = true }
+
+# LAN device discovery (Phase E2): enumerate local interfaces so the
+# Ecowitt UDP discovery can broadcast on every NIC of a dual-homed host.
+if-addrs = { version = "0.13", optional = true }
+
+# HA WebSocket client (Phase F1): HA's device/entity registries are only
+# available over the WS API. Default features (no TLS) suffice for the
+# on-LAN ws:// HA endpoint and keep the runtime image OpenSSL-free.
+tokio-tungstenite = { version = "0.26", optional = true }
 
 # Async helpers
 futures = "0.3"
@@ -62,22 +71,31 @@ async-trait = { version = "0.1", optional = true }
 thiserror = { version = "2", optional = true }
 
 # TOML parser/serializer for /data/localsky.toml config file.
-toml = { version = "0.8", optional = true }
+toml = { version = "1.0", optional = true }
+
+# Rhai: embedded, sandboxed scripting for user-defined skip rules. `sync`
+# makes Engine/AST Send+Sync so a compiled script set can move into the
+# refresher task. Augment-only: scripts can add a skip, never clear a
+# deterministic safety gate (enforced by the caller).
+rhai = { version = "1", default-features = false, features = [
+    "std",
+    "sync",
+], optional = true }
 
 # JSON Schema generation from serde-derived types. Served at
 # /api/config/schema so the settings UI can render form fields and
 # validate user input client-side.
-schemars = { version = "0.8", optional = true }
+schemars = { version = "1.0", optional = true }
 
 # MQTT client for HA discovery + state publish (HA-optional path: HA
 # users get free sensor.localsky_* entities without LocalSky reading HA).
 # Pure-Rust, no native deps; rustls-tls keeps the runtime image small.
-rumqttc = { version = "0.24", default-features = false, features = ["use-rustls"], optional = true }
+rumqttc = { version = "0.25", default-features = false, features = ["use-rustls"], optional = true }
 
 # SQLite for the irrigation run-history layer. bundled features so we
 # don't need libsqlite3 on the runtime image (alpine-friendly). Used
 # from spawn_blocking so its sync API doesn't stall the tokio runtime.
-rusqlite = { version = "0.39", features = ["bundled"], optional = true }
+rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 
 # Web Push: sends notifications to subscribed PWAs via VAPID. Same
 # rustls-tls toggle as reqwest so the runtime image stays OpenSSL-free.
@@ -88,8 +106,17 @@ web-push = { version = "0.11", default-features = false, features = ["isahc-clie
 # Rust, no_std-compatible, so it's free to link into the WASM bundle.
 base64 = "0.22"
 
+# HMAC-SHA256 signing for the Tuya cloud adapter (openapi.tuyaXX.com
+# requires per-request HMAC signatures). Pure Rust, all transitively
+# present already via web-push; making them direct deps so the Tuya
+# source can use them. ssr-only — Tuya signing never runs in the WASM
+# bundle.
+sha2 = { version = "0.11", optional = true }
+hmac = { version = "0.13", optional = true }
+hex = { version = "0.4", optional = true }
+
 # WASM
-wasm-bindgen = { version = "=0.2.121", optional = true }
+wasm-bindgen = { version = "=0.2.122", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
 gloo-net = { version = "0.7", features = ["http", "eventsource"], optional = true }
@@ -118,7 +145,25 @@ web-sys = { version = "0.3", optional = true, features = [
     "MessageEvent",
     "MouseEvent",
     "InputEvent",
+    "Document",
+    "Element",
+    "HtmlElement",
+    "ScrollIntoViewOptions",
+    "ScrollBehavior",
+    "ScrollLogicalPosition",
+    "File",
+    "FileList",
+    "Blob",
+    "FormData",
+    "Request",
+    "RequestInit",
+    "Response",
+    "DragEvent",
+    "DataTransfer",
 ] }
+
+[dev-dependencies]
+insta = { version = "1", features = ["json"] }
 
 [features]
 hydrate = [
@@ -140,16 +185,22 @@ ssr = [
     "dep:leptos_axum",
     "dep:tracing-subscriber",
     "dep:arc-swap",
+    "dep:if-addrs",
+    "dep:tokio-tungstenite",
     "dep:async-stream",
     "dep:reqwest",
     "dep:anyhow",
     "dep:async-trait",
     "dep:thiserror",
     "dep:toml",
+    "dep:rhai",
     "dep:schemars",
     "dep:rumqttc",
     "dep:rusqlite",
     "dep:web-push",
+    "dep:sha2",
+    "dep:hmac",
+    "dep:hex",
     "leptos/ssr",
     "leptos_router/ssr",
     "leptos_meta/ssr",

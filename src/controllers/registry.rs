@@ -31,10 +31,7 @@ impl ControllerRegistry {
 
     /// Replace the registry contents atomically. Used by the hot-reload
     /// path when config.controllers changes.
-    pub fn set(
-        &self,
-        controllers: Vec<(Arc<dyn IrrigationController>, bool /* default */)>,
-    ) {
+    pub fn set(&self, controllers: Vec<(Arc<dyn IrrigationController>, bool /* default */)>) {
         let mut by_id = HashMap::new();
         let mut default_id = None;
         for (c, is_default) in controllers {
@@ -49,7 +46,8 @@ impl ControllerRegistry {
             keys.sort();
             default_id = keys.into_iter().next().cloned();
         }
-        self.inner.store(Arc::new(RegistryState { by_id, default_id }));
+        self.inner
+            .store(Arc::new(RegistryState { by_id, default_id }));
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<dyn IrrigationController>> {
@@ -58,16 +56,15 @@ impl ControllerRegistry {
 
     pub fn default(&self) -> Option<Arc<dyn IrrigationController>> {
         let s = self.inner.load();
-        s.default_id.as_ref().and_then(|id| s.by_id.get(id).cloned())
+        s.default_id
+            .as_ref()
+            .and_then(|id| s.by_id.get(id).cloned())
     }
 
     /// Pick `id` if provided, otherwise the default. Convenience for the
     /// /api/irrigation dispatch path which accepts an optional controller
     /// override in the request payload.
-    pub fn default_or_named(
-        &self,
-        id: Option<&str>,
-    ) -> Option<Arc<dyn IrrigationController>> {
+    pub fn default_or_named(&self, id: Option<&str>) -> Option<Arc<dyn IrrigationController>> {
         match id {
             Some(name) => self.get(name),
             None => self.default(),
@@ -122,14 +119,8 @@ mod tests {
     fn default_or_named_routes_correctly() {
         let r = ControllerRegistry::new();
         r.set(vec![(dry("primary"), true), (dry("backup"), false)]);
-        assert_eq!(
-            r.default_or_named(None).unwrap().id(),
-            "primary"
-        );
-        assert_eq!(
-            r.default_or_named(Some("backup")).unwrap().id(),
-            "backup"
-        );
+        assert_eq!(r.default_or_named(None).unwrap().id(), "primary");
+        assert_eq!(r.default_or_named(Some("backup")).unwrap().id(), "backup");
         assert!(r.default_or_named(Some("missing")).is_none());
     }
 
@@ -146,7 +137,14 @@ mod tests {
     #[test]
     fn ids_returns_sorted() {
         let r = ControllerRegistry::new();
-        r.set(vec![(dry("z"), false), (dry("a"), false), (dry("m"), false)]);
-        assert_eq!(r.ids(), vec!["a".to_string(), "m".to_string(), "z".to_string()]);
+        r.set(vec![
+            (dry("z"), false),
+            (dry("a"), false),
+            (dry("m"), false),
+        ]);
+        assert_eq!(
+            r.ids(),
+            vec!["a".to_string(), "m".to_string(), "z".to_string()]
+        );
     }
 }

@@ -89,7 +89,11 @@ impl WeatherSource for MqttSubscribe {
             .client_id
             .clone()
             .unwrap_or_else(|| format!("localsky-source-{}", self.id));
-        let mut opts = MqttOptions::new(&client_id, &self.config.broker_host, self.config.broker_port);
+        let mut opts = MqttOptions::new(
+            &client_id,
+            &self.config.broker_host,
+            self.config.broker_port,
+        );
         opts.set_keep_alive(Duration::from_secs(30));
         if let (Some(u), Some(p)) = (&self.config.username, &self.config.password) {
             opts.set_credentials(u, p);
@@ -252,6 +256,8 @@ pub fn parse_weather_field(name: &str) -> Option<WeatherField> {
         "lightning_count" => LightningCount,
         "lightning_distance_mi" => LightningDistanceMi,
         "et0_today" => Et0Today,
+        "flow_gpm" => FlowGpm,
+        "flow_total_gal_today" => FlowTotalGalToday,
         _ => return None,
     })
 }
@@ -331,8 +337,26 @@ mod tests {
 
     #[test]
     fn parse_field_known_variants() {
-        assert!(matches!(parse_weather_field("air_temp_f"), Some(WeatherField::AirTempF)));
-        assert!(matches!(parse_weather_field("rh_pct"), Some(WeatherField::RhPct)));
+        assert!(matches!(
+            parse_weather_field("air_temp_f"),
+            Some(WeatherField::AirTempF)
+        ));
+        assert!(matches!(
+            parse_weather_field("rh_pct"),
+            Some(WeatherField::RhPct)
+        ));
         assert!(parse_weather_field("not_a_field").is_none());
+    }
+
+    #[test]
+    fn parse_flow_fields() {
+        assert!(matches!(
+            parse_weather_field("flow_gpm"),
+            Some(WeatherField::FlowGpm)
+        ));
+        assert!(matches!(
+            parse_weather_field("flow_total_gal_today"),
+            Some(WeatherField::FlowTotalGalToday)
+        ));
     }
 }

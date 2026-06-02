@@ -7,7 +7,7 @@
 // Each engine tick steps the bucket: ETc drives it down, effective rain
 // + applied irrigation refill it. Trigger irrigation when depletion >= RAW.
 
-use crate::config::schema::{SoilTexture, GrassSpecies};
+use crate::config::schema::{GrassSpecies, SoilTexture};
 use crate::engine::soil_catalog::{raw_mm as raw_for, taw_mm as taw_for};
 use crate::engine::species_catalog::{kc_at_doy_lat, lookup as species_lookup};
 
@@ -119,7 +119,12 @@ pub fn summarize(
     let needs = should_irrigate(state.depletion_mm, raw);
     let runtime = if needs {
         // Refill back to field capacity (depletion = 0).
-        refill_runtime_seconds(state.depletion_mm, precip_rate_mm_hr, capture_efficiency, max_duration_s)
+        refill_runtime_seconds(
+            state.depletion_mm,
+            precip_rate_mm_hr,
+            capture_efficiency,
+            max_duration_s,
+        )
     } else {
         0
     };
@@ -159,7 +164,10 @@ mod tests {
     fn step_clamps_below_zero_at_field_capacity() {
         let mut s = ZoneWaterState { depletion_mm: 2.0 };
         step(&mut s, 0.0, 50.0, 0.0, 0.70, 60.0); // big rain
-        assert_eq!(s.depletion_mm, 0.0, "should not go negative (above FC = runoff)");
+        assert_eq!(
+            s.depletion_mm, 0.0,
+            "should not go negative (above FC = runoff)"
+        );
     }
 
     #[test]

@@ -17,17 +17,26 @@ pub struct HistoryDb {
 }
 
 impl HistoryDb {
-    /// Open or create the SQLite file at the given path. Schema is
-    /// applied with CREATE IF NOT EXISTS so this is idempotent.
+    /// Open or create the SQLite file at the given path and run all
+    /// versioned migrations. Idempotent: re-opening an already-migrated
+    /// database is a no-op.
     pub fn open(path: PathBuf) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        let conn = Connection::open(&path)
-            .with_context(|| format!("open sqlite at {path:?}"))?;
+        let mut conn =
+            Connection::open(&path).with_context(|| format!("open sqlite at {path:?}"))?;
         conn.pragma_update(None, "journal_mode", "WAL").ok();
         conn.pragma_update(None, "synchronous", "NORMAL").ok();
-        conn.execute_batch(SCHEMA)?;
+        // Apply v2 migrations. This evolves a legacy v0.1 database to
+        // the v2 schema in-place (runs gets zone_slug etc; decisions
+        // gets renamed to verdict_history) and creates fresh tables on
+        // a clean install.
+        let applied = crate::persistence::run_migrations(&mut conn)
+            .with_context(|| "applying schema migrations")?;
+        if !applied.is_empty() {
+            tracing::info!(applied = ?applied, "applied schema migrations");
+        }
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -38,60 +47,31 @@ impl HistoryDb {
     }
 }
 
-const SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS runs (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    zone          TEXT    NOT NULL,
-    start_epoch   INTEGER NOT NULL,
-    duration_s    INTEGER NOT NULL,
-    skip_reason   TEXT,
-    UNIQUE(zone, start_epoch)
-);
-CREATE INDEX IF NOT EXISTS idx_runs_zone_start ON runs(zone, start_epoch DESC);
-CREATE INDEX IF NOT EXISTS idx_runs_start ON runs(start_epoch DESC);
+// Schema lives in src/persistence/migrations/ now; HistoryDb just opens
+// the connection and the migration runner handles tables.
 
--- Web Push subscriptions (Phase 5). One row per browser/device + origin
--- combination. endpoint is unique because the browser hands us a stable
--- URL per subscription; re-subscribing on the same device re-uses the row
--- (INSERT OR REPLACE) so we don't accumulate dead duplicates.
-CREATE TABLE IF NOT EXISTS push_subscriptions (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    endpoint    TEXT    NOT NULL UNIQUE,
-    p256dh      TEXT    NOT NULL,
-    auth        TEXT    NOT NULL,
-    created_at  INTEGER NOT NULL,
-    last_seen   INTEGER NOT NULL
-);
-
--- Skip-check verdict transitions. One row per (verdict, reason) change so
--- "did we actually skip on day X" is answerable in 30 days. UNIQUE(epoch)
--- prevents a tight loop from ever producing duplicate rows.
-CREATE TABLE IF NOT EXISTS decisions (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    epoch       INTEGER NOT NULL,
-    verdict     TEXT    NOT NULL,
-    reason      TEXT    NOT NULL,
-    UNIQUE(epoch)
-);
-CREATE INDEX IF NOT EXISTS idx_decisions_epoch ON decisions(epoch DESC);
-"#;
-
-/// Insert a completed run, ignoring duplicates by (zone, start_epoch).
-/// Called from spawn_blocking — pass the Arc<Mutex<Connection>>.
-pub async fn record_run(
-    conn: Arc<Mutex<Connection>>,
-    rec: RunRecord,
-) -> Result<()> {
+/// Insert a completed run, ignoring duplicates by (zone_slug,
+/// start_epoch, controller_id). The HA-refresher source always tags
+/// these as `ha_refresher` / `ha_service_call` since they reflect HA's
+/// own status sensors, not a LocalSky-initiated dispatch.
+pub async fn record_run(conn: Arc<Mutex<Connection>>, rec: RunRecord) -> Result<()> {
     tokio::task::spawn_blocking(move || -> Result<()> {
         let conn = conn.blocking_lock();
+        let end_epoch = rec.start_epoch + rec.duration_s;
         conn.execute(
-            "INSERT OR IGNORE INTO runs (zone, start_epoch, duration_s, skip_reason)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT OR IGNORE INTO runs
+                (zone_slug, start_epoch, end_epoch, duration_s,
+                 source, controller_id, status, skip_reason)
+             VALUES (?1, ?2, ?3, ?4,
+                     'ha_refresher', 'ha_service_call',
+                     CASE WHEN ?5 IS NULL THEN 'completed' ELSE 'aborted' END,
+                     ?5)",
             params![
                 rec.zone,
                 rec.start_epoch,
+                end_epoch,
                 rec.duration_s,
-                rec.skip_reason
+                rec.skip_reason,
             ],
         )?;
         Ok(())
@@ -100,19 +80,22 @@ pub async fn record_run(
     .context("spawn_blocking join failed")?
 }
 
-/// Insert a verdict-change row. INSERT OR IGNORE on the (epoch) unique
-/// index means same-second double-writes from a busy refresher loop are
-/// silently absorbed.
+/// Insert a verdict-change row into verdict_history. INSERT OR IGNORE
+/// on the UNIQUE(epoch) index means same-second double-writes from a
+/// busy refresher loop are silently absorbed. inputs_json is left as
+/// `{}` here; the v2 engine writes the full blob through its own path.
 pub async fn record_decision(
     conn: Arc<Mutex<Connection>>,
     rec: DecisionRecord,
+    trace_json: String,
 ) -> Result<()> {
     tokio::task::spawn_blocking(move || -> Result<()> {
         let conn = conn.blocking_lock();
         conn.execute(
-            "INSERT OR IGNORE INTO decisions (epoch, verdict, reason)
-             VALUES (?1, ?2, ?3)",
-            params![rec.epoch, rec.verdict, rec.reason],
+            "INSERT OR IGNORE INTO verdict_history
+                (epoch, date_local, verdict, reason, inputs_json, trace_json)
+             VALUES (?1, strftime('%Y-%m-%d', ?1, 'unixepoch'), ?2, ?3, '{}', ?4)",
+            params![rec.epoch, rec.verdict, rec.reason, trace_json],
         )?;
         Ok(())
     })
@@ -130,17 +113,24 @@ pub async fn decisions_window(
     tokio::task::spawn_blocking(move || -> Result<DecisionWindow> {
         let conn = conn.blocking_lock();
         let mut stmt = conn.prepare(
-            "SELECT epoch, verdict, reason
-             FROM decisions
+            "SELECT epoch, verdict, reason, trace_json
+             FROM verdict_history
              WHERE epoch >= ?1 AND epoch < ?2
              ORDER BY epoch ASC",
         )?;
         let decisions: Vec<DecisionRecord> = stmt
             .query_map(params![from_epoch, to_epoch], |row| {
+                let trace_json: String = row.get(3)?;
+                let trace = if trace_json.is_empty() {
+                    None
+                } else {
+                    serde_json::from_str(&trace_json).ok()
+                };
                 Ok(DecisionRecord {
                     epoch: row.get(0)?,
                     verdict: row.get(1)?,
                     reason: row.get(2)?,
+                    trace,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -164,8 +154,12 @@ pub async fn window(
 ) -> Result<HistoryWindow> {
     tokio::task::spawn_blocking(move || -> Result<HistoryWindow> {
         let conn = conn.blocking_lock();
+        // COALESCE on duration_s because the v2 schema allows NULL for
+        // rows in the 'running' or 'intended' transient states; the
+        // legacy window view treats those as zero-length until they
+        // complete and the row is updated.
         let mut stmt = conn.prepare(
-            "SELECT zone, start_epoch, duration_s, skip_reason
+            "SELECT zone_slug, start_epoch, COALESCE(duration_s, 0), skip_reason
              FROM runs
              WHERE start_epoch >= ?1 AND start_epoch < ?2
              ORDER BY start_epoch ASC",
@@ -188,4 +182,67 @@ pub async fn window(
     })
     .await
     .context("spawn_blocking join failed")?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ha::snapshot::{DecisionTrace, RuleEval};
+
+    fn mem() -> Arc<Mutex<Connection>> {
+        let mut c = Connection::open_in_memory().unwrap();
+        crate::persistence::run_migrations(&mut c).unwrap();
+        Arc::new(Mutex::new(c))
+    }
+
+    #[tokio::test]
+    async fn decision_trace_roundtrips() {
+        let db = mem();
+        let trace = DecisionTrace {
+            verdict: "skip".into(),
+            reason: "Already wet (0.10\" today)".into(),
+            rules: vec![RuleEval {
+                id: "already_wet".into(),
+                label: "Already wet today".into(),
+                category: "weather".into(),
+                detail: "0.10\" today vs 0.05\" floor".into(),
+                outcome: "fired".into(),
+                verdict: Some("skip".into()),
+            }],
+        };
+        let rec = DecisionRecord {
+            epoch: 1_700_000_000,
+            verdict: "skip".into(),
+            reason: "Already wet (0.10\" today)".into(),
+            trace: None,
+        };
+        record_decision(db.clone(), rec, serde_json::to_string(&trace).unwrap())
+            .await
+            .unwrap();
+
+        let w = decisions_window(db.clone(), 1_600_000_000, 1_800_000_000)
+            .await
+            .unwrap();
+        assert_eq!(w.decisions.len(), 1);
+        assert_eq!(w.decisions[0].verdict, "skip");
+        assert_eq!(w.decisions[0].trace.clone().expect("trace present"), trace);
+    }
+
+    #[tokio::test]
+    async fn legacy_empty_trace_reads_as_none() {
+        let db = mem();
+        let rec = DecisionRecord {
+            epoch: 1_700_000_500,
+            verdict: "run".into(),
+            reason: String::new(),
+            trace: None,
+        };
+        record_decision(db.clone(), rec, String::new())
+            .await
+            .unwrap();
+        let w = decisions_window(db.clone(), 1_600_000_000, 1_800_000_000)
+            .await
+            .unwrap();
+        assert!(w.decisions[0].trace.is_none());
+    }
 }

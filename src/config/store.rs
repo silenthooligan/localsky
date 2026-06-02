@@ -35,6 +35,15 @@ impl FileConfigStore {
     pub fn is_initialized(&self) -> bool {
         self.path.exists()
     }
+
+    /// Synchronous best-effort read of the current on-disk config.
+    /// Used by SSR components that need to consult the live config
+    /// inside a Leptos `view!` (which can't await). Returns `None` on
+    /// any error (missing file, parse failure, env-var expansion etc.)
+    /// so the caller can fall back gracefully.
+    pub fn load_blocking(&self) -> Option<crate::config::Config> {
+        loader::load_from_path(&self.path).ok()
+    }
 }
 
 fn map_load_err(e: LoadError) -> ConfigStoreError {
@@ -130,10 +139,7 @@ mod tests {
 
     fn tempfile_dir() -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!(
-            "localsky-config-test-{}",
-            std::process::id()
-        ));
+        p.push(format!("localsky-config-test-{}", std::process::id()));
         std::fs::create_dir_all(&p).unwrap();
         p
     }

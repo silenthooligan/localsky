@@ -117,25 +117,26 @@ impl SensorHistoryStore {
         source_ids: Vec<String>,
     ) -> Result<std::collections::HashMap<String, i64>, SensorHistoryError> {
         let c = self.conn.clone();
-        tokio::task::spawn_blocking(move || -> rusqlite::Result<std::collections::HashMap<String, i64>> {
-            let conn = c.blocking_lock();
-            let mut out = std::collections::HashMap::new();
-            // One prepared statement; iterate ids. Cheap on a few-source
-            // setup; SQLite's per-statement overhead is tiny.
-            let mut stmt = conn.prepare(
-                "SELECT MAX(epoch) FROM sensor_history WHERE source_id = ?",
-            )?;
-            for id in source_ids {
-                let row: Option<i64> = stmt
-                    .query_row(rusqlite::params![&id], |r| r.get(0))
-                    .ok()
-                    .flatten();
-                if let Some(epoch) = row {
-                    out.insert(id, epoch);
+        tokio::task::spawn_blocking(
+            move || -> rusqlite::Result<std::collections::HashMap<String, i64>> {
+                let conn = c.blocking_lock();
+                let mut out = std::collections::HashMap::new();
+                // One prepared statement; iterate ids. Cheap on a few-source
+                // setup; SQLite's per-statement overhead is tiny.
+                let mut stmt =
+                    conn.prepare("SELECT MAX(epoch) FROM sensor_history WHERE source_id = ?")?;
+                for id in source_ids {
+                    let row: Option<i64> = stmt
+                        .query_row(rusqlite::params![&id], |r| r.get(0))
+                        .ok()
+                        .flatten();
+                    if let Some(epoch) = row {
+                        out.insert(id, epoch);
+                    }
                 }
-            }
-            Ok(out)
-        })
+                Ok(out)
+            },
+        )
         .await
         .map_err(|e| SensorHistoryError::Sqlite(format!("join: {e}")))?
         .map_err(|e| SensorHistoryError::Sqlite(e.to_string()))
@@ -175,6 +176,75 @@ impl SensorHistoryStore {
         .map_err(|e| SensorHistoryError::Sqlite(format!("join: {e}")))?
         .map_err(|e| SensorHistoryError::Sqlite(e.to_string()))
     }
+
+    /// Latest reading for every (source_id, key) whose key looks like a
+    /// soil-moisture channel (e.g. Ecowitt `soilmoisture1..8`, or an
+    /// `*_soil_moisture` mirror). Powers the zone soil-sensor picker so a
+    /// user can assign any local channel to a zone. Ordered by source then
+    /// key.
+    pub async fn soil_channels(&self) -> Result<Vec<Reading>, SensorHistoryError> {
+        let c = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<Reading>> {
+            let conn = c.blocking_lock();
+            let mut stmt = conn.prepare(
+                "SELECT epoch, source_id, key, value FROM sensor_history s
+                 WHERE (key LIKE 'soilmoisture%' OR key LIKE '%soil_moisture%')
+                   AND epoch = (SELECT MAX(epoch) FROM sensor_history
+                                WHERE source_id = s.source_id AND key = s.key)
+                 GROUP BY source_id, key
+                 ORDER BY source_id, key",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(Reading {
+                        epoch: r.get(0)?,
+                        source_id: r.get(1)?,
+                        key: r.get(2)?,
+                        value: r.get(3)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .await
+        .map_err(|e| SensorHistoryError::Sqlite(format!("join: {e}")))?
+        .map_err(|e| SensorHistoryError::Sqlite(e.to_string()))
+    }
+
+    /// Latest value for every distinct key a source has reported, newest
+    /// first. Powers the Sensors page "what is this integration actually
+    /// reporting right now?" view.
+    pub async fn latest_for_source(
+        &self,
+        source_id: String,
+    ) -> Result<Vec<Reading>, SensorHistoryError> {
+        let c = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<Reading>> {
+            let conn = c.blocking_lock();
+            let mut stmt = conn.prepare(
+                "SELECT epoch, source_id, key, value FROM sensor_history s
+                 WHERE source_id = ?1
+                   AND epoch = (SELECT MAX(epoch) FROM sensor_history
+                                WHERE source_id = ?1 AND key = s.key)
+                 GROUP BY key
+                 ORDER BY key",
+            )?;
+            let rows = stmt
+                .query_map(params![source_id], |r| {
+                    Ok(Reading {
+                        epoch: r.get(0)?,
+                        source_id: r.get(1)?,
+                        key: r.get(2)?,
+                        value: r.get(3)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .await
+        .map_err(|e| SensorHistoryError::Sqlite(format!("join: {e}")))?
+        .map_err(|e| SensorHistoryError::Sqlite(e.to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -201,7 +271,10 @@ mod tests {
             .await
             .unwrap();
         }
-        let series = s.series("air_temp_c".into(), 1000, 2000, 100).await.unwrap();
+        let series = s
+            .series("air_temp_c".into(), 1000, 2000, 100)
+            .await
+            .unwrap();
         assert_eq!(series.len(), 5);
         // Newest first.
         assert!(series[0].epoch > series[4].epoch);
@@ -264,10 +337,51 @@ mod tests {
             ])
             .await
             .unwrap();
-        assert_eq!(res.get("tempest_lan"), Some(&1100), "should pick MAX(epoch) per source");
+        assert_eq!(
+            res.get("tempest_lan"),
+            Some(&1100),
+            "should pick MAX(epoch) per source"
+        );
         assert_eq!(res.get("open_meteo"), Some(&950));
         assert_eq!(res.get("ecowitt"), Some(&1200));
-        assert_eq!(res.get("never_emitted"), None, "unseen sources omitted from map");
+        assert_eq!(
+            res.get("never_emitted"),
+            None,
+            "unseen sources omitted from map"
+        );
+    }
+
+    #[tokio::test]
+    async fn soil_channels_finds_soil_keys_only() {
+        let s = fresh_store().await;
+        for (src, key, epoch, val) in [
+            ("ecowitt", "soilmoisture1", 1000i64, 40.0),
+            ("ecowitt", "soilmoisture1", 1100, 42.0), // newer wins
+            ("ecowitt", "soilmoisture2", 1050, 55.0),
+            ("ecowitt", "tempf", 1100, 70.0), // not soil -> excluded
+            ("zigbee", "back_yard_soil_moisture", 900, 31.0),
+        ] {
+            s.insert(Reading {
+                epoch,
+                source_id: src.into(),
+                key: key.into(),
+                value: val,
+            })
+            .await
+            .unwrap();
+        }
+        let rows = s.soil_channels().await.unwrap();
+        // soilmoisture1, soilmoisture2, back_yard_soil_moisture (3 channels).
+        assert_eq!(rows.len(), 3, "only soil channels, deduped per key");
+        let ch1 = rows
+            .iter()
+            .find(|r| r.key == "soilmoisture1")
+            .expect("ch1 present");
+        assert_eq!(ch1.value, 42.0, "newest reading per channel");
+        assert!(
+            !rows.iter().any(|r| r.key == "tempf"),
+            "non-soil keys excluded"
+        );
     }
 
     #[tokio::test]

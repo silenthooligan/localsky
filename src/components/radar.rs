@@ -6,19 +6,48 @@
 // renders the target div + control row and pipes lat/lon/zoom in via
 // data-* attrs read at SSR from the WEATHER_APP_LAT / LON / ZOOM env
 // vars (sourced from HA's /api/config when the env was seeded).
+//
+// Lifecycle note: leaflet.js and radar.js are loaded ONCE at app boot
+// via app.rs::shell, not per-route. Earlier versions injected the
+// <script> tags from inside this component's view; on every route
+// swap Leptos reinserted them, the browser re-executed the IIFE in
+// radar.js, and MutationObservers stacked up so the second visit to
+// /weather sometimes showed a dead map until a full reload. The IIFE's
+// MutationObserver picks up #radar-map appearing/disappearing on
+// route changes and calls init()/teardown() accordingly, so no script
+// reload is needed here.
 
 use leptos::prelude::*;
 
 #[cfg(feature = "ssr")]
 fn coords() -> (f64, f64, u32) {
-    let lat = std::env::var("WEATHER_APP_LAT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(40.0);
-    let lon = std::env::var("WEATHER_APP_LON")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(-75.0);
+    use crate::config::FileConfigStore;
+    use std::sync::Arc;
+
+    // Prefer the live deployment.location from the config so changes
+    // made in Settings -> Location actually flow through to the radar
+    // center. Earlier this read env vars only; env_compat seeds the
+    // config from WEATHER_APP_LAT/LON at first boot, but later edits via
+    // the settings page never updated the env, so the radar kept
+    // recentering on the env defaults (40.0, -75.0 — NYC area) regardless
+    // of what the user configured.
+    let from_config: Option<(f64, f64)> = use_context::<Arc<FileConfigStore>>()
+        .and_then(|store| store.load_blocking())
+        .map(|cfg| (cfg.deployment.location.lat, cfg.deployment.location.lon))
+        .filter(|(lat, lon)| !(*lat == 0.0 && *lon == 0.0));
+
+    let (lat, lon) = from_config.unwrap_or_else(|| {
+        let lat = std::env::var("WEATHER_APP_LAT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(40.0);
+        let lon = std::env::var("WEATHER_APP_LON")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(-75.0);
+        (lat, lon)
+    });
+
     let zoom = std::env::var("WEATHER_APP_ZOOM")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -62,10 +91,6 @@ pub fn RadarPanel() -> impl IntoView {
                     "IEM NEXRAD"
                 </a>
             </div>
-            <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-                integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
-                crossorigin=""></script>
-            <script src="/radar.js" defer></script>
         </section>
     }
 }

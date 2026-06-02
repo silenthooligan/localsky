@@ -19,8 +19,8 @@ use serde::Serialize;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use web_push::{
-    ContentEncoding, IsahcWebPushClient, SubscriptionInfo, SubscriptionKeys,
-    VapidSignatureBuilder, WebPushClient, WebPushError, WebPushMessageBuilder,
+    ContentEncoding, IsahcWebPushClient, SubscriptionInfo, SubscriptionKeys, VapidSignatureBuilder,
+    WebPushClient, WebPushError, WebPushMessageBuilder,
 };
 
 #[derive(Debug, Clone)]
@@ -31,7 +31,11 @@ pub enum PushEvent {
     ZoneStarted { name: String, slug: String },
     /// A zone just transitioned from running to idle. `duration_min` is
     /// the run length in minutes (rounded).
-    ZoneStopped { name: String, slug: String, duration_min: u32 },
+    ZoneStopped {
+        name: String,
+        slug: String,
+        duration_min: u32,
+    },
     /// Daily verdict computed (sent once per day on first verdict
     /// computation). `verdict` = "skip" | "run" | "run_extended".
     DailyVerdict { verdict: String, reason: String },
@@ -66,9 +70,7 @@ impl PushDispatcher {
 
 /// Spawn the background dispatcher task. Returns a sender handle the
 /// HA refresher captures and emits into.
-pub fn spawn_dispatcher(
-    conn: Option<Arc<Mutex<Connection>>>,
-) -> PushDispatcher {
+pub fn spawn_dispatcher(conn: Option<Arc<Mutex<Connection>>>) -> PushDispatcher {
     let (tx, mut rx) = mpsc::channel::<PushEvent>(64);
     let cfg = VapidConfig::from_env();
 
@@ -94,7 +96,9 @@ pub fn spawn_dispatcher(
                 tracing::debug!("push: history db not configured; dropping event");
                 continue;
             };
-            let Some(cfg) = cfg.as_ref() else { continue; };
+            let Some(cfg) = cfg.as_ref() else {
+                continue;
+            };
 
             let payload = render_payload(&ev);
             let body = match serde_json::to_string(&payload) {
@@ -117,7 +121,11 @@ pub fn spawn_dispatcher(
                 let result = send_one(&client, cfg, &sub, body.as_bytes()).await;
                 match result {
                     Ok(()) => {
-                        tracing::debug!("push: sent {} -> {}", payload.tag, mask_endpoint(&sub.endpoint));
+                        tracing::debug!(
+                            "push: sent {} -> {}",
+                            payload.tag,
+                            mask_endpoint(&sub.endpoint)
+                        );
                     }
                     Err(SendErr::Gone) | Err(SendErr::NotFound) => {
                         tracing::info!(
@@ -149,7 +157,11 @@ fn render_payload(ev: &PushEvent) -> PushPayload {
             tag: format!("zone-{slug}"),
             url: format!("/irrigation/zone/{slug}"),
         },
-        PushEvent::ZoneStopped { name, slug, duration_min } => PushPayload {
+        PushEvent::ZoneStopped {
+            name,
+            slug,
+            duration_min,
+        } => PushPayload {
             title: format!("{name} done"),
             body: format!("Ran for {duration_min} min."),
             tag: format!("zone-{slug}"),

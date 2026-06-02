@@ -13,14 +13,18 @@ pub fn LlmStep() -> impl IntoView {
     let model = RwSignal::new(String::new());
     let api_key = RwSignal::new(String::new());
 
-    let show_url = move || matches!(
-        provider.get().as_str(),
-        "openai_compat" | "ollama" | "llamacpp"
-    );
-    let show_model = move || matches!(
-        provider.get().as_str(),
-        "ollama" | "openai_compat" | "llamacpp"
-    );
+    let show_url = move || {
+        matches!(
+            provider.get().as_str(),
+            "openai_compat" | "ollama" | "llamacpp"
+        )
+    };
+    let show_model = move || {
+        matches!(
+            provider.get().as_str(),
+            "ollama" | "openai_compat" | "llamacpp"
+        )
+    };
     let show_key = move || provider.get() == "openai_compat";
 
     view! {

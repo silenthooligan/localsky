@@ -20,10 +20,15 @@ pub mod refresher;
 pub mod rest;
 #[cfg(feature = "ssr")]
 pub mod store;
+#[cfg(feature = "ssr")]
+pub mod ws;
 
 #[cfg(feature = "ssr")]
 pub use mqtt_publish::{slugify, HaMqttPublisher, MqttPublishError};
 #[cfg(feature = "ssr")]
-pub use refresher::spawn_refresher;
+pub use refresher::{
+    resolve_snapshot_source, spawn_refresher, SnapshotSource, WateringPolicy, ZoneBudgetCfg,
+    ZoneRuntime, ZoneSoilCfg,
+};
 #[cfg(feature = "ssr")]
 pub use store::IrrigationStore;

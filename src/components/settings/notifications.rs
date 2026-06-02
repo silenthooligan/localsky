@@ -5,7 +5,8 @@
 
 use leptos::prelude::*;
 
-use crate::components::ui::{FormField, Panel, Toggle};
+use crate::components::settings_ui::SettingsResult;
+use crate::components::ui::{FormField, HelpHint, Panel, Toggle};
 
 #[component]
 pub fn SettingsNotifications() -> impl IntoView {
@@ -101,6 +102,7 @@ pub fn SettingsNotifications() -> impl IntoView {
             </header>
 
             <Panel title="Web Push (per device)".to_string()>
+                <HelpHint topic="notifications"/>
                 <Toggle
                     checked=web_push_enabled
                     label="Server-side push enabled".to_string()
@@ -109,77 +111,80 @@ pub fn SettingsNotifications() -> impl IntoView {
             </Panel>
 
             <Panel title="MQTT (HA discovery)".to_string()>
-                <FormField
-                    label="Broker host".to_string()
-                    helptext="Leave blank to disable MQTT entirely.".to_string()
-                    error=Signal::derive(|| None::<String>)
-                >
-                    <input
-                        type="text"
-                        class="ui-input"
-                        placeholder="broker.local"
-                        prop:value=move || mqtt_host.get()
-                        on:input=move |ev| mqtt_host.set(event_target_value(&ev))
-                    />
-                </FormField>
+                <HelpHint topic="notifications"/>
+                <div class="grid settings-field-grid">
+                    <FormField
+                        label="Broker host".to_string()
+                        helptext="Leave blank to disable MQTT entirely.".to_string()
+                        error=Signal::derive(|| None::<String>)
+                    >
+                        <input
+                            type="text"
+                            class="ui-input"
+                            placeholder="broker.local"
+                            prop:value=move || mqtt_host.get()
+                            on:input=move |ev| mqtt_host.set(event_target_value(&ev))
+                        />
+                    </FormField>
 
-                <FormField
-                    label="Port".to_string()
-                    helptext="Default 1883 (unencrypted). 8883 for TLS.".to_string()
-                    error=Signal::derive(|| None::<String>)
-                >
-                    <input
-                        type="number"
-                        class="ui-input"
-                        min="1"
-                        max="65535"
-                        prop:value=move || mqtt_port.get().to_string()
-                        on:input=move |ev| {
-                            if let Ok(v) = event_target_value(&ev).parse::<u16>() {
-                                mqtt_port.set(v);
+                    <FormField
+                        label="Port".to_string()
+                        helptext="Default 1883 (unencrypted). 8883 for TLS.".to_string()
+                        error=Signal::derive(|| None::<String>)
+                    >
+                        <input
+                            type="number"
+                            class="ui-input"
+                            min="1"
+                            max="65535"
+                            prop:value=move || mqtt_port.get().to_string()
+                            on:input=move |ev| {
+                                if let Ok(v) = event_target_value(&ev).parse::<u16>() {
+                                    mqtt_port.set(v);
+                                }
                             }
-                        }
-                    />
-                </FormField>
+                        />
+                    </FormField>
 
-                <FormField
-                    label="Username".to_string()
-                    helptext="Optional. Required if your broker authenticates.".to_string()
-                    error=Signal::derive(|| None::<String>)
-                >
-                    <input
-                        type="text"
-                        class="ui-input"
-                        prop:value=move || mqtt_username.get()
-                        on:input=move |ev| mqtt_username.set(event_target_value(&ev))
-                    />
-                </FormField>
+                    <FormField
+                        label="Username".to_string()
+                        helptext="Optional. Required if your broker authenticates.".to_string()
+                        error=Signal::derive(|| None::<String>)
+                    >
+                        <input
+                            type="text"
+                            class="ui-input"
+                            prop:value=move || mqtt_username.get()
+                            on:input=move |ev| mqtt_username.set(event_target_value(&ev))
+                        />
+                    </FormField>
 
-                <FormField
-                    label="Password".to_string()
-                    helptext="Optional.".to_string()
-                    error=Signal::derive(|| None::<String>)
-                >
-                    <input
-                        type="password"
-                        class="ui-input"
-                        prop:value=move || mqtt_password.get()
-                        on:input=move |ev| mqtt_password.set(event_target_value(&ev))
-                    />
-                </FormField>
+                    <FormField
+                        label="Password".to_string()
+                        helptext="Optional.".to_string()
+                        error=Signal::derive(|| None::<String>)
+                    >
+                        <input
+                            type="password"
+                            class="ui-input"
+                            prop:value=move || mqtt_password.get()
+                            on:input=move |ev| mqtt_password.set(event_target_value(&ev))
+                        />
+                    </FormField>
 
-                <FormField
-                    label="Discovery prefix".to_string()
-                    helptext="HA discovery topic prefix. Default 'homeassistant'.".to_string()
-                    error=Signal::derive(|| None::<String>)
-                >
-                    <input
-                        type="text"
-                        class="ui-input"
-                        prop:value=move || mqtt_discovery_prefix.get()
-                        on:input=move |ev| mqtt_discovery_prefix.set(event_target_value(&ev))
-                    />
-                </FormField>
+                    <FormField
+                        label="Discovery prefix".to_string()
+                        helptext="HA discovery topic prefix. Default 'homeassistant'.".to_string()
+                        error=Signal::derive(|| None::<String>)
+                    >
+                        <input
+                            type="text"
+                            class="ui-input"
+                            prop:value=move || mqtt_discovery_prefix.get()
+                            on:input=move |ev| mqtt_discovery_prefix.set(event_target_value(&ev))
+                        />
+                    </FormField>
+                </div>
 
                 <Toggle
                     checked=mqtt_publish_enabled
@@ -189,68 +194,67 @@ pub fn SettingsNotifications() -> impl IntoView {
             </Panel>
 
             <Panel title="ntfy".to_string()>
-                <FormField
-                    label="Base URL".to_string()
-                    helptext="e.g. https://ntfy.sh, or your self-hosted instance.".to_string()
-                    error=Signal::derive(|| None::<String>)
-                >
-                    <input
-                        type="url"
-                        class="ui-input"
-                        placeholder="https://ntfy.sh"
-                        prop:value=move || ntfy_base_url.get()
-                        on:input=move |ev| ntfy_base_url.set(event_target_value(&ev))
-                    />
-                </FormField>
-                <FormField
-                    label="Topic".to_string()
-                    helptext="Pick something unique; ntfy topics are public by default.".to_string()
-                    error=Signal::derive(|| None::<String>)
-                >
-                    <input
-                        type="text"
-                        class="ui-input"
-                        prop:value=move || ntfy_topic.get()
-                        on:input=move |ev| ntfy_topic.set(event_target_value(&ev))
-                    />
-                </FormField>
+                <HelpHint topic="notifications"/>
+                <div class="grid settings-field-grid">
+                    <FormField
+                        label="Base URL".to_string()
+                        helptext="e.g. https://ntfy.sh, or your self-hosted instance.".to_string()
+                        error=Signal::derive(|| None::<String>)
+                    >
+                        <input
+                            type="url"
+                            class="ui-input"
+                            placeholder="https://ntfy.sh"
+                            prop:value=move || ntfy_base_url.get()
+                            on:input=move |ev| ntfy_base_url.set(event_target_value(&ev))
+                        />
+                    </FormField>
+                    <FormField
+                        label="Topic".to_string()
+                        helptext="Pick something unique; ntfy topics are public by default.".to_string()
+                        error=Signal::derive(|| None::<String>)
+                    >
+                        <input
+                            type="text"
+                            class="ui-input"
+                            prop:value=move || ntfy_topic.get()
+                            on:input=move |ev| ntfy_topic.set(event_target_value(&ev))
+                        />
+                    </FormField>
+                </div>
             </Panel>
 
             <Panel title="Slack".to_string()>
-                <FormField
-                    label="Incoming webhook URL".to_string()
-                    helptext="Generate from Slack > Apps > Incoming Webhooks. Leave blank to disable.".to_string()
-                    error=Signal::derive(|| None::<String>)
-                >
-                    <input
-                        type="url"
-                        class="ui-input"
-                        placeholder="https://hooks.slack.com/services/..."
-                        prop:value=move || slack_webhook.get()
-                        on:input=move |ev| slack_webhook.set(event_target_value(&ev))
-                    />
-                </FormField>
+                <HelpHint topic="notifications"/>
+                <div class="grid settings-field-grid">
+                    <FormField
+                        label="Incoming webhook URL".to_string()
+                        helptext="Generate from Slack > Apps > Incoming Webhooks. Leave blank to disable.".to_string()
+                        error=Signal::derive(|| None::<String>)
+                    >
+                        <input
+                            type="url"
+                            class="ui-input"
+                            placeholder="https://hooks.slack.com/services/..."
+                            prop:value=move || slack_webhook.get()
+                            on:input=move |ev| slack_webhook.set(event_target_value(&ev))
+                        />
+                    </FormField>
+                </div>
             </Panel>
 
-            <button
-                type="button"
-                class="setup-apply-btn"
-                disabled=move || saving.get()
-                on:click=on_save
-            >
-                {move || if saving.get() { "Saving…" } else { "Save changes" }}
-            </button>
-
-            <Show when=move || !result_msg.get().is_empty()>
-                <p
-                    class="setup-result"
-                    class:setup-result--ok=move || result_ok.get()
-                    class:setup-result--err=move || !result_ok.get()
-                    role="status"
+            <div class="settings-actions">
+                <button
+                    type="button"
+                    class="setup-footer__btn setup-footer__btn--primary"
+                    disabled=move || saving.get()
+                    on:click=on_save
                 >
-                    {move || result_msg.get()}
-                </p>
-            </Show>
+                    {move || if saving.get() { "Saving…" } else { "Save changes" }}
+                </button>
+            </div>
+
+            <SettingsResult result_msg=result_msg result_ok=result_ok/>
         </main>
     }
 }
@@ -284,16 +288,16 @@ async fn fetch_notifications() -> Result<NotificationsDraft, String> {
         .unwrap_or(serde_json::Value::Null);
 
     let mqtt = n.get("mqtt").cloned().unwrap_or(serde_json::Value::Null);
-    let web_push = n.get("web_push").cloned().unwrap_or(serde_json::Value::Null);
+    let web_push = n
+        .get("web_push")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     let ntfy = n.get("ntfy").cloned().unwrap_or(serde_json::Value::Null);
     let slack = n.get("slack").cloned().unwrap_or(serde_json::Value::Null);
 
     Ok(NotificationsDraft {
         mqtt_host: get_str(&mqtt, "host").to_string(),
-        mqtt_port: mqtt
-            .get("port")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(1883) as u16,
+        mqtt_port: mqtt.get("port").and_then(|v| v.as_u64()).unwrap_or(1883) as u16,
         mqtt_username: get_str(&mqtt, "username").to_string(),
         mqtt_password: get_str(&mqtt, "password").to_string(),
         mqtt_discovery_prefix: if mqtt.get("discovery_prefix").is_some() {

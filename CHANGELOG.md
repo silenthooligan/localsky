@@ -8,6 +8,19 @@ The v2 burndown. Lays a ports-and-adapters foundation underneath the existing v0
 
 ### Added
 
+#### Devices + Home Assistant parity
+
+- Device model: a unified registry of gateways, controllers, cloud services, and the HA bridge, each grouping the sensors or zones it provides. `GET /api/v1/devices` and a Devices settings panel
+- Native Ecowitt gateway support without Home Assistant: a local-API poller (`ecowitt_gw_poll`, reads `/get_livedata_info` and records soil/weather to history; handles both `ch_soil` and `ch_ec` probes) alongside the existing push receiver
+- Native LAN gateway discovery: Ecowitt UDP broadcast (`GET /api/v1/devices/discover`) with a "Discover gateways" button; multi-homed hosts are probed per interface with computed subnet broadcasts
+- Home Assistant device import over the WebSocket API (device + entity registries), scoped to weather/soil/irrigation-relevant devices
+
+#### Standalone runtime (Home Assistant optional)
+
+- Native pause / one-day override persisted locally so a no-HA deploy can be paused (HA helpers no longer required)
+- Config-fed per-zone weekly water budgets so any configured zone gets a run-time, not just a fixed set
+- Configurable Home Assistant controller entity prefix (`deployment.ha_sprinkler_prefix`) so the HA path works for any controller naming, not one hardcoded deployment
+
 #### Engine (was SI + IU, now native)
 
 - FAO-56 Penman-Monteith reference ET0 with ASCE-EWRI 2005 simplified variant and Hargreaves-Samani 1985 fallback when only temp range + lat + DOY are available

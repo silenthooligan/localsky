@@ -53,7 +53,11 @@ pub fn DurationSheet(
 
     let preset = move |m: u32| {
         let cls = move || {
-            if minutes.get() == m { "duration-chip is-on" } else { "duration-chip" }
+            if minutes.get() == m {
+                "duration-chip is-on"
+            } else {
+                "duration-chip"
+            }
         };
         view! {
             <button class=cls on:click=move |_| minutes.set(m)>{m}" m"</button>

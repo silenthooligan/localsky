@@ -1,0 +1,37 @@
+---
+source: src/api/snapshot_tests.rs
+expression: "TempestSnapshot::default()"
+---
+{
+  "last_packet_epoch": 0,
+  "air_temp_f": 0.0,
+  "feels_like_f": 0.0,
+  "dew_point_f": 0.0,
+  "wet_bulb_f": 0.0,
+  "rh_pct": 0.0,
+  "pressure_inhg": 0.0,
+  "pressure_trend_inhg": [],
+  "wind_lull_mph": 0.0,
+  "wind_avg_mph": 0.0,
+  "wind_gust_mph": 0.0,
+  "wind_dir_deg": 0.0,
+  "rapid_wind_mph": 0.0,
+  "rapid_wind_dir": 0.0,
+  "illuminance_lx": 0.0,
+  "uv_index": 0.0,
+  "solar_w_m2": 0.0,
+  "rain_in_last_min": 0.0,
+  "rain_in_today": 0.0,
+  "rain_intensity_in_hr": 0.0,
+  "precip_type": 0,
+  "lightning_count_last_min": 0,
+  "lightning_strikes_last_hour": 0,
+  "lightning_recent": [],
+  "lightning_avg_dist_mi": 0.0,
+  "last_strike_distance_mi": null,
+  "last_strike_epoch": null,
+  "battery_v": 0.0,
+  "battery_pct": 0.0,
+  "station_serial": "",
+  "hub_serial": ""
+}

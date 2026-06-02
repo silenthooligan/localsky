@@ -80,8 +80,8 @@ where
 
 fn render_step(step: &str) -> impl IntoView {
     use crate::components::setup::{
-        ControllersStep, LlmStep, LocationStep, NotificationsStep, ReviewStep,
-        SourcesStep, WelcomeStep, ZonesStep,
+        ControllersStep, LlmStep, LocationStep, NotificationsStep, ReviewStep, SourcesStep,
+        WelcomeStep, ZonesStep,
     };
     match step {
         "welcome" => view! { <WelcomeStep/> }.into_any(),

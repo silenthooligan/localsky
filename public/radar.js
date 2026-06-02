@@ -93,6 +93,16 @@
       zoomSnap: isMobile ? 1 : 0.5,
     }).setView([lat, lon], zoom);
 
+    // Recompute tile coverage whenever the .radar-map element resizes. On
+    // wide screens the radar lives in a flex-grown side column so its
+    // height tracks the left column's content; without invalidateSize()
+    // Leaflet only paints tiles at the initial container size and the
+    // fresh whitespace below falls back to leaflet.css's default
+    // .leaflet-container background.
+    if (typeof ResizeObserver !== 'undefined') {
+      new ResizeObserver(function () { map.invalidateSize(); }).observe(el);
+    }
+
     L.control
       .zoom({ position: isMobile ? 'bottomright' : 'topleft' })
       .addTo(map);
@@ -110,7 +120,7 @@
       }
     ).addTo(map);
 
-    L.circleMarker([lat, lon], {
+    var stationMarker = L.circleMarker([lat, lon], {
       radius: 7,
       color: '#7ed957',
       fillColor: '#7ed957',
@@ -119,6 +129,25 @@
     })
       .bindTooltip('Tempest', { permanent: false, direction: 'top' })
       .addTo(map);
+
+    // Authoritative center. The data-* attrs are correct on a server-
+    // rendered load but fall back to a default on client-side (SPA)
+    // navigation, so the map could open on the wrong region until a
+    // refresh. Fetch the configured location (config-or-env) and recenter
+    // the map + station marker; updating lat/lon here also means any
+    // strike rings drawn afterward use the true center.
+    fetch('/api/v1/location')
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d && isFinite(d.lat) && isFinite(d.lon)) {
+          lat = d.lat;
+          lon = d.lon;
+          if (isFinite(d.zoom)) zoom = d.zoom;
+          map.setView([lat, lon], zoom);
+          stationMarker.setLatLng([lat, lon]);
+        }
+      })
+      .catch(function () { /* keep the data-* center on failure */ });
 
     // ---------- Layer 1: Precipitation (RainViewer animated) ----------
 

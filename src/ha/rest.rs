@@ -18,9 +18,11 @@ impl HaClient {
     pub fn from_env() -> Result<Self> {
         let token = std::env::var("HA_TOKEN")
             .or_else(|_| std::env::var("HA_LONG_LIVED_TOKEN"))
-            .context("HA_TOKEN (or HA_LONG_LIVED_TOKEN) env var is required for the irrigation backend")?;
-        let base_url = std::env::var("HA_URL")
-            .context("HA_URL env var is required when HA is configured")?;
+            .context(
+                "HA_TOKEN (or HA_LONG_LIVED_TOKEN) env var is required for the irrigation backend",
+            )?;
+        let base_url =
+            std::env::var("HA_URL").context("HA_URL env var is required when HA is configured")?;
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(8))
             .user_agent("localsky/irrigation")
@@ -45,10 +47,7 @@ impl HaClient {
             .await
             .with_context(|| format!("GET {url}"))?;
         if !resp.status().is_success() {
-            return Err(anyhow!(
-                "GET /api/states returned {}",
-                resp.status()
-            ));
+            return Err(anyhow!("GET /api/states returned {}", resp.status()));
         }
         let arr: Vec<Value> = resp.json().await.context("decode /api/states JSON")?;
         Ok(arr)
@@ -63,10 +62,7 @@ impl HaClient {
         service: &str,
         data: &T,
     ) -> Result<()> {
-        let url = format!(
-            "{}/api/services/{}/{}",
-            self.base_url, domain, service
-        );
+        let url = format!("{}/api/services/{}/{}", self.base_url, domain, service);
         let resp = self
             .client
             .post(&url)
