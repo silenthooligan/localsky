@@ -3,6 +3,8 @@
 
 use leptos::prelude::*;
 
+use crate::components::ui::Icon;
+
 #[component]
 pub fn EmptyState(
     /// One-line title.
@@ -15,15 +17,14 @@ pub fn EmptyState(
     #[prop(into)]
     cta_label: String,
     #[prop(into)] cta_href: String,
-    /// Optional emoji or icon glyph shown above the title. Decorative.
-    #[prop(into, optional)]
-    icon: String,
+    /// Optional Icon registry name shown above the title. Decorative.
+    #[prop(optional)]
+    icon: Option<&'static str>,
 ) -> impl IntoView {
-    let icon_owned = icon.clone();
     view! {
         <div class="ui-empty">
-            {(!icon.is_empty()).then(|| view! {
-                <div class="ui-empty__icon" aria-hidden="true">{icon_owned.clone()}</div>
+            {icon.map(|name| view! {
+                <div class="ui-empty__icon" aria-hidden="true"><Icon name=name size=40/></div>
             })}
             <h3 class="ui-empty__title">{title}</h3>
             <p class="ui-empty__body">{body}</p>

@@ -17,6 +17,8 @@
 // and the unified device UI (G).
 
 pub mod builder;
+pub mod ha_import;
+pub mod reconcile;
 pub mod registry;
 
 pub use builder::build_devices;
@@ -130,6 +132,11 @@ pub struct Device {
     pub online: Option<bool>,
     /// Epoch of the last reading/contact, when known.
     pub last_seen_epoch: Option<i64>,
+    /// Set on a native device that Phase F3 reconciled with an HA-imported
+    /// copy of the same physical hardware: the two are shown as one card
+    /// (this native one) badged "+ HA". The HA duplicate is dropped.
+    #[serde(default)]
+    pub also_in_ha: bool,
     /// Sensors or zones this device provides.
     pub children: Vec<DeviceChild>,
 }

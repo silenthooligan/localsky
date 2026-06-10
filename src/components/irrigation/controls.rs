@@ -272,6 +272,33 @@ pub(crate) fn post_action(body: serde_json::Value) {
 #[allow(dead_code)]
 pub(crate) fn post_action(_body: serde_json::Value) {}
 
+/// Like `post_action`, but reports completion so callers can run
+/// optimistic UI (pending state cleared by the next snapshot, or rolled
+/// back + toasted on HTTP failure).
+#[cfg(feature = "hydrate")]
+pub(crate) fn post_action_then(body: serde_json::Value, done: Callback<Result<(), String>>) {
+    use leptos::task::spawn_local;
+    spawn_local(async move {
+        let payload = body.to_string();
+        let req = gloo_net::http::Request::post("/api/irrigation/action")
+            .header("Content-Type", "application/json")
+            .body(payload);
+        let result = match req {
+            Ok(r) => match r.send().await {
+                Ok(resp) if resp.ok() => Ok(()),
+                Ok(resp) => Err(format!("HTTP {}", resp.status())),
+                Err(e) => Err(e.to_string()),
+            },
+            Err(e) => Err(e.to_string()),
+        };
+        done.run(result);
+    });
+}
+
+#[cfg(not(feature = "hydrate"))]
+#[allow(dead_code)]
+pub(crate) fn post_action_then(_body: serde_json::Value, _done: Callback<Result<(), String>>) {}
+
 // `event_target_value` comes in from `leptos::prelude::*`. It's
 // defined on both ssr and hydrate builds (SSR returns empty since the
 // event closure never actually fires there).

@@ -28,6 +28,36 @@ fn fmt_day(epoch: i64) -> String {
         .unwrap_or_else(|| "—".into())
 }
 
+fn day_key(epoch: i64) -> String {
+    Local
+        .timestamp_opt(epoch, 0)
+        .single()
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_default()
+}
+
+/// Collapse the raw decision log (the engine re-evaluates many times a day,
+/// so a single day can hold dozens of identical entries) to one row per
+/// calendar day: the latest decision that day, plus how many evaluations it
+/// represents. Input is newest-first; output preserves that order.
+fn group_by_day(decisions: Vec<DecisionRecord>) -> Vec<(DecisionRecord, usize)> {
+    use std::collections::HashMap;
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for d in &decisions {
+        *counts.entry(day_key(d.epoch)).or_insert(0) += 1;
+    }
+    let mut seen: HashMap<String, ()> = HashMap::new();
+    let mut out = Vec::new();
+    for d in decisions {
+        let k = day_key(d.epoch);
+        if seen.insert(k.clone(), ()).is_none() {
+            let n = *counts.get(&k).unwrap_or(&1);
+            out.push((d, n));
+        }
+    }
+    out
+}
+
 #[component]
 pub fn RuleLabPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     // Past decisions (newest first). None selected = show today's live trace.
@@ -87,7 +117,7 @@ pub fn RuleLabPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                                 <span class="rulelab-history__reason">"Live decision"</span>
                             </button>
                             {move || {
-                                decisions.get().into_iter().map(|d| {
+                                group_by_day(decisions.get()).into_iter().map(|(d, n)| {
                                     let ep = d.epoch;
                                     let tok = verdict_token(&d.verdict);
                                     let lab = verdict_label(&d.verdict);
@@ -100,7 +130,12 @@ pub fn RuleLabPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                                             class:is-active=move || selected.get() == Some(ep)
                                             on:click=move |_| selected.set(Some(ep))
                                         >
-                                            <span class="rulelab-history__day">{day}</span>
+                                            <span class="rulelab-history__day">
+                                                {day}
+                                                {(n > 1).then(|| view! {
+                                                    <span class="rulelab-history__count" title="evaluations that day">{n}" evals"</span>
+                                                })}
+                                            </span>
                                             <span class="rulelab-history__pill" style=format!("--v:{tok}")>{lab}</span>
                                             <span class="rulelab-history__reason">{reason}</span>
                                         </button>
@@ -144,12 +179,15 @@ pub fn RuleLabPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
 #[component]
 fn SafetyGates(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     view! {
-        <details class="rulelab-gates">
-            <summary>"Built-in safety ladder — always on, runs before your rules"</summary>
+        <details class="rulelab-gates" open>
+            <summary>"Built-in skip rules — always on, run before your rules"</summary>
             <div class="rulelab-gates__body">
                 <p class="sensors-section__hint">
-                    "These deterministic gates (freeze, wind, watering restriction, rain, soil saturation) decide first and can't be disabled. Your rules above only run when these leave a zone watering — they can add a skip or scale a run, never override a gate."
+                    "These deterministic gates (freeze, wind, watering restriction, rain, soil saturation) decide first and can't be disabled. Your custom rules above only run when these leave a zone watering — they can add a skip or scale a run, never override a gate."
                 </p>
+                <a class="setup-footer__btn setup-footer__btn--primary rulelab-gates__cta" href="/settings/skip-rules">
+                    "Configure thresholds (rain inches, wind mph, freeze °F…)"
+                </a>
                 {move || {
                     match snap.get().decision_trace {
                         Some(t) => t.rules.into_iter()

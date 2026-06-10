@@ -68,7 +68,7 @@ pub fn InstallPrompt() -> impl IntoView {
         Mode::Hidden => ().into_any(),
         Mode::Native => view! {
             <div class="install-prompt" role="region" aria-label="Install LocalSky">
-                <div class="install-prompt-icon" aria-hidden="true">"📲"</div>
+                <div class="install-prompt-icon" aria-hidden="true"><crate::components::ui::Icon name="smartphone" size=26/></div>
                 <div class="install-prompt-text">
                     <div class="install-prompt-title">"Install LocalSky"</div>
                     <div class="install-prompt-body">"Add to your home screen for full-screen mode and push notifications."</div>
@@ -79,10 +79,10 @@ pub fn InstallPrompt() -> impl IntoView {
         }.into_any(),
         Mode::Ios => view! {
             <div class="install-prompt" role="region" aria-label="Install LocalSky on iOS">
-                <div class="install-prompt-icon" aria-hidden="true">"🏠"</div>
+                <div class="install-prompt-icon" aria-hidden="true"><crate::components::ui::Icon name="home" size=26/></div>
                 <div class="install-prompt-text">
                     <div class="install-prompt-title">"Install LocalSky"</div>
-                    <div class="install-prompt-body">"Tap the Share button " <span class="install-prompt-share" aria-hidden="true">"⎙"</span> " in Safari, then \u{201C}Add to Home Screen\u{201D} to install."</div>
+                    <div class="install-prompt-body">"Tap the Share button " <span class="install-prompt-share" aria-hidden="true"><crate::components::ui::Icon name="share" size=14/></span> " in Safari, then \u{201C}Add to Home Screen\u{201D} to install."</div>
                 </div>
                 <button class="install-prompt-close" aria-label="Dismiss" on:click=on_dismiss>"\u{2715}"</button>
             </div>

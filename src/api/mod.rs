@@ -29,6 +29,8 @@
 //   GET  /health                     per-source freshness + controller summary
 //   GET  /sensors/manifest           declarative entity inventory for HACS
 
+pub mod auth;
+pub mod backup;
 pub mod config;
 pub mod devices;
 pub mod forecast;

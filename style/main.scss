@@ -965,6 +965,35 @@ body::after {
   display: none;
 }
 
+// ── Tablet rail (761-1100px): icon-only sidebar ─────────────────────
+// iPad portrait / small landscape used to get the cramped full desktop
+// sidebar. Collapse it to a 64px icon rail instead: labels and section
+// titles hide, icons center, the link title attribute carries the
+// tooltip. Phone (≤760px) keeps the drawer; ≥1101px keeps the full rail.
+@media (min-width: 761px) and (max-width: 1100px) {
+  .sidebar {
+    flex: 0 0 64px;
+    width: 64px;
+    padding: var(--space-4) var(--space-2);
+    gap: var(--space-4);
+    align-items: center;
+  }
+  .sidebar-brand { padding: 0 0 0.4rem; }
+  .sidebar-brand-name { display: none; }
+  .sidebar-section { width: 100%; align-items: stretch; }
+  .sidebar-section-title { display: none; }
+  .sidebar-link {
+    justify-content: center;
+    padding: 0.6rem 0;
+  }
+  .sidebar-link-label { display: none; }
+  .sidebar-link-icon { margin: 0; }
+  .sidebar-link--sub { padding-left: 0; }
+  .sidebar-footer { padding: var(--space-3) 0 var(--space-1); align-items: center; }
+  .sidebar-footer-link { justify-content: center; padding: 0.45rem 0; }
+  .sidebar-footer-label { display: none; }
+}
+
 @media (max-width: 760px) {
   .app-shell { flex-direction: column; }
 
@@ -1071,11 +1100,124 @@ a { color: var(--accent); }
   gap: 1.25rem;
 }
 
+// Route-change polish: client-side navigations swap the route subtree
+// inside .page; a one-shot entrance keyframe on the route roots makes
+// the swap feel composed instead of abrupt. Progressive enhancement
+// only (animation, no layout), disabled under prefers-reduced-motion.
+.page > :not(.page-header):not(.install-prompt):not(.health-banner) {
+  animation: route-enter var(--motion-base) ease-out both;
+}
+@keyframes route-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .page > :not(.page-header):not(.install-prompt):not(.health-banner) { animation: none; }
+}
+
 // Global page header. Always-visible band above the route content
 // hosting cross-cutting controls (today: just the Nerd mode pill).
 // Sits above the route's own toolbars (irrigation tab strip, history
 // range selector) so it never overlaps them and never scrolls away
 // from the user's reach the way the buried Advanced toggle did.
+// Wizard network scan panel + result rows.
+.scan-panel { display: flex; flex-direction: column; gap: var(--space-2); }
+.scan-panel__btn { display: inline-flex; align-items: center; gap: var(--space-2); align-self: flex-start; }
+.scan-results { display: flex; flex-direction: column; gap: var(--space-2); }
+.scan-row { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3); background: var(--elev-2); border: 1px solid var(--elev-border); border-radius: var(--radius-md); }
+.scan-row__icon { display: flex; color: var(--accent); flex: none; }
+.scan-row__text { display: flex; flex-direction: column; gap: 1px; margin-right: auto; min-width: 0; }
+.scan-row__text strong { color: var(--text-bright); font-size: var(--text-body-sm); }
+.scan-row__text span { color: var(--text-faint); font-size: var(--text-meta); }
+
+// Wizard location: address search + result list.
+.geo-search { display: flex; gap: var(--space-2); }
+.geo-search .ui-input { flex: 1; }
+.geo-results { display: flex; flex-direction: column; gap: var(--space-1); }
+.geo-result { display: flex; align-items: baseline; gap: var(--space-3); width: 100%; text-align: left; padding: var(--space-2) var(--space-3); background: var(--elev-2); border: 1px solid var(--elev-border); border-radius: var(--radius-sm); cursor: pointer; color: var(--text); font: inherit; }
+.geo-result:hover { border-color: var(--accent); background: var(--elev-3); }
+.geo-result__name { flex: 1; min-width: 0; font-size: var(--text-body-sm); }
+.geo-result__coords { flex: none; font-family: var(--font-mono); font-size: var(--text-meta); color: var(--text-faint); }
+
+// Login page: centered card, full-viewport.
+.login-page { display: flex; align-items: center; justify-content: center; min-height: 70vh; padding: var(--space-5); }
+.login-card { display: flex; flex-direction: column; gap: var(--space-3); width: min(380px, 100%); padding: var(--space-6) var(--space-5); background: var(--elev-1); border: 1px solid var(--elev-border-strong); border-radius: var(--radius-lg); box-shadow: var(--shadow-2); }
+.login-card__brand { display: flex; align-items: center; gap: var(--space-3); justify-content: center; font-family: var(--font-display); font-weight: 800; font-size: 1.4rem; color: var(--text-bright); margin-bottom: var(--space-2); }
+.login-card__title { margin: 0 0 var(--space-2); font-size: var(--text-h2); color: var(--text-bright); text-align: center; }
+.login-card__submit { width: 100%; margin-top: var(--space-2); }
+.login-card__error { display: flex; align-items: center; gap: var(--space-2); margin: 0; color: var(--verdict-skip); font-size: var(--text-body-sm); }
+
+// Account settings: owner row + token manager.
+.account-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.account-row__who { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--text); font-weight: 600; }
+.account-row__who svg { color: var(--verdict-run); }
+.token-reveal { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3); margin-bottom: var(--space-3); background: color-mix(in oklab, var(--accent) 10%, var(--elev-2)); border: 1px solid color-mix(in oklab, var(--accent) 40%, transparent); border-radius: var(--radius-md); }
+.token-reveal__note { margin: 0; font-size: var(--text-meta); font-weight: 700; color: var(--text-bright); }
+.token-reveal__value { font-family: var(--font-mono); font-size: 0.85rem; word-break: break-all; color: var(--text-bright); background: var(--elev-0); padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); }
+.token-reveal .ui-btn { align-self: flex-start; }
+.token-create { display: flex; gap: var(--space-2); margin-bottom: var(--space-3); }
+.token-create .ui-input { flex: 1; }
+.token-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.token-list__row { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-3); background: var(--elev-2); border-radius: var(--radius-sm); }
+.token-list__name { font-weight: 600; color: var(--text); margin-right: auto; }
+.token-list__meta { font-size: var(--text-meta); color: var(--text-faint); font-family: var(--font-mono); }
+.token-list__revoke { border: none; background: none; color: var(--accent-danger); font-size: var(--text-meta); font-weight: 600; cursor: pointer; padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm); }
+.token-list__revoke:hover { background: color-mix(in oklab, var(--accent-danger) 14%, transparent); }
+
+// Health banner: degraded weather sources, dismissable per incident.
+.health-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-3);
+  background: color-mix(in oklab, var(--verdict-wind) 12%, var(--elev-1));
+  border: 1px solid color-mix(in oklab, var(--verdict-wind) 45%, transparent);
+  border-radius: var(--radius-md);
+  color: var(--text);
+  font-size: var(--text-body-sm);
+  animation: health-banner-in var(--motion-base) ease-out;
+}
+.health-banner__icon { display: flex; color: var(--verdict-wind); flex: none; }
+.health-banner__text { flex: 1; min-width: 0; }
+.health-banner__link { flex: none; color: var(--accent); font-weight: 600; text-decoration: none; }
+.health-banner__link:hover { text-decoration: underline; }
+.health-banner__dismiss { display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; flex: none; border: none; background: none; color: var(--text-faint); border-radius: var(--radius-sm); cursor: pointer; }
+.health-banner__dismiss:hover { color: var(--text); background: var(--elev-2); }
+@keyframes health-banner-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .health-banner { animation: none; }
+}
+
+// Connection pill: silent while live; labeled dot when degraded.
+.conn-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0.65rem;
+  border-radius: 999px;
+  font-size: var(--text-meta);
+  font-weight: 600;
+  border: 1px solid var(--elev-border-strong);
+  background: var(--elev-2);
+  color: var(--text-dim);
+}
+.conn-pill__dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.conn-pill--reconnect { color: var(--verdict-wind); border-color: color-mix(in oklab, var(--verdict-wind) 40%, transparent); }
+.conn-pill--reconnect .conn-pill__dot { animation: conn-pulse 1.2s ease-in-out infinite; }
+.conn-pill--offline { color: var(--verdict-skip); border-color: color-mix(in oklab, var(--verdict-skip) 40%, transparent); }
+.conn-pill--stale { color: var(--verdict-extend); border-color: color-mix(in oklab, var(--verdict-extend) 40%, transparent); }
+@keyframes conn-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .conn-pill--reconnect .conn-pill__dot { animation: none; }
+}
+
 .page-header {
   display: flex;
   justify-content: flex-end;
@@ -2604,6 +2746,18 @@ html { scroll-behavior: smooth; }
   gap: 0.4rem;
 }
 
+// Assigned soil sensor's live reading + origin, shown under the zone's
+// sensor picker so the zone carries the full data picture.
+.zone-soil-live {
+  display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;
+  margin-top: 0.5rem; padding: 6px 10px; border-radius: var(--radius-sm);
+  background: var(--elev-1); border: 1px solid var(--elev-border);
+  &__pct { font-weight: 800; color: var(--accent); font-family: var(--font-mono); }
+  &__origin { color: var(--text-muted); font-size: var(--text-meta); }
+  &__manage { margin-left: auto; color: var(--accent); font-size: var(--text-meta); text-decoration: none;
+    &:hover { text-decoration: underline; } }
+}
+
 .zone-math-title {
   font-size: 0.85rem;
   font-weight: 600;
@@ -4127,7 +4281,7 @@ html { scroll-behavior: smooth; }
   letter-spacing: 0.04em;
 }
 .hourly-glyph {
-  fill: var(--text);
+  color: var(--text);
 }
 .hourly-temp {
   font-family: var(--font-mono);
@@ -6772,13 +6926,43 @@ html:not([data-nerd="true"]) .skip-breakdown:not(:has(.sk-row-tripped)) {
   box-shadow: 0 0 0 1px var(--accent-danger);
 }
 
+// ---- .ui-skel (loading skeletons) ----
+.ui-skel {
+  position: relative;
+  overflow: hidden;
+  background: var(--elev-2);
+  border-radius: var(--radius-sm);
+}
+.ui-skel::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, color-mix(in oklab, var(--text-bright) 7%, transparent), transparent);
+  animation: ui-skel-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes ui-skel-shimmer {
+  100% { transform: translateX(100%); }
+}
+.ui-skel--line { height: 0.9rem; width: 100%; }
+.ui-skel--block { height: 8rem; width: 100%; border-radius: var(--radius-md); }
+.ui-skel--tile { height: 5.25rem; width: 100%; border-radius: var(--radius-md); }
+.ui-skel--chart { height: 13rem; width: 100%; border-radius: var(--radius-md); }
+.ui-skel--row { height: 3.25rem; width: 100%; border-radius: var(--radius-md); }
+.ui-skel-rows { display: flex; flex-direction: column; gap: var(--space-2); }
+@media (prefers-reduced-motion: reduce) {
+  .ui-skel::after { animation: none; }
+}
+[data-theme="hc"] .ui-skel { background: var(--elev-2); border: 1px solid var(--elev-border); }
+[data-theme="hc"] .ui-skel::after { animation: none; background: none; }
+
 // ---- .ui-empty ----
 .ui-empty {
   text-align: center;
   padding: 2.5rem 1.5rem;
   color: var(--text-dim);
 }
-.ui-empty__icon { font-size: 2.5rem; margin-bottom: 0.75rem; }
+.ui-empty__icon { font-size: 2.5rem; margin-bottom: 0.75rem; color: var(--text-faint); display: flex; justify-content: center; }
 .ui-empty__title { color: var(--text); margin: 0.25rem 0 0.5rem; }
 .ui-empty__body { margin: 0 0 1.25rem; line-height: 1.5; }
 .ui-empty__cta {
@@ -7005,6 +7189,22 @@ html:not([data-nerd="true"]) .skip-breakdown:not(:has(.sk-row-tripped)) {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+}
+
+// Unified "Add a device" bar on the Devices hub: a single grouped, left-aligned
+// row of add affordances so the flows aren't scattered across the panel.
+.device-add-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+
+  &__label {
+    font-weight: 600;
+    color: var(--text);
+    margin-right: 0.25rem;
+  }
 }
 
 // Devices panel (Phase D). Section intro + the per-device child list.
@@ -7634,6 +7834,32 @@ html:not([data-nerd="true"]) .skip-breakdown:not(:has(.sk-row-tripped)) {
 .ui-input:focus { outline: var(--focus-ring); outline-offset: var(--focus-ring-offset); }
 
 // review step
+// One-time post-wizard welcome card on the Weather home.
+.welcome-card { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-5); background: var(--elev-1); border: 1px solid var(--elev-border-strong); border-radius: var(--radius-lg); box-shadow: var(--shadow-1); }
+.welcome-card__head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.welcome-card__title { margin: 0; font-size: var(--text-h2); color: var(--text-bright); }
+.welcome-card__dismiss { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border: none; background: none; color: var(--text-faint); border-radius: var(--radius-sm); cursor: pointer; }
+.welcome-card__dismiss:hover { color: var(--text); background: var(--elev-2); }
+.welcome-card__body { margin: 0; color: var(--text-dim); }
+.welcome-card__links { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-3); }
+.welcome-card__link { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3) var(--space-4); background: var(--elev-2); border: 1px solid var(--elev-border); border-radius: var(--radius-md); color: var(--accent); text-decoration: none; transition: border-color var(--motion-fast) ease, background var(--motion-fast) ease; }
+.welcome-card__link:hover { border-color: var(--accent); background: var(--elev-3); }
+.welcome-card__link-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.welcome-card__link-text strong { color: var(--text-bright); font-size: var(--text-body-sm); }
+.welcome-card__link-text span { color: var(--text-faint); font-size: var(--text-meta); }
+
+// Review step summary table: one row per wizard section with an Edit link.
+.review-table { display: flex; flex-direction: column; gap: 1px; background: var(--elev-border); border: 1px solid var(--elev-border); border-radius: var(--radius-md); overflow: hidden; margin-bottom: var(--space-4); }
+.review-row { display: flex; align-items: baseline; gap: var(--space-3); padding: var(--space-3) var(--space-4); background: var(--elev-1); }
+.review-row__label { flex: none; width: 9.5rem; font-size: var(--text-meta); font-weight: 700; color: var(--text-bright); }
+.review-row__value { flex: 1; min-width: 0; font-size: var(--text-body-sm); color: var(--text-dim); overflow-wrap: anywhere; }
+.review-row__edit { flex: none; font-size: var(--text-meta); color: var(--accent); text-decoration: none; }
+.review-row__edit:hover { text-decoration: underline; }
+@media (max-width: 760px) {
+  .review-row { flex-wrap: wrap; }
+  .review-row__label { width: 100%; }
+}
+
 .review-summary {
   background: var(--bg-panel-soft);
   border: 1px solid var(--border);
@@ -7995,7 +8221,13 @@ html[data-readonly="true"] body::before {
 
 // ── LineChart ──────────────────────────────────────────────────────────
 .ui-line-chart { display: flex; flex-direction: column; gap: var(--space-3); }
-.ui-line-chart__plot { position: relative; width: 100%; }
+.ui-line-chart__plot { position: relative; width: 100%; touch-action: pan-y; }
+.ui-line-chart__cross { position: absolute; top: 0; bottom: 0; width: 1px; background: color-mix(in oklab, var(--text-bright) 35%, transparent); pointer-events: none; }
+.ui-line-chart__tip { position: absolute; top: 6px; z-index: 5; display: flex; flex-direction: column; gap: 3px; padding: var(--space-2) var(--space-3); background: var(--elev-3); border: 1px solid var(--elev-border-strong); border-radius: var(--radius-md); box-shadow: var(--shadow-2); pointer-events: none; min-width: 8rem; max-width: 16rem; }
+.ui-line-chart__tip-head { font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint); }
+.ui-line-chart__tip-row { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-meta); color: var(--text); }
+.ui-line-chart__tip-label { color: var(--text-dim); margin-right: auto; }
+.ui-line-chart__tip-val { font-family: var(--font-mono); color: var(--text-bright); }
 .ui-line-chart__svg { display: block; width: 100%; overflow: visible; }
 .ui-line-chart__grid { stroke: var(--elev-line); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .ui-line-chart__line {
@@ -8295,8 +8527,31 @@ button.mobile-tab {
   background: color-mix(in oklab, var(--accent-danger) 14%, transparent);
   border: 1px solid color-mix(in oklab, var(--accent-danger) 30%, transparent);
   border-radius: var(--radius-sm); padding: 0.3rem 0.6rem; cursor: pointer;
+  position: relative; z-index: 2;
   &:hover { background: color-mix(in oklab, var(--accent-danger) 24%, transparent); }
+  &:disabled { opacity: 0.6; cursor: progress; }
 }
+
+// Full-card select affordance: a real <button> overlay so keyboard and
+// assistive tech get proper semantics without nesting interactives.
+.zone-card__hit {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border: none;
+  background: none;
+  cursor: pointer;
+  border-radius: inherit;
+  padding: 0;
+}
+.zone-card:has(.zone-card__hit:focus-visible) {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+}
+// Keep the card body readable above the hit overlay where it needs to be
+// interactive; plain text stays below it (selection is sacrificed for the
+// big tap target, same trade the old role="button" made).
+.zone-card__foot { position: relative; z-index: 2; }
 .zone-card__more {
   display: inline-flex; align-items: center; gap: 2px;
   color: var(--accent); text-decoration: none; font-weight: 600; font-size: var(--text-body-sm);
@@ -8483,6 +8738,8 @@ button.mobile-tab {
   letter-spacing: 0.08em; padding: 4px 9px; border-radius: var(--radius-sm); white-space: nowrap;
 }
 .zone-detail__status--running { color: var(--verdict-run); background: color-mix(in oklab, var(--verdict-run) 16%, transparent); }
+.zone-detail__status--pending { color: var(--verdict-wind); background: color-mix(in oklab, var(--verdict-wind) 16%, transparent); animation: conn-pulse 1.2s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .zone-detail__status--pending { animation: none; } }
 .zone-detail__status--scheduled { color: var(--accent); background: color-mix(in oklab, var(--accent) 16%, transparent); }
 .zone-detail__status--idle { color: var(--text-faint); background: var(--surface-soft); }
 .zone-detail__stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--space-3); }
@@ -8507,7 +8764,7 @@ button.mobile-tab {
 // ═══════════════════════════════════════════════════════════════════════
 // Rule Lab (marquee feature 2)
 // ═══════════════════════════════════════════════════════════════════════
-.rulelab-page { display: flex; flex-direction: column; gap: var(--space-5); }
+.rulelab-page { display: flex; flex-direction: column; gap: var(--space-5); max-width: 1280px; width: 100%; margin-inline: auto; }
 .rulelab-tabs { display: flex; gap: var(--space-1); border-bottom: 1px solid var(--elev-border); }
 .rulelab-tab {
   appearance: none; background: none; border: none; cursor: pointer;
@@ -8519,6 +8776,9 @@ button.mobile-tab {
 .rulelab-gates { border: 1px solid var(--elev-border); border-radius: var(--radius-md); background: var(--elev-1); }
 .rulelab-gates summary { cursor: pointer; padding: var(--space-3); font-weight: 600; color: var(--text-dim); }
 .rulelab-gates__body { padding: 0 var(--space-3) var(--space-3); display: flex; flex-direction: column; gap: var(--space-1); }
+// Make the "Configure thresholds" link read as a real button, left-aligned
+// (the global --primary rule sets margin-left:auto for footer rows).
+.rulelab-gates__cta { margin-left: 0 !important; align-self: flex-start; margin-top: var(--space-3); text-decoration: none; }
 .rulelab-gates__row { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-1) 0; }
 .rulelab-gates__cat { font-family: var(--font-mono); font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.05em; padding: 1px 6px; border-radius: var(--radius-sm); background: var(--surface-soft); color: var(--text-faint); min-width: 5.5rem; text-align: center; }
 .rulelab-gates__cat--safety { color: var(--verdict-skip); background: color-mix(in oklab, var(--verdict-skip) 14%, transparent); }
@@ -8536,6 +8796,20 @@ button.mobile-tab {
 .cond-row__text { display: flex; flex-direction: column; gap: 1px; margin-right: auto; min-width: 0; }
 .cond-row__name { font-weight: 700; color: var(--text-bright); }
 .cond-row__sum { font-size: var(--text-meta); color: var(--text-faint); font-family: var(--font-mono); }
+
+// Wizard controller rows: identity line + Test / Scan actions, with the
+// scan-import checklist stacking underneath.
+.cond-row--stack { flex-direction: column; align-items: stretch; gap: var(--space-2); }
+.cond-row__head { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
+.cond-row__actions { display: flex; gap: var(--space-2); flex: none; flex-wrap: wrap; }
+.setup-test-result { margin: 0; font-size: var(--text-meta); color: var(--text-dim); padding-left: calc(8px + var(--space-3)); }
+.setup-test-result.is-ok { color: var(--verdict-run); }
+.setup-test-result.is-err { color: var(--verdict-skip); }
+.setup-scan { display: flex; flex-direction: column; gap: var(--space-2); margin-left: calc(8px + var(--space-3)); padding: var(--space-3); background: var(--elev-1); border: 1px solid var(--elev-border); border-radius: var(--radius-md); }
+.setup-scan__title { margin: 0; font-size: var(--text-meta); font-weight: 700; color: var(--text-bright); }
+.setup-scan__row { display: flex; align-items: center; gap: var(--space-2); min-height: 32px; font-size: var(--text-body-sm); color: var(--text); cursor: pointer; }
+.setup-scan__row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); }
+.setup-scan .setup-footer__btn--primary { align-self: flex-start; margin-top: var(--space-2); }
 .cond-editor { display: flex; flex-direction: column; gap: var(--space-3); margin-top: var(--space-4); padding: var(--space-4); background: var(--elev-2); border: 1px solid var(--elev-border-strong); border-radius: var(--radius-md); }
 .cond-editor__field { display: flex; flex-direction: column; gap: var(--space-1); }
 .cond-editor__field span { font-size: var(--text-meta); color: var(--text-dim); }
@@ -8587,7 +8861,12 @@ button.mobile-tab {
   &:hover { background: var(--surface-soft); }
   &.is-active { background: color-mix(in oklab, var(--accent) 14%, transparent); box-shadow: inset 3px 0 0 var(--accent); }
 }
-.rulelab-history__day { font-weight: 600; color: var(--text-bright); }
+.rulelab-history__day { font-weight: 600; color: var(--text-bright); display: inline-flex; align-items: baseline; gap: 6px; }
+.rulelab-history__count {
+  font-size: var(--text-meta); font-weight: 500; color: var(--text-faint);
+  background: var(--elev-1); border: 1px solid var(--elev-border);
+  padding: 1px 6px; border-radius: var(--radius-sm);
+}
 .rulelab-history__pill {
   justify-self: end;
   font-family: var(--font-mono); font-size: var(--text-micro); font-weight: 800;
@@ -8669,7 +8948,7 @@ button.mobile-tab {
 // ═══════════════════════════════════════════════════════════════════════
 // Simulator (marquee feature 1)
 // ═══════════════════════════════════════════════════════════════════════
-.sim-page { display: flex; flex-direction: column; gap: var(--space-6); }
+.sim-page { display: flex; flex-direction: column; gap: var(--space-6); max-width: 1280px; width: 100%; margin-inline: auto; }
 .sim-page__header { display: flex; flex-direction: column; gap: 2px; }
 .sim-page__eyebrow {
   margin: 0; font-size: var(--text-meta); letter-spacing: var(--tracking-eyebrow);
@@ -8701,6 +8980,26 @@ button.mobile-tab {
   &:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 }
 .sim-script__hint { margin: 0; font-size: var(--text-meta); color: var(--text-faint); code { font-family: var(--font-mono); color: var(--accent); } }
+
+// Collapsible Rhai help: variables + clickable templates.
+.rhai-help {
+  border: 1px solid var(--elev-border); border-radius: var(--radius); background: var(--elev-1);
+  font-size: var(--text-meta);
+  summary { cursor: pointer; padding: 8px 12px; color: var(--accent); font-weight: 600; user-select: none; }
+}
+.rhai-help__body { padding: 0 12px 12px; display: flex; flex-direction: column; gap: var(--space-2); color: var(--text-muted); }
+.rhai-help__body code { font-family: var(--font-mono); color: var(--accent); }
+.rhai-help__h { margin: var(--space-2) 0 0; font-weight: 700; color: var(--text-bright); text-transform: uppercase; letter-spacing: var(--tracking-eyebrow); font-size: var(--text-meta); }
+.rhai-help__vars { margin: 0; padding-left: 1.1rem; display: flex; flex-direction: column; gap: 3px; }
+.rhai-help__templates { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.rhai-help__templates li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.rhai-help__tpl {
+  font-family: var(--font-mono); cursor: pointer; text-align: left;
+  background: var(--elev-2); border: 1px solid var(--elev-border); border-radius: var(--radius-sm);
+  padding: 2px 8px; color: var(--accent);
+  &:hover { border-color: var(--accent); }
+}
+.rhai-help__desc { color: var(--text-faint); }
 .sim-slider__label { font-size: var(--text-meta); letter-spacing: var(--tracking-eyebrow); text-transform: uppercase; color: var(--text-faint); font-weight: 600; }
 .sim-inputs__reset { margin-top: var(--space-2); }
 
@@ -8725,6 +9024,17 @@ button.mobile-tab {
 .sim-verdict__arrow.is-changed { color: var(--accent); animation: toast-in var(--motion-base) var(--ease-spring); }
 .sim-verdict__reason { margin: 0; text-align: center; color: var(--text-bright); font-weight: 600; }
 
+// Captioned before/after states (shown only when the verdict actually flips).
+.sim-verdict__state { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.sim-verdict__caption {
+  font-size: var(--text-meta); letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase; color: var(--text-faint); font-weight: 700;
+}
+// No-change case: one prominent verdict + a plain-language note.
+.sim-verdict__single { display: flex; flex-direction: column; align-items: center; gap: var(--space-3); }
+.sim-verdict__pill--lg { font-size: var(--text-h1); padding: 12px 28px; }
+.sim-verdict__samenote { color: var(--text-muted); font-weight: 500; text-align: center; }
+
 .sim-diff { border-top: 1px solid var(--elev-line); padding-top: var(--space-4); }
 .sim-diff__title { margin: 0 0 var(--space-2); font-size: var(--text-meta); text-transform: uppercase; letter-spacing: var(--tracking-eyebrow); color: var(--text-faint); }
 .sim-diff__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
@@ -8742,7 +9052,7 @@ button.mobile-tab {
 // ═══════════════════════════════════════════════════════════════════════
 // History (marquee feature 4)
 // ═══════════════════════════════════════════════════════════════════════
-.hist-page { display: flex; flex-direction: column; gap: var(--space-6); }
+.hist-page { display: flex; flex-direction: column; gap: var(--space-6); max-width: 1280px; width: 100%; margin-inline: auto; }
 .hist-page__header { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap; }
 .hist-page__eyebrow {
   margin: 0; font-size: var(--text-meta); letter-spacing: var(--tracking-eyebrow);
@@ -8765,7 +9075,35 @@ button.mobile-tab {
   display: flex; flex-direction: column; gap: var(--space-4);
 }
 .hist-panel__title { margin: 0; font-size: var(--text-h2); color: var(--text-bright); }
+.hist-panel__hint { margin: 0; color: var(--text-faint); font-size: var(--text-meta); }
 .hist-empty { color: var(--text-faint); padding: var(--space-5); text-align: center; }
+
+// Watering calendar heatmap: a wrapping grid of day cells.
+.hist-cal {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15px, 1fr));
+  gap: 4px;
+}
+.hist-cal__cell {
+  aspect-ratio: 1; border-radius: 3px; border: 1px solid var(--elev-border);
+  min-height: 15px;
+}
+
+// "Why it skipped" horizontal bars.
+.hist-breakdown { display: flex; flex-direction: column; gap: var(--space-3); }
+.hist-bar {
+  display: grid; grid-template-columns: 8rem 1fr auto; align-items: center; gap: var(--space-3);
+}
+.hist-bar__label { color: var(--text-bright); font-weight: 600; font-size: var(--text-meta); }
+.hist-bar__track {
+  height: 12px; border-radius: 6px; background: var(--elev-1);
+  border: 1px solid var(--elev-border); overflow: hidden;
+}
+.hist-bar__fill { display: block; height: 100%; border-radius: 6px; min-width: 2px; transition: width var(--motion-base) var(--ease-out); }
+.hist-bar__val { color: var(--text-faint); font-size: var(--text-meta); font-variant-numeric: tabular-nums; }
+@media (max-width: 600px) {
+  .hist-bar { grid-template-columns: 6rem 1fr auto; gap: var(--space-2); }
+}
 .hist-zone-row {
   display: grid; grid-template-columns: 9rem 1fr auto; align-items: center; gap: var(--space-4);
   padding: var(--space-2) 0; border-bottom: 1px solid var(--elev-line);
@@ -8849,6 +9187,31 @@ button.mobile-tab {
     box-shadow: inset 3px 0 0 var(--accent);
   }
 }
+
+// Default detail pane: live system overview (version/uptime/status +
+// source freshness + controller list with jump links).
+.settings-overview { display: flex; flex-direction: column; gap: var(--space-4); padding: var(--space-5); background: var(--elev-1); border: 1px solid var(--elev-border); border-radius: var(--radius-lg); }
+.settings-overview__stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: var(--space-3); }
+.settings-overview__stat { display: flex; flex-direction: column; gap: 2px; padding: var(--space-3); background: var(--elev-2); border: 1px solid var(--elev-border); border-radius: var(--radius-md); }
+.settings-overview__stat-label { font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-faint); }
+.settings-overview__stat-value { font-family: var(--font-mono); font-size: var(--text-h3); color: var(--text-bright); }
+.settings-overview__status { font-family: var(--font-mono); font-size: var(--text-h3); color: var(--text-bright); }
+.settings-overview__status.is-ok { color: var(--verdict-run); }
+.settings-overview__status.is-warn { color: var(--verdict-wind); }
+.settings-overview__section { display: flex; flex-direction: column; gap: var(--space-2); }
+.settings-overview__section-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.settings-overview__section-head h3 { margin: 0; font-size: var(--text-body); color: var(--text-bright); }
+.settings-overview__jump { border: none; background: none; color: var(--accent); font-size: var(--text-meta); font-weight: 600; cursor: pointer; padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm); }
+.settings-overview__jump:hover { background: var(--elev-2); }
+.settings-overview__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.settings-overview__row { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); background: var(--elev-2); border-radius: var(--radius-sm); font-size: var(--text-body-sm); }
+.settings-overview__row-name { color: var(--text); font-weight: 600; margin-right: auto; }
+.settings-overview__row-meta { color: var(--text-faint); font-size: var(--text-meta); font-family: var(--font-mono); }
+.settings-overview__dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.settings-overview__dot.is-fresh { background: var(--verdict-run); }
+.settings-overview__dot.is-stale { background: var(--verdict-wind); }
+.settings-overview__dot.is-offline { background: var(--verdict-skip); }
+.settings-overview__hint { margin: 0; color: var(--text-faint); font-size: var(--text-meta); line-height: 1.5; }
 
 .settings-shell__placeholder {
   display: flex;

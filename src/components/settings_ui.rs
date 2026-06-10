@@ -152,8 +152,7 @@ fn render_value(v: &serde_json::Value) -> String {
 /// pass an empty `view!{}` if a section is not needed.
 #[component]
 pub fn SettingsCard(
-    /// Brand glyph or kind icon. Plain string so callers can pass an
-    /// emoji, a Unicode glyph, or an empty string for no icon.
+    /// Icon registry name (ui::Icon). Empty string hides the icon slot.
     icon: String,
     /// Primary title (controller id, source id, zone name).
     title: String,
@@ -202,7 +201,11 @@ pub fn SettingsCard(
                 aria-expanded=move || if expanded.get() { "true" } else { "false" }
                 on:click=toggle
             >
-                <span class="settings-card__icon" aria-hidden="true">{icon}</span>
+                <span class="settings-card__icon" aria-hidden="true">
+                    {(!icon.is_empty()).then(|| view! {
+                        <crate::components::ui::Icon name=icon.clone() size=20/>
+                    })}
+                </span>
                 <span class="settings-card__head-text">
                     <span class="settings-card__title">{title}</span>
                     {show_subtitle.then(|| view! {
@@ -225,6 +228,18 @@ pub fn SettingsCard(
 /// it lived as copy-pasted markup in nine files. Extracted here so the
 /// status styling is defined once and the page components stay a thin
 /// shell. Hidden until `result_msg` is non-empty.
+/// Route a completed save to the right surface: success goes to an
+/// ephemeral toast (no layout shift, auto-dismiss), and any stale inline
+/// error is cleared. Errors must stay inline next to the form (persistent
+/// until fixed), so callers keep setting result_msg/result_ok themselves
+/// on the Err path. Staging hints ("Click Save to apply") also stay
+/// inline; this is only for server-acknowledged saves.
+pub fn toast_saved(result_msg: RwSignal<String>, result_ok: RwSignal<bool>, msg: &str) {
+    result_ok.set(true);
+    result_msg.set(String::new());
+    crate::components::ui::use_toast().success(msg.to_string());
+}
+
 #[component]
 pub fn SettingsResult(
     /// Status text. Empty string keeps the line hidden.

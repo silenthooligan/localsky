@@ -154,7 +154,11 @@ impl WizardStore {
         if !draft.license_accepted {
             return Err(WizardError::LicenseNotAccepted);
         }
-        // At minimum: location set, one controller, one source.
+        // Location is the one hard requirement: sunrise scheduling and
+        // forecasts are meaningless without it. Sources get defaulted at
+        // apply (see finalize_for_apply, matching the wizard UI's
+        // "skipping is fine" promise); controllers are optional so a
+        // weather-station-only deployment is a first-class setup.
         if draft.config.deployment.location.lat == 0.0
             && draft.config.deployment.location.lon == 0.0
         {
@@ -162,17 +166,54 @@ impl WizardStore {
                 "location is required (lat/lon both 0 is not a valid setup)".into(),
             ));
         }
-        if draft.config.sources.is_empty() {
-            return Err(WizardError::Validation(
-                "at least one weather source is required".into(),
-            ));
-        }
-        if draft.config.controllers.is_empty() {
-            return Err(WizardError::Validation(
-                "at least one irrigation controller is required".into(),
-            ));
+        // Structural validation (ids, references, ranges). Warnings pass;
+        // errors block with every detail joined so the Review step can
+        // show exactly what to fix.
+        let report = crate::config::validate::validate(&draft.config);
+        if !report.ok() {
+            let details: Vec<String> = report.errors.iter().map(|i| i.detail.clone()).collect();
+            return Err(WizardError::Validation(details.join("; ")));
         }
         Ok(())
+    }
+
+    /// Fill the defaults the wizard UI promises when steps are skipped:
+    /// no sources -> Tempest UDP (zero-config LAN listener) + Open-Meteo
+    /// (uses the location from the Location step); no timezone -> infer
+    /// from lat/lon so sunrise scheduling lands at the right wall-clock
+    /// hour even when the container TZ is UTC. Called by apply after
+    /// validation passes, before the config is written.
+    pub fn finalize_for_apply(draft: &mut WizardDraft) {
+        if draft.config.deployment.timezone.is_none() {
+            let loc = &draft.config.deployment.location;
+            draft.config.deployment.timezone = crate::timeutil::tz_name_for(loc.lat, loc.lon);
+        }
+        Self::finalize_sources(draft);
+    }
+
+    fn finalize_sources(draft: &mut WizardDraft) {
+        use crate::config::schema::{OpenMeteoConfig, SourceEntry, SourceKind, TempestUdpConfig};
+        if draft.config.sources.is_empty() {
+            // Both configs are fully serde-defaulted; round-trip through
+            // an empty JSON object to get those defaults without the
+            // structs needing a Default impl.
+            let tempest: TempestUdpConfig =
+                serde_json::from_value(serde_json::json!({})).expect("serde defaults");
+            let open_meteo: OpenMeteoConfig =
+                serde_json::from_value(serde_json::json!({})).expect("serde defaults");
+            draft.config.sources.push(SourceEntry {
+                id: "tempest_lan".into(),
+                priority: 100,
+                enabled: true,
+                source: SourceKind::TempestUdp(tempest),
+            });
+            draft.config.sources.push(SourceEntry {
+                id: "open_meteo".into(),
+                priority: 50,
+                enabled: true,
+                source: SourceKind::OpenMeteo(open_meteo),
+            });
+        }
     }
 }
 

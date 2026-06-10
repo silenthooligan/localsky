@@ -34,7 +34,7 @@ pub fn HourlyForecast(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
                 {move || {
                     let entries: Vec<HourlyEntry> = snap.get().hourly.into_iter().take(48).collect();
                     if entries.is_empty() {
-                        view! { <div class="daily-loading">"Loading hourly…"</div> }.into_any()
+                        view! { <crate::components::ui::Skeleton variant="chart"/> }.into_any()
                     } else {
                         view! { <HourlyChart entries/> }.into_any()
                     }
@@ -79,7 +79,20 @@ fn HourlyChart(entries: Vec<HourlyEntry>) -> impl IntoView {
         view! {
             <g>
                 <text x={x.to_string()} y="14" text-anchor="middle" class="hourly-time">{label}</text>
-                <text x={x.to_string()} y="42" text-anchor="middle" class="hourly-glyph" font-size="22">{g}</text>
+                <svg
+                    x={(x - 11.0).to_string()}
+                    y="26"
+                    width="22"
+                    height="22"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.75"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    class="hourly-glyph"
+                    inner_html=crate::components::ui::icon::paths_for(g)
+                ></svg>
                 <text x={x.to_string()} y="62" text-anchor="middle" class="hourly-temp">
                     {format!("{:.0}°", e.temp_f)}
                 </text>

@@ -12,7 +12,7 @@
 // added in Phase 4. For now we filter client-side from the unfiltered
 // response; harmless for our 4-zone fleet.
 
-use crate::components::irrigation::controls::post_action;
+use crate::components::irrigation::controls::post_action_then;
 use crate::components::irrigation::mobile::duration_sheet::DurationSheet;
 use crate::ha::snapshot::{IrrigationSnapshot, ZoneMath, ZoneState};
 use crate::history::types::{HistoryWindow, RunRecord};
@@ -88,7 +88,7 @@ pub fn MobileZoneDetail(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 return view! {
                     <div class="mobile-stack">
                         <a href="/zones" class="mobile-back-link" on:click=on_back.clone()>"‹ Zones"</a>
-                        <div class="mobile-zone-detail-empty">"Loading zone..."</div>
+                        <div class="mobile-zone-detail-empty"><crate::components::ui::SkeletonRows count=5/></div>
                     </div>
                 }.into_any();
             }
@@ -114,9 +114,22 @@ pub fn MobileZoneDetail(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             sheet_label.set(zname_for_run.clone());
             sheet_visible.set(true);
         };
+        let stopping = RwSignal::new(false);
         let on_stop = move |_| {
+            if stopping.get_untracked() {
+                return;
+            }
+            stopping.set(true);
             let slug = zslug_for_stop.clone();
-            post_action(json!({"kind": "stop", "zone": slug}));
+            post_action_then(
+                json!({"kind": "stop", "zone": slug}),
+                Callback::new(move |result: Result<(), String>| {
+                    if let Err(e) = result {
+                        stopping.set(false);
+                        crate::components::ui::use_toast().error(format!("Stop failed: {e}"));
+                    }
+                }),
+            );
         };
 
         // Filter history to this zone, sort newest-first, take last 14 days.
@@ -183,7 +196,13 @@ pub fn MobileZoneDetail(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 <div class="mobile-zone-actions">
                     {if running {
                         view! {
-                            <button class="btn-clay btn-clay-hot mobile-primary-btn" on:click=on_stop>"STOP"</button>
+                            <button
+                                class="btn-clay btn-clay-hot mobile-primary-btn"
+                                prop:disabled=move || stopping.get()
+                                on:click=on_stop
+                            >
+                                {move || if stopping.get() { "STOPPING…" } else { "STOP" }}
+                            </button>
                         }.into_any()
                     } else {
                         view! {

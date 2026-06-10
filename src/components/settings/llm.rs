@@ -64,8 +64,11 @@ pub fn SettingsLlm() -> impl IntoView {
             wasm_bindgen_futures::spawn_local(async move {
                 match save_llm(payload).await {
                     Ok(()) => {
-                        result_ok.set(true);
-                        result_msg.set("Saved. Advisor reconnects on next call.".into());
+                        crate::components::settings_ui::toast_saved(
+                            result_msg,
+                            result_ok,
+                            "Saved. Advisor reconnects on next call.",
+                        );
                     }
                     Err(e) => {
                         result_ok.set(false);

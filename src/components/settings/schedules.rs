@@ -93,7 +93,7 @@ pub fn SettingsSchedules() -> impl IntoView {
         if arr.is_empty() {
             return view! {
                 <li class="settings-list__item">
-                    <span class="settings-list__icon" aria-hidden="true">"📅"</span>
+                    <span class="settings-list__icon" aria-hidden="true"><crate::components::ui::Icon name="calendar" size=18/></span>
                     <span class="settings-list__text">
                         <span class="settings-list__label">"No manual schedules configured"</span>
                         <span class="settings-list__helptext">
@@ -144,10 +144,10 @@ pub fn SettingsSchedules() -> impl IntoView {
             wasm_bindgen_futures::spawn_local(async move {
                 match save_config(cfg).await {
                     Ok(()) => {
-                        result_ok.set(true);
-                        result_msg.set(
-                            "Saved. Scheduler picks up new schedules on next container restart."
-                                .into(),
+                        crate::components::settings_ui::toast_saved(
+                            result_msg,
+                            result_ok,
+                            "Saved. Scheduler picks up new schedules on next container restart.",
                         );
                     }
                     Err(e) => {
@@ -168,7 +168,7 @@ pub fn SettingsSchedules() -> impl IntoView {
     view! {
         <main id="main-content" class="settings-page">
             <header class="settings-page__header">
-                <a class="settings-page__back" href="/settings">"← Settings"</a>
+                <a class="settings-page__back" href="/settings">"Back to Settings"</a>
                 <h1 class="settings-page__title">"Manual schedules"</h1>
                 <p class="settings-page__subtitle">
                     "Fire a zone at a fixed weekday + time, on top of (or instead of) "

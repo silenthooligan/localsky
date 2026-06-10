@@ -32,6 +32,12 @@ use crate::ports::config_store::ConfigStore;
 pub struct WizardApiState {
     pub draft_store: Arc<WizardStore>,
     pub config_store: Arc<FileConfigStore>,
+    /// Present when the identity store booted; lets apply persist
+    /// auth.mode = required when the wizard created an owner account.
+    pub auth_rt: Option<Arc<crate::auth::AuthRuntime>>,
+    /// Live Tempest store: passive discovery (a broadcasting hub shows
+    /// up here without any probe).
+    pub tempest_store: Option<Arc<crate::tempest::state::TempestStore>>,
 }
 
 pub fn router(state: WizardApiState) -> Router {
@@ -41,7 +47,9 @@ pub fn router(state: WizardApiState) -> Router {
         .route("/apply", post(post_apply))
         .route("/test_source", post(post_test_source))
         .route("/test_controller", post(post_test_controller))
+        .route("/test_llm", post(post_test_llm))
         .route("/scan_zones", post(post_scan_zones))
+        .route("/discover", get(get_discover))
         .route("/geocode", get(get_geocode))
         .with_state(state)
 }
@@ -106,14 +114,23 @@ async fn delete_draft(State(s): State<WizardApiState>) -> impl IntoResponse {
 async fn post_apply(State(s): State<WizardApiState>) -> impl IntoResponse {
     let draft_store = s.draft_store.clone();
     let load_res = tokio::task::spawn_blocking(move || draft_store.load()).await;
-    let draft = match load_res {
+    let mut draft = match load_res {
         Ok(Ok(d)) => d,
         Ok(Err(e)) => return wizard_err(e).into_response(),
         Err(e) => return wizard_err(WizardError::Io(format!("join: {e}"))).into_response(),
     };
-    // Pre-apply checks.
+    // Pre-apply checks, then fill the defaults the wizard promises for
+    // skipped steps (sources) before writing.
     if let Err(e) = s.draft_store.validate_for_apply(&draft) {
         return wizard_err(e).into_response();
+    }
+    WizardStore::finalize_for_apply(&mut draft);
+    // The Account step creates the owner directly in SQLite; reflect it
+    // in the written policy so login is required from first boot.
+    if let Some(rt) = &s.auth_rt {
+        if rt.setup_complete.load(std::sync::atomic::Ordering::Relaxed) {
+            draft.config.auth.mode = crate::config::schema::AuthMode::Required;
+        }
     }
     // Write the config atomically.
     match s.config_store.save(&draft.config).await {
@@ -199,6 +216,50 @@ async fn post_test_controller(
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct TestLlmBody {
+    pub llm: crate::config::schema::LlmConfig,
+}
+
+async fn post_test_llm(
+    State(_s): State<WizardApiState>,
+    Json(body): Json<TestLlmBody>,
+) -> impl IntoResponse {
+    let provider = match crate::runtime::build_llm_from(&body.llm).await {
+        Some(p) => p,
+        None => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(ApiError {
+                    error: "llm_unreachable".into(),
+                    detail: Some(
+                        "no provider responded; for Auto, make sure Ollama / llama.cpp / LM Studio is running on this host".into(),
+                    ),
+                }),
+            )
+                .into_response()
+        }
+    };
+    match provider.health().await {
+        Ok(h) => Json(serde_json::json!({
+            "ok": h.reachable,
+            "provider": provider.id(),
+            "model_loaded": h.model_loaded,
+            "provider_version": h.provider_version,
+            "detail": h.last_error,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(ApiError {
+                error: "llm_unreachable".into(),
+                detail: Some(e.to_string()),
+            }),
+        )
+            .into_response(),
+    }
+}
+
 async fn post_scan_zones(
     State(_s): State<WizardApiState>,
     Json(body): Json<TestControllerBody>,
@@ -224,6 +285,38 @@ async fn post_scan_zones(
         )
             .into_response(),
     }
+}
+
+// ---- Network discovery. One aggregated sweep for the wizard. ----
+
+/// GET /api/wizard/discover -> everything findable on the LAN right now:
+/// passive Tempest (any hub already broadcasting on UDP 50222), Ecowitt
+/// gateways (UDP broadcast probe), OpenSprinkler controllers (HTTP /24
+/// sweep). User-initiated only; total wall time a few seconds.
+async fn get_discover(State(s): State<WizardApiState>) -> impl IntoResponse {
+    let tempest = s.tempest_store.as_ref().map(|store| {
+        let snap = store.snapshot();
+        let now = chrono::Utc::now().timestamp();
+        let fresh = snap.last_packet_epoch > 0 && now - snap.last_packet_epoch < 300;
+        serde_json::json!({
+            "detected": fresh,
+            "hub_serial": if snap.hub_serial.is_empty() { serde_json::Value::Null } else { snap.hub_serial.clone().into() },
+            "last_seen_epoch": snap.last_packet_epoch,
+        })
+    });
+
+    let (ecowitt, opensprinkler) = tokio::join!(
+        crate::discovery::ecowitt::discover_ecowitt(std::time::Duration::from_secs(3)),
+        crate::discovery::opensprinkler::discover_opensprinkler(std::time::Duration::from_millis(
+            1500
+        )),
+    );
+
+    Json(serde_json::json!({
+        "tempest": tempest,
+        "ecowitt": ecowitt,
+        "opensprinkler": opensprinkler,
+    }))
 }
 
 // ---- Geocode proxy. Lets the location step do address -> lat/lon. ----

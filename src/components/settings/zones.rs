@@ -44,8 +44,10 @@ pub fn SettingsZones() -> impl IntoView {
     let new_soil_sensor = RwSignal::new(String::new());
     let new_soil_min = RwSignal::new(30.0f64);
     let new_soil_sat = RwSignal::new(70.0f64);
-    // Discovered local soil channels (id, label) from /api/v1/sensors/soil.
-    let soil_sensor_opts = RwSignal::new(Vec::<(String, String)>::new());
+    // Soil channels from /api/v1/sensors/soil: (id, label, current_pct, source).
+    // current_pct + source let the zone show the assigned sensor's live reading
+    // and whether it's native or HA-bridged.
+    let soil_sensor_opts = RwSignal::new(Vec::<(String, String, Option<f64>, String)>::new());
 
     #[cfg(feature = "hydrate")]
     {
@@ -62,6 +64,11 @@ pub fn SettingsZones() -> impl IntoView {
                                 Some((
                                     s.get("id")?.as_str()?.to_string(),
                                     s.get("label")?.as_str()?.to_string(),
+                                    s.get("current_pct").and_then(|v| v.as_f64()),
+                                    s.get("source")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
                                 ))
                             })
                             .collect();
@@ -161,8 +168,11 @@ pub fn SettingsZones() -> impl IntoView {
             wasm_bindgen_futures::spawn_local(async move {
                 match save_config(candidate).await {
                     Ok(()) => {
-                        result_ok.set(true);
-                        result_msg.set("Saved. Engine picks up new zones on next tick.".into());
+                        crate::components::settings_ui::toast_saved(
+                            result_msg,
+                            result_ok,
+                            "Saved. Engine picks up new zones on next tick.",
+                        );
                     }
                     Err(e) => {
                         result_ok.set(false);
@@ -305,7 +315,7 @@ fn ZoneForm(
     new_soil_sensor: RwSignal<String>,
     new_soil_min: RwSignal<f64>,
     new_soil_sat: RwSignal<f64>,
-    soil_sensor_opts: RwSignal<Vec<(String, String)>>,
+    soil_sensor_opts: RwSignal<Vec<(String, String, Option<f64>, String)>>,
     editing_slug: RwSignal<Option<String>>,
     add_open: RwSignal<bool>,
     result_msg: RwSignal<String>,
@@ -685,11 +695,39 @@ fn ZoneForm(
                     <option value="" selected=move || new_soil_sensor.get().is_empty()>
                         "(none — modeled bucket)"
                     </option>
-                    {move || soil_sensor_opts.get().into_iter().map(|(id, label)| {
-                        let sel = new_soil_sensor.get() == id;
+                    {move || soil_sensor_opts.get().into_iter().map(|(id, label, _, _)| {
+                        let cur = new_soil_sensor.get();
+                        let sel = cur.strip_prefix("ha:").unwrap_or(&cur) == id.strip_prefix("ha:").unwrap_or(&id);
                         view! { <option value=id.clone() selected=sel>{label}</option> }
                     }).collect_view()}
                 </select>
+                // Live reading + origin of the assigned sensor — the "full
+                // data picture" right in the zone, with a jump to manage it.
+                {move || {
+                    let sel = new_soil_sensor.get();
+                    if sel.is_empty() { return view! {}.into_any(); }
+                    // Zones store the bare entity (sensor.x) while the soil feed
+                    // ids HA channels as ha:sensor.x — match on the bare id.
+                    let bare = |s: &str| s.strip_prefix("ha:").unwrap_or(s).to_string();
+                    let sel_bare = bare(&sel);
+                    let opt = soil_sensor_opts.get().into_iter().find(|(id, ..)| bare(id) == sel_bare);
+                    let (reading, origin) = match opt {
+                        Some((_, _, pct, source)) => {
+                            let r = pct.map(|p| format!("{p:.0}%")).unwrap_or_else(|| "—".into());
+                            let o = if source == "home_assistant" { "Home Assistant" } else if source.is_empty() { "manual / HA entity" } else { "LocalSky native" };
+                            (r, o.to_string())
+                        }
+                        // Selected an id (e.g. a typed ha:entity) not in the list.
+                        None => ("live".to_string(), "manual / HA entity".to_string()),
+                    };
+                    view! {
+                        <div class="zone-soil-live">
+                            <span class="zone-soil-live__pct">{reading}</span>
+                            <span class="zone-soil-live__origin">{origin}</span>
+                            <a class="zone-soil-live__manage" href="/settings/devices">"Manage in Devices →"</a>
+                        </div>
+                    }.into_any()
+                }}
                 <input
                     type="text"
                     class="ui-input"
@@ -698,6 +736,15 @@ fn ZoneForm(
                     prop:value=move || new_soil_sensor.get()
                     on:input=move |ev| new_soil_sensor.set(event_target_value(&ev))
                 />
+                <a
+                    class="setup-footer__btn setup-footer__btn--ghost"
+                    href="/settings/devices?discover=1"
+                    target="_blank"
+                    rel="noopener"
+                    style="margin-top: 0.4rem; display: inline-flex"
+                >
+                    "+ Add a sensor"
+                </a>
             </FormField>
 
             <FormField

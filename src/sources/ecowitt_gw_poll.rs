@@ -178,6 +178,16 @@ pub fn parse_livedata(body: &Value, source_id: &str, epoch: i64) -> Vec<Reading>
                 if let Some(v) = item.get("ec").and_then(Value::as_str).and_then(parse_num) {
                     push(format!("soilec{ch}"), v);
                 }
+                if let Some(v) = item
+                    .get("battery")
+                    .and_then(Value::as_str)
+                    .and_then(parse_num)
+                {
+                    // Ecowitt soil battery is a 0-5 level; publish as % (×20)
+                    // so HA's battery device_class + the low-battery alert read
+                    // in familiar units.
+                    push(format!("soilbatt{ch}"), (v * 20.0).clamp(0.0, 100.0));
+                }
             }
         }
     }
@@ -209,6 +219,41 @@ pub fn parse_livedata(body: &Value, source_id: &str, epoch: i64) -> Vec<Reading>
 /// Spawn the poll loop. Runs until the process exits (no per-source shutdown
 /// signal, same contract as the Tempest/forecast refreshers in main.rs).
 /// A `None` history store makes this a no-op (nothing to write to).
+/// Parse /get_cli_soilad into calibrated `soilmoistureN` readings using the
+/// per-channel dry/wet AD endpoints. Channels with no calibration entry are
+/// skipped (their livedata humidity value is kept). moisture% is clamped 0..100.
+pub fn parse_soilad(
+    body: &Value,
+    source_id: &str,
+    epoch: i64,
+    calibration: &std::collections::HashMap<String, crate::config::schema::SoilAdCalibration>,
+) -> Vec<Reading> {
+    let mut out = Vec::new();
+    let Some(arr) = body.as_array() else {
+        return out;
+    };
+    for c in arr {
+        let Some(ch) = c.get("ch").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(cal) = calibration.get(ch) else {
+            continue;
+        };
+        let Some(ad) = c.get("nowAd").and_then(Value::as_str).and_then(parse_num) else {
+            continue;
+        };
+        let span = (cal.ad_wet - cal.ad_dry).abs().max(1.0);
+        let pct = ((ad - cal.ad_dry) / span * 100.0).clamp(0.0, 100.0);
+        out.push(Reading {
+            epoch,
+            source_id: source_id.to_string(),
+            key: format!("soilmoisture{ch}"),
+            value: pct,
+        });
+    }
+    out
+}
+
 pub fn spawn(id: String, config: EcowittGwPollConfig, history: Option<SensorHistoryStore>) {
     let Some(history) = history else {
         warn!(source_id = %id, "ecowitt_gw_poll: no sensor_history store; poller disabled");
@@ -219,6 +264,7 @@ pub fn spawn(id: String, config: EcowittGwPollConfig, history: Option<SensorHist
         .build()
         .expect("reqwest client construction");
     let url = format!("http://{}/get_livedata_info", config.host);
+    let soilad_url = format!("http://{}/get_cli_soilad", config.host);
     let interval = Duration::from_secs(config.poll_interval_s.max(5) as u64);
 
     tokio::spawn(async move {
@@ -236,7 +282,20 @@ pub fn spawn(id: String, config: EcowittGwPollConfig, history: Option<SensorHist
                         last_ok = Some(true);
                     }
                     let epoch = chrono::Utc::now().timestamp();
-                    let readings = parse_livedata(&body, &id, epoch);
+                    let mut readings = parse_livedata(&body, &id, epoch);
+                    // Native calibrated soil: when dry/wet endpoints are
+                    // configured, read the raw AD and recompute moisture so it
+                    // matches a calibrated source-of-truth, replacing the
+                    // gateway's own % from livedata.
+                    if !config.soil_calibration.is_empty() {
+                        if let Ok(soilad) = fetch(&client, &soilad_url).await {
+                            let cal = parse_soilad(&soilad, &id, epoch, &config.soil_calibration);
+                            if !cal.is_empty() {
+                                readings.retain(|r| !r.key.starts_with("soilmoisture"));
+                                readings.extend(cal);
+                            }
+                        }
+                    }
                     if readings.is_empty() {
                         debug!(source_id = %id, "ecowitt_gw_poll: no parseable readings");
                         continue;
@@ -268,6 +327,33 @@ async fn fetch(client: &Client, url: &str) -> anyhow::Result<Value> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn parse_soilad_calibrates_from_raw_ad() {
+        use crate::config::schema::SoilAdCalibration;
+        // Real /get_cli_soilad shape; ch1 AD 724 with HA's dry/wet 502/1442
+        // must yield 23.6% (matches Home Assistant exactly).
+        let body = json!([
+            {"ch": "1", "name": "Back Yard Soil", "soilVal": "19", "nowAd": "724"},
+            {"ch": "2", "name": "Front", "nowAd": "913"},
+        ]);
+        let mut cal = std::collections::HashMap::new();
+        cal.insert(
+            "1".to_string(),
+            SoilAdCalibration {
+                ad_dry: 502.0,
+                ad_wet: 1442.0,
+            },
+        );
+        let out = parse_soilad(&body, "ecowitt_gw", 100, &cal);
+        assert_eq!(out.len(), 1, "only ch1 has a calibration entry");
+        assert_eq!(out[0].key, "soilmoisture1");
+        assert!(
+            (out[0].value - 23.6).abs() < 0.1,
+            "expected ~23.6%, got {}",
+            out[0].value
+        );
+    }
 
     fn sample() -> Value {
         // Abridged GW2000 /get_livedata_info, real-world shape.

@@ -36,22 +36,23 @@ pub fn kind_options() -> Vec<(String, String)> {
     .collect()
 }
 
+/// Icon registry name (ui::Icon) for a source kind.
 pub fn kind_icon(kind: &str) -> &'static str {
     match kind {
-        "tempest_udp" | "tempest_ws" => "🌬",
-        "davis_wll" => "🌡",
-        "open_meteo" | "nws" | "openweather" | "pirate_weather" | "met_norway" => "☁",
-        "ecowitt_local" | "ecowitt_gw_poll" => "📡",
-        "mqtt" => "📬",
-        "http_webhook" => "📥",
-        "ha_passthrough" => "🏠",
-        "ambient_weather" => "🌤",
-        "netatmo" => "🌦",
-        "yolink" => "🛰",
-        "lacrosse" => "🌤",
-        "tuya_cloud" => "🔌",
-        "demo_replay" => "🧪",
-        _ => "🔌",
+        "tempest_udp" | "tempest_ws" => "wind",
+        "davis_wll" => "thermometer",
+        "open_meteo" | "nws" | "openweather" | "pirate_weather" | "met_norway" => "cloud",
+        "ecowitt_local" | "ecowitt_gw_poll" => "sources",
+        "mqtt" => "download",
+        "http_webhook" => "download",
+        "ha_passthrough" => "home",
+        "ambient_weather" => "cloud-sun",
+        "netatmo" => "cloud-drizzle",
+        "yolink" => "sources",
+        "lacrosse" => "cloud-sun",
+        "tuya_cloud" => "zap",
+        "demo_replay" => "play",
+        _ => "sources",
     }
 }
 
@@ -115,7 +116,16 @@ pub fn SourceEditorPanel(
     on_commit: Callback<serde_json::Value>,
     on_cancel: Callback<()>,
 ) -> impl IntoView {
-    let editing = existing.is_some();
+    // "edit" = the seed carries a real id (lock the id field). A seed with no
+    // id but a kind/config (e.g. "adopt this discovered gateway") is a
+    // prefilled ADD: the id stays editable and we keep the seeded config.
+    let editing = existing
+        .as_ref()
+        .and_then(|s| s.get("id"))
+        .and_then(|v| v.as_str())
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    let has_seed_config = existing.as_ref().and_then(|s| s.get("config")).is_some();
     let seed_id = existing
         .as_ref()
         .and_then(|s| s.get("id"))
@@ -151,9 +161,11 @@ pub fn SourceEditorPanel(
     let config_text = RwSignal::new(seed_config);
     let error = RwSignal::new(String::new());
 
-    // When adding, swap the JSON template as the kind changes.
+    // When composing a fresh source (not editing, no seeded config), swap the
+    // JSON template as the kind changes. Skip when a config was seeded (adopt)
+    // so the prefilled host isn't clobbered.
     #[cfg(feature = "hydrate")]
-    if !editing {
+    if !editing && !has_seed_config {
         Effect::new(move |_| {
             let k = kind.get();
             config_text.set(default_config_text(&k));

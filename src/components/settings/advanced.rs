@@ -23,6 +23,65 @@ pub fn SettingsAdvanced() -> impl IntoView {
     let update_status: RwSignal<UpdateStatus> = RwSignal::new(UpdateStatus::Idle);
     let demo_mode_active = RwSignal::new(false);
     let snapshots = RwSignal::new(Vec::<SnapshotRow>::new());
+    let restore_msg = RwSignal::new(String::new());
+
+    // Restore upload: POST the picked bundle as multipart to
+    // /api/v1/backup/restore and surface the server's note.
+    let on_restore_file = move |ev: leptos::ev::Event| {
+        #[cfg(feature = "hydrate")]
+        {
+            use wasm_bindgen::JsCast;
+            let Some(input) = ev
+                .target()
+                .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
+            else {
+                return;
+            };
+            let Some(file) = input.files().and_then(|f| f.item(0)) else {
+                return;
+            };
+            restore_msg.set("Uploading…".into());
+            wasm_bindgen_futures::spawn_local(async move {
+                let form = web_sys::FormData::new().ok();
+                let Some(form) = form else {
+                    restore_msg.set("FormData unavailable".into());
+                    return;
+                };
+                let _ = form.append_with_blob_and_filename("bundle", &file, &file.name());
+                let result = async {
+                    let resp = gloo_net::http::Request::post("/api/v1/backup/restore")
+                        .body(form)
+                        .map_err(|e| e.to_string())?
+                        .send()
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let v = resp
+                        .json::<serde_json::Value>()
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    if resp.ok() {
+                        Ok(v.get("note")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("restored")
+                            .to_string())
+                    } else {
+                        Err(v
+                            .get("error")
+                            .and_then(|e| e.as_str())
+                            .unwrap_or("restore failed")
+                            .to_string())
+                    }
+                }
+                .await;
+                match result {
+                    Ok(note) => restore_msg.set(format!("Restore accepted: {note}")),
+                    Err(e) => restore_msg.set(format!("Restore failed: {e}")),
+                }
+            });
+        }
+        #[cfg(not(feature = "hydrate"))]
+        let _ = ev;
+    };
 
     #[cfg(feature = "hydrate")]
     {
@@ -166,6 +225,36 @@ pub fn SettingsAdvanced() -> impl IntoView {
                         }).collect_view()}
                     </ul>
                 </Show>
+            </Panel>
+
+            <Panel title="Backup and restore".to_string()>
+                <p class="settings-page__subtitle" style="margin: 0 0 0.75rem">
+                    "One bundle holds the config and the full history database "
+                    "(runs, sensor readings, decisions). The VAPID push key and "
+                    "instance identity stay out of it on purpose. Restoring a "
+                    "database requires a container restart; a config restore "
+                    "applies on the next engine tick."
+                </p>
+                <div class="settings-form-actions" style="justify-content:flex-start; gap: var(--space-2)">
+                    <a class="setup-footer__btn setup-footer__btn--primary" href="/api/v1/backup" download>
+                        "Download backup"
+                    </a>
+                    <label class="setup-footer__btn setup-footer__btn--ghost" style="cursor:pointer">
+                        "Restore from bundle…"
+                        <input
+                            type="file"
+                            accept=".tar.gz,.tgz,application/gzip"
+                            style="display:none"
+                            on:change=on_restore_file
+                        />
+                    </label>
+                </div>
+                {move || {
+                    let m = restore_msg.get();
+                    (!m.is_empty()).then(|| view! {
+                        <p class="settings-page__subtitle" style="margin: 0.5rem 0 0">{m}</p>
+                    })
+                }}
             </Panel>
 
             <Panel title="Raw TOML editor".to_string()>

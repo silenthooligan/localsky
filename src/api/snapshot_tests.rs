@@ -43,7 +43,7 @@ mod tests {
     fn info_v1_shape() {
         let fixture = InfoFixture {
             service: "localsky",
-            service_version: "0.2.0-alpha.1",
+            service_version: "0.2.0-beta.1",
             api_version: super::super::info::API_VERSION,
         };
         assert_json_snapshot!("info_v1", fixture);

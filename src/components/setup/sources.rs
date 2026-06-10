@@ -128,6 +128,8 @@ pub fn SourcesStep() -> impl IntoView {
                 "horizon. Add what you have — the engine picks per-field winners by priority."
             </p>
 
+            <crate::components::setup::discover::NetworkScan mode="sources" draft=draft/>
+
             <ul class="cond-list">{added_view}</ul>
 
             {move || if adding.get() {

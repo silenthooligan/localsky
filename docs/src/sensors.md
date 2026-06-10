@@ -29,7 +29,7 @@ Examples: Ecowitt WH51 / WH52 (battery), Aqara Zigbee, Sonoff Zigbee, capacitive
 - **Soil-moisture projection**: 7-day forward curve under no-irrigation, color-coded for "stays in healthy band" vs. "will dry out".
 - **Smarter dry-out detection**: catches the case where ET-based math underestimates actual drying (heavy clay holding water visibly longer than expected, or sandy spots draining faster).
 
-**Connect via**: any source that publishes `sensor.<zone_slug>_soil_moisture` (HA passthrough), or a direct adapter (Ecowitt LAN, Aqara via HA, Tasmota via MQTT).
+**Connect via**: any source that publishes `sensor.<zone_slug>_soil_moisture` (HA passthrough), or a direct adapter (Ecowitt GW1100/GW2000 native LAN poll, Aqara via HA, Tasmota via MQTT).
 
 ### Soil temperature probes
 
@@ -91,8 +91,8 @@ Once a source is providing the field, the tile lights up and the skip rules inco
 | Sensor | Direct adapter | Via HA | Notes |
 |---|---|---|---|
 | Tempest hub (UDP) | Tested (v0.1) | Yes | Air temp, humidity, wind, solar, lightning, rain, pressure |
-| Ecowitt GW1100/GW2000 LAN | Planned | Yes (ecowitt2mqtt) | All sub-sensors via the gateway |
-| Ecowitt WH51/WH52 (soil) | Via gateway | Via ecowitt2mqtt | Battery-powered; 868/915 MHz |
+| Ecowitt GW1100/GW2000 LAN | Live (v0.1) | Yes | Native direct poll: `/get_livedata_info` for moisture/temp/EC/battery per channel, `/get_cli_soilad` for raw FDR AD used in calibration |
+| Ecowitt WH51/WH52 (soil) | Live (v0.1) | Yes | Polled natively via gateway; LocalSky calibrates moisture per zone against dry/wet AD endpoints in its own config; battery-powered, 868/915 MHz |
 | Aqara Zigbee | Via HA | Yes | Soil moisture + temp probes; needs Zigbee coordinator |
 | Sonoff Zigbee | Via HA | Yes | Same as Aqara |
 | Ambient Weather | Planned | Yes | Cloud API; socket.io |

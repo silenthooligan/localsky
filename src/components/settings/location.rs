@@ -79,8 +79,11 @@ pub fn SettingsLocation() -> impl IntoView {
             wasm_bindgen_futures::spawn_local(async move {
                 match patch_location(payload).await {
                     Ok(()) => {
-                        result_ok.set(true);
-                        result_msg.set("Saved. Engine picks up on next tick.".into());
+                        crate::components::settings_ui::toast_saved(
+                            result_msg,
+                            result_ok,
+                            "Saved. Engine picks up on next tick.",
+                        );
                     }
                     Err(e) => {
                         result_ok.set(false);

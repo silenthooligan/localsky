@@ -1,0 +1,11 @@
+# Build-time intermediates produced by build_logo.py — checked-in are:
+#   reference.jpg         (the brand reference image, source of truth)
+#   logomark-master.png   (the cleaned, transparent-bg cropped art)
+#   logomark-master-dark.png (the ink->teal recolor variant)
+#   logomark-{light,dark}.png (proof renders, 480x480, for docs)
+#   logomark-art.png      (transparent-bg art tile)
+#   build_logo.py
+# Anything else under this directory is a one-shot output.
+favicon-dark-64.png
+favicon-light-64.png
+final-preview.png

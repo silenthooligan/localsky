@@ -21,25 +21,25 @@ pub fn NextRunHero(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     let glyph = move || {
         let s = snap.get();
         if !s.ha_reachable {
-            "✕"
+            "x"
         } else if s.zones.iter().any(|z| z.running) {
-            "💦"
+            "droplet"
         } else if s.skip_check.will_skip {
             // Pick a glyph that matches the skip reason at a glance.
             let r = s.skip_check.reason.as_str();
             if r.starts_with("Rain") || r.starts_with("Already wet") {
-                "🌧️"
+                "cloud-rain"
             } else if r.starts_with("Wind") {
-                "💨"
+                "wind"
             } else if r.starts_with("Freeze") {
-                "❄️"
+                "snowflake"
             } else if r.starts_with("Paused") {
-                "⏸"
+                "pause"
             } else {
-                "⛅"
+                "cloud-sun"
             }
         } else {
-            "💧"
+            "droplet"
         }
     };
 
@@ -99,7 +99,9 @@ pub fn NextRunHero(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
 
     view! {
         <section class="next-run-hero">
-            <div class="next-run-glyph" aria-hidden="true">{glyph}</div>
+            <div class="next-run-glyph" aria-hidden="true">
+                {move || view! { <crate::components::ui::Icon name=glyph() size=44/> }}
+            </div>
             <div class="next-run-body">
                 <div class="next-run-eyebrow">"Next morning run"</div>
                 <h1 class="next-run-headline">{headline}</h1>
@@ -235,7 +237,10 @@ fn SkipRow(
     view! {
         <div class="sk-row" class:sk-row-tripped=move || tripped.get()>
             <span class="sk-mark" aria-hidden="true">
-                {move || if tripped.get() { "✗" } else { "✓" }}
+                {move || {
+                    let name = if tripped.get() { "x" } else { "check" };
+                    view! { <crate::components::ui::Icon name=name size=13 stroke=2.5/> }
+                }}
             </span>
             <span class="sk-label">{label}</span>
             <span class="sk-value">{move || value.get()}</span>

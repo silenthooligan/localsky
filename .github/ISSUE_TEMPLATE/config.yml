@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://docs.localsky.io
+    about: Configuration reference, API, engine internals, irrigation walk-through.
+  - name: Security disclosure
+    url: https://github.com/silenthooligan/localsky/security/advisories/new
+    about: Use the private security advisory flow for anything sensitive. Don't file a public issue.
+  - name: HACS integration issues
+    url: https://github.com/silenthooligan/localsky-hacs/issues
+    about: Bugs in the Home Assistant integration (entities, services, config flow) belong in the HACS repo.

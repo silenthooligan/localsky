@@ -5,14 +5,19 @@ The engine answers one question: **should I water tomorrow, and if so, how long?
 ## Pipeline overview
 
 ```
-Weather sources -> MergedSnapshot -> Engine -> Verdict + per-zone runtime
-                                       |
-                                       +-- FAO-56 ET0 (eq. 6)
-                                       +-- Species Kc (UF/IFAS)
-                                       +-- Soil water balance
-                                       +-- Skip rules
-                                       +-- Cycle-and-soak
+Weather sources ---------> MergedSnapshot -> Engine -> Verdict + per-zone runtime
+Ecowitt GW (native poll) /                    |                |
+                                              +-- FAO-56 ET0   +-> OpenSprinkler HTTP
+                                              +-- Species Kc       (opensprinkler_direct)
+                                              +-- Soil water balance
+                                              +-- Skip rules (frost-skip uses native soil temp)
+                                              +-- Cycle-and-soak
+                                              |
+                                              +-> Publishes results to HA
+                                                  (sensor.localsky_<zone>_soil_*, valves, verdict)
 ```
+
+LocalSky owns the full pipeline end to end: it polls the Ecowitt gateway directly, runs all ET and bucket math internally, evaluates skip rules (including frost-skip against its own native soil-temperature readings), and actuates OpenSprinkler via a direct HTTP controller (`opensprinkler_direct`, targeting the controller's LAN address). Results are published back to HA for display, but HA is a consumer, not a driver. No Smart Irrigation, no Irrigation Unlimited, no MQTT sidecar.
 
 Each box is a pure function of its inputs. No hidden state, no opinionated overrides, no proprietary fudge factors.
 
@@ -27,6 +32,12 @@ Per source, per tick, LocalSky records:
 - Atmospheric pressure (kPa; elevation-derived if missing)
 - Rainfall (gross + intensity)
 - Day-of-year + latitude + elevation
+
+Soil inputs (natively polled from the Ecowitt GW1100B gateway's LAN address):
+
+- Per-zone soil moisture % (calibrated from raw FDR AD against dry/wet endpoints in LocalSky config)
+- Per-zone soil temperature (used directly for the frost-skip rule; no HA aggregation step)
+- Per-zone EC and battery state
 
 If multiple sources report the same field, the merge engine picks the winner per [merge policy](configuration.md#sources): max for rainfall (one stuck gauge can't hide actual rain), min for overnight low, highest priority for everything else.
 

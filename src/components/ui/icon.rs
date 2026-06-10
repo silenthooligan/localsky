@@ -12,8 +12,10 @@ use leptos::prelude::*;
 
 #[component]
 pub fn Icon(
-    /// Registry name. Unknown names render a debug box.
-    name: &'static str,
+    /// Registry name. Unknown names render a debug box. Accepts both
+    /// string literals and owned Strings (kind-icon maps).
+    #[prop(into)]
+    name: String,
     /// Pixel size (width == height). Default 18.
     #[prop(optional)]
     size: Option<u32>,
@@ -27,7 +29,7 @@ pub fn Icon(
     let dim = size.unwrap_or(18);
     let sw = stroke.unwrap_or(1.75);
     let style = format!("width:{dim}px;height:{dim}px;");
-    let body = paths_for(name);
+    let body = paths_for(&name);
     view! {
         <svg
             xmlns="http://www.w3.org/2000/svg"
@@ -68,7 +70,10 @@ pub fn weather_glyph(condition: &str) -> &'static str {
     }
 }
 
-fn paths_for(name: &str) -> &'static str {
+/// Raw inner-SVG path data for a registry name. Public for the rare case
+/// where a glyph must be embedded inside an existing <svg> scene (e.g. the
+/// hourly chart) instead of through the <Icon/> component.
+pub fn paths_for(name: &str) -> &'static str {
     match name {
         // ── Brand ────────────────────────────────────────────────────
         "brand" => {
@@ -205,6 +210,40 @@ fn paths_for(name: &str) -> &'static str {
         "activity" => r#"<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>"#,
         "hail" => {
             r#"<path d="M4 14.9A7 7 0 1 1 15.7 8h1.8a4.5 4.5 0 0 1 0 9H7"/><circle cx="8" cy="20" r="1"/><circle cx="12" cy="21" r="1"/><circle cx="16" cy="20" r="1"/>"#
+        }
+        "cloud-drizzle" => {
+            r#"<path d="M4 14.9A7 7 0 1 1 15.7 8h1.8a4.5 4.5 0 0 1 0 9H7"/><line x1="8" y1="19" x2="8" y2="19.01"/><line x1="8" y1="22" x2="8" y2="22.01"/><line x1="12" y1="21" x2="12" y2="21.01"/><line x1="16" y1="19" x2="16" y2="19.01"/><line x1="16" y1="22" x2="16" y2="22.01"/>"#
+        }
+        "snowflake" => {
+            r#"<line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/><path d="m20 16-4-4 4-4"/><path d="m4 8 4 4-4 4"/><path d="m16 4-4 4-4-4"/><path d="m8 20 4-4 4 4"/>"#
+        }
+        "sunrise" => {
+            r#"<path d="M12 2v8"/><path d="m4.93 10.93 1.41 1.41"/><path d="M2 18h2"/><path d="M20 18h2"/><path d="m19.07 10.93-1.41 1.41"/><path d="M22 22H2"/><path d="m8 6 4-4 4 4"/><path d="M16 18a4 4 0 0 0-8 0"/>"#
+        }
+
+        // ── Misc chrome / state ──────────────────────────────────────
+        "chevron-left" => r#"<polyline points="15 18 9 12 15 6"/>"#,
+        "smartphone" => {
+            r#"<rect x="5" y="2" width="14" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12.01" y2="18"/>"#
+        }
+        "share" => {
+            r#"<path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/>"#
+        }
+        "home" => {
+            r#"<path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>"#
+        }
+        "wifi-off" => {
+            r#"<line x1="2" y1="2" x2="22" y2="22"/><path d="M8.5 16.5a5 5 0 0 1 7 0"/><path d="M2 8.82a15 15 0 0 1 4.17-2.65"/><path d="M10.66 5c4.01-.36 8.14.9 11.34 3.76"/><path d="M16.85 11.25a10 10 0 0 1 2.22 1.68"/><path d="M5 13a10 10 0 0 1 5.24-2.76"/><line x1="12" y1="20" x2="12.01" y2="20"/>"#
+        }
+        "alert-triangle" => {
+            r#"<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>"#
+        }
+        "zap" => r#"<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>"#,
+        "search" => {
+            r#"<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>"#
+        }
+        "leaf" => {
+            r#"<path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.48 19 2c1 2 2 4.18 2 8 0 5.5-4.78 10-10 10Z"/><path d="M2 21c0-3 1.85-5.36 5.08-6C9.5 14.52 12 13 13 12"/>"#
         }
 
         _ => r#"<rect x="3" y="3" width="18" height="18" rx="2"/>"#,

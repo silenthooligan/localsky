@@ -45,6 +45,7 @@ pub fn build_devices(config: &Config) -> Vec<Device> {
             source_id: Some(entry.id.clone()),
             online: None,
             last_seen_epoch: None,
+            also_in_ha: false,
             children,
         });
     }
@@ -72,6 +73,7 @@ pub fn build_devices(config: &Config) -> Vec<Device> {
             source_id: Some(entry.id.clone()),
             online: None,
             last_seen_epoch: None,
+            also_in_ha: false,
             children,
         });
     }

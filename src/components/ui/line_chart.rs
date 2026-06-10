@@ -49,6 +49,11 @@ pub fn LineChart(
     /// Optional unit suffix for the y-axis max/min labels.
     #[prop(into, optional)]
     y_unit: String,
+    /// Optional x-axis display labels, indexed by point position of the
+    /// first series (all current callers share one x domain). Shown as
+    /// the tooltip header while scrubbing.
+    #[prop(optional)]
+    x_labels: Vec<String>,
 ) -> impl IntoView {
     const W: f64 = 600.0;
     let h = height as f64;
@@ -102,9 +107,88 @@ pub fn LineChart(
     let ymin_label = format!("{:.0}{}", ymin, y_unit);
     let empty = all.is_empty();
 
+    // Scrub state: pointer x as a 0..1 fraction of the plot width. None
+    // when the pointer is outside. Hover only ever changes client-side,
+    // so SSR and the first hydrate frame render no crosshair (DOM match).
+    let hover: RwSignal<Option<f64>> = RwSignal::new(None);
+    let lookup = StoredValue::new((series.clone(), x_labels, y_unit.clone()));
+
+    let on_move = move |ev: leptos::ev::PointerEvent| {
+        #[cfg(feature = "hydrate")]
+        {
+            use wasm_bindgen::JsCast;
+            if let Some(t) = ev.current_target() {
+                if let Ok(el) = t.dyn_into::<web_sys::Element>() {
+                    let r = el.get_bounding_client_rect();
+                    if r.width() > 0.0 {
+                        let fx = ((ev.client_x() as f64 - r.left()) / r.width()).clamp(0.0, 1.0);
+                        hover.set(Some(fx));
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "hydrate"))]
+        let _ = &ev;
+    };
+    let on_leave = move |_| hover.set(None);
+
+    let scrub = move || {
+        let fx = hover.get()?;
+        if empty {
+            return None;
+        }
+        let xv = xmin + fx * xspan;
+        let (rows, header) = lookup.with_value(|(series, x_labels, y_unit)| {
+            let rows: Vec<(String, String, String)> = series
+                .iter()
+                .filter_map(|s| {
+                    let (idx, &(_, y)) = s.points.iter().enumerate().min_by(|(_, a), (_, b)| {
+                        (a.0 - xv).abs().partial_cmp(&(b.0 - xv).abs()).unwrap()
+                    })?;
+                    let _ = idx;
+                    Some((s.label.clone(), s.color.clone(), format!("{y:.1}{y_unit}")))
+                })
+                .collect();
+            let header = series.first().and_then(|s| {
+                let (idx, _) = s.points.iter().enumerate().min_by(|(_, a), (_, b)| {
+                    (a.0 - xv).abs().partial_cmp(&(b.0 - xv).abs()).unwrap()
+                })?;
+                x_labels.get(idx).cloned()
+            });
+            (rows, header)
+        });
+        if rows.is_empty() {
+            return None;
+        }
+        // Flip the tooltip to the left of the crosshair past 60% so it
+        // never clips the right edge.
+        let pct = fx * 100.0;
+        let tip_style = if fx > 0.6 {
+            format!("right:{:.1}%;", 100.0 - pct + 1.5)
+        } else {
+            format!("left:{:.1}%;", pct + 1.5)
+        };
+        Some(view! {
+            <div class="ui-line-chart__cross" style=format!("left:{pct:.2}%")></div>
+            <div class="ui-line-chart__tip" style=tip_style>
+                {header.map(|h| view! { <div class="ui-line-chart__tip-head">{h}</div> })}
+                {rows.into_iter().map(|(label, color, val)| view! {
+                    <div class="ui-line-chart__tip-row">
+                        <span class="ui-line-chart__swatch" style=format!("background:{color}")></span>
+                        <span class="ui-line-chart__tip-label">{label}</span>
+                        <span class="ui-line-chart__tip-val">{val}</span>
+                    </div>
+                }).collect_view()}
+            </div>
+        })
+    };
+
     view! {
         <div class="ui-line-chart">
-            <div class="ui-line-chart__plot">
+            <div class="ui-line-chart__plot"
+                on:pointermove=on_move
+                on:pointerleave=on_leave
+            >
                 <svg
                     class="ui-line-chart__svg"
                     viewBox=format!("0 0 {W} {h}")
@@ -129,6 +213,7 @@ pub fn LineChart(
                         <span>{ymin_label}</span>
                     </div>
                 })}
+                {scrub}
             </div>
             {(legend && !legend_items.is_empty()).then(|| view! {
                 <div class="ui-line-chart__legend">

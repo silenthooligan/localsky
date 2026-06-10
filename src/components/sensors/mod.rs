@@ -249,17 +249,19 @@ pub fn SensorsPage(
                     <h1 class="sensors-page__title">"Sensors"</h1>
                 </div>
                 <p class="sensors-page__sub">
-                    "Your data sources and the live readings flowing from them. Soil moisture feeds the per-zone skip decision; weather feeds ET."
+                    "Every sensor LocalSky can use, from both Home Assistant and its own native sources, with the live readings flowing from them. Soil moisture feeds the per-zone skip decision; weather feeds ET."
                 </p>
                 <details class="sensors-howto">
-                    <summary>"How do I add a sensor?"</summary>
+                    <summary>"Where do sensors come from?"</summary>
                     <div class="sensors-howto__body">
-                        <p><strong>"Adding a soil probe (most common):"</strong>" you don't add probes here one by one. Pair the probe in its own app first — for Ecowitt, that's the Ecowitt / WS View app. Once Home Assistant sees it, it appears automatically in the soil-sensor list when you edit a zone. Then open "<a href="/settings/zones">"a zone"</a>" and pick it + set its saturation threshold."</p>
-                        <p><strong>"Adding a whole new data source"</strong>" (a gateway or cloud service LocalSky doesn't have yet — a second Ecowitt gateway, a Davis station, MQTT): use \"+ Add a sensor\" below. Receiver sources (Ecowitt LAN, webhook) show live readings here the moment data arrives, so you can confirm it's working."</p>
+                        <p><strong>"It doesn't matter where a device lives."</strong>" LocalSky and Home Assistant mirror each other, so a sensor added in either place shows up in both. You don't add probes here one by one."</p>
+                        <p><strong>"From Home Assistant:"</strong>" anything HA already sees — Ecowitt soil probes, a Tempest, any weather or moisture entity — is imported automatically and appears here and on the "<a href="/settings/devices">"Devices"</a>" page. Pair a new probe in its own app first (for Ecowitt that's the Ecowitt / WS View app); once HA sees it, it shows up with no per-probe setup. Assign soil probes to zones in the "<a href="/settings/zones">"zone editor"</a>"."</p>
+                        <p><strong>"From LocalSky directly:"</strong>" add a source LocalSky talks to itself — a LAN Ecowitt gateway, a webhook, MQTT — with \"Add a data source\" below. Receiver sources show live readings here the moment data arrives, so you can confirm it's working. Discovered gateways and controllers are listed on the "<a href="/settings/devices">"Devices"</a>" page."</p>
                     </div>
                 </details>
-                <div class="sensors-page__actions">
+                <div class="sensors-page__actions" style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap">
                     <Button variant="primary" icon="plus" on_click=Callback::new(move |_| selected.set(Sel::AddSource))>"Add a data source"</Button>
+                    <a class="setup-footer__btn setup-footer__btn--ghost" href="/settings/devices">"Manage all devices →"</a>
                 </div>
             </header>
 
@@ -698,7 +700,7 @@ fn SourceDetail(
                         </p>
                     }.into_any();
                 }
-                view! { <p class="sensors-section__hint">"Loading live readings…"</p> }.into_any()
+                view! { <crate::components::ui::SkeletonRows count=3/> }.into_any()
             }}
         </div>
     }

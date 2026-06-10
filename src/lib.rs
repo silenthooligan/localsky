@@ -26,6 +26,8 @@ pub mod push_client;
 #[cfg(feature = "ssr")]
 pub mod api;
 #[cfg(feature = "ssr")]
+pub mod auth;
+#[cfg(feature = "ssr")]
 pub mod config;
 #[cfg(feature = "ssr")]
 pub mod controllers;
@@ -38,7 +40,11 @@ pub mod discovery;
 #[cfg(feature = "ssr")]
 pub mod engine;
 #[cfg(feature = "ssr")]
+pub mod instance;
+#[cfg(feature = "ssr")]
 pub mod llm;
+#[cfg(feature = "ssr")]
+pub mod network;
 #[cfg(feature = "ssr")]
 pub mod notifications;
 #[cfg(feature = "ssr")]
@@ -57,6 +63,10 @@ pub mod scheduler;
 pub mod sources;
 #[cfg(feature = "ssr")]
 pub mod sw;
+#[cfg(feature = "ssr")]
+pub mod timeutil;
+#[cfg(feature = "ssr")]
+pub mod updates;
 #[cfg(feature = "ssr")]
 pub mod zones;
 
@@ -79,6 +89,15 @@ fn register_service_worker() {
         Some(w) => w,
         None => return,
     };
+
+    // Service workers only exist in a secure context. Over plain HTTP (LAN
+    // IP, a LAN hostname, local dev) navigator.serviceWorker is
+    // undefined, so container.register() below throws an uncaught TypeError
+    // mid-hydration. Bail cleanly so HTTP access still boots the app fully.
+    if !win.is_secure_context() {
+        log_nav("sw: skipped (insecure context)");
+        return;
+    }
 
     // Kill switch: a stuck or buggy SW can be neutralized by setting
     //   localStorage.setItem('sw_disabled', '1')

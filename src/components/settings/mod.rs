@@ -14,6 +14,7 @@
 //   units.rs           - imperial / metric / custom per-field
 //   advanced.rs        - nerd mode, rollback snapshots
 
+pub mod account;
 pub mod advanced;
 pub mod controllers;
 pub mod devices;
@@ -29,6 +30,7 @@ pub mod theme;
 pub mod units;
 pub mod zones;
 
+pub use account::SettingsAccount;
 pub use advanced::SettingsAdvanced;
 pub use controllers::SettingsControllers;
 pub use devices::SettingsDevices;

@@ -178,6 +178,16 @@ pub struct ZoneSoilCfg {
     pub target_min_pct: f64,
 }
 
+/// Offline guard for a raw soil reading: a non-positive value (exactly 0% /
+/// negative) is a disconnected/faulty probe (e.g. a WH51 out of soil), NOT
+/// bone-dry soil — return None so the zone falls back to weather/modeled
+/// rather than over-watering. Real soil is essentially never exactly 0.00%.
+/// (Soil calibration itself lives at the source — see `parse_soilad`'s
+/// native AD-based dry/wet calibration in the Ecowitt poll adapter.)
+fn apply_soil_quality(raw: Option<f64>) -> Option<f64> {
+    raw.filter(|v| *v > 0.0)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_refresher(
     store: Arc<IrrigationStore>,
@@ -723,6 +733,11 @@ async fn build_from_map(
                 // Per-zone verdict is back-filled after decide_per_zone runs
                 // (a follow-up commit); None until then.
                 verdict: None,
+                // Native soil temp/EC/battery merged in after the gateway poll
+                // resolves them (resolve_soil_extras, below).
+                soil_temp_f: None,
+                soil_ec: None,
+                soil_battery_pct: None,
             }
         })
         .collect();
@@ -836,6 +851,22 @@ async fn build_from_map(
         days_since_significant_rain: days_since_rain,
     };
 
+    // Native per-zone soil extras (temp/EC/battery) from the gateway poll.
+    // Merge them onto the published zones[] and derive the frost gate's yard
+    // min/max soil temperature natively — no dependency on an HA soil-temp
+    // aggregate (which used to come from the ecowitt2mqtt sidecar).
+    let soil_extras = resolve_soil_extras(&watering_policy.soil_zones, sensor_history).await;
+    for z in &mut snap.zones {
+        if let Some(e) = soil_extras.iter().find(|e| e.slug == z.slug) {
+            z.soil_temp_f = e.temp_f;
+            z.soil_ec = e.ec;
+            z.soil_battery_pct = e.battery_pct;
+        }
+    }
+    let soil_temps: Vec<f64> = soil_extras.iter().filter_map(|e| e.temp_f).collect();
+    let soil_temp_yard_min_f = soil_temps.iter().copied().reduce(f64::min);
+    let soil_temp_yard_max_f = soil_temps.iter().copied().reduce(f64::max);
+
     let inputs = Inputs {
         temp_now_f: temp_now,
         wind_now_mph: wind_now,
@@ -871,10 +902,9 @@ async fn build_from_map(
         } else {
             resolve_soil_zones(&watering_policy.soil_zones, &map, sensor_history).await
         },
-        soil_temp_yard_min_f: state_f64(&map, "sensor.soil_temp_yard_now_min"),
-        soil_temp_yard_max_f: state_f64(&map, "sensor.soil_temp_yard_now_max"),
-        frost_skip_soil_f: state_f64(&map, "input_number.irrigation_frost_skip_f")
-            .unwrap_or(watering_policy.skip_rules.frost_skip_soil_f),
+        soil_temp_yard_min_f,
+        soil_temp_yard_max_f,
+        frost_skip_soil_f: watering_policy.skip_rules.frost_skip_soil_f,
 
         is_paused: state_eq(&map, "input_boolean.irrigation_pause", "on"),
         is_dry_run: state_eq(&map, "input_boolean.irrigation_dry_run", "on"),
@@ -1439,8 +1469,9 @@ async fn compute_soil_forecasts(
         let soil_depth_mm = z.depth;
         let target_min = z.target_min;
         let target_max = z.target_max;
-        // Resolve this zone's live reading via its assigned sensor.
-        let current = resolve_soil_pct(z.sensor.as_deref(), map, history).await;
+        // Resolve this zone's live reading via its assigned sensor, with the
+        // same offline guard + calibration the decision path uses.
+        let current = apply_soil_quality(resolve_soil_pct(z.sensor.as_deref(), map, history).await);
 
         // No probe data → emit a no_data entry the dashboard renders as
         // a grey "(probe offline)" tile rather than rendering a flat zero.
@@ -1650,7 +1681,8 @@ async fn resolve_soil_zones(
 ) -> Vec<ZoneSoil> {
     let mut out = Vec::with_capacity(cfg.len());
     for z in cfg {
-        let pct = resolve_soil_pct(z.soil_sensor_id.as_deref(), map, history).await;
+        let raw = resolve_soil_pct(z.soil_sensor_id.as_deref(), map, history).await;
+        let pct = apply_soil_quality(raw);
         out.push(ZoneSoil {
             slug: z.slug.clone(),
             name: z.name.clone(),
@@ -1660,6 +1692,58 @@ async fn resolve_soil_zones(
         });
     }
     out
+}
+
+/// Native per-zone soil extras (temp / EC / battery) resolved alongside
+/// moisture but kept OFF the engine's `ZoneSoil` (no skip rule consumes them).
+/// Published to HA via the snapshot `zones[]` and used to derive the frost
+/// gate's yard-min soil temperature.
+#[derive(Debug, Clone, Default)]
+struct ZoneSoilExtra {
+    slug: String,
+    temp_f: Option<f64>,
+    ec: Option<f64>,
+    battery_pct: Option<f64>,
+}
+
+/// Resolve the native temp/EC/battery sibling channels for every configured
+/// zone whose moisture is a `source:<id>:soilmoisture<N>` channel.
+async fn resolve_soil_extras(
+    cfg: &[ZoneSoilCfg],
+    history: Option<&crate::persistence::SensorHistoryStore>,
+) -> Vec<ZoneSoilExtra> {
+    let mut out = Vec::with_capacity(cfg.len());
+    for z in cfg {
+        let spec = z.soil_sensor_id.as_deref();
+        out.push(ZoneSoilExtra {
+            slug: z.slug.clone(),
+            temp_f: resolve_soil_sibling(spec, |n| format!("soiltemp{n}f"), history).await,
+            ec: resolve_soil_sibling(spec, |n| format!("soilec{n}"), history).await,
+            battery_pct: resolve_soil_sibling(spec, |n| format!("soilbatt{n}"), history).await,
+        });
+    }
+    out
+}
+
+/// Resolve a per-channel sibling reading (soil temp / EC / battery) for a zone
+/// whose moisture sensor is a native `source:<id>:soilmoisture<N>` channel, by
+/// swapping the key suffix and reading the latest history value for the same
+/// source + channel. Returns `None` for non-`source:` specs (e.g. an `ha:`
+/// entity has no native sibling) or when the reading is unavailable.
+async fn resolve_soil_sibling(
+    moisture_spec: Option<&str>,
+    sibling_key: impl Fn(&str) -> String,
+    history: Option<&crate::persistence::SensorHistoryStore>,
+) -> Option<f64> {
+    let rest = moisture_spec?.strip_prefix("source:")?;
+    let (sid, key) = rest.split_once(':')?;
+    let n = key.strip_prefix("soilmoisture")?;
+    let h = history?;
+    h.last_value(sid.to_string(), sibling_key(n))
+        .await
+        .ok()
+        .flatten()
+        .map(|r| r.value)
 }
 
 /// Build the legacy four soil zones from their hardcoded HA entities +
@@ -1675,7 +1759,9 @@ fn build_legacy_soil_zones(map: &HashMap<String, Value>) -> Vec<ZoneSoil> {
     .map(|(slug, name, sat_default, target_min)| ZoneSoil {
         slug: slug.into(),
         name: name.into(),
-        pct: state_f64(map, &format!("sensor.{slug}_soil_moisture")),
+        // Offline guard: a raw 0% reading is a disconnected probe, not
+        // bone-dry soil.
+        pct: apply_soil_quality(state_f64(map, &format!("sensor.{slug}_soil_moisture"))),
         saturation_pct: state_f64(
             map,
             &format!("input_number.irrigation_{slug}_saturation_pct"),

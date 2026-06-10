@@ -13,6 +13,7 @@ pub mod env_compat;
 pub mod loader;
 pub mod schema;
 pub mod store;
+pub mod validate;
 pub mod wizard;
 
 pub use schema::*;

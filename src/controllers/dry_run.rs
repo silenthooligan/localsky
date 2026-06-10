@@ -145,6 +145,29 @@ impl IrrigationController for DryRunController {
         // the scheduler doesn't try to reconcile against fake data.
         Ok(Vec::new())
     }
+
+    async fn discover_zones(
+        &self,
+    ) -> ControllerResult<Vec<crate::ports::irrigation_controller::DiscoveredZone>> {
+        // Sample stations so the wizard's full add -> test -> scan ->
+        // import-zones flow is experiential with zero hardware. They
+        // import as ordinary editable ZoneConfig stubs.
+        use crate::ports::irrigation_controller::DiscoveredZone;
+        Ok(vec![
+            DiscoveredZone {
+                station_id: "1".into(),
+                name: "Front Lawn".into(),
+            },
+            DiscoveredZone {
+                station_id: "2".into(),
+                name: "Back Lawn".into(),
+            },
+            DiscoveredZone {
+                station_id: "3".into(),
+                name: "Garden Beds".into(),
+            },
+        ])
+    }
 }
 
 fn now_epoch() -> i64 {

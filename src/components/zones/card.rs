@@ -6,8 +6,8 @@
 use leptos::prelude::*;
 use serde_json::json;
 
-use crate::components::irrigation::controls::post_action;
-use crate::components::ui::Icon;
+use crate::components::irrigation::controls::post_action_then;
+use crate::components::ui::{use_toast, Icon};
 use crate::ha::snapshot::ZoneState;
 
 /// (status key, label, color token) for a zone's live state.
@@ -34,9 +34,24 @@ pub fn ZoneCard(zone: ZoneState, selected: RwSignal<Option<String>>) -> impl Int
     let deficit = format!("{:.1}", zone.bucket_mm);
     let running = zone.running;
     let stop_slug = slug.clone();
+    // Disabled-after-click guard; the next streamed snapshot recreates the
+    // card with the real state, so this only needs to cover the gap.
+    let stopping = RwSignal::new(false);
     let on_stop = move |ev: leptos::ev::MouseEvent| {
         ev.stop_propagation();
-        post_action(json!({ "kind": "stop", "zone": stop_slug.clone() }));
+        if stopping.get_untracked() {
+            return;
+        }
+        stopping.set(true);
+        post_action_then(
+            json!({ "kind": "stop", "zone": stop_slug.clone() }),
+            Callback::new(move |result: Result<(), String>| {
+                if let Err(e) = result {
+                    stopping.set(false);
+                    use_toast().error(format!("Stop failed: {e}"));
+                }
+            }),
+        );
     };
     let photo = zone.photo_url.clone().filter(|p| !p.is_empty());
 
@@ -58,15 +73,22 @@ pub fn ZoneCard(zone: ZoneState, selected: RwSignal<Option<String>>) -> impl Int
             view! { <div class="zone-card__reason">{r}</div> }
         });
 
+    let select_label = format!("Open {} details", zone.name);
     view! {
         <div
             class=format!("zone-card zone-card--{status}")
             class:is-selected=is_active
             style=format!("--zc:{color}")
-            role="button"
-            tabindex="0"
-            on:click=move |_| selected.set(Some(slug_sel.clone()))
         >
+            // A real <button> overlay carries the select action (keyboard +
+            // AT correct); the inline Stop sits above it via z-index, so no
+            // nested-interactive markup.
+            <button
+                type="button"
+                class="zone-card__hit"
+                aria-label=select_label
+                on:click=move |_| selected.set(Some(slug_sel.clone()))
+            ></button>
             {photo.map(|src| view! {
                 <div class="zone-card__photo" style=format!("background-image:url('{src}')")></div>
             })}
@@ -94,8 +116,14 @@ pub fn ZoneCard(zone: ZoneState, selected: RwSignal<Option<String>>) -> impl Int
                 </div>
                 {running.then(|| view! {
                     <div class="zone-card__foot">
-                        <button type="button" class="zone-card__stop" on:click=on_stop>
-                            <Icon name="stop" size=14/>"Stop"
+                        <button
+                            type="button"
+                            class="zone-card__stop"
+                            prop:disabled=move || stopping.get()
+                            on:click=on_stop
+                        >
+                            <Icon name="stop" size=14/>
+                            {move || if stopping.get() { "Stopping…" } else { "Stop" }}
                         </button>
                     </div>
                 })}

@@ -8,6 +8,18 @@ The v2 burndown. Lays a ports-and-adapters foundation underneath the existing v0
 
 ### Added
 
+#### Launch hardening (auth, identity, discovery, ops)
+
+- Built-in authentication: owner account (argon2id), browser sessions, show-once API tokens for integrations; `[auth]` policy block with `mode` (default `disabled` on upgrades, `required` for new wizard installs that create an account), rolling `session_ttl_days`, and `trusted_networks` CIDRs. Login page, wizard Account step, Settings Account section with token management. Static assets, `/api/v1/info`, ingest receivers, and liveness stay public; anonymous health is trimmed to liveness-only
+- Stable instance identity (`/data/instance-id`) surfaced in `/api/v1/info` (`uuid`) and announced over mDNS as `_localsky._tcp.local.` with version + auth TXT records (config-gated via `[network] mdns_enabled`), enabling Home Assistant zeroconf discovery
+- Timezone inference: offline lat/lon to IANA lookup autofills the wizard, persists on apply, and backs `GET /api/v1/location/timezone`; the wizard Location step now persists to the draft and gained address search via the Nominatim proxy
+- Config validation (`GET /api/v1/config/validate`): structured errors/warnings with stable codes; errors block wizard apply and `PUT /api/config`
+- One-sweep network discovery for the wizard (`GET /api/wizard/discover`): passive Tempest detection, Ecowitt UDP broadcast probe, OpenSprinkler LAN sweep; Scan-my-network panels with one-click Add on the Sources + Controllers steps
+- Backup + restore: `GET /api/v1/backup` (tar.gz of config + consistent database copy + manifest), `POST /api/v1/backup/restore` (validated config applies live; database stages and swaps at next boot), snapshot listing, and Download/Restore controls under Settings Advanced
+- Opt-in update check (`[updates] check_enabled`): daily GitHub releases poll behind `GET /api/v1/updates`; off by default, no telemetry
+- Wizard honors its skip promises: skipped Sources synthesize Tempest UDP + Open-Meteo defaults, controllers are optional (weather-only installs are first-class), and DryRun controllers are fully testable with sample zone discovery
+- API contract 1.6.0: additive `auth_required` + `uuid` on `/api/v1/info`; new `/api/v1/auth/*` endpoint family
+
 #### Devices + Home Assistant parity
 
 - Device model: a unified registry of gateways, controllers, cloud services, and the HA bridge, each grouping the sensors or zones it provides. `GET /api/v1/devices` and a Devices settings panel

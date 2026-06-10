@@ -71,8 +71,11 @@ pub fn SettingsNotifications() -> impl IntoView {
             wasm_bindgen_futures::spawn_local(async move {
                 match save_notifications(payload).await {
                     Ok(()) => {
-                        result_ok.set(true);
-                        result_msg.set("Saved. New channels engage on next event.".into());
+                        crate::components::settings_ui::toast_saved(
+                            result_msg,
+                            result_ok,
+                            "Saved. New channels engage on next event.",
+                        );
                     }
                     Err(e) => {
                         result_ok.set(false);

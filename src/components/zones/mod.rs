@@ -67,13 +67,23 @@ pub fn ZonesPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             <div class="zones-shell">
                 <div class="zones-cards">
                     {move || {
-                        let zones = snap.get().zones;
-                        if zones.is_empty() {
+                        let s = snap.get();
+                        if s.last_refresh_epoch == 0 {
+                            // First snapshot hasn't streamed in yet.
+                            return view! { <crate::components::ui::SkeletonRows count=4/> }.into_any();
+                        }
+                        if s.zones.is_empty() {
                             return view! {
-                                <div class="zones-empty">"No zones configured yet. Add zones in Settings → Zones."</div>
+                                <crate::components::ui::EmptyState
+                                    title="No zones yet"
+                                    body="Add a controller, scan it for stations, and your zones show up here with live status."
+                                    cta_label="Set up zones"
+                                    cta_href="/settings/zones"
+                                    icon="zones"
+                                />
                             }.into_any();
                         }
-                        zones.into_iter().map(|z| view! { <ZoneCard zone=z selected/> }).collect_view().into_any()
+                        s.zones.into_iter().map(|z| view! { <ZoneCard zone=z selected/> }).collect_view().into_any()
                     }}
                 </div>
                 <div class="zones-detail">

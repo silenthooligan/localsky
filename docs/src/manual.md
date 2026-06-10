@@ -9,11 +9,15 @@
 
 ## What it is
 
-LocalSky is the irrigation control surface and recommendation engine for a
-self-hosted lawn + garden installation. It is the user-facing front end
-(`your LocalSky URL`) and the deterministic Rust service behind it; the
-back-end stack is Home Assistant + Smart Irrigation + Irrigation Unlimited +
-OpenSprinkler + Ecowitt soil sensors + a Tempest weather station.
+LocalSky is the irrigation engine for a self-hosted lawn + garden installation.
+It is the user-facing front end (`your LocalSky URL`) and the deterministic
+Rust service behind it. LocalSky decides, schedules, and actuates OpenSprinkler
+directly (HTTP to the controller). It polls the Ecowitt GW1100B gateway natively
+for per-zone soil moisture, soil temp, EC, and raw FDR AD values, and calibrates
+moisture per zone itself. It publishes sensor state back to Home Assistant so HA
+can surface entities and drive automations, but HA is not the irrigation back-end.
+The hardware stack is: LocalSky + OpenSprinkler + Ecowitt soil sensors + a
+Tempest weather station.
 
 It runs **entirely on local hardware**. There is no Rachio-cloud equivalent.
 The only outbound traffic is an Open-Meteo forecast pull every 30 minutes
@@ -34,53 +38,48 @@ The stack is open-source end-to-end. Every component is replaceable.
                                 └──────────────────┬───────────────────┘
                                                    │
 ┌──────────────────────────────────────────────────┴──────────────────┐
-│ container 281 · LocalSky (Rust / Leptos SSR + WASM)                       │
+│ container 281 · LocalSky (Rust / Leptos SSR + WASM)                 │
 │   • Forecast intelligence engine (skip_logic::evaluate)             │
 │   • 7-day verdict strip + soil-moisture projection                  │
 │   • Live Tempest UDP listener (port 50222)                          │
 │   • Open-Meteo forecast refresher (30 min)                          │
+│   • Ecowitt GW1100B poller (native HTTP, /get_livedata_info +       │
+│     /get_cli_soilad); per-zone moisture calibration                 │
+│   • Irrigation scheduler: computes per-zone durations,              │
+│     applies skip/override rules, actuates OpenSprinkler via REST    │
 │   • SQLite history (365-day run log)                                │
 │   • Web Push via VAPID (PWA notifications)                          │
 │   • SSE stream at /api/irrigation/stream                            │
-│   • LLM advisor (the LLM provider, optional)                            │
-└─────────────────────────────────┬───────────────────────────────────┘
-                                  │ HA REST (10 s poll) + states bulk
-                                  ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│ container 279 · Home Assistant + sidecars                                 │
-│   • Home Assistant Core (host networking, port 8123)                │
-│   • Mosquitto MQTT broker                                           │
-│   • ecowitt2mqtt sidecar (port 8088), translates GW1100B push      │
-│     into MQTT discovery; chains raw POSTs to HA's native webhook    │
-│   • Smart Irrigation HACS, daily ET bucket math per zone           │
-│   • Irrigation Unlimited, sequence scheduler, per-zone adjust_time │
-└──────┬─────────────────────────┬─────────────────────────┬──────────┘
-       │ REST                    │ ZHA / Zigbee             │ MQTT discovery
-       ▼                          ▼                          ▼
-┌─────────────┐         ┌──────────────────┐     ┌────────────────────┐
-│OpenSprinkler│         │ Water-leak nodes │     │ Ecowitt GW1100B    │
-│ 192.0.2.60│        │ (Samjin IM6001)  │     │ 192.0.2.61      │
-│ DC, latching│         └──────────────────┘     │  + 4× WH52 3-in-1  │
-│ 4 zones live│                                  │ Push every 60 s    │
-└──────┬──────┘                                  └────────────────────┘
-       │ DC pulses (~25 ms)
-       ▼
-   solenoids                          ┌──────────────────────────────┐
-                                      │ WeatherFlow Tempest hub      │
-                                      │ 192.0.2.62                │
-                                      │ UDP 50222 every 3 s (rapid)  │
-                                      │ 1 min full obs               │
-                                      └──────────────────────────────┘
+│   • LLM advisor (optional)                                          │
+│   • Publishes sensor.localsky_* entities to HA via MQTT discovery   │
+└────┬──────────────────────────────────────────┬───────────────────┬─┘
+     │ HTTP REST (actuate)                       │ HTTP (LAN poll)   │ MQTT discovery
+     ▼                                           ▼                   ▼
+┌─────────────┐                      ┌────────────────────┐  ┌──────────────────────┐
+│OpenSprinkler│                      │ Ecowitt GW1100B    │  │ container 279        │
+│ 192.0.2.60  │                      │ 192.0.2.61         │  │ Home Assistant       │
+│ DC, latching│                      │  + 4× WH52 3-in-1  │  │ (entity aggregation, │
+│ 4 zones     │                      │ polled every 60 s  │  │  automations, voice) │
+└──────┬──────┘                      └────────────────────┘  └──────────┬───────────┘
+       │ DC pulses (~25 ms)                                              │ ZHA / Zigbee
+       ▼                                                                 ▼
+   solenoids                                                  ┌──────────────────┐
+                                                              │ Water-leak nodes │
+                                    ┌──────────────────────┐  │ (Samjin IM6001)  │
+                                    │ WeatherFlow Tempest   │  └──────────────────┘
+                                    │ hub 192.0.2.62        │
+                                    │ UDP 50222 every 3 s   │
+                                    │ 1 min full obs         │
+                                    └──────────────────────┘
 ```
 
 **One-paragraph elevator pitch.** LocalSky takes a Rust engine that reads
 both a real on-premise weather station and a 7-day forecast, blends it
 with calibrated soil sensors and an evapotranspiration bucket per zone,
-and decides whether and how much to water tomorrow morning. Decisions are
-expressed as per-zone override calls to a deterministic scheduler
-(Irrigation Unlimited); execution lands on an open-hardware sprinkler
-controller (OpenSprinkler). Everything is observable, every threshold is
-tunable, every line of code is yours.
+and decides whether and how much to water tomorrow morning. It then
+actuates OpenSprinkler directly via HTTP, with per-zone durations computed
+and overrides applied inside the engine itself. Everything is observable,
+every threshold is tunable, every line of code is yours.
 
 ---
 
@@ -92,7 +91,7 @@ tunable, every line of code is yours.
 | **Weather station** | WeatherFlow Tempest | Hyperlocal weather | All-in-one wind/rain/temp/humidity/pressure/UV/illuminance/lightning. Pushes to your hub on UDP 50222 every 3 s. |
 | **Hub** | Tempest Hub | UDP relay | LAN-only when paired; no cloud account required for local UDP path. |
 | **Soil sensors** | Ecowitt WH52 ×4 | Per-zone soil | 3-in-1: capacitive moisture (FDR), soil temp, EC. AAA battery, IP66. 12-month battery life. |
-| **Soil hub** | Ecowitt GW1100B | RF receiver, custom-server push | Pushes to ecowitt2mqtt every 60 s. Local HTTP API exposes raw AD values. |
+| **Soil hub** | Ecowitt GW1100B | RF receiver, LAN HTTP API | LocalSky polls `/get_livedata_info` and `/get_cli_soilad` every 60 s directly. No push relay or sidecar needed. |
 | **Server** | Proxmox host (any x86) | container fleet | LocalSky in container 281, HA in container 279. Modest spec (~2 cores, 4 GB total for both). |
 | **Reverse proxy** | Caddy (container 220) | TLS + optional OAuth gate | Bypasses webhook + static asset routes per [feedback_oauth_gate_vs_crossorigin.md]. |
 | **Optional add-ons** | UDM Pro, Cloudflare Tunnel | Edge networking | For remote access. Stack works without any of these. |
@@ -108,13 +107,11 @@ hard cloud dependency.
 
 | Layer | Component | What it owns |
 |---|---|---|
-| **Engine** | LocalSky (Rust) | Forecast intelligence, skip/run verdict, 7-day verdict strip, 7-day moisture projection, SSE stream, dashboard, run history, push notifications, LLM advisor |
-| **Orchestration** | Home Assistant | Entity registry, automations, voice integrations, alerting, OAuth surface for the web dashboard |
-| **ET bucket math** | Smart Irrigation (HACS) | FAO-56 daily bucket per zone, ET₀ from Open-Meteo or Tempest, soil/plant type configuration, multiplier overrides |
-| **Scheduler** | Irrigation Unlimited (HACS) | Sequence definition, sun-relative trigger, per-zone preamble, manual run + suspend + adjust_time service surface |
-| **Hardware bridge** | `opensprinkler` integration | Maps OpenSprinkler stations to HA entities; receives DC-pulse `run_seconds` commands |
-| **Sensor bridge** | ecowitt2mqtt | Translates Ecowitt push payloads (including the `soil_ec_*` family the native HA integration drops) into MQTT discovery |
-| **MQTT broker** | Eclipse Mosquitto | Local broker for discovery + state |
+| **Engine** | LocalSky (Rust) | Forecast intelligence, skip/run verdict, FAO-56 ET bucket per zone, per-zone scheduling, OpenSprinkler actuation, Ecowitt soil polling + calibration, 7-day verdict strip, 7-day moisture projection, SSE stream, dashboard, run history, push notifications, LLM advisor |
+| **Soil sensors** | Ecowitt GW1100B + 4× WH52 | LocalSky polls `/get_livedata_info` + `/get_cli_soilad` directly; gateway pushes every 60 s; LocalSky owns calibration |
+| **Controller** | OpenSprinkler (DC, 8-zone) | Receives per-zone run commands via LocalSky HTTP REST; executes DC pulses to latching solenoids |
+| **HA integration** | Home Assistant | Receives `sensor.localsky_*` entities via MQTT discovery; provides entity registry, automations, voice, and alerting |
+| **MQTT broker** | Eclipse Mosquitto | Local broker for LocalSky outbound discovery |
 | **Edge proxy** | Caddy | TLS, OAuth, asset bypass |
 
 ---
@@ -152,23 +149,23 @@ firmware). "✅" = shipping, "🟡" = partial / requires add-on / opaque,
 | Sensor-driven saturation skip | ❌ (virtual bucket only) | ✅ (per-zone moisture ≥ threshold) |
 | Sensor-driven frost skip | ❌ | ✅ |
 | Per-zone moisture binding | ❌ | ✅ |
-| Operator-controlled calibration | ❌ (no sensor exists) | ✅ (HA-side AD-capture, audit trail in logbook) |
+| Operator-controlled calibration | ❌ (no sensor exists) | ✅ (LocalSky dashboard Capture DRY/WET, audit trail in run log) |
 | Raw AD value visibility | ❌ | ✅ (separate `sensor.<zone>_soil_ad` diagnostic entity) |
 | EC (fertilizer salt) trend monitoring | ❌ | ✅ (7-day mean + change statistics) |
 | Soil temperature surface | ❌ | ✅ (per zone + yard min/max aggregates) |
 | **Predictive view** | | |
 | 7-day skip/run preview strip | ❌ (calendar shows next runs, not the engine's verdict for each) | ✅ (same engine runs against synthetic forecast inputs) |
 | **7-day soil moisture projection** | ❌ (bucket is opaque) | ✅ (per-zone water-balance trajectory with target band overlay) |
-| Forecast ET visibility | ❌ (ET is internal) | ✅ (`sensor.open_meteo_eto_today` + tomorrow + 3-day avg surfaced) |
-| Per-zone bucket exposure | ❌ | ✅ (`bucket_mm` attribute on `sensor.smart_irrigation_<zone>`) |
+| Forecast ET visibility | ❌ (ET is internal) | ✅ (`sensor.localsky_open_meteo_eto_today` + tomorrow + 3-day avg surfaced) |
+| Per-zone bucket exposure | ❌ | ✅ (`bucket_mm` and planned duration surfaced per zone in the LocalSky dashboard and via `sensor.localsky_<zone>_budget_seconds`) |
 | **Per-zone overrides** | | |
-| Per-zone one-day skip | ❌ ("disable zone" is permanent until re-enabled) | ✅ (`irrigation_unlimited.adjust_time(actual="00:00:00")` at 23:30:35) |
-| Per-zone Kc bump on heat | ❌ | ✅ (`adjust_time(percentage=120)` when soil temp ≥ heat-stress threshold) |
+| Per-zone one-day skip | ❌ ("disable zone" is permanent until re-enabled) | ✅ (LocalSky zeroes that zone's duration when moisture ≥ saturation threshold) |
+| Per-zone Kc bump on heat | ❌ | ✅ (LocalSky applies 120% duration when soil temp ≥ heat-stress threshold) |
 | Per-zone target band (min ↔ max) | 🟡 (allowed depletion, internal-only) | ✅ (`target_min_pct` + `saturation_pct` operator-tunable) |
 | Yard-wide saturation skip (engine-level) | ❌ | ✅ (all 4 zones ≥ threshold AND known) |
 | **Scheduling** | | |
-| Sun-relative trigger | 🟡 (sunrise as fixed time, no offset before sunrise) | ✅ (IU `sun: sunrise, before: 00:30`) |
-| Inter-zone preamble (DC latching) | 🟡 (Rachio is AC only) | ✅ (`preamble: 00:00:02`) |
+| Sun-relative trigger | 🟡 (sunrise as fixed time, no offset before sunrise) | ✅ (LocalSky anchors sequence to finish before sunrise, computes start time dynamically) |
+| Inter-zone preamble (DC latching) | 🟡 (Rachio is AC only) | ✅ (configurable inter-zone preamble delay for DC latching solenoids) |
 | Manual run with custom duration | ✅ | ✅ |
 | Cancel next | ✅ | ✅ |
 | **Operator visibility** | | |
@@ -277,18 +274,21 @@ Rachio has no first-party soil sensor and no native third-party binding.
 Their "saturation skip" is a **virtual bucket** computed from ET + rain
 + soil/plant type. The user has no way to ground-truth it.
 
-LocalSky uses **4× Ecowitt WH52 3-in-1 probes** with **HA-side
-calibration**. Each probe reports raw AD (FDR-based capacitance proxy);
-the operator runs a `Capture DRY` (probe in air) and `Capture WET`
-(probe in saturated soil) on the dashboard, and the template sensor
-[`sensor.<zone>_soil_moisture`](../src/ha/snapshot.rs) computes
-moisture % via a linear map between captured endpoints, clamped 0..100,
-with the audit trail in HA's logbook. The gateway's own factory
-calibration is bypassed and surfaced only as a `_raw_pct` diagnostic.
+LocalSky uses **4× Ecowitt WH52 3-in-1 probes** polled natively by the
+LocalSky Rust engine. LocalSky calls `/get_livedata_info` on the
+GW1100B gateway every 60 s for per-zone moisture %,
+soil temp, and EC, and `/get_cli_soilad` for raw FDR AD counts. The
+gateway's factory moisture % is captured as a `_raw_pct` diagnostic;
+LocalSky applies its own calibration on top.
 
-Two HA `input_number` helpers per zone (`wh52_<zone>_ad_dry` /
-`_ad_wet`) hold the captured values across restarts (no `initial:` so
-the recorder's restore_state preserves operator captures).
+The operator runs `Capture DRY` (probe in air) and `Capture WET`
+(probe in saturated soil) from the dashboard. LocalSky maps raw AD
+between captured endpoints linearly, clamps 0..100, and stores the
+calibration in its own config (not in HA helpers). The audit trail
+lands in LocalSky's run log and is surfaced as `sensor.localsky_<zone>_soil_ad`
+alongside the calibrated `sensor.localsky_<zone>_soil_moisture` entities
+published to HA. No HA-side template sensors, no `input_number` helpers,
+no ecowitt2mqtt translation step is involved.
 
 ### 5. Predictive 7-day moisture projection (Phase E)
 
@@ -308,7 +308,7 @@ Where:
 - `CAPTURE_EFFICIENCY = 0.7` (accounts for runoff, slope, canopy
   interception, 30% of forecast rain doesn't make it into the root
   zone),
-- `zone_Kc` matches Smart Irrigation's multiplier (1.08 for turf, 0.50
+- `zone_Kc` is the operator-configured crop coefficient (1.08 for turf, 0.50
   for shrubs),
 - `soil_depth_mm` is the effective root zone (150 mm turf, 200 mm
   shrubs),
@@ -332,28 +332,28 @@ shows **whether you'll be in your healthy band next Friday**. That's
 the difference between "the engine ran something this morning" and
 "the engine is keeping the lawn alive over the week."
 
-### 6. Per-zone surgical overrides (Phase E HA-side)
+### 6. Per-zone surgical overrides (Phase E)
 
 Rachio has no per-zone calendar overrides. To skip one zone tomorrow,
 the user disables the entire zone (which then stays disabled until
 manually re-enabled).
 
-The LocalSky stack runs `irrigation_unlimited.adjust_time` directly
-against IU's loaded sequence at three points:
+LocalSky computes per-zone durations and applies overrides inside the
+engine before sending the run command to OpenSprinkler. The decision
+pipeline runs nightly at:
 
 ```
-23:30:00  smart_irrigation_iu_sync     → adjust_time(actual=HH:MM:SS) per zone
-23:30:30  smart_irrigation_iu_pre_run  → suspend(11h) if LocalSky verdict = skip
-23:30:35  irrigation_per_zone_sat_skip → adjust_time(actual="00:00:00")
-                                          per zone where moisture ≥ threshold
-23:30:40  irrigation_heat_stress_bump  → adjust_time(percentage=120)
-                                          per zone where soil temp ≥ threshold
+23:30:00  FAO-56 bucket math → per-zone base duration
+23:30:30  verdict check      → suspend entire sequence if LocalSky says skip
+23:30:35  saturation check   → zero duration for zones where moisture ≥ threshold
+23:30:40  heat-stress bump   → 120% duration for zones where soil temp ≥ threshold
 ```
 
 Saturation runs before heat-stress so `120% × 0 = 0` (saturation wins
 when a zone is both wet and hot). Each rule logs the per-zone decision
-to the HA logbook. The morning IU sequence dispatches the modified
-durations to OpenSprinkler.
+to LocalSky's run log and publishes the result as `sensor.localsky_*`
+entities in HA. OpenSprinkler receives the final per-zone run commands
+directly via HTTP REST.
 
 ### 7. Soil-temp frost skip + warm-season binary
 
@@ -364,23 +364,23 @@ still cold enough that sprays freeze on contact and dormant roots
 won't drink.
 
 LocalSky's skip-logic ladder fires `Soil frost` when
-`sensor.soil_temp_yard_now_min < irrigation_frost_skip_f` (default
-35 °F). The yard-min is a `min_max` aggregate over the 4 zone temps.
+`sensor.localsky_soil_temp_yard_min < irrigation_frost_skip_f` (default
+35 °F). The yard-min is a min/max aggregate over the 4 zone temps.
 
-Inverse use case: `binary_sensor.warm_season_active` flips on when
-the 7-day rolling minimum of yard-min soil temperature crosses
+Inverse use case: `binary_sensor.localsky_warm_season_active` flips on
+when the 7-day rolling minimum of yard-min soil temperature crosses
 `soil_warm_season_threshold_f` (default 65 °F). For Florida
 St. Augustine and Bahia, ≥ 65 °F sustained = pre-emergent window
-opens. The user can hang their own automation off this, Rachio
+opens. The user can hang their own automation off this in HA; Rachio
 doesn't expose anything like it.
 
 ### 8. EC (electrical conductivity) for fertilizer salt monitoring
 
-Each WH52 also reports soil EC (µS/cm). LocalSky runs **statistics
-sensors** for each zone:
+Each WH52 also reports soil EC (µS/cm). LocalSky tracks statistics
+for each zone and publishes them to HA:
 
-- `sensor.<zone>_ec_mean_7d`: rolling 7-day mean
-- `sensor.<zone>_ec_change_7d`: total change across the 7-day window
+- `sensor.localsky_<zone>_ec_mean_7d`: rolling 7-day mean
+- `sensor.localsky_<zone>_ec_change_7d`: total change across the 7-day window
 
 Rising EC = salt accumulation (fertilizer or coastal intrusion).
 Sudden drop after rain = leaching event. The dashboard surfaces both
@@ -466,17 +466,17 @@ Every decision LocalSky makes is built from open inputs you can
 inspect:
 
 ```
-sensor.localsky_irrigation_verdict       ← the engine's call
-sensor.localsky_irrigation_reason        ← the human-readable why
-sensor.<zone>_soil_moisture              ← live calibrated %
-sensor.<zone>_soil_ad                    ← raw FDR AD (no math applied)
-input_number.wh52_<zone>_ad_{dry,wet}    ← your captured endpoints
-input_number.irrigation_<zone>_*         ← every threshold, tunable
-sensor.smart_irrigation_<zone>           ← SI's per-zone duration
-sensor.smart_irrigation_<zone>.bucket    ← FAO-56 deficit
-sensor.open_meteo_eto_today              ← reference ET₀
-sensor.soil_temp_yard_now_min            ← min_max aggregate
-binary_sensor.warm_season_active         ← 7d rolling soil-temp gate
+sensor.localsky_irrigation_verdict         ← the engine's call
+sensor.localsky_irrigation_reason          ← the human-readable why
+sensor.localsky_<zone>_soil_moisture       ← live calibrated % (LocalSky-owned)
+sensor.localsky_<zone>_soil_ad             ← raw FDR AD (no math applied)
+sensor.localsky_<zone>_soil_temp           ← per-zone soil temperature
+sensor.localsky_<zone>_budget_seconds      ← planned run duration for tonight
+sensor.localsky_<zone>_ec                  ← soil EC (µS/cm)
+sensor.localsky_open_meteo_eto_today       ← reference ET₀
+sensor.localsky_soil_temp_yard_min         ← min_max aggregate across zones
+binary_sensor.localsky_warm_season_active  ← 7d rolling soil-temp gate
+input_number.irrigation_<zone>_*           ← every threshold, tunable in HA
 ```
 
 Every threshold has a dashboard slider. Every automation has a logbook
@@ -491,7 +491,8 @@ the gauges.
 
 ## Watering-time math (the "why is this zone 30 min?" answer)
 
-Smart Irrigation computes each zone's planned run-time as:
+LocalSky computes each zone's planned run-time internally using FAO-56-based
+bucket math:
 
 ```
 seconds = ( |bucket_mm| / throughput_mm_per_hr ) × 3600 × multiplier
@@ -502,14 +503,14 @@ Where each input is operator-tunable:
 
 | Input | Meaning | Per-zone or global |
 |---|---|---|
-| `bucket_mm` | Soil-water deficit. SI's FAO-56 bucket; negative when ET has depleted from field capacity. | Per zone |
-| `throughput_mm_hr` | The head's precipitation rate. Fixed sprays land 20-40 mm/hr; rotors 6-14 mm/hr; drip 1-5 mm/hr. | Per zone (manually entered in SI) |
+| `bucket_mm` | Soil-water deficit from LocalSky's FAO-56 bucket; negative when ET has depleted from field capacity. | Per zone |
+| `throughput_mm_hr` | The head's precipitation rate. Fixed sprays land 20-40 mm/hr; rotors 6-14 mm/hr; drip 1-5 mm/hr. | Per zone (configured in LocalSky settings) |
 | `multiplier` | Crop coefficient (Kc). St. Augustine warm-season turf runs Kc 1.08 in summer; mulched shrubs ~0.50. | Per zone |
-| `maximum_duration` | A safety ceiling so a misconfigured throughput can't run a zone for 12 hours. Default in SI's source is 3600 s (60 min). | Per zone |
+| `maximum_duration` | A safety ceiling so a misconfigured throughput can't run a zone for 12 hours. Default is 3600 s (60 min). | Per zone |
 
 Two zones with the same bucket deficit and Kc can have **very different** scheduled
 run-times if their throughput differs. A rotor zone at 2.6 mm/hr will run ~3× longer
-than a fixed-spray zone at 7.8 mm/hr to deliver the same depth of water, that's not
+than a fixed-spray zone at 7.8 mm/hr to deliver the same depth of water; that's not
 a bug, it's heads spreading water more slowly on purpose (better infiltration, less
 runoff).
 
@@ -520,12 +521,12 @@ run-time. When the safety ceiling is binding (the calculated need exceeds
 
 ## Weekly water-budget mode (Phase H)
 
-Opt-in per zone: when `input_boolean.irrigation_<zone>_weekly_budget_mode`
-is on, the morning pipeline ignores SI's daily-bucket flex for that zone
-and uses LocalSky's weekly plan instead. The model:
+Opt-in per zone: when a zone has weekly budget mode enabled, the nightly
+pipeline replaces FAO-56 daily-bucket flex for that zone with LocalSky's
+weekly plan. The model:
 
 ```
-weekly_budget_mm  = input_number.irrigation_<zone>_weekly_budget_in × 25.4
+weekly_budget_mm  = irrigation_<zone>_weekly_budget_in × 25.4
 expected_rain_mm  = 7d_weighted_forecast × 25.4 × 0.7  (CAPTURE_EFFICIENCY)
 needed_mm         = max(0, weekly_budget_mm − expected_rain_mm)
 mm_per_session    = needed_mm / sessions_per_week
@@ -547,49 +548,36 @@ guidance:
 | Turf (3 zones) | 1.0" | 2 | UF/IFAS warm-season guideline |
 | Shrubs (mulched) | 0.5" | 1 | Mulch retains, slower dry-down |
 
-All four numbers are operator-tunable per zone via `input_number`
-helpers. The "Weekly water budget" bento card on the irrigation page
-shows each zone's plan + reason for today's recommendation (skipped
+All four numbers are operator-tunable per zone via LocalSky's zone
+configuration. The "Weekly water budget" bento card on the irrigation
+page shows each zone's plan + reason for today's recommendation (skipped
 because rain incoming, skipped because ran 2 days ago, or running
 because last run was 4 days ago and the next 24h is dry).
 
-The pipeline order:
+The pipeline order (nightly, inside LocalSky):
 
 ```
-23:00:00  Smart Irrigation calc -> sensor.smart_irrigation_<zone>
-23:30:00  smart_irrigation_iu_sync writes SI values into IU.adjust_time
-23:30:25  localsky_weekly_budget_override (NEW)
-            for zones with mode=on, overwrites with LocalSky's plan
-23:30:30  smart_irrigation_iu_pre_run_skip_check (LocalSky + frost)
-23:30:35  irrigation_per_zone_saturation_skip
-23:30:40  irrigation_heat_stress_kc_bump
-sunrise -15m  IU sequence finishes (anchor: finish)
+23:30:00  FAO-56 bucket calc → per-zone base duration
+23:30:25  weekly_budget_override
+            for zones with mode=on, overwrites base with weekly plan
+23:30:30  verdict check (LocalSky skip rules + frost)
+23:30:35  per-zone saturation skip (moisture ≥ threshold → zero duration)
+23:30:40  heat-stress Kc bump (soil temp ≥ threshold → 120%)
+sunrise -15m  OpenSprinkler run sequence finishes
 ```
 
-The override at 23:30:25 lands between the SI sync and the verdict check
-so per-zone budget overrides win over SI, but the LocalSky verdict
-(skip/run/skip-on-frost) still has the final say on whether the whole
-sequence runs.
+The budget override at 23:30:25 lands before the verdict and skip checks
+so the LocalSky verdict (skip/run/skip-on-frost) still has the final say
+on whether the sequence runs, but per-zone budget values win over the
+FAO-56 default when budget mode is on.
 
 ## Scheduling: finish before sunrise, not start before sunrise
 
-Irrigation Unlimited supports `anchor: finish` on a schedule, which inverts
-the time semantics: instead of "trigger at this time", it's "finish at this
-time". The configuration in this repo uses:
-
-```yaml
-schedules:
-  - name: Finish 15 min before sunrise
-    anchor: finish
-    time:
-      sun: sunrise
-      before: "00:15"
-```
-
-So the sequence is timed to **finish 15 minutes before sunrise**. IU computes
-the start time automatically as `sunrise − 15min − total_sequence_seconds`.
-When the SI → IU sync at 23:30 rewrites per-zone durations, the start time
-auto-adjusts; no automation needed.
+LocalSky schedules zones to **finish 15 minutes before sunrise**. It
+computes sunrise from lat/lon and works backward: start time =
+`sunrise − 15 min − total_sequence_seconds`. When nightly per-zone
+durations are updated, the start time auto-adjusts; no separate
+automation is needed.
 
 This matches arborist guidance for warm-season grasses: water finishing
 before peak ET hits gives the lawn ~15 min to drain so canopy + soil
@@ -604,14 +592,14 @@ St. Augustine in humid climates.
 |---|---|---|
 | A | done | Forecast intelligence engine (14 rules) |
 | B | done | HA reads LocalSky verdict via REST sensor |
-| C | done | Heat-stress Kc bump into Smart Irrigation |
-| D | done | Ecowitt GW1100B + 4× WH52 via ecowitt2mqtt sidecar with HA-side calibration |
-| E | done | Soil-aware verdict (frost + yard-wide saturation) + per-zone IU.adjust_time overrides + 7-day moisture projection + dashboard tiles |
+| C | done | Heat-stress Kc bump (120% duration on hot zones) |
+| D | done | Ecowitt GW1100B + 4× WH52 polled natively by LocalSky; per-zone moisture calibration inside the engine; ecowitt2mqtt and HA-side template calibration retired |
+| E | done | Soil-aware verdict (frost + yard-wide saturation) + per-zone duration overrides (saturation skip, heat-stress bump) computed in LocalSky + 7-day moisture projection + dashboard tiles |
 | F | done (degraded) | LLM advisor (the LLM provider); offline when vLLM unreachable |
 | PWA | done | Manifest, service worker, web push, mobile shell |
 | **E.1** | done | "Why this duration?" math tile per zone + per-zone history visualization (summary tiles, daily bar chart, recent-runs list) + sequence anchored to finish before sunrise |
-| **H** | done | **Weekly water-budget mode**: per-zone opt-in scheduler that allocates a weekly water target (default 1.0" turf / 0.5" shrubs, operator-tunable) across N sessions/week (default 2 turf / 1 shrubs), subtracts probability-weighted forecast rain × 0.7 capture, defers when next-24h rain ≥ 0.10" or the zone ran within the minimum interval (7 / sessions days), and emits today's recommended seconds. HA's `localsky_weekly_budget_override` automation at 23:30:25 reads `sensor.localsky_<zone>_budget_seconds` and overrides SI's IU value via `irrigation_unlimited.adjust_time(actual=HH:MM:SS)`. Per-zone `input_boolean.irrigation_<zone>_weekly_budget_mode` toggles each zone between budget mode and SI's daily flex independently. |
-| **G (planned)** | | Per-zone forward verdict (when Smart Irrigation moisture binding lands upstream, or via local moisture-driven `set_bucket` overrides) |
+| **H** | done | **Weekly water-budget mode**: per-zone opt-in scheduler that allocates a weekly water target (default 1.0" turf / 0.5" shrubs, operator-tunable) across N sessions/week (default 2 turf / 1 shrubs), subtracts probability-weighted forecast rain × 0.7 capture, defers when next-24h rain ≥ 0.10" or the zone ran within the minimum interval (7 / sessions days), and emits today's recommended seconds. LocalSky applies the budget override at 23:30:25, before the verdict and skip checks, so the skip ladder still has final say. Per-zone budget mode toggles each zone between weekly-budget and FAO-56 daily flex independently. |
+| **G (planned)** | | Per-zone forward verdict based on live soil moisture trajectory (moisture-driven `set_bucket` overrides in the FAO-56 model) |
 | **I (planned)** | | Flow-meter integration (OpenSprinkler flow input → real-time leak detection + per-event volume) |
 | **J (planned)** | | EC-driven flush-watering recommendation (informational → optional automation) |
 | **K (planned)** | | Forecast ET vector (Open-Meteo per-day `et0_fao_evapotranspiration`) added to `DailyEntry` so the 7-day projection uses real future ET instead of today's value |

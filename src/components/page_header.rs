@@ -37,6 +37,7 @@ pub fn PageHeader() -> impl IntoView {
 
     view! {
         <div class="page-header" aria-label="Page header">
+            <crate::components::connection::ConnPill/>
             <div class="mode-toggle" role="group" aria-label="Display mode">
                 <span class="mode-toggle__label">"Mode"</span>
                 <button

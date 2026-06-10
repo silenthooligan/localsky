@@ -81,7 +81,9 @@ fn VerdictCell(v: DayVerdict) -> impl IntoView {
     view! {
         <div class=cls title=tooltip role="group" aria-label=aria>
             <div class="verdict-cell-day">{weekday}</div>
-            <div class="verdict-cell-glyph" aria-hidden="true">{glyph}</div>
+            <div class="verdict-cell-glyph" aria-hidden="true">
+                <crate::components::ui::Icon name=glyph size=22/>
+            </div>
             <div class="verdict-cell-temp" aria-hidden="true">{temp_str}</div>
             <div class="verdict-cell-rain" aria-hidden="true">{rain_str}</div>
             <div class="verdict-cell-tag" aria-hidden="true">{tag}</div>

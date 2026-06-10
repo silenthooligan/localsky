@@ -9,10 +9,10 @@ services:
     container_name: localsky
     restart: unless-stopped
     network_mode: host
-    # Temporary: image defaults to uid 10001 since the 2026-05-21 hardening pass.
-    # /mnt/docker/localsky and _shared/keys are still root-owned on container.
-    # To drop this override: pct exec 281 chown -R 10001:10001 /mnt/docker/localsky
-    # and ensure 10001 can read /mnt/docker/komodo/_shared/keys/vapid-private.pem.
+    # Temporary: image defaults to uid 10001 since the 2026-05-21 hardening pass,
+    # but the data + keys mounts may still be root-owned on the host.
+    # To drop this override, chown the data dir to 10001:10001 on the host
+    # and make sure 10001 can read the mounted vapid-private.pem.
     user: "0:0"
     environment:
       - TZ=${TZ}
@@ -45,13 +45,15 @@ services:
       # web-push CLI or openssl, see .agent/agent.md for the recipe.
       - VAPID_PUBLIC_KEY=${VAPID_PUBLIC_KEY:-}
       - VAPID_PRIVATE_KEY_PATH=${VAPID_PRIVATE_KEY_PATH:-/keys/vapid-private.pem}
-      - VAPID_SUBJECT=${VAPID_SUBJECT:-mailto:erik.skean@gmail.com}
+      # RFC 8292 subject: contact URL the push service may use. Override
+      # with VAPID_SUBJECT (mailto: or https:) if you want your own.
+      - VAPID_SUBJECT=${VAPID_SUBJECT:-https://github.com/silenthooligan/localsky}
     volumes:
-      - /mnt/docker/localsky:/data
-      # _shared/keys lives on the host's syncthing volume; the VAPID
-      # private key is checked into _shared/keys/ (per the
-      # 'feedback_track_creds.md' convention) and mounted read-only.
-      - /mnt/docker/komodo/_shared/keys:/keys:ro
+      - ./data:/data
+      # The VAPID private key lives in a host keys directory and is
+      # mounted read-only; generate one with the web-push CLI or
+      # openssl (see docs/notifications.md).
+      - ./keys:/keys:ro
     logging:
       driver: json-file
       options:
@@ -84,7 +86,7 @@ services:
       - LOCALSKY_DEMO=1
       - HISTORY_DB_PATH=/data/irrigation.db
     volumes:
-      - /mnt/docker/localsky-v2:/data
+      - ./demo-data:/data
     # The image HEALTHCHECK targets 8090 (the prod port). Override for the
     # demo sidecar since it binds 8091.
     healthcheck:

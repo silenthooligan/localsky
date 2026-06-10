@@ -59,6 +59,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "irrigation_control",
         sql: include_str!("migrations/M0008_irrigation_control.sql"),
     },
+    Migration {
+        version: "M0009",
+        name: "auth",
+        sql: include_str!("migrations/M0009_auth.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]
@@ -218,6 +223,7 @@ mod tests {
                 "M0006".to_string(),
                 "M0007".to_string(),
                 "M0008".to_string(),
+                "M0009".to_string(),
             ]
         );
     }

@@ -129,37 +129,60 @@ pub async fn fetch_ha_devices(cfg: &HaWsConfig) -> Result<Vec<Device>> {
     Ok(build_ha_devices(&devs, &ents))
 }
 
-/// Keywords that mark a device as weather/soil/irrigation-relevant. Matched
-/// against the device's manufacturer/model/name and its entity ids. Keeps the
-/// import from dumping all ~130 HA devices (lights, locks, automations) into
-/// the weather app.
-const RELEVANT_KEYWORDS: &[&str] = &[
+/// Weather/irrigation VENDOR keywords, matched only against a device's
+/// manufacturer / model / name. Generic weather words (temperature, humidity,
+/// wind, rain) are deliberately NOT here: every thermostat, phone, and alarm
+/// panel has a temp/battery sensor, and matching those flooded the import.
+const VENDOR_KEYWORDS: &[&str] = &[
     "ecowitt",
     "tempest",
     "weatherflow",
     "davis",
-    "ambient",
+    "ambient weather",
     "netatmo",
     "acurite",
-    "weather",
-    "soil",
-    "moisture",
-    "rain",
-    "wind",
-    "irrigation",
-    "sprinkler",
     "opensprinkler",
     "rachio",
     "hydrawise",
-    "bhyve",
     "b-hyve",
-    "valve",
+    "bhyve",
+    "rain bird",
+    "rainbird",
+];
+
+/// Specific entity-id terms that mark a device as irrigation/soil hardware
+/// regardless of vendor (a soil probe, a sprinkler valve).
+const ENTITY_KEYWORDS: &[&str] = &[
+    "soil",
+    "moisture",
+    "irrigation",
+    "sprinkler",
     "evapotranspiration",
 ];
 
-fn is_relevant(hay: &str) -> bool {
-    let h = hay.to_ascii_lowercase();
-    RELEVANT_KEYWORDS.iter().any(|k| h.contains(k))
+/// True when the HA device is LocalSky's own integration device (or its
+/// entities are LocalSky-published). Skipping it prevents an import->publish
+/// echo loop: LocalSky should never re-import what it exposed to HA.
+fn is_localsky_own(d: &Value) -> bool {
+    if d.get("manufacturer")
+        .and_then(Value::as_str)
+        .map(|m| m.eq_ignore_ascii_case("localsky"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    d.get("identifiers")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter().any(|ident| {
+                ident
+                    .as_array()
+                    .and_then(|p| p.first())
+                    .and_then(Value::as_str)
+                    == Some("localsky")
+            })
+        })
+        .unwrap_or(false)
 }
 
 /// Coarse role for an HA entity from its entity_id (domain + keywords).
@@ -219,13 +242,36 @@ pub fn build_ha_devices(devs: &[Value], ents: &[Value]) -> Vec<Device> {
             .unwrap_or("Home Assistant device");
         let entity_ids = by_device.remove(id).unwrap_or_default();
 
-        // Relevance: device fields OR any of its entity ids.
-        let blob = format!("{manufacturer} {model} {name} {}", entity_ids.join(" "));
-        if !is_relevant(&blob) {
+        // Echo guard: never re-import LocalSky's own published device.
+        if is_localsky_own(d) {
+            continue;
+        }
+
+        // Skip HA "service" devices. HACS frontend plugins (button-card, the
+        // Irrigation Unlimited Lovelace card) and integration meta-entries
+        // register in the device registry with entry_type="service". They're
+        // not physical hardware — real gateways/controllers have no entry_type
+        // — so they're pure noise in a device list.
+        if d.get("entry_type").and_then(Value::as_str) == Some("service") {
+            continue;
+        }
+
+        // Relevance: a weather/irrigation VENDOR on the device fields, OR a
+        // soil/irrigation-specific term on an entity id. (Generic weather
+        // words on entity ids are excluded; a phone's battery sensor or an
+        // alarm panel's temp reading shouldn't pull the whole device in.)
+        let dev_fields = format!("{manufacturer} {model} {name}").to_ascii_lowercase();
+        let vendor_hit = VENDOR_KEYWORDS.iter().any(|k| dev_fields.contains(k));
+        let entity_hit = entity_ids.iter().any(|e| {
+            let el = e.to_ascii_lowercase();
+            ENTITY_KEYWORDS.iter().any(|k| el.contains(k))
+        });
+        if !(vendor_hit || entity_hit) {
             continue;
         }
 
         // Kind: irrigation if it looks like a controller/valve, else gateway.
+        let blob = format!("{dev_fields} {}", entity_ids.join(" "));
         let kind = if is_irrigation(&blob) {
             DeviceKind::IrrigationController
         } else {
@@ -253,6 +299,7 @@ pub fn build_ha_devices(devs: &[Value], ents: &[Value]) -> Vec<Device> {
             source_id: None,
             online: None,
             last_seen_epoch: None,
+            also_in_ha: false,
             children,
         });
     }
@@ -325,6 +372,32 @@ fn humanize_entity(entity_id: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn skips_localsky_own_and_unrelated_devices() {
+        let devs = vec![
+            // LocalSky's own HACS device — must be skipped (echo guard).
+            json!({"id":"ls","name":"LocalSky","manufacturer":"LocalSky","model":"","identifiers":[["localsky","entry123"]]}),
+            // A laptop / alarm panel with only a battery+temp sensor — no
+            // vendor, no soil/irrigation entity, so it's dropped.
+            json!({"id":"laptop","name":"Travel Laptop","manufacturer":"Microsoft","model":"Surface","identifiers":[]}),
+            // A real Ecowitt — kept by vendor.
+            json!({"id":"gw","name":"GW1100B","manufacturer":"Ecowitt","model":"GW1100B","identifiers":[["ecowitt","abc"]]}),
+            // A HACS Lovelace plugin (Irrigation Unlimited Card). It matches
+            // "irrigation" by name but is entry_type=service, so it must be
+            // dropped as non-hardware noise rather than shown as a controller.
+            json!({"id":"iucard","name":"Irrigation Unlimited Card","manufacturer":"rgc99","model":"plugin","entry_type":"service","identifiers":[["hacs","447474061"]]}),
+        ];
+        let ents = vec![
+            json!({"device_id":"ls","entity_id":"sensor.localsky_back_yard_soil_moisture","disabled_by":null}),
+            json!({"device_id":"laptop","entity_id":"sensor.laptop_battery","disabled_by":null}),
+            json!({"device_id":"laptop","entity_id":"sensor.laptop_temperature","disabled_by":null}),
+            json!({"device_id":"gw","entity_id":"sensor.gw1100b_indoor_temperature","disabled_by":null}),
+        ];
+        let out = build_ha_devices(&devs, &ents);
+        assert_eq!(out.len(), 1, "only the Ecowitt survives");
+        assert_eq!(out[0].id, "ha:gw");
+    }
 
     #[test]
     fn imports_ecowitt_device_with_entities() {

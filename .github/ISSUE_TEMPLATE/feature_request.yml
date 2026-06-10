@@ -1,0 +1,35 @@
+name: Feature request
+description: Suggest a new capability, source, controller, or UI improvement
+labels: ["enhancement", "triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What's the problem
+      description: What can't you do today, or what's painful about how you do it now? Lead with the use case, not the proposed solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you'd like to see
+      description: Optional. If you have a specific idea, sketch it here.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you've considered
+      description: Other projects, workarounds, manual processes you've tried.
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - Weather source (new station, new forecast provider)
+        - Irrigation controller (new hardware or integration)
+        - Engine (skip rule, ET model, soil model, scheduling)
+        - UI (dashboard, settings, wizard, mobile)
+        - HACS integration (entities, services, device card)
+        - Docs
+        - Other
+    validations:
+      required: true

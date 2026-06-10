@@ -8,5 +8,6 @@
 // every interface so a gateway on any attached subnet is found.
 
 pub mod ecowitt;
+pub mod opensprinkler;
 
 pub use ecowitt::{discover_ecowitt, DiscoveredGateway};

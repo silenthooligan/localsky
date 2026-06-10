@@ -58,6 +58,31 @@ async fn main() -> anyhow::Result<()> {
     // (the rest of the irrigation page works fine).
     let history_path =
         std::env::var("HISTORY_DB_PATH").unwrap_or_else(|_| "/data/irrigation.db".to_string());
+    // Stable per-install identity (mDNS TXT uuid + HACS unique_id),
+    // persisted next to the DB so it survives config restores.
+    localsky::instance::init(
+        std::path::Path::new(&history_path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("/data")),
+    );
+    // Staged restore swap: POST /api/v1/backup/restore writes the
+    // uploaded DB to <db>.restore; the swap happens here, before
+    // anything opens the live file.
+    {
+        let stage = format!("{history_path}.restore");
+        if std::path::Path::new(&stage).exists() {
+            let aside = format!(
+                "{history_path}.pre-restore.{}",
+                chrono::Utc::now().timestamp()
+            );
+            let swap = std::fs::rename(&history_path, &aside)
+                .and_then(|()| std::fs::rename(&stage, &history_path));
+            match swap {
+                Ok(()) => tracing::info!(kept = %aside, "restored database swapped in"),
+                Err(e) => tracing::warn!(error = %e, "staged DB restore failed; keeping current"),
+            }
+        }
+    }
     let history_db = match HistoryDb::open(history_path.clone().into()) {
         Ok(db) => Some(db),
         Err(e) => {
@@ -306,6 +331,11 @@ async fn main() -> anyhow::Result<()> {
     if let Some(cfg) = boot_cfg.as_ref() {
         device_registry.set(localsky::devices::build_devices(cfg));
     }
+    // F1b: import HA devices into the registry on a background loop (no-op
+    // when HA isn't configured). Makes HA's hardware appear in /devices.
+    if !demo_mode {
+        localsky::devices::ha_import::spawn(device_registry.clone(), 120);
+    }
 
     // HA controller entity prefix for the POST /action handler (config-driven;
     // default "opensprinkler" so the HA path works for any operator's naming).
@@ -363,6 +393,25 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     let draft_store = Arc::new(WizardStore::new(&draft_path));
+
+    // ----- Built-in auth -----
+    // Identity store shares the history SQLite (M0009 tables). Policy is
+    // hot-read from the config file every 10s; existing configs without
+    // an [auth] block deserialize to mode=disabled, so nothing changes
+    // until an owner account is created. The middleware is layered over
+    // the WHOLE app (pages, APIs, static fallback) at the end of this fn.
+    let auth_rt = history_conn.clone().map(|hc| {
+        let store = localsky::auth::AuthStore::new(hc);
+        let rt = std::sync::Arc::new(localsky::auth::AuthRuntime::new(store));
+        rt.spawn_refresh(cfg_store.clone());
+        rt
+    });
+    let mk_auth = |rt: std::sync::Arc<localsky::auth::AuthRuntime>| {
+        api::auth::router(api::auth::AuthApiState {
+            rt,
+            cfg_store: cfg_store.clone(),
+        })
+    };
 
     // Receiver sources (Ecowitt local POST + generic HTTP webhook).
     // Loaded from the config file if present; absent on fresh installs.
@@ -441,6 +490,8 @@ async fn main() -> anyhow::Result<()> {
         api::wizard::router(api::wizard::WizardApiState {
             draft_store: draft_store.clone(),
             config_store: cfg_store.clone(),
+            auth_rt: auth_rt.clone(),
+            tempest_store: Some(tempest_store.clone()),
         })
     };
     let mk_photos = {
@@ -514,6 +565,21 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/v1/health", mk_health())
         .nest("/api/v1/ingest", mk_ingest())
         .nest("/api/v1/zones", mk_photos())
+        .nest(
+            "/api/v1/backup",
+            api::backup::router(api::backup::BackupApiState {
+                cfg_store: cfg_store.clone(),
+                db: history_conn.clone(),
+                db_path: history_path.clone(),
+                snapshots: history_conn
+                    .clone()
+                    .map(localsky::persistence::ConfigSnapshotStore::new),
+            }),
+        )
+        .route(
+            "/api/v1/updates",
+            axum::routing::get(localsky::updates::updates_handler),
+        )
         // Serve uploaded zone photos as static files at /site/photos/*.
         .nest_service(
             "/site/photos",
@@ -531,13 +597,52 @@ async fn main() -> anyhow::Result<()> {
             HeaderValue::from_static("no-cache"),
         ));
 
+    // Mount the auth API + layer the enforcement middleware over the
+    // complete router so it sees pages, APIs, and the static fallback.
+    // No history DB = no identity store; auth stays structurally off.
+    let auth_rt_for_mdns = auth_rt.clone();
+    let app = if let Some(rt) = auth_rt {
+        app.nest("/api/auth", mk_auth(rt.clone()))
+            .nest("/api/v1/auth", mk_auth(rt.clone()))
+            .layer(axum::middleware::from_fn_with_state(
+                rt,
+                localsky::auth::middleware::enforce,
+            ))
+    } else {
+        tracing::warn!("no history DB; built-in auth unavailable (mode stays disabled)");
+        app
+    };
+
+    // Opt-in update check ([updates].check_enabled).
+    if boot_cfg
+        .as_ref()
+        .map(|c| c.updates.check_enabled)
+        .unwrap_or(false)
+    {
+        localsky::updates::spawn();
+    }
+
+    // mDNS announce so the HACS zeroconf step + LAN clients find this
+    // instance. Config-gated (network.mdns_enabled, default on);
+    // skipped in demo mode.
+    let mdns_enabled = boot_cfg
+        .as_ref()
+        .map(|c| c.network.mdns_enabled)
+        .unwrap_or(true);
+    if mdns_enabled && !demo_mode {
+        localsky::network::mdns::spawn(addr.port(), auth_rt_for_mdns);
+    }
+
     tracing::info!("localsky listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .with_context(|| format!("bind {addr}: is another service holding this port?"))?;
-    axum::serve(listener, app.into_make_service())
-        .await
-        .context("axum serve loop exited unexpectedly")?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .context("axum serve loop exited unexpectedly")?;
     Ok(())
 }
 

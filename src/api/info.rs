@@ -22,7 +22,10 @@ use serde::{Deserialize, Serialize};
 /// irrigation snapshot. 1.4.0 adds the additive `GET /devices` endpoint
 /// (the MA-style device topology: gateways/controllers + their children).
 /// 1.5.0 adds `GET /devices/discover` (native LAN gateway discovery).
-pub const API_VERSION: &str = "1.5.0";
+/// 1.6.0 adds `auth_required` + `uuid` here (built-in auth + stable
+/// instance identity for HACS/zeroconf pairing) and the /api/v1/auth
+/// endpoint family.
+pub const API_VERSION: &str = "1.6.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {
@@ -53,6 +56,13 @@ pub struct Info {
     /// reason as dry_run so deployed-demo instances are visually
     /// distinct.
     pub demo: bool,
+    /// True when this instance requires authentication. Integration
+    /// clients (HACS) read this on probe and prompt for an API token.
+    pub auth_required: bool,
+    /// Stable per-install id (also broadcast in the mDNS TXT record).
+    /// Lets clients dedupe across IP/host changes. None before first
+    /// boot completes init.
+    pub uuid: Option<String>,
 }
 
 pub fn router() -> Router {
@@ -63,7 +73,12 @@ fn env_flag(name: &str) -> bool {
     std::env::var(name).ok().as_deref() == Some("1")
 }
 
-async fn info() -> Json<Info> {
+async fn info(req: axum::http::Request<axum::body::Body>) -> Json<Info> {
+    let auth_required = req
+        .extensions()
+        .get::<crate::auth::middleware::AuthRequired>()
+        .map(|a| a.0)
+        .unwrap_or(false);
     Json(Info {
         service: "localsky",
         service_version: env!("CARGO_PKG_VERSION"),
@@ -73,6 +88,8 @@ async fn info() -> Json<Info> {
         repository: "https://github.com/silenthooligan/localsky",
         dry_run: env_flag("LOCALSKY_SMART_DRY_RUN"),
         demo: env_flag("LOCALSKY_DEMO"),
+        auth_required,
+        uuid: crate::instance::get().map(str::to_string),
     })
 }
 
@@ -82,7 +99,8 @@ mod tests {
 
     #[tokio::test]
     async fn info_endpoint_returns_expected_shape() {
-        let Json(body) = info().await;
+        let req = axum::http::Request::new(axum::body::Body::empty());
+        let Json(body) = info(req).await;
         assert_eq!(body.service, "localsky");
         assert_eq!(body.api_prefix, "/api/v1");
         assert_eq!(body.license, "Apache-2.0");

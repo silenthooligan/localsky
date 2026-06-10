@@ -540,7 +540,7 @@ fn ConditionRuleEditor(
 
             <div class="cond-editor__preview">
                 {move || match would_fire() {
-                    Some(true) => view! { <span class="cond-fire cond-fire--yes">"Would fire now ✓"</span> }.into_any(),
+                    Some(true) => view! { <span class="cond-fire cond-fire--yes">"Would fire now"</span> }.into_any(),
                     Some(false) => view! { <span class="cond-fire cond-fire--no">"Would not fire now"</span> }.into_any(),
                     None => view! { <span class="cond-fire">"Per-zone — evaluated live per zone"</span> }.into_any(),
                 }}

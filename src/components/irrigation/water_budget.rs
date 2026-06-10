@@ -118,7 +118,7 @@ fn WaterBudgetTile(zone: Signal<WaterBudget>) -> impl IntoView {
         let m = (z.seconds_per_session as f64) / 60.0;
         if z.session_capped {
             format!(
-                "session run-time: {:.0} min  ⚠ capped (would need longer to deliver full depth)",
+                "session run-time: {:.0} min, capped (would need longer to deliver full depth)",
                 m
             )
         } else {

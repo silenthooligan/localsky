@@ -15,6 +15,7 @@
 //   form_field.rs - label + helptext + error wrapper
 //   list_item.rs  - icon + title + subtitle + trailing control/chevron
 //   empty_state.rs - icon + title + body + CTA for empty pages
+//   skeleton.rs   - shimmering ghost placeholders for first-load states
 //   stat_tile.rs  - label + big number + delta + inline sparkline
 //   sparkline.rs  - inline single-series SVG trend line
 //   line_chart.rs - multi-series SVG chart (paths) + HTML legend/axes
@@ -34,6 +35,7 @@ pub mod panel;
 pub mod photo_field;
 pub mod segmented;
 pub mod sheet;
+pub mod skeleton;
 pub mod slider;
 pub mod sparkline;
 pub mod stat_tile;
@@ -53,6 +55,7 @@ pub use panel::Panel;
 pub use photo_field::PhotoField;
 pub use segmented::SegmentedControl;
 pub use sheet::Sheet;
+pub use skeleton::{Skeleton, SkeletonRows};
 pub use slider::Slider;
 pub use sparkline::Sparkline;
 pub use stat_tile::{DeltaSense, StatTile};

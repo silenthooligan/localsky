@@ -104,7 +104,11 @@ Most home irrigation systems are either dumb timers or cloud tethered too. The c
 ### UI and operability
 
 - **Installable PWA** on iOS, Android, and desktop with VAPID-signed push notifications
-- **First-run wizard** + in-app settings; no editing config files by hand
+- **Built-in authentication**: owner account, sessions, and show-once API tokens for integrations; trusted-network CIDRs keep the home LAN frictionless while remote access requires sign-in
+- **Network discovery**: one-click setup finds your Tempest broadcast, Ecowitt gateways, and OpenSprinkler on the LAN; LocalSky announces itself over mDNS so Home Assistant discovers it right back
+- **First-run wizard** + in-app settings; no editing config files by hand (address search, timezone autofill, live controller test + zone import)
+- **One-file backup and restore**: config plus full history database as a single bundle, downloadable from Settings
+- **Opt-in update check** (off by default; nothing phones home unless you turn it on)
 - **Versioned JSON schema** published at `/api/config/schema` for the settings UI
 - **Atomic config writes** with snapshot-before-write retention and always-reachable rollback endpoint
 - **Versioned SQLite migrations** with engine-replay history (stored verdict inputs replay through the current rules)

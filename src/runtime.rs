@@ -426,6 +426,12 @@ pub fn build_test_controller(
     entry: &crate::config::schema::ControllerEntry,
 ) -> Result<Arc<dyn IrrigationController>, String> {
     let c: Arc<dyn IrrigationController> = match &entry.controller {
+        // DryRun is the zero-hardware sandbox: always reachable, and its
+        // discover_zones returns sample stations so the wizard's whole
+        // test + scan + import flow works before any real gear exists.
+        ControllerKind::DryRun(c) => {
+            Arc::new(DryRunController::new(entry.id.clone(), c.clone(), None))
+        }
         ControllerKind::OpensprinklerDirect(c) => Arc::new(
             OpenSprinklerDirect::new(entry.id.clone(), c.clone(), Default::default())
                 .map_err(|e| e.to_string())?,
@@ -452,7 +458,15 @@ pub fn build_test_controller(
 }
 
 async fn build_llm(cfg: &Config) -> Option<Arc<dyn LlmProvider>> {
-    let llm_cfg = cfg.llm.as_ref()?;
+    build_llm_from(cfg.llm.as_ref()?).await
+}
+
+/// Build a provider straight from an `LlmConfig`, independent of a full
+/// `Config`. Used by `build_llm` at boot and by the wizard's test_llm
+/// endpoint to probe a draft provider before it is applied.
+pub async fn build_llm_from(
+    llm_cfg: &crate::config::schema::LlmConfig,
+) -> Option<Arc<dyn LlmProvider>> {
     match &llm_cfg.provider {
         LlmProviderKind::Auto(auto_cfg) => {
             let targets = if auto_cfg.probe_order.is_empty() {

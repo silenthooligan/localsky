@@ -6,6 +6,8 @@
 
 - [Quick start](getting-started.md)
 - [Standalone mode](standalone.md)
+- [Authentication](authentication.md)
+- [Reverse proxy and HTTPS](reverse-proxy.md)
 - [Home Assistant integration](hacs.md)
 
 # Configuration

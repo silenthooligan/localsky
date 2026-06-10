@@ -34,6 +34,7 @@ pub type ConfigApiState = Arc<FileConfigStore>;
 pub fn router(state: ConfigApiState) -> Router {
     Router::new()
         .route("/", get(get_config).put(put_config))
+        .route("/validate", get(get_validate))
         .route("/schema", get(get_schema))
         .route("/preview", post(preview_config))
         .route("/rollback", post(post_rollback))
@@ -271,8 +272,43 @@ async fn put_config(
                 .into_response();
         }
     };
+    // Structural validation: errors block the save (the report rides in
+    // the 422 body so the UI can show field-level issues); warnings are
+    // returned alongside the success body.
+    let report = crate::config::validate::validate(&cfg);
+    if !report.ok() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": "config_invalid",
+                "validation": report,
+            })),
+        )
+            .into_response();
+    }
     match store.save(&cfg).await {
-        Ok(v) => Json(v).into_response(),
+        Ok(v) => Json(serde_json::json!({
+            "saved": v,
+            "validation": report,
+        }))
+        .into_response(),
+        Err(e) => store_err(e).into_response(),
+    }
+}
+
+/// GET /api/v1/config/validate -> the structured report for the config
+/// as currently on disk. The settings overview surfaces warnings.
+async fn get_validate(State(store): State<ConfigApiState>) -> impl IntoResponse {
+    match store.load().await {
+        Ok(cfg) => Json(serde_json::json!({
+            "validation": crate::config::validate::validate(&cfg)
+        }))
+        .into_response(),
+        Err(ConfigStoreError::NotFound) => Json(serde_json::json!({
+            "validation": { "errors": [], "warnings": [] },
+            "note": "no config yet (wizard pending)",
+        }))
+        .into_response(),
         Err(e) => store_err(e).into_response(),
     }
 }

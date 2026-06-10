@@ -12,9 +12,9 @@ use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
 
 use super::{
-    SettingsAdvanced, SettingsControllers, SettingsLlm, SettingsLocation, SettingsNotifications,
-    SettingsRestrictions, SettingsSchedules, SettingsSkipRules, SettingsSources, SettingsTheme,
-    SettingsUnits, SettingsZones,
+    SettingsAccount, SettingsAdvanced, SettingsControllers, SettingsDevices, SettingsLlm,
+    SettingsLocation, SettingsNotifications, SettingsRestrictions, SettingsSchedules,
+    SettingsSkipRules, SettingsSources, SettingsTheme, SettingsUnits, SettingsZones,
 };
 use crate::components::ui::Icon;
 
@@ -102,6 +102,12 @@ const GROUPS: &[SectionGroup] = &[
         title: "App",
         subtitle: "How LocalSky talks to you + per-browser preferences.",
         links: &[
+            SectionLink {
+                key: "account",
+                label: "Account",
+                helptext: "Owner login + API tokens for integrations",
+                icon: "settings",
+            },
             SectionLink {
                 key: "notifications",
                 label: "Notifications",
@@ -192,13 +198,7 @@ pub fn SettingsHome() -> impl IntoView {
                 </div>
 
                 {move || match selected.get() {
-                    None => view! {
-                        <div class="settings-shell__placeholder">
-                            <Icon name="settings" size=34/>
-                            <p>"Pick a setting on the left to edit it here."</p>
-                        </div>
-                    }
-                    .into_any(),
+                    None => view! { <SettingsOverview selected=selected/> }.into_any(),
                     Some(key) => view! {
                         <div class="settings-shell__pane">
                             <button
@@ -222,9 +222,172 @@ pub fn SettingsHome() -> impl IntoView {
     }
 }
 
+/// Default detail pane: a live system overview instead of dead space.
+/// Polls /api/v1/health once on mount (hydrate-only; SSR + first frame
+/// render the skeleton, so the DOM matches) and shows version, uptime,
+/// counts with per-source freshness dots, plus quick links into the
+/// relevant sections.
+#[component]
+fn SettingsOverview(selected: RwSignal<Option<&'static str>>) -> impl IntoView {
+    let health: RwSignal<serde_json::Value> = RwSignal::new(serde_json::Value::Null);
+
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        leptos::task::spawn_local(async move {
+            if let Ok(resp) = gloo_net::http::Request::get("/api/v1/health").send().await {
+                if let Ok(v) = resp.json::<serde_json::Value>().await {
+                    health.set(v);
+                }
+            }
+        });
+    });
+    #[cfg(not(feature = "hydrate"))]
+    let _ = health;
+
+    move || {
+        let h = health.get();
+        if h.is_null() {
+            return view! {
+                <div class="settings-overview">
+                    <crate::components::ui::SkeletonRows count=4/>
+                </div>
+            }
+            .into_any();
+        }
+        let version = h
+            .get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string();
+        let status = h
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string();
+        let uptime_s = h.get("uptime_s").and_then(|v| v.as_u64()).unwrap_or(0);
+        let uptime = if uptime_s >= 86_400 {
+            format!("{}d {}h", uptime_s / 86_400, (uptime_s % 86_400) / 3_600)
+        } else if uptime_s >= 3_600 {
+            format!("{}h {}m", uptime_s / 3_600, (uptime_s % 3_600) / 60)
+        } else {
+            format!("{}m", uptime_s / 60)
+        };
+        let status_tone = match status.as_str() {
+            "ok" => "settings-overview__status is-ok",
+            "degraded" => "settings-overview__status is-warn",
+            _ => "settings-overview__status",
+        };
+
+        let sources = h
+            .get("sources")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let controllers = h
+            .get("controllers")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let source_rows = sources
+            .iter()
+            .map(|s| {
+                let id = s
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
+                    .to_string();
+                let st = s.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+                let dot = match st {
+                    "fresh" => "settings-overview__dot is-fresh",
+                    "stale" => "settings-overview__dot is-stale",
+                    _ => "settings-overview__dot is-offline",
+                };
+                view! {
+                    <li class="settings-overview__row">
+                        <span class=dot aria-hidden="true"></span>
+                        <span class="settings-overview__row-name">{id}</span>
+                        <span class="settings-overview__row-meta">{st.to_string()}</span>
+                    </li>
+                }
+            })
+            .collect_view();
+        let controller_rows = controllers
+            .iter()
+            .map(|c| {
+                let id = c
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
+                    .to_string();
+                let kind = c
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let is_default = c.get("default").and_then(|v| v.as_bool()) == Some(true);
+                view! {
+                    <li class="settings-overview__row">
+                        <span class="settings-overview__dot is-fresh" aria-hidden="true"></span>
+                        <span class="settings-overview__row-name">{id}</span>
+                        <span class="settings-overview__row-meta">
+                            {kind}
+                            {if is_default { " · default" } else { "" }}
+                        </span>
+                    </li>
+                }
+            })
+            .collect_view();
+
+        view! {
+            <div class="settings-overview">
+                <div class="settings-overview__stats">
+                    <div class="settings-overview__stat">
+                        <span class="settings-overview__stat-label">"Status"</span>
+                        <span class=status_tone>{status}</span>
+                    </div>
+                    <div class="settings-overview__stat">
+                        <span class="settings-overview__stat-label">"Version"</span>
+                        <span class="settings-overview__stat-value">{version}</span>
+                    </div>
+                    <div class="settings-overview__stat">
+                        <span class="settings-overview__stat-label">"Uptime"</span>
+                        <span class="settings-overview__stat-value">{uptime}</span>
+                    </div>
+                </div>
+
+                <div class="settings-overview__section">
+                    <div class="settings-overview__section-head">
+                        <h3>"Weather sources"</h3>
+                        <button type="button" class="settings-overview__jump"
+                            on:click=move |_| selected.set(Some("sources"))>"Edit"</button>
+                    </div>
+                    <ul class="settings-overview__list">{source_rows}</ul>
+                </div>
+
+                <div class="settings-overview__section">
+                    <div class="settings-overview__section-head">
+                        <h3>"Controllers"</h3>
+                        <button type="button" class="settings-overview__jump"
+                            on:click=move |_| selected.set(Some("controllers"))>"Edit"</button>
+                    </div>
+                    <ul class="settings-overview__list">{controller_rows}</ul>
+                </div>
+
+                <p class="settings-overview__hint">
+                    "Pick a section on the left to edit it here. The Sensors hub shows live "
+                    "per-field readings; the Devices section maps everything that feeds this box."
+                </p>
+            </div>
+        }
+        .into_any()
+    }
+}
+
 /// Render the editor component for a section key into the detail pane.
 fn section_view(key: &str) -> leptos::prelude::AnyView {
     match key {
+        "devices" => view! { <SettingsDevices/> }.into_any(),
         "zones" => view! { <SettingsZones/> }.into_any(),
         "sources" => view! { <SettingsSources/> }.into_any(),
         "controllers" => view! { <SettingsControllers/> }.into_any(),
@@ -233,6 +396,7 @@ fn section_view(key: &str) -> leptos::prelude::AnyView {
         "restrictions" => view! { <SettingsRestrictions/> }.into_any(),
         "schedules" => view! { <SettingsSchedules/> }.into_any(),
         "llm" => view! { <SettingsLlm/> }.into_any(),
+        "account" => view! { <SettingsAccount/> }.into_any(),
         "notifications" => view! { <SettingsNotifications/> }.into_any(),
         "units" => view! { <SettingsUnits/> }.into_any(),
         "theme" => view! { <SettingsTheme/> }.into_any(),

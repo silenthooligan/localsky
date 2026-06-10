@@ -69,6 +69,18 @@ pub struct ZoneState {
     /// while others run.
     #[serde(default)]
     pub verdict: Option<ZoneVerdict>,
+
+    /// Native soil temperature (°F) from this zone's probe, polled directly
+    /// by LocalSky (Ecowitt `ch_ec`). `None` when the probe is offline.
+    /// Published to HA and used to derive the yard-min frost gate.
+    #[serde(default)]
+    pub soil_temp_f: Option<f64>,
+    /// Native soil EC (µS/cm) from this zone's probe. Display-only.
+    #[serde(default)]
+    pub soil_ec: Option<f64>,
+    /// Probe battery as a percentage (Ecowitt 0-5 level scaled ×20).
+    #[serde(default)]
+    pub soil_battery_pct: Option<f64>,
 }
 
 /// Per-zone flex-math breakdown for the math-transparency tile. All
@@ -158,26 +170,24 @@ pub struct SkipCheck {
     pub rain_skip_in: f64,
 
     // ── Soil sensor inputs (Phase E) ──
-    /// Per-zone calibrated soil moisture %, from HA template sensors
-    /// (raw FDR AD via ecowitt2mqtt, mapped between operator-captured
-    /// dry/wet endpoints). `None` when the probe is unavailable (radio
-    /// dropout, gateway offline, calibration not yet performed).
+    /// Per-zone calibrated soil moisture %, owned natively by LocalSky
+    /// (raw FDR AD polled from the gateway, calibrated per zone). `None`
+    /// when the probe is unavailable (radio dropout, gateway offline).
     pub soil_back_yard_pct: Option<f64>,
     pub soil_front_yard_pct: Option<f64>,
     pub soil_side_yard_pct: Option<f64>,
     pub soil_back_yard_shrubs_pct: Option<f64>,
-    /// Yard-wide soil temperature aggregates (min/max across the 4 zones).
-    /// Min drives the soil-frost gate; max is informational.
+    /// Yard-wide soil temperature aggregates (min/max), computed natively
+    /// from the per-zone soil temps in zones[]. Min drives the frost gate.
     pub soil_temp_yard_min_f: Option<f64>,
     pub soil_temp_yard_max_f: Option<f64>,
     /// Soil-frost skip threshold (°F). Below this, suspend the morning run.
-    /// Pulled from input_number.irrigation_frost_skip_f (default 35.0).
+    /// From the LocalSky skip-rules config (default 35.0).
     pub frost_skip_soil_f: f64,
     /// Per-zone saturation thresholds (%). When ALL four zones are at or
     /// above their threshold, the engine returns a yard-wide skip. Per-zone
-    /// gating (one wet zone, others dry) is handled by HA-side automations
-    /// calling irrigation_unlimited.adjust_time directly — LocalSky's
-    /// verdict is sequence-level all-or-nothing.
+    /// gating (one wet zone, others dry) is surfaced via each zone's own
+    /// verdict in zones[].
     pub saturation_back_yard_pct: f64,
     pub saturation_front_yard_pct: f64,
     pub saturation_side_yard_pct: f64,

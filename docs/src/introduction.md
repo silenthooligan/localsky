@@ -15,7 +15,7 @@ This site is the operator's manual. The dashboard, settings UI, and first-run wi
 - New install: jump to **[Quick start](getting-started.md)** for the docker run and the first-run wizard walkthrough.
 - Weather-only user: the wizard's "Controllers" step accepts an empty list. The irrigation surfaces disappear and LocalSky runs as a pure weather product.
 - No Home Assistant: **[Standalone mode](standalone.md)** covers sensors via MQTT, Ecowitt LAN, and HTTP webhooks.
-- Existing HA user: **[Home Assistant integration](hacs.md)** covers the outbound MQTT discovery path and the legacy Smart Irrigation + Irrigation Unlimited passthrough.
+- Existing HA user: **[Home Assistant integration](hacs.md)** covers the outbound MQTT discovery path and how `sensor.localsky_*` entities integrate with HA automations and dashboards.
 
 ## Where things live
 
@@ -36,7 +36,7 @@ This site is the operator's manual. The dashboard, settings UI, and first-run wi
 LocalSky is designed to work well in either configuration:
 
 - **Standalone**: a self-contained service that talks directly to your weather sensors (and optionally to your irrigation controller). Add sensors over MQTT, Ecowitt LAN POST, or HTTP webhooks.
-- **Alongside Home Assistant**: an outbound MQTT discovery publisher auto-creates `sensor.localsky_*` entities in HA. A passthrough adapter is also available for existing Smart Irrigation + Irrigation Unlimited setups.
+- **Alongside Home Assistant**: an outbound MQTT discovery publisher auto-creates `sensor.localsky_*` entities in HA. LocalSky owns irrigation scheduling and actuation; HA aggregates the published state for dashboards, automations, and voice integrations.
 
 Both modes are first-class. Pick the one that fits your stack.
 

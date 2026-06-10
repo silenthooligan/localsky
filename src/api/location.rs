@@ -19,7 +19,22 @@ use crate::ports::config_store::ConfigStore;
 pub fn router(cfg_store: Arc<FileConfigStore>) -> Router {
     Router::new()
         .route("/", get(location))
+        .route("/timezone", get(timezone))
         .with_state(cfg_store)
+}
+
+#[derive(serde::Deserialize)]
+struct TzQuery {
+    lat: f64,
+    lon: f64,
+}
+
+/// GET /api/v1/location/timezone?lat=..&lon=.. -> { timezone } via the
+/// offline tzf dataset. The wizard's Location step autofills with it.
+async fn timezone(
+    axum::extract::Query(q): axum::extract::Query<TzQuery>,
+) -> Json<serde_json::Value> {
+    Json(json!({ "timezone": crate::timeutil::tz_name_for(q.lat, q.lon) }))
 }
 
 async fn location(State(store): State<Arc<FileConfigStore>>) -> Json<serde_json::Value> {

@@ -140,6 +140,45 @@ pub fn SimulatorPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                             "Return true (or a reason string) to skip. Augment-only: a rule can add a skip, never clear a safety gate. Add it to "
                             <code>"[scripting]"</code>" once it behaves."
                         </p>
+                        <details class="rhai-help">
+                            <summary>"Variables & templates"</summary>
+                            <div class="rhai-help__body">
+                                <p>
+                                    "A rule is a Rhai expression. Return "<code>"true"</code>
+                                    " to skip (the reason is the rule's name), or a non-empty "
+                                    "string for a custom reason. Empty string or false = don't skip."
+                                </p>
+                                <p class="rhai-help__h">"Available variables"</p>
+                                <ul class="rhai-help__vars">
+                                    <li><code>"temp_now_f"</code>" current temp (\u{b0}F)"</li>
+                                    <li><code>"humidity_now_pct"</code>" current humidity (%)"</li>
+                                    <li><code>"wind_now_mph"</code>" / "<code>"wind_max_today_mph"</code>" wind now / today's max (mph)"</li>
+                                    <li><code>"rain_today_in"</code>" rain so far today (in)"</li>
+                                    <li><code>"rain_intensity_now_in_hr"</code>" rain rate now (in/hr)"</li>
+                                    <li><code>"forecast_in"</code>" / "<code>"rain_next_4h_in"</code>" forecast rain: tomorrow / next 4h (in)"</li>
+                                    <li><code>"rain_tomorrow_prob_pct"</code>" tomorrow's rain chance (%)"</li>
+                                    <li><code>"temp_min_24h_f"</code>" / "<code>"temp_max_3day_f"</code>" temp extremes (\u{b0}F)"</li>
+                                    <li><code>"days_since_significant_rain"</code>" dry-spell length (days)"</li>
+                                </ul>
+                                <p class="rhai-help__h">"Templates \u{2014} click to try"</p>
+                                <ul class="rhai-help__templates">
+                                    {[
+                                        ("rain_today_in > 0.5", "skip after heavy rain today"),
+                                        ("wind_max_today_mph > 20.0", "skip on windy days"),
+                                        ("humidity_now_pct > 90.0 && temp_now_f < 72.0", "skip when cool and humid"),
+                                        ("if days_since_significant_rain < 2 { \"recent rain\" } else { \"\" }", "skip only just after rain"),
+                                    ].into_iter().map(|(code, desc)| view! {
+                                        <li>
+                                            <button type="button" class="rhai-help__tpl"
+                                                on:click=move |_| test_script.set(code.to_string())>
+                                                <code>{code}</code>
+                                            </button>
+                                            <span class="rhai-help__desc">{desc}</span>
+                                        </li>
+                                    }).collect_view()}
+                                </ul>
+                            </div>
+                        </details>
                     </div>
 
                     <div class="sim-inputs__reset">
@@ -206,17 +245,42 @@ fn SimVerdict(r: SimResult) -> impl IntoView {
         })
         .collect();
 
-    view! {
-        <div class="sim-verdict">
+    let verdict_block = if changed {
+        // The scenario flips the decision: show the before -> after clearly,
+        // each side captioned so it reads as "today vs your changes".
+        view! {
             <div class="sim-verdict__transition">
-                <span class="sim-verdict__pill" style=format!("--v:{btok}")>{blab}</span>
-                <span class="sim-verdict__arrow" class:is-changed=changed>"→"</span>
-                <span class="sim-verdict__pill" style=format!("--v:{htok}")>{hlab}</span>
+                <div class="sim-verdict__state">
+                    <span class="sim-verdict__caption">"Today"</span>
+                    <span class="sim-verdict__pill" style=format!("--v:{btok}")>{blab}</span>
+                </div>
+                <span class="sim-verdict__arrow is-changed" aria-label="changes to">"→"</span>
+                <div class="sim-verdict__state">
+                    <span class="sim-verdict__caption">"With your changes"</span>
+                    <span class="sim-verdict__pill" style=format!("--v:{htok}")>{hlab}</span>
+                </div>
             </div>
+        }
+        .into_any()
+    } else {
+        // No flip: one big verdict + a plain-language note, instead of the
+        // confusing "SKIP -> SKIP".
+        view! {
+            <div class="sim-verdict__single">
+                <span class="sim-verdict__pill sim-verdict__pill--lg" style=format!("--v:{htok}")>{hlab}</span>
+                <span class="sim-verdict__samenote">"Same as today \u{2014} your changes don\u{2019}t flip the decision."</span>
+            </div>
+        }
+        .into_any()
+    };
+
+    view! {
+        <div class="sim-verdict" class:is-changed=changed>
+            {verdict_block}
             <p class="sim-verdict__reason">{hreason}</p>
             {(!diffs.is_empty()).then(|| view! {
                 <div class="sim-diff">
-                    <h3 class="sim-diff__title">"What changed"</h3>
+                    <h3 class="sim-diff__title">"Rules that moved"</h3>
                     <ul class="sim-diff__list">
                         {diffs.into_iter().map(|(label, from, to)| view! {
                             <li class="sim-diff__row">
@@ -227,9 +291,7 @@ fn SimVerdict(r: SimResult) -> impl IntoView {
                     </ul>
                 </div>
             })}
-            {move || (changed).then(|| view! {
-                <a class="sim-verdict__link" href="/rules">"See the full ladder in Rule Lab →"</a>
-            })}
+            <a class="sim-verdict__link" href="/rules">"See the full ladder in Rule Lab →"</a>
         </div>
     }
 }

@@ -27,7 +27,9 @@ pub fn DailyForecast(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
                 {move || {
                     let s = snap.get();
                     if s.daily.is_empty() {
-                        view! { <div class="daily-loading">"Loading forecast…"</div> }.into_any()
+                        (0..7).map(|_| {
+                            view! { <crate::components::ui::Skeleton variant="block"/> }.into_any()
+                        }).collect::<Vec<_>>().into_any()
                     } else {
                         s.daily.iter().enumerate().take(7).map(|(idx, d)| {
                             view! { <DailyCard entry=d.clone() is_today={idx == 0}/> }.into_any()
@@ -68,7 +70,9 @@ fn DailyCard(entry: DailyEntry, is_today: bool) -> impl IntoView {
                 <span class="daily-card-day">{day_label}</span>
                 <span class="daily-card-date">{date_label}</span>
             </header>
-            <div class="daily-card-glyph" title=label aria-label=label>{g}</div>
+            <div class="daily-card-glyph" title=label aria-label=label>
+                <crate::components::ui::Icon name=g size=30/>
+            </div>
             <div class="daily-card-temps">
                 <span class="daily-card-temp-hi">{format!("{:.0}°", entry.temp_max_f)}</span>
                 <span class="daily-card-temp-sep">"/"</span>

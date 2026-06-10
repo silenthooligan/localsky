@@ -81,7 +81,26 @@ pub struct ControllerSummary {
     pub enabled: bool,
 }
 
-pub async fn health(State(state): State<HealthState>) -> Json<HealthResponse> {
+pub async fn health(
+    State(state): State<HealthState>,
+    req: axum::http::Request<axum::body::Body>,
+) -> Json<HealthResponse> {
+    // Anonymous callers on an auth-required instance get liveness only:
+    // status/version/uptime, no per-source detail (Docker healthchecks
+    // and uptime monitors keep working without leaking topology).
+    let full_detail = {
+        use crate::auth::middleware::{AuthRequired, RequestIdentity};
+        let required = req
+            .extensions()
+            .get::<AuthRequired>()
+            .map(|a| a.0)
+            .unwrap_or(false);
+        let identified = matches!(
+            req.extensions().get::<RequestIdentity>(),
+            Some(RequestIdentity::User(_)) | Some(RequestIdentity::TrustedNetwork)
+        );
+        !required || identified
+    };
     let uptime_s = started_at().elapsed().as_secs();
     let mut config_present = false;
     let mut schema_version = None;
@@ -197,6 +216,12 @@ pub async fn health(State(state): State<HealthState>) -> Json<HealthResponse> {
         (false, _) => "wizard",
         (_, _) => "degraded",
     };
+
+    if !full_detail {
+        sources_freshness.clear();
+        controller_summaries.clear();
+        schema_version = None;
+    }
 
     Json(HealthResponse {
         status,

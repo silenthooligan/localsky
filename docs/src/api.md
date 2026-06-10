@@ -345,3 +345,35 @@ else:
 ```
 
 JavaScript / shell / Rust clients follow the same shape.
+
+## Authentication endpoints (API 1.6.0)
+
+When `[auth] mode = "required"`, every endpoint outside the public set
+(static assets, `/api/v1/info`, `/ingest/*`, auth endpoints, trimmed
+health) needs a session cookie or `Authorization: Bearer lsk_...` API
+token. SSE streams additionally accept `?access_token=lsk_...`.
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/v1/auth/status` | GET | `{ mode, setup_complete, authenticated }`; always public |
+| `/api/v1/auth/setup` | POST | Create the first owner account `{username, password}`; 409 once one exists |
+| `/api/v1/auth/login` | POST | Sign in; sets the session cookie |
+| `/api/v1/auth/logout` | POST | Clear the session |
+| `/api/v1/auth/session` | GET | Current user (401 when anonymous and auth is required) |
+| `/api/v1/auth/tokens` | GET / POST | List / create API tokens (`{name}` -> `{token}` shown once) |
+| `/api/v1/auth/tokens/{id}` | DELETE | Revoke a token |
+
+`/api/v1/info` carries `auth_required` (probe before pairing) and the
+stable instance `uuid` (also announced over mDNS as `_localsky._tcp.`).
+
+## Backup, validation, updates
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/v1/backup` | GET | tar.gz bundle: `localsky.toml` + consistent `irrigation.db` copy + manifest |
+| `/api/v1/backup/restore` | POST | Multipart restore (`bundle`, or bare `config` / `db`); database swaps at next boot |
+| `/api/v1/backup/snapshots` | GET | Config snapshot history feeding `POST /api/v1/config/rollback` |
+| `/api/v1/config/validate` | GET | Structured validation report (errors + warnings, stable codes) for the on-disk config |
+| `/api/v1/location/timezone?lat=&lon=` | GET | Offline IANA timezone lookup |
+| `/api/wizard/discover` | GET | One LAN sweep: passive Tempest, Ecowitt broadcast, OpenSprinkler probe |
+| `/api/v1/updates` | GET | `{ current, latest, update_available, release_url }`; populated only when `[updates] check_enabled` |

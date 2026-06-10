@@ -1,0 +1,67 @@
+name: Bug report
+description: Something is wrong with LocalSky on a real install
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Before filing, run `curl http://<host>:8090/api/v1/info`
+        on the LocalSky host and paste the JSON below. It includes the service
+        version, API version, and feature flags that triage starts from.
+  - type: textarea
+    id: info_dump
+    attributes:
+      label: /api/v1/info output
+      description: Paste the full JSON from `curl http://<host>:8090/api/v1/info`.
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened
+      description: One or two sentences. Skip the long preamble.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: |
+        Steps from a clean state if possible. If it only happens with specific
+        hardware (controller, sensor, station), say so.
+      placeholder: |
+        1. Open /irrigation
+        2. Click "Run zone 1 for 10 min"
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        `docker logs --since 10m localsky` is usually enough. Trim secrets if any.
+      render: shell
+  - type: input
+    id: deployment
+    attributes:
+      label: Deployment shape
+      description: e.g. "Docker on Ubuntu 22.04, Caddy reverse proxy" or "HACS standalone".
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you submit
+      options:
+        - label: I searched existing issues and didn't find a duplicate
+          required: true
+        - label: The /api/v1/info output above is from the affected instance
+          required: true

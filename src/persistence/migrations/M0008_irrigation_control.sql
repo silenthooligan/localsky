@@ -8,7 +8,7 @@
 -- so the native snapshot builder reads them here instead and a standalone
 -- deploy can actually be paused.
 --
--- Persisted (not in-memory) on purpose: Komodo redeploys the stack on
+-- Persisted (not in-memory) on purpose: GitOps redeploys the stack on
 -- every push, so an in-memory pause would be silently dropped on restart
 -- and the lawn would water on a day the operator paused it. A single row
 -- (id = 1, enforced by CHECK) holds the whole control surface; setters

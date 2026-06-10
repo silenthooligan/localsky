@@ -115,6 +115,11 @@ pub fn App() -> impl IntoView {
     // to gate `.nerd-only` blocks and reveal the full skip-check
     // breakdown. Per-device, not per-account.
     let nerd_mode: RwSignal<bool> = RwSignal::new(false);
+    // Gate persistence until the initial localStorage read has run. Without
+    // this the persist Effect fires on mount (nerd_mode=false) and writes "0"
+    // before the deferred read, so the read then sees "0" and the
+    // default-to-nerd never takes for new users.
+    let nerd_loaded = RwSignal::new(false);
     provide_context(NerdMode(nerd_mode));
     #[cfg(feature = "hydrate")]
     {
@@ -157,14 +162,23 @@ pub fn App() -> impl IntoView {
             gloo_timers::future::TimeoutFuture::new(0).await;
             if let Some(win) = web_sys::window() {
                 if let Ok(Some(storage)) = win.local_storage() {
-                    if let Ok(Some(v)) = storage.get_item("nerd_mode") {
-                        nerd_mode.set(v == "1" || v == "true");
+                    match storage.get_item("nerd_mode") {
+                        // Respect an explicit prior choice...
+                        Ok(Some(v)) => nerd_mode.set(v == "1" || v == "true"),
+                        // ...but default new users into nerd mode: the full
+                        // skip-check breakdown + projections are the point.
+                        _ => nerd_mode.set(true),
                     }
                 }
             }
+            nerd_loaded.set(true);
         });
         Effect::new(move |_| {
             let v = nerd_mode.get();
+            // Don't persist/clobber until the initial read has settled.
+            if !nerd_loaded.get() {
+                return;
+            }
             if let Some(win) = web_sys::window() {
                 if let Ok(Some(storage)) = win.local_storage() {
                     let _ = storage.set_item("nerd_mode", if v { "1" } else { "0" });
@@ -219,74 +233,23 @@ pub fn App() -> impl IntoView {
         });
     }
 
-    // On the client, open one EventSource per stream and overwrite the
-    // matching signal on every event. Runs only after hydration.
+    // Shared connection state: every SSE subscription reports into it, the
+    // PageHeader pill renders it. Provided unconditionally so use_context
+    // resolves on both SSR and hydrate (status only mutates client-side).
+    let conn = crate::components::connection::ConnState::new();
+    provide_context(conn);
+
+    // On the client, open one auto-reconnecting EventSource per stream and
+    // overwrite the matching signal on every event. Runs only after
+    // hydration. subscribe_sse owns retry/backoff + health reporting.
     #[cfg(feature = "hydrate")]
     {
-        // Tempest stream
+        use crate::components::connection::{spawn_conn_watchdog, subscribe_sse};
         Effect::new(move |_| {
-            use gloo_net::eventsource::futures::EventSource;
-            use leptos::task::spawn_local;
-            spawn_local(async move {
-                let Ok(mut es) = EventSource::new("/api/stream") else {
-                    return;
-                };
-                let Ok(mut sub) = es.subscribe("snapshot") else {
-                    return;
-                };
-                use futures::StreamExt;
-                while let Some(Ok((_, msg))) = sub.next().await {
-                    if let Some(payload) = msg.data().as_string() {
-                        if let Ok(s) = serde_json::from_str::<Snapshot>(&payload) {
-                            set_tempest.set(s);
-                        }
-                    }
-                }
-            });
-        });
-
-        // Irrigation stream
-        Effect::new(move |_| {
-            use gloo_net::eventsource::futures::EventSource;
-            use leptos::task::spawn_local;
-            spawn_local(async move {
-                let Ok(mut es) = EventSource::new("/api/irrigation/stream") else {
-                    return;
-                };
-                let Ok(mut sub) = es.subscribe("snapshot") else {
-                    return;
-                };
-                use futures::StreamExt;
-                while let Some(Ok((_, msg))) = sub.next().await {
-                    if let Some(payload) = msg.data().as_string() {
-                        if let Ok(s) = serde_json::from_str::<IrrigationSnapshot>(&payload) {
-                            set_irrigation.set(s);
-                        }
-                    }
-                }
-            });
-        });
-
-        // Forecast stream
-        Effect::new(move |_| {
-            use gloo_net::eventsource::futures::EventSource;
-            use leptos::task::spawn_local;
-            spawn_local(async move {
-                let Ok(mut es) = EventSource::new("/api/forecast/stream") else {
-                    return;
-                };
-                let Ok(mut sub) = es.subscribe("snapshot") else {
-                    return;
-                };
-                use futures::StreamExt;
-                while let Some(Ok((_, msg))) = sub.next().await {
-                    if let Some(payload) = msg.data().as_string() {
-                        if let Ok(s) = serde_json::from_str::<ForecastSnapshot>(&payload) {
-                            set_forecast.set(s);
-                        }
-                    }
-                }
-            });
+            subscribe_sse::<Snapshot>("/api/stream", set_tempest, conn);
+            subscribe_sse::<IrrigationSnapshot>("/api/irrigation/stream", set_irrigation, conn);
+            subscribe_sse::<ForecastSnapshot>("/api/forecast/stream", set_forecast, conn);
+            spawn_conn_watchdog(conn);
         });
     }
 
@@ -306,6 +269,7 @@ pub fn App() -> impl IntoView {
                 <main class="page" id="main-content">
                     <InstallPrompt/>
                     <PageHeader/>
+                    <crate::components::health_banner::HealthBanner/>
                 <Routes fallback=|| view! { <NotFound/> }>
                     <Route path=path!("/")
                         view=move || view! {
@@ -396,6 +360,11 @@ pub fn App() -> impl IntoView {
                             <Title text="LocalSky · LLM"/>
                             <crate::components::settings::SettingsLlm/>
                         }/>
+                    <Route path=path!("/settings/account")
+                        view=move || view! {
+                            <Title text="LocalSky · Settings · Account"/>
+                            <crate::components::settings::SettingsAccount/>
+                        }/>
                     <Route path=path!("/settings/notifications")
                         view=|| view! {
                             <Title text="LocalSky · Notifications"/>
@@ -451,6 +420,11 @@ pub fn App() -> impl IntoView {
                             <Title text="LocalSky · Setup"/>
                             <crate::components::setup::SetupShell/>
                         }/>
+                    <Route path=path!("/login")
+                        view=move || view! {
+                            <Title text="LocalSky · Sign in"/>
+                            <crate::components::login::LoginPage/>
+                        }/>
                     <Route path=path!("/about")
                         view=|| view! {
                             <Title text="LocalSky · About"/>
@@ -486,6 +460,7 @@ fn WeatherHome(
     view! {
         <div class="weather-layout">
             <div class="weather-main">
+                {view! { <crate::components::welcome_card::WelcomeCard/> }.into_any()}
                 {render_hero(snap).into_any()}
                 {view! { <crate::components::weather_telemetry::WeatherTelemetry snap/> }.into_any()}
                 {render_panels(snap).into_any()}

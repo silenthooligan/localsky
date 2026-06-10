@@ -254,8 +254,10 @@ impl VapidConfig {
     fn from_env() -> Option<Self> {
         let private_path = std::env::var("VAPID_PRIVATE_KEY_PATH").ok()?;
         let public_b64u = std::env::var("VAPID_PUBLIC_KEY").ok()?;
+        // RFC 8292 allows an https: URL subject; the project URL is a
+        // sane operator-neutral default when VAPID_SUBJECT is unset.
         let subject = std::env::var("VAPID_SUBJECT")
-            .unwrap_or_else(|_| "mailto:erik.skean@gmail.com".to_string());
+            .unwrap_or_else(|_| "https://github.com/silenthooligan/localsky".to_string());
 
         let private_pem = match std::fs::read_to_string(&private_path) {
             Ok(s) => s,

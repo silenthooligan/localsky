@@ -19,6 +19,7 @@ const STEPS: &[(&str, &str)] = &[
     ("zones", "Zones"),
     ("llm", "LLM"),
     ("notifications", "Notifications"),
+    ("account", "Account"),
     ("review", "Review"),
 ];
 
@@ -80,8 +81,8 @@ where
 
 fn render_step(step: &str) -> impl IntoView {
     use crate::components::setup::{
-        ControllersStep, LlmStep, LocationStep, NotificationsStep, ReviewStep, SourcesStep,
-        WelcomeStep, ZonesStep,
+        AccountStep, ControllersStep, LlmStep, LocationStep, NotificationsStep, ReviewStep,
+        SourcesStep, WelcomeStep, ZonesStep,
     };
     match step {
         "welcome" => view! { <WelcomeStep/> }.into_any(),
@@ -91,6 +92,7 @@ fn render_step(step: &str) -> impl IntoView {
         "zones" => view! { <ZonesStep/> }.into_any(),
         "llm" => view! { <LlmStep/> }.into_any(),
         "notifications" => view! { <NotificationsStep/> }.into_any(),
+        "account" => view! { <AccountStep/> }.into_any(),
         "review" => view! { <ReviewStep/> }.into_any(),
         other => view! { <StepPlaceholder step=other.to_string()/> }.into_any(),
     }
@@ -123,13 +125,13 @@ pub fn SetupFooter(prev: Option<String>, next: Option<String>) -> impl IntoView 
     view! {
         <footer class="setup-footer">
             {prev.map(|href| view! {
-                <a class="setup-footer__btn setup-footer__btn--ghost" href=href>"← Back"</a>
+                <a class="setup-footer__btn setup-footer__btn--ghost" href=href>"Back"</a>
             })}
             <a class="setup-footer__btn setup-footer__btn--ghost" href="/">
                 "Save and finish later"
             </a>
             {next.map(|href| view! {
-                <a class="setup-footer__btn setup-footer__btn--primary" href=href>"Next →"</a>
+                <a class="setup-footer__btn setup-footer__btn--primary" href=href>"Next"</a>
             })}
         </footer>
     }

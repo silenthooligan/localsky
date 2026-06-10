@@ -7,8 +7,8 @@
 //   1. Address-parity radio (binds to deployment.address_parity). The
 //      engine evaluator uses this to pick which weekday list of a
 //      restriction applies to this household.
-//   2. Quick-preset panel: one click adds the St. Johns River Water
-//      Management District (Florida) DST + Standard-Time restrictions.
+//   2. Starter-template panel: one click adds a common generic restriction
+//      pattern (no-midday / two-days-a-week / odd-even) the user then edits.
 //   3. List + add/edit form for engine.watering_restrictions.
 //
 // Mirrors the editing-state pattern from settings/zones.rs: an
@@ -127,11 +127,11 @@ pub fn SettingsRestrictions() -> impl IntoView {
         if arr.is_empty() {
             return view! {
                 <li class="settings-list__item">
-                    <span class="settings-list__icon" aria-hidden="true">"📋"</span>
+                    <span class="settings-list__icon" aria-hidden="true"><crate::components::ui::Icon name="rules" size=18/></span>
                     <span class="settings-list__text">
                         <span class="settings-list__label">"No restrictions configured"</span>
                         <span class="settings-list__helptext">
-                            "Use the preset above for Florida (SJRWMD) or +Add restriction below for any other jurisdiction."
+                            "Pick a starter template above, or +Add restriction below to enter your area\u{2019}s allowed days and hours."
                         </span>
                     </span>
                 </li>
@@ -169,31 +169,14 @@ pub fn SettingsRestrictions() -> impl IntoView {
         view! { <>{items}</> }.into_any()
     };
 
-    let preset_sjrwmd = move |_| {
-        // St. Johns River Water Management District (Florida) card values.
-        // 0=Sun, 3=Wed, 4=Thu, 6=Sat per chrono::Weekday::num_days_from_sunday().
-        let dst = serde_json::json!({
-            "id": "sjrwmd_dst",
-            "name": "St. Johns RWMD - Daylight saving",
-            "enabled": true,
-            "effective": { "kind": "dst_only" },
-            "allowed_weekdays_odd": [3, 6],
-            "allowed_weekdays_even": [4, 0],
-            "forbidden_hour_start": 10,
-            "forbidden_hour_end": 16,
-            "max_minutes_per_zone": 60,
-        });
-        let est = serde_json::json!({
-            "id": "sjrwmd_est",
-            "name": "St. Johns RWMD - Standard time",
-            "enabled": true,
-            "effective": { "kind": "standard_only" },
-            "allowed_weekdays_odd": [6],
-            "allowed_weekdays_even": [0],
-            "forbidden_hour_start": 10,
-            "forbidden_hour_end": 16,
-            "max_minutes_per_zone": 60,
-        });
+    // Add a generic starter restriction (the user then edits it for their
+    // area). Re-adding the same template replaces it rather than duplicating.
+    let add_starter = Callback::new(move |restriction: serde_json::Value| {
+        let id = restriction
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         config_json.update(|cfg| {
             let engine = cfg.as_object_mut().and_then(|o| {
                 o.entry("engine")
@@ -206,22 +189,14 @@ pub fn SettingsRestrictions() -> impl IntoView {
                     .or_insert(serde_json::json!([]))
                     .as_array_mut()
                     .unwrap();
-                // Replace any existing sjrwmd_* so re-clicking doesn't dup.
-                arr.retain(|r| {
-                    !matches!(
-                        r.get("id").and_then(|v| v.as_str()),
-                        Some("sjrwmd_dst" | "sjrwmd_est")
-                    )
-                });
-                arr.push(dst);
-                arr.push(est);
+                arr.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id.as_str()));
+                arr.push(restriction);
             }
         });
         result_ok.set(true);
-        result_msg.set(
-            "Added St. Johns RWMD preset (DST + Standard). Click Save below to persist.".into(),
-        );
-    };
+        result_msg
+            .set("Added a starter restriction. Edit it for your area, then Save below.".into());
+    });
 
     let on_save = move |_| {
         if saving.get() {
@@ -260,8 +235,11 @@ pub fn SettingsRestrictions() -> impl IntoView {
             wasm_bindgen_futures::spawn_local(async move {
                 match save_config(cfg).await {
                     Ok(()) => {
-                        result_ok.set(true);
-                        result_msg.set("Saved. Engine picks up restrictions on next tick.".into());
+                        crate::components::settings_ui::toast_saved(
+                            result_msg,
+                            result_ok,
+                            "Saved. Engine picks up restrictions on next tick.",
+                        );
                     }
                     Err(e) => {
                         result_ok.set(false);
@@ -281,8 +259,8 @@ pub fn SettingsRestrictions() -> impl IntoView {
     // True when there's at least one enabled restriction with a non-empty
     // weekday list and the operator hasn't picked an address parity yet.
     // The engine's allowed_today() returns true (bypasses) on N/A parity,
-    // which silently disables the SJRWMD-style weekday gate. Surface that
-    // loudly here so the user knows why their preset isn't blocking runs.
+    // which silently disables an odd/even weekday gate. Surface that loudly
+    // here so the user knows why their restriction isn't blocking runs.
     let needs_parity = move || {
         if parity.get() != "not_applicable" {
             return false;
@@ -306,7 +284,7 @@ pub fn SettingsRestrictions() -> impl IntoView {
     view! {
         <main id="main-content" class="settings-page">
             <header class="settings-page__header">
-                <a class="settings-page__back" href="/settings">"← Settings"</a>
+                <a class="settings-page__back" href="/settings">"Back to Settings"</a>
                 <h1 class="settings-page__title">"Watering restrictions"</h1>
                 <p class="settings-page__subtitle">
                     "Honor regulatory rules from your water management district or HOA. "
@@ -344,36 +322,37 @@ pub fn SettingsRestrictions() -> impl IntoView {
                 />
             </Panel>
 
-            <Panel title="Quick preset".to_string()>
+            <Panel title="Starter templates".to_string()>
                 <p class="settings-page__subtitle" style="margin: 0 0 0.75rem">
-                    "St. Johns River Water Management District (north-east Florida). "
-                    "Adds two paired restrictions (DST + Standard time) with the days, "
-                    "hours, and 60-min per-zone cap from the WMD card. "
-                    <a
-                        href="https://aws.sjrwmd.com/SJRWMD/waterconservation/SJRWMD-Watering-restrictions-card.pdf"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        style="color: var(--accent)"
-                    >
-                        "WMD card (PDF)"
-                    </a>
-                    " · "
-                    <a
-                        href="https://www.sjcfl.us/protect-our-water/"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        style="color: var(--accent)"
-                    >
-                        "St. Johns County info"
-                    </a>
+                    "Many areas limit watering to certain days and hours. Start from a "
+                    "common pattern, then edit the days, hours, and dates to match your "
+                    "local rules \u{2014} or build your own with +Add restriction below. "
+                    "Check your water utility or municipality for the exact rules where you live."
                 </p>
-                <button
-                    type="button"
-                    class="setup-footer__btn setup-footer__btn--primary"
-                    on:click=preset_sjrwmd
-                >
-                    "Add St. Johns RWMD preset"
-                </button>
+                <div style="display:flex; gap:0.5rem; flex-wrap:wrap">
+                    <button type="button" class="setup-footer__btn setup-footer__btn--primary"
+                        title="No watering during the hottest part of the day (any day)"
+                        on:click=move |_| add_starter.run(serde_json::json!({
+                            "id": "starter_no_midday", "name": "No midday watering", "enabled": true,
+                            "effective": { "kind": "all_year" },
+                            "forbidden_hour_start": 10, "forbidden_hour_end": 16,
+                        }))>"No midday watering"</button>
+                    <button type="button" class="setup-footer__btn setup-footer__btn--primary"
+                        title="Water only two days a week (Wed & Sat), no midday"
+                        on:click=move |_| add_starter.run(serde_json::json!({
+                            "id": "starter_two_days", "name": "Two days a week", "enabled": true,
+                            "effective": { "kind": "all_year" },
+                            "allowed_weekdays_odd": [3, 6], "allowed_weekdays_even": [3, 6],
+                            "forbidden_hour_start": 10, "forbidden_hour_end": 16,
+                        }))>"Two days a week"</button>
+                    <button type="button" class="setup-footer__btn setup-footer__btn--primary"
+                        title="Odd house numbers water Wed/Sat, even Thu/Sun (common parity rule)"
+                        on:click=move |_| add_starter.run(serde_json::json!({
+                            "id": "starter_odd_even", "name": "Odd/even address days", "enabled": true,
+                            "effective": { "kind": "all_year" },
+                            "allowed_weekdays_odd": [3, 6], "allowed_weekdays_even": [4, 0],
+                        }))>"Odd/even address days"</button>
+                </div>
             </Panel>
 
             <Panel title="Configured restrictions".to_string()>
@@ -605,7 +584,7 @@ fn RestrictionForm(
 
             <FormField
                 label="ID".to_string()
-                helptext="snake_case identifier (e.g. sjrwmd_dst, hoa_summer). Read-only while editing.".to_string()
+                helptext="snake_case identifier (e.g. two_days, no_midday, hoa_summer). Read-only while editing.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 <input
@@ -646,15 +625,15 @@ fn RestrictionForm(
 
             <FormField
                 label="Effective window".to_string()
-                helptext="When this restriction applies. DST + Standard handle Florida's seasonal switch automatically.".to_string()
+                helptext="When this restriction is active. Most areas use All year. Summer/winter follow your timezone's daylight-saving switch automatically, for places with seasonal rules.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 <SegmentedControl
                     value=new_effective_kind
                     options=vec![
                         ("all_year".into(), "All year".into()),
-                        ("dst_only".into(), "DST only".into()),
-                        ("standard_only".into(), "Standard time".into()),
+                        ("dst_only".into(), "Summer (DST)".into()),
+                        ("standard_only".into(), "Winter (standard)".into()),
                         ("date_range".into(), "Custom range".into()),
                     ]
                     aria_label="Effective window".to_string()
@@ -967,8 +946,8 @@ fn RestrictionCard(
         .and_then(|v| v.get("kind"))
         .and_then(|v| v.as_str())
     {
-        Some("dst_only") => "DST only",
-        Some("standard_only") => "Standard time only",
+        Some("dst_only") => "Summer (DST)",
+        Some("standard_only") => "Winter (standard)",
         Some("date_range") => "Custom date range",
         _ => "All year",
     };

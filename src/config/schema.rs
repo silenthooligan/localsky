@@ -52,6 +52,17 @@ pub struct Config {
     /// A no-code complement to `scripting`. See `ConditionsConfig`.
     #[serde(default)]
     pub conditions: ConditionsConfig,
+    /// Built-in authentication policy. Identity (accounts, sessions,
+    /// API tokens) lives in SQLite; this block is policy only. Absent
+    /// on existing configs -> Disabled -> behavior unchanged.
+    #[serde(default)]
+    pub auth: AuthConfig,
+    /// LAN presence (mDNS announce). Default on; announce-only.
+    #[serde(default)]
+    pub network: NetworkConfig,
+    /// Opt-in update check (GitHub releases poll, off by default).
+    #[serde(default)]
+    pub updates: UpdatesConfig,
 }
 
 impl Default for Config {
@@ -69,8 +80,85 @@ impl Default for Config {
             manual_schedules: Vec::new(),
             scripting: ScriptingConfig::default(),
             conditions: ConditionsConfig::default(),
+            auth: AuthConfig::default(),
+            network: NetworkConfig::default(),
+            updates: UpdatesConfig::default(),
         }
     }
+}
+
+// ----- Update check -----
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct UpdatesConfig {
+    /// When true, poll the GitHub releases API daily and surface
+    /// "update available" in the UI. Plain GET, no telemetry attached;
+    /// off by default so fresh installs phone nowhere.
+    #[serde(default)]
+    pub check_enabled: bool,
+}
+
+// ----- LAN presence -----
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct NetworkConfig {
+    /// Announce _localsky._tcp via mDNS so clients (HACS zeroconf)
+    /// discover this instance. Announce-only; requires host networking
+    /// under Docker to be visible beyond the container.
+    #[serde(default = "default_true_network")]
+    pub mdns_enabled: bool,
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self { mdns_enabled: true }
+    }
+}
+
+fn default_true_network() -> bool {
+    true
+}
+
+// ----- Authentication policy -----
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMode {
+    /// No authentication. The pre-auth behavior; right for deployments
+    /// already gated by a reverse proxy or an isolated trusted LAN.
+    #[default]
+    Disabled,
+    /// Login required for the UI + API. Static assets, /api/v1/info,
+    /// ingest receivers, and liveness stay public; see auth::middleware.
+    Required,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AuthConfig {
+    #[serde(default)]
+    pub mode: AuthMode,
+    /// Browser session lifetime. Rolling: activity extends it.
+    #[serde(default = "default_session_ttl_days")]
+    pub session_ttl_days: u32,
+    /// CIDRs that skip auth while mode = required, e.g. "10.0.0.0/24".
+    /// Lets an operator require login from the WAN/VPN side while the
+    /// home LAN stays frictionless.
+    #[serde(default)]
+    pub trusted_networks: Vec<String>,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            mode: AuthMode::Disabled,
+            session_ttl_days: default_session_ttl_days(),
+            trusted_networks: Vec::new(),
+        }
+    }
+}
+
+fn default_session_ttl_days() -> u32 {
+    30
 }
 
 // ----- Structured trigger rules (no-code) -----
@@ -431,6 +519,22 @@ pub struct EcowittGwPollConfig {
     /// is plenty for irrigation and easy on the device.
     #[serde(default = "default_ecowitt_poll_s")]
     pub poll_interval_s: u32,
+    /// Per-channel raw-AD soil calibration, keyed by channel ("1".."N"). When
+    /// present, the poller reads /get_cli_soilad and computes moisture from the
+    /// raw AD via (ad - ad_dry) / (ad_wet - ad_dry) * 100, clamped 0..100 —
+    /// matching whatever dry/wet endpoints you captured rather than the
+    /// gateway's own (often unset) % value. Lets LocalSky own calibrated soil
+    /// natively instead of leaning on a Home Assistant template sensor.
+    #[serde(default)]
+    pub soil_calibration: std::collections::HashMap<String, SoilAdCalibration>,
+}
+
+/// Dry (probe in air) and wet (probe in water/saturated) raw-AD endpoints for
+/// one soil channel. moisture% = (ad - ad_dry) / (ad_wet - ad_dry) * 100.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SoilAdCalibration {
+    pub ad_dry: f64,
+    pub ad_wet: f64,
 }
 
 fn default_ecowitt_poll_s() -> u32 {

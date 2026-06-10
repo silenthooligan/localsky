@@ -13,7 +13,7 @@
 *.sqlite-shm
 *.sqlite-wal
 
-# VAPID and any local keypairs. Real secrets stay in _shared/keys/ on the
+# VAPID and any local keypairs. Keep real secrets outside the repo on the
 # internal deployment; the public repo never sees them.
 /keys/
 *.pem
@@ -22,7 +22,3 @@
 
 # mdBook output (Phase 14)
 /book
-
-# Never commit real secrets
-.env
-*.pem

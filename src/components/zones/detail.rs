@@ -10,8 +10,8 @@ use chrono::{Local, TimeZone};
 use leptos::prelude::*;
 use serde_json::json;
 
-use crate::components::irrigation::controls::post_action;
-use crate::components::ui::{Button, Icon, LineChart, Series, StatTile, Stepper};
+use crate::components::irrigation::controls::post_action_then;
+use crate::components::ui::{use_toast, Button, Icon, LineChart, Series, StatTile, Stepper};
 use crate::ha::snapshot::{IrrigationSnapshot, ZoneMath, ZoneState};
 use crate::history::types::HistoryWindow;
 use leptos_router::hooks::use_params_map;
@@ -79,12 +79,60 @@ pub fn ZoneDetailView(
     // Run-duration stepper (minutes), seeded to a sane 10.
     let run_min: RwSignal<f64> = RwSignal::new(10.0);
 
+    // Optimistic control state: Some(true) = start requested, Some(false)
+    // = stop requested. The reconcile Effect clears it once the streamed
+    // snapshot confirms the new running state (or rolls back with a toast
+    // if the controller never confirms within the deadline).
+    let pending: RwSignal<Option<bool>> = RwSignal::new(None);
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        let Some(expect_running) = pending.get() else {
+            return;
+        };
+        let confirmed = snap
+            .get()
+            .zones
+            .iter()
+            .find(|z| z.slug == slug.get_untracked())
+            .map(|z| z.running == expect_running)
+            .unwrap_or(false);
+        if confirmed {
+            pending.set(None);
+        }
+    });
+    // Generation guard so a stale deadline timer can't clear a newer
+    // request: each pending set bumps the generation, and a timer only
+    // acts if its generation is still current.
+    let pending_gen = StoredValue::new(0u64);
+    #[cfg(feature = "hydrate")]
+    {
+        // Deadline: clear a pending flag that never confirmed after 25s
+        // (two snapshot ticks) and tell the user.
+        Effect::new(move |_| {
+            if pending.get().is_none() {
+                return;
+            }
+            let gen = pending_gen.with_value(|g| *g);
+            leptos::task::spawn_local(async move {
+                gloo_timers::future::TimeoutFuture::new(25_000).await;
+                let still_current = pending_gen.with_value(|g| *g) == gen;
+                if still_current && pending.get_untracked().is_some() {
+                    pending.set(None);
+                    use_toast()
+                        .warn("Controller didn't confirm the change; check the Sensors hub.");
+                }
+            });
+        });
+    }
+    #[cfg(not(feature = "hydrate"))]
+    let _ = pending_gen;
+
     move || {
         match zone() {
         None => view! {
             <div class="zone-detail">
                 {back.then(|| view! { <a class="zone-detail__back" href="/zones"><Icon name="chevron-right" size=16 class="zone-detail__back-icon".to_string()/>"Zones"</a> })}
-                <div class="zone-detail__empty">"Loading zone…"</div>
+                <div class="zone-detail__empty"><crate::components::ui::SkeletonRows count=5/></div>
             </div>
         }
         .into_any(),
@@ -106,15 +154,40 @@ pub fn ZoneDetailView(
             let zslug = z.slug.clone();
             let stop_slug = zslug.clone();
             let run_slug = zslug.clone();
+            let action_done = Callback::new(move |result: Result<(), String>| {
+                if let Err(e) = result {
+                    pending.set(None);
+                    use_toast().error(format!("Zone command failed: {e}"));
+                }
+            });
             let on_stop = move |_: leptos::ev::MouseEvent| {
-                post_action(json!({ "kind": "stop", "zone": stop_slug.clone() }));
+                pending_gen.update_value(|g| *g += 1);
+                pending.set(Some(false));
+                post_action_then(
+                    json!({ "kind": "stop", "zone": stop_slug.clone() }),
+                    action_done,
+                );
             };
             let on_run = move |_: leptos::ev::MouseEvent| {
                 let seconds = (run_min.get_untracked() * 60.0).round().max(1.0) as u32;
-                post_action(json!({ "kind": "run", "zone": run_slug.clone(), "seconds": seconds }));
+                pending_gen.update_value(|g| *g += 1);
+                pending.set(Some(true));
+                post_action_then(
+                    json!({ "kind": "run", "zone": run_slug.clone(), "seconds": seconds }),
+                    action_done,
+                );
             };
-            let status_label = if running { "RUNNING" } else if z.planned_run_seconds > 0 { "SCHEDULED" } else { "IDLE" };
-            let status_class = if running {
+            let pending_now = pending.get();
+            let status_label = match pending_now {
+                Some(true) if !running => "STARTING…",
+                Some(false) if running => "STOPPING…",
+                _ if running => "RUNNING",
+                _ if z.planned_run_seconds > 0 => "SCHEDULED",
+                _ => "IDLE",
+            };
+            let status_class = if pending_now.is_some() && running != pending_now.unwrap_or(false) {
+                "zone-detail__status zone-detail__status--pending"
+            } else if running {
                 "zone-detail__status zone-detail__status--running"
             } else if z.planned_run_seconds > 0 {
                 "zone-detail__status zone-detail__status--scheduled"
@@ -168,13 +241,23 @@ pub fn ZoneDetailView(
                     <section class="zone-detail__panel zone-detail__actions">
                         {if running {
                             view! {
-                                <Button variant="danger" icon="stop" on_click=Callback::new(on_stop)>"Stop zone"</Button>
+                                <Button
+                                    variant="danger"
+                                    icon="stop"
+                                    loading=Signal::derive(move || pending.get().is_some())
+                                    on_click=Callback::new(on_stop)
+                                >"Stop zone"</Button>
                             }.into_any()
                         } else {
                             view! {
                                 <div class="zone-detail__run">
                                     <Stepper value=run_min min=1.0 max=120.0 step=1.0 suffix=" min"/>
-                                    <Button variant="primary" icon="play" on_click=Callback::new(on_run)>"Run now"</Button>
+                                    <Button
+                                        variant="primary"
+                                        icon="play"
+                                        loading=Signal::derive(move || pending.get().is_some())
+                                        on_click=Callback::new(on_run)
+                                    >"Run now"</Button>
                                 </div>
                             }.into_any()
                         }}

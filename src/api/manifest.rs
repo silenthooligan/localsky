@@ -477,18 +477,64 @@ fn push_zone_entities(out: &mut Vec<EntityDescriptor>, zones: &[crate::ha::snaps
             ..Default::default()
         });
 
-        // Soil saturation % (from Ecowitt / soil probe — calibrated).
-        // Lives in skip_check.saturation_<slug>_pct (top-level path, not
-        // zone-relative), so no zone_slug.
+        // Soil moisture % — the live calibrated probe reading the engine
+        // decides on (native Ecowitt poll or HA bridge). Lives in
+        // skip_check.soil_<slug>_pct (top-level path, not zone-relative),
+        // so no zone_slug. `null` when the probe is offline → HA shows the
+        // sensor unavailable, which is correct.
         out.push(EntityDescriptor {
             platform: "sensor",
             id: format!("{slug}_soil_moisture"),
             name: format!("{pretty} soil moisture"),
             snapshot: "irrigation",
-            path: vec!["skip_check".into(), format!("saturation_{slug}_pct")],
+            path: vec!["skip_check".into(), format!("soil_{slug}_pct")],
             unit: Some("%"),
             device_class: Some("moisture"),
             state_class: Some("measurement"),
+            ..Default::default()
+        });
+
+        // Native soil temperature (°F) — LocalSky polls the gateway directly,
+        // so HA no longer needs the ecowitt2mqtt MQTT entity. zone_slug +
+        // path-into-zone reads zones[].soil_temp_f.
+        out.push(EntityDescriptor {
+            platform: "sensor",
+            id: format!("{slug}_soil_temperature"),
+            name: format!("{pretty} soil temperature"),
+            snapshot: "irrigation",
+            path: vec!["soil_temp_f".into()],
+            unit: Some("°F"),
+            device_class: Some("temperature"),
+            state_class: Some("measurement"),
+            zone_slug: Some(slug.clone()),
+            ..Default::default()
+        });
+
+        // Native soil EC (µS/cm) — salinity / fertilizer drift. Display-only.
+        out.push(EntityDescriptor {
+            platform: "sensor",
+            id: format!("{slug}_soil_ec"),
+            name: format!("{pretty} soil EC"),
+            snapshot: "irrigation",
+            path: vec!["soil_ec".into()],
+            unit: Some("µS/cm"),
+            state_class: Some("measurement"),
+            icon: Some("mdi:flash-outline"),
+            zone_slug: Some(slug.clone()),
+            ..Default::default()
+        });
+
+        // Probe battery (%, from the Ecowitt 0-5 level scaled ×20).
+        out.push(EntityDescriptor {
+            platform: "sensor",
+            id: format!("{slug}_soil_battery"),
+            name: format!("{pretty} soil battery"),
+            snapshot: "irrigation",
+            path: vec!["soil_battery_pct".into()],
+            unit: Some("%"),
+            device_class: Some("battery"),
+            state_class: Some("measurement"),
+            zone_slug: Some(slug.clone()),
             ..Default::default()
         });
 

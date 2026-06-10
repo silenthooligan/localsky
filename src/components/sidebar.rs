@@ -117,15 +117,15 @@ pub fn Sidebar() -> impl IntoView {
             // configuration-recovery, not day-to-day.
             // ───────────────────────────────────────────────────────
             <div class="sidebar-footer">
-                <a class="sidebar-footer-link" href="/setup">
+                <a class="sidebar-footer-link" href="/setup" title="Re-run wizard">
                     <span class="sidebar-footer-label">"Re-run wizard"</span>
                     <span class="sidebar-footer-glyph"><Icon name="wizard" size=14u32/></span>
                 </a>
-                <a class="sidebar-footer-link" href="/about">
+                <a class="sidebar-footer-link" href="/about" title="About">
                     <span class="sidebar-footer-label">"About"</span>
                     <span class="sidebar-footer-glyph"><Icon name="info" size=14u32/></span>
                 </a>
-                <a class="sidebar-footer-link" href="https://github.com/silenthooligan/localsky" target="_blank" rel="noopener">
+                <a class="sidebar-footer-link" href="https://github.com/silenthooligan/localsky" target="_blank" rel="noopener" title="GitHub">
                     <span class="sidebar-footer-label">"GitHub"</span>
                     <span class="sidebar-footer-glyph"><Icon name="external" size=14u32/></span>
                 </a>
@@ -203,7 +203,9 @@ fn NavLink(
 
     view! {
         <li>
-            <a class=active_class href=href on:click=on_click>
+            // title carries the label for the tablet icon-rail, where the
+            // text label is hidden and hover/long-press needs a tooltip.
+            <a class=active_class href=href on:click=on_click title=label>
                 <span class="sidebar-link-icon"><Icon name=icon/></span>
                 <span class="sidebar-link-label">{label}</span>
             </a>

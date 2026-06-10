@@ -81,8 +81,11 @@ pub fn SettingsSkipRules() -> impl IntoView {
             wasm_bindgen_futures::spawn_local(async move {
                 match patch_skip_rules(payload).await {
                     Ok(()) => {
-                        result_ok.set(true);
-                        result_msg.set("Saved. Engine picks up on next tick.".into());
+                        crate::components::settings_ui::toast_saved(
+                            result_msg,
+                            result_ok,
+                            "Saved. Engine picks up on next tick.",
+                        );
                     }
                     Err(e) => {
                         result_ok.set(false);
@@ -123,7 +126,9 @@ pub fn SettingsSkipRules() -> impl IntoView {
                     "Override the 17-rule skip ladder's thresholds. The engine "
                     "evaluates these every tick to decide run / skip / extended "
                     "for tonight and the next 6 days. Defaults shown match the "
-                    "values the engine uses with no override."
+                    "values the engine uses with no override. See these rules "
+                    "decide a real day, and layer your own on top, in "
+                    <a href="/rules" style="color: var(--accent)">"Rule Lab"</a>"."
                 </p>
             </header>
 

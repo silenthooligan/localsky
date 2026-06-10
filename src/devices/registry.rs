@@ -10,40 +10,67 @@ use arc_swap::ArcSwap;
 
 use super::Device;
 
+/// Two independent slices that `all()` merges: config-derived native devices
+/// (rebuilt on config reload) and HA-imported devices (refreshed by a
+/// background task). Kept separate so each can be replaced without touching
+/// the other.
+#[derive(Default)]
+struct RegistryState {
+    config: Vec<Device>,
+    ha: Vec<Device>,
+}
+
 #[derive(Clone)]
 pub struct DeviceRegistry {
-    inner: Arc<ArcSwap<Vec<Device>>>,
+    inner: Arc<ArcSwap<RegistryState>>,
 }
 
 impl DeviceRegistry {
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(ArcSwap::from_pointee(Vec::new())),
+            inner: Arc::new(ArcSwap::from_pointee(RegistryState::default())),
         }
     }
 
-    /// Replace the whole device set atomically. The list is kept sorted by
-    /// id by the builder so reads have a stable order.
+    /// Replace the config-derived (native) device set. Kept sorted by the
+    /// builder so reads have a stable order.
     pub fn set(&self, devices: Vec<Device>) {
-        self.inner.store(Arc::new(devices));
+        let cur = self.inner.load();
+        self.inner.store(Arc::new(RegistryState {
+            config: devices,
+            ha: cur.ha.clone(),
+        }));
     }
 
-    /// Snapshot of every device.
+    /// Replace the HA-imported device set (Phase F1b background refresh).
+    pub fn set_ha(&self, devices: Vec<Device>) {
+        let cur = self.inner.load();
+        self.inner.store(Arc::new(RegistryState {
+            config: cur.config.clone(),
+            ha: devices,
+        }));
+    }
+
+    /// Snapshot of every device: native + HA-imported, reconciled (F3) so a
+    /// physical device present on both sides shows once (native, badged
+    /// also_in_ha) rather than twice. Sorted by id.
     pub fn all(&self) -> Vec<Device> {
-        self.inner.load().as_ref().clone()
+        let s = self.inner.load();
+        super::reconcile::reconcile(&s.config, &s.ha)
     }
 
     /// One device by id.
     pub fn get(&self, id: &str) -> Option<Device> {
-        self.inner.load().iter().find(|d| d.id == id).cloned()
+        self.all().into_iter().find(|d| d.id == id)
     }
 
     pub fn len(&self) -> usize {
-        self.inner.load().len()
+        let s = self.inner.load();
+        s.config.len() + s.ha.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inner.load().is_empty()
+        self.len() == 0
     }
 }
 
@@ -69,6 +96,7 @@ mod tests {
             source_id: None,
             online: None,
             last_seen_epoch: None,
+            also_in_ha: false,
             children: Vec::new(),
         }
     }
@@ -92,5 +120,24 @@ mod tests {
         r.set(vec![dev("new")]);
         assert!(r.get("old").is_none());
         assert!(r.get("new").is_some());
+    }
+
+    #[test]
+    fn config_and_ha_sets_merge_independently() {
+        let r = DeviceRegistry::new();
+        r.set(vec![dev("source:a")]);
+        r.set_ha(vec![dev("ha:x"), dev("ha:y")]);
+        assert_eq!(r.len(), 3);
+        assert!(r.get("source:a").is_some());
+        assert!(r.get("ha:x").is_some());
+        // Replacing HA devices leaves config devices intact, and vice versa.
+        r.set_ha(vec![dev("ha:z")]);
+        assert!(r.get("source:a").is_some());
+        assert!(r.get("ha:x").is_none());
+        assert!(r.get("ha:z").is_some());
+        assert_eq!(r.len(), 2);
+        // all() is sorted by id.
+        let ids: Vec<_> = r.all().into_iter().map(|d| d.id).collect();
+        assert_eq!(ids, vec!["ha:z".to_string(), "source:a".to_string()]);
     }
 }
