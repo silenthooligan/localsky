@@ -68,7 +68,7 @@ jobs:
           touch "/tmp/digests/${digest#sha256:}"
       - name: upload digest
         if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: digests-${{ matrix.slug }}
           path: /tmp/digests/*
@@ -88,7 +88,7 @@ jobs:
       packages: write
     steps:
       - name: download digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
           pattern: digests-*
@@ -139,4 +139,8 @@ jobs:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.merge.outputs.version }}
           format: table
           severity: HIGH,CRITICAL
+          # Gate on actionable findings only: distro CVEs marked
+          # fix_deferred / will_not_fix have no upgrade path and would
+          # keep the gate permanently red on noise.
+          ignore-unfixed: true
           exit-code: '1'

@@ -2,7 +2,7 @@
 # Stage 1 compiles the SSR binary + WASM client via cargo-leptos.
 # Stage 2 ships only the binary, the static `site/` bundle, and CA roots.
 
-FROM rust:slim-bookworm@sha256:b5f842fac1e3b4ff718a652a8e0173b62d9403ec826ef4998880b9347db30684 AS builder
+FROM rust:slim-trixie@sha256:082a5849a6870672b5f7a5bf4eddc71723fce38756fd834a0d734a5306a310ab AS builder
 
 RUN apt-get update && apt-get install -y \
         pkg-config libssl-dev curl wget build-essential \
@@ -48,7 +48,7 @@ ENV GITEA_SHA=${GITEA_SHA}
 RUN cargo leptos build --release
 
 # ── Runtime ──
-FROM debian:bookworm-slim@sha256:66117fe525ba266a4d9de1dc238fa9b9d2fe78ff9d0836b8348d133e836f39b5
+FROM debian:trixie-slim@sha256:4e401d95de7083948053197a9c3913343cd06b706bf15eb6a0c3ccd26f436a0e
 
 RUN apt-get update && apt-get install -y \
         ca-certificates libssl3 curl \
