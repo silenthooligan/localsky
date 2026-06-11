@@ -90,6 +90,11 @@
   background: rgba(94, 200, 255, 0.08);
   border-radius: 3px;
   padding: 0.05em 0.4em;
+  /* Inline code must wrap: long flag strings (-v /opt/...:/data) were
+     unwrappable tokens that pushed callout boxes past the content
+     column. anywhere lets the box stay inside the page at any width. */
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 /* Headings: accent color for h1, slightly muted for subheads. */
@@ -103,6 +108,10 @@
   background: rgba(94, 200, 255, 0.04);
   border-left: 3px solid var(--ls-accent);
   color: var(--ls-text-dim);
+  /* Never wider than the content column regardless of contents. */
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-wrap: anywhere;
 }
 
 /* Tables: panel header + alternating row tint. */
