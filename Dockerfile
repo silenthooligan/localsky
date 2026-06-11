@@ -9,10 +9,13 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # cargo-binstall for fast cargo-leptos install (avoids OOM on source build).
-RUN wget https://github.com/cargo-bins/cargo-binstall/releases/latest/download/cargo-binstall-x86_64-unknown-linux-musl.tgz \
-    && tar -xvf cargo-binstall-x86_64-unknown-linux-musl.tgz \
+# Arch-aware: the build runs natively on both amd64 and arm64 runners, so
+# the bootstrap binary must match the build machine.
+RUN arch="$(uname -m)" \
+    && wget -q "https://github.com/cargo-bins/cargo-binstall/releases/latest/download/cargo-binstall-${arch}-unknown-linux-musl.tgz" \
+    && tar -xf "cargo-binstall-${arch}-unknown-linux-musl.tgz" \
     && cp cargo-binstall /usr/local/cargo/bin \
-    && rm cargo-binstall-x86_64-unknown-linux-musl.tgz cargo-binstall
+    && rm "cargo-binstall-${arch}-unknown-linux-musl.tgz" cargo-binstall
 
 RUN cargo binstall cargo-leptos -y
 RUN rustup target add wasm32-unknown-unknown
