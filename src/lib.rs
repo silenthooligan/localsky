@@ -10,6 +10,17 @@
 // component trees and could approach the budget on its own as they grow.
 // Compile-time query budget only, no runtime cost.
 #![recursion_limit = "512"]
+// Lint baseline: stylistic clippy classes the codebase predates. CI
+// runs -D warnings; these allows keep that gate meaningful for new
+// warning classes while the baseline is burned down over time.
+#![allow(clippy::field_reassign_with_default)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::doc_lazy_continuation)]
+#![allow(clippy::doc_overindented_list_items)]
+#![allow(clippy::unused_unit)]
+#![allow(clippy::unit_arg)]
+#![allow(clippy::manual_clamp)]
 
 pub mod app;
 pub mod components;

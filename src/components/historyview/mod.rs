@@ -100,7 +100,7 @@ fn skip_breakdown(decisions: &[DecisionRecord]) -> Vec<(&'static str, usize, &'s
         ("Other", other, "var(--text-faint)"),
     ];
     v.retain(|(_, c, _)| *c > 0);
-    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v.sort_by_key(|r| std::cmp::Reverse(r.1));
     v
 }
 

@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+#[derive(Default)]
 pub struct IngestState {
     /// Per-zone slug → epoch the zone was first seen running. None
     /// means we last saw it idle (or never). On running→idle we
@@ -26,15 +27,6 @@ pub struct IngestState {
     /// builds a valid skip_check; thereafter holds the most recent
     /// transition so we can detect changes against the next poll.
     last_decision: Option<(String, String)>,
-}
-
-impl Default for IngestState {
-    fn default() -> Self {
-        Self {
-            seen_running: HashMap::new(),
-            last_decision: None,
-        }
-    }
 }
 
 impl IngestState {

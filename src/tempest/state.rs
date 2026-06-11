@@ -112,6 +112,13 @@ struct RollingBuffers {
 }
 
 #[cfg(feature = "ssr")]
+impl Default for TempestStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "ssr")]
 impl TempestStore {
     pub fn new() -> Self {
         let initial = Arc::new(Snapshot::default());
@@ -152,7 +159,7 @@ impl TempestStore {
         while roll
             .pressure
             .front()
-            .map_or(false, |(t, _)| *t < six_hours_ago)
+            .is_some_and(|(t, _)| *t < six_hours_ago)
         {
             roll.pressure.pop_front();
         }
@@ -173,7 +180,7 @@ impl TempestStore {
         while roll
             .strikes
             .front()
-            .map_or(false, |s| s.time_epoch < one_hour_ago)
+            .is_some_and(|s| s.time_epoch < one_hour_ago)
         {
             roll.strikes.pop_front();
         }
@@ -250,7 +257,7 @@ impl TempestStore {
             while roll
                 .strikes
                 .front()
-                .map_or(false, |s| s.time_epoch < one_hour_ago)
+                .is_some_and(|s| s.time_epoch < one_hour_ago)
             {
                 roll.strikes.pop_front();
             }
@@ -306,14 +313,13 @@ fn wet_bulb_c(t_c: f64, rh: f64) -> f64 {
 #[cfg(feature = "ssr")]
 fn feels_like_f(t_f: f64, rh: f64, wind_mph: f64) -> f64 {
     if t_f >= 80.0 && rh >= 40.0 {
-        let hi = -42.379 + 2.049_015_23 * t_f + 10.143_331_27 * rh
+        -42.379 + 2.049_015_23 * t_f + 10.143_331_27 * rh
             - 0.224_755_41 * t_f * rh
             - 0.006_837_83 * t_f * t_f
             - 0.054_817_17 * rh * rh
             + 0.001_228_74 * t_f * t_f * rh
             + 0.000_852_82 * t_f * rh * rh
-            - 0.000_001_99 * t_f * t_f * rh * rh;
-        hi
+            - 0.000_001_99 * t_f * t_f * rh * rh
     } else if t_f <= 50.0 && wind_mph >= 3.0 {
         35.74 + 0.6215 * t_f - 35.75 * wind_mph.powf(0.16) + 0.4275 * t_f * wind_mph.powf(0.16)
     } else {

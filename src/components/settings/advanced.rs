@@ -552,7 +552,7 @@ async fn fetch_update_status() -> Result<UpdateStatus, String> {
 #[cfg(feature = "hydrate")]
 fn version_newer(candidate: &str, baseline: &str) -> bool {
     fn parts(s: &str) -> Vec<(u64, String)> {
-        s.split(|c: char| c == '.' || c == '-')
+        s.split(['.', '-'])
             .map(|p| {
                 let n = p
                     .chars()

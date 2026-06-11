@@ -112,7 +112,6 @@ pub fn SettingsTheme() -> impl IntoView {
                     let bg = p.swatch_bg;
                     let accent = p.swatch_accent;
                     let text = p.swatch_text;
-                    let pick = pick.clone();
                     view! {
                         <button
                             type="button"

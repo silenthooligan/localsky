@@ -13,6 +13,7 @@
 
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
+#[cfg(feature = "hydrate")]
 use leptos_router::hooks::use_query_map;
 use serde::Deserialize;
 
@@ -179,6 +180,9 @@ pub fn SettingsDevices() -> impl IntoView {
     let discovering = RwSignal::new(false);
     let discovered_once = RwSignal::new(false);
 
+    // Called only from the hydrate-gated effects below; SSR builds never
+    // invoke it.
+    #[allow(unused_variables)]
     let refresh = move || {
         #[cfg(feature = "hydrate")]
         wasm_bindgen_futures::spawn_local(async move {
@@ -349,7 +353,10 @@ pub fn SettingsDevices() -> impl IntoView {
                 return view! { <p class="settings-empty">"No gateways found on the LAN."</p> }
                     .into_any();
             }
-            return view! {}.into_any();
+            return {
+                let _: () = view! {};
+                ().into_any()
+            };
         }
         let rows: Vec<_> = list
             .into_iter()
@@ -527,13 +534,17 @@ fn device_card(dev: Device, on_edit: Callback<String>) -> impl IntoView {
                             view! { <SettingsBadge label="Offline".into() tone=BadgeTone::Danger/> }
                                 .into_any()
                         }
-                        None => view! {}.into_any(),
+                        None => {
+                            let _: () = view! {};
+                            ().into_any()
+                        },
                     };
                     let mirror_badge = if also_in_ha {
                         view! { <SettingsBadge label="+ HA".into() tone=BadgeTone::Accent/> }
                             .into_any()
                     } else {
-                        view! {}.into_any()
+                        let _: () = view! {};
+                        ().into_any()
                     };
                     view! {
                         {origin_badge}
@@ -566,7 +577,8 @@ fn device_card(dev: Device, on_edit: Callback<String>) -> impl IntoView {
                         view! { <span class="device-child-empty">"Managed in Home Assistant"</span> }
                             .into_any()
                     } else {
-                        view! {}.into_any()
+                        let _: () = view! {};
+                        ().into_any()
                     }
                 })
             />

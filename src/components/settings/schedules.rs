@@ -22,8 +22,7 @@ use crate::components::ui::{FormField, Panel, SegmentedControl, Toggle};
 /// of either with a plain hyphen so old toml entries written before the
 /// `feedback_no_em_dashes` rule still render legibly.
 fn sanitize_name(raw: &str) -> String {
-    raw.replace('\u{2014}', "-")
-        .replace('\u{2013}', "-")
+    raw.replace(['\u{2014}', '\u{2013}'], "-")
         .replace("\u{00e2}\u{0080}\u{0094}", "-")
         .replace("\u{00e2}\u{0080}\u{0093}", "-")
 }

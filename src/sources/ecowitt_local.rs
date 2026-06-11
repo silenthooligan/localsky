@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn parses_full_observation() {
-        let s = build(None);
+        let _s = build(None);
         let (tx, mut rx) = broadcast::channel::<SourceEvent>(8);
         let s = EcowittLocal::new(
             "ecowitt_test",
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn silently_drops_empty_payloads() {
-        let s = build(None);
+        let _s = build(None);
         let (tx, mut rx) = broadcast::channel::<SourceEvent>(8);
         let s = EcowittLocal::new(
             "ecowitt_test",

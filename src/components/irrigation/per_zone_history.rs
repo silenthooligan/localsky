@@ -168,7 +168,7 @@ fn PerZoneCard(slug: String, name: String, window: ReadSignal<HistoryWindow>) ->
             .filter(|r| r.zone == runs_slug)
             .cloned()
             .collect();
-        filtered.sort_by(|a, b| b.start_epoch.cmp(&a.start_epoch));
+        filtered.sort_by_key(|r| std::cmp::Reverse(r.start_epoch));
         filtered.truncate(10);
         filtered
     });

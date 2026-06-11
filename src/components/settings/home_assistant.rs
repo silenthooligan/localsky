@@ -8,7 +8,9 @@
 
 use leptos::prelude::*;
 
-use crate::components::ui::{use_toast, Icon, SkeletonRows};
+#[cfg(feature = "hydrate")]
+use crate::components::ui::use_toast;
+use crate::components::ui::{Icon, SkeletonRows};
 use crate::docs::doc_url;
 
 /// One integration capability card: icon, name, plain-language meaning,
@@ -219,7 +221,7 @@ pub fn SettingsHomeAssistant() -> impl IntoView {
                     .and_then(|v| v.as_str())
                     .unwrap_or("standalone")
                     .to_string();
-                let hacs_epoch = h.get("hacs_last_seen_epoch").and_then(|v| v.as_i64()).unwrap_or(0);
+                let _hacs_epoch = h.get("hacs_last_seen_epoch").and_then(|v| v.as_i64()).unwrap_or(0);
                 let hacs_streaming = h.get("hacs_streaming").and_then(|v| v.as_bool()).unwrap_or(false);
                 let mqtt = h.get("mqtt_discovery").and_then(|v| v.as_bool()).unwrap_or(false);
                 let passthrough: Vec<(String, usize)> = h

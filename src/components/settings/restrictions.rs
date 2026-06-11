@@ -29,8 +29,7 @@ use crate::components::ui::{FormField, Panel, SegmentedControl, Toggle};
 /// `feedback_no_em_dashes` rule still render legibly. Idempotent; safe
 /// to call on already-clean strings.
 fn sanitize_name(raw: &str) -> String {
-    raw.replace('\u{2014}', "-") // U+2014 EM DASH
-        .replace('\u{2013}', "-") // U+2013 EN DASH
+    raw.replace(['\u{2014}', '\u{2013}'], "-") // U+2013 EN DASH
         .replace("\u{00e2}\u{0080}\u{0094}", "-") // Latin-1-decoded UTF-8 of em-dash
         .replace("\u{00e2}\u{0080}\u{0093}", "-") // Latin-1-decoded UTF-8 of en-dash
 }

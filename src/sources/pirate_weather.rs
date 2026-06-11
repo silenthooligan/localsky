@@ -43,6 +43,7 @@ struct ForecastResponse {
 struct CurrentBlock {
     temperature: Option<f64>,
     #[serde(rename = "apparentTemperature")]
+    #[allow(dead_code)] // kept to mirror the API shape
     apparent_temperature: Option<f64>,
     #[serde(rename = "dewPoint")]
     dew_point: Option<f64>,

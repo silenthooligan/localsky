@@ -44,6 +44,7 @@ struct OneCallResponse {
 #[derive(Debug, Deserialize)]
 struct CurrentBlock {
     temp: Option<f64>,
+    #[allow(dead_code)] // kept to mirror the API shape
     feels_like: Option<f64>,
     pressure: Option<f64>, // hPa
     humidity: Option<f64>,

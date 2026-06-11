@@ -221,7 +221,7 @@ impl IrrigationController for Rachio {
                 // momentarily unreachable. Mark reachable=false so the
                 // dashboard surfaces the degraded state.
                 debug!("rachio status fetch failed, falling back to last_status: {e}");
-                let mut last = self.last_status.lock().await;
+                let last = self.last_status.lock().await;
                 if let Some(s) = last.as_ref() {
                     let mut stale = s.clone();
                     stale.reachable = false;
@@ -410,6 +410,7 @@ impl IrrigationController for Rachio {
     }
 }
 
+#[allow(dead_code)] // serde response type, kept to mirror the API shape
 #[derive(Debug, Deserialize, Serialize)]
 struct RachioPersonInfo {
     id: String,

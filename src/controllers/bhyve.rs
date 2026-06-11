@@ -188,7 +188,7 @@ impl IrrigationController for Bhyve {
             dev = self.config.device_id
         );
         // B-hyve takes run_time in MINUTES, rounded up.
-        let run_time = (duration_s + 59) / 60;
+        let run_time = duration_s.div_ceil(60);
         let body = json!({
             "action": "run",
             "stations": [{ "station": station, "run_time": run_time }],
@@ -232,8 +232,8 @@ impl IrrigationController for Bhyve {
             Ok(v) => {
                 let zone_states: Vec<ZoneRuntimeStatus> = self
                     .station_to_slug
-                    .iter()
-                    .map(|(_station, slug)| ZoneRuntimeStatus {
+                    .values()
+                    .map(|slug| ZoneRuntimeStatus {
                         slug: slug.clone(),
                         // We could parse `v.status.run_mode` + active
                         // station here; left as None for v1 since the

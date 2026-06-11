@@ -34,6 +34,8 @@ const POLL_INTERVAL: Duration = Duration::from_secs(30 * 60); // 30 min
 
 pub struct MetNorway {
     id: String,
+    #[allow(dead_code)]
+    // user_agent is consumed at construction; kept for parity with other sources
     config: MetNorwayConfig,
     location: Location,
     client: Client,
@@ -58,6 +60,7 @@ struct TimeStep {
 struct TimeStepData {
     instant: InstantBlock,
     #[serde(rename = "next_1_hours")]
+    #[allow(dead_code)] // kept to mirror the API shape
     next_1_hours: Option<NextBlock>,
 }
 
@@ -73,16 +76,19 @@ struct InstantDetails {
     relative_humidity: Option<f64>,
     wind_speed: Option<f64>,
     wind_from_direction: Option<f64>,
+    #[allow(dead_code)] // kept to mirror the API shape
     cloud_area_fraction: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
 struct NextBlock {
+    #[allow(dead_code)] // kept to mirror the API shape
     details: NextDetails,
 }
 
 #[derive(Debug, Deserialize)]
 struct NextDetails {
+    #[allow(dead_code)] // kept to mirror the API shape
     precipitation_amount: Option<f64>,
 }
 

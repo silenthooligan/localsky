@@ -129,7 +129,7 @@ pub struct RapidWindOb {
 impl RapidWindOb {
     pub fn from_array(arr: &[serde_json::Value]) -> Option<Self> {
         Some(Self {
-            time_epoch: arr.get(0)?.as_i64()?,
+            time_epoch: arr.first()?.as_i64()?,
             speed_mps: arr.get(1)?.as_f64().unwrap_or(0.0),
             direction_deg: arr.get(2)?.as_f64().unwrap_or(0.0),
         })
@@ -146,7 +146,7 @@ pub struct StrikeEvent {
 impl StrikeEvent {
     pub fn from_array(arr: &[serde_json::Value]) -> Option<Self> {
         Some(Self {
-            time_epoch: arr.get(0)?.as_i64()?,
+            time_epoch: arr.first()?.as_i64()?,
             distance_km: arr.get(1)?.as_f64().unwrap_or(0.0),
             energy: arr.get(2)?.as_u64().unwrap_or(0),
         })

@@ -191,7 +191,7 @@ impl IrrigationController for Rainbird {
     async fn run_zone(&self, slug: &str, duration_s: u32) -> ControllerResult<RunHandle> {
         let station = self.station_for(slug)?;
         // Rain Bird's cloud takes duration in MINUTES (round up).
-        let duration_min = (duration_s + 59) / 60;
+        let duration_min = duration_s.div_ceil(60);
         let body = json!({
             "command": "WaterControllerOnce",
             "station": station,

@@ -38,6 +38,8 @@ const POLL_INTERVAL: Duration = Duration::from_secs(30 * 60); // 30 min
 
 pub struct Nws {
     id: String,
+    #[allow(dead_code)]
+    // user_agent is consumed at construction; kept for parity with other sources
     config: NwsConfig,
     location: Location,
     client: Client,

@@ -16,7 +16,9 @@ pub fn BetaFeedback() -> impl IntoView {
     let open = RwSignal::new(false);
     let kind = RwSignal::new("bug".to_string());
     let text = RwSignal::new(String::new());
-    // Diagnostic context, fetched once when the sheet first opens.
+    // Diagnostic context, fetched once when the sheet first opens. Read
+    // and written only inside hydrate-gated code; unused in SSR builds.
+    #[allow(unused_variables)]
     let ctx = RwSignal::new(String::new());
 
     #[cfg(feature = "hydrate")]

@@ -1623,10 +1623,7 @@ fn compute_next_run_epoch(location: (f64, f64), zones: &[crate::ha::snapshot::Zo
     if lat == 0.0 && lon == 0.0 {
         return 0;
     }
-    let total_dispatch_s: u64 = zones
-        .iter()
-        .map(|z| z.planned_run_seconds.max(0) as u64)
-        .sum();
+    let total_dispatch_s: u64 = zones.iter().map(|z| z.planned_run_seconds as u64).sum();
     let zones_to_run = zones.iter().filter(|z| z.planned_run_seconds > 0).count();
     let sequence_total_s =
         total_dispatch_s + INTER_ZONE_PREAMBLE_S * (zones_to_run.saturating_sub(1)) as u64;

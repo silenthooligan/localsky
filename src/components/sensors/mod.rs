@@ -82,6 +82,7 @@ fn dir_card(deg: f64) -> &'static str {
 }
 
 /// Parse the /api/v1/health `sources` array into rows.
+#[cfg(feature = "hydrate")]
 fn parse_source_rows(v: &serde_json::Value) -> Vec<SourceRow> {
     v.get("sources")
         .and_then(|s| s.as_array())
@@ -187,6 +188,8 @@ pub fn SensorsPage(
     // Persist one source entry (add or replace-by-id) via read-modify-write
     // on the full config, then re-load health and land on the source's live
     // readings so the user immediately sees it ingesting.
+    // Toast handle is only fired from hydrate-gated save paths below.
+    #[allow(unused_variables)]
     let toast = crate::components::ui::use_toast();
     let persist_entry = Callback::new(move |entry: serde_json::Value| {
         let id = entry

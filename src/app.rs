@@ -118,7 +118,9 @@ pub fn App() -> impl IntoView {
     // Gate persistence until the initial localStorage read has run. Without
     // this the persist Effect fires on mount (nerd_mode=false) and writes "0"
     // before the deferred read, so the read then sees "0" and the
-    // default-to-nerd never takes for new users.
+    // default-to-nerd never takes for new users. Only the hydrate-gated
+    // block below touches it; SSR builds leave it unused.
+    #[allow(unused_variables)]
     let nerd_loaded = RwSignal::new(false);
     provide_context(NerdMode(nerd_mode));
     #[cfg(feature = "hydrate")]

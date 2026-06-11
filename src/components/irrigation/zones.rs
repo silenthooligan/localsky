@@ -128,7 +128,10 @@ fn ZoneCard(zone: Signal<ZoneState>) -> impl IntoView {
                     Some(u) => view! {
                         <img class="zone-card-photo" src=u alt="" loading="lazy"/>
                     }.into_any(),
-                    None => view! { <></> }.into_any(),
+                    None => {
+                        let _: () = view! { <></> };
+                        ().into_any()
+                    },
                 }
             }}
             <header class="zone-card-head">

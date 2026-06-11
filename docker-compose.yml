@@ -84,6 +84,11 @@ services:
       - LEPTOS_SITE_ADDR=0.0.0.0:8091
       - LEPTOS_SITE_ROOT=site
       - LOCALSKY_DEMO=1
+      # Operator-opt-in analytics for the PUBLIC demo only: served
+      # first-party via Caddy's /stats proxy on demo.localsky.io.
+      - LOCALSKY_ANALYTICS_SRC=/stats/u.js
+      - LOCALSKY_ANALYTICS_WEBSITE_ID=e22df262-a571-466b-81a0-9b61b83e54af
+      - LOCALSKY_ANALYTICS_HOST_URL=https://demo.localsky.io/stats
       - HISTORY_DB_PATH=/data/irrigation.db
     volumes:
       - ./demo-data:/data

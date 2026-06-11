@@ -141,11 +141,11 @@ impl BiasModel {
         }
 
         let mut out = Self::identity();
-        for m in 1..=12 {
-            let count = per_month[m].len();
+        for (m, samples) in per_month.iter_mut().enumerate().skip(1) {
+            let count = samples.len();
             out.sample_counts[m] = count;
             if count >= MIN_OBSERVATIONS {
-                let median = robust_median(&mut per_month[m]);
+                let median = robust_median(samples);
                 out.multipliers[m] = median.clamp(BIAS_FLOOR, BIAS_CEIL);
             }
         }

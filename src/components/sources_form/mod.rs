@@ -125,6 +125,8 @@ pub fn SourceEditorPanel(
         .and_then(|v| v.as_str())
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
+    // Read only by the hydrate-gated template-swap effect below.
+    #[allow(unused_variables)]
     let has_seed_config = existing.as_ref().and_then(|s| s.get("config")).is_some();
     let seed_id = existing
         .as_ref()

@@ -463,7 +463,7 @@ fn push_zone_entities(out: &mut Vec<EntityDescriptor>, zones: &[crate::ha::snaps
         // Valve entity — open/close maps to run/stop irrigation action.
         out.push(EntityDescriptor {
             platform: "valve",
-            id: format!("{slug}"),
+            id: slug.to_string(),
             name: pretty.clone(),
             snapshot: "irrigation",
             path: vec!["running".into()],

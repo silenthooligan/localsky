@@ -14,7 +14,7 @@ use leptos::tachys::view::any_view::IntoAny;
 
 #[component]
 pub fn ZoneMathPanel(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
-    let zone0 = Signal::derive(move || snap.get().zones.get(0).cloned().unwrap_or_default());
+    let zone0 = Signal::derive(move || snap.get().zones.first().cloned().unwrap_or_default());
     let zone1 = Signal::derive(move || snap.get().zones.get(1).cloned().unwrap_or_default());
     let zone2 = Signal::derive(move || snap.get().zones.get(2).cloned().unwrap_or_default());
     let zone3 = Signal::derive(move || snap.get().zones.get(3).cloned().unwrap_or_default());

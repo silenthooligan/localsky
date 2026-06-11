@@ -36,7 +36,7 @@ pub fn RunningBanner(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         let first_slug = first.slug.clone();
         let first_planned = first.planned_run_seconds;
 
-        let extra_count = if count > 1 { count - 1 } else { 0 };
+        let extra_count = count.saturating_sub(1);
 
         let on_stop = move |_| {
             // Single running zone -> stop just that one. Multiple -> stop_all

@@ -305,31 +305,6 @@ pub fn build_sources(cfg: &Config) -> Vec<Arc<dyn WeatherSource>> {
     out
 }
 
-/// Stringify a SourceKind for log lines without exposing config bodies.
-fn source_kind_name(s: &SourceKind) -> &'static str {
-    match s {
-        SourceKind::TempestUdp(_) => "tempest_udp",
-        SourceKind::TempestWs(_) => "tempest_ws",
-        SourceKind::OpenMeteo(_) => "open_meteo",
-        SourceKind::EcowittLocal(_) => "ecowitt_local",
-        SourceKind::EcowittGwPoll(_) => "ecowitt_gw_poll",
-        SourceKind::Nws(_) => "nws",
-        SourceKind::OpenWeather(_) => "openweather",
-        SourceKind::PirateWeather(_) => "pirate_weather",
-        SourceKind::MetNorway(_) => "met_norway",
-        SourceKind::AmbientWeather(_) => "ambient_weather",
-        SourceKind::Netatmo(_) => "netatmo",
-        SourceKind::Yolink(_) => "yolink",
-        SourceKind::Lacrosse(_) => "lacrosse",
-        SourceKind::TuyaCloud(_) => "tuya_cloud",
-        SourceKind::DavisWll(_) => "davis_wll",
-        SourceKind::HaPassthrough(_) => "ha_passthrough",
-        SourceKind::Mqtt(_) => "mqtt",
-        SourceKind::HttpWebhook(_) => "http_webhook",
-        SourceKind::DemoReplay(_) => "demo_replay",
-    }
-}
-
 pub fn build_controllers(
     cfg: &Config,
     runs: RunsStore,

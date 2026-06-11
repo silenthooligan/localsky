@@ -128,6 +128,8 @@ pub fn ControllerEditorPanel(
                 return;
             }
         };
+        // Consumed only by the hydrate-gated scan request below.
+        #[allow(unused_variables)]
         let entry = serde_json::json!({
             "id": id.get(),
             "default": default_flag.get(),

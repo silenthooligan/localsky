@@ -147,7 +147,7 @@ pub fn spawn(
             let total_dispatch_s: u64 = snap
                 .zones
                 .iter()
-                .map(|z| z.planned_run_seconds.max(0) as u64)
+                .map(|z| z.planned_run_seconds as u64)
                 .sum();
             let zones_to_run: usize = snap
                 .zones
@@ -216,7 +216,7 @@ pub fn spawn(
                                 .default()
                                 .map(|c| c.id().to_string())
                                 .unwrap_or_default(),
-                            planned_duration_s: zone.planned_run_seconds.max(0) as u32,
+                            planned_duration_s: zone.planned_run_seconds,
                             skip_reason: None,
                             et0_mm: None,
                             etc_mm: None,
@@ -265,7 +265,7 @@ pub fn spawn(
                                     .default()
                                     .map(|c| c.id().to_string())
                                     .unwrap_or_default(),
-                                planned_duration_s: zone.planned_run_seconds.max(0) as u32,
+                                planned_duration_s: zone.planned_run_seconds,
                                 skip_reason: None,
                                 et0_mm: None,
                                 etc_mm: None,
@@ -348,7 +348,7 @@ async fn dispatch_today(
                         .default()
                         .map(|c| c.id().to_string())
                         .unwrap_or_default(),
-                    planned_duration_s: zone.planned_run_seconds.max(0) as u32,
+                    planned_duration_s: zone.planned_run_seconds,
                     skip_reason: None,
                     et0_mm: None,
                     etc_mm: None,
@@ -422,11 +422,11 @@ async fn dispatch_today(
         if zone.planned_run_seconds == 0 {
             continue;
         }
-        let duration_s = zone.planned_run_seconds.max(0) as u32;
+        let duration_s = zone.planned_run_seconds;
 
         // Build the cycle-and-soak plan if we have enough cfg context;
         // otherwise dispatch the zone in one shot.
-        let segments = build_cycle_plan(cfg.as_deref(), &zone.slug, duration_s, soak_minutes);
+        let segments = build_cycle_plan(cfg, &zone.slug, duration_s, soak_minutes);
 
         for (idx, seg) in segments.iter().enumerate() {
             if dry_run {

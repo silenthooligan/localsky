@@ -46,7 +46,7 @@ fn TabChip(href: &'static str, label: &'static str) -> impl IntoView {
     };
     let navigate = use_navigate();
     let on_click = move |ev: leptos::ev::MouseEvent| {
-        log_nav(&format!("irrigation tab click {href}"));
+        log_nav(format!("irrigation tab click {href}"));
         if ev.ctrl_key() || ev.meta_key() || ev.shift_key() || ev.button() != 0 {
             return;
         }

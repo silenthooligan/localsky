@@ -821,7 +821,10 @@ fn ZoneForm(
                 // data picture" right in the zone, with a jump to manage it.
                 {move || {
                     let sel = new_soil_sensor.get();
-                    if sel.is_empty() { return view! {}.into_any(); }
+                    if sel.is_empty() { return {
+                        let _: () = view! {};
+                        ().into_any()
+                    }; }
                     // Zones store the bare entity (sensor.x) while the soil feed
                     // ids HA channels as ha:sensor.x — match on the bare id.
                     let bare = |s: &str| s.strip_prefix("ha:").unwrap_or(s).to_string();

@@ -191,7 +191,7 @@ mod tests {
                 .map(|(_, v)| *v)
                 .unwrap();
             assert!(
-                h >= 0.0 && h <= 100.0,
+                (0.0..=100.0).contains(&h),
                 "humidity out of range: {h} at t={t}"
             );
         }
