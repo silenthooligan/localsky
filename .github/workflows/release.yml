@@ -1,8 +1,10 @@
 name: release
 
-# Every v* tag becomes a GitHub Release automatically: generated notes
-# from merged changes since the previous tag, prefixed with the image
-# pull instructions. Publish flow stays: tag, push, done.
+# Every v* tag becomes a GitHub Release automatically. The body is the
+# matching CHANGELOG.md section (the mirror squashes commits, so
+# generated notes carry no detail), prefixed with the image pull
+# instructions. Betas are full releases marked Latest; only alpha and
+# rc tags publish as prereleases. Publish flow stays: tag, push, done.
 
 on:
   push:
@@ -21,23 +23,44 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - name: create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: |
-          cat > /tmp/header.md <<BODY
+          VERSION="${TAG#v}"
+          cat > /tmp/body.md <<BODY
           ## Run it
 
           \`\`\`bash
-          docker run -d -p 8090:8090 -v localsky-data:/data ghcr.io/${{ github.repository }}:${TAG#v}
+          docker run -d -p 8090:8090 -v localsky-data:/data ghcr.io/${{ github.repository }}:${VERSION}
           \`\`\`
 
           Multi-arch image (amd64 + arm64). Quick start: https://localsky.io/docs/getting-started
 
           BODY
+          # Pull this version's section out of CHANGELOG.md: from its
+          # heading to the next "## [" heading. Empty when the section
+          # is missing; the release still publishes with the header.
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { found=1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md >> /tmp/body.md
+          PREV=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)
+          if [ -n "$PREV" ]; then
+            printf '\n**Full Changelog**: https://github.com/%s/compare/%s...%s\n' \
+              "${{ github.repository }}" "$PREV" "$TAG" >> /tmp/body.md
+          fi
+          # Alpha/rc tags are prereleases; betas and stable are the
+          # latest release (beta in the version string says enough).
+          case "$TAG" in
+            *-alpha*|*-rc*) FLAGS="--prerelease";;
+            *) FLAGS="--latest";;
+          esac
           gh release create "$TAG" \
             --title "$TAG" \
-            --notes-file /tmp/header.md \
-            --generate-notes \
-            $(case "$TAG" in *-*) echo --prerelease;; esac)
+            --notes-file /tmp/body.md \
+            $FLAGS
