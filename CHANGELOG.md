@@ -30,13 +30,6 @@ All notable changes to LocalSky are documented here. Format follows [Keep a Chan
 - Em dashes removed from all product copy, including unicode-escaped ones
 - Title/subtitle spacing normalized across page headers, panels, and gate rows
 
-### CI (public repository)
-
-- Native multi-arch runners (amd64 + arm64) replace QEMU emulation: builds drop from 2h10m to about 16m
-- Trivy scans the published multi-arch tag with registry auth, gating on fixable HIGH/CRITICAL only
-- Pushing a `v*` tag auto-publishes a GitHub release with generated notes
-- Concurrency auto-cancel, job timeouts, pinned action releases, zero-warning clippy baseline
-
 ## [0.2.0-beta.1] - 2026-06-10
 
 The v2 burndown. Lays a ports-and-adapters foundation underneath the existing v0.1 deployment without changing observable behavior, plus the standalone, UI, and ops work to make LocalSky a viable open-source product.
