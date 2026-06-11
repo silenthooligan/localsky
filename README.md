@@ -9,9 +9,17 @@
 </p>
 
 <p align="center">
+  <strong><a href="https://localsky.io">localsky.io</a></strong> &nbsp;&middot;&nbsp;
+  <a href="https://localsky.io/docs/">Documentation</a> &nbsp;&middot;&nbsp;
+  <a href="https://demo.localsky.io">Live demo</a>
+</p>
+
+<p align="center">
   <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/License-Apache_2.0-3b82f6.svg"></a>
   <a href="https://www.rust-lang.org/"><img alt="Built with Rust" src="https://img.shields.io/badge/Built_with-Rust-d97706.svg"></a>
   <a href="https://leptos.dev/"><img alt="Built with Leptos" src="https://img.shields.io/badge/Built_with-Leptos-9333ea.svg"></a>
+  <a href="https://localsky.io"><img alt="Website" src="https://img.shields.io/badge/localsky.io-website-5ec8ff.svg"></a>
+  <a href="https://localsky.io/docs/"><img alt="Docs" src="https://img.shields.io/badge/localsky.io-docs-5ec8ff.svg"></a>
   <a href="https://github.com/silenthooligan/localsky/releases"><img alt="Status" src="https://img.shields.io/badge/Status-Beta-3b82f6.svg"></a>
 </p>
 
@@ -131,7 +139,7 @@ docker run -d \
 
 Visit <http://localhost:8090>. The `LOCALSKY_DEMO=1` flag boots with simulated data so you can explore the UI before connecting any hardware.
 
-For a real install, drop `LOCALSKY_DEMO`, mount your config volume, and visit `/setup`. The first-run wizard walks you through location, weather sources, controllers, and zones. See [docs/getting-started.md](docs/getting-started.md) for a full walkthrough.
+For a real install, drop `LOCALSKY_DEMO`, mount your config volume, and visit `/setup`. The first-run wizard walks you through location, weather sources, controllers, and zones. See [the quick start](https://localsky.io/docs/getting-started) for a full walkthrough.
 
 If you only want the weather dashboard, leave the controllers list empty in the wizard. LocalSky will skip the irrigation surfaces entirely and run as a pure weather product.
 
@@ -168,18 +176,18 @@ Promote to **Tested** only when CI fixture or maintainer-confirmed run exists.
 
 Full docs live in [`docs/`](docs/) and are built into an mdBook for online viewing. Start here:
 
-- [Getting started](docs/getting-started.md), install, prerequisites, and first-run walkthrough
-- [Standalone mode](docs/standalone.md), the full no-Home-Assistant path
-- [Controllers](docs/controllers.md), OpenSprinkler deep-dive plus alternatives
-- [Sensors](docs/sensors.md), what each sensor type unlocks
-- [Configuration reference](docs/configuration.md), every `localsky.toml` field
-- [API reference](docs/api.md), REST + SSE endpoints, JSON shapes
-- [Irrigation engine](docs/irrigation-engine.md), FAO-56 walkthrough with citations
-- [Grass species](docs/grass-species.md) and [soil textures](docs/soil-textures.md)
-- [Skip rules](docs/skip-rules.md), every rule in the ladder, explained
-- [HACS integration](docs/hacs.md), Home Assistant Community Store roadmap
-- [UX journey](docs/ux-journey.md), first-run, upgrades, hardware changes, config changes
-- [Launch checklist](docs/launch-checklist.md), gating criteria for the 0.1.0 cut
+- [Getting started](https://localsky.io/docs/getting-started), install, prerequisites, and first-run walkthrough
+- [Standalone mode](https://localsky.io/docs/standalone), the full no-Home-Assistant path
+- [Controllers](https://localsky.io/docs/controllers), OpenSprinkler deep-dive plus alternatives
+- [Sensors](https://localsky.io/docs/sensors), what each sensor type unlocks
+- [Configuration reference](https://localsky.io/docs/configuration), every `localsky.toml` field
+- [API reference](https://localsky.io/docs/api), REST + SSE endpoints, JSON shapes
+- [Irrigation engine](https://localsky.io/docs/irrigation-engine), FAO-56 walkthrough with citations
+- [Grass species](https://localsky.io/docs/grass-species) and [soil textures](https://localsky.io/docs/soil-textures)
+- [Skip rules](https://localsky.io/docs/skip-rules), every rule in the ladder, explained
+- [HACS integration](https://localsky.io/docs/hacs), Home Assistant Community Store roadmap
+- [UX journey](https://localsky.io/docs/ux-journey), first-run, upgrades, hardware changes, config changes
+- [Launch checklist](https://localsky.io/docs/launch-checklist), gating criteria for the 0.1.0 cut
 
 ## Architecture at a glance
 
