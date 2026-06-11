@@ -349,3 +349,16 @@ The JSON Schema is published at runtime: `GET /api/v1/config/schema`. The settin
 ## Backup + restore
 
 Covered in full in [Backup, restore, and recovery](backup-restore.md). The short version: all persistent state is `/data/localsky.toml` plus `/data/irrigation.db`, and `GET /api/v1/backup` hands you both as one consistent `.tar.gz` (also available as the Download backup button under Settings -> Advanced).
+
+## Optional analytics for public instances
+
+LocalSky never sends telemetry. If you run a *public* instance (a demo,
+a showcase) and want to measure visits with your own analytics tool,
+set all of these and the app shell renders one script tag; leave them
+unset (the default) and nothing is loaded or sent, ever:
+
+```bash
+LOCALSKY_ANALYTICS_SRC=/stats/u.js            # your tracker script URL
+LOCALSKY_ANALYTICS_WEBSITE_ID=<your-site-id>  # data-website-id value
+LOCALSKY_ANALYTICS_HOST_URL=                  # optional data-host-url
+```

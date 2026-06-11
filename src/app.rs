@@ -529,6 +529,30 @@ fn NotFound() -> impl IntoView {
 // viewport-fit=cover is what makes env(safe-area-inset-*) return non-zero
 // on notched iPhones. The bottom-tab nav and the standalone-PWA chrome
 // both need that for safe-area padding to actually take effect.
+/// Optional analytics tag for operators who run a PUBLIC instance and
+/// want to measure visits with their own tool (Umami, Plausible, any
+/// script-tag tracker). Strictly opt-in via two env vars read at SSR:
+/// LOCALSKY_ANALYTICS_SRC (script URL) and LOCALSKY_ANALYTICS_WEBSITE_ID
+/// (data-website-id). Both unset (the default) renders nothing, which
+/// keeps the no-telemetry promise: a stock install never loads or sends
+/// anything anywhere.
+fn analytics_tag() -> Option<impl IntoView> {
+    let src = std::env::var("LOCALSKY_ANALYTICS_SRC").ok()?;
+    let id = std::env::var("LOCALSKY_ANALYTICS_WEBSITE_ID").ok()?;
+    if src.is_empty() || id.is_empty() {
+        return None;
+    }
+    let host_url = std::env::var("LOCALSKY_ANALYTICS_HOST_URL").unwrap_or_default();
+    Some(view! {
+        <script
+            defer
+            src=src
+            data-website-id=id
+            data-host-url=host_url
+        ></script>
+    })
+}
+
 pub fn shell(options: LeptosOptions) -> impl IntoView {
     view! {
         <!DOCTYPE html>
@@ -546,6 +570,11 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <meta name="apple-mobile-web-app-capable" content="yes"/>
                 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
                 <meta name="apple-mobile-web-app-title" content="LocalSky"/>
+                // Operator-opt-in analytics. LocalSky itself sends nothing,
+                // ever; this renders a tracker tag ONLY when the operator
+                // sets both env vars (used by the hosted public demo, useful
+                // for anyone running a public instance). Unset = no tag.
+                {analytics_tag()}
                 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
                     integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
                     crossorigin=""/>
