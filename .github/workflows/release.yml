@@ -1,0 +1,43 @@
+name: release
+
+# Every v* tag becomes a GitHub Release automatically: generated notes
+# from merged changes since the previous tag, prefixed with the image
+# pull instructions. Publish flow stays: tag, push, done.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cat > /tmp/header.md <<BODY
+          ## Run it
+
+          \`\`\`bash
+          docker run -d -p 8090:8090 -v localsky-data:/data ghcr.io/${{ github.repository }}:${TAG#v}
+          \`\`\`
+
+          Multi-arch image (amd64 + arm64). Quick start: https://localsky.io/docs/getting-started
+
+          BODY
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file /tmp/header.md \
+            --generate-notes \
+            $(case "$TAG" in *-*) echo --prerelease;; esac)
