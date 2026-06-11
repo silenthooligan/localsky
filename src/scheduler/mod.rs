@@ -10,6 +10,9 @@
 // Shutdown via watch<bool>; every adapter task drops within 5s or is aborted.
 
 #[cfg(feature = "ssr")]
+pub mod dispatch_gate;
+
+#[cfg(feature = "ssr")]
 pub mod manual;
 
 #[cfg(feature = "ssr")]

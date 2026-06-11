@@ -72,6 +72,10 @@ pub struct AuthPolicy {
     pub required: bool,
     pub session_ttl_days: u32,
     pub trusted: Vec<ipnet::IpNet>,
+    /// Reverse proxies whose X-Forwarded-For is believed (see client_ip).
+    pub trusted_proxies: Vec<ipnet::IpNet>,
+    /// Extra Origins allowed to make state-changing calls cross-origin.
+    pub trusted_origins: Vec<String>,
 }
 
 pub struct AuthRuntime {
@@ -103,6 +107,12 @@ impl AuthRuntime {
                 .iter()
                 .filter_map(|s| s.parse::<ipnet::IpNet>().ok())
                 .collect(),
+            trusted_proxies: cfg
+                .trusted_proxies
+                .iter()
+                .filter_map(|s| s.parse::<ipnet::IpNet>().ok())
+                .collect(),
+            trusted_origins: cfg.trusted_origins.clone(),
         }
     }
 
@@ -236,22 +246,65 @@ fn query_token(req: &Request<Body>) -> Option<String> {
     })
 }
 
-/// Best-effort client IP: X-Forwarded-For first hop, else peer addr.
-pub fn client_ip(req: &Request<Body>) -> Option<IpAddr> {
-    if let Some(xff) = req
+/// Client IP for policy decisions (trusted_networks bypass, login rate
+/// limiting). The socket peer address is authoritative. X-Forwarded-For
+/// is honored ONLY when the peer itself is a configured trusted proxy,
+/// and then the LAST hop not in trusted_proxies wins: rightmost entries
+/// were appended by our own proxy chain, while anything left of the
+/// first untrusted hop is client-supplied and trivially spoofable.
+pub fn client_ip(req: &Request<Body>, trusted_proxies: &[ipnet::IpNet]) -> Option<IpAddr> {
+    let peer = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip())?;
+    if !trusted_proxies.iter().any(|net| net.contains(&peer)) {
+        return Some(peer);
+    }
+    let Some(xff) = req
         .headers()
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
-    {
-        if let Some(first) = xff.split(',').next() {
-            if let Ok(ip) = first.trim().parse() {
-                return Some(ip);
-            }
+    else {
+        return Some(peer);
+    };
+    for hop in xff.split(',').rev() {
+        match hop.trim().parse::<IpAddr>() {
+            Ok(ip) if trusted_proxies.iter().any(|net| net.contains(&ip)) => continue,
+            Ok(ip) => return Some(ip),
+            // Malformed hop: stop walking, fall back to the peer.
+            Err(_) => break,
         }
     }
-    req.extensions()
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|ci| ci.0.ip())
+    Some(peer)
+}
+
+/// True when a browser-supplied Origin may perform a state-changing
+/// request. Same-origin (Origin host equal to the Host or
+/// X-Forwarded-Host the request arrived with) passes; so does an exact
+/// entry in auth.trusted_origins (full origin or bare host). "null" and
+/// malformed Origins are rejected: they only show up cross-origin
+/// (sandboxed iframes, data: URLs) where a write has no business.
+fn origin_allowed(
+    origin: &str,
+    host: Option<&str>,
+    fwd_host: Option<&str>,
+    trusted_origins: &[String],
+) -> bool {
+    let origin = origin.trim().trim_end_matches('/');
+    let Some(origin_host) = origin.split("://").nth(1).filter(|h| !h.is_empty()) else {
+        return false;
+    };
+    if trusted_origins
+        .iter()
+        .map(|t| t.trim().trim_end_matches('/'))
+        .any(|t| t.eq_ignore_ascii_case(origin) || t.eq_ignore_ascii_case(origin_host))
+    {
+        return true;
+    }
+    [host, fwd_host]
+        .iter()
+        .flatten()
+        .any(|h| h.trim().eq_ignore_ascii_case(origin_host))
 }
 
 fn unauthorized_api() -> Response {
@@ -276,23 +329,31 @@ pub async fn enforce(
     let path = req.uri().path().to_string();
     req.extensions_mut().insert(AuthRequired(policy.required));
 
-    // Origin check on non-GET API mutations (CSRF hardening alongside
-    // SameSite=Lax). Only enforced when Origin is present and disagrees
-    // with Host; non-browser clients send no Origin and pass.
-    if policy.required && !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
-        let origin_host = req
+    // Origin check on state-changing requests (CSRF + DNS-rebinding
+    // hardening alongside SameSite=Lax). Enforced in BOTH auth modes:
+    // with auth disabled this is the only thing stopping a hostile
+    // website from firing cross-origin writes at a LAN instance.
+    // Browsers always attach Origin to cross-origin POST/PUT/PATCH/
+    // DELETE; header-less clients (curl, integrations) pass. /ingest/*
+    // is exempt (weather hardware POSTs; per-source secrets gate those).
+    if !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS)
+        && !path.starts_with("/ingest")
+        && !path.starts_with("/api/v1/ingest")
+    {
+        if let Some(origin) = req
             .headers()
             .get(header::ORIGIN)
             .and_then(|v| v.to_str().ok())
-            .and_then(|o| o.split("://").nth(1))
-            .map(|h| h.to_string());
-        let host = req
-            .headers()
-            .get(header::HOST)
-            .and_then(|v| v.to_str().ok())
-            .map(|h| h.to_string());
-        if let (Some(o), Some(h)) = (origin_host, host) {
-            if o != h {
+        {
+            let host = req
+                .headers()
+                .get(header::HOST)
+                .and_then(|v| v.to_str().ok());
+            let fwd_host = req
+                .headers()
+                .get("x-forwarded-host")
+                .and_then(|v| v.to_str().ok());
+            if !origin_allowed(origin, host, fwd_host, &policy.trusted_origins) {
                 return (StatusCode::FORBIDDEN, "cross-origin write rejected").into_response();
             }
         }
@@ -318,7 +379,7 @@ pub async fn enforce(
     }
 
     // Trusted-network bypass.
-    if let Some(ip) = client_ip(&req) {
+    if let Some(ip) = client_ip(&req, &policy.trusted_proxies) {
         if policy.trusted.iter().any(|net| net.contains(&ip)) {
             req.extensions_mut().insert(RequestIdentity::TrustedNetwork);
             return next.run(req).await;
@@ -399,11 +460,110 @@ mod tests {
             mode: AuthMode::Required,
             session_ttl_days: 30,
             trusted_networks: vec!["10.1.2.0/24".into(), "garbage".into()],
+            trusted_proxies: vec!["172.18.0.0/16".into(), "nonsense".into()],
+            trusted_origins: vec!["https://dash.example.com".into()],
         };
         let p = AuthRuntime::policy_from_cfg(&cfg);
         assert!(p.required);
         assert_eq!(p.trusted.len(), 1);
         assert!(p.trusted[0].contains(&"10.1.2.50".parse::<IpAddr>().unwrap()));
         assert!(!p.trusted[0].contains(&"172.16.0.1".parse::<IpAddr>().unwrap()));
+        assert_eq!(p.trusted_proxies.len(), 1);
+        assert_eq!(p.trusted_origins.len(), 1);
+    }
+
+    fn req_with_peer(peer: &str, xff: Option<&str>) -> Request<Body> {
+        let mut req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/auth/login")
+            .body(Body::empty())
+            .unwrap();
+        if let Some(xff) = xff {
+            req.headers_mut()
+                .insert("x-forwarded-for", HeaderValue::from_str(xff).unwrap());
+        }
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+                peer.parse().unwrap(),
+                40000,
+            )));
+        req
+    }
+
+    #[test]
+    fn spoofed_xff_from_untrusted_peer_is_ignored() {
+        // Attacker on the WAN claims to be on the trusted LAN via XFF.
+        let req = req_with_peer("203.0.113.5", Some("192.168.1.10"));
+        let ip = client_ip(&req, &[]).unwrap();
+        assert_eq!(ip, "203.0.113.5".parse::<IpAddr>().unwrap());
+        // Even with proxies configured, a peer outside the list keeps
+        // its own address.
+        let proxies = vec!["172.18.0.0/16".parse::<ipnet::IpNet>().unwrap()];
+        let ip = client_ip(&req, &proxies).unwrap();
+        assert_eq!(ip, "203.0.113.5".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn xff_honored_from_trusted_proxy_takes_last_untrusted_hop() {
+        let proxies = vec!["172.18.0.0/16".parse::<ipnet::IpNet>().unwrap()];
+        // client -> evil-claimed hop -> real client -> our proxy chain.
+        let req = req_with_peer("172.18.0.2", Some("10.9.9.9, 198.51.100.7, 172.18.0.3"));
+        let ip = client_ip(&req, &proxies).unwrap();
+        // 172.18.0.3 is a trusted hop (skipped); 198.51.100.7 is the
+        // last untrusted hop; 10.9.9.9 is client-forgeable and ignored.
+        assert_eq!(ip, "198.51.100.7".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn trusted_proxy_without_xff_falls_back_to_peer() {
+        let proxies = vec!["172.18.0.0/16".parse::<ipnet::IpNet>().unwrap()];
+        let req = req_with_peer("172.18.0.2", None);
+        let ip = client_ip(&req, &proxies).unwrap();
+        assert_eq!(ip, "172.18.0.2".parse::<IpAddr>().unwrap());
+        // Garbage XFF also falls back to the peer.
+        let req = req_with_peer("172.18.0.2", Some("not-an-ip"));
+        let ip = client_ip(&req, &proxies).unwrap();
+        assert_eq!(ip, "172.18.0.2".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn origin_check_blocks_cross_origin_writes() {
+        let none: &[String] = &[];
+        // Same-origin passes (typical browser request).
+        assert!(origin_allowed(
+            "http://192.168.1.20:3000",
+            Some("192.168.1.20:3000"),
+            None,
+            none
+        ));
+        // Cross-origin (hostile site, DNS rebinding) rejected.
+        assert!(!origin_allowed(
+            "http://evil.example",
+            Some("192.168.1.20:3000"),
+            None,
+            none
+        ));
+        // Opaque "null" origin rejected.
+        assert!(!origin_allowed(
+            "null",
+            Some("192.168.1.20:3000"),
+            None,
+            none
+        ));
+        // Reverse proxy: X-Forwarded-Host carries the public name.
+        assert!(origin_allowed(
+            "https://sky.example.com",
+            Some("192.168.1.20:3000"),
+            Some("sky.example.com"),
+            none
+        ));
+        // Explicit trusted origin passes despite the Host mismatch.
+        let trusted = vec!["https://dash.example.com".to_string()];
+        assert!(origin_allowed(
+            "https://dash.example.com",
+            Some("192.168.1.20:3000"),
+            None,
+            &trusted
+        ));
     }
 }

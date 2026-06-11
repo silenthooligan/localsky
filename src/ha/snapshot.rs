@@ -152,7 +152,16 @@ pub struct SkipCheck {
     /// Today's forecast peak wind (Open-Meteo daily[0]).
     pub wind_max_today_mph: f64,
     /// Min hourly forecast temperature for the next 24h (overnight low).
+    /// Stays f64 on the wire for /api/v1 back-compat; 0.0 is the legacy
+    /// missing-data placeholder. Check `temp_min_24h_valid` to tell a
+    /// genuine 0 °F low apart from "no forecast".
     pub temp_min_24h_f: f64,
+    /// False when the 24h forecast low was unavailable (the engine then
+    /// treats the overnight-freeze rule as not applicable). Additive
+    /// /api/v1 field; defaults true when absent so JSON from older
+    /// producers keeps its prior "value is real" semantics.
+    #[serde(default = "default_true")]
+    pub temp_min_24h_valid: bool,
     /// Max forecast daily-high temperature across today + next 2 days.
     pub temp_max_3day_f: f64,
     /// Days since the last day with ≥ 0.05" rain (today included).
@@ -506,6 +515,11 @@ pub struct RuleEval {
 pub struct DecisionTrace {
     pub verdict: String,
     pub reason: String,
+    /// True when the live "now" readings were degraded for this decision
+    /// (station stale/absent; forecast current-hour values stood in, or no
+    /// data was available at all). Additive field; absent = false.
+    #[serde(default)]
+    pub degraded: bool,
     pub rules: Vec<RuleEval>,
 }
 
@@ -514,6 +528,10 @@ fn one_f64() -> f64 {
 }
 
 fn default_true_running_known() -> bool {
+    true
+}
+
+fn default_true() -> bool {
     true
 }
 

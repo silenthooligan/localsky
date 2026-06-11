@@ -18,11 +18,13 @@
 // is used by data. Brand gradient accent stripe at the top.
 
 use crate::components::ui::Icon;
+use crate::components::units_fmt::{fmt_rain_rate, fmt_temp_short, use_unit_prefs};
 use crate::tempest::state::Snapshot;
 use leptos::prelude::*;
 
 #[component]
 pub fn Hero(snap: ReadSignal<Snapshot>) -> impl IntoView {
+    let prefs = use_unit_prefs();
     // Choose the headline glyph + label + accent from the live state.
     // Order matters: lightning > rain > hail > sun-by-irradiance > night.
     // Glyphs are themeable stroke icons (currentColor) tinted by accent,
@@ -99,7 +101,7 @@ pub fn Hero(snap: ReadSignal<Snapshot>) -> impl IntoView {
                 }}
                 <div class="hero-headline">
                     <div class="hero-temp">
-                        {move || format!("{:.0}°", snap.get().air_temp_f)}
+                        {move || fmt_temp_short(snap.get().air_temp_f, prefs.get())}
                     </div>
                     <div class="hero-condition">{move || condition().1}</div>
                 </div>
@@ -107,7 +109,7 @@ pub fn Hero(snap: ReadSignal<Snapshot>) -> impl IntoView {
                     <span class="hero-callout">
                         <span class="hero-callout__k">"feels"</span>
                         <span class="hero-callout__v">
-                            {move || format!("{:.0}°", snap.get().feels_like_f)}
+                            {move || fmt_temp_short(snap.get().feels_like_f, prefs.get())}
                         </span>
                     </span>
                     <span class="hero-callout">
@@ -129,11 +131,11 @@ pub fn Hero(snap: ReadSignal<Snapshot>) -> impl IntoView {
                 </span>
                 <span class="hero-stat" role="listitem">
                     <span class="hero-stat__k">"DEW"</span>
-                    <span class="hero-stat__v">{move || format!("{:.0}°", snap.get().dew_point_f)}</span>
+                    <span class="hero-stat__v">{move || fmt_temp_short(snap.get().dew_point_f, prefs.get())}</span>
                 </span>
                 <span class="hero-stat" role="listitem">
                     <span class="hero-stat__k">"WET"</span>
-                    <span class="hero-stat__v">{move || format!("{:.0}°", snap.get().wet_bulb_f)}</span>
+                    <span class="hero-stat__v">{move || fmt_temp_short(snap.get().wet_bulb_f, prefs.get())}</span>
                 </span>
                 <span class="hero-stat" role="listitem">
                     <span class="hero-stat__k">"WIND"</span>
@@ -147,7 +149,7 @@ pub fn Hero(snap: ReadSignal<Snapshot>) -> impl IntoView {
                 <span class="hero-stat" role="listitem">
                     <span class="hero-stat__k">"RAIN"</span>
                     <span class="hero-stat__v">
-                        {move || format!("{:.2}in/h", snap.get().rain_intensity_in_hr)}
+                        {move || fmt_rain_rate(snap.get().rain_intensity_in_hr, prefs.get())}
                     </span>
                 </span>
                 {pressure_chip}

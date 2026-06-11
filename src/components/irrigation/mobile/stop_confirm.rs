@@ -6,15 +6,16 @@
 // component is always mounted, opens when visible.set(true), closes
 // on either confirm or cancel.
 
-use crate::components::irrigation::controls::post_action;
+use crate::components::irrigation::controls::{post_action_then, toast_on_err};
 use leptos::prelude::*;
 use serde_json::json;
 
 #[component]
 pub fn StopAllConfirm(visible: RwSignal<bool>, running_count: Signal<usize>) -> impl IntoView {
+    let stop_done = toast_on_err("Stop all failed; zones may still be running");
     let close = move |_| visible.set(false);
     let confirm = move |_| {
-        post_action(json!({"kind": "stop_all"}));
+        post_action_then(json!({"kind": "stop_all"}), stop_done);
         visible.set(false);
     };
 

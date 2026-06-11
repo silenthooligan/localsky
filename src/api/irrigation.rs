@@ -1,16 +1,26 @@
 // Irrigation API endpoints. Mirrors the Tempest API exactly for reads:
 // a JSON snapshot and an SSE stream. Adds POST /action for the
 // dashboard's interactive controls (zone runs, stops, threshold edits,
-// vacation pause). Action handlers translate UI intent into HA
-// service-call POSTs via HaClient.
+// vacation pause).
+//
+// Zone Run/Stop/StopAll dispatch through the ControllerRegistry (the
+// same adapters the scheduler uses) whenever the deploy is native OR a
+// default controller is configured; only legacy HA deploys with no
+// configured controllers fall back to HA service calls against the
+// public opensprinkler integration (prefix-driven, no private scripts).
 //
 // Mounted at /api/irrigation/* by api::router.
 
+use crate::config::schema::SkipRuleParams;
+use crate::controllers::registry::ControllerRegistry;
 use crate::ha::rest::HaClient;
 use crate::ha::{IrrigationStore, SnapshotSource};
 use crate::history::db;
 use crate::llm::{AdvisorError, AdvisorState};
+use crate::persistence::runs::{NewRun, RunsStore};
 use crate::persistence::IrrigationControlStore;
+use crate::ports::irrigation_controller::ControllerError;
+use crate::scheduler::dispatch_gate;
 use axum::{
     extract::{Query, State},
     http::StatusCode,
@@ -38,6 +48,34 @@ static SHADOW_STORE: std::sync::OnceLock<Arc<IrrigationStore>> = std::sync::Once
 /// Register the shadow store (called from main at boot when shadow_native).
 pub fn set_shadow_store(s: Arc<IrrigationStore>) {
     let _ = SHADOW_STORE.set(s);
+}
+
+/// Dispatch plumbing for POST /action zone controls: the controller
+/// registry (hot-swappable; same instance the schedulers use) plus the
+/// runs store for recording manual runs. Set once at boot from main.rs.
+/// Unset (demo mode, or boot before wiring) means the registry route
+/// answers 503 rather than guessing at HA scripts.
+struct DispatchHandles {
+    registry: ControllerRegistry,
+    runs: Option<RunsStore>,
+}
+
+static DISPATCH: std::sync::OnceLock<DispatchHandles> = std::sync::OnceLock::new();
+
+/// Register the controller registry + runs store for manual zone
+/// dispatch (called from main at boot).
+pub fn set_dispatch_handles(registry: ControllerRegistry, runs: Option<RunsStore>) {
+    let _ = DISPATCH.set(DispatchHandles { registry, runs });
+}
+
+/// Configured engine skip-rule thresholds for the What-If simulator,
+/// from `cfg.engine.skip_rules` (called from main at boot). Unset falls
+/// back to SkipRuleParams::default(), which equals an untouched config.
+static SIM_SKIP_PARAMS: std::sync::OnceLock<SkipRuleParams> = std::sync::OnceLock::new();
+
+/// Register the configured skip params used by POST /simulate.
+pub fn set_sim_skip_params(params: SkipRuleParams) {
+    let _ = SIM_SKIP_PARAMS.set(params);
 }
 
 pub fn router(
@@ -227,7 +265,6 @@ async fn simulate(
     State(store): State<Arc<IrrigationStore>>,
     Json(req): Json<crate::ha::snapshot::SimRequest>,
 ) -> Json<crate::ha::snapshot::SimResult> {
-    use crate::config::schema::SkipRuleParams;
     use crate::engine::skip_rules::{decide_traced, inputs_from_skipcheck};
 
     let snap = store.snapshot();
@@ -267,7 +304,10 @@ async fn simulate(
         hypo.rain_3day_weighted_in = v;
     }
 
-    let p = SkipRuleParams::default();
+    // Use the operator's configured skip thresholds (set at boot from
+    // cfg.engine.skip_rules) so the What-If traces match the production
+    // ladder. Falls back to defaults, which equal an untouched config.
+    let p = SIM_SKIP_PARAMS.get().cloned().unwrap_or_default();
     let baseline = decide_traced(&base, &p);
     let mut hypothetical = decide_traced(&hypo, &p);
 
@@ -304,11 +344,43 @@ async fn simulate(
     })
 }
 
+/// Live count of non-browser consumers on the irrigation stream plus
+/// the epoch of the most recent connect. The Home Assistant integration
+/// is the only steady-state non-Mozilla SSE client, so this doubles as
+/// its liveness signal in /api/v1/health's `ha` block.
+pub static INTEGRATION_STREAMS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+pub static LAST_INTEGRATION_STREAM_EPOCH: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
+/// Decrements the live-stream gauge when the SSE connection drops (the
+/// stream and its closures are dropped by axum on disconnect).
+struct IntegrationStreamGuard;
+impl Drop for IntegrationStreamGuard {
+    fn drop(&mut self) {
+        INTEGRATION_STREAMS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 async fn stream(
     State(store): State<Arc<IrrigationStore>>,
+    headers: axum::http::HeaderMap,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let is_integration = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|ua| !ua.starts_with("Mozilla"))
+        .unwrap_or(true);
+    let guard = is_integration.then(|| {
+        INTEGRATION_STREAMS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        LAST_INTEGRATION_STREAM_EPOCH.store(
+            chrono::Utc::now().timestamp(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        IntegrationStreamGuard
+    });
     let rx = store.subscribe();
-    let s = WatchStream::new(rx).map(|snap| {
+    let s = WatchStream::new(rx).map(move |snap| {
+        let _hold = &guard;
         let payload = serde_json::to_string(&*snap).unwrap_or_else(|_| "{}".into());
         Ok(Event::default().event("snapshot").data(payload))
     });
@@ -320,13 +392,13 @@ async fn stream(
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Action {
-    /// Run a single zone for `seconds`. Maps to the existing
-    /// `script.os_zone_toggle` script (toggles run/stop based on
-    /// current running state) so we don't double-fire if the zone is
-    /// already wet. Server clamps to <=7200s (2 hours) defensively;
-    /// the mobile UI also caps at 120 min, but a buggy client or a
-    /// hostile request shouldn't be able to leak large durations into
-    /// the lawn.
+    /// Run a single zone for `seconds`. Dispatches through the
+    /// ControllerRegistry's default controller (native deploys, or any
+    /// deploy with configured controllers); legacy HA-only deploys fall
+    /// back to the opensprinkler integration's `run` service. Server
+    /// clamps to <=7200s (2 hours) defensively; the mobile UI also caps
+    /// at 120 min, but a buggy client or a hostile request shouldn't be
+    /// able to leak large durations into the lawn.
     Run { zone: String, seconds: u32 },
     /// Stop a single zone immediately.
     Stop { zone: String },
@@ -350,9 +422,10 @@ pub enum Action {
     /// reset this to "none" each day.
     /// Requires HA helper: input_select.irrigation_override_tomorrow.
     SetOverrideTomorrow { mode: String },
-    /// Trigger Irrigation Unlimited's full sequence immediately, bypassing
-    /// the skip-check. Maps to irrigation_unlimited.run_now on the c1_s1
-    /// sequence entity.
+    /// Tombstone: previously triggered Irrigation Unlimited's full
+    /// sequence via irrigation_unlimited.run_now. IU support has been
+    /// removed; the variant stays deserializable so stale clients get a
+    /// clear 410 instead of a generic parse error.
     RunSequenceNow,
 }
 
@@ -407,9 +480,6 @@ const PAUSE_UNTIL_ENTITY: &str = "input_datetime.irrigation_pause_until";
 
 /// HA entity for the one-day override (none/skip/run).
 const OVERRIDE_ENTITY: &str = "input_select.irrigation_override_tomorrow";
-
-/// IU sequence binary_sensor used as the target for run_now.
-const IU_SEQUENCE_ENTITY: &str = "binary_sensor.irrigation_unlimited_c1_s1";
 
 /// State for the POST /action handler. The vacation pause + one-day
 /// override are routed to local persisted state on a native (standalone)
@@ -478,10 +548,161 @@ async fn native_control_action(
     }
 }
 
+/// Routing decision for zone Run/Stop/StopAll: dispatch through the
+/// ControllerRegistry whenever the deploy is native OR a default
+/// controller is configured (the registry adapters are what the
+/// schedulers use, so manual taps behave exactly like scheduled runs).
+/// Only legacy HA deploys with no configured controllers fall back to
+/// HA service calls. Pure so the decision is unit-testable.
+fn route_via_registry(source: SnapshotSource, has_default_controller: bool) -> bool {
+    source == SnapshotSource::Native || has_default_controller
+}
+
+/// Map a ControllerError to an HTTP response for the action endpoint.
+fn controller_error_response(e: ControllerError) -> (StatusCode, Json<Value>) {
+    let status = match &e {
+        ControllerError::ZoneUnknown(_) => StatusCode::BAD_REQUEST,
+        ControllerError::Unsupported(_) => StatusCode::NOT_IMPLEMENTED,
+        _ => StatusCode::BAD_GATEWAY,
+    };
+    (status, Json(json!({ "error": e.to_string() })))
+}
+
+/// Dispatch zone Run/Stop/StopAll through the registry's default
+/// controller. Confirmed manual runs are recorded in the runs table
+/// (source "manual") so the history Gantt and scheduler dedupe see
+/// them. Only called with the three zone-action variants.
+async fn registry_zone_action(body: Action) -> (StatusCode, Json<Value>) {
+    let Some(d) = DISPATCH.get() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(
+                json!({ "error": "controller dispatch unavailable (controller registry not initialized; is the persistence DB mounted?)" }),
+            ),
+        );
+    };
+    let Some(controller) = d.registry.default() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(
+                json!({ "error": "no irrigation controller configured; add one in Settings (or localsky.toml [controllers]) to run zones" }),
+            ),
+        );
+    };
+    match body {
+        Action::Run { zone, seconds } => {
+            let clamped = seconds.min(RUN_SECONDS_MAX).max(1);
+            if clamped != seconds {
+                tracing::warn!(
+                    "irrigation::Run clamped seconds {} -> {} (max {})",
+                    seconds,
+                    clamped,
+                    RUN_SECONDS_MAX
+                );
+            }
+            match controller.run_zone(&zone, clamped).await {
+                Ok(handle) => {
+                    if let Some(rs) = d.runs.as_ref() {
+                        let row = NewRun {
+                            zone_slug: zone.clone(),
+                            start_epoch: handle.started_epoch,
+                            source: "manual".into(),
+                            controller_id: handle.controller_id.clone(),
+                            planned_duration_s: clamped,
+                            skip_reason: None,
+                            et0_mm: None,
+                            etc_mm: None,
+                            cycle_index: None,
+                            cycle_count: None,
+                        };
+                        // The controller owns the shutoff timer, so end =
+                        // start + duration matches what the hardware does.
+                        if let Err(e) = rs
+                            .insert_completed(
+                                row,
+                                handle.started_epoch + clamped as i64,
+                                clamped,
+                                None,
+                            )
+                            .await
+                        {
+                            tracing::warn!(zone = %zone, error = %e, "manual run row insert failed");
+                        }
+                    }
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "ok": true,
+                            "dispatched": format!("controller:{}", handle.controller_id),
+                            "zone": zone,
+                            "seconds": clamped,
+                        })),
+                    )
+                }
+                Err(e) => controller_error_response(e),
+            }
+        }
+        Action::Stop { zone } => match controller.stop_zone(&zone).await {
+            Ok(()) => (
+                StatusCode::OK,
+                Json(json!({
+                    "ok": true,
+                    "dispatched": format!("controller:{}", controller.id()),
+                    "stopped": zone,
+                })),
+            ),
+            Err(e) => controller_error_response(e),
+        },
+        Action::StopAll => match controller.stop_all().await {
+            Ok(()) => (
+                StatusCode::OK,
+                Json(json!({
+                    "ok": true,
+                    "dispatched": format!("controller:{}", controller.id()),
+                    "stopped": "all",
+                })),
+            ),
+            Err(e) => controller_error_response(e),
+        },
+        // Only the three zone-action variants reach this fn.
+        _ => unreachable!("registry_zone_action called with non-zone action"),
+    }
+}
+
 async fn action(State(st): State<ActionState>, Json(body): Json<Action>) -> impl IntoResponse {
+    // Stop / Stop All / pause must also interrupt any in-flight
+    // smart-morning sequence: flag the dispatch gate before routing so
+    // the scheduler abandons remaining segments regardless of which
+    // backend executes the stop.
+    match &body {
+        Action::Stop { .. } | Action::StopAll => dispatch_gate::request_stop(),
+        Action::SetPauseUntil { epoch } if *epoch > chrono::Utc::now().timestamp() => {
+            dispatch_gate::request_stop()
+        }
+        Action::Toggle { key, on } if key == "irrigation_pause" && *on => {
+            dispatch_gate::request_stop()
+        }
+        _ => {}
+    }
+
+    // Zone run/stop dispatch through the controller registry (native
+    // deploys, or any deploy with configured controllers).
+    if matches!(
+        body,
+        Action::Run { .. } | Action::Stop { .. } | Action::StopAll
+    ) {
+        let has_default = DISPATCH
+            .get()
+            .map(|d| d.registry.default().is_some())
+            .unwrap_or(false);
+        if route_via_registry(st.source, has_default) {
+            return registry_zone_action(body).await;
+        }
+    }
+
     // Native deploys have no HA helpers; the vacation pause + one-day
     // override live in local state. Route those three actions there. Every
-    // other action (zone run/stop, thresholds, IU) stays HA-only.
+    // other action (thresholds, toggles) stays HA-only.
     if st.source == SnapshotSource::Native
         && matches!(
             body,
@@ -491,6 +712,17 @@ async fn action(State(st): State<ActionState>, Json(body): Json<Action>) -> impl
         )
     {
         return native_control_action(&st.control, body).await;
+    }
+
+    // Irrigation Unlimited support has been removed; answer stale
+    // clients with a clear 410 instead of dispatching anything.
+    if matches!(body, Action::RunSequenceNow) {
+        return (
+            StatusCode::GONE,
+            Json(
+                json!({ "error": "run_sequence_now was removed along with Irrigation Unlimited support; use per-zone Run instead" }),
+            ),
+        );
     }
 
     let client = match HaClient::from_env() {
@@ -520,14 +752,16 @@ async fn action(State(st): State<ActionState>, Json(body): Json<Action>) -> impl
                     RUN_SECONDS_MAX
                 );
             }
+            // Public opensprinkler integration service (prefix-driven
+            // entity), replacing the old private script.os_zone_toggle.
             client
                 .call_service(
-                    "script",
-                    "os_zone_toggle",
-                    &json!({ "station_entity": eid, "duration": clamped }),
+                    "opensprinkler",
+                    "run",
+                    &json!({ "entity_id": eid, "run_seconds": clamped }),
                 )
                 .await
-                .map(|_| json!({ "ok": true, "fired": "script.os_zone_toggle", "zone": zone, "seconds": clamped }))
+                .map(|_| json!({ "ok": true, "fired": "opensprinkler.run", "zone": zone, "seconds": clamped }))
                 .map_err(|e| e.to_string())
         }
         Action::Stop { zone } => {
@@ -543,11 +777,18 @@ async fn action(State(st): State<ActionState>, Json(body): Json<Action>) -> impl
                 .map(|_| json!({ "ok": true, "fired": "opensprinkler.stop", "zone": zone }))
                 .map_err(|e| e.to_string())
         }
-        Action::StopAll => client
-            .call_service("script", "os_stop_all", &json!({}))
-            .await
-            .map(|_| json!({ "ok": true, "fired": "script.os_stop_all" }))
-            .map_err(|e| e.to_string()),
+        Action::StopAll => {
+            // The opensprinkler integration stops ALL stations when its
+            // stop service targets the controller-level switch (the same
+            // `switch.<prefix>_enabled` entity the refresher reads for
+            // master enable). Replaces the old private script.os_stop_all.
+            let eid = format!("switch.{}_enabled", st.sprinkler_prefix);
+            client
+                .call_service("opensprinkler", "stop", &json!({ "entity_id": eid }))
+                .await
+                .map(|_| json!({ "ok": true, "fired": "opensprinkler.stop", "stopped": "all" }))
+                .map_err(|e| e.to_string())
+        }
         Action::SetThreshold { key, value } => {
             let Some(eid) = threshold_entity(&key) else {
                 return (
@@ -634,15 +875,8 @@ async fn action(State(st): State<ActionState>, Json(body): Json<Action>) -> impl
                 .map(|_| json!({ "ok": true, "fired": "input_select.select_option", "mode": mode }))
                 .map_err(|e| e.to_string())
         }
-        Action::RunSequenceNow => client
-            .call_service(
-                "irrigation_unlimited",
-                "run_now",
-                &json!({ "entity_id": IU_SEQUENCE_ENTITY }),
-            )
-            .await
-            .map(|_| json!({ "ok": true, "fired": "irrigation_unlimited.run_now" }))
-            .map_err(|e| e.to_string()),
+        // Handled by the 410 early-return above; IU is gone.
+        Action::RunSequenceNow => unreachable!("run_sequence_now answered before the HA path"),
     };
 
     match result {
@@ -698,5 +932,49 @@ async fn decisions_window(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_deploy_always_routes_registry() {
+        // Even with no controller configured the native deploy must NOT
+        // fall through to HA scripts (that's the every-tap-500s bug);
+        // the registry path answers 503 with a clear message instead.
+        assert!(route_via_registry(SnapshotSource::Native, false));
+        assert!(route_via_registry(SnapshotSource::Native, true));
+    }
+
+    #[test]
+    fn ha_deploy_with_controller_routes_registry() {
+        assert!(route_via_registry(SnapshotSource::HomeAssistant, true));
+    }
+
+    #[test]
+    fn legacy_ha_deploy_without_controller_keeps_ha_path() {
+        assert!(!route_via_registry(SnapshotSource::HomeAssistant, false));
+    }
+
+    #[test]
+    fn controller_errors_map_to_sensible_status() {
+        let (s, _) = controller_error_response(ControllerError::ZoneUnknown("x".into()));
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        let (s, _) = controller_error_response(ControllerError::Unsupported("y".into()));
+        assert_eq!(s, StatusCode::NOT_IMPLEMENTED);
+        let (s, _) = controller_error_response(ControllerError::AuthFailed);
+        assert_eq!(s, StatusCode::BAD_GATEWAY);
+        let (s, _) = controller_error_response(ControllerError::Offline);
+        assert_eq!(s, StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn run_sequence_now_still_deserializes() {
+        // The tombstone variant must stay parseable so stale clients get
+        // the 410 body rather than a 422 deserialization error.
+        let a: Action = serde_json::from_str(r#"{"kind":"run_sequence_now"}"#).unwrap();
+        assert!(matches!(a, Action::RunSequenceNow));
     }
 }

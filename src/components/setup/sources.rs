@@ -121,7 +121,7 @@ pub fn SourcesStep() -> impl IntoView {
 
     view! {
         <div class="setup-step">
-            <h2 class="setup-step__title">"Weather sources"</h2>
+            <h2 class="setup-step__title">"Where should your weather come from?"</h2>
             <p class="setup-step__body">
                 "LocalSky merges across any number of sources. A live LAN station (Tempest, "
                 "Ecowitt) is the strongest signal; a forecast model (Open-Meteo, NWS) fills the "

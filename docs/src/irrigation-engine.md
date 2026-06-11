@@ -92,7 +92,7 @@ Fallback when wind, solar, or humidity are missing:
 ET₀ = 0.0023 * (Ra * 0.408) * (Tmean + 17.8) * sqrt(Tmax - Tmin)
 ```
 
-Typical bias vs. PM is +/- 15-25% in humid subtropical climates. Acceptable when better data isn't available; LocalSky flags Hargreaves-derived values in the dashboard math tile so the operator knows.
+Typical bias vs. PM is +/- 15-25% depending on climate; humid and windy climates see the largest errors. Acceptable when better data isn't available; LocalSky flags Hargreaves-derived values in the dashboard math tile so the operator knows.
 
 ## Crop ET (ETc)
 
@@ -128,7 +128,7 @@ needs_irrigation = (depletion >= RAW)
 RAW = TAW * MAD%
 ```
 
-`MAD` (Management Allowed Depletion) defaults per species. St. Augustine: 50%. Bahia: 55%. Ornamental shrubs: 40%. The catalog cites UF/IFAS for the Florida-relevant species.
+`MAD` (Management Allowed Depletion) defaults per species. St. Augustine: 50%. Bahia: 55%. Ornamental shrubs: 40%. The catalog cites UF/IFAS extension publications for the warm-season species and FAO-56 Table 12 for the cool-season and non-turf categories.
 
 Implementation: [src/engine/water_balance.rs](../src/engine/water_balance.rs).
 

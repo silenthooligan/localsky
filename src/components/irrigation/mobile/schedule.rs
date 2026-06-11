@@ -8,7 +8,7 @@
 // run-now button works regardless because it only needs the existing
 // IU sequence entity that already powers the rest of the dashboard.
 
-use crate::components::irrigation::controls::{post_action, ThresholdsPanel};
+use crate::components::irrigation::controls::{post_action_then, toast_on_err, ThresholdsPanel};
 use crate::components::irrigation::history::HistoryPanel;
 use crate::components::irrigation::per_zone_history::PerZoneHistory;
 use crate::components::irrigation::soil_sensors::SoilSensors;
@@ -64,7 +64,6 @@ pub fn MobileSchedule(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             <h2 class="mobile-section-title">"Controls"</h2>
             <VacationPauseRow snap/>
             <OverrideTomorrowRow snap/>
-            <RunSequenceNowRow snap/>
 
             <h2 class="mobile-section-title">"Thresholds"</h2>
             {view! { <ThresholdsPanel snap/> }.into_any()}
@@ -220,19 +219,23 @@ fn VacationPauseRow(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         }
     };
 
+    let pause_done = toast_on_err("Couldn't update the vacation pause");
     let on_save = move |_| {
         let s = local_str.get();
         if s.is_empty() {
             return;
         }
         if let Some(epoch) = input_value_to_epoch(&s) {
-            post_action(json!({"kind": "set_pause_until", "epoch": epoch}));
+            post_action_then(
+                json!({"kind": "set_pause_until", "epoch": epoch}),
+                pause_done,
+            );
         }
     };
 
     let on_clear = move |_| {
         local_str.set(String::new());
-        post_action(json!({"kind": "clear_pause_until"}));
+        post_action_then(json!({"kind": "clear_pause_until"}), pause_done);
     };
 
     move || {
@@ -258,7 +261,9 @@ fn VacationPauseRow(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         };
 
         view! {
-            <div class="mobile-control-card">
+            // vacation-pause-row is load-bearing: the kiosk/read-only CSS
+            // hides this card by that class.
+            <div class="mobile-control-card vacation-pause-row">
                 <div class="mobile-control-head">
                     <h3 class="mobile-control-title">"Vacation pause until"</h3>
                     <div class="mobile-control-status" class:is-active=move || active_now>{label_now}</div>
@@ -287,10 +292,14 @@ fn OverrideTomorrowRow(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     let helpers_ok = move || snap.get().override_helpers_present;
     let current = move || snap.get().override_tomorrow.clone();
 
+    let override_done = toast_on_err("Couldn't set the override");
     let click = move |mode: &'static str| {
         let m = mode.to_string();
         move |_| {
-            post_action(json!({"kind": "set_override_tomorrow", "mode": m.clone()}));
+            post_action_then(
+                json!({"kind": "set_override_tomorrow", "mode": m.clone()}),
+                override_done,
+            );
         }
     };
     let on_none = click("none");
@@ -318,7 +327,9 @@ fn OverrideTomorrowRow(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             }
         };
         view! {
-            <div class="mobile-control-card">
+            // override-tomorrow-row is load-bearing: the kiosk/read-only
+            // CSS hides this card by that class.
+            <div class="mobile-control-card override-tomorrow-row">
                 <div class="mobile-control-head">
                     <h3 class="mobile-control-title">"Override tomorrow"</h3>
                 </div>
@@ -332,54 +343,6 @@ fn OverrideTomorrowRow(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 </p>
             </div>
         }.into_any()
-    }
-}
-
-#[component]
-fn RunSequenceNowRow(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
-    let confirm_open: RwSignal<bool> = RwSignal::new(false);
-    let on_open = move |_| confirm_open.set(true);
-    let on_cancel = move |_| confirm_open.set(false);
-    let on_confirm = move |_| {
-        post_action(json!({"kind": "run_sequence_now"}));
-        confirm_open.set(false);
-    };
-    let any_running = move || snap.get().zones.iter().any(|z| z.running);
-
-    view! {
-        <div class="mobile-control-card">
-            <div class="mobile-control-head">
-                <h3 class="mobile-control-title">"Run sequence now"</h3>
-            </div>
-            <button
-                class="btn-clay btn-clay-good mobile-primary-btn"
-                on:click=on_open
-                disabled=move || any_running()
-            >
-                "Run full sequence"
-            </button>
-            <p class="mobile-control-help">
-                "Triggers the IU sequence immediately, bypassing the morning skip-check. Disabled while a zone is already running."
-            </p>
-            {move || if confirm_open.get() {
-                view! {
-                    <div class="bottom-sheet-backdrop" on:click=on_cancel aria-hidden="true"></div>
-                    <div class="bottom-sheet bottom-sheet-confirm" role="dialog" aria-modal="true">
-                        <div class="bottom-sheet-handle" aria-hidden="true"></div>
-                        <div class="bottom-sheet-title">"Run full sequence?"</div>
-                        <p class="bottom-sheet-body">
-                            "Starts every zone for its currently-planned duration, ignoring skip-check rules. Are you sure?"
-                        </p>
-                        <div class="bottom-sheet-actions">
-                            <button class="btn-clay" on:click=on_cancel>"Cancel"</button>
-                            <button class="btn-clay btn-clay-good" on:click=on_confirm>"Run sequence"</button>
-                        </div>
-                    </div>
-                }.into_any()
-            } else {
-                ().into_any()
-            }}
-        </div>
     }
 }
 

@@ -25,7 +25,10 @@ use serde::{Deserialize, Serialize};
 /// 1.6.0 adds `auth_required` + `uuid` here (built-in auth + stable
 /// instance identity for HACS/zeroconf pairing) and the /api/v1/auth
 /// endpoint family.
-pub const API_VERSION: &str = "1.6.0";
+/// 1.7.0 (additive): SkipCheck.temp_min_24h_valid, DecisionTrace.degraded,
+/// GET /api/v1/config/snapshots + POST rollback {ts}, ha.hacs_streaming;
+/// action kind run_sequence_now retired (410 Gone).
+pub const API_VERSION: &str = "1.7.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {

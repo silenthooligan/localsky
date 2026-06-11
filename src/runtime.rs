@@ -236,7 +236,11 @@ pub fn build_receiver_sources(
     (eco, webhook)
 }
 
-fn build_sources(cfg: &Config) -> Vec<Arc<dyn WeatherSource>> {
+/// Construct every poll/listen-style WeatherSource adapter from config.
+/// main.rs spawns each returned adapter's run() loop against the shared
+/// source bus at boot (receiver-POST kinds come from
+/// build_receiver_sources instead; legacy v0.1 paths are skipped below).
+pub fn build_sources(cfg: &Config) -> Vec<Arc<dyn WeatherSource>> {
     let mut out: Vec<Arc<dyn WeatherSource>> = Vec::new();
     for entry in &cfg.sources {
         if !entry.enabled {
@@ -532,6 +536,7 @@ mod tests {
         cfg.sources.push(crate::config::schema::SourceEntry {
             id: "demo".into(),
             priority: 100,
+            max_age_s: None,
             enabled: true,
             source: crate::config::schema::SourceKind::DemoReplay(Default::default()),
         });

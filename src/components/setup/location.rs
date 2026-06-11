@@ -274,7 +274,7 @@ pub fn LocationStep() -> impl IntoView {
                     <input
                         type="text"
                         class="ui-input"
-                        placeholder="e.g. Gainesville, FL"
+                        placeholder="e.g. Springfield, Sydney, or 51.5, -0.1"
                         prop:value=move || query.get()
                         on:input=move |ev| query.set(event_target_value(&ev))
                         on:keydown=move |ev| if ev.key() == "Enter" { on_search(()) }
@@ -350,7 +350,7 @@ pub fn LocationStep() -> impl IntoView {
 
             <FormField
                 label="Timezone".to_string()
-                helptext="IANA name (e.g. America/New_York). Autofills from the location; clear to re-derive at boot.".to_string()
+                helptext="IANA name (e.g. America/New_York or Europe/Berlin). Autofills from the location; clear to re-derive at boot.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 <input
@@ -365,7 +365,7 @@ pub fn LocationStep() -> impl IntoView {
 
             <SetupFooter
                 prev=prev_step_href("location")
-                next=Signal::derive(next_href).get_untracked()
+                next=Signal::derive(next_href)
             />
         </div>
     }

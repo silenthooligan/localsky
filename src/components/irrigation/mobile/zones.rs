@@ -3,7 +3,7 @@
 // an inline "10m" quick-run chip on the right for the fastest-possible path
 // to start a zone (one tap, no detail view).
 
-use crate::components::irrigation::controls::post_action;
+use crate::components::irrigation::controls::{post_action_then, toast_on_err};
 use crate::ha::snapshot::{IrrigationSnapshot, ZoneState};
 use crate::nav_log::log_nav;
 use leptos::prelude::*;
@@ -53,18 +53,22 @@ fn MobileZoneRow(zone: ZoneState) -> impl IntoView {
         );
     };
 
+    let action_done = toast_on_err("Zone command failed");
     let on_quick_run = move |ev: leptos::ev::MouseEvent| {
         ev.stop_propagation();
         ev.prevent_default();
         let slug = slug_for_run.clone();
-        post_action(json!({"kind": "run", "zone": slug, "seconds": 600}));
+        post_action_then(
+            json!({"kind": "run", "zone": slug, "seconds": 600}),
+            action_done,
+        );
     };
 
     let on_stop = move |ev: leptos::ev::MouseEvent| {
         ev.stop_propagation();
         ev.prevent_default();
         let slug = slug_for_stop.clone();
-        post_action(json!({"kind": "stop", "zone": slug}));
+        post_action_then(json!({"kind": "stop", "zone": slug}), action_done);
     };
 
     let badge_class = if zone_running {

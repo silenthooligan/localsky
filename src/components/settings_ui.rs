@@ -240,6 +240,40 @@ pub fn toast_saved(result_msg: RwSignal<String>, result_ok: RwSignal<bool>, msg:
     crate::components::ui::use_toast().success(msg.to_string());
 }
 
+/// Error banner + Retry for a failed initial config GET, shared by the
+/// settings editor pages (zones, sources, controllers). Rendered INSTEAD
+/// of the editor body: an empty editor after a failed load reads as data
+/// loss, and "Save all changes" from it would PUT a hollow config over
+/// the real one.
+#[component]
+pub fn SettingsLoadError(
+    /// Some(message) when the initial config GET failed.
+    error: RwSignal<Option<String>>,
+    /// Bump to re-run the page's load effect.
+    retry: RwSignal<u32>,
+) -> impl IntoView {
+    view! {
+        <crate::components::ui::Panel title="".to_string()>
+            <p class="setup-result setup-result--err" role="alert">
+                {move || format!(
+                    "Couldn't load the current configuration: {}",
+                    error.get().unwrap_or_default()
+                )}
+            </p>
+            <p class="sensors-section__hint">
+                "Your settings are intact on the server; this page just couldn't "
+                "fetch them. Editing is disabled until the load succeeds so a "
+                "save can't overwrite the real configuration with an empty form."
+            </p>
+            <button
+                type="button"
+                class="setup-footer__btn setup-footer__btn--primary"
+                on:click=move |_| retry.update(|n| *n += 1)
+            >"Retry"</button>
+        </crate::components::ui::Panel>
+    }
+}
+
 #[component]
 pub fn SettingsResult(
     /// Status text. Empty string keeps the line hidden.

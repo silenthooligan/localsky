@@ -8,7 +8,9 @@
 //                                    via unredact_secrets() so partial edits work
 //   GET  /api/config/schema       -> JsonSchema for the settings UI forms
 //   POST /api/config/preview      -> dry-run validation against a candidate
-//   POST /api/config/rollback?to=<v> -> restore a snapshot (Phase 4)
+//   GET  /api/config/snapshots    -> file snapshots (<config_dir>/snapshots)
+//   POST /api/config/rollback     -> {"ts": <snapshot ts>} restore (also
+//                                    accepts legacy ?to=<ts>)
 //
 // Not wired into the main api router yet. Phase 5 composition root passes
 // a constructed FileConfigStore via state.
@@ -37,6 +39,7 @@ pub fn router(state: ConfigApiState) -> Router {
         .route("/validate", get(get_validate))
         .route("/schema", get(get_schema))
         .route("/preview", post(preview_config))
+        .route("/snapshots", get(get_snapshots))
         .route("/rollback", post(post_rollback))
         .route("/raw", get(get_raw_toml).put(put_raw_toml))
         .with_state(state)
@@ -108,7 +111,21 @@ async fn put_raw_toml(State(store): State<ConfigApiState>, body: String) -> impl
         )
             .into_response();
     }
-    if let Err(e) = tokio::fs::write(store.path(), body.as_bytes()).await {
+    // Same structural validation the wizard preflight + PUT / run:
+    // errors block the save, warnings ride along in the success body.
+    let report = crate::config::validate::validate(&parsed);
+    if !report.ok() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": "config_invalid",
+                "validation": report,
+            })),
+        )
+            .into_response();
+    }
+    // Store-managed write: snapshots the previous file + fsyncs.
+    if let Err(e) = store.save_raw_toml(body.clone()).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiError {
@@ -118,7 +135,8 @@ async fn put_raw_toml(State(store): State<ConfigApiState>, body: String) -> impl
         )
             .into_response();
     }
-    Json(serde_json::json!({ "ok": true, "bytes": body.len() })).into_response()
+    Json(serde_json::json!({ "ok": true, "bytes": body.len(), "validation": report }))
+        .into_response()
 }
 
 #[derive(Debug, Serialize)]
@@ -213,6 +231,11 @@ fn redact_secrets(v: &mut serde_json::Value) {
 /// stored config, and any place the candidate contains the sentinel,
 /// substitutes the original value back in. Lets clients PUT a redacted
 /// JSON without losing the secret.
+///
+/// Arrays whose elements carry an `id` field (sources, controllers) are
+/// matched BY ID, not by index: a reorder or delete in the candidate
+/// must not attach one entry's stored secret to a different entry.
+/// Id-less arrays still match positionally.
 fn unredact_secrets(candidate: &mut serde_json::Value, original: &serde_json::Value) {
     use serde_json::Value;
     match (candidate, original) {
@@ -230,10 +253,59 @@ fn unredact_secrets(candidate: &mut serde_json::Value, original: &serde_json::Va
             }
         }
         (Value::Array(c), Value::Array(o)) => {
-            for (i, c_v) in c.iter_mut().enumerate() {
-                if let Some(o_v) = o.get(i) {
-                    unredact_secrets(c_v, o_v);
+            // The stored side decides the matching mode: it is always
+            // server-serialized, so sources/controllers reliably carry
+            // string ids there. Candidate entries without an id (or
+            // with an unknown id) simply get nothing restored; any
+            // sentinel left in them is rejected by the caller.
+            let id_keyed = !o.is_empty()
+                && o.iter()
+                    .all(|v| v.get("id").map(|id| id.is_string()).unwrap_or(false));
+            if id_keyed {
+                for c_v in c.iter_mut() {
+                    let id = c_v.get("id").and_then(|v| v.as_str()).map(str::to_owned);
+                    let Some(id) = id else { continue };
+                    if let Some(o_v) = o
+                        .iter()
+                        .find(|ov| ov.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
+                    {
+                        unredact_secrets(c_v, o_v);
+                    }
                 }
+            } else {
+                for (i, c_v) in c.iter_mut().enumerate() {
+                    if let Some(o_v) = o.get(i) {
+                        unredact_secrets(c_v, o_v);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// JSON paths of every string still equal to the sentinel. A non-empty
+/// result after unredact_secrets means a redacted placeholder had no
+/// stored counterpart (new/renamed entry); saving it would persist the
+/// literal sentinel as the secret, so the PUT handler rejects instead.
+fn remaining_sentinels(v: &serde_json::Value, path: &str, out: &mut Vec<String>) {
+    use serde_json::Value;
+    match v {
+        Value::String(s) if s == SECRET_REDACTED_SENTINEL => out.push(path.to_string()),
+        Value::Object(map) => {
+            for (k, val) in map {
+                remaining_sentinels(val, &format!("{path}.{k}"), out);
+            }
+        }
+        Value::Array(arr) => {
+            for (i, val) in arr.iter().enumerate() {
+                // Prefer the element id in the path when present.
+                let seg = val
+                    .get("id")
+                    .and_then(|id| id.as_str())
+                    .map(|id| format!("{path}[id={id}]"))
+                    .unwrap_or_else(|| format!("{path}[{i}]"));
+                remaining_sentinels(val, &seg, out);
             }
         }
         _ => {}
@@ -258,6 +330,24 @@ async fn put_config(
     };
     if !original.is_null() {
         unredact_secrets(&mut candidate_json, &original);
+    }
+    // Any sentinel that survived has no stored counterpart (new entry,
+    // renamed id, or no config on disk). Saving would persist the
+    // literal "***redacted***" as the secret; reject instead.
+    let mut leftover = Vec::new();
+    remaining_sentinels(&candidate_json, "$", &mut leftover);
+    if !leftover.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "unmatched_redacted_secret".into(),
+                detail: Some(format!(
+                    "redacted placeholder(s) with no stored value at: {}; supply the real secret",
+                    leftover.join(", ")
+                )),
+            }),
+        )
+            .into_response();
     }
     let cfg: Config = match serde_json::from_value(candidate_json) {
         Ok(c) => c,
@@ -343,19 +433,64 @@ async fn preview_config(
     })
 }
 
-#[derive(Debug, Deserialize)]
-struct RollbackQuery {
-    to: u32,
+/// GET /api/v1/config/snapshots -> the on-disk snapshot history
+/// (<config_dir>/snapshots/<ts>.toml), newest first.
+async fn get_snapshots(State(store): State<ConfigApiState>) -> impl IntoResponse {
+    match store.list_snapshots().await {
+        Ok(list) => {
+            let snapshots: Vec<_> = list
+                .into_iter()
+                .map(|v| {
+                    serde_json::json!({
+                        "ts": v.version,
+                        "applied_at_epoch": v.applied_at_epoch,
+                        "schema_version": v.schema_version,
+                        "note": v.note,
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({ "snapshots": snapshots })).into_response()
+        }
+        Err(e) => store_err(e).into_response(),
+    }
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct RollbackQuery {
+    to: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RollbackBody {
+    ts: u32,
+}
+
+/// POST /api/v1/config/rollback with {"ts": <snapshot ts>} (or the
+/// legacy ?to=<ts> query). Validates the snapshot parses before the
+/// swap; the pre-rollback config is snapshotted first.
 async fn post_rollback(
     State(store): State<ConfigApiState>,
     Query(q): Query<RollbackQuery>,
+    body: Option<Json<RollbackBody>>,
 ) -> impl IntoResponse {
-    // Phase 4 DB wiring will make this functional. Until then it returns
-    // 404 because no snapshots are persisted.
-    match store.rollback(q.to).await {
-        Ok(cfg) => Json(cfg).into_response(),
+    let Some(ts) = body.map(|Json(b)| b.ts).or(q.to) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "rollback_target_missing".into(),
+                detail: Some("send {\"ts\": <snapshot ts>} or ?to=<ts>".into()),
+            }),
+        )
+            .into_response();
+    };
+    match store.rollback(ts).await {
+        Ok(cfg) => {
+            // Same redaction contract as GET /: secrets never ride the
+            // JSON wire format.
+            let mut v = serde_json::to_value(&cfg).unwrap_or(serde_json::Value::Null);
+            redact_secrets(&mut v);
+            Json(serde_json::json!({ "ok": true, "restored_ts": ts, "config": v })).into_response()
+        }
         Err(e) => store_err(e).into_response(),
     }
 }
@@ -503,5 +638,83 @@ mod tests {
         unredact_secrets(&mut candidate, &original);
         // Edited value preserved (it wasn't the sentinel)
         assert_eq!(candidate["llm"]["config"]["api_key"], "new-api-key");
+    }
+
+    #[test]
+    fn unredact_reordered_sources_keeps_secrets_on_the_right_id() {
+        let original = cfg_with_secrets();
+        let mut candidate = original.clone();
+        redact_secrets(&mut candidate);
+        // User reordered the sources array in the settings UI.
+        let arr = candidate["sources"].as_array_mut().unwrap();
+        arr.reverse();
+        unredact_secrets(&mut candidate, &original);
+        let mqtt = candidate["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == "mqtt_sensors")
+            .unwrap();
+        assert_eq!(
+            mqtt["config"]["password"], "mqtt_password_123",
+            "mqtt entry must get the mqtt password, not the HA token"
+        );
+        let ha = candidate["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == "ha_pass")
+            .unwrap();
+        assert_eq!(ha["config"]["bearer_token"], "supersecret_ha_token_xyz");
+    }
+
+    #[test]
+    fn unredact_after_delete_does_not_shift_secrets() {
+        let original = cfg_with_secrets();
+        let mut candidate = original.clone();
+        redact_secrets(&mut candidate);
+        // User deleted the FIRST source; index 0 is now mqtt_sensors.
+        candidate["sources"].as_array_mut().unwrap().remove(0);
+        unredact_secrets(&mut candidate, &original);
+        let sources = candidate["sources"].as_array().unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0]["id"], "mqtt_sensors");
+        assert_eq!(
+            sources[0]["config"]["password"], "mqtt_password_123",
+            "deletion must not hand mqtt the deleted entry's secret"
+        );
+        // And nothing still carries the sentinel.
+        let mut leftover = Vec::new();
+        remaining_sentinels(&candidate, "$", &mut leftover);
+        assert!(leftover.is_empty(), "leftover sentinels: {leftover:?}");
+    }
+
+    #[test]
+    fn new_entry_with_sentinel_is_flagged_not_silently_saved() {
+        let original = cfg_with_secrets();
+        let mut candidate = original.clone();
+        redact_secrets(&mut candidate);
+        // User added a brand-new source but left the secret field as
+        // the redaction placeholder.
+        candidate["sources"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "brand_new",
+                "priority": 10,
+                "enabled": true,
+                "kind": "mqtt",
+                "config": { "broker_host": "x", "broker_port": 1883,
+                            "username": "u", "password": SECRET_REDACTED_SENTINEL,
+                            "subscriptions": [] }
+            }));
+        unredact_secrets(&mut candidate, &original);
+        let mut leftover = Vec::new();
+        remaining_sentinels(&candidate, "$", &mut leftover);
+        assert_eq!(leftover.len(), 1, "exactly the new entry's secret flagged");
+        assert!(
+            leftover[0].contains("brand_new"),
+            "path names the entry: {leftover:?}"
+        );
     }
 }

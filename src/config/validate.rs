@@ -182,6 +182,14 @@ pub fn validate(cfg: &Config) -> ValidationReport {
             );
         }
     }
+    for net in &cfg.auth.trusted_proxies {
+        if net.parse::<ipnet::IpNet>().is_err() {
+            r.warn(
+                "trusted_proxy_invalid",
+                format!("auth.trusted_proxies entry '{net}' is not a valid CIDR and is ignored"),
+            );
+        }
+    }
 
     // Ecowitt poll sources need a gateway host.
     for s in &cfg.sources {

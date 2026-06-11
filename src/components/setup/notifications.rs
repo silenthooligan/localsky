@@ -16,7 +16,7 @@ pub fn NotificationsStep() -> impl IntoView {
 
     view! {
         <div class="setup-step">
-            <h2 class="setup-step__title">"Notifications (optional)"</h2>
+            <h2 class="setup-step__title">"Notifications "<span class="setup-step__optional">"optional"</span></h2>
             <p class="setup-step__body">
                 "Where should LocalSky send zone-start, zone-stop, daily "
                 "verdict, and anomaly events? Every channel is independent; "

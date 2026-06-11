@@ -63,6 +63,9 @@ pub struct Config {
     /// Opt-in update check (GitHub releases poll, off by default).
     #[serde(default)]
     pub updates: UpdatesConfig,
+    /// Local history retention knobs (SQLite sensor_history pruning).
+    #[serde(default)]
+    pub persistence: PersistenceConfig,
 }
 
 impl Default for Config {
@@ -83,8 +86,32 @@ impl Default for Config {
             auth: AuthConfig::default(),
             network: NetworkConfig::default(),
             updates: UpdatesConfig::default(),
+            persistence: PersistenceConfig::default(),
         }
     }
+}
+
+// ----- Persistence retention -----
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PersistenceConfig {
+    /// Days of sensor_history readings to keep. Rows older than this are
+    /// pruned opportunistically as new readings are ingested. 0 disables
+    /// pruning (keep everything forever).
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u32,
+}
+
+impl Default for PersistenceConfig {
+    fn default() -> Self {
+        Self {
+            retention_days: default_retention_days(),
+        }
+    }
+}
+
+pub fn default_retention_days() -> u32 {
+    90
 }
 
 // ----- Update check -----
@@ -145,6 +172,18 @@ pub struct AuthConfig {
     /// home LAN stays frictionless.
     #[serde(default)]
     pub trusted_networks: Vec<String>,
+    /// CIDRs of reverse proxies whose X-Forwarded-For is believed,
+    /// e.g. "172.18.0.0/16". When the socket peer is NOT in this list
+    /// the peer address itself is the client IP and X-Forwarded-For is
+    /// ignored (it is trivially spoofable). Empty = never trust XFF.
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
+    /// Extra Origins allowed to make state-changing API calls, e.g.
+    /// "https://dash.example.com". Same-origin requests (Origin host
+    /// matching the request Host) always pass; this list is for
+    /// deliberate cross-origin frontends.
+    #[serde(default)]
+    pub trusted_origins: Vec<String>,
 }
 
 impl Default for AuthConfig {
@@ -153,6 +192,8 @@ impl Default for AuthConfig {
             mode: AuthMode::Disabled,
             session_ttl_days: default_session_ttl_days(),
             trusted_networks: Vec::new(),
+            trusted_proxies: Vec::new(),
+            trusted_origins: Vec::new(),
         }
     }
 }
@@ -284,9 +325,10 @@ pub struct Deployment {
     #[serde(default = "default_display_name")]
     pub display_name: String,
     /// House-address parity for jurisdictions that gate watering days
-    /// by odd vs even address (e.g. St. Johns River WMD in Florida).
-    /// Defaults to `NotApplicable`, which makes weekday-restriction
-    /// gates a no-op even when configured.
+    /// by odd vs even address (e.g. St. Johns River WMD in Florida, or
+    /// the odd/even day schemes used by Australian and Spanish water
+    /// utilities). Defaults to `NotApplicable`, which makes
+    /// weekday-restriction gates a no-op even when configured.
     #[serde(default)]
     pub address_parity: AddressParity,
     /// Where the irrigation snapshot is sourced from. `Auto` (default)
@@ -406,6 +448,12 @@ pub struct SourceEntry {
     pub priority: i32,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Maximum age (seconds) an observation from this source may have
+    /// before it is considered stale: /api/health caps its status at
+    /// "stale" and the merge layer excludes it from candidate values.
+    /// None (default) keeps the kind-default freshness windows only.
+    #[serde(default)]
+    pub max_age_s: Option<u64>,
     #[serde(flatten)]
     pub source: SourceKind,
 }
@@ -1144,6 +1192,7 @@ pub enum GrassSpecies {
     KentuckyBluegrass,
     TallFescue,
     PerennialRyegrass,
+    Kikuyu,
     OrnamentalShrubs,
     VegetableGarden,
     DripXeriscape,
@@ -1381,9 +1430,10 @@ pub struct WateringRestriction {
 }
 
 /// When a `WateringRestriction` applies. DST/Standard windows handle
-/// the typical Florida split between summer (DST) and winter (EST)
-/// restrictions. `DateRange` lets HOA / city rules name an arbitrary
-/// MM-DD..MM-DD range, including wraparound (e.g. Nov-15..Feb-28).
+/// seasonal summer/winter restriction splits (e.g. Florida districts
+/// switch rules with daylight saving). `DateRange` lets local authority,
+/// council, or HOA rules name an arbitrary MM-DD..MM-DD range, including
+/// wraparound (e.g. Nov-15..Feb-28).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EffectiveWindow {

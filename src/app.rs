@@ -380,6 +380,16 @@ pub fn App() -> impl IntoView {
                             <Title text="LocalSky · Controllers"/>
                             <crate::components::settings::SettingsControllers/>
                         }/>
+                    <Route path=path!("/settings/help")
+                        view=move || view! {
+                            <Title text="LocalSky · Settings · Help"/>
+                            <crate::components::settings::help::SettingsHelp/>
+                        }/>
+                    <Route path=path!("/settings/home-assistant")
+                        view=move || view! {
+                            <Title text="LocalSky · Settings · Home Assistant"/>
+                            <crate::components::settings::SettingsHomeAssistant/>
+                        }/>
                     <Route path=path!("/settings/devices")
                         view=|| view! {
                             <Title text="LocalSky · Devices"/>
@@ -436,6 +446,10 @@ pub fn App() -> impl IntoView {
                 // transitions and never unmounts/remounts (which would lose
                 // the active highlight animation).
                     <MobileNav/>
+                // Beta feedback pill: fixed chrome like the nav, outside
+                // <Routes> so it persists across navigation. CSS hides it
+                // in kiosk/readonly modes and on the login gate.
+                <crate::components::feedback::BetaFeedback/>
                 </main>
                 <crate::components::ui::ToastViewport/>
             </div>

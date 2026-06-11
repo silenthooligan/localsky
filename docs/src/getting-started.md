@@ -38,7 +38,9 @@ Open http://localhost:8090. The dashboard renders with simulated weather and an 
 - Running screenshots for documentation
 - Verifying a Docker image build before deploying it
 
-The demo data loops on a synthetic Florida summer day at 10× wall-clock rate. No external network calls except the Leaflet stylesheet for the radar map.
+The demo data loops on a synthetic humid-subtropical summer day at 10× wall-clock rate. No external network calls except the Leaflet stylesheet for the radar map.
+
+When you're ready for the real thing, remove the demo container with `docker rm -f localsky` and follow the install below. The demo container was started without a volume mount, so nothing it generated persists on disk.
 
 ## Real install
 
@@ -52,31 +54,68 @@ The demo data loops on a synthetic Florida summer day at 10× wall-clock rate. N
 ### Install
 
 ```bash
-mkdir -p /opt/localsky/data
 docker run -d \
   --name localsky \
   --restart unless-stopped \
   -p 8090:8090 \
-  -v /opt/localsky/data:/data \
+  -p 50222:50222/udp \
+  -v localsky-data:/data \
   ghcr.io/silenthooligan/localsky:latest
 ```
 
-`/opt/localsky/data` (or wherever you point the `-v` mount) is where the config file and SQLite database live. Adjust the host path to fit your filesystem.
+`localsky-data` is a named Docker volume that holds the config file (`/data/localsky.toml`) and the SQLite database. Docker creates it on first run and it survives container upgrades.
 
-Visit http://localhost:8090. The dashboard redirects you to `/setup` because there's no config file yet.
+> **Prefer a bind mount?** The container runs as uid 10001, not root. If you mount a host directory instead (`-v /opt/localsky/data:/data`), first run `sudo chown -R 10001:10001 /opt/localsky/data`, or start the container with `--user 0:0`.
+
+> **Networking for LAN weather stations.** On Linux, `--network host` is recommended: WeatherFlow Tempest hubs broadcast on UDP port 50222, and the wizard's network discovery (Tempest and Ecowitt broadcasts, OpenSprinkler subnet sweep) needs to see your LAN. With host networking, drop the `-p` flags; LocalSky listens on port 8090 directly. The bridged alternative shown above (`-p 8090:8090 -p 50222:50222/udp`) works too, but LAN broadcasts may not cross the bridge, so discovery can miss devices.
+
+### Docker Compose
+
+The same install as a `docker-compose.yml`:
+
+```yaml
+services:
+  localsky:
+    image: ghcr.io/silenthooligan/localsky:latest
+    container_name: localsky
+    restart: unless-stopped
+    # Recommended on Linux so Tempest UDP broadcasts and network
+    # discovery reach the container. Remove the ports: block if you
+    # uncomment this.
+    # network_mode: host
+    ports:
+      - "8090:8090"
+      - "50222:50222/udp"
+    environment:
+      - TZ=America/New_York  # your IANA timezone, e.g. Europe/Berlin, Australia/Sydney
+    volumes:
+      - localsky-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8090/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+volumes:
+  localsky-data:
+```
+
+Once the container is up, open http://localhost:8090/setup to start the first-run wizard. A fresh install does not redirect automatically, so go to `/setup` directly.
 
 ### First-run wizard
 
-Eight steps; none take more than a minute.
+Nine steps; none take more than a minute. Three of them (AI advisor, Notifications, Account) are optional, and the progress strip renders them as hollow dots.
 
-1. **Welcome**: accept the Apache-2.0 license. Telemetry defaults off.
-2. **Location**: latitude + longitude in decimal degrees. Elevation optional; improves FAO-56 ET₀. Timezone optional too (derives from lat/lon at boot).
-3. **Sources**: informational. Auto-creates a Tempest UDP listener (in case you have one) + Open-Meteo forecast. Full editor under `/settings/sources` post-wizard.
-4. **Controllers**: informational. Auto-detects HA env vars and creates an HA-service-call controller if present; otherwise add one under `/settings/controllers`.
-5. **Zones**: informational. Configure under `/settings/zones`.
-6. **LLM**: pick a provider, or leave at "Auto" or "None".
-7. **Notifications**: Web Push, MQTT, ntfy, Slack (all independent + optional).
-8. **Review**: click Save and finish. Settings write to `/data/localsky.toml` atomically with a snapshot to history.
+1. **Welcome**: what LocalSky is and the Apache-2.0 license acknowledgement. No telemetry, no analytics, no email signup.
+2. **Your location**: search for your address (built-in geocoding) or enter latitude and longitude directly. Elevation improves the FAO-56 ET₀ math; the timezone autofills from an offline dataset whenever lat/lon change.
+3. **Weather**: add weather and sensor sources with the same editor used in the Sensors hub. A one-click network scan finds Tempest and Ecowitt hardware on your LAN. Skipping is fine; sources can be added any time afterward.
+4. **Controller**: add your irrigation controller with the same editor as Settings, test it live against the real hardware, and scan it for zones. Scanned stations can be imported as zone stubs.
+5. **Zones**: explains LocalSky's zone model and shows the grass-species gallery so you pick the right species. Zone editing itself lives under `/settings/zones` after the wizard; zones imported from a controller scan arrive there pre-populated.
+6. **AI advisor** (optional): pick an LLM provider, or None. You can test the connection live before finishing. See [llm.md](llm.md).
+7. **Notifications** (optional): Web Push, MQTT, ntfy, Slack. All independent; none required.
+8. **Account** (optional): create the owner account (username plus a password stored as an argon2id hash). The account is created immediately and you are signed in on that browser; finishing setup switches authentication to required. Skipping leaves auth disabled. See [authentication.md](authentication.md).
+9. **Review & apply**: a per-section summary with edit links back into each step. Save and finish writes the config and sends you to the dashboard.
 
 ### After the wizard
 
@@ -84,17 +123,17 @@ Everything is editable under `/settings`. See [docs/configuration.md](configurat
 
 ## Standalone vs Home Assistant integration
 
-> **TL;DR**: LocalSky is a complete native product, not an HA add-on. Smart Irrigation and Irrigation Unlimited are no longer required; LocalSky's engine does what they did. HA can still play a role (Mode 2 or 3 below) but is never a dependency. Deep version: [docs/standalone.md](standalone.md).
+> **TL;DR**: LocalSky is a complete native product, not an HA add-on. Smart Irrigation and Irrigation Unlimited are no longer required; LocalSky's engine does what they did. HA can still play a role (paths 2 to 4 below) but is never a dependency. Deep version: [docs/standalone.md](standalone.md).
 
-LocalSky has three operating modes. Pick the one that fits your stack.
+LocalSky has four integration paths. Pick the one that fits your stack.
 
-### Mode 1: Standalone (no Home Assistant)
+### Path 1: Standalone (the default)
 
-LocalSky talks directly to your irrigation hardware. No HA install required, no HA running, no MQTT broker.
+LocalSky talks directly to your irrigation hardware. No HA install required, no MQTT broker.
 
 Setup:
-1. Run the install command above without setting `HA_URL` or `MQTT_HOST`.
-2. In the wizard's Controllers step, configure your direct-controlled controller (OpenSprinkler is the canonical example).
+1. Run the install command above.
+2. In the wizard's Controller step, add your direct-controlled controller (OpenSprinkler is the canonical example) and test it.
 3. Done. LocalSky's dashboard becomes your irrigation surface; the engine drives zones directly.
 
 What this gets you:
@@ -106,26 +145,30 @@ What this gets you:
 
 What you give up: HA's broader sensor + automation ecosystem. If you don't have HA today, you don't need it.
 
-### Mode 2: Outbound to HA (LocalSky publishes, HA consumes)
+### Path 2: HACS integration (recommended for HA users)
 
-LocalSky talks to your controller directly, AND publishes its state via MQTT discovery so existing HA dashboards see `sensor.localsky_*` entities automatically. No HA YAML required.
+Install the LocalSky integration through HACS. It polls LocalSky's REST API and creates native HA entities, driven by LocalSky's entity manifest (`/api/v1/sensors/manifest`), so new zones and sources show up in HA automatically with no MQTT broker and no YAML. LocalSky still owns the irrigation engine and talks to the controller itself; HA gets a live, read-and-act view.
 
-Setup:
-1. Same install command.
-2. Configure your controller directly under `/settings/controllers`.
-3. Under `/settings/notifications`, set the MQTT broker host (your existing HA broker, or any other).
-4. HA auto-discovers `sensor.localsky_<zone>_bucket_mm`, `sensor.localsky_<zone>_et_today_mm`, `sensor.localsky_<zone>_planned_seconds`, `binary_sensor.localsky_zone_<zone>_running`, and `sensor.localsky_verdict_today`.
+Full walkthrough: [docs/hacs.md](hacs.md).
 
-This mode works well for users who use HA for the rest of their home but want LocalSky to own irrigation.
+### Path 3: MQTT discovery (when a broker already runs)
 
-### Mode 3: HA-driven (legacy continuity)
-
-LocalSky's controller dispatches through HA service calls instead of directly. Useful when you already run Smart Irrigation + Irrigation Unlimited + OpenSprinkler HACS through HA and don't want to re-plumb.
+LocalSky talks to your controller directly, AND publishes its state via MQTT discovery so HA dashboards see `sensor.localsky_*` entities automatically. An alternative to the HACS integration when you already run a broker; do not enable both, or you get duplicate entities.
 
 Setup:
-1. Pass `HA_URL` and `HA_LONG_LIVED_TOKEN` env vars to the container.
-2. In the wizard's Controllers step, pick `ha_service_call`. Map your LocalSky zones to HA entity ids.
-3. LocalSky reads HA state via `/api/states`, dispatches runs via `/api/services/<domain>/<service>`.
+1. Same install command; configure your controller under `/settings/controllers`.
+2. Under Settings > Notifications, set the MQTT broker host, port, credentials, and discovery prefix, and leave publishing enabled.
+3. Settings > Home Assistant shows whether discovery is currently publishing.
+4. HA auto-discovers the entities once its MQTT integration is connected to the same broker.
+
+### Path 4: HA service-call controller (valves only HA can reach)
+
+LocalSky's controller dispatches through HA service calls instead of directly. Useful when you already run an HA-driven irrigation integration (opensprinkler HACS, irrigation_unlimited, and similar) and don't want to re-plumb, or when only HA can reach the valves.
+
+Setup:
+1. In the wizard's Controller step (or `/settings/controllers`), pick the `ha_service_call` controller type.
+2. Give it your HA base URL and a long-lived access token, and map your LocalSky zone slugs to HA entity ids. The start and stop services are configurable (defaults target an OpenSprinkler-style setup).
+3. LocalSky dispatches runs via HA's `/api/services/<domain>/<service>` API.
 
 This is the path for upgrading an existing HA-driven irrigation setup without losing automations.
 
@@ -157,7 +200,7 @@ localsky.example.com {
 }
 ```
 
-Add basic auth or oauth2-proxy if you want authentication. LocalSky doesn't enforce auth itself; the proxy layer is where you add it.
+LocalSky ships built-in authentication: an owner account (password stored as an argon2id hash) plus API tokens for integrations. New installs that create the owner account in the wizard's Account step finish with auth mode set to `required`; installs that skip that step default to `mode = "disabled"` in the `[auth]` config section. Proxy-level auth (basic auth, oauth2-proxy) is optional defense in depth on top of that, not a substitute. Details: [docs/authentication.md](authentication.md).
 
 ### Cloudflare Tunnel
 
@@ -183,11 +226,11 @@ The Web Push functionality works through any of the reachability options above. 
 
 The full list of supported controllers and their integration shape lives in [docs/controllers.md](controllers.md). Short version:
 
-- **OpenSprinkler** (firmware 2.1.9+), the ideal controller. Direct HTTP API on the LAN, no cloud, $130-180 hardware.
+- **OpenSprinkler** (firmware 2.1.9+), the ideal controller. Direct HTTP API on the LAN, no cloud, US$130-180 hardware (US pricing; varies by region).
 - **OpenSprinkler Pi**: same protocol as the boxed version; runs on a Raspberry Pi
 - **Home Assistant service call**: works with any HA-driven irrigation integration (opensprinkler HACS, irrigation_unlimited, rachio, esphome sprinkler component, hubitat sprinkler, etc.)
 - **ESPHome sprinkler component** (planned), DIY ESP32-based controllers
-- **Rachio** Gen 2 / 3 (planned), cloud API, $130-250 hardware
+- **Rachio** Gen 2 / 3 (planned), cloud API, US$130-250 hardware
 - **DryRun**: no-op for testing + demos
 
 LocalSky's controller HAL is a Rust trait; adding new adapters takes ~100-200 lines. See [CONTRIBUTING.md](../CONTRIBUTING.md).
@@ -208,25 +251,7 @@ The dashboard renders cleanly without any of these; sensor tiles show empty stat
 
 ## Optional: Local LLM
 
-LocalSky's advisor produces plain-English explanations of why today's verdict is what it is. Three setup paths from easiest to most flexible:
-
-### Ollama
-
-If you have Ollama running on the same host:
-
-```bash
-ollama pull llama3.2:3b-instruct
-```
-
-LocalSky's "Auto" provider probes `localhost:11434` and detects Ollama within seconds. Models with tool support (llama3.1-8b, qwen2.5-7b) give richer responses on a workstation; phi3-mini-Q4 runs comfortably on a Pi 4.
-
-### llama.cpp
-
-Run `llama-server` on the same host listening on `localhost:8080`. Auto-detect picks it up the same way.
-
-### Any OpenAI-compatible endpoint
-
-Anything that speaks `/v1/chat/completions`: OpenAI, LM Studio, vLLM, TGI, Anthropic-compatible shims, etc. Set `LLM_PROVIDER=openai_compat`, `LLM_BASE_URL=https://...`, `LLM_MODEL=...`, `LLM_API_KEY=...`.
+LocalSky's advisor produces plain-English explanations of why today's verdict is what it is. It is entirely optional: point it at any OpenAI-compatible endpoint, a local Ollama or llama.cpp instance, or nothing at all. Setup, provider options, and model recommendations live in [docs/llm.md](llm.md).
 
 ## Troubleshooting
 

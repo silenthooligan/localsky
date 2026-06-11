@@ -1,7 +1,11 @@
 // SettingsUnits. Imperial vs metric vs custom-per-field. Persists to
 // localStorage so units are a per-device preference, not a per-
-// deployment one. The dashboard's number formatters read this on each
-// render so changes apply without reload.
+// deployment one. Read back by components::units_fmt::use_unit_prefs,
+// which feeds the primary temperature and precipitation displays
+// (weather hero, stat tiles, forecast hourly/daily). The wind and area
+// keys are still persisted by the system presets but have no display
+// consumers yet, so their per-field selectors are not rendered (no
+// dead controls); restore the FormFields below when they get wired.
 
 use leptos::prelude::*;
 
@@ -87,7 +91,9 @@ pub fn SettingsUnits() -> impl IntoView {
                 <h1 class="settings-page__title">"Units"</h1>
                 <p class="settings-page__subtitle">
                     "Per-device. Applies to display only; engine math runs in "
-                    "metric internally and converts at the boundary."
+                    "metric internally and converts at the boundary. Today this "
+                    "drives the temperature and rainfall readouts (hero, stat "
+                    "tiles, forecast); wind and area conversions are coming."
                 </p>
             </header>
 
@@ -135,36 +141,11 @@ pub fn SettingsUnits() -> impl IntoView {
                         />
                     </FormField>
 
-                    <FormField
-                        label="Wind speed".to_string()
-                        helptext="".to_string()
-                        error=Signal::derive(|| None::<String>)
-                    >
-                        <SegmentedControl
-                            value=wind_unit
-                            options=vec![
-                                ("mph".into(), "mph".into()),
-                                ("kph".into(), "kph".into()),
-                                ("ms".into(), "m/s".into()),
-                            ]
-                            aria_label="Wind speed unit".to_string()
-                        />
-                    </FormField>
-
-                    <FormField
-                        label="Zone area".to_string()
-                        helptext="".to_string()
-                        error=Signal::derive(|| None::<String>)
-                    >
-                        <SegmentedControl
-                            value=area_unit
-                            options=vec![
-                                ("sqft".into(), "ft²".into()),
-                                ("sqm".into(), "m²".into()),
-                            ]
-                            aria_label="Area unit".to_string()
-                        />
-                    </FormField>
+                    // Wind speed and zone area selectors intentionally not
+                    // rendered: nothing reads units_wind / units_area yet,
+                    // and a control that does nothing reads as a bug. The
+                    // system presets still persist both keys so existing
+                    // choices survive until the displays are wired.
                 </Panel>
             </Show>
         </main>

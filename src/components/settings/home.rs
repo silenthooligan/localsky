@@ -11,9 +11,10 @@
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
 
+use super::help::SettingsHelp;
 use super::{
-    SettingsAccount, SettingsAdvanced, SettingsControllers, SettingsDevices, SettingsLlm,
-    SettingsLocation, SettingsNotifications, SettingsRestrictions, SettingsSchedules,
+    SettingsAccount, SettingsAdvanced, SettingsControllers, SettingsDevices, SettingsHomeAssistant,
+    SettingsLlm, SettingsLocation, SettingsNotifications, SettingsRestrictions, SettingsSchedules,
     SettingsSkipRules, SettingsSources, SettingsTheme, SettingsUnits, SettingsZones,
 };
 use crate::components::ui::Icon;
@@ -43,6 +44,12 @@ const GROUPS: &[SectionGroup] = &[
                 icon: "controllers",
             },
             SectionLink {
+                key: "home-assistant",
+                label: "Home Assistant",
+                helptext: "The bidirectional link: what flows in, what HA consumes",
+                icon: "home",
+            },
+            SectionLink {
                 key: "zones",
                 label: "Zones",
                 helptext: "Grass species, soil texture, area, sprinkler PR",
@@ -51,7 +58,7 @@ const GROUPS: &[SectionGroup] = &[
             SectionLink {
                 key: "sources",
                 label: "Weather sources",
-                helptext: "Tempest, Ecowitt, NWS, and 18 more",
+                helptext: "Tempest, Ecowitt, Open-Meteo, and 18 more",
                 icon: "sources",
             },
             SectionLink {
@@ -125,6 +132,12 @@ const GROUPS: &[SectionGroup] = &[
                 label: "Theme",
                 helptext: "Dark, light, auto, high-contrast",
                 icon: "theme",
+            },
+            SectionLink {
+                key: "help",
+                label: "Help & documentation",
+                helptext: "Installation guide, manual, migration, API",
+                icon: "info",
             },
             SectionLink {
                 key: "advanced",
@@ -388,6 +401,8 @@ fn SettingsOverview(selected: RwSignal<Option<&'static str>>) -> impl IntoView {
 fn section_view(key: &str) -> leptos::prelude::AnyView {
     match key {
         "devices" => view! { <SettingsDevices/> }.into_any(),
+        "home-assistant" => view! { <SettingsHomeAssistant/> }.into_any(),
+        "help" => view! { <SettingsHelp/> }.into_any(),
         "zones" => view! { <SettingsZones/> }.into_any(),
         "sources" => view! { <SettingsSources/> }.into_any(),
         "controllers" => view! { <SettingsControllers/> }.into_any(),

@@ -100,24 +100,17 @@ impl WeatherSource for MqttSubscribe {
         }
         let (client, mut eventloop) = AsyncClient::new(opts, 32);
 
-        // Subscribe to every configured topic. rumqttc lets us batch
-        // these post-connect; we send them immediately and the client
-        // queues them until the connack arrives.
-        for sub in &self.config.subscriptions {
-            if let Err(e) = client.subscribe(&sub.topic, QoS::AtMostOnce).await {
-                warn!(
-                    source = self.id,
-                    topic = sub.topic,
-                    error = %e,
-                    "mqtt subscribe failed"
-                );
-            }
-        }
+        // Subscriptions are issued on every ConnAck (initial connect AND
+        // each automatic reconnect). rumqttc reconnects with a clean
+        // session and does NOT replay subscriptions, so subscribing only
+        // once up front meant a broker restart left this source
+        // connected but subscribed to nothing: permanent silent data
+        // loss until the container restarted.
         info!(
             source = self.id,
             broker = self.config.broker_host,
             count = self.config.subscriptions.len(),
-            "mqtt source connected; awaiting messages"
+            "mqtt source starting; subscriptions issued on each connect"
         );
 
         loop {
@@ -127,7 +120,27 @@ impl WeatherSource for MqttSubscribe {
                         Ok(Event::Incoming(Packet::Publish(p))) => {
                             self.handle_publish(&bus, &p.topic, &p.payload);
                         }
-                        Ok(_) => {} // ConnAck, PingResp, etc.
+                        Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                            let mut ok = 0usize;
+                            for sub in &self.config.subscriptions {
+                                match client.subscribe(&sub.topic, QoS::AtMostOnce).await {
+                                    Ok(()) => ok += 1,
+                                    Err(e) => warn!(
+                                        source = self.id,
+                                        topic = sub.topic,
+                                        error = %e,
+                                        "mqtt subscribe failed"
+                                    ),
+                                }
+                            }
+                            info!(
+                                source = self.id,
+                                subscribed = ok,
+                                total = self.config.subscriptions.len(),
+                                "mqtt source connected; subscriptions issued"
+                            );
+                        }
+                        Ok(_) => {} // PingResp, SubAck, etc.
                         Err(e) => {
                             warn!(source = self.id, error = %e, "mqtt eventloop error; reconnecting");
                             tokio::time::sleep(Duration::from_secs(2)).await;

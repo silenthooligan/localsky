@@ -75,7 +75,17 @@ pub fn router(irrigation: Arc<IrrigationStore>) -> Router {
         .with_state(irrigation)
 }
 
+/// Epoch of the most recent manifest fetch. Only the Home Assistant
+/// integration calls this endpoint, so it doubles as an "HA integration
+/// is alive" signal surfaced by /api/v1/health's `ha` block.
+pub static LAST_MANIFEST_FETCH_EPOCH: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
 async fn manifest(State(store): State<Arc<IrrigationStore>>) -> Json<Manifest> {
+    LAST_MANIFEST_FETCH_EPOCH.store(
+        chrono::Utc::now().timestamp(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let snap = store.snapshot();
     let mut entities = Vec::new();
 

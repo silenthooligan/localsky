@@ -287,7 +287,7 @@ pub fn SettingsRestrictions() -> impl IntoView {
                 <a class="settings-page__back" href="/settings">"Back to Settings"</a>
                 <h1 class="settings-page__title">"Watering restrictions"</h1>
                 <p class="settings-page__subtitle">
-                    "Honor regulatory rules from your water management district or HOA. "
+                    "Honor watering rules from your local water authority, council, water management district, or HOA. "
                     "Restrictions can gate the live verdict (skip when not allowed), "
                     "cap the per-zone dispatch length, and follow odd/even address weekday rotation. "
                     "Stacks with all your skip-rule thresholds; the tightest rule wins."
@@ -625,15 +625,15 @@ fn RestrictionForm(
 
             <FormField
                 label="Effective window".to_string()
-                helptext="When this restriction is active. Most areas use All year. Summer/winter follow your timezone's daylight-saving switch automatically, for places with seasonal rules.".to_string()
+                helptext="When this restriction is active. Most areas use All year. Summer/winter follow the US daylight-saving calendar; outside the US, use Custom range for seasonal rules.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 <SegmentedControl
                     value=new_effective_kind
                     options=vec![
                         ("all_year".into(), "All year".into()),
-                        ("dst_only".into(), "Summer (DST)".into()),
-                        ("standard_only".into(), "Winter (standard)".into()),
+                        ("dst_only".into(), "Summer (US DST)".into()),
+                        ("standard_only".into(), "Winter (US standard)".into()),
                         ("date_range".into(), "Custom range".into()),
                     ]
                     aria_label="Effective window".to_string()
@@ -946,8 +946,8 @@ fn RestrictionCard(
         .and_then(|v| v.get("kind"))
         .and_then(|v| v.as_str())
     {
-        Some("dst_only") => "Summer (DST)",
-        Some("standard_only") => "Winter (standard)",
+        Some("dst_only") => "Summer (US DST)",
+        Some("standard_only") => "Winter (US standard)",
         Some("date_range") => "Custom date range",
         _ => "All year",
     };

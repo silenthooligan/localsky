@@ -201,6 +201,7 @@ mod tests {
         let trace = DecisionTrace {
             verdict: "skip".into(),
             reason: "Already wet (0.10\" today)".into(),
+            degraded: false,
             rules: vec![RuleEval {
                 id: "already_wet".into(),
                 label: "Already wet today".into(),

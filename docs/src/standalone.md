@@ -16,7 +16,7 @@ Everything. The full LocalSky feature set runs without HA:
 - 17-rule skip ladder
 - 7-day forward verdict strip
 - Cycle-and-soak runtime splitting
-- Direct controller dispatch (OpenSprinkler HTTP API, ESPHome native protocol, Rachio cloud)
+- Direct controller dispatch (OpenSprinkler HTTP API, Rachio, Hydrawise, B-hyve, Rain Bird, MQTT command)
 - Sensor ingestion via MQTT subscribe + direct LAN adapters
 - LLM advisor (Ollama, llama.cpp, or any OpenAI-compatible)
 - Web Push notifications (browser, per device)
@@ -123,7 +123,7 @@ The adapter handles:
 |---|---|---|
 | ESPHome-flashed ESP32 + sensor | Native MQTT publish (or via HA's MQTT integration) | Subscribe to `esphome/<device>/<sensor>/state` |
 | Tasmota-flashed device | Native MQTT publish | Subscribe to `tasmota/<device>/SENSOR` |
-| Zigbee sensors (Aqara, Sonoff) | Via Zigbee2MQTT (no HA needed) | Subscribe to `zigbee2mqtt/<friendly_name>` |
+| Zigbee sensors (Aqara, Sonoff) | Via Zigbee2MQTT (no HA needed) | Subscribe to `zigbee2mqtt/<friendly_name>`. Already on ZHA or Z2M feeding HA? Use the HA passthrough source (kind = `ha_passthrough`) instead; no re-pairing. |
 | Ecowitt gateway (WH51, WH52) | Via ecowitt2mqtt sidecar | Subscribe to `ecowitt/<device_id>` |
 | Shelly devices | Native MQTT (firmware setting) | Subscribe to `shellies/<device>/<field>` |
 | Arbitrary Arduino / Pi project | PubSubClient / paho-mqtt | Subscribe to whatever topic you publish |
@@ -136,43 +136,56 @@ For sensors that speak a documented LAN protocol, LocalSky can talk to them dire
 
 | Sensor | Adapter | Status |
 |---|---|---|
-| Tempest hub (UDP broadcast 50222) | `tempest_udp` | Tested |
-| Ecowitt GW1100 / GW2000 (HTTP POST) | `ecowitt_local` | Planned |
-| Ambient Weather (socket.io) | `ambient_weather` | Planned |
+| Tempest hub (UDP broadcast 50222) | `tempest_udp` | Shipped |
+| Ecowitt GW1100 / GW2000 (LAN push to `/ingest/ecowitt`) | `ecowitt_local` | Shipped |
+| Ecowitt GW1100 / GW2000 (native LAN poll, incl. per-channel soil calibration) | `ecowitt_gw_poll` | Shipped |
+| Ambient Weather (cloud REST) | `ambient_weather` | Shipped |
 | ESPHome native API (protobuf over TCP) | `esphome_native` (sensor mode) | Planned |
 
 Direct adapters bypass MQTT entirely; the device talks to LocalSky's listener directly. Less infra, no broker. Use when the device supports a documented protocol that LocalSky has an adapter for.
 
-### Path 3: HTTP webhook receiver (planned)
+#### Networking note: Tempest UDP
 
-For sensors with arbitrary HTTP push capability (some commercial weather stations, custom scripts), a generic webhook receiver source is planned:
+The Tempest hub broadcasts on UDP port 50222, and broadcasts do not cross Docker's default bridge network. Run the LocalSky container with `network_mode: host` (the repo's `docker-compose.yml` already does) so the listener actually hears the hub. On a multi-homed host this also lets one NIC face the sensor subnet while another handles outbound API calls.
+
+### Path 3: HTTP webhook receiver
+
+For sensors with arbitrary HTTP push capability (some commercial weather stations, custom scripts), the generic `http_webhook` source accepts JSON POSTs directly:
 
 ```toml
 [[sources]]
-id = "webhook_sensors"
+id = "lawn"
 kind = "http_webhook"
 [sources.config]
-path = "/ingest/<token>"
-# Sensor POSTs JSON to http://localsky:8090/ingest/<token>
+path = "/ingest/lawn"
+token = "${WEBHOOK_TOKEN}"     # optional; sent via X-LocalSky-Token header or ?token=
+
+[[sources.config.fields]]
+field = "air_temp_f"
+json_path = "outdoor.temp"     # drill into the JSON payload
+scale = 1.0
+offset = 0.0
 ```
 
-Status: planned. Until then, run a small Python or Node bridge that converts your HTTP source to MQTT publishes.
+The device POSTs JSON to `http://localsky:8090/ingest/webhook/lawn` (the URL segment is the source `id`).
+
+Field names use the same snake_case weather-field vocabulary as the MQTT source, and the same `json_path` + `scale`/`offset` transform scheme.
 
 ## Controller dispatch without Home Assistant
 
-You have three direct paths:
+You have several direct paths:
 
 ### OpenSprinkler (the recommended hardware)
 
-Direct HTTP API on the LAN. See [docs/controllers.md](controllers.md#opensprinkler-the-ideal). $130-180 hardware; the engine talks to it without anything else in the middle.
+Direct HTTP API on the LAN. See [docs/controllers.md](controllers.md#opensprinkler-the-ideal). US$130-180 hardware; the engine talks to it without anything else in the middle.
 
 ### ESPHome sprinkler (DIY)
 
-For people who want full open hardware: an ESP32 + relay board + ESPHome's `sprinkler` component. ~$15-40 in parts. LocalSky's `esphome_native` controller (planned) speaks the protobuf protocol directly. Until that adapter lands, run the ESPHome device under ESPHome's standalone web interface (no HA needed) and use MQTT for state, with manual valve control from LocalSky still pending the native adapter.
+For people who want full open hardware: an ESP32 + relay board + ESPHome's `sprinkler` component. ~US$15-40 in parts. LocalSky's `esphome_native` controller (planned) will speak the protobuf protocol directly. Until that adapter lands, enable MQTT on the ESPHome device and drive it with LocalSky's `mqtt_command` controller; no HA needed.
 
-### Rachio (planned)
+### Rachio, Hydrawise, B-hyve, Rain Bird
 
-Cloud API, no HA required. LocalSky speaks Rachio v1 directly.
+Vendor cloud or LAN APIs, no HA required. LocalSky ships direct adapters for all four; see [docs/controllers.md](controllers.md) for setup per vendor.
 
 ### Existing setups: what if I already have HA driving Rachio / Hunter / B-hyve?
 
@@ -233,16 +246,9 @@ Some objections to HA we hear and how LocalSky stands up:
 
 LocalSky is for the user who wants the irrigation engine without buying into the broader home automation philosophy. If you're an HA user already, LocalSky still plays well (Mode 2 / Mode 3); if you're not, you're not missing anything.
 
-## Future: LocalSky as an HACS integration
+## Already running HA? There's a native integration
 
-There's a path the other direction: a Python-side HACS integration that polls LocalSky's REST API and creates HA entities natively, without going through MQTT. This lets HA users get LocalSky as a "first-class HA integration" experience:
-
-- One-click install via HACS
-- Configuration through HA's UI
-- LocalSky entities appear under "LocalSky" in HA's device list
-- LocalSky's verdicts + zone state become available to HA automations and Lovelace dashboards without YAML
-
-Status: roadmap. Once the LocalSky API stabilizes at v1.0, the HACS integration is a separate ~300-line Python project that wraps the REST endpoints documented in [docs/api.md](api.md). If you're a Python developer interested in building this, see the [CONTRIBUTING.md](../CONTRIBUTING.md) on cross-project contribution.
+If you do run Home Assistant, LocalSky ships a native HA integration (installed via HACS) that creates LocalSky's entities and services in HA directly over the REST/SSE API, no MQTT broker needed. See [docs/hacs.md](hacs.md).
 
 ## Summary table
 
@@ -253,7 +259,8 @@ Status: roadmap. Once the LocalSky API stabilizes at v1.0, the HACS integration 
 | Controller dispatch | ✅ direct | ✅ direct | ✅ through HA |
 | Sensor ingestion | ✅ MQTT subscribe + direct adapters | ✅ same + HA passthrough | ✅ HA passthrough |
 | Sensor entities visible in HA | ❌ | ✅ via MQTT discovery | ✅ HA owns them |
-| HA automations on LocalSky verdicts | ❌ | ✅ via MQTT entities | ✅ direct in HA |
+| Native HA integration ([HACS](hacs.md)) | ❌ (no HA) | ✅ recommended over MQTT discovery | ✅ |
+| HA automations on LocalSky verdicts | ❌ | ✅ via MQTT entities or the HACS integration | ✅ direct in HA |
 | Web Push notifications | ✅ | ✅ | ✅ |
 | LLM advisor | ✅ | ✅ | ✅ |
 | Mobile PWA | ✅ | ✅ | ✅ |

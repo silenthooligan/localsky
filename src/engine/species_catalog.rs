@@ -16,10 +16,13 @@
 //       ENH1115 - Florida-Friendly Landscaping (ornamentals)
 //
 // Numbers represent typical mature stand Kc in a humid subtropical climate
-// (north/central Florida latitudes). Northern users on cool-season grasses
-// should see KBG/TTTF/PRG entries. Curves are not auto-adjusted for
-// latitude or stress; operators with measured local data should override
-// per-zone via ZoneConfig.mad_pct_override / precip_rate_mm_hr.
+// and transfer to comparable climates worldwide (US Gulf South, coastal
+// Australia, southern Brazil, East Asia); curves auto-shift six months for
+// the Southern Hemisphere via kc_at_doy_lat. Cool-temperate users should
+// see the KBG/TTTF/PRG entries. Beyond the hemisphere shift, curves are not
+// adjusted for latitude or stress; operators with measured local data
+// should override per-zone via ZoneConfig.mad_pct_override /
+// precip_rate_mm_hr.
 
 use crate::config::schema::GrassSpecies;
 
@@ -45,16 +48,16 @@ pub struct SpeciesProfile {
 pub fn lookup(species: GrassSpecies) -> SpeciesProfile {
     use GrassSpecies::*;
     match species {
-        // ----- Warm-season turfgrasses (Florida-centric) -----
+        // ----- Warm-season turfgrasses -----
         StAugustine => SpeciesProfile {
-            // Active growth Apr-Oct; semi-dormant Nov-Mar in north FL.
+            // Active growth Apr-Oct (NH anchor); semi-dormant in the cool season.
             kc_monthly: [0.55, 0.60, 0.70, 0.85, 0.95, 1.00, 1.00, 1.00, 0.95, 0.85, 0.70, 0.55],
             root_depth_mm: 150.0, // 4-6"; 5" mid -> ~125mm; aerated lawns up to 6" / 150mm.
             mad_pct: 0.50,
             salinity_tolerance_ds_m: Some(6.0),
             mow_height_in: Some(3.5),
-            notes: "Most common Florida turf. Shallow-rooted; prefers deeper, less frequent watering.",
-            citation: "UF/IFAS ENH62",
+            notes: "Warm-season turf common across the US Southeast, Mediterranean climates, and Australia/NZ (sold there as Buffalo). Shallow-rooted; prefers deeper, less frequent watering.",
+            citation: "FAO-56 Table 12; UF/IFAS ENH62",
         },
         Bermuda => SpeciesProfile {
             kc_monthly: [0.50, 0.55, 0.65, 0.80, 0.90, 0.95, 0.95, 0.95, 0.90, 0.80, 0.65, 0.50],
@@ -63,7 +66,7 @@ pub fn lookup(species: GrassSpecies) -> SpeciesProfile {
             salinity_tolerance_ds_m: Some(8.0),
             mow_height_in: Some(1.5),
             notes: "Deepest-rooted common turf. Drought-tolerant; can go semi-dormant in heat.",
-            citation: "UF/IFAS ENH19",
+            citation: "FAO-56 Table 12; UF/IFAS ENH19",
         },
         Zoysia => SpeciesProfile {
             kc_monthly: [0.55, 0.60, 0.65, 0.75, 0.85, 0.90, 0.90, 0.90, 0.85, 0.75, 0.65, 0.55],
@@ -72,7 +75,7 @@ pub fn lookup(species: GrassSpecies) -> SpeciesProfile {
             salinity_tolerance_ds_m: Some(7.0),
             mow_height_in: Some(2.0),
             notes: "Slow but dense; tolerates moderate shade; recovers slowly from drought.",
-            citation: "UF/IFAS ENH11",
+            citation: "FAO-56 Table 12; UF/IFAS ENH11",
         },
         Bahia => SpeciesProfile {
             kc_monthly: [0.55, 0.60, 0.65, 0.75, 0.80, 0.85, 0.85, 0.85, 0.80, 0.75, 0.65, 0.55],
@@ -80,8 +83,8 @@ pub fn lookup(species: GrassSpecies) -> SpeciesProfile {
             mad_pct: 0.55,
             salinity_tolerance_ds_m: Some(4.0),
             mow_height_in: Some(3.5),
-            notes: "Drought-tolerant; common Florida pasture grass; tolerates low fertility.",
-            citation: "UF/IFAS ENH6",
+            notes: "Drought-tolerant pasture-and-lawn grass widespread across the subtropical Americas; tolerates low fertility.",
+            citation: "FAO-56 Table 12; UF/IFAS ENH6",
         },
         Centipede => SpeciesProfile {
             kc_monthly: [0.50, 0.55, 0.60, 0.70, 0.80, 0.85, 0.85, 0.85, 0.80, 0.70, 0.60, 0.50],
@@ -90,9 +93,22 @@ pub fn lookup(species: GrassSpecies) -> SpeciesProfile {
             salinity_tolerance_ds_m: Some(3.0),
             mow_height_in: Some(2.0),
             notes: "Low-maintenance; shallow-rooted; iron-chlorotic on high-pH soils.",
-            citation: "UF/IFAS ENH8",
+            citation: "FAO-56 Table 12; UF/IFAS ENH8",
         },
 
+        GrassSpecies::Kikuyu => SpeciesProfile {
+            kc_monthly: [
+                0.55, 0.60, 0.70, 0.85, 0.95, 1.00, 1.00, 1.00, 0.95, 0.85, 0.70, 0.55,
+            ],
+            root_depth_mm: 300.0, // deep, aggressive rhizomes; 10-14" typical
+            mad_pct: 0.5,
+            salinity_tolerance_ds_m: Some(4.0),
+            mow_height_in: Some(1.5),
+            notes: "Southern-hemisphere staple (Australia, NZ, South Africa). \
+                    Vigorous warm-season runner; curve anchors shift \
+                    automatically below the equator.",
+            citation: "FAO-56 Table 12 (kikuyu grass)",
+        },
         // ----- Cool-season turfgrasses (transitional + northern users) -----
         KentuckyBluegrass => SpeciesProfile {
             // Peak ET in spring/fall; summer heat stress dips Kc.
@@ -119,7 +135,7 @@ pub fn lookup(species: GrassSpecies) -> SpeciesProfile {
             mad_pct: 0.50,
             salinity_tolerance_ds_m: Some(5.0),
             mow_height_in: Some(2.5),
-            notes: "Quick germination; often used for winter overseeding in the south.",
+            notes: "Quick germination; often overseeded into dormant warm-season lawns for winter color.",
             citation: "FAO-56 Table 12 (cool-season turf)",
         },
 
@@ -132,7 +148,7 @@ pub fn lookup(species: GrassSpecies) -> SpeciesProfile {
             salinity_tolerance_ds_m: None,
             mow_height_in: None,
             notes: "Established shrubs; water deeply + infrequently. Drip preferred.",
-            citation: "UF/IFAS ENH1115",
+            citation: "FAO-56 Table 12; UF/IFAS ENH1115",
         },
         VegetableGarden => SpeciesProfile {
             // Wide swing; mid-season (fruit set) is the high.

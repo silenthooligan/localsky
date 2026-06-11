@@ -34,7 +34,12 @@ pub struct Inputs {
     pub rain_7day_weighted_in: f64,
     pub rain_next_4h_in: f64,
     pub wind_max_today_mph: f64,
-    pub temp_min_24h_f: f64,
+    /// Forecast overnight low for the next 24h. `None` when the hourly
+    /// forecast window is unavailable, so the overnight-freeze gate can
+    /// distinguish "no data" from a genuine 0 °F (or colder) low. The
+    /// old representation used 0.0 as a missing-data sentinel, which
+    /// silently disabled the rule in real sub-zero cold snaps.
+    pub temp_min_24h_f: Option<f64>,
     pub temp_max_3day_f: f64,
     pub days_since_significant_rain: u32,
 
@@ -55,6 +60,15 @@ pub struct Inputs {
     pub soil_temp_yard_max_f: Option<f64>,
     pub frost_skip_soil_f: f64,
 
+    // ── Live-readings provenance ──
+    /// Where `temp_now_f` / `wind_now_mph` (and live humidity) came from.
+    /// `Station` = a fresh local station packet (normal). `ForecastFallback`
+    /// = the station is stale/absent and the current-hour forecast is
+    /// standing in; rules still evaluate but the decision trace is marked
+    /// degraded. `Unavailable` = no station AND no forecast; the ladder
+    /// fails safe with a skip rather than deciding on fabricated values.
+    pub live_readings: LiveReadings,
+
     // ── Toggles ──
     pub is_paused: bool,
     pub is_dry_run: bool,
@@ -71,6 +85,20 @@ pub struct Inputs {
     pub watering_restrictions: Vec<WateringRestriction>,
     /// Operator's address parity from `cfg.deployment.address_parity`.
     pub address_parity: AddressParity,
+}
+
+/// Health/provenance of the live "now" readings feeding the engine.
+/// Default `Station` preserves the historical behavior for every caller
+/// that doesn't track provenance (simulator, verdict strip, tests).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LiveReadings {
+    /// Fresh local station data (Tempest packet within the staleness window).
+    #[default]
+    Station,
+    /// Station stale or absent; current-hour forecast values standing in.
+    ForecastFallback,
+    /// No station data and no forecast. Fail safe: skip, don't fabricate.
+    Unavailable,
 }
 
 /// One zone's live soil reading + its per-zone thresholds, sourced from
@@ -159,7 +187,11 @@ pub fn evaluate_with(i: &Inputs, params: &SkipRuleParams) -> SkipCheck {
         rain_7day_weighted_in: i.rain_7day_weighted_in,
         rain_next_4h_in: i.rain_next_4h_in,
         wind_max_today_mph: i.wind_max_today_mph,
-        temp_min_24h_f: i.temp_min_24h_f,
+        // Wire shape stays f64 for /api/v1 back-compat: missing data keeps
+        // the historical 0.0 placeholder, with the new (additive) validity
+        // flag alongside so consumers can tell 0 °F from "no forecast".
+        temp_min_24h_f: i.temp_min_24h_f.unwrap_or(0.0),
+        temp_min_24h_valid: i.temp_min_24h_f.is_some(),
         temp_max_3day_f: i.temp_max_3day_f,
         days_since_significant_rain: i.days_since_significant_rain,
         heat_index_now_f: heat_index_now,
@@ -329,6 +361,15 @@ fn pre_soil(i: &Inputs, p: &SkipRuleParams) -> Option<(&'static str, String)> {
             }
         }
     }
+    // Live-data integrity. When neither the station nor the forecast can
+    // supply current conditions, the freeze/wind gates below would be
+    // judging fabricated numbers. Prefer a skip over a phantom run.
+    if i.live_readings == LiveReadings::Unavailable {
+        return Some((
+            "skip",
+            "Live weather unavailable (no station data or forecast); failing safe".to_string(),
+        ));
+    }
     if i.rain_intensity_now_in_hr > p.rain_now_in_hr {
         return Some((
             "skip",
@@ -347,14 +388,18 @@ fn pre_soil(i: &Inputs, p: &SkipRuleParams) -> Option<(&'static str, String)> {
             ),
         ));
     }
-    if i.temp_min_24h_f > 0.0 && i.temp_min_24h_f < i.min_temp_f {
-        return Some((
-            "skip",
-            format!(
-                "Overnight freeze ({:.0}°F low next 24h < {:.0}°F)",
-                i.temp_min_24h_f, i.min_temp_f
-            ),
-        ));
+    // Applicability is "do we have a forecast low at all" (Option), not a
+    // numeric sentinel: a genuine low of 0 °F or colder must still skip.
+    if let Some(t24) = i.temp_min_24h_f {
+        if t24 < i.min_temp_f {
+            return Some((
+                "skip",
+                format!(
+                    "Overnight freeze ({:.0}°F low next 24h < {:.0}°F)",
+                    t24, i.min_temp_f
+                ),
+            ));
+        }
     }
     if let Some(t) = i.soil_temp_yard_min_f {
         if t < i.frost_skip_soil_f {
@@ -562,7 +607,11 @@ pub fn inputs_from_skipcheck(s: &SkipCheck) -> Inputs {
         rain_7day_weighted_in: s.rain_7day_weighted_in,
         rain_next_4h_in: s.rain_next_4h_in,
         wind_max_today_mph: s.wind_max_today_mph,
-        temp_min_24h_f: s.temp_min_24h_f,
+        temp_min_24h_f: if s.temp_min_24h_valid {
+            Some(s.temp_min_24h_f)
+        } else {
+            None
+        },
         temp_max_3day_f: s.temp_max_3day_f,
         days_since_significant_rain: s.days_since_significant_rain,
         max_wind_mph: s.max_wind_mph,
@@ -603,6 +652,9 @@ pub fn inputs_from_skipcheck(s: &SkipCheck) -> Inputs {
         soil_temp_yard_min_f: s.soil_temp_yard_min_f,
         soil_temp_yard_max_f: s.soil_temp_yard_max_f,
         frost_skip_soil_f: s.frost_skip_soil_f,
+        // SkipCheck doesn't carry live-readings provenance; the what-if
+        // assumes healthy inputs (matches the other neutralized gates).
+        live_readings: LiveReadings::Station,
         // Control gates neutralized for the what-if.
         is_paused: false,
         is_dry_run: false,
@@ -743,6 +795,27 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
         );
     }
 
+    // Live-data integrity (mirrors pre_soil): with no station and no
+    // forecast, fail safe instead of judging fabricated readings.
+    gate(
+        &mut rules,
+        &mut decided,
+        "live_data",
+        "Live weather availability",
+        "safety",
+        true,
+        i.live_readings == LiveReadings::Unavailable,
+        match i.live_readings {
+            LiveReadings::Station => "live station readings".to_string(),
+            LiveReadings::ForecastFallback => {
+                "station stale/absent; using forecast current-hour values (degraded)".to_string()
+            }
+            LiveReadings::Unavailable => "no station data and no forecast".to_string(),
+        },
+        "skip",
+        "Live weather unavailable (no station data or forecast); failing safe".to_string(),
+    );
+
     // Currently raining.
     gate(
         &mut rules,
@@ -780,25 +853,30 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
         ),
     );
 
-    // Overnight freeze look-ahead.
-    gate(
-        &mut rules,
-        &mut decided,
-        "overnight_freeze",
-        "Overnight freeze",
-        "safety",
-        i.temp_min_24h_f > 0.0,
-        i.temp_min_24h_f < i.min_temp_f,
-        format!(
-            "24h low {:.0}°F vs {:.0}°F min",
-            i.temp_min_24h_f, i.min_temp_f
-        ),
-        "skip",
-        format!(
-            "Overnight freeze ({:.0}°F low next 24h < {:.0}°F)",
-            i.temp_min_24h_f, i.min_temp_f
-        ),
-    );
+    // Overnight freeze look-ahead. Applicable only when a 24h forecast
+    // low exists; a genuine 0 °F (or colder) low still fires the rule.
+    {
+        let t24 = i.temp_min_24h_f;
+        gate(
+            &mut rules,
+            &mut decided,
+            "overnight_freeze",
+            "Overnight freeze",
+            "safety",
+            t24.is_some(),
+            t24.map(|t| t < i.min_temp_f).unwrap_or(false),
+            match t24 {
+                Some(t) => format!("24h low {:.0}°F vs {:.0}°F min", t, i.min_temp_f),
+                None => "no 24h forecast low".to_string(),
+            },
+            "skip",
+            format!(
+                "Overnight freeze ({:.0}°F low next 24h < {:.0}°F)",
+                t24.unwrap_or(0.0),
+                i.min_temp_f
+            ),
+        );
+    }
 
     // Soil frost.
     {
@@ -1033,6 +1111,9 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
     DecisionTrace {
         verdict,
         reason,
+        // Anything short of fresh station data marks the trace degraded so
+        // the Rule Lab / API can flag that live inputs were substituted.
+        degraded: i.live_readings != LiveReadings::Station,
         rules,
     }
 }
@@ -1057,7 +1138,7 @@ mod tests {
             rain_7day_weighted_in: 0.0,
             rain_next_4h_in: 0.0,
             wind_max_today_mph: 6.0,
-            temp_min_24h_f: 60.0,
+            temp_min_24h_f: Some(60.0),
             temp_max_3day_f: 80.0,
             days_since_significant_rain: 1,
             max_wind_mph: 10.0,
@@ -1067,6 +1148,7 @@ mod tests {
             soil_temp_yard_min_f: None,
             soil_temp_yard_max_f: None,
             frost_skip_soil_f: 35.0,
+            live_readings: LiveReadings::Station,
             is_paused: false,
             is_dry_run: false,
             pause_until_epoch: 0,
@@ -1128,8 +1210,11 @@ mod tests {
         push(|i| i.temp_now_f = 30.0);
         push(|i| {
             i.temp_now_f = 50.0;
-            i.temp_min_24h_f = 32.0;
+            i.temp_min_24h_f = Some(32.0);
         });
+        push(|i| i.temp_min_24h_f = None);
+        push(|i| i.live_readings = LiveReadings::ForecastFallback);
+        push(|i| i.live_readings = LiveReadings::Unavailable);
         push(|i| i.soil_temp_yard_min_f = Some(33.0));
         push(|i| i.wind_now_mph = 20.0);
         push(|i| i.wind_max_today_mph = 30.0);
@@ -1414,10 +1499,70 @@ mod tests {
     fn overnight_freeze_look_ahead() {
         let mut i = base();
         i.temp_now_f = 50.0;
-        i.temp_min_24h_f = 32.0;
+        i.temp_min_24h_f = Some(32.0);
         let s = evaluate(&i);
         assert_eq!(s.verdict, "skip");
         assert!(s.reason.contains("Overnight freeze"));
+    }
+
+    #[test]
+    fn overnight_freeze_fires_on_subzero_low() {
+        // Regression: 0.0 used to be the missing-data sentinel, so a real
+        // forecast low at or below 0 °F silently disabled the rule.
+        let mut i = base();
+        i.temp_now_f = 45.0;
+        i.temp_min_24h_f = Some(-5.0);
+        i.min_temp_f = 38.0;
+        let s = evaluate(&i);
+        assert_eq!(s.verdict, "skip");
+        assert!(s.reason.contains("Overnight freeze"));
+        assert!(s.reason.contains("-5"));
+    }
+
+    #[test]
+    fn overnight_freeze_missing_forecast_does_not_fire() {
+        let mut i = base();
+        i.temp_min_24h_f = None;
+        let s = evaluate(&i);
+        assert_eq!(s.verdict, "run");
+        // Wire surface: legacy 0.0 placeholder + explicit validity flag.
+        assert_eq!(s.temp_min_24h_f, 0.0);
+        assert!(!s.temp_min_24h_valid);
+        // Traced ladder marks the rule not-applicable, not passed.
+        let t = decide_traced(&i, &SkipRuleParams::default());
+        let r = t.rules.iter().find(|r| r.id == "overnight_freeze").unwrap();
+        assert_eq!(r.outcome, "skipped");
+    }
+
+    #[test]
+    fn skipcheck_surfaces_overnight_low_validity() {
+        let mut i = base();
+        i.temp_min_24h_f = Some(-5.0);
+        let s = evaluate(&i);
+        assert!(s.temp_min_24h_valid);
+        assert_eq!(s.temp_min_24h_f, -5.0);
+    }
+
+    #[test]
+    fn unavailable_live_readings_fail_safe_skip() {
+        let mut i = base();
+        i.live_readings = LiveReadings::Unavailable;
+        let s = evaluate(&i);
+        assert_eq!(s.verdict, "skip");
+        assert!(s.reason.contains("Live weather unavailable"));
+    }
+
+    #[test]
+    fn forecast_fallback_runs_but_marks_trace_degraded() {
+        let p = SkipRuleParams::default();
+        let mut i = base();
+        i.live_readings = LiveReadings::ForecastFallback;
+        let t = decide_traced(&i, &p);
+        assert_eq!(t.verdict, "run");
+        assert!(t.degraded);
+        // Fresh station data is not degraded.
+        let t2 = decide_traced(&base(), &p);
+        assert!(!t2.degraded);
     }
 
     #[test]

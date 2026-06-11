@@ -33,7 +33,7 @@ pub fn verify_password(password: &str, phc: &str) -> bool {
 /// only the hex hash is stored.
 pub fn generate_token(prefix: &str) -> (String, String) {
     let mut bytes = [0u8; 32];
-    use rand::RngCore;
+    use rand::Rng;
     rand::rng().fill_bytes(&mut bytes);
     let body = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     let plaintext = format!("{prefix}{body}");

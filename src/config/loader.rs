@@ -406,6 +406,7 @@ mod tests {
         cfg.sources.push(crate::config::schema::SourceEntry {
             id: "has space".into(), // invalid
             priority: 50,
+            max_age_s: None,
             enabled: true,
             source: crate::config::schema::SourceKind::DemoReplay(Default::default()),
         });
@@ -420,12 +421,14 @@ mod tests {
         cfg.sources.push(crate::config::schema::SourceEntry {
             id: "a".into(),
             priority: 50,
+            max_age_s: None,
             enabled: true,
             source: crate::config::schema::SourceKind::DemoReplay(Default::default()),
         });
         cfg.sources.push(crate::config::schema::SourceEntry {
             id: "a".into(),
             priority: 50,
+            max_age_s: None,
             enabled: true,
             source: crate::config::schema::SourceKind::DemoReplay(Default::default()),
         });

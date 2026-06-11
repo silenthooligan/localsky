@@ -164,10 +164,10 @@ web-sys = { version = "0.3", optional = true, features = [
     "DragEvent",
     "DataTransfer",
 ] }
-rand = { version = "0.9", optional = true }
+rand = { version = "0.10", optional = true }
 ipnet = { version = "2", optional = true }
 argon2 = { version = "0.5", optional = true }
-mdns-sd = { version = "0.13", optional = true }
+mdns-sd = { version = "0.20", optional = true }
 # Offline lat/lon -> IANA timezone (bundled dataset; the wizard
 # autofills the timezone with it so sunrise scheduling never fires at a
 # UTC hour on a mis-configured container).

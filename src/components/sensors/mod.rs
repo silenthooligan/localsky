@@ -144,6 +144,24 @@ pub fn SensorsPage(
 
     #[cfg(feature = "hydrate")]
     {
+        // Deep link: /sensors?source=<id> lands straight in that source's
+        // inline editor (Edit buttons elsewhere in the app point here).
+        Effect::new(move |_| {
+            if let Some(win) = web_sys::window() {
+                let search = win.location().search().unwrap_or_default();
+                let q = |key: &str| {
+                    search.trim_start_matches('?').split('&').find_map(|kv| {
+                        let (k, v) = kv.split_once('=')?;
+                        (k == key && !v.is_empty()).then(|| v.to_string())
+                    })
+                };
+                if let Some(id) = q("source") {
+                    selected.set(Sel::EditSource(id));
+                } else if q("add").is_some() {
+                    selected.set(Sel::AddSource);
+                }
+            }
+        });
         Effect::new(move |_| {
             leptos::task::spawn_local(async move { load_health(sources).await });
         });
@@ -259,7 +277,7 @@ pub fn SensorsPage(
                         <p><strong>"From LocalSky directly:"</strong>" add a source LocalSky talks to itself — a LAN Ecowitt gateway, a webhook, MQTT — with \"Add a data source\" below. Receiver sources show live readings here the moment data arrives, so you can confirm it's working. Discovered gateways and controllers are listed on the "<a href="/settings/devices">"Devices"</a>" page."</p>
                     </div>
                 </details>
-                <div class="sensors-page__actions" style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap">
+                <div class="sensors-page__actions">
                     <Button variant="primary" icon="plus" on_click=Callback::new(move |_| selected.set(Sel::AddSource))>"Add a data source"</Button>
                     <a class="setup-footer__btn setup-footer__btn--ghost" href="/settings/devices">"Manage all devices →"</a>
                 </div>
@@ -340,6 +358,30 @@ pub fn SensorsPage(
                         let rows = sources.get();
                         if rows.is_empty() { return ().into_any(); }
                         let (local, cloud): (Vec<_>, Vec<_>) = rows.into_iter().partition(|r| is_local(&r.kind));
+                        // ha_passthrough with an empty field_map feeds no
+                        // sensor data; it lives on the Home Assistant panel
+                        // (Settings) instead of masquerading as a sensor here.
+                        let cfg_now = config.get();
+                        let feeds_nothing = |id: &str| -> bool {
+                            cfg_now
+                                .get("sources")
+                                .and_then(|a| a.as_array())
+                                .and_then(|arr| {
+                                    arr.iter().find(|s| {
+                                        s.get("id").and_then(|v| v.as_str()) == Some(id)
+                                    })
+                                })
+                                .map(|s| {
+                                    s.get("kind").and_then(|v| v.as_str()) == Some("ha_passthrough")
+                                        && s.pointer("/config/field_map")
+                                            .and_then(|m| m.as_object())
+                                            .map(|m| m.is_empty())
+                                            .unwrap_or(true)
+                                })
+                                .unwrap_or(false)
+                        };
+                        let local: Vec<SourceRow> =
+                            local.into_iter().filter(|r| !feeds_nothing(&r.id)).collect();
                         let render = move |r: SourceRow| {
                             let id = r.id.clone();
                             let id_a = id.clone();
@@ -381,7 +423,40 @@ pub fn SensorsPage(
                         }
                         Sel::Source(id) => {
                             match sources.get().into_iter().find(|r| r.id == id) {
-                                Some(r) => view! { <SourceDetail r selected toggle_enabled/> }.into_any(),
+                                Some(r) => {
+                                    // Zones whose soil sensor references this
+                                    // source ("source:<id>:<channel>" or a bare
+                                    // id), so assignment is visible right here.
+                                    let assigned: Vec<(String, String)> = config
+                                        .get()
+                                        .get("zones")
+                                        .and_then(|z| z.as_object())
+                                        .map(|zones| {
+                                            zones
+                                                .iter()
+                                                .filter(|(_, z)| {
+                                                    z.get("soil_sensor_id")
+                                                        .and_then(|v| v.as_str())
+                                                        .map(|spec| {
+                                                            spec == id
+                                                                || spec.starts_with(&format!("source:{id}"))
+                                                        })
+                                                        .unwrap_or(false)
+                                                })
+                                                .map(|(slug, z)| {
+                                                    (
+                                                        slug.clone(),
+                                                        z.get("display_name")
+                                                            .and_then(|v| v.as_str())
+                                                            .unwrap_or(slug)
+                                                            .to_string(),
+                                                    )
+                                                })
+                                                .collect()
+                                        })
+                                        .unwrap_or_default();
+                                    view! { <SourceDetail r selected toggle_enabled assigned/> }.into_any()
+                                }
                                 None => view! { <div class="sensors-empty">"Source not found."</div> }.into_any(),
                             }
                         }
@@ -602,6 +677,8 @@ fn SourceDetail(
     r: SourceRow,
     selected: RwSignal<Sel>,
     toggle_enabled: Callback<(String, bool)>,
+    /// Zones whose soil sensor is wired to this source: (slug, name).
+    assigned: Vec<(String, String)>,
 ) -> impl IntoView {
     let dot = dot_color(&r.status);
     let seen = match r.stale_for_s {
@@ -664,6 +741,32 @@ fn SourceDetail(
                 </button>
             </div>
             <div class="sensor-groups">
+                <FieldGroup title="Zone assignment">
+                    {if assigned.is_empty() {
+                        view! {
+                            <p class="sensors-section__hint" style="margin:0">
+                                "Not assigned to any zone. Open a zone's settings and pick "
+                                "this source as its soil sensor to drive per-zone skip rules."
+                            </p>
+                        }.into_any()
+                    } else {
+                        assigned
+                            .iter()
+                            .map(|(slug, name)| {
+                                let href = format!("/settings/zones?zone={slug}");
+                                let label = name.clone();
+                                view! {
+                                    <a class="sensor-assigned" href=href>
+                                        <crate::components::ui::Icon name="zones" size=14/>
+                                        {label}
+                                        <span class="sensor-assigned__edit">"edit zone"</span>
+                                    </a>
+                                }
+                            })
+                            .collect_view()
+                            .into_any()
+                    }}
+                </FieldGroup>
                 <FieldGroup title="Integration">
                     <F k="Type" v=r.kind.clone()/>
                     <F k="Scope" v=if is_local(&r.kind) { "Local network".to_string() } else { "Cloud".to_string() }/>

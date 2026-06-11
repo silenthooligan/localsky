@@ -503,6 +503,15 @@
 // they paint white-on-white and disappear; remap to ink-tinted overlays
 // so the affected widgets keep their structure in light mode.
 @mixin localsky-light-element-overrides {
+  // The sidebar stays dark in every theme, but its base fill is
+  // 72%-navy-over-transparent: over the dark page it reads near-black,
+  // over light mode's white page it washes to a mid gray and the
+  // (re-pinned light) nav text loses contrast. Pin an opaque navy in
+  // light mode so the side panel text stays crisp.
+  .sidebar {
+    background: var(--brand-navy-900);
+    border-right-color: rgba(15, 21, 37, 0.18);
+  }
   // Zone-math row caption text was hard-coded white at 55% — invisible
   // on a near-white panel. Use the ink-equivalent tint.
   .zone-math-row-cap > dd { color: rgba(15, 21, 37, 0.62); }
@@ -1782,11 +1791,13 @@ a { color: var(--accent); }
 // the title in an h2 with no flex container.
 .panel__header {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
   margin-bottom: var(--space-2);
 }
+.panel__tools { display: flex; align-items: center; gap: var(--space-2); }
+.panel__tools:empty { display: none; }
 .panel__eyebrow {
   font-family: var(--font-mono);
   font-size: var(--text-micro);
@@ -2343,6 +2354,10 @@ a { color: var(--accent); }
   width: var(--toggle-w);
   height: var(--toggle-h);
   background: var(--clay-surface);
+  /* Rendered as a real <button role="switch"> for keyboard access;
+     strip the UA button chrome so the clay surface stays intact. */
+  border: 0;
+  padding: 0;
   border-radius: 999px;
   cursor: pointer;
   box-shadow: var(--clay-shadow-pressed);
@@ -4112,11 +4127,24 @@ html { scroll-behavior: smooth; }
 }
 
 @media (max-width: 760px) {
+  // Phones: a swipeable snap rail keeps all 7 days reachable instead of
+  // hiding days 5-7. ~3.3 cards visible cues the scroll affordance.
   .daily-row {
-    grid-template-columns: repeat(4, 1fr);
+    display: flex;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scroll-snap-type: x mandatory;
+    scrollbar-width: none;
+    width: 0;
+    min-width: 100%;
+    contain: inline-size;
+    padding-bottom: 2px;
   }
-  .daily-row .daily-card:nth-child(n+5) {
-    display: none;
+  .daily-row::-webkit-scrollbar { display: none; }
+  .daily-row .daily-card {
+    flex: 0 0 30%;
+    min-width: 108px;
+    scroll-snap-align: start;
   }
 }
 
@@ -4241,6 +4269,17 @@ html { scroll-behavior: smooth; }
 .hourly-scroll {
   // Overflow horizontally; the inner SVG is wider than the panel
   // so phones can swipe through 48h without zooming.
+  //
+  // width:0 + min-width:100% is load-bearing: a scroll container's
+  // min-content width still includes its children, and mobile Chrome
+  // expands the LAYOUT VIEWPORT to fit that minimum (the whole page
+  // rendered zoomed-out on phones because this svg is ~2700px wide).
+  // Forcing the used width to the containing block severs that
+  // propagation everywhere; contain:inline-size does it natively on
+  // current engines.
+  width: 0;
+  min-width: 100%;
+  contain: inline-size;
   overflow-x: auto;
   overflow-y: hidden;
   -webkit-overflow-scrolling: touch;
@@ -5213,18 +5252,57 @@ html:not([data-nerd="true"]) .skip-breakdown:not(:has(.sk-row-tripped)) {
 // genuinely unmistakable. When no zones are running it grays out.
 // ─────────────────────────────────────────────────────────────────────
 
+// Emergency stop. A quiet card while idle; a danger-tinted, glowing
+// card while anything runs. Lead row (icon + title + state line) with
+// the action right-aligned, wrapping to full-width on narrow screens.
 .stop-all {
-  display: inline-flex;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  background: var(--elev-1);
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
+  isolation: isolate;
+  transition: border-color var(--motion-base) ease, background var(--motion-base) ease, box-shadow var(--motion-base) ease;
+}
+.stop-all--armed {
+  background: color-mix(in oklab, var(--accent-danger) 10%, var(--elev-1));
+  border-color: color-mix(in oklab, var(--accent-danger) 45%, transparent);
+  box-shadow: 0 4px 22px color-mix(in oklab, var(--accent-danger) 22%, transparent);
+}
+
+.stop-all__lead {
+  display: flex;
   align-items: center;
   gap: var(--space-3);
-  align-self: flex-start;
-  padding: var(--space-2) var(--space-3) var(--space-2) var(--space-4);
-  background: color-mix(in oklab, var(--accent-danger) 14%, var(--bg-panel));
-  border: 1px solid color-mix(in oklab, var(--accent-danger) 45%, transparent);
-  border-radius: 999px;
-  box-shadow: 0 4px 18px color-mix(in oklab, var(--accent-danger) 22%, transparent);
-  isolation: isolate;
+  flex: 1;
+  min-width: 220px;
 }
+.stop-all__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  flex: none;
+  border-radius: 50%;
+  color: var(--text-faint);
+  background: var(--elev-2);
+  border: 1px solid var(--elev-border);
+}
+.stop-all--armed .stop-all__icon {
+  color: #ffffff;
+  background: var(--accent-danger);
+  border-color: color-mix(in oklab, var(--accent-danger) 70%, #000);
+  animation: conn-pulse 1.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .stop-all--armed .stop-all__icon { animation: none; }
+}
+.stop-all__text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 
 .stop-all-title {
   margin: 0;
@@ -5233,16 +5311,20 @@ html:not([data-nerd="true"]) .skip-breakdown:not(:has(.sk-row-tripped)) {
   font-weight: 700;
   letter-spacing: var(--tracking-eyebrow);
   text-transform: uppercase;
-  color: var(--accent-danger);
+  color: var(--text-faint);
 }
+.stop-all--armed .stop-all-title { color: var(--accent-danger); }
 
 .stop-all-help {
   margin: 0;
   font-size: var(--text-body-sm);
   color: var(--text-dim);
   line-height: var(--leading-snug);
-  flex: 1;
   min-width: 0;
+}
+
+@media (max-width: 760px) {
+  .stop-all-btn { flex: 1 1 100%; }
 }
 
 // Actually-red button. Solid danger fill (not the faint clay tint the
@@ -5287,14 +5369,8 @@ html:not([data-nerd="true"]) .skip-breakdown:not(:has(.sk-row-tripped)) {
   }
 }
 
-// Disarmed state on the parent pill — tones the whole thing down so
-// the disabled button doesn't look like a partially-active warning.
-.stop-all:has(.stop-all-btn:disabled) {
-  background: var(--bg-panel-soft);
-  border-color: var(--border);
-  box-shadow: none;
-  .stop-all-title { color: var(--text-faint); }
-}
+// Disarmed: the base card styling above IS the quiet state; nothing
+// extra needed (armed styling is gated on .stop-all--armed).
 
 // ------------------------------------------------------------------
 // Thresholds + toggles panel (bento cell). Three sliders + two clay
@@ -7197,8 +7273,12 @@ html:not([data-nerd="true"]) .skip-breakdown:not(:has(.sk-row-tripped)) {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem;
-  margin-bottom: 0.5rem;
+  gap: var(--space-3);
+  margin: var(--space-4) 0 var(--space-2);
+  padding: var(--space-4);
+  background: var(--elev-1);
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius-lg);
 
   &__label {
     font-weight: 600;
@@ -7932,13 +8012,25 @@ html:not([data-nerd="true"]) .skip-breakdown:not(:has(.sk-row-tripped)) {
    We hide the buttons rather than disable them: a tap on a hidden
    element is impossible, whereas a tap on a disabled button still
    surfaces the hit area on touch devices. Status displays (running
-   zones, verdict, history) stay fully visible. */
+   zones, verdict, history) stay fully visible.
+
+   Every selector here must match a class that actually ships in a
+   component (the renamed .thresholds-panel / missing schedule-card
+   classes once let controls leak through in kiosk mode). Coverage:
+   stop-all panel + button, running-banner stop, zone
+   grid run/stop, mobile zone list run/stop, mobile zone detail
+   actions, v2 zone-detail run/stop, threshold sliders (includes the
+   pause/dry-run toggle row inside .thresholds), and the three mobile
+   schedule control cards. */
 html[data-readonly="true"] .stop-all,
 html[data-readonly="true"] .stop-all-btn,
+html[data-readonly="true"] .running-banner-stop,
 html[data-readonly="true"] .zone-actions,
 html[data-readonly="true"] .zone-stop-btn,
+html[data-readonly="true"] .zone-row-action,
+html[data-readonly="true"] .zone-detail__actions,
 html[data-readonly="true"] .mobile-zone-actions,
-html[data-readonly="true"] .thresholds-panel,
+html[data-readonly="true"] .thresholds,
 html[data-readonly="true"] .vacation-pause-row,
 html[data-readonly="true"] .override-tomorrow-row,
 html[data-readonly="true"] .run-sequence-now-row {
@@ -8444,7 +8536,7 @@ button.mobile-tab {
 // ═══════════════════════════════════════════════════════════════════════
 // Zones — KPI summary + rich card grid (marquee feature 3)
 // ═══════════════════════════════════════════════════════════════════════
-.zones-page { display: flex; flex-direction: column; gap: var(--space-6); }
+.zones-page { display: flex; flex-direction: column; gap: var(--space-4); }
 .zones-page__header { display: flex; flex-direction: column; gap: 2px; }
 .zones-page__eyebrow {
   margin: 0; font-size: var(--text-meta); letter-spacing: var(--tracking-eyebrow);
@@ -8453,7 +8545,29 @@ button.mobile-tab {
 .zones-page__title { margin: 0; font-size: var(--text-h1); letter-spacing: var(--tracking-display); color: var(--text-bright); }
 .zones-page__sub { margin: 0; color: var(--text-dim); }
 
-.zones-kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--space-4); }
+// Zones KPI strip: content-sized stat chips clustered left (value right
+// beside its label, nothing stretched to fill the row), with a hairline
+// rule separating the summary from the zones below.
+.zones-kpis {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding-bottom: var(--space-4);
+  border-bottom: 1px solid var(--elev-border);
+}
+.zones-kpis .stat-tile {
+  flex: 0 0 auto;
+  width: max-content;
+  flex-direction: row;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+}
+.zones-kpis .stat-tile__head { order: 2; }
+.zones-kpis .stat-tile__value-row { order: 1; flex-wrap: nowrap; }
+.zones-kpis .stat-tile__value { font-size: var(--text-h3); }
+.zones-kpis .stat-tile__label { font-size: var(--text-micro); }
+.zones-kpis .stat-tile__icon { align-self: center; }
 .zones-empty {
   color: var(--text-faint); padding: var(--space-7); text-align: center;
   background: var(--elev-1); border: 1px dashed var(--elev-border); border-radius: var(--radius-lg);
@@ -8467,10 +8581,19 @@ button.mobile-tab {
   align-items: start;
 }
 .zones-cards { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
-.zones-detail { min-width: 0; position: sticky; top: var(--space-5); }
-@media (max-width: 900px) {
+.zones-detail {
+  min-width: 0;
+  position: sticky;
+  top: var(--space-5);
+  // Visual seam between the card rail and the slide-out detail.
+  border-left: 1px solid var(--elev-border-strong);
+  padding-left: var(--space-6);
+}
+@media (max-width: 760px) {
+  // Phones: cards navigate to /zones/:slug (full-screen detail), so the
+  // inline pane is hidden rather than dumped below the fold.
   .zones-shell { grid-template-columns: 1fr; }
-  .zones-detail { position: static; }
+  .zones-detail { display: none; }
 }
 
 .zone-card {
@@ -8534,24 +8657,34 @@ button.mobile-tab {
 
 // Full-card select affordance: a real <button> overlay so keyboard and
 // assistive tech get proper semantics without nesting interactives.
-.zone-card__hit {
+//
+// Click routing: the generic `.zone-card > *` rule positions every child
+// at z-index 1 in DOM order, which painted the body OVER this overlay
+// and ate the clicks (the "dead click" bug). The fix is pointer-events
+// routing, not z-order: content children ignore the pointer so clicks
+// fall through to the overlay button beneath; the inline Stop button
+// opts back in. The extra `button` in the selector outranks the generic
+// child rule so position:absolute always sticks.
+.zone-card > button.zone-card__hit {
   position: absolute;
   inset: 0;
-  z-index: 1;
+  z-index: 0;
   border: none;
   background: none;
   cursor: pointer;
   border-radius: inherit;
   padding: 0;
 }
+.zone-card > :not(.zone-card__hit) {
+  pointer-events: none;
+}
+.zone-card .zone-card__stop {
+  pointer-events: auto;
+}
 .zone-card:has(.zone-card__hit:focus-visible) {
   outline: var(--focus-ring);
   outline-offset: 2px;
 }
-// Keep the card body readable above the hit overlay where it needs to be
-// interactive; plain text stays below it (selection is sacrificed for the
-// big tap target, same trade the old role="button" made).
-.zone-card__foot { position: relative; z-index: 2; }
 .zone-card__more {
   display: inline-flex; align-items: center; gap: 2px;
   color: var(--accent); text-decoration: none; font-weight: 600; font-size: var(--text-body-sm);
@@ -8559,7 +8692,7 @@ button.mobile-tab {
 }
 
 @media (max-width: 760px) {
-  .zones-kpis { grid-template-columns: repeat(2, 1fr); }
+  .zones-kpis .stat-tile { flex: 1 1 40%; }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -8675,7 +8808,12 @@ button.mobile-tab {
 .sensor-row__title { font-weight: 600; color: var(--text-bright); }
 .sensor-row__sub { font-size: var(--text-meta); color: var(--text-faint); font-family: var(--font-mono); }
 
-.sensors-detail { min-width: 0; }
+.sensors-detail {
+  min-width: 0;
+  // Same seam the Zones master-detail uses between rail and pane.
+  border-left: 1px solid var(--elev-border-strong);
+  padding-left: var(--space-6);
+}
 .sensor-detail-card {
   background: var(--elev-1); border: 1px solid var(--elev-border);
   border-radius: var(--radius-lg); box-shadow: var(--shadow-1);
@@ -8702,6 +8840,7 @@ button.mobile-tab {
 
 @media (max-width: 860px) {
   .sensors-shell { grid-template-columns: 1fr; }
+  .sensors-detail { border-left: 0; padding-left: 0; }
   .sensors-list { position: static; }
 }
 
@@ -8751,6 +8890,274 @@ button.mobile-tab {
 .zone-detail__panel-title { margin: 0; font-size: var(--text-h3); color: var(--text-bright); }
 .zone-detail__actions { flex-direction: row; align-items: center; }
 .zone-detail__run { display: flex; align-items: center; gap: var(--space-3); }
+// Home Assistant integration: hero + capability cards with status
+// chips and inline actions. Outcome-language UX, not a status dump.
+.ha-hero {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  background: var(--elev-1);
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
+}
+.ha-hero--ok { border-color: color-mix(in oklab, var(--verdict-run) 35%, transparent); }
+.ha-hero__icon {
+  display: flex; align-items: center; justify-content: center;
+  width: 46px; height: 46px; flex: none;
+  border-radius: var(--radius-md);
+  color: var(--text-faint); background: var(--elev-2); border: 1px solid var(--elev-border);
+}
+.ha-hero--ok .ha-hero__icon { color: var(--verdict-run); border-color: color-mix(in oklab, var(--verdict-run) 35%, transparent); }
+.ha-hero__text { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.ha-hero__row { display: flex; align-items: center; gap: var(--space-3); }
+.ha-hero__row strong { font-size: var(--text-h3); color: var(--text-bright); }
+.ha-hero__text p { margin: 0; color: var(--text-dim); line-height: 1.5; max-width: 64ch; }
+
+.ha-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 2px 10px; border-radius: 999px;
+  font-size: var(--text-micro); font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+  border: 1px solid var(--elev-border-strong); color: var(--text-faint); background: var(--elev-2);
+  white-space: nowrap;
+}
+.ha-chip__dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.ha-chip--on { color: var(--verdict-run); border-color: color-mix(in oklab, var(--verdict-run) 40%, transparent); background: color-mix(in oklab, var(--verdict-run) 10%, var(--elev-2)); }
+.ha-chip--warn { color: var(--verdict-wind); border-color: color-mix(in oklab, var(--verdict-wind) 40%, transparent); background: color-mix(in oklab, var(--verdict-wind) 10%, var(--elev-2)); }
+
+.ha-cards { display: flex; flex-direction: column; gap: var(--space-3); margin-top: var(--space-4); }
+.ha-card {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  background: var(--elev-1);
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius-lg);
+}
+.ha-card__icon {
+  display: flex; align-items: center; justify-content: center;
+  width: 38px; height: 38px; flex: none; margin-top: 2px;
+  border-radius: var(--radius-md);
+  color: var(--text-faint); background: var(--elev-2); border: 1px solid var(--elev-border);
+}
+.ha-card__icon--on { color: var(--verdict-run); }
+.ha-card__icon--warn { color: var(--verdict-wind); }
+.ha-card__body { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; flex: 1; }
+.ha-card__top { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
+.ha-card__title { font-weight: 700; color: var(--text-bright); }
+.ha-card__meaning { margin: 0; color: var(--text-dim); font-size: var(--text-body-sm); line-height: 1.5; max-width: 70ch; }
+.ha-card__actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
+.ha-card__actions:empty { display: none; }
+
+.ha-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 12px; border-radius: var(--radius-sm);
+  font-size: var(--text-meta); font-weight: 600;
+  color: var(--text-dim); background: none; border: 1px solid var(--elev-border-strong);
+  text-decoration: none; cursor: pointer;
+  transition: color var(--motion-fast) ease, border-color var(--motion-fast) ease;
+}
+.ha-btn:hover { color: var(--accent); border-color: var(--accent); }
+.ha-btn--primary { color: #fff; background: var(--accent); border-color: var(--accent); }
+.ha-btn--primary:hover { color: #fff; filter: brightness(1.1); }
+.ha-btn--danger:hover { color: var(--accent-danger); border-color: var(--accent-danger); }
+.ha-btn:disabled { opacity: 0.6; cursor: progress; }
+
+// Shared action-row rhythm: button clusters get their own breathing
+// room instead of hugging the prose around them.
+.sensors-page__actions {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  flex-wrap: wrap;
+  margin: var(--space-4) 0 var(--space-2);
+}
+
+// HA panel: simple tier (connect guide + plain flow lines + advanced
+// disclosure).
+.ha-connect {
+  margin-top: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  background: var(--elev-1);
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius-lg);
+}
+.ha-connect__title { margin: 0 0 var(--space-2); font-weight: 700; color: var(--text-bright); }
+.ha-connect__steps { margin: 0 0 var(--space-3); padding-left: 1.2rem; display: flex; flex-direction: column; gap: var(--space-2); color: var(--text-dim); line-height: 1.5; }
+.ha-connect__steps strong { color: var(--text); }
+
+.ha-flows-simple {
+  margin-top: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-5);
+  background: var(--elev-1);
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius-lg);
+}
+.ha-flow-line { display: flex; align-items: flex-start; gap: var(--space-2); color: var(--text-dim); line-height: 1.5; }
+.ha-flow-line svg { color: var(--verdict-run); flex: none; margin-top: 3px; }
+.ha-flow-line strong { color: var(--text); }
+
+.ha-advanced { margin-top: var(--space-4); }
+.ha-advanced__summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border: 1px dashed var(--elev-border-strong);
+  border-radius: var(--radius-md);
+  color: var(--text-dim);
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+.ha-advanced__summary::-webkit-details-marker { display: none; }
+.ha-advanced__summary:hover { color: var(--text); border-color: var(--accent); }
+.ha-advanced__hint { margin-left: auto; font-weight: 400; font-size: var(--text-meta); color: var(--text-faint); }
+.ha-advanced[open] .ha-advanced__summary { border-style: solid; margin-bottom: var(--space-2); }
+
+// Wizard: progress bar + hero + pillars + needs list + optional badge.
+.setup-progress { display: flex; flex-direction: column; gap: var(--space-2); margin-top: var(--space-3); }
+.setup-progress__meta { display: flex; justify-content: space-between; align-items: baseline; }
+.setup-progress__count { font-family: var(--font-mono); font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-faint); }
+.setup-progress__name { font-weight: 700; color: var(--text); }
+.setup-progress__track { height: 6px; border-radius: 999px; background: var(--elev-2); overflow: hidden; }
+.setup-progress__fill { height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--accent-cool, var(--accent))); transition: width var(--motion-base) ease; }
+.setup-progress__dots { display: flex; gap: var(--space-2); list-style: none; margin: 0; padding: 0; }
+.setup-progress__dot {
+  display: block; width: 9px; height: 9px; border-radius: 50%;
+  background: var(--elev-2); border: 1px solid var(--elev-border-strong);
+  transition: background var(--motion-fast) ease, transform var(--motion-fast) ease;
+}
+.setup-progress__dot--optional { border-style: dashed; }
+.setup-progress__dot--done { background: var(--accent); border-color: var(--accent); opacity: 0.55; }
+.setup-progress__dot--current { background: var(--accent); border-color: var(--accent); transform: scale(1.35); }
+.setup-progress__dot:hover { transform: scale(1.35); }
+
+.setup-hero { text-align: center; padding: var(--space-4) 0 var(--space-2); }
+.setup-hero__icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 64px; height: 64px; border-radius: 20px; margin-bottom: var(--space-3);
+  color: var(--accent); background: color-mix(in oklab, var(--accent) 12%, var(--elev-1));
+  border: 1px solid color-mix(in oklab, var(--accent) 30%, transparent);
+}
+.setup-hero__title { margin: 0 0 var(--space-2); font-size: var(--text-h1); color: var(--text-bright); }
+.setup-hero__sub { margin: 0 auto; color: var(--text-dim); max-width: 46ch; line-height: 1.55; }
+
+.setup-pillars { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: var(--space-3); margin: var(--space-5) 0; }
+.setup-pillar {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: var(--space-4);
+  background: var(--elev-1); border: 1px solid var(--elev-border); border-radius: var(--radius-lg);
+}
+.setup-pillar svg { color: var(--accent); }
+.setup-pillar strong { color: var(--text-bright); }
+.setup-pillar span { color: var(--text-faint); font-size: var(--text-body-sm); line-height: 1.45; }
+
+.setup-needs { margin-bottom: var(--space-4); padding: var(--space-4); background: var(--elev-2); border-radius: var(--radius-md); }
+.setup-needs__title { margin: 0 0 var(--space-2); font-weight: 600; color: var(--text); }
+.setup-needs__list { margin: 0; padding-left: 1.2rem; color: var(--text-dim); display: flex; flex-direction: column; gap: 4px; line-height: 1.45; }
+
+.setup-step__optional {
+  display: inline-block; vertical-align: middle; margin-left: var(--space-2);
+  padding: 2px 10px; border-radius: 999px;
+  font-size: var(--text-micro); font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--text-faint); background: var(--elev-2); border: 1px dashed var(--elev-border-strong);
+}
+
+// About page.
+.about-page { width: 100%; max-width: 880px; margin: 0 auto; padding: var(--space-6) var(--space-5) var(--space-8); display: flex; flex-direction: column; gap: var(--space-5); }
+.about-hero { text-align: center; padding-top: var(--space-4); }
+.about-hero__mark {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 92px; height: 92px; border-radius: 26px; margin-bottom: var(--space-3);
+  background: color-mix(in oklab, var(--accent) 10%, var(--elev-1));
+  border: 1px solid color-mix(in oklab, var(--accent) 28%, transparent);
+  box-shadow: 0 10px 40px color-mix(in oklab, var(--accent) 18%, transparent);
+}
+.about-hero__mark img { display: block; }
+.about-hero__name { margin: 0; font-size: 2.2rem; letter-spacing: 0.06em; font-weight: 800; color: var(--text-bright); }
+.about-hero__accent { color: var(--accent); }
+.about-hero__tag { margin: var(--space-2) auto 0; color: var(--text-dim); max-width: 44ch; line-height: 1.55; }
+.about-hero__badges { display: flex; justify-content: center; gap: var(--space-2); margin-top: var(--space-3); }
+.about-hero__badges a { text-decoration: none; }
+
+.about-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--space-3); }
+.about-fact {
+  display: flex; flex-direction: column; gap: 2px; text-align: center;
+  padding: var(--space-3); background: var(--elev-1); border: 1px solid var(--elev-border); border-radius: var(--radius-md);
+}
+.about-fact__k { font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-faint); }
+.about-fact__v { font-weight: 700; color: var(--text-bright); }
+
+.about-links { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: var(--space-3); }
+.about-link {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: var(--space-4);
+  background: var(--elev-1); border: 1px solid var(--elev-border); border-radius: var(--radius-lg);
+  color: var(--text); text-decoration: none;
+  transition: border-color var(--motion-fast) ease, transform var(--motion-fast) ease;
+}
+.about-link:hover { border-color: var(--accent); transform: translateY(-1px); }
+.about-link svg { color: var(--accent); margin-bottom: 4px; }
+.about-link strong { color: var(--text-bright); }
+.about-link span { color: var(--text-faint); font-size: var(--text-body-sm); }
+
+.about-credits { padding-top: var(--space-2); }
+.about-credits__title { margin: 0 0 var(--space-3); font-size: var(--text-h3); color: var(--text); }
+.about-footer { text-align: center; color: var(--text-faint); font-size: var(--text-meta); margin: 0; }
+
+// Header affordance: jump straight to this zone's settings.
+.zone-detail__edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  padding: 4px 10px;
+  border: 1px solid var(--elev-border-strong);
+  border-radius: 999px;
+  color: var(--text-dim);
+  font-size: var(--text-meta);
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: color var(--motion-fast) ease, border-color var(--motion-fast) ease;
+}
+.zone-detail__edit:hover { color: var(--accent); border-color: var(--accent); }
+
+// Sensors hub: zones wired to a source, each linking into its editor.
+.sensor-assigned {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 2px var(--space-2) 2px 0;
+  padding: 4px 10px;
+  background: var(--elev-2);
+  border: 1px solid var(--elev-border);
+  border-radius: 999px;
+  color: var(--text);
+  font-size: var(--text-body-sm);
+  text-decoration: none;
+}
+.sensor-assigned:hover { border-color: var(--accent); }
+.sensor-assigned svg { color: var(--accent); }
+.sensor-assigned__edit { color: var(--text-faint); font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.05em; }
+
+// Soil sensor panel: probe stats grid + 7-day projection rail.
+.zone-soil__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--space-3); }
+.zone-soil__stat { display: flex; flex-direction: column; gap: 2px; padding: var(--space-3); background: var(--elev-2); border: 1px solid var(--elev-border); border-left: 3px solid var(--sc, var(--elev-border-strong)); border-radius: var(--radius-md); }
+.zone-soil__k { font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-faint); }
+.zone-soil__v { font-family: var(--font-mono); font-size: var(--text-stat); color: var(--text-bright); }
+.zone-soil__v small { font-size: 0.55em; color: var(--text-dim); margin-left: 2px; }
+.zone-soil__band { font-size: var(--text-meta); color: var(--text-faint); }
+.zone-soil__forecast { display: flex; flex-direction: column; gap: var(--space-2); }
+.zone-soil__forecast-label { font-size: var(--text-meta); color: var(--text-dim); }
+.zone-soil__forecast .ui-sparkline { width: 100%; }
+
 .zone-detail__math { margin: 0; display: flex; flex-direction: column; gap: var(--space-2); }
 .zone-detail__math > div { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); }
 .zone-detail__math dt { color: var(--text-dim); margin: 0; }
@@ -8803,6 +9210,9 @@ button.mobile-tab {
 .cond-row__head { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
 .cond-row__actions { display: flex; gap: var(--space-2); flex: none; flex-wrap: wrap; }
 .setup-test-result { margin: 0; font-size: var(--text-meta); color: var(--text-dim); padding-left: calc(8px + var(--space-3)); }
+.setup-reentry { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-5) 0 var(--space-4); }
+.setup-reentry .setup-footer__btn { margin: 0; }
+.setup-step .setup-reentry + .sensors-section__hint { margin-top: 0; max-width: 70ch; line-height: 1.55; }
 .setup-test-result.is-ok { color: var(--verdict-run); }
 .setup-test-result.is-err { color: var(--verdict-skip); }
 .setup-scan { display: flex; flex-direction: column; gap: var(--space-2); margin-left: calc(8px + var(--space-3)); padding: var(--space-3); background: var(--elev-1); border: 1px solid var(--elev-border); border-radius: var(--radius-md); }
@@ -9005,8 +9415,17 @@ button.mobile-tab {
 
 .sim-result { position: sticky; top: var(--space-5); }
 .sim-result__empty {
-  color: var(--text-faint); padding: var(--space-7); text-align: center;
-  background: var(--elev-1); border: 1px dashed var(--elev-border); border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: 260px;
+  padding: var(--space-6);
+  text-align: center;
+  color: var(--text-faint);
+  border: 1px dashed var(--elev-border);
+  border-radius: var(--radius-lg);
 }
 .sim-verdict {
   display: flex; flex-direction: column; gap: var(--space-4);
@@ -9170,7 +9589,15 @@ button.mobile-tab {
   align-items: start;
 }
 .settings-shell__list { display: flex; flex-direction: column; gap: var(--space-6); min-width: 0; }
-.settings-shell__detail { min-width: 0; display: flex; flex-direction: column; gap: var(--space-3); }
+.settings-shell__detail {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  // Same seam the Zones master-detail uses between rail and pane.
+  border-left: 1px solid var(--elev-border-strong);
+  padding-left: var(--space-6);
+}
 
 // Clickable section rows are <button>s reusing the ListItem look.
 .settings-row {
@@ -9264,7 +9691,7 @@ button.mobile-tab {
 @media (max-width: 980px) {
   // Single column: show list OR detail, never both.
   .settings-shell { grid-template-columns: 1fr; gap: var(--space-5); }
-  .settings-shell__detail { display: none; }
+  .settings-shell__detail { display: none; border-left: 0; padding-left: 0; }
   .settings-shell.has-detail .settings-shell__list { display: none; }
   .settings-shell.has-detail .settings-shell__detail { display: block; }
   .settings-shell__back { display: inline-flex; }
@@ -9290,4 +9717,113 @@ button.mobile-tab {
   .page { margin: 0 !important; }
   .hist-panel, .stat-tile { box-shadow: none !important; border-color: #ccc !important; }
   body { background: #fff !important; }
+}
+
+.sim-result__empty-title { margin: var(--space-2) 0 0; color: var(--text-dim); font-weight: 700; }
+.sim-result__empty-body { margin: 0; font-size: var(--text-body-sm); max-width: 34ch; }
+
+// Login is a gate, not an app page: hide the navigation chrome around
+// it so the card stands alone (CSS-only via :has, no hydration risk).
+.app-shell:has(.login-page) .sidebar,
+.app-shell:has(.login-page) .sidebar-backdrop,
+.app-shell:has(.login-page) .mobile-app-bar,
+.app-shell:has(.login-page) .mobile-tab-bar,
+.app-shell:has(.login-page) .page-header,
+.app-shell:has(.login-page) .install-prompt {
+  display: none;
+}
+.app-shell:has(.login-page) .page { max-width: none; }
+
+// ------------------------------------------------------------------
+// Beta feedback pill + composer. Fixed chrome, bottom-right; sits
+// above the tab bar on phones. Hidden in kiosk/readonly and on the
+// login gate.
+// ------------------------------------------------------------------
+.beta-fb {
+  position: fixed;
+  right: var(--space-4);
+  bottom: var(--space-4);
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-2);
+}
+@media (max-width: 760px) {
+  .beta-fb { bottom: calc(64px + var(--space-3)); }
+}
+.beta-fb__pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-size: var(--text-meta);
+  font-weight: 700;
+  color: #0b1020;
+  background: var(--accent);
+  border: 1px solid color-mix(in oklab, var(--accent) 70%, #000);
+  box-shadow: 0 6px 24px color-mix(in oklab, var(--accent) 35%, transparent);
+  cursor: pointer;
+  transition: transform var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
+}
+.beta-fb__pill:hover { transform: translateY(-1px); box-shadow: 0 8px 28px color-mix(in oklab, var(--accent) 45%, transparent); }
+.beta-fb__sheet {
+  width: min(340px, calc(100vw - 2 * var(--space-4)));
+  padding: var(--space-4);
+  background: var(--elev-1);
+  border: 1px solid var(--elev-border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-3, 0 18px 60px rgba(0,0,0,0.5));
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.beta-fb__title { margin: 0; font-weight: 800; color: var(--text-bright); }
+.beta-fb__sub { margin: 0; font-size: var(--text-body-sm); color: var(--text-dim); line-height: 1.45; }
+.beta-fb__kind { display: flex; gap: var(--space-2); }
+.beta-fb__kind-btn {
+  flex: 1;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--elev-border-strong);
+  background: none;
+  color: var(--text-dim);
+  font-size: var(--text-meta);
+  font-weight: 600;
+  cursor: pointer;
+}
+.beta-fb__kind-btn.is-active { color: var(--accent); border-color: var(--accent); background: color-mix(in oklab, var(--accent) 10%, transparent); }
+.beta-fb__text {
+  width: 100%;
+  resize: vertical;
+  min-height: 88px;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--elev-border-strong);
+  background: var(--elev-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--text-body-sm);
+}
+.beta-fb__send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  border: none;
+  background: var(--accent);
+  color: #0b1020;
+  font-weight: 700;
+  cursor: pointer;
+}
+.beta-fb__send:hover { filter: brightness(1.08); }
+.beta-fb__privacy { margin: 0; font-size: var(--text-micro); color: var(--text-faint); line-height: 1.4; }
+
+html[data-readonly="true"] .beta-fb,
+html[data-kiosk="true"] .beta-fb,
+.app-shell:has(.login-page) .beta-fb {
+  display: none;
 }

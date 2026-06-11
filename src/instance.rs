@@ -35,7 +35,7 @@ pub fn get() -> Option<&'static str> {
 }
 
 fn generate() -> String {
-    use rand::RngCore;
+    use rand::Rng;
     let mut b = [0u8; 16];
     rand::rng().fill_bytes(&mut b);
     // RFC 4122 v4 shape.

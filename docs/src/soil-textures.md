@@ -1,6 +1,6 @@
 # Soil Texture Catalog
 
-USDA soil texture classification. LocalSky uses field capacity (FC), wilting point (WP), available water (AW = FC - WP), and infiltration rate per texture + slope. Source: [src/engine/soil_catalog.rs](../src/engine/soil_catalog.rs).
+USDA soil texture classification (developed in the US but used internationally as the standard texture taxonomy; the classes apply to any soil, anywhere). LocalSky uses field capacity (FC), wilting point (WP), available water (AW = FC - WP), and infiltration rate per texture + slope. Source: [src/engine/soil_catalog.rs](../src/engine/soil_catalog.rs).
 
 Pick texture per zone in the zone editor. If unsure, use the [USDA texture triangle](https://www.nrcs.usda.gov/sites/default/files/2022-09/Soil-Texture-Triangle.pdf): rub moist soil between your fingers and match to the closest class.
 
@@ -26,7 +26,7 @@ Values per FAO-56 Table 19 + USDA NRCS Part 652 Table 11-3.
 TAW_mm = (FC - WP) * root_depth_mm
 ```
 
-This is the depth of water the zone can hold between field capacity (fully wet, no gravity drainage) and the wilting point (so dry the plant gives up). St. Augustine on sandy loam at the default 150 mm root depth: TAW = (0.23 - 0.10) * 150 = 19.5 mm. Same species on loam at the same depth: TAW = (0.34 - 0.12) * 150 = 33 mm, more than 1.6x the buffer.
+This is the depth of water the zone can hold between field capacity (fully wet, no gravity drainage) and the wilting point (so dry the plant gives up). St. Augustine on sandy loam at the default 150 mm root depth: TAW = (0.23 - 0.10) * 150 = 19.5 mm. Tall fescue on loam at its 250 mm default depth: TAW = (0.34 - 0.12) * 250 = 55 mm, nearly triple the buffer.
 
 ### Readily Available Water (RAW)
 
@@ -60,7 +60,7 @@ Without a soil test, two practical methods:
 
 ### Jar test
 
-1. Half-fill a quart jar with soil from the zone's root depth.
+1. Half-fill a one-litre (quart) jar with soil from the zone's root depth.
 2. Fill the rest with water + a teaspoon of dish soap.
 3. Shake hard. Set aside.
 4. After 1 minute, mark the sand layer (settles first).
@@ -70,7 +70,7 @@ Without a soil test, two practical methods:
 
 ## When in doubt
 
-If you genuinely don't know, **sandy loam** is the safest "Florida default" guess. It's the median Florida turf soil and the engine's math is most forgiving when off by one texture class in either direction (loamy sand or loam).
+If you genuinely don't know, **sandy loam** is the safest guess: it sits mid-triangle and the engine's math is most forgiving when off by one texture class in either direction (loamy sand or loam).
 
 ## Contributing a texture
 

@@ -201,7 +201,7 @@ pub fn ReviewStep() -> impl IntoView {
 
     view! {
         <div class="setup-step">
-            <h2 class="setup-step__title">"Review and apply"</h2>
+            <h2 class="setup-step__title">"Everything look right?"</h2>
             <p class="setup-step__body">
                 "When you click apply, your settings save to "
                 <code>"/data/localsky.toml"</code>" and the dashboard mounts. "
@@ -235,9 +235,9 @@ pub fn ReviewStep() -> impl IntoView {
                     "(retained for 20 versions; rollback via /api/config/rollback)."
                 </p>
                 <p class="review-summary__line">
-                    "Once applied, this wizard becomes unavailable until you "
-                    "delete the file. The /settings page is the editor "
-                    "from that point on."
+                    "Once applied, day-to-day edits live in /settings. If you "
+                    "open the wizard again it offers a choice: modify the "
+                    "current setup or start fresh."
                 </p>
             </div>
 
@@ -261,7 +261,7 @@ pub fn ReviewStep() -> impl IntoView {
                 </p>
             </Show>
 
-            <SetupFooter prev=prev_step_href("review") next=None/>
+            <SetupFooter prev=prev_step_href("review") next={None::<String>}/>
         </div>
     }
 }

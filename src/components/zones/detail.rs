@@ -11,7 +11,9 @@ use leptos::prelude::*;
 use serde_json::json;
 
 use crate::components::irrigation::controls::post_action_then;
-use crate::components::ui::{use_toast, Button, Icon, LineChart, Series, StatTile, Stepper};
+use crate::components::ui::{
+    use_toast, Button, Icon, LineChart, Series, Sparkline, StatTile, Stepper,
+};
 use crate::ha::snapshot::{IrrigationSnapshot, ZoneMath, ZoneState};
 use crate::history::types::HistoryWindow;
 use leptos_router::hooks::use_params_map;
@@ -32,7 +34,7 @@ fn zone_day_buckets(window: &HistoryWindow, slug: &str, days: i64) -> Vec<f64> {
         .iter()
         .filter(|r| r.skip_reason.is_none() && r.zone == slug)
     {
-        let back = ((today_mid - r.start_epoch) / 86_400).max(0);
+        let back = crate::components::time_bucket::days_back(today_mid, r.start_epoch).max(0);
         if (back as usize) < n {
             b[back as usize] += r.duration_s as f64 / 60.0;
         }
@@ -129,6 +131,24 @@ pub fn ZoneDetailView(
 
     move || {
         match zone() {
+        // No matching zone. Before the first snapshot streams in we can't
+        // tell "still loading" from "bad slug", so show the skeleton; once
+        // the snapshot has loaded (last_refresh_epoch > 0) an unmatched
+        // slug is a real miss and gets an explicit empty state instead of
+        // an infinite skeleton.
+        None if snap.get().last_refresh_epoch > 0 => view! {
+            <div class="zone-detail">
+                {back.then(|| view! { <a class="zone-detail__back" href="/zones"><Icon name="chevron-right" size=16 class="zone-detail__back-icon".to_string()/>"Zones"</a> })}
+                <crate::components::ui::EmptyState
+                    title="Zone not found"
+                    body="No zone with this address exists in the current configuration; it may have been renamed or removed."
+                    cta_label="Back to Zones"
+                    cta_href="/zones"
+                    icon="zones"
+                />
+            </div>
+        }
+        .into_any(),
         None => view! {
             <div class="zone-detail">
                 {back.then(|| view! { <a class="zone-detail__back" href="/zones"><Icon name="chevron-right" size=16 class="zone-detail__back-icon".to_string()/>"Zones"</a> })}
@@ -137,6 +157,15 @@ pub fn ZoneDetailView(
         }
         .into_any(),
         Some(z) => {
+            // Assigned-probe data: live moisture + band from the snapshot's
+            // soil_forecasts (keyed by slug), plus the probe's native
+            // temp/EC/battery readings carried on the ZoneState itself.
+            let soil_fc = snap
+                .get()
+                .soil_forecasts
+                .iter()
+                .find(|f| f.zone_slug == z.slug)
+                .cloned();
             let running = z.running;
             let planned = ((z.planned_run_seconds + 30) / 60).to_string();
             let today = format!("{:.0}", z.today_run_minutes);
@@ -219,6 +248,14 @@ pub fn ZoneDetailView(
                         <h1 class="zone-detail__name">{name}</h1>
                         <span class=status_class>{status_label}</span>
                         {verdict_pill}
+                        <a
+                            class="zone-detail__edit"
+                            href=format!("/settings/zones?zone={zslug}")
+                            title="Species, soil, sprinkler, sensor assignment, budgets"
+                        >
+                            <Icon name="settings" size=14/>
+                            "Edit zone"
+                        </a>
                     </header>
                     {verdict_reason}
 
@@ -228,6 +265,74 @@ pub fn ZoneDetailView(
                         <StatTile label="Deficit" value=deficit unit="mm" icon="gauge" accent="var(--accent-cool)".to_string()/>
                         <StatTile label="Last run" value=last_run icon="calendar" accent="var(--accent-warm)".to_string()/>
                     </div>
+
+                    {
+                        let has_probe = soil_fc.as_ref().map(|f| f.current_pct.is_some()).unwrap_or(false)
+                            || z.soil_temp_f.is_some()
+                            || z.soil_ec.is_some()
+                            || z.soil_battery_pct.is_some();
+                        has_probe.then(|| {
+                            let moisture = soil_fc.as_ref().and_then(|f| f.current_pct);
+                            let band = soil_fc
+                                .as_ref()
+                                .map(|f| (f.target_min_pct, f.target_max_pct));
+                            let predicted = soil_fc
+                                .as_ref()
+                                .map(|f| f.predicted_pct.clone())
+                                .filter(|p| p.len() >= 2);
+                            view! {
+                                <section class="zone-detail__panel">
+                                    <h2 class="zone-detail__panel-title">"Soil sensor"</h2>
+                                    <div class="zone-soil__grid">
+                                        {moisture.map(|pct| {
+                                            let band_label = band
+                                                .map(|(lo, hi)| format!("target {lo:.0}-{hi:.0}%"))
+                                                .unwrap_or_default();
+                                            let tone = match (pct, band) {
+                                                (p, Some((lo, _))) if p < lo => "var(--verdict-extend)",
+                                                (p, Some((_, hi))) if p >= hi => "var(--accent-cool)",
+                                                _ => "var(--verdict-run)",
+                                            };
+                                            view! {
+                                                <div class="zone-soil__stat" style=format!("--sc:{tone}")>
+                                                    <span class="zone-soil__k">"Moisture"</span>
+                                                    <span class="zone-soil__v">{format!("{pct:.0}")}<small>"%"</small></span>
+                                                    <span class="zone-soil__band">{band_label}</span>
+                                                </div>
+                                            }
+                                        })}
+                                        {z.soil_temp_f.map(|t| view! {
+                                            <div class="zone-soil__stat">
+                                                <span class="zone-soil__k">"Soil temp"</span>
+                                                <span class="zone-soil__v">{format!("{t:.0}")}<small>"°F"</small></span>
+                                                <span class="zone-soil__band">"frost gate input"</span>
+                                            </div>
+                                        })}
+                                        {z.soil_ec.map(|ec| view! {
+                                            <div class="zone-soil__stat">
+                                                <span class="zone-soil__k">"Conductivity"</span>
+                                                <span class="zone-soil__v">{format!("{ec:.0}")}<small>" µS/cm"</small></span>
+                                                <span class="zone-soil__band">"salinity / fertility"</span>
+                                            </div>
+                                        })}
+                                        {z.soil_battery_pct.map(|b| view! {
+                                            <div class="zone-soil__stat" style=format!("--sc:{}", if b <= 20.0 { "var(--verdict-skip)" } else { "var(--verdict-run)" })>
+                                                <span class="zone-soil__k">"Probe battery"</span>
+                                                <span class="zone-soil__v">{format!("{b:.0}")}<small>"%"</small></span>
+                                                <span class="zone-soil__band">{if b <= 20.0 { "replace soon" } else { "healthy" }}</span>
+                                            </div>
+                                        })}
+                                    </div>
+                                    {predicted.map(|p| view! {
+                                        <div class="zone-soil__forecast">
+                                            <span class="zone-soil__forecast-label">"7-day moisture projection (no watering)"</span>
+                                            <Sparkline points=p accent="var(--accent-cool)".to_string() height=44/>
+                                        </div>
+                                    })}
+                                </section>
+                            }
+                        })
+                    }
 
                     <section class="zone-detail__panel">
                         <h2 class="zone-detail__panel-title">"Watered minutes — last 30 days"</h2>

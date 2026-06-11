@@ -67,21 +67,13 @@ async fn main() -> anyhow::Result<()> {
     );
     // Staged restore swap: POST /api/v1/backup/restore writes the
     // uploaded DB to <db>.restore; the swap happens here, before
-    // anything opens the live file.
-    {
-        let stage = format!("{history_path}.restore");
-        if std::path::Path::new(&stage).exists() {
-            let aside = format!(
-                "{history_path}.pre-restore.{}",
-                chrono::Utc::now().timestamp()
-            );
-            let swap = std::fs::rename(&history_path, &aside)
-                .and_then(|()| std::fs::rename(&stage, &history_path));
-            match swap {
-                Ok(()) => tracing::info!(kept = %aside, "restored database swapped in"),
-                Err(e) => tracing::warn!(error = %e, "staged DB restore failed; keeping current"),
-            }
-        }
+    // anything opens the live file. The helper also drops the old
+    // -wal/-shm siblings so SQLite cannot replay the previous
+    // database's WAL into the restored file.
+    match api::backup::apply_staged_restore(&history_path) {
+        Ok(Some(aside)) => tracing::info!(kept = %aside, "restored database swapped in"),
+        Ok(None) => {}
+        Err(e) => tracing::warn!(error = %e, "staged DB restore failed; keeping current"),
     }
     let history_db = match HistoryDb::open(history_path.clone().into()) {
         Ok(db) => Some(db),
@@ -102,9 +94,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let forecast_store = Arc::new(ForecastStore::new());
-    if !demo_mode {
-        spawn_forecast_refresher(forecast_store.clone());
-    }
+    // (Refresher spawned below once the boot config is loaded, so it can
+    // use the wizard-configured deployment.location.)
 
     // Push dispatcher. Background task that drains PushEvents from the
     // HA refresher and fans them out to subscribed PWAs via VAPID.
@@ -119,12 +110,27 @@ async fn main() -> anyhow::Result<()> {
     // per zone in that case.
     let boot_config_path =
         std::env::var("CONFIG_PATH").unwrap_or_else(|_| "/data/localsky.toml".to_string());
+    // Shared config store handle: the boot snapshot here, the settings/
+    // wizard routes below, and the forecast refresher's live re-reads.
+    let cfg_store = Arc::new(FileConfigStore::new(&boot_config_path));
     // Load cfg once and derive both per-zone runtime + watering policy
     // from it. Empty defaults if the toml hasn't been written yet.
-    let boot_cfg = {
-        let store = FileConfigStore::new(&boot_config_path);
-        store.load().await.ok()
-    };
+    let boot_cfg = cfg_store.load().await.ok();
+
+    // Open-Meteo forecast refresher. Coordinates come from the wizard
+    // config (config first, env fallback) and are re-read from the live
+    // config store each tick so a location change applies without a
+    // restart. The smart-morning scheduler reads its coordinates from
+    // boot_cfg separately below; only the forecast path changes here.
+    if !demo_mode {
+        spawn_forecast_refresher(
+            forecast_store.clone(),
+            boot_cfg
+                .as_ref()
+                .map(|c| (c.deployment.location.lat, c.deployment.location.lon)),
+            Some(cfg_store.clone()),
+        );
+    }
 
     let zone_runtime = match boot_cfg.as_ref() {
         Some(cfg) => {
@@ -215,7 +221,26 @@ async fn main() -> anyhow::Result<()> {
         let registry = localsky::controllers::registry::ControllerRegistry::new();
         if let (Some(cfg), Some(rs)) = (boot_cfg.as_ref(), runs_store.as_ref()) {
             registry.set(localsky::runtime::build_controllers(cfg, rs.clone()));
+        } else if boot_cfg
+            .as_ref()
+            .map(|c| !c.controllers.is_empty())
+            .unwrap_or(false)
+        {
+            // Controllers are configured but the persistence DB is not
+            // available, so build_controllers cannot run and the registry
+            // stays EMPTY: no watering (scheduled or manual) will dispatch.
+            // Loud by design — a silent empty registry is a dry lawn.
+            tracing::error!(
+                history_db = %history_path,
+                "controllers are configured but the persistence DB failed to open; the controller \
+                 registry is EMPTY and NO watering (scheduled or manual) will dispatch. Fix the \
+                 /data mount (HISTORY_DB_PATH) and restart."
+            );
         }
+        // Wire the registry + runs store into POST /api/irrigation/action
+        // so manual zone Run/Stop/StopAll dispatch through the same
+        // adapters the schedulers use (native installs have no HA scripts).
+        localsky::api::irrigation::set_dispatch_handles(registry.clone(), runs_store.clone());
 
         // Shadow mode: when authoritative source is HA and shadow_native is
         // on, build the native snapshot alongside it for comparison via
@@ -313,6 +338,10 @@ async fn main() -> anyhow::Result<()> {
     // Set LLM_ADVISOR_DISABLED=1 to short-circuit (tile reads "disabled").
     let advisor = AdvisorState::from_env();
 
+    // Configured skip thresholds for POST /simulate's What-If traces, so
+    // the simulator matches the production ladder rather than defaults.
+    localsky::api::irrigation::set_sim_skip_params(watering_policy.skip_rules.clone());
+
     // Snapshot source again at router scope (the one above is scoped to the
     // refresher block). The POST /action handler uses it to route the
     // vacation pause + one-day override to local state (native) vs HA
@@ -374,9 +403,7 @@ async fn main() -> anyhow::Result<()> {
     // The wizard writes /data/localsky.toml on apply; until the file
     // exists, config endpoints return the env_compat-synthesized
     // baseline so /api/v1/health stays useful on a fresh install.
-    let config_path =
-        std::env::var("CONFIG_PATH").unwrap_or_else(|_| "/data/localsky.toml".to_string());
-    let cfg_store = Arc::new(FileConfigStore::new(&config_path));
+    let config_path = boot_config_path.clone();
     let draft_path = format!("{config_path}.draft");
 
     // Zone photos directory. Uploaded files land here and are served
@@ -434,9 +461,15 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let sensor_history = match rusqlite::Connection::open(&history_path) {
-        Ok(c) => Some(localsky::persistence::SensorHistoryStore::new(Arc::new(
-            tokio::sync::Mutex::new(c),
-        ))),
+        Ok(c) => Some(
+            localsky::persistence::SensorHistoryStore::new(Arc::new(tokio::sync::Mutex::new(c)))
+                .with_retention_days(
+                    boot_cfg
+                        .as_ref()
+                        .map(|c| c.persistence.retention_days)
+                        .unwrap_or_else(localsky::config::schema::default_retention_days),
+                ),
+        ),
         Err(e) => {
             tracing::warn!(
                 history = %history_path,
@@ -466,6 +499,43 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // V2 source runtime. One recorder task consumes the shared source
+    // bus and turns observations into sensor_history rows + an in-memory
+    // last-seen map for /api/health, then each configured polling
+    // adapter's run() loop is spawned against that bus. Receiver-POST
+    // adapters (Ecowitt local, HTTP webhook) publish on the same bus
+    // from /ingest/*, so one recorder covers everything. Boot-time
+    // wiring: source add/remove takes a restart (same contract as the
+    // ecowitt_gw_poll spawns above).
+    let source_last_seen = localsky::sources::SourceLastSeen::default();
+    localsky::sources::bus_recorder::spawn(
+        receiver_bus_tx.clone(),
+        sensor_history.clone(),
+        source_last_seen.clone(),
+    );
+    // The watch sender must stay alive for the process lifetime:
+    // dropping it closes the channel and every source's select loop
+    // would spin on the closed receiver.
+    let (_source_shutdown_tx, source_shutdown_rx) = tokio::sync::watch::channel(false);
+    if !demo_mode {
+        if let Some(cfg) = boot_cfg.as_ref() {
+            let polling = localsky::runtime::build_sources(cfg);
+            if !polling.is_empty() {
+                tracing::info!(count = polling.len(), "spawning configured weather sources");
+            }
+            for source in polling {
+                let bus = receiver_bus_tx.clone();
+                let shut = source_shutdown_rx.clone();
+                tokio::spawn(async move {
+                    let id = source.id().to_string();
+                    if let Err(e) = source.run(bus, shut).await {
+                        tracing::warn!(source = %id, error = %e, "weather source task exited");
+                    }
+                });
+            }
+        }
+    }
+
     let mk_health = || {
         axum::Router::new()
             .route("/", axum::routing::get(api::health::health))
@@ -475,6 +545,7 @@ async fn main() -> anyhow::Result<()> {
                 tempest_store: Some(tempest_store.clone()),
                 forecast_store: Some(forecast_store.clone()),
                 irrigation_store: Some(irrigation_store.clone()),
+                source_last_seen: Some(source_last_seen.clone()),
             })
     };
     let mk_ingest = || {

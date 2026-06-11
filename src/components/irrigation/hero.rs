@@ -210,8 +210,10 @@ fn SkipBreakdown(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                     value=Signal::derive(move || format!("{:.0}°F", snap.get().skip_check.temp_min_24h_f))
                     threshold=Signal::derive(move || format!("≥ {:.0}°F", snap.get().skip_check.min_temp_f))
                     tripped=Signal::derive(move || {
+                        // Validity flag (not the old 0.0 sentinel) so a real
+                        // sub-zero forecast low still trips the row.
                         let s = snap.get().skip_check;
-                        s.temp_min_24h_f > 0.0 && s.temp_min_24h_f < s.min_temp_f
+                        s.temp_min_24h_valid && s.temp_min_24h_f < s.min_temp_f
                     })
                 />
             }.into_any()}

@@ -4,7 +4,7 @@
 
 use crate::controllers::registry::ControllerRegistry;
 use crate::engine::scripting::CompiledScripts;
-use crate::engine::skip_rules::ZoneSoil;
+use crate::engine::skip_rules::{LiveReadings, ZoneSoil};
 use crate::forecast::snapshot::ForecastSnapshot;
 use crate::forecast::ForecastStore;
 use crate::ha::rest::HaClient;
@@ -784,28 +784,32 @@ async fn build_from_map(
     let tempest = tempest_store.snapshot();
 
     let rain_today_used = rain_today_tempest.max(rain_today_om);
-    let humidity_now = tempest.rh_pct;
-    // Prefer the in-process Tempest listener once it's received its
-    // first packet. Falls back to HA's Tempest-derived sensors before
-    // the first obs_st lands so the dashboard still has live values
-    // immediately after a container restart.
-    let tempest_alive = tempest.last_packet_epoch > 0;
-    let temp_now = if tempest_alive {
-        tempest.air_temp_f
-    } else {
-        state_f64(&map, "sensor.st_00206451_temperature").unwrap_or(70.0)
-    };
-    let wind_now = if tempest_alive {
-        tempest.wind_avg_mph
-    } else {
-        state_f64(&map, "sensor.st_00206451_wind_speed_average").unwrap_or(0.0)
-    };
+    // Live "now" readings. Prefer the in-process Tempest listener while
+    // its packets are fresh (recency-gated: a station that stopped
+    // reporting hours ago must not keep driving freeze/wind gates).
+    // When stale or absent, fall back to the current-hour forecast and
+    // mark the inputs degraded; with no forecast either, mark them
+    // unavailable so the engine fails safe (skip, never a phantom run
+    // on fabricated 70 °F / 0 mph defaults).
+    let now_epoch = Utc::now().timestamp();
+    let (temp_now, wind_now, humidity_now, live_readings) =
+        resolve_current_conditions(&tempest, fc.hourly.first(), now_epoch);
+    if live_readings != LiveReadings::Station {
+        tracing::debug!(
+            ?live_readings,
+            tempest_last_packet_epoch = tempest.last_packet_epoch,
+            "live station readings unavailable or stale; inputs degraded"
+        );
+    }
 
     let (rain_tomorrow_om_in, rain_tomorrow_prob) = fc.tomorrow_precip_with_prob_in();
     let rain_3day_weighted = fc.future_n_day_weighted_precip_in(3);
     let rain_7day_weighted = fc.future_n_day_weighted_precip_in(7);
     let rain_next_4h = fc.next_n_hours_precip_in(4);
-    let temp_min_24h = fc.min_temp_next_24h_f().unwrap_or(0.0);
+    // Option end-to-end: None = no hourly forecast window. The engine's
+    // overnight-freeze gate keys applicability off is_some(), so a real
+    // sub-zero low is no longer confused with "no data".
+    let temp_min_24h: Option<f64> = fc.min_temp_next_24h_f();
     let temp_max_3day = fc.max_temp_next_3d_f().unwrap_or(0.0);
     let wind_max_today = fc.wind_max_today_mph().unwrap_or(0.0);
     let days_since_rain = fc.days_since_significant_rain(rain_today_used);
@@ -842,7 +846,9 @@ async fn build_from_map(
         rain_7day_weighted_in: rain_7day_weighted,
         rain_next_4h_in: rain_next_4h,
         rain_tomorrow_prob_pct: rain_tomorrow_prob,
-        temp_min_24h_f: temp_min_24h,
+        // Wire shape stays f64 (0.0 = legacy missing-data placeholder);
+        // skip_check.temp_min_24h_valid carries the validity bit.
+        temp_min_24h_f: temp_min_24h.unwrap_or(0.0),
         temp_max_3day_f: temp_max_3day,
         humidity_now_pct: humidity_now,
         heat_index_now_f: heat_index_now,
@@ -906,6 +912,11 @@ async fn build_from_map(
         soil_temp_yard_max_f,
         frost_skip_soil_f: watering_policy.skip_rules.frost_skip_soil_f,
 
+        // Provenance of the live "now" readings (resolved above). The
+        // ladder fails safe (skip) when Unavailable and marks the trace
+        // degraded on ForecastFallback.
+        live_readings,
+
         is_paused: state_eq(&map, "input_boolean.irrigation_pause", "on"),
         is_dry_run: state_eq(&map, "input_boolean.irrigation_dry_run", "on"),
 
@@ -913,7 +924,7 @@ async fn build_from_map(
         // override (is_tomorrow=false); the verdict-strip path below sets
         // it true on the [+1] cell.
         pause_until_epoch: snap.pause_until_epoch,
-        now_epoch: Utc::now().timestamp(),
+        now_epoch,
         override_tomorrow: snap.override_tomorrow.clone(),
         is_tomorrow: false,
 
@@ -931,10 +942,11 @@ async fn build_from_map(
         &inputs,
         scripts,
         &watering_policy.condition_rules,
+        &watering_policy.skip_rules,
     );
 
     snap.forecast = forecast;
-    snap.seven_day_verdicts = compute_seven_day_verdicts(&fc, &inputs);
+    snap.seven_day_verdicts = compute_seven_day_verdicts(&fc, &inputs, &watering_policy.skip_rules);
     snap.soil_forecasts = compute_soil_forecasts(
         &fc,
         &inputs,
@@ -1095,11 +1107,18 @@ fn apply_engine(
     inputs: &Inputs,
     scripts: &CompiledScripts,
     condition_rules: &[crate::engine::conditions::ConditionRule],
+    // Operator-tuned thresholds from cfg.engine.skip_rules (threaded via
+    // WateringPolicy). Previously this constructed SkipRuleParams::default()
+    // locally, which silently discarded 8 of the 12 user-tunable knobs
+    // (already_wet_in, rain_now_in_hr, rain_next_4h_skip_in,
+    // rain_3day_factor, the three heat-advisory gates, and
+    // wind_forecast_slack_mph). Defaults are unchanged, so untouched
+    // configs decide identically.
+    params: &crate::config::schema::SkipRuleParams,
 ) {
-    let params = crate::config::schema::SkipRuleParams::default();
-    snap.skip_check = skip_logic::evaluate(inputs);
+    snap.skip_check = skip_logic::evaluate_with(inputs, params);
     // Structured provenance for the same decision (powers Rule Lab).
-    snap.decision_trace = Some(crate::engine::skip_rules::decide_traced(inputs, &params));
+    snap.decision_trace = Some(crate::engine::skip_rules::decide_traced(inputs, params));
 
     // Augment-only user scripts: consulted ONLY when the deterministic
     // ladder said "run", so a script can ADD a skip but can never clear a
@@ -1126,7 +1145,7 @@ fn apply_engine(
 
     // Per-zone verdicts: global gates bind every zone, then per-zone soil
     // saturation + user condition rules let zones diverge. Augment-only.
-    let verdicts = crate::engine::skip_rules::decide_per_zone(inputs, &params, condition_rules);
+    let verdicts = crate::engine::skip_rules::decide_per_zone(inputs, params, condition_rules);
     for z in snap.zones.iter_mut() {
         z.verdict = verdicts.iter().find(|v| v.zone_slug == z.slug).cloned();
     }
@@ -1581,12 +1600,15 @@ fn fc_heat_multiplier(today: &Inputs) -> f64 {
 ///     daily[..N] looking for ≥0.05 days, falling back to past_daily.
 ///   - rain_intensity_now/wind_now/temp_now: 0 / forecast_wind / temp_min
 ///     respectively (so the live-only rules don't fire on a forecast day).
-fn compute_seven_day_verdicts(fc: &ForecastSnapshot, today: &Inputs) -> Vec<DayVerdict> {
-    crate::engine::compute_verdict_strip(
-        fc,
-        today,
-        &crate::config::schema::SkipRuleParams::default(),
-    )
+fn compute_seven_day_verdicts(
+    fc: &ForecastSnapshot,
+    today: &Inputs,
+    // Operator-tuned thresholds (cfg.engine.skip_rules), same params the
+    // live decision uses, so the strip previews the real ladder rather
+    // than a defaults-only shadow of it.
+    params: &crate::config::schema::SkipRuleParams,
+) -> Vec<DayVerdict> {
+    crate::engine::compute_verdict_strip(fc, today, params)
 }
 
 /// Smart-morning target_start epoch for the next morning that hasn't
@@ -1640,6 +1662,50 @@ fn state_f64(map: &HashMap<String, Value>, eid: &str) -> Option<f64> {
         .and_then(|s| s.get("state"))
         .and_then(Value::as_str)
         .and_then(|s| s.parse::<f64>().ok())
+}
+
+/// How fresh the latest Tempest packet must be (seconds) for the station
+/// to keep driving the live "now" inputs. Tempest obs_st arrives every
+/// minute under normal conditions; 10 minutes of silence means the radio
+/// path is down and the readings are no longer "now".
+const TEMPEST_LIVE_MAX_AGE_S: i64 = 600;
+
+/// Resolve the live current conditions (temp °F, wind mph, humidity %)
+/// plus their provenance:
+///   1. Tempest station, when its last packet is within
+///      `TEMPEST_LIVE_MAX_AGE_S` of `now_epoch` → `Station`.
+///   2. Current-hour forecast (Open-Meteo hourly[0]) → `ForecastFallback`
+///      (decision trace marked degraded; rules still evaluate).
+///   3. Neither → `Unavailable` with neutral zeros; the engine's
+///      live-data gate then fails safe with a skip, so the placeholder
+///      values never reach a run/skip comparison.
+/// This replaced hard-coded fallbacks to one specific install's HA
+/// entities (`sensor.st_00206451_*`) with `unwrap_or(70.0)` / `0.0`,
+/// which fabricated 70 °F / 0 mph for every standalone non-Tempest user.
+fn resolve_current_conditions(
+    tempest: &crate::tempest::state::Snapshot,
+    current_hour: Option<&crate::forecast::snapshot::HourlyEntry>,
+    now_epoch: i64,
+) -> (f64, f64, f64, LiveReadings) {
+    let station_fresh = tempest.last_packet_epoch > 0
+        && now_epoch.saturating_sub(tempest.last_packet_epoch) < TEMPEST_LIVE_MAX_AGE_S;
+    if station_fresh {
+        return (
+            tempest.air_temp_f,
+            tempest.wind_avg_mph,
+            tempest.rh_pct,
+            LiveReadings::Station,
+        );
+    }
+    if let Some(h) = current_hour {
+        return (
+            h.temp_f,
+            h.wind_mph,
+            h.humidity_pct as f64,
+            LiveReadings::ForecastFallback,
+        );
+    }
+    (0.0, 0.0, 0.0, LiveReadings::Unavailable)
 }
 
 /// Resolve a zone's assigned soil sensor to a live %. Supports three
@@ -1770,6 +1836,134 @@ fn build_legacy_soil_zones(map: &HashMap<String, Value>) -> Vec<ZoneSoil> {
         target_min_pct: target_min,
     })
     .collect()
+}
+
+#[cfg(test)]
+mod engine_params_tests {
+    use super::*;
+
+    fn base_inputs() -> Inputs {
+        Inputs {
+            temp_now_f: 70.0,
+            wind_now_mph: 3.0,
+            wind_max_today_mph: 6.0,
+            temp_min_24h_f: Some(60.0),
+            temp_max_3day_f: 80.0,
+            humidity_now_pct: 55.0,
+            days_since_significant_rain: 1,
+            max_wind_mph: 10.0,
+            min_temp_f: 38.0,
+            rain_skip_in: 0.25,
+            frost_skip_soil_f: 35.0,
+            now_epoch: 1_700_000_000,
+            ..Default::default()
+        }
+    }
+
+    /// Regression for the params-threading fix: a non-default
+    /// `already_wet_in` must reach the live decision. Before the fix,
+    /// apply_engine constructed SkipRuleParams::default() locally, so
+    /// the operator's config value never changed any verdict.
+    #[test]
+    fn user_already_wet_threshold_flips_verdict() {
+        let scripts = CompiledScripts::compile(&[]);
+        let mut inputs = base_inputs();
+        inputs.rain_today_in = 0.07;
+
+        // Default threshold (0.05"): 0.07" today is "already wet" -> skip.
+        let mut snap = IrrigationSnapshot::default();
+        let defaults = crate::config::schema::SkipRuleParams::default();
+        apply_engine(&mut snap, &inputs, &scripts, &[], &defaults);
+        assert_eq!(snap.skip_check.verdict, "skip");
+        assert!(snap.skip_check.reason.starts_with("Already wet"));
+
+        // Operator raises the floor to 0.10": the same inputs must run.
+        let mut tuned = crate::config::schema::SkipRuleParams::default();
+        tuned.already_wet_in = 0.10;
+        let mut snap2 = IrrigationSnapshot::default();
+        apply_engine(&mut snap2, &inputs, &scripts, &[], &tuned);
+        assert_eq!(snap2.skip_check.verdict, "run");
+        // The trace must agree (same params reach decide_traced).
+        assert_eq!(snap2.decision_trace.as_ref().unwrap().verdict, "run");
+    }
+}
+
+#[cfg(test)]
+mod current_conditions_tests {
+    use super::{resolve_current_conditions, LiveReadings, TEMPEST_LIVE_MAX_AGE_S};
+    use crate::forecast::snapshot::HourlyEntry;
+    use crate::tempest::state::Snapshot as TempestSnapshot;
+
+    const NOW: i64 = 1_700_000_000;
+
+    fn tempest(last_packet_epoch: i64) -> TempestSnapshot {
+        TempestSnapshot {
+            last_packet_epoch,
+            air_temp_f: 61.5,
+            wind_avg_mph: 4.2,
+            rh_pct: 71.0,
+            ..Default::default()
+        }
+    }
+
+    fn hour() -> HourlyEntry {
+        HourlyEntry {
+            temp_f: 55.0,
+            wind_mph: 7.5,
+            humidity_pct: 64,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn fresh_station_drives_live_inputs() {
+        let t = tempest(NOW - 90);
+        let h = hour();
+        let (temp, wind, rh, src) = resolve_current_conditions(&t, Some(&h), NOW);
+        assert_eq!(src, LiveReadings::Station);
+        assert_eq!(temp, 61.5);
+        assert_eq!(wind, 4.2);
+        assert_eq!(rh, 71.0);
+    }
+
+    #[test]
+    fn stale_station_falls_back_to_current_hour_forecast() {
+        // Packet seen, but older than the recency window: the old
+        // "ever-seen" check (last_packet_epoch > 0) would have kept the
+        // dead station's readings live forever.
+        let t = tempest(NOW - TEMPEST_LIVE_MAX_AGE_S - 1);
+        let h = hour();
+        let (temp, wind, rh, src) = resolve_current_conditions(&t, Some(&h), NOW);
+        assert_eq!(src, LiveReadings::ForecastFallback);
+        assert_eq!(temp, 55.0);
+        assert_eq!(wind, 7.5);
+        assert_eq!(rh, 64.0);
+    }
+
+    #[test]
+    fn never_seen_station_with_forecast_is_fallback() {
+        let t = tempest(0);
+        let h = hour();
+        let (_, _, _, src) = resolve_current_conditions(&t, Some(&h), NOW);
+        assert_eq!(src, LiveReadings::ForecastFallback);
+    }
+
+    #[test]
+    fn no_station_and_no_forecast_is_unavailable() {
+        let t = tempest(0);
+        let (temp, wind, _, src) = resolve_current_conditions(&t, None, NOW);
+        assert_eq!(src, LiveReadings::Unavailable);
+        // Neutral zeros, never the old fabricated 70 °F.
+        assert_eq!(temp, 0.0);
+        assert_eq!(wind, 0.0);
+    }
+
+    #[test]
+    fn boundary_age_is_stale() {
+        let t = tempest(NOW - TEMPEST_LIVE_MAX_AGE_S);
+        let (_, _, _, src) = resolve_current_conditions(&t, None, NOW);
+        assert_eq!(src, LiveReadings::Unavailable);
+    }
 }
 
 #[cfg(test)]

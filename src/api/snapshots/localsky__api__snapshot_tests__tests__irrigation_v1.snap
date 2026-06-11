@@ -1,6 +1,5 @@
 ---
 source: src/api/snapshot_tests.rs
-assertion_line: 63
 expression: "IrrigationSnapshot::default()"
 ---
 {
@@ -28,6 +27,7 @@ expression: "IrrigationSnapshot::default()"
     "rain_next_4h_in": 0.0,
     "wind_max_today_mph": 0.0,
     "temp_min_24h_f": 0.0,
+    "temp_min_24h_valid": false,
     "temp_max_3day_f": 0.0,
     "days_since_significant_rain": 0,
     "heat_index_now_f": 0.0,

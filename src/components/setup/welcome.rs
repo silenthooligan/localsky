@@ -1,10 +1,11 @@
-// WelcomeStep. License acknowledgement + telemetry opt-in. Required
-// before Apply on the Review step.
+// WelcomeStep. The first ten seconds of the product: what LocalSky is,
+// what setup will ask for, and the license acknowledgement, framed as
+// an onboarding moment rather than a legal wall.
 
 use leptos::prelude::*;
 
 use crate::components::setup::shell::{next_step_href, SetupFooter};
-use crate::components::ui::Toggle;
+use crate::components::ui::{Icon, Toggle};
 
 #[component]
 pub fn WelcomeStep() -> impl IntoView {
@@ -21,28 +22,54 @@ pub fn WelcomeStep() -> impl IntoView {
 
     view! {
         <div class="setup-step">
-            <h2 class="setup-step__title">"Welcome to LocalSky"</h2>
-            <p class="setup-step__body">
-                "LocalSky is local-first weather and irrigation control. Your "
-                "data stays on your hardware. This wizard walks through the "
-                "essential pieces: where you are, what weather you can see, "
-                "which controller drives your zones, and which grasses and "
-                "soils you actually have."
-            </p>
+            <div class="setup-hero">
+                <span class="setup-hero__icon"><Icon name="weather" size=30/></span>
+                <h2 class="setup-hero__title">"Let's get your weather and watering dialed in"</h2>
+                <p class="setup-hero__sub">
+                    "LocalSky watches the sky over your yard and waters exactly "
+                    "what each zone needs: no more, no less."
+                </p>
+            </div>
+
+            <div class="setup-pillars">
+                <div class="setup-pillar">
+                    <Icon name="home" size=18/>
+                    <strong>"Local-first"</strong>
+                    <span>"Runs on your hardware. Your data never leaves home."</span>
+                </div>
+                <div class="setup-pillar">
+                    <Icon name="sources" size=18/>
+                    <strong>"Any hardware, or none"</strong>
+                    <span>"Works with a backyard station, or just your address and a forecast."</span>
+                </div>
+                <div class="setup-pillar">
+                    <Icon name="zap" size=18/>
+                    <strong>"Plays well with others"</strong>
+                    <span>"Home Assistant optional; one integration when you want it."</span>
+                </div>
+            </div>
+
+            <div class="setup-needs">
+                <p class="setup-needs__title">"Setup takes about five minutes. Helpful to have:"</p>
+                <ul class="setup-needs__list">
+                    <li>"Your address (or coordinates); weather and sun math start there"</li>
+                    <li>"Optional: a weather station on your network (Tempest, Ecowitt, Davis...)"</li>
+                    <li>"Optional: your sprinkler controller (it can be found by a network scan)"</li>
+                </ul>
+            </div>
 
             <Toggle
                 checked=license_accepted
                 label="I accept the Apache-2.0 license".to_string()
-                helptext="LocalSky is open source under Apache-2.0. The full text lives in LICENSE.".to_string()
+                helptext="Free and open source. The full text lives in LICENSE.".to_string()
             />
 
-            <p class="setup-step__body">
-                "LocalSky does not send telemetry. There is no analytics ping, no "
-                "anonymous-usage report, no account, no email signup. If that changes "
-                "in a future release it will be opt-in and disclosed here."
+            <p class="setup-step__hint" style="opacity:0.8">
+                "No telemetry, no analytics, no account requirement, no email signup. "
+                "If that ever changes it will be opt-in and disclosed right here."
             </p>
 
-            <SetupFooter prev=None next=Signal::derive(next_href).get_untracked()/>
+            <SetupFooter prev={None::<String>} next=Signal::derive(next_href)/>
             <p class="setup-step__hint" class:setup-step__hint--visible=move || !can_advance()>
                 "Accept the license to continue."
             </p>

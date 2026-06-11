@@ -11,7 +11,7 @@ use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
 
 use crate::components::settings_ui::{
-    BadgeTone, SettingsBadge, SettingsCard, SettingsKv, SettingsResult,
+    BadgeTone, SettingsBadge, SettingsCard, SettingsKv, SettingsLoadError, SettingsResult,
 };
 use crate::components::ui::{FormField, Panel, PhotoField, SegmentedControl};
 use crate::docs::doc_url;
@@ -22,6 +22,10 @@ pub fn SettingsZones() -> impl IntoView {
     let saving = RwSignal::new(false);
     let result_msg = RwSignal::new(String::new());
     let result_ok = RwSignal::new(false);
+    // Initial-load state: Some(err) when the config GET failed. The
+    // editor body is replaced by a Retry banner in that case.
+    let load_error: RwSignal<Option<String>> = RwSignal::new(None);
+    let load_retry = RwSignal::new(0u32);
 
     // Zone form state, shared by Add and Edit. When `editing_slug` is
     // Some, the form panel is in edit mode (saves overwrite that slug);
@@ -30,6 +34,10 @@ pub fn SettingsZones() -> impl IntoView {
     let editing_slug: RwSignal<Option<String>> = RwSignal::new(None);
     let new_slug = RwSignal::new(String::new());
     let new_display_name = RwSignal::new(String::new());
+    // Seeded "warm" and re-seeded from the configured latitude once the
+    // config loads (see the climate-default Effect below): |lat| < 35
+    // keeps a warm-season default, elsewhere cool-season. A Berlin user
+    // should not open the form to a Florida lawn.
     let new_species = RwSignal::new("st_augustine".to_string());
     let new_soil = RwSignal::new("sandy_loam".to_string());
     let new_area = RwSignal::new(1000.0f64);
@@ -48,6 +56,100 @@ pub fn SettingsZones() -> impl IntoView {
     // current_pct + source let the zone show the assigned sensor's live reading
     // and whether it's native or HA-bridged.
     let soil_sensor_opts = RwSignal::new(Vec::<(String, String, Option<f64>, String)>::new());
+
+    // Deep link: /settings/zones?zone=<slug> opens that zone's editor
+    // directly (zone-detail Edit buttons land here). One-shot: runs when
+    // the config first loads, then never fights the user's clicks.
+    #[cfg(feature = "hydrate")]
+    {
+        let deep_done = RwSignal::new(false);
+        Effect::new(move |_| {
+            let cfg = config_json.get();
+            if cfg.is_null() || deep_done.get_untracked() {
+                return;
+            }
+            let Some(win) = web_sys::window() else { return };
+            let search = win.location().search().unwrap_or_default();
+            let Some(slug) = search.trim_start_matches('?').split('&').find_map(|kv| {
+                let (k, v) = kv.split_once('=')?;
+                (k == "zone" && !v.is_empty()).then(|| v.to_string())
+            }) else {
+                deep_done.set(true);
+                return;
+            };
+            deep_done.set(true);
+            // Snapshot slugs are underscore-normalized ("back_yard") while
+            // config keys may use hyphens ("back-yard"); match on the
+            // normalized form and keep the REAL config key for editing.
+            let zones_obj = cfg.get("zones").and_then(|m| m.as_object());
+            let Some(slug) = zones_obj.and_then(|m| {
+                m.keys()
+                    .find(|k| k.replace('-', "_") == slug.replace('-', "_"))
+                    .cloned()
+            }) else {
+                return;
+            };
+            let Some(z) = zones_obj.and_then(|m| m.get(&slug)).cloned() else {
+                return;
+            };
+            let gs = |k: &str| z.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let gf = |k: &str, d: f64| z.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
+            new_slug.set(slug.clone());
+            new_display_name.set(gs("display_name"));
+            new_species.set(if gs("species").is_empty() {
+                "st_augustine".into()
+            } else {
+                gs("species")
+            });
+            new_soil.set(if gs("soil_texture").is_empty() {
+                "sandy_loam".into()
+            } else {
+                gs("soil_texture")
+            });
+            new_area.set(gf("area_sqft", 1000.0));
+            new_sprinkler.set(if gs("sprinkler_type").is_empty() {
+                "rotor".into()
+            } else {
+                gs("sprinkler_type")
+            });
+            new_precip.set(
+                z.get("precip_rate_mm_hr")
+                    .and_then(|v| v.as_f64())
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+            );
+            new_controller.set(gs("controller_id"));
+            new_station.set(gs("controller_station"));
+            new_photo_url.set(gs("photo_url"));
+            new_soil_sensor.set(gs("soil_sensor_id"));
+            new_soil_min.set(gf("target_min_pct_soil", 30.0));
+            new_soil_sat.set(gf("saturation_pct_soil", 70.0));
+            editing_slug.set(Some(slug));
+            add_open.set(true);
+        });
+    }
+
+    // Climate-aware Add-form default: re-seed the species once from the
+    // configured latitude, only while the form is untouched (still on the
+    // boot seed and the editor closed), so it never fights user input.
+    #[cfg(feature = "hydrate")]
+    {
+        let seeded = RwSignal::new(false);
+        Effect::new(move |_| {
+            if seeded.get_untracked() || add_open.get_untracked() {
+                return;
+            }
+            let lat = config_json
+                .get()
+                .pointer("/deployment/location/lat")
+                .and_then(|v| v.as_f64());
+            let Some(lat) = lat else { return };
+            seeded.set(true);
+            if lat.abs() >= 35.0 && new_species.get_untracked() == "st_augustine" {
+                new_species.set("tall_fescue".to_string());
+            }
+        });
+    }
 
     #[cfg(feature = "hydrate")]
     {
@@ -78,19 +180,24 @@ pub fn SettingsZones() -> impl IntoView {
             });
         });
         Effect::new(move |_| {
+            let _ = load_retry.get();
             wasm_bindgen_futures::spawn_local(async move {
-                if let Ok(cfg) = fetch_config().await {
-                    // Pre-select first available controller for new zones.
-                    if let Some(ctrl) = cfg
-                        .get("controllers")
-                        .and_then(|v| v.as_array())
-                        .and_then(|a| a.first())
-                    {
-                        if let Some(id) = ctrl.get("id").and_then(|v| v.as_str()) {
-                            new_controller.set(id.to_string());
+                match fetch_config().await {
+                    Ok(cfg) => {
+                        // Pre-select first available controller for new zones.
+                        if let Some(ctrl) = cfg
+                            .get("controllers")
+                            .and_then(|v| v.as_array())
+                            .and_then(|a| a.first())
+                        {
+                            if let Some(id) = ctrl.get("id").and_then(|v| v.as_str()) {
+                                new_controller.set(id.to_string());
+                            }
                         }
+                        config_json.set(cfg);
+                        load_error.set(None);
                     }
-                    config_json.set(cfg);
+                    Err(e) => load_error.set(Some(e)),
                 }
             });
         });
@@ -208,6 +315,10 @@ pub fn SettingsZones() -> impl IntoView {
                 </p>
             </header>
 
+            <Show
+                when=move || load_error.get().is_none()
+                fallback=move || view! { <SettingsLoadError error=load_error retry=load_retry/> }
+            >
             <Panel title="Configured zones".to_string()>
                 <ul class="settings-card-list">
                     {zones_view}
@@ -287,6 +398,7 @@ pub fn SettingsZones() -> impl IntoView {
             >
                 {move || if saving.get() { "Saving…" } else { "Save all changes" }}
             </button>
+            </Show>
 
             <SettingsResult result_msg=result_msg result_ok=result_ok/>
         </main>
@@ -557,15 +669,19 @@ fn ZoneForm(
             >
                 <SegmentedControl
                     value=new_species
+                    // Warm-season, then cool-season, then non-turf;
+                    // alphabetical within each group so no single
+                    // region's turf leads the control.
                     options=vec![
-                        ("st_augustine".into(), "St. Augustine".into()),
-                        ("bermuda".into(), "Bermuda".into()),
-                        ("zoysia".into(), "Zoysia".into()),
                         ("bahia".into(), "Bahia".into()),
+                        ("bermuda".into(), "Bermuda".into()),
                         ("centipede".into(), "Centipede".into()),
+                        ("kikuyu".into(), "Kikuyu".into()),
+                        ("st_augustine".into(), "St. Augustine".into()),
+                        ("zoysia".into(), "Zoysia".into()),
                         ("kentucky_bluegrass".into(), "KBG".into()),
-                        ("tall_fescue".into(), "Tall Fescue".into()),
                         ("perennial_ryegrass".into(), "PRG".into()),
+                        ("tall_fescue".into(), "Tall Fescue".into()),
                         ("ornamental_shrubs".into(), "Shrubs".into()),
                         ("vegetable_garden".into(), "Vegetables".into()),
                         ("drip_xeriscape".into(), "Drip / xeri".into()),
@@ -577,7 +693,7 @@ fn ZoneForm(
 
             <FormField
                 label="Soil texture".to_string()
-                helptext="USDA class. Drives field capacity, wilting point, and infiltration rate.".to_string()
+                helptext="USDA texture class (used internationally). Drives field capacity, wilting point, and infiltration rate.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 <SegmentedControl
@@ -849,6 +965,10 @@ async fn fetch_config() -> Result<serde_json::Value, String> {
         .send()
         .await
         .map_err(|e| e.to_string())?;
+    // A JSON error body must not be mistaken for the config.
+    if !resp.ok() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
     resp.json::<serde_json::Value>()
         .await
         .map_err(|e| e.to_string())
@@ -883,6 +1003,7 @@ fn pretty_species(slug: &str) -> &'static str {
         "kentucky_bluegrass" => "Kentucky Bluegrass",
         "tall_fescue" => "Tall Fescue",
         "perennial_ryegrass" => "Perennial Ryegrass",
+        "kikuyu" => "Kikuyu",
         "ornamental_shrubs" => "Ornamental shrubs",
         "vegetable_garden" => "Vegetable garden",
         "drip_xeriscape" => "Drip / xeriscape",

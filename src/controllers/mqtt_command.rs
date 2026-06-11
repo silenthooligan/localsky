@@ -16,9 +16,10 @@
 // No state subscription — commands are fire-and-forget. For confirmed
 // state with feedback, use ESPHome native or HaServiceCall instead.
 //
-// run_zone fires the on-publish and immediately returns a RunHandle.
-// LocalSky's irrigation engine schedules the matching off-publish at
-// start+duration; MqttCommand does not run its own timer.
+// run_zone fires the on-publish, spawns a shutoff timer that publishes
+// the matching off payload after duration_s, and immediately returns a
+// RunHandle. stop_zone / stop_all publish off right away; the timer's
+// later off-publish is idempotent so an early stop is harmless.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -146,6 +147,43 @@ impl IrrigationController for MqttCommand {
 
     async fn run_zone(&self, slug: &str, duration_s: u32) -> ControllerResult<RunHandle> {
         self.publish_zone(slug, true).await?;
+        // MQTT targets are dumb command sinks with no native run timer:
+        // without a scheduled off-publish the valve stays open until
+        // something else closes it. Spawn the shutoff timer here so the
+        // promise in the RunHandle (planned_duration_s) is actually kept.
+        // An earlier stop_zone/stop_all publishes off immediately; the
+        // timer's later duplicate off is idempotent.
+        if duration_s > 0 {
+            if let Some(cmd) = self.config.zone_command_map.get(slug) {
+                let client = self.client.clone();
+                let topic = cmd.topic.clone();
+                let off_payload = cmd.off_payload.clone().into_bytes();
+                let retain = cmd.retain;
+                let controller_id = self.id.clone();
+                let zone = slug.to_string();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(duration_s as u64)).await;
+                    match client
+                        .publish(&topic, QoS::AtLeastOnce, retain, off_payload)
+                        .await
+                    {
+                        Ok(()) => debug!(
+                            controller = %controller_id,
+                            zone = %zone,
+                            topic = %topic,
+                            "mqtt shutoff timer: off published"
+                        ),
+                        Err(e) => warn!(
+                            controller = %controller_id,
+                            zone = %zone,
+                            topic = %topic,
+                            error = %e,
+                            "mqtt shutoff timer: off publish failed; zone may still be running"
+                        ),
+                    }
+                });
+            }
+        }
         Ok(RunHandle {
             controller_id: self.id.clone(),
             zone_slug: slug.to_string(),
@@ -267,6 +305,22 @@ mod tests {
         let c = MqttCommand::new("mq", cfg());
         let err = c.run_zone("not_a_zone", 60).await.unwrap_err();
         assert!(matches!(err, ControllerError::ZoneUnknown(_)));
+    }
+
+    #[tokio::test]
+    async fn run_zone_enqueues_on_and_schedules_off() {
+        // No broker in tests: publishes enqueue into rumqttc's request
+        // channel and succeed locally. This verifies the on-publish +
+        // shutoff-timer spawn path doesn't error or panic.
+        let c = MqttCommand::new("mq", cfg());
+        let handle = c.run_zone("back_yard", 1).await.unwrap();
+        assert_eq!(handle.planned_duration_s, 1);
+        assert_eq!(
+            handle.provider_ref.as_deref(),
+            Some("homeassistant/switch/back_yard/set")
+        );
+        // Let the 1s shutoff timer fire (its off-publish also enqueues).
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
     }
 
     #[tokio::test]

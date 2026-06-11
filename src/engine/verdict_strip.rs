@@ -99,7 +99,7 @@ pub fn compute(fc: &ForecastSnapshot, today: &Inputs, params: &SkipRuleParams) -
             rain_7day_weighted_in: rain_7day_weighted,
             rain_next_4h_in: 0.0,
             wind_max_today_mph: d.wind_max_mph,
-            temp_min_24h_f: d.temp_min_f,
+            temp_min_24h_f: Some(d.temp_min_f),
             temp_max_3day_f: temp_max_3day,
             days_since_significant_rain: days_since,
 
@@ -113,6 +113,9 @@ pub fn compute(fc: &ForecastSnapshot, today: &Inputs, params: &SkipRuleParams) -
             soil_temp_yard_min_f: None,
             soil_temp_yard_max_f: None,
             frost_skip_soil_f: today.frost_skip_soil_f,
+            // The strip cells are forecast projections by construction;
+            // the live-data integrity gate is a today-only concern.
+            live_readings: Default::default(),
             is_paused: today.is_paused,
             is_dry_run: false,
 

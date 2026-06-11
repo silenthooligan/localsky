@@ -4,6 +4,7 @@
 // small screens so phone users get the whole 48h without zooming.
 
 use crate::components::forecast::glyph::weather_code_glyph;
+use crate::components::units_fmt::{fmt_temp_short, use_unit_prefs, UnitPrefs};
 use crate::forecast::snapshot::{ForecastSnapshot, HourlyEntry};
 use chrono::{DateTime, Local, TimeZone, Timelike};
 use leptos::prelude::*;
@@ -11,6 +12,7 @@ use leptos::tachys::view::any_view::IntoAny;
 
 #[component]
 pub fn HourlyForecast(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
+    let unit_prefs = use_unit_prefs();
     view! {
         <section class="forecast-hourly">
             <header class="forecast-section-head">
@@ -33,10 +35,11 @@ pub fn HourlyForecast(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
             <div class="hourly-scroll">
                 {move || {
                     let entries: Vec<HourlyEntry> = snap.get().hourly.into_iter().take(48).collect();
+                    let prefs = unit_prefs.get();
                     if entries.is_empty() {
                         view! { <crate::components::ui::Skeleton variant="chart"/> }.into_any()
                     } else {
-                        view! { <HourlyChart entries/> }.into_any()
+                        view! { <HourlyChart entries prefs/> }.into_any()
                     }
                 }}
             </div>
@@ -45,7 +48,7 @@ pub fn HourlyForecast(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
 }
 
 #[component]
-fn HourlyChart(entries: Vec<HourlyEntry>) -> impl IntoView {
+fn HourlyChart(entries: Vec<HourlyEntry>, prefs: UnitPrefs) -> impl IntoView {
     let n = entries.len().max(1);
     let col_w: f64 = 56.0;
     let total_w = col_w * n as f64;
@@ -94,7 +97,7 @@ fn HourlyChart(entries: Vec<HourlyEntry>) -> impl IntoView {
                     inner_html=crate::components::ui::icon::paths_for(g)
                 ></svg>
                 <text x={x.to_string()} y="62" text-anchor="middle" class="hourly-temp">
-                    {format!("{:.0}°", e.temp_f)}
+                    {fmt_temp_short(e.temp_f, prefs)}
                 </text>
             </g>
         }.into_any()

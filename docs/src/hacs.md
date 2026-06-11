@@ -1,140 +1,215 @@
-# LocalSky as an HACS integration (roadmap)
+# Home Assistant integration
 
-This document describes a *future, separate project*: a Python-side HACS integration that exposes LocalSky as a native Home Assistant integration. Distinct from LocalSky itself.
+LocalSky ships a native Home Assistant integration, distributed through HACS from [github.com/silenthooligan/localsky-hacs](https://github.com/silenthooligan/localsky-hacs). It turns a running LocalSky instance into a first-class HA device: every weather reading, zone valve, soil probe, verdict, and threshold slider becomes an HA entity, and run/stop/pause become HA services you can call from automations.
 
-LocalSky's current relationship with HA has two production paths:
+LocalSky stays the brain. The integration is a thin client over LocalSky's REST and SSE API; if HA goes down, watering continues unaffected.
 
-- **Mode 2 (outbound)**: LocalSky publishes via MQTT discovery; HA auto-discovers `sensor.localsky_*` entities. Recommended today.
-- **Mode 3 (HA-driven)**: LocalSky dispatches controller actions through HA's service-call API. Legacy continuity for users already running HA-driven irrigation.
+> **Two pieces, in this order.** LocalSky is a server you run yourself (one Docker container, see the [Quick start](getting-started.md)); this integration is only the bridge that surfaces it inside Home Assistant. Installing the integration without a running LocalSky gives you nothing to pair with. Server first, integration second.
 
-A third path, **HACS integration**, would let HA users get LocalSky as a first-class integration installable from the HACS marketplace, without MQTT in the middle.
+> **Pick one path into HA, never both.** LocalSky can also publish entities through MQTT discovery (`sensor.localsky_*` via your broker). Running MQTT discovery *and* the HACS integration at the same time creates two copies of every entity. New setups should use the HACS integration; if you previously used MQTT discovery, disable LocalSky's MQTT publishing and clear the retained `homeassistant/.../config` discovery topics before adding the integration (see [Troubleshooting](#troubleshooting) below).
 
-## What HACS is
+## What you get
 
-The [Home Assistant Community Store](https://hacs.xyz/) is HA's marketplace for community-built integrations and custom dashboards. Users install HACS once, then add individual integrations through it. Each integration is a small Python project conforming to HA's `DataUpdateCoordinator` + `Entity` patterns.
+One HA device per LocalSky instance, populated from LocalSky's live entity manifest (`GET /api/v1/sensors/manifest`). Updates arrive over Server-Sent Events by default, so zone state changes show up in HA in under a second; a 30 second poll is the fallback. Adding a zone or sensor in LocalSky surfaces in HA automatically, no reconfiguration needed.
 
-## What a LocalSky HACS integration would do
+## Requirements
 
-The integration polls LocalSky's REST API and creates HA entities natively. Conceptual flow:
+- Home Assistant **2024.11.0** or newer (enforced by HACS).
+- LocalSky **0.2.0** or newer. The integration probes `GET /api/v1/info` during setup and refuses to pair with older instances (you will see a "service too old" error in the config flow).
+- Network reachability from HA to LocalSky's HTTP port (default **8090**).
 
-```
-[HA running on user's host]
-    |
-    v (HACS-installed Python custom_component)
-[LocalSky HACS integration]
-    |
-    v (HTTP polls every 30s)
-[LocalSky REST API on the same LAN]
-    |
-    v
-[/api/snapshot, /api/irrigation/snapshot, /api/forecast/snapshot]
-```
+## Install
 
-The integration would create HA entities matching the MQTT discovery layout LocalSky publishes today:
+### 1. Add the custom repository
 
-- `sensor.localsky_<zone>_bucket_mm`
-- `sensor.localsky_<zone>_et_today_mm`
-- `sensor.localsky_<zone>_planned_seconds`
-- `binary_sensor.localsky_<zone>_running`
-- `sensor.localsky_verdict_today`
-- `sensor.localsky_<zone>_soil_moisture` (when sensors connected)
-- One device per LocalSky deployment
+The integration is not yet in the HACS default catalog, so this step is required first:
 
-Plus actions: `service.localsky.run_zone(zone, seconds)`, `service.localsky.stop_zone(zone)`, `service.localsky.stop_all()`.
+1. In Home Assistant, open **HACS**.
+2. Open the three-dot menu (top right) and choose **Custom repositories**.
+3. Add `https://github.com/silenthooligan/localsky-hacs` with category **Integration**.
+4. Search for **LocalSky** in HACS and install it.
+5. Restart Home Assistant.
 
-## Why this path makes sense
+### 2. Pair with your LocalSky instance
 
-The MQTT discovery path (Mode 2) requires:
+LocalSky announces itself on the LAN via mDNS as `_localsky._tcp.local.`, so in most cases HA discovers it on its own: a "LocalSky" card appears under **Settings > Devices & Services > Discovered**. Click **Configure** and confirm.
 
-- A working MQTT broker (operator runs Mosquitto or uses HA's built-in)
-- The HA MQTT integration configured
-- The right discovery prefix set in LocalSky
+If discovery does not fire (separate VLANs, mDNS blocked), add it manually:
 
-HACS would skip all of that. Click "Add Integration" → "LocalSky" → enter the LocalSky URL → done. HA polls REST; entities appear. No broker, no discovery prefix, no MQTT debugging.
+1. **Settings > Devices & Services > Add Integration**, search for **LocalSky**.
+2. Enter the host (for example `192.168.1.100`) and port (default `8090`).
 
-It's also a place to surface LocalSky-specific affordances that don't translate cleanly to MQTT entities:
+**Pair against LocalSky directly on port 8090, not through a reverse proxy.** If you front LocalSky with Caddy/nginx plus an auth gate, the gate's redirects will break the integration's API calls and the SSE stream. The proxy is for your browser; HA should talk to the instance directly on the LAN.
 
-- Run-history Gantt as an HA custom card
-- The 7-day verdict strip as a Lovelace UI element
-- Native HA service calls that map 1:1 to LocalSky's REST control endpoints
+### Options
 
-## Project shape
+After pairing, the integration card exposes three options (**Configure** on the integration entry):
 
-The HACS integration is a **separate Python project**, in its own repository:
+| Option | Default | Range |
+|---|---|---|
+| Use SSE push updates | on | on/off |
+| Poll interval (fallback when SSE is off) | 30 s | 5 to 600 s |
+| Default run duration for valve/switch open | 600 s | 60 to 7200 s |
 
-- Suggested name: `homeassistant-localsky`
-- Repository: e.g. `github.com/silenthooligan/homeassistant-localsky`
-- Language: Python 3.11+ (matches HA's current version)
-- License: Apache-2.0 (same as LocalSky)
-- Size: ~300-500 LOC of Python (HA integrations are small)
+## Authentication
 
-Key files (matches HA's custom component layout):
+If your LocalSky instance has an owner account (see [authentication.md](authentication.md)), the `/api/v1/info` probe reports `auth_required` and the config flow adds a token step.
 
-```
-custom_components/localsky/
-├── __init__.py            # entry point, DataUpdateCoordinator setup
-├── manifest.json          # HA + HACS metadata
-├── config_flow.py         # UI config flow (host/port/optional API key)
-├── const.py               # domain name, scan interval, default ports
-├── coordinator.py         # polls /api/snapshot + /api/irrigation/snapshot
-├── sensor.py              # sensor.localsky_* entity classes
-├── binary_sensor.py       # binary_sensor.localsky_* entity classes
-├── services.yaml          # service definitions for run_zone / stop_zone
-├── services.py            # service handler implementations
-└── strings.json           # localized UI strings
-hacs.json                  # HACS-side metadata
-README.md                  # install instructions, screenshots
-```
+**Create the API token in LocalSky first**, before adding the integration:
 
-## Why not build it inside LocalSky's repo?
+1. In LocalSky, open **Settings > Account**.
+2. Under API tokens, create a token with a recognizable name (for example `home-assistant`).
+3. Copy the token; LocalSky shows it once.
+4. Paste it into the config flow's token step. The integration validates it against `GET /api/v1/auth/session` before finishing.
 
-Three reasons:
+If the token is later revoked, or you enable auth on a previously open instance, the integration receives a 401 and starts HA's reauthentication flow: a repair issue appears asking for a fresh token. Create a new one in **Settings > Account** and paste it in.
 
-1. **Different release cadence**: HA integrations need to track HA's quarterly version. LocalSky shouldn't be coupled to that schedule.
-2. **Different runtime**: LocalSky is Rust + WASM. The HACS integration is Python. Mixing the two in one repo complicates CI without payoff.
-3. **Different audience**: HACS users want the "click install" experience. LocalSky users want "single Docker container." Splitting repos keeps the two stories crisp.
+## Entity reference
 
-The HACS integration depends on LocalSky's REST API ([docs/api.md](api.md)) being stable. Once LocalSky tags v1.0 (API stable), the HACS project becomes a viable side project.
+Entity inventory comes from LocalSky's manifest, so the exact set depends on your sources and zones. The tables below list what a typical install produces. Entity ids are generated by HA from the device and entity names; check **Settings > Devices & Services > LocalSky** for the exact ids on your install.
 
-## Prerequisites for shipping HACS
+### Weather
 
-Before the HACS project can be useful:
+One `weather.*` entity built from the live station snapshot, with a 7 day daily forecast, plus individual sensors:
 
-- [ ] LocalSky API stabilized at v1.0 with semver guarantees on the JSON wire format
-- [ ] `/api/health` endpoint reliable for the coordinator's "is the host up?" check
-- [ ] `/api/irrigation/snapshot` schema documented in OpenAPI / JSON Schema (already published at `/api/config/schema`, planned for the snapshot endpoints too)
-- [ ] Stable controller dispatch via `POST /api/irrigation/action` (today; need to verify the wire shape is final)
+Units below are LocalSky's native (imperial) reporting units; Home Assistant converts sensors with supported device classes (temperature, wind speed, precipitation, pressure, distance) to your configured unit system automatically.
 
-When those are in place: a Python developer who knows HA's `DataUpdateCoordinator` pattern can ship the HACS integration in ~1-2 weekends.
-
-## Who builds it?
-
-Not LocalSky's maintainers. The Rust + agronomy + meteorology surface is enough work for the upstream team. The HACS integration is a perfect community contribution: low-risk Python in a well-trodden HA pattern, with a clear consumer (HA users who want LocalSky native).
-
-If you'd like to build it, see [CONTRIBUTING.md](../CONTRIBUTING.md) on cross-project work and open a discussion on the main LocalSky repo to coordinate.
-
-## What about a custom dashboard card?
-
-Separate but related: Lovelace custom cards (also distributed via HACS) for LocalSky-specific UI elements:
-
-- `localsky-verdict-strip-card`: renders the 7-day forward verdict strip in Lovelace
-- `localsky-zone-card`: a single-zone status card with bucket bar + planned-run countdown
-- `localsky-history-gantt-card`: 30-day run history Gantt
-
-These plug into the HACS integration's entities. Build them as a separate project (`hacs-localsky-cards` or similar) using lit-html or vanilla web components.
-
-## Roadmap relationship
-
-| LocalSky version | HACS dependency status |
+| Sensor | Unit |
 |---|---|
-| 0.1 | not viable yet (API wire format not stable) |
-| 0.2 | API stabilizes; HACS project can start |
-| 0.5 | HACS integration alpha, community-tested |
-| 1.0 | LocalSky tags 1.0; API semver-locked; HACS integration matures |
+| Air temperature, feels like, dew point, wet bulb | °F |
+| Humidity | % |
+| Pressure | inHg |
+| Wind speed, gust, lull | mph |
+| Wind direction | ° |
+| Solar irradiance | W/m² |
+| UV index, illuminance | index, lx |
+| Rain today, rain last minute, rain intensity | in, in/hr |
+| Lightning strikes (last hour), average distance | count, mi |
+| Station battery | % |
+
+### Irrigation
+
+| Entity | Platform | Notes |
+|---|---|---|
+| Irrigation verdict | `sensor` | today's run/skip verdict from the engine |
+| Irrigation reason | `sensor` | the human-readable "why" behind the verdict |
+| ET₀ today | `sensor` | mm |
+| Days since rain | `sensor` | days since significant rain |
+| Rain tomorrow probability | `sensor` | % |
+| Heat multiplier | `sensor` | engine's heat adjustment factor |
+| Water level | `sensor` | controller water level % |
+| Max wind, Min temp, Rain skip | `number` | skip-threshold sliders (0-50 mph, 20-60 °F, 0-1 in; about 0-80 km/h, -7 to 16 °C, 0-25 mm). These sliders do not convert to HA's unit system; set them in imperial | 
+| HA reachable | `binary_sensor` | connectivity diagnostic |
+| Irrigation suspended | `binary_sensor` | on while a pause is active |
+| Any zone running | `binary_sensor` | on while any zone runs |
+
+### Per zone
+
+| Entity | Platform | Notes |
+|---|---|---|
+| `valve.<zone>` | `valve` | the canonical control: open = run (default duration from options), close = stop |
+| `<zone> running` | `binary_sensor` | device class `running` |
+| `<zone> soil bucket` | `sensor` | engine bucket state, mm |
+| `<zone> soil moisture` | `sensor` | live probe %, unavailable when no probe assigned |
+| `<zone> soil temperature` | `sensor` | °F, native Ecowitt probes |
+| `<zone> soil EC` | `sensor` | µS/cm, native Ecowitt probes |
+| `<zone> soil battery` | `sensor` | probe battery % |
+| `<zone> planned run` | `sensor` | seconds planned for the next run |
+| `<zone> run today` | `sensor` | minutes actually run today |
+| `switch.<zone> run` | `switch` | legacy shim, disabled by default; prefer the valve |
+
+## Service reference
+
+Five services, registered under the `localsky` domain. All accept an optional `entry_id` to target one instance when several LocalSky deployments are paired; without it the call fans out to every entry.
+
+| Service | Fields | Limits |
+|---|---|---|
+| `localsky.run_zone` | `zone` (slug, required), `seconds` (required) | seconds clamped to 1-7200; LocalSky's server enforces the same 2 hour cap |
+| `localsky.stop_zone` | `zone` (required) | |
+| `localsky.stop_all` | | stops every running zone |
+| `localsky.pause` | `hours` (default 24) | 1-720 hours; schedules and manual runs will not fire while paused |
+| `localsky.resume` | | clears an active pause |
+
+## Example automations
+
+Get notified when the engine decides to skip, with the reason:
+
+```yaml
+automation:
+  - alias: "LocalSky: notify on skip"
+    triggers:
+      - trigger: state
+        entity_id: sensor.localsky_irrigation_verdict
+        to: "skip"
+    actions:
+      - action: notify.mobile_app_your_phone
+        data:
+          title: "Watering skipped today"
+          message: "{{ states('sensor.localsky_irrigation_reason') }}"
+```
+
+Give the dog-run zone a five minute rinse when a helper toggles:
+
+```yaml
+  - alias: "LocalSky: quick rinse"
+    triggers:
+      - trigger: state
+        entity_id: input_boolean.rinse_dog_run
+        to: "on"
+    actions:
+      - action: localsky.run_zone
+        data:
+          zone: dog_run
+          seconds: 300
+```
+
+Pause watering for three days when vacation mode turns on, resume on return:
+
+```yaml
+  - alias: "LocalSky: vacation pause"
+    triggers:
+      - trigger: state
+        entity_id: input_boolean.vacation_mode
+        to: "on"
+    actions:
+      - action: localsky.pause
+        data:
+          hours: 72
+
+  - alias: "LocalSky: vacation resume"
+    triggers:
+      - trigger: state
+        entity_id: input_boolean.vacation_mode
+        to: "off"
+    actions:
+      - action: localsky.resume
+```
+
+## Outage behavior
+
+- **LocalSky restarts or the network blips:** the SSE streams reconnect automatically with backoff (2 s growing to 30 s). In polling mode, failed polls mark the entities unavailable until the next successful fetch.
+- **HA restarts or goes down:** nothing changes on the LocalSky side. Scheduling, skip rules, and controller dispatch all run inside LocalSky; HA is a window into the system, not part of the watering path. (The one exception is the `ha_service_call` controller, which routes valve commands *through* HA; see [migrating-from-ha.md](migrating-from-ha.md) for why and how to move off it.)
+
+## Troubleshooting
+
+**LocalSky is not discovered.** mDNS does not cross VLANs or Docker bridge networks by default. LocalSky's compose file runs with `network_mode: host` so the announcement reaches the LAN; if your HA and LocalSky sit on different subnets, skip discovery and add the integration manually with host and port.
+
+**Setup fails with "service too old".** The integration requires LocalSky 0.2.0 or newer. Upgrade the LocalSky container and retry.
+
+**Repeating 401 / reauth loop.** The stored token is no longer valid. Open LocalSky **Settings > Account**, delete the old token, create a new one, and complete the reauth prompt in HA. If you are fronting LocalSky with a proxy auth gate, re-pair against port 8090 directly; the gate's redirects can masquerade as auth failures.
+
+**Duplicate entities.** You have both MQTT discovery and the HACS integration active. Choose one:
+
+- Keep the HACS integration (recommended): disable MQTT publishing in LocalSky's config, then clear the retained discovery topics on your broker, for example `mosquitto_sub -h <broker> -t 'homeassistant/#' --remove-retained --retained-only -W 5`. The stale `sensor.localsky_*` MQTT entities disappear after an HA restart.
+- Keep MQTT discovery: remove the LocalSky integration entry under **Settings > Devices & Services**.
+
+## Catalog status
+
+Today the integration installs as a HACS **custom repository**. Submission to the HACS default catalog is planned and gated on a soak period for the custom-repo install path, LocalSky's `/api/v1/*` surface being declared stable, and the integration's test suite. Until then, the custom repository step above is required exactly once per HA install.
 
 ## See also
 
-- [docs/api.md](api.md): the REST surface the HACS integration would call
-- [docs/standalone.md](standalone.md): comparison of all integration modes
-- HACS upstream documentation: https://hacs.xyz/docs/publish/start
-- Home Assistant custom integration documentation: https://developers.home-assistant.io/docs/creating_component_index
+- [standalone.md](standalone.md): everything LocalSky does without HA
+- [migrating-from-ha.md](migrating-from-ha.md): moving the watering brain out of HA
+- [api.md](api.md): the REST and SSE surface the integration consumes
+- [authentication.md](authentication.md): owner accounts and API tokens

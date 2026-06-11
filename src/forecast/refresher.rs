@@ -2,13 +2,21 @@
 // forecast every 30 minutes from the no-auth public API and pushes
 // the parsed snapshot into ForecastStore.
 //
-// The lat/lon comes from WEATHER_APP_LAT / WEATHER_APP_LON env vars
-// (already wired for the radar centering). Timezone is auto-detected
-// by Open-Meteo from the coordinates so daily windows match the
-// user's local clock.
+// Coordinates resolve per refresh tick, in priority order:
+//   1. deployment.location from the live config store (so a wizard
+//      location change applies on the next tick, no restart),
+//   2. the boot-config coordinates passed by main.rs,
+//   3. WEATHER_APP_LAT / WEATHER_APP_LON env vars (legacy v0.1 path),
+//   4. 40.0 / -75.0 as the last-ditch default.
+// (0, 0) config coordinates are treated as "never set" so a blank
+// config cannot point the forecast at Null Island.
+// Timezone is auto-detected by Open-Meteo from the coordinates so
+// daily windows match the user's local clock.
 
+use crate::config::FileConfigStore;
 use crate::forecast::snapshot::{DailyEntry, ForecastSnapshot, HourlyEntry};
 use crate::forecast::store::ForecastStore;
+use crate::ports::config_store::ConfigStore;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use reqwest::Client;
@@ -22,16 +30,16 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(30 * 60);
 /// the refresher never sleeps longer than the happy-path interval.
 const BACKOFF_MAX: Duration = Duration::from_secs(30 * 60);
 
-pub fn spawn_forecast_refresher(store: Arc<ForecastStore>) {
+/// Spawn the refresher loop. `boot_coords` is the wizard-configured
+/// deployment.location at boot (None on fresh installs); `cfg_store`
+/// is the live config handle re-read each tick so location edits apply
+/// without a restart.
+pub fn spawn_forecast_refresher(
+    store: Arc<ForecastStore>,
+    boot_coords: Option<(f64, f64)>,
+    cfg_store: Option<Arc<FileConfigStore>>,
+) {
     tokio::spawn(async move {
-        let lat: f64 = std::env::var("WEATHER_APP_LAT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(40.0);
-        let lon: f64 = std::env::var("WEATHER_APP_LON")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(-75.0);
         let client = match Client::builder()
             .timeout(Duration::from_secs(10))
             .user_agent("localsky/forecast")
@@ -51,6 +59,7 @@ pub fn spawn_forecast_refresher(store: Arc<ForecastStore>) {
         let mut degraded: bool = false;
 
         loop {
+            let (lat, lon) = resolve_coords(cfg_store.as_deref(), boot_coords).await;
             let sleep_for = match refresh_once(&client, lat, lon).await {
                 Ok(snap) => {
                     store.store(snap);
@@ -85,6 +94,44 @@ pub fn spawn_forecast_refresher(store: Arc<ForecastStore>) {
             tokio::time::sleep(sleep_for).await;
         }
     });
+}
+
+/// Resolve forecast coordinates for one refresh tick. Live config wins
+/// (wizard changes apply without restart), then the boot-config coords,
+/// then the legacy env vars, then the 40/-75 default. (0, 0) means
+/// "location never set" and falls through.
+async fn resolve_coords(
+    cfg_store: Option<&FileConfigStore>,
+    boot_coords: Option<(f64, f64)>,
+) -> (f64, f64) {
+    if let Some(store) = cfg_store {
+        if let Ok(cfg) = store.load().await {
+            let (lat, lon) = (cfg.deployment.location.lat, cfg.deployment.location.lon);
+            if lat != 0.0 || lon != 0.0 {
+                return (lat, lon);
+            }
+        }
+    }
+    if let Some((lat, lon)) = boot_coords {
+        if lat != 0.0 || lon != 0.0 {
+            return (lat, lon);
+        }
+    }
+    env_coords()
+}
+
+/// Legacy v0.1 coordinate source: WEATHER_APP_LAT/LON env vars with the
+/// historical 40.0 / -75.0 fallback.
+fn env_coords() -> (f64, f64) {
+    let lat: f64 = std::env::var("WEATHER_APP_LAT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(40.0);
+    let lon: f64 = std::env::var("WEATHER_APP_LON")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(-75.0);
+    (lat, lon)
 }
 
 /// Exponential backoff with jitter, capped at BACKOFF_MAX. base = 30s,
@@ -292,5 +339,57 @@ mod tests {
     #[test]
     fn empty_string_returns_zero() {
         assert_eq!(parse_om_local(""), 0);
+    }
+
+    #[tokio::test]
+    async fn resolve_coords_prefers_live_config_location() {
+        let dir = std::env::temp_dir().join(format!(
+            "ls-forecast-coords-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("localsky.toml");
+        let store = FileConfigStore::new(&path);
+        let mut cfg = crate::config::schema::Config::default();
+        cfg.deployment.location.lat = 28.5;
+        cfg.deployment.location.lon = -81.4;
+        store.save(&cfg).await.unwrap();
+        // Config beats the (Philadelphia-defaulting) boot coords.
+        let got = resolve_coords(Some(&store), Some((40.0, -75.0))).await;
+        assert!((got.0 - 28.5).abs() < 1e-9);
+        assert!((got.1 - (-81.4)).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn resolve_coords_falls_back_to_boot_coords_without_config() {
+        let dir = std::env::temp_dir().join(format!(
+            "ls-forecast-nocfg-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = FileConfigStore::new(dir.join("missing.toml"));
+        let got = resolve_coords(Some(&store), Some((28.5, -81.4))).await;
+        assert!((got.0 - 28.5).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn resolve_coords_treats_null_island_as_unset() {
+        let dir = std::env::temp_dir().join(format!(
+            "ls-forecast-zero-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("localsky.toml");
+        let store = FileConfigStore::new(&path);
+        let cfg = crate::config::schema::Config::default(); // lat/lon 0.0
+        store.save(&cfg).await.unwrap();
+        let got = resolve_coords(Some(&store), Some((28.5, -81.4))).await;
+        assert!(
+            (got.0 - 28.5).abs() < 1e-9,
+            "zero config coords must fall through"
+        );
     }
 }

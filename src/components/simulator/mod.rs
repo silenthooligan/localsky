@@ -188,7 +188,16 @@ pub fn SimulatorPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
 
                 <section class="sim-result">
                     {move || match result.get() {
-                        None => view! { <div class="sim-result__empty">"Adjust a slider to simulate."</div> }.into_any(),
+                        None => view! {
+                            <div class="sim-result__empty">
+                                <crate::components::ui::Icon name="simulator" size=34/>
+                                <p class="sim-result__empty-title">"Move a slider to run a what-if"</p>
+                                <p class="sim-result__empty-body">
+                                    "The engine re-decides instantly with your hypothetical "
+                                    "weather and shows the verdict diff against today."
+                                </p>
+                            </div>
+                        }.into_any(),
                         Some(r) => view! { <SimVerdict r/> }.into_any(),
                     }}
                 </section>

@@ -181,7 +181,7 @@ pub fn ControllersStep() -> impl IntoView {
 
     view! {
         <div class="setup-step">
-            <h2 class="setup-step__title">"Irrigation controller"</h2>
+            <h2 class="setup-step__title">"What runs your sprinklers?"</h2>
             <p class="setup-step__body">
                 "Which hardware fires your valves? OpenSprinkler talks directly on the LAN; "
                 "Rachio, Hydrawise, B-hyve and Rain Bird connect through their cloud APIs; "

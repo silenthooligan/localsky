@@ -109,7 +109,7 @@ pub fn AccountStep() -> impl IntoView {
 
     view! {
         <div class="setup-step">
-            <h2 class="setup-step__title">"Owner account"</h2>
+            <h2 class="setup-step__title">"Protect this LocalSky "<span class="setup-step__optional">"optional"</span></h2>
             <p class="setup-step__body">
                 "Protect this LocalSky with a login. The account guards the UI and API; "
                 "integrations like Home Assistant authenticate with an API token you create "

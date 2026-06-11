@@ -2,11 +2,13 @@
 
 LocalSky ships a built-in catalog of 12 grass species + ornamental categories with monthly Kc curves, root zone depths, and MAD percentages. Source: [src/engine/species_catalog.rs](../src/engine/species_catalog.rs).
 
+Curves are listed January-December as Northern-Hemisphere anchors; for Southern-Hemisphere locations the engine shifts every curve six months automatically.
+
 ETc for any zone equals `ET0 * Kc(species, day-of-year) * heat_multiplier`. Picking the right species is the single most impactful zone setting.
 
-## Warm-season turfgrasses (Florida-centric)
+## Warm-season turfgrasses
 
-These five are LocalSky's primary use case. UF/IFAS Extension publication numbers cited.
+These five dominate lawns across warm and subtropical climates worldwide (southern US, Australia, South America, southern Europe, Asia). Kc values cite UF/IFAS Extension publications; the curves are climate-driven, not region-specific.
 
 ### St. Augustinegrass
 
@@ -15,8 +17,8 @@ These five are LocalSky's primary use case. UF/IFAS Extension publication number
 - **Root zone depth**: ~150 mm (4-6 in; aerated lawns up to 6 in)
 - **MAD**: 50%
 - **Salinity tolerance**: ~6 dS/m (ECe at 50% yield)
-- **Mow height**: 3.5 in
-- **Notes**: most common Florida turf. Shallow-rooted; prefers deeper, less-frequent watering. Active growth Apr-Oct; semi-dormant Nov-Mar in north FL.
+- **Mow height**: 3.5 in (9 cm)
+- **Notes**: the dominant turf of humid-subtropical regions (US Gulf South; sold as "Buffalo grass" in Australia and New Zealand). Shallow-rooted; prefers deeper, less-frequent watering. Active through the warm season, semi-dormant through the cool season in cooler parts of its range.
 
 ### Bermudagrass
 
@@ -25,8 +27,8 @@ These five are LocalSky's primary use case. UF/IFAS Extension publication number
 - **Root zone depth**: ~200 mm (4-8 in; deep on sand)
 - **MAD**: 50%
 - **Salinity tolerance**: ~8 dS/m
-- **Mow height**: 1.5 in
-- **Notes**: deepest-rooted common turf. Drought-tolerant; can go semi-dormant in heat.
+- **Mow height**: 1.5 in (4 cm)
+- **Notes**: deepest-rooted common turf (sold as "Couch grass" in Australia). Drought-tolerant; can go semi-dormant in heat.
 
 ### Zoysiagrass
 
@@ -35,7 +37,7 @@ These five are LocalSky's primary use case. UF/IFAS Extension publication number
 - **Root zone depth**: ~150 mm
 - **MAD**: 50%
 - **Salinity tolerance**: ~7 dS/m
-- **Mow height**: 2.0 in
+- **Mow height**: 2.0 in (5 cm)
 - **Notes**: slow but dense; tolerates moderate shade; recovers slowly from drought.
 
 ### Bahiagrass
@@ -45,8 +47,8 @@ These five are LocalSky's primary use case. UF/IFAS Extension publication number
 - **Root zone depth**: ~200 mm
 - **MAD**: 55%
 - **Salinity tolerance**: ~4 dS/m
-- **Mow height**: 3.5 in
-- **Notes**: drought-tolerant; common Florida pasture grass; tolerates low fertility.
+- **Mow height**: 3.5 in (9 cm)
+- **Notes**: drought-tolerant; widely grown pasture grass across the subtropics (native to South America); tolerates low fertility.
 
 ### Centipedegrass
 
@@ -55,12 +57,12 @@ These five are LocalSky's primary use case. UF/IFAS Extension publication number
 - **Root zone depth**: ~100 mm (3-5 in; shallow)
 - **MAD**: 50%
 - **Salinity tolerance**: ~3 dS/m
-- **Mow height**: 2.0 in
+- **Mow height**: 2.0 in (5 cm)
 - **Notes**: low-maintenance; iron-chlorotic on high-pH soils.
 
 ## Cool-season turfgrasses
 
-For northern and transitional-zone users. Curves drawn from FAO-56 Table 12.
+For cool-temperate and transitional climates (northern US and Canada, the UK and northern Europe, New Zealand, highland regions). Curves drawn from FAO-56 Table 12.
 
 ### Kentucky Bluegrass
 
@@ -81,13 +83,13 @@ For northern and transitional-zone users. Curves drawn from FAO-56 Table 12.
 - **Kc (Jan-Dec)**: 0.55 / 0.65 / 0.78 / 0.85 / 0.85 / 0.80 / 0.78 / 0.80 / 0.85 / 0.80 / 0.65 / 0.55
 - **Root zone depth**: ~125 mm
 - **MAD**: 50%
-- **Notes**: quick germination; often used for winter overseeding in the south.
+- **Notes**: quick germination; often used to overseed dormant warm-season lawns in mild-winter regions.
 
 ## Non-turf categories
 
 ### Ornamental shrubs
 
-- **Citation**: UF/IFAS [ENH1115](https://edis.ifas.ufl.edu/publication/EP378), "Florida-Friendly Landscaping"
+- **Citation**: UF/IFAS [ENH1115](https://edis.ifas.ufl.edu/publication/EP378), "Florida-Friendly Landscaping". Kc range consistent with FAO-56 Table 12 ornamental values.
 - **Kc**: 0.45-0.55 year-round (low seasonal variation)
 - **Root zone depth**: ~250 mm
 - **MAD**: 40%
@@ -129,6 +131,6 @@ New species PRs welcome. Open a PR against [src/engine/species_catalog.rs](../sr
 - 12 monthly Kc values (mid-month anchors)
 - Default root zone depth (mm)
 - Default MAD percentage
-- A citation: FAO-56 Table 12, an Extension publication number, or a peer-reviewed paper. We don't accept "trust me" submissions.
+- A citation: FAO-56 Table 12, a university extension or national agronomy-institute publication (UF/IFAS, AHDB, CSIRO, etc.), or a peer-reviewed paper. We don't accept "trust me" submissions.
 
 The catalog stores `citation` and `notes` strings inline; the dashboard exposes them in the zone-editor's species picker so operators see provenance at pick time.

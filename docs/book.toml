@@ -10,9 +10,9 @@ default-theme = "ayu"
 preferred-dark-theme = "ayu"
 git-repository-url = "https://github.com/silenthooligan/localsky"
 edit-url-template = "https://github.com/silenthooligan/localsky/edit/main/docs/src/{path}"
-site-url = "/"
+site-url = "/docs/"
 additional-css = ["theme/css/custom.css"]
-additional-js = ["theme/js/umami.js"]
+additional-js = ["theme/js/umami.js", "theme/js/backlink.js", "theme/js/branding.js"]
 no-section-label = false
 mathjax-support = false
 

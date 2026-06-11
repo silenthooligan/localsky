@@ -40,6 +40,25 @@ pub fn SettingsAdvanced() -> impl IntoView {
             let Some(file) = input.files().and_then(|f| f.item(0)) else {
                 return;
             };
+            // Destructive: a restore replaces the configuration and the
+            // full history database at the next container restart, so the
+            // file pick alone must not trigger it.
+            let confirmed = web_sys::window()
+                .map(|w| {
+                    w.confirm_with_message(
+                        "Restore from this bundle? It replaces the current \
+                         configuration and history database at the next \
+                         container restart.",
+                    )
+                    .unwrap_or(false)
+                })
+                .unwrap_or(false);
+            if !confirmed {
+                // Clear the picker so re-selecting the same file fires
+                // another change event.
+                input.set_value("");
+                return;
+            }
             restore_msg.set("Uploading…".into());
             wasm_bindgen_futures::spawn_local(async move {
                 let form = web_sys::FormData::new().ok();
@@ -714,6 +733,9 @@ fn RawTomlEditor() -> impl IntoView {
 
     #[cfg(feature = "hydrate")]
     {
+        // Toast handle captured at component scope; the load task runs
+        // detached, where context lookup isn't reliable.
+        let toast = crate::components::ui::use_toast();
         // Initial load on mount.
         Effect::new(move |_| {
             state.set(RawSaveState::Loading);
@@ -723,7 +745,10 @@ fn RawTomlEditor() -> impl IntoView {
                         text.set(s);
                         state.set(RawSaveState::Idle);
                     }
-                    Err(e) => state.set(RawSaveState::Error(format!("load: {e}"))),
+                    Err(e) => {
+                        state.set(RawSaveState::Error(format!("load: {e}")));
+                        toast.error(format!("Couldn't load localsky.toml: {e}"));
+                    }
                 }
             });
         });
@@ -787,6 +812,12 @@ async fn fetch_raw_toml() -> Result<String, String> {
         .send()
         .await
         .map_err(|e| e.to_string())?;
+    // An error body (auth page, JSON error) must not land in the
+    // textarea, where saving it back would clobber the real config.
+    if !resp.ok() {
+        let detail = resp.text().await.unwrap_or_default();
+        return Err(format!("{} {}", resp.status(), detail));
+    }
     resp.text().await.map_err(|e| e.to_string())
 }
 

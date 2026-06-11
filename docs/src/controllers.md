@@ -4,16 +4,18 @@ LocalSky's `IrrigationController` port abstracts the act of firing valves. The s
 
 ## Supported controllers
 
-| Controller | Path | Cloud required? | Hardware cost | Status in v0.1 |
+| Controller | Path | Cloud required? | Hardware cost (US$) | Status in v0.1 |
 |---|---|---|---|---|
-| **OpenSprinkler** (boxed) | Direct HTTP on LAN | No | $130-180 | Tested |
-| **OpenSprinkler Pi** | Direct HTTP on LAN | No | ~$80 (Pi) + relay board | Tested |
+| **OpenSprinkler** (boxed) | Direct HTTP on LAN | No | 130-180 | Tested |
+| **OpenSprinkler Pi** | Direct HTTP on LAN | No | ~80 (Pi) + relay board | Tested |
 | **Home Assistant service call** | HA REST | No (HA local) | Whatever HA drives | Tested |
-| **ESPHome sprinkler** | ESPHome native API | No | $5-40 ESP32 + valves | Community / planned |
-| **Rachio** Gen 2/3 | Rachio cloud API | Yes | $130-250 | Planned |
-| **Hunter Hydrawise** | Cloud API | Yes | $130-300 | Community / planned |
-| **B-hyve** | Cloud API | Yes | $80-150 | Community / planned |
+| **ESPHome sprinkler** | ESPHome native API | No | 5-40 ESP32 + valves | Community / planned |
+| **Rachio** Gen 2/3 | Rachio cloud API | Yes | 130-250 | Planned |
+| **Hunter Hydrawise** | Cloud API | Yes | 130-300 | Community / planned |
+| **B-hyve** | Cloud API | Yes | 80-150 | Community / planned |
 | **DryRun** | No-op | No | None | Tested |
+
+Prices are US retail; availability and cost vary by region. Rachio, B-hyve, and Hydrawise are sold mostly through North American retail; OpenSprinkler and ESPHome hardware ship worldwide, which makes them the natural picks outside North America too.
 
 ## OpenSprinkler (the ideal)
 
@@ -21,8 +23,8 @@ OpenSprinkler is LocalSky's reference controller for one reason: it speaks a doc
 
 ### Hardware options
 
-- **OpenSprinkler 3.x boxed** (24 stations, $180), the canonical choice for an outdoor enclosure.
-- **OpenSprinkler 3.x bare PCB** ($130), DIY mount.
+- **OpenSprinkler 3.x boxed** (24 stations, US$180), the canonical choice for an outdoor enclosure.
+- **OpenSprinkler 3.x bare PCB** (US$130), DIY mount.
 - **OpenSprinkler Pi**: a Pi HAT + relay board. Cheaper if you have a spare Pi.
 - **OpenSprinkler OSPi-Plus**: newer board, more I/O.
 

@@ -99,7 +99,7 @@ struct Credentials {
 }
 
 async fn post_setup(State(s): State<AuthApiState>, req: Request<Body>) -> Response {
-    if let Some(ip) = client_ip(&req) {
+    if let Some(ip) = client_ip(&req, &s.rt.policy.load().trusted_proxies) {
         if !s.rt.allow_login_attempt(ip).await {
             return err(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -161,7 +161,7 @@ async fn post_setup(State(s): State<AuthApiState>, req: Request<Body>) -> Respon
 }
 
 async fn post_login(State(s): State<AuthApiState>, req: Request<Body>) -> Response {
-    if let Some(ip) = client_ip(&req) {
+    if let Some(ip) = client_ip(&req, &s.rt.policy.load().trusted_proxies) {
         if !s.rt.allow_login_attempt(ip).await {
             return err(
                 StatusCode::TOO_MANY_REQUESTS,

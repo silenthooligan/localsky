@@ -11,8 +11,10 @@
 // shrink the run, or extend it — it can never clear a freeze / wind /
 // restriction / rain gate or force a run. `AdjustMultiplier` is hard-
 // clamped to [0.5, 1.5] in code here, never trusted from config. A metric
-// with no data (e.g. ZoneSoilPct when the probe is offline) compares as
-// `false`, so missing data never *causes* a skip via a custom rule.
+// with no data (e.g. ZoneSoilPct when the probe is offline) evaluates as
+// Unknown and Unknown propagates through Not/All/Any (Kleene logic), so
+// no amount of nesting (`Not(...)` included) can turn missing data into a
+// fired rule: at the root, Unknown coerces to "did not fire".
 
 use serde::{Deserialize, Serialize};
 
@@ -40,7 +42,7 @@ pub enum Metric {
     HumidityNowPct,
     DaysSinceRain,
     /// Per-zone soil moisture %. `None` (probe offline / unassigned) → the
-    /// comparison is `false`.
+    /// comparison is Unknown, which can never fire a rule.
     ZoneSoilPct,
 }
 
@@ -184,29 +186,84 @@ fn metric_value(m: Metric, i: &Inputs, zone: &ZoneSoil) -> Option<f64> {
         Metric::WindNowMph => i.wind_now_mph,
         Metric::WindMaxTodayMph => i.wind_max_today_mph,
         Metric::TempNowF => i.temp_now_f,
-        Metric::TempMin24hF => i.temp_min_24h_f,
+        // None when the 24h forecast low is unavailable → Unknown, so a
+        // missing forecast can't satisfy (or, via Not, fire) a rule.
+        Metric::TempMin24hF => return i.temp_min_24h_f,
         Metric::TempMax3dayF => i.temp_max_3day_f,
         Metric::HumidityNowPct => i.humidity_now_pct,
         Metric::DaysSinceRain => i.days_since_significant_rain as f64,
-        // None when the probe is offline / unassigned → compare false.
+        // None when the probe is offline / unassigned → Unknown.
         Metric::ZoneSoilPct => return zone.pct,
     })
 }
 
-/// Evaluate one condition tree against a zone context. A `Compare` over a
-/// metric with no value is `false` (fail-safe).
-pub fn eval_expr(e: &ConditionExpr, ctx: &ConditionCtx) -> bool {
+/// Three-valued (Kleene) truth so missing data stays "missing" through
+/// the whole tree instead of collapsing to `false` mid-walk, where a
+/// wrapping `Not` would flip it to `true` and let a probe outage fire a
+/// skip rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tri {
+    True,
+    False,
+    Unknown,
+}
+
+fn eval_tri(e: &ConditionExpr, ctx: &ConditionCtx) -> Tri {
     match e {
         ConditionExpr::Compare { metric, op, value } => {
             match metric_value(*metric, ctx.i, ctx.zone) {
-                Some(v) => op.apply(v, *value),
-                None => false,
+                Some(v) => {
+                    if op.apply(v, *value) {
+                        Tri::True
+                    } else {
+                        Tri::False
+                    }
+                }
+                None => Tri::Unknown,
             }
         }
-        ConditionExpr::All(xs) => xs.iter().all(|x| eval_expr(x, ctx)),
-        ConditionExpr::Any(xs) => xs.iter().any(|x| eval_expr(x, ctx)),
-        ConditionExpr::Not(x) => !eval_expr(x, ctx),
+        // Kleene AND: False dominates, then Unknown, else True.
+        // Empty All stays vacuously true.
+        ConditionExpr::All(xs) => {
+            let mut acc = Tri::True;
+            for x in xs {
+                match eval_tri(x, ctx) {
+                    Tri::False => return Tri::False,
+                    Tri::Unknown => acc = Tri::Unknown,
+                    Tri::True => {}
+                }
+            }
+            acc
+        }
+        // Kleene OR: True dominates, then Unknown, else False.
+        // Empty Any stays false.
+        ConditionExpr::Any(xs) => {
+            let mut acc = Tri::False;
+            for x in xs {
+                match eval_tri(x, ctx) {
+                    Tri::True => return Tri::True,
+                    Tri::Unknown => acc = Tri::Unknown,
+                    Tri::False => {}
+                }
+            }
+            acc
+        }
+        ConditionExpr::Not(x) => match eval_tri(x, ctx) {
+            Tri::True => Tri::False,
+            Tri::False => Tri::True,
+            Tri::Unknown => Tri::Unknown,
+        },
     }
+}
+
+/// Evaluate one condition tree against a zone context. Internally
+/// tri-state: a `Compare` over a metric with no value is Unknown, and
+/// Unknown propagates through `Not`/`All`/`Any` (Kleene logic). Only
+/// here at the root does Unknown coerce to `false`, so an expression
+/// whose outcome depends on missing data can never fire a rule
+/// (fail-safe: missing data never causes a skip).
+pub fn eval_expr(e: &ConditionExpr, ctx: &ConditionCtx) -> bool {
+    eval_tri(e, ctx) == Tri::True
 }
 
 /// Run every enabled, in-scope rule for one zone and fold their effects.
@@ -390,6 +447,93 @@ mod tests {
                 &c
             ));
         }
+    }
+
+    #[test]
+    fn not_over_missing_metric_does_not_fire() {
+        let i = Inputs::default();
+        let z = zone("a", None);
+        let c = ctx_for(&i, &z);
+        let missing_cmp = ConditionExpr::Compare {
+            metric: Metric::ZoneSoilPct,
+            op: CmpOp::Lt,
+            value: 30.0,
+        };
+        // Not(Unknown) is Unknown, which coerces to false at the root —
+        // a probe outage must not fire a skip rule through negation.
+        assert!(!eval_expr(
+            &ConditionExpr::Not(Box::new(missing_cmp.clone())),
+            &c
+        ));
+        // Double negation stays Unknown too.
+        assert!(!eval_expr(
+            &ConditionExpr::Not(Box::new(ConditionExpr::Not(Box::new(missing_cmp.clone())))),
+            &c
+        ));
+        // End-to-end: a Skip rule built on Not(missing) never skips.
+        let r = rule(
+            "dry_skip",
+            ConditionExpr::Not(Box::new(missing_cmp)),
+            RuleAction::Skip,
+        );
+        let out = apply_zone_rules(std::slice::from_ref(&r), &c);
+        assert!(out.skip.is_none(), "missing data must never cause a skip");
+        assert_eq!(out.fired[0].outcome, "passed");
+    }
+
+    #[test]
+    fn unknown_propagates_through_all_any() {
+        let i = Inputs {
+            wind_now_mph: 12.0,
+            ..Default::default()
+        };
+        let z = zone("a", None);
+        let c = ctx_for(&i, &z);
+        let unknown = ConditionExpr::Compare {
+            metric: Metric::ZoneSoilPct,
+            op: CmpOp::Gt,
+            value: 50.0,
+        };
+        let truthy = ConditionExpr::Compare {
+            metric: Metric::WindNowMph,
+            op: CmpOp::Gt,
+            value: 10.0,
+        };
+        let falsy = ConditionExpr::Compare {
+            metric: Metric::WindNowMph,
+            op: CmpOp::Gt,
+            value: 100.0,
+        };
+        // All(True, Unknown) depends on the missing value → does not fire.
+        assert!(!eval_expr(
+            &ConditionExpr::All(vec![truthy.clone(), unknown.clone()]),
+            &c
+        ));
+        // All(False, Unknown) is decided by the known false → false.
+        assert!(!eval_expr(
+            &ConditionExpr::All(vec![falsy.clone(), unknown.clone()]),
+            &c
+        ));
+        // Any(True, Unknown) is decided by the known true → fires.
+        assert!(eval_expr(
+            &ConditionExpr::Any(vec![truthy.clone(), unknown.clone()]),
+            &c
+        ));
+        // Any(False, Unknown) depends on the missing value → does not fire.
+        assert!(!eval_expr(
+            &ConditionExpr::Any(vec![falsy.clone(), unknown.clone()]),
+            &c
+        ));
+        // Not(All(True, Unknown)) must stay Unknown, not become true.
+        assert!(!eval_expr(
+            &ConditionExpr::Not(Box::new(ConditionExpr::All(vec![truthy, unknown.clone()]))),
+            &c
+        ));
+        // Not(Any(False, Unknown)) must stay Unknown, not become true.
+        assert!(!eval_expr(
+            &ConditionExpr::Not(Box::new(ConditionExpr::Any(vec![falsy, unknown]))),
+            &c
+        ));
     }
 
     #[test]

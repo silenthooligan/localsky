@@ -10,11 +10,13 @@
 use leptos::prelude::*;
 
 use crate::components::ui::StatTile;
+use crate::components::units_fmt::{temp_unit, temp_value, use_unit_prefs};
 use crate::history::types::WeatherHistory;
 use crate::tempest::state::Snapshot;
 
 #[component]
 pub fn WeatherTelemetry(snap: ReadSignal<Snapshot>) -> impl IntoView {
+    let prefs = use_unit_prefs();
     let hist = RwSignal::new(WeatherHistory::default());
 
     #[cfg(feature = "hydrate")]
@@ -40,8 +42,9 @@ pub fn WeatherTelemetry(snap: ReadSignal<Snapshot>) -> impl IntoView {
             {move || {
                 let s = snap.get();
                 let h = hist.get();
+                let p = prefs.get();
                 view! {
-                    <StatTile label="Temp" value=format!("{:.0}", s.air_temp_f) unit="°F" icon="thermometer" spark=h.air_temp_f accent="var(--accent-warm)".to_string()/>
+                    <StatTile label="Temp" value=temp_value(s.air_temp_f, p) unit=temp_unit(p) icon="thermometer" spark=h.air_temp_f accent="var(--accent-warm)".to_string()/>
                     <StatTile label="Humidity" value=format!("{:.0}", s.rh_pct) unit="%" icon="droplet" spark=h.rh_pct accent="var(--accent-rain)".to_string()/>
                     <StatTile label="Wind" value=format!("{:.0}", s.wind_avg_mph) unit="mph" icon="wind" spark=h.wind_avg_mph accent="var(--accent-cool)".to_string()/>
                     <StatTile label="Pressure" value=format!("{:.2}", s.pressure_inhg) unit="inHg" icon="gauge" spark=h.pressure_inhg accent="var(--accent)".to_string()/>

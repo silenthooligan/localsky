@@ -10,6 +10,13 @@
 //   - The adapter exchanges refresh_token -> access_token at startup
 //     and on every 401, rotating the refresh_token when Netatmo
 //     issues a new one in the response.
+//   - Rotated refresh tokens are persisted to a sidecar state file
+//     (netatmo_tokens.json next to the config file, keyed by source
+//     id) because Netatmo invalidates the old token on rotation: an
+//     in-memory-only rotation would brick the source on restart. The
+//     sidecar records which config token it was rotated from, so
+//     pasting a fresh token into the config (re-authorization) takes
+//     precedence over a stale sidecar entry.
 //
 // Endpoint:
 //   POST /oauth2/token              refresh_token -> access_token + new refresh_token
@@ -40,6 +47,7 @@ use crate::config::schema::NetatmoConfig;
 use crate::ports::weather_source::{
     ShutdownSignal, SourceBus, SourceCaps, SourceEvent, WeatherField, WeatherSource,
 };
+use serde::Serialize;
 
 const API_BASE: &str = "https://api.netatmo.com";
 const POLL_INTERVAL: Duration = Duration::from_secs(10 * 60);
@@ -49,9 +57,13 @@ pub struct Netatmo {
     config: NetatmoConfig,
     client: Client,
     /// (access_token, refresh_token). Both rotate over the source's
-    /// lifetime; refresh_token starts from config and is replaced on
-    /// every successful /oauth2/token round-trip.
+    /// lifetime; refresh_token starts from config (or the persisted
+    /// rotation state) and is replaced on every successful
+    /// /oauth2/token round-trip.
     tokens: Mutex<NetatmoTokens>,
+    /// Sidecar file rotated refresh tokens are persisted to. None
+    /// disables persistence (tests).
+    state_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -68,19 +80,41 @@ struct TokenResponse {
 
 impl Netatmo {
     pub fn new(id: impl Into<String>, config: NetatmoConfig) -> Self {
+        Self::with_state_path(id, config, Some(default_state_path()))
+    }
+
+    /// Construct with an explicit sidecar path (None = no persistence).
+    /// `new()` uses the default path next to the config file.
+    pub fn with_state_path(
+        id: impl Into<String>,
+        config: NetatmoConfig,
+        state_path: Option<std::path::PathBuf>,
+    ) -> Self {
+        let id = id.into();
         let client = Client::builder()
             .timeout(Duration::from_secs(15))
             .build()
             .expect("reqwest client construction");
+        // Resume a previously rotated refresh token when the sidecar
+        // entry descends from the SAME config token; a changed config
+        // token means the operator re-authorized, so config wins.
+        let mut refresh_token = config.refresh_token.clone();
+        if let Some(path) = state_path.as_ref() {
+            if let Some(current) = load_persisted_token(path, &id, &config.refresh_token) {
+                info!(source_id = %id, "resuming rotated Netatmo refresh token from state file");
+                refresh_token = current;
+            }
+        }
         let initial = NetatmoTokens {
             access_token: None,
-            refresh_token: config.refresh_token.clone(),
+            refresh_token,
         };
         Self {
-            id: id.into(),
+            id,
             config,
             client,
             tokens: Mutex::new(initial),
+            state_path,
         }
     }
 
@@ -112,9 +146,34 @@ impl Netatmo {
             .error_for_status()?
             .json()
             .await?;
-        let mut t = self.tokens.lock().await;
-        t.access_token = Some(resp.access_token.clone());
-        t.refresh_token = resp.refresh_token;
+        let rotated = {
+            let mut t = self.tokens.lock().await;
+            t.access_token = Some(resp.access_token.clone());
+            let changed = t.refresh_token != resp.refresh_token;
+            t.refresh_token = resp.refresh_token.clone();
+            changed
+        };
+        // Netatmo invalidates the old refresh token on rotation, so the
+        // new one must survive a restart. Best-effort: a failed write
+        // only warns (the source keeps running on the in-memory token).
+        if rotated {
+            if let Some(path) = self.state_path.as_ref() {
+                if let Err(e) = persist_rotated_token(
+                    path,
+                    &self.id,
+                    &self.config.refresh_token,
+                    &resp.refresh_token,
+                ) {
+                    warn!(
+                        source_id = %self.id,
+                        error = %e,
+                        "could not persist rotated Netatmo refresh token; re-authorization may be needed after a restart"
+                    );
+                } else {
+                    debug!(source_id = %self.id, "persisted rotated Netatmo refresh token");
+                }
+            }
+        }
         Ok(resp.access_token)
     }
 
@@ -221,6 +280,80 @@ fn extract_fields(station: &Value) -> Vec<(WeatherField, f64)> {
 
 fn c_to_f(c: f64) -> f64 {
     c * 9.0 / 5.0 + 32.0
+}
+
+// ----- Rotated refresh-token persistence -----
+//
+// Format: JSON map of source id -> { config_refresh_token,
+// current_refresh_token } at <config dir>/netatmo_tokens.json.
+// config_refresh_token records which configured token the rotation
+// chain descends from; when the operator pastes a new token into the
+// config (re-authorization), the sidecar entry no longer matches and
+// is ignored (then overwritten on the next rotation).
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedTokenEntry {
+    config_refresh_token: String,
+    current_refresh_token: String,
+}
+
+/// Default sidecar location: next to the config file so it lives on
+/// the same persistent volume (/data in the container).
+fn default_state_path() -> std::path::PathBuf {
+    let config_path =
+        std::env::var("CONFIG_PATH").unwrap_or_else(|_| "/data/localsky.toml".to_string());
+    std::path::Path::new(&config_path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("/data"))
+        .join("netatmo_tokens.json")
+}
+
+fn read_state_file(
+    path: &std::path::Path,
+) -> std::collections::HashMap<String, PersistedTokenEntry> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// The persisted current token for `id`, but only when the entry was
+/// rotated from the SAME config token (otherwise the operator
+/// re-authorized and the sidecar is stale).
+fn load_persisted_token(path: &std::path::Path, id: &str, config_token: &str) -> Option<String> {
+    let entries = read_state_file(path);
+    let entry = entries.get(id)?;
+    if entry.config_refresh_token == config_token {
+        Some(entry.current_refresh_token.clone())
+    } else {
+        None
+    }
+}
+
+/// Read-modify-write the sidecar with the newly rotated token for `id`.
+/// Atomic via tmp + rename so a crash mid-write can't truncate other
+/// sources' entries.
+fn persist_rotated_token(
+    path: &std::path::Path,
+    id: &str,
+    config_token: &str,
+    current_token: &str,
+) -> anyhow::Result<()> {
+    let mut entries = read_state_file(path);
+    entries.insert(
+        id.to_string(),
+        PersistedTokenEntry {
+            config_refresh_token: config_token.to_string(),
+            current_refresh_token: current_token.to_string(),
+        },
+    );
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&entries)?)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 /// Minimal application/x-www-form-urlencoded encoder for the four
@@ -340,7 +473,7 @@ mod tests {
     use serde_json::json;
 
     fn nt_test() -> Netatmo {
-        Netatmo::new(
+        Netatmo::with_state_path(
             "nt",
             NetatmoConfig {
                 client_id: "c".into(),
@@ -348,7 +481,76 @@ mod tests {
                 refresh_token: "rt".into(),
                 device_id: "70:ee:50:00:11:22".into(),
             },
+            None,
         )
+    }
+
+    fn temp_state_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir()
+            .join(format!(
+                "ls-netatmo-{tag}-{}-{}",
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            ))
+            .join("netatmo_tokens.json")
+    }
+
+    #[test]
+    fn persisted_rotation_round_trips() {
+        let path = temp_state_path("roundtrip");
+        persist_rotated_token(&path, "nt", "config-token", "rotated-1").unwrap();
+        assert_eq!(
+            load_persisted_token(&path, "nt", "config-token").as_deref(),
+            Some("rotated-1")
+        );
+        // A second rotation replaces the entry.
+        persist_rotated_token(&path, "nt", "config-token", "rotated-2").unwrap();
+        assert_eq!(
+            load_persisted_token(&path, "nt", "config-token").as_deref(),
+            Some("rotated-2")
+        );
+    }
+
+    #[test]
+    fn new_config_token_invalidates_sidecar_entry() {
+        let path = temp_state_path("reauth");
+        persist_rotated_token(&path, "nt", "old-config-token", "rotated-1").unwrap();
+        // Operator re-authorized and pasted a new token into config:
+        // the stale sidecar entry must NOT be resumed.
+        assert_eq!(load_persisted_token(&path, "nt", "new-config-token"), None);
+    }
+
+    #[test]
+    fn sidecar_keeps_entries_per_source_id() {
+        let path = temp_state_path("multi");
+        persist_rotated_token(&path, "nt_a", "cfg-a", "rot-a").unwrap();
+        persist_rotated_token(&path, "nt_b", "cfg-b", "rot-b").unwrap();
+        assert_eq!(
+            load_persisted_token(&path, "nt_a", "cfg-a").as_deref(),
+            Some("rot-a")
+        );
+        assert_eq!(
+            load_persisted_token(&path, "nt_b", "cfg-b").as_deref(),
+            Some("rot-b")
+        );
+    }
+
+    #[test]
+    fn constructor_resumes_persisted_token() {
+        let path = temp_state_path("resume");
+        persist_rotated_token(&path, "nt", "rt", "rotated-current").unwrap();
+        let n = Netatmo::with_state_path(
+            "nt",
+            NetatmoConfig {
+                client_id: "c".into(),
+                client_secret: "s".into(),
+                refresh_token: "rt".into(),
+                device_id: "70:ee:50:00:11:22".into(),
+            },
+            Some(path),
+        );
+        let tokens = n.tokens.blocking_lock();
+        assert_eq!(tokens.refresh_token, "rotated-current");
     }
 
     #[test]

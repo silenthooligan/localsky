@@ -12,18 +12,18 @@ Source: [src/engine/skip_rules.rs](../src/engine/skip_rules.rs).
 | 2 | Manual override: run tomorrow | `is_tomorrow && override_tomorrow == "run"` | none | UI |
 | 3 | Vacation pause (timed) | `pause_until_epoch > now_epoch` | none | UI |
 | 4 | Vacation pause (toggle) | `is_paused == true` | none | UI |
-| 5 | Currently raining | `rain_intensity_now_in_hr > 0.01` | 0.01 in/hr | `rain_now_in_hr` |
-| 6 | Freeze risk now | `temp_now_f < min_temp_f` | 38°F | `min_temp_f` |
-| 7 | Overnight freeze | `temp_min_24h_f < min_temp_f` | 38°F | `min_temp_f` |
-| 8 | Soil frost | `soil_temp_yard_min_f < frost_skip_soil_f` | 35°F | `frost_skip_soil_f` |
-| 9 | Wind too high now | `wind_now_mph > max_wind_mph` | 10 mph | `max_wind_mph` |
-| 10 | Windy day forecast | `wind_max_today_mph > max_wind_mph + 5` | +5 mph slack | `wind_forecast_slack_mph` |
-| 11 | Already wet | `rain_today_in >= 0.05` | 0.05 in | `already_wet_in` |
+| 5 | Currently raining | `rain_intensity_now_in_hr > 0.01` | 0.01 in/hr (0.25 mm/hr) | `rain_now_in_hr` |
+| 6 | Freeze risk now | `temp_now_f < min_temp_f` | 38°F (3.3°C) | `min_temp_f` |
+| 7 | Overnight freeze | `temp_min_24h_f < min_temp_f` | 38°F (3.3°C) | `min_temp_f` |
+| 8 | Soil frost | `soil_temp_yard_min_f < frost_skip_soil_f` | 35°F (1.7°C) | `frost_skip_soil_f` |
+| 9 | Wind too high now | `wind_now_mph > max_wind_mph` | 10 mph (16 km/h) | `max_wind_mph` |
+| 10 | Windy day forecast | `wind_max_today_mph > max_wind_mph + 5` | +5 mph (8 km/h) slack | `wind_forecast_slack_mph` |
+| 11 | Already wet | `rain_today_in >= 0.05` | 0.05 in (1.3 mm) | `already_wet_in` |
 | 12 | All zones soil-saturated | every zone's moisture % >= saturation threshold | per-zone | per-zone soil settings |
-| 13 | Rain in next 4 hours | `rain_next_4h_in >= 0.10` | 0.10 in | `rain_next_4h_skip_in` |
-| 14 | Tomorrow rain (confidence-weighted) | `forecast_in * prob/100 >= rain_skip_in` | 0.25 in (weighted) | `rain_skip_in` |
+| 13 | Rain in next 4 hours | `rain_next_4h_in >= 0.10` | 0.10 in (2.5 mm) | `rain_next_4h_skip_in` |
+| 14 | Tomorrow rain (confidence-weighted) | `forecast_in * prob/100 >= rain_skip_in` | 0.25 in (6.4 mm), weighted | `rain_skip_in` |
 | 15 | 3-day rain rollup | `rain_3day_weighted_in >= 1.5 * rain_skip_in` | 1.5x multiplier | `rain_3day_factor` |
-| 16 | Heat advisory (pre-water) | 3-day max >= 95°F + humidity >= 60% + 2+ dry days | composite | `heat_advisory_*` |
+| 16 | Heat advisory (pre-water) | 3-day max >= 95°F (35°C) + humidity >= 60% + 2+ dry days | composite | `heat_advisory_*` |
 | 17 | Dry-run mode | `is_dry_run == true` | none | UI |
 | - | Default | (no rule matched) | none | run |
 
@@ -39,7 +39,7 @@ The ladder returns one of three verdicts:
 
 ### Currently raining (rule 5)
 
-Live precipitation intensity from the Tempest hub (or merged from any source advertising `RainIntensityInHr`). 0.01 in/hr is essentially "you can see the pavement getting wet"; anything above triggers the skip.
+Live precipitation intensity from the Tempest hub (or merged from any source advertising `RainIntensityInHr`). 0.01 in/hr (0.25 mm/hr) is essentially "you can see the pavement getting wet"; anything above triggers the skip.
 
 ### Freeze + soil frost (rules 6-8)
 
@@ -49,11 +49,11 @@ Soil temperature comes from any source providing `soil_temp_yard_min_f`. If no s
 
 ### Wind (rules 9-10)
 
-Two thresholds: live wind right now, and forecast peak with a 5 mph slack on the latter (forecast peaks tend to overshoot real maxes). Operators with sensitive sprinkler types (mp_rotator, drip) want max_wind_mph lower (~6); rotor heads tolerate up to 12-15 mph.
+Two thresholds: live wind right now, and forecast peak with a 5 mph (8 km/h) slack on the latter (forecast peaks tend to overshoot real maxes). Operators with sensitive sprinkler types (mp_rotator, drip) want max_wind_mph lower (~6 mph / 10 km/h); rotor heads tolerate up to 12-15 mph (19-24 km/h).
 
 ### Already wet (rule 11)
 
-Fixed floor at 0.05 in of accumulated rain today. Configurable but rarely changed, it's a sanity check that says "I'm not going to add water to a wet lawn."
+Fixed floor at 0.05 in (1.3 mm) of accumulated rain today. Configurable but rarely changed, it's a sanity check that says "I'm not going to add water to a wet lawn."
 
 ### Yard-wide soil saturation (rule 12)
 
@@ -67,7 +67,7 @@ Three look-ahead windows: next 4 hours (hourly forecast), tomorrow (probability-
 
 The only rule that can fire `run_extended`. Triggers when:
 
-- `temp_max_3day_f >= 95°F` (or operator's heat_advisory_temp_f)
+- `temp_max_3day_f >= 95°F` (35°C; or operator's heat_advisory_temp_f)
 - `humidity_now_pct >= 60%` (heat_advisory_humidity_pct)
 - `days_since_significant_rain >= 2` (heat_advisory_dry_days)
 - `rain_3day_weighted_in < 0.5 * rain_skip_in` (forecast doesn't cover it)
@@ -80,18 +80,18 @@ All thresholds live under `cfg.engine.skip_rules` in `/data/localsky.toml`. The 
 
 ```toml
 [engine.skip_rules]
-already_wet_in           = 0.05
-rain_now_in_hr           = 0.01
-rain_next_4h_skip_in     = 0.10
+already_wet_in           = 0.05   # 1.3 mm
+rain_now_in_hr           = 0.01   # 0.25 mm/hr
+rain_next_4h_skip_in     = 0.10   # 2.5 mm
 rain_3day_factor         = 1.5
-heat_advisory_temp_f     = 95.0
+heat_advisory_temp_f     = 95.0   # 35 C
 heat_advisory_humidity_pct = 60.0
 heat_advisory_dry_days   = 2
-wind_forecast_slack_mph  = 5.0
-max_wind_mph             = 10.0
-min_temp_f               = 38.0
-rain_skip_in             = 0.25
-frost_skip_soil_f        = 35.0
+wind_forecast_slack_mph  = 5.0    # 8 km/h
+max_wind_mph             = 10.0   # 16 km/h
+min_temp_f               = 38.0   # 3.3 C
+rain_skip_in             = 0.25   # 6.4 mm
+frost_skip_soil_f        = 35.0   # 1.7 C
 ```
 
 Edit via `PUT /api/config` (the settings UI does this); changes apply on the next engine tick (default 60s).

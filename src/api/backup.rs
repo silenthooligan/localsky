@@ -31,6 +31,36 @@ use crate::config::FileConfigStore;
 use crate::persistence::ConfigSnapshotStore;
 use crate::ports::config_store::ConfigStore;
 
+/// Boot-time swap of a staged restore (<db>.restore) into place. Called
+/// by main BEFORE anything opens the live DB. Moves the live file aside
+/// (timestamped .pre-restore), deletes the old -wal/-shm siblings, then
+/// renames the staged file in. Returns the aside path when a swap
+/// happened, None when nothing was staged.
+///
+/// The -wal/-shm deletion is load-bearing: SQLite associates journal
+/// files by NAME, so a leftover <db>-wal from the previous database
+/// would be replayed into the freshly restored .db on first open,
+/// corrupting it. The staged file came from VACUUM INTO (or an upload
+/// of one), which is self-contained, so nothing is lost by deleting.
+pub fn apply_staged_restore(db_path: &str) -> std::io::Result<Option<String>> {
+    let stage = format!("{db_path}.restore");
+    if !std::path::Path::new(&stage).exists() {
+        return Ok(None);
+    }
+    let aside = format!("{db_path}.pre-restore.{}", chrono::Utc::now().timestamp());
+    if std::path::Path::new(db_path).exists() {
+        std::fs::rename(db_path, &aside)?;
+    }
+    for ext in ["-wal", "-shm"] {
+        let sibling = format!("{db_path}{ext}");
+        if std::path::Path::new(&sibling).exists() {
+            std::fs::remove_file(&sibling)?;
+        }
+    }
+    std::fs::rename(&stage, db_path)?;
+    Ok(Some(aside))
+}
+
 #[derive(Clone)]
 pub struct BackupApiState {
     pub cfg_store: Arc<FileConfigStore>,
@@ -259,5 +289,65 @@ async fn get_snapshots(State(s): State<BackupApiState>) -> Response {
     match snaps.list().await {
         Ok(list) => Json(serde_json::json!({ "snapshots": list })).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn staged_restore_swap_removes_old_wal_and_shm() {
+        let dir = std::env::temp_dir().join(format!(
+            "localsky-backup-test-{}-walshm",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("irrigation.db");
+        let db = db.to_str().unwrap().to_string();
+
+        std::fs::write(&db, b"OLD-DB").unwrap();
+        std::fs::write(format!("{db}-wal"), b"OLD-WAL").unwrap();
+        std::fs::write(format!("{db}-shm"), b"OLD-SHM").unwrap();
+        std::fs::write(format!("{db}.restore"), b"NEW-DB").unwrap();
+
+        let aside = apply_staged_restore(&db).unwrap().expect("swap happened");
+
+        assert_eq!(std::fs::read(&db).unwrap(), b"NEW-DB");
+        assert_eq!(std::fs::read(&aside).unwrap(), b"OLD-DB");
+        assert!(
+            !std::path::Path::new(&format!("{db}-wal")).exists(),
+            "old WAL must not be replayed into the restored db"
+        );
+        assert!(!std::path::Path::new(&format!("{db}-shm")).exists());
+        assert!(!std::path::Path::new(&format!("{db}.restore")).exists());
+    }
+
+    #[test]
+    fn staged_restore_noop_without_stage_file() {
+        let dir =
+            std::env::temp_dir().join(format!("localsky-backup-test-{}-noop", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("irrigation.db");
+        std::fs::write(&db, b"LIVE").unwrap();
+        let res = apply_staged_restore(db.to_str().unwrap()).unwrap();
+        assert!(res.is_none());
+        assert_eq!(std::fs::read(&db).unwrap(), b"LIVE");
+    }
+
+    #[test]
+    fn staged_restore_onto_fresh_install_works() {
+        let dir =
+            std::env::temp_dir().join(format!("localsky-backup-test-{}-fresh", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("irrigation.db");
+        let db = db.to_str().unwrap().to_string();
+        std::fs::write(format!("{db}.restore"), b"NEW-DB").unwrap();
+        let aside = apply_staged_restore(&db).unwrap().expect("swap happened");
+        assert_eq!(std::fs::read(&db).unwrap(), b"NEW-DB");
+        assert!(!std::path::Path::new(&aside).exists(), "no old db to keep");
     }
 }

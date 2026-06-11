@@ -181,6 +181,7 @@ fn synth_irrigation(t_sim: f64) -> IrrigationSnapshot {
         rain_next_4h_in: 0.18,
         wind_max_today_mph: 8.0,
         temp_min_24h_f: 71.0,
+        temp_min_24h_valid: true,
         temp_max_3day_f: 97.0,
         days_since_significant_rain: 2,
         heat_index_now_f: 88.0,

@@ -117,8 +117,8 @@ pub fn Sidebar() -> impl IntoView {
             // configuration-recovery, not day-to-day.
             // ───────────────────────────────────────────────────────
             <div class="sidebar-footer">
-                <a class="sidebar-footer-link" href="/setup" title="Re-run wizard">
-                    <span class="sidebar-footer-label">"Re-run wizard"</span>
+                <a class="sidebar-footer-link" href="/setup" title="Setup wizard">
+                    <span class="sidebar-footer-label">"Setup wizard"</span>
                     <span class="sidebar-footer-glyph"><Icon name="wizard" size=14u32/></span>
                 </a>
                 <a class="sidebar-footer-link" href="/about" title="About">

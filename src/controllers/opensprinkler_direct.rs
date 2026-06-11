@@ -98,8 +98,47 @@ impl OpenSprinklerDirect {
         if !status.is_success() {
             return Err(ControllerError::Remote(format!("HTTP {status}: {body}")));
         }
-        serde_json::from_str(&body)
+        let value: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| ControllerError::Remote(format!("json parse: {e}; body={body}")))?;
+        // OS replies HTTP 200 even on errors and signals them via a
+        // {"result":N} envelope (firmware always uses 200 + result
+        // codes). Without this check a wrong password "passes" the /jc
+        // probe (the wizard's controller test) because {"result":2}
+        // deserializes into an all-default struct, and stop commands
+        // are never actually verified.
+        check_result_envelope(&value)?;
+        serde_json::from_value(value)
             .map_err(|e| ControllerError::Remote(format!("json parse: {e}; body={body}")))
+    }
+}
+
+/// Inspect an OpenSprinkler response for the {"result":N} error
+/// envelope. Status endpoints (/jc, /jn, /jl) return their data object
+/// directly on success and never include "result"; command endpoints
+/// (/cm, /cv) return {"result":1} on success. Anything else is an
+/// error: 2 = unauthorized (wrong password), the rest per the firmware
+/// API reference.
+fn check_result_envelope(v: &serde_json::Value) -> Result<(), ControllerError> {
+    let Some(code) = v.get("result").and_then(|r| r.as_i64()) else {
+        return Ok(());
+    };
+    match code {
+        1 => Ok(()),
+        2 => Err(ControllerError::AuthFailed),
+        other => {
+            let label = match other {
+                3 => "mismatch",
+                16 => "data missing",
+                17 => "out of range",
+                18 => "data format error",
+                32 => "page not found",
+                48 => "not permitted",
+                _ => "unknown error",
+            };
+            Err(ControllerError::Remote(format!(
+                "OpenSprinkler error result={other} ({label})"
+            )))
+        }
     }
 }
 
@@ -190,17 +229,32 @@ impl IrrigationController for OpenSprinklerDirect {
     async fn stop_zone(&self, slug: &str) -> ControllerResult<()> {
         let sid = self.station_for(slug)?;
         let zero_indexed = sid.saturating_sub(1);
-        let _: CmResponse = self
+        let r: CmResponse = self
             .get_json(
                 "/cm",
                 &[("sid", zero_indexed.to_string()), ("en", "0".to_string())],
             )
             .await?;
+        // get_json already rejects non-1 result envelopes; this guards
+        // the (unexpected) case of a 200 body with no result at all so
+        // a stop is never silently assumed to have worked.
+        if r.result != 1 {
+            return Err(ControllerError::Remote(format!(
+                "OS rejected station stop: result={}",
+                r.result
+            )));
+        }
         Ok(())
     }
 
     async fn stop_all(&self) -> ControllerResult<()> {
-        let _: CmResponse = self.get_json("/cv", &[("rsn", "1".to_string())]).await?;
+        let r: CmResponse = self.get_json("/cv", &[("rsn", "1".to_string())]).await?;
+        if r.result != 1 {
+            return Err(ControllerError::Remote(format!(
+                "OS rejected stop-all: result={}",
+                r.result
+            )));
+        }
         Ok(())
     }
 
@@ -292,9 +346,12 @@ impl IrrigationController for OpenSprinklerDirect {
         &self,
     ) -> ControllerResult<Vec<crate::ports::irrigation_controller::DiscoveredZone>> {
         use crate::ports::irrigation_controller::DiscoveredZone;
-        #[derive(Deserialize, Default)]
+        // snames is REQUIRED: a wrong password is rejected upstream by
+        // the result-envelope check (AuthFailed), and any other body
+        // missing snames is a protocol error. Either way the scan
+        // surfaces the failure instead of reporting "0 zones found".
+        #[derive(Deserialize)]
         struct JnResponse {
-            #[serde(default)]
             snames: Vec<String>,
         }
         let r: JnResponse = self.get_json("/jn", &[]).await?;
@@ -367,6 +424,36 @@ mod tests {
         .unwrap();
         let err = c.station_for("nope").unwrap_err();
         assert!(matches!(err, ControllerError::ZoneUnknown(_)));
+    }
+
+    #[test]
+    fn result_envelope_accepts_success_and_data_bodies() {
+        // Command success: {"result":1}.
+        assert!(check_result_envelope(&serde_json::json!({"result": 1})).is_ok());
+        // Status bodies (/jc, /jn) have no result key on success.
+        assert!(check_result_envelope(&serde_json::json!({"en": 1, "wl": 100})).is_ok());
+        assert!(check_result_envelope(&serde_json::json!({"snames": ["Front", "Back"]})).is_ok());
+    }
+
+    #[test]
+    fn result_envelope_maps_unauthorized_to_auth_failed() {
+        // Wrong password: OS replies HTTP 200 with {"result":2}. This
+        // must NOT pass the wizard's controller test.
+        let err = check_result_envelope(&serde_json::json!({"result": 2})).unwrap_err();
+        assert!(matches!(err, ControllerError::AuthFailed));
+    }
+
+    #[test]
+    fn result_envelope_surfaces_other_error_codes() {
+        for code in [3, 16, 17, 18, 32, 48, 99] {
+            let err = check_result_envelope(&serde_json::json!({"result": code})).unwrap_err();
+            match err {
+                ControllerError::Remote(msg) => {
+                    assert!(msg.contains(&format!("result={code}")), "msg: {msg}")
+                }
+                other => panic!("expected Remote, got {other:?}"),
+            }
+        }
     }
 
     #[test]

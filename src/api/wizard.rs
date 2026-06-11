@@ -50,6 +50,8 @@ pub fn router(state: WizardApiState) -> Router {
         .route("/test_llm", post(post_test_llm))
         .route("/scan_zones", post(post_scan_zones))
         .route("/discover", get(get_discover))
+        .route("/state", get(get_state))
+        .route("/seed_current", post(post_seed_current))
         .route("/geocode", get(get_geocode))
         .with_state(state)
 }
@@ -284,6 +286,52 @@ async fn post_scan_zones(
             }),
         )
             .into_response(),
+    }
+}
+
+// ---- Re-entry support: state probe + seed-from-current. ----
+
+/// GET /api/wizard/state -> { config_present, draft_present }. The setup
+/// shell uses it to offer "modify current setup" vs "start fresh" when
+/// the wizard is re-entered on an already-configured instance.
+async fn get_state(State(s): State<WizardApiState>) -> impl IntoResponse {
+    let draft_present = s.draft_store.exists();
+    let config_present = s.config_store.is_initialized();
+    Json(serde_json::json!({
+        "config_present": config_present,
+        "draft_present": draft_present,
+    }))
+}
+
+/// POST /api/wizard/seed_current -> start a draft pre-filled from the
+/// live config (license already accepted on the original run), so the
+/// wizard becomes an editor over the existing setup instead of a wipe.
+async fn post_seed_current(State(s): State<WizardApiState>) -> impl IntoResponse {
+    let cfg = match s.config_store.load().await {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(ApiError {
+                    error: "no_config".into(),
+                    detail: Some(format!("nothing to modify: {e}")),
+                }),
+            )
+                .into_response()
+        }
+    };
+    let draft = WizardDraft {
+        current_step: crate::config::wizard::WizardStep::Location,
+        config: cfg,
+        license_accepted: true,
+        telemetry_choice: Some(false),
+        last_updated_epoch: chrono::Utc::now().timestamp(),
+    };
+    let store = s.draft_store.clone();
+    match tokio::task::spawn_blocking(move || store.save(&draft)).await {
+        Ok(Ok(())) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Ok(Err(e)) => wizard_err(e).into_response(),
+        Err(e) => wizard_err(WizardError::Io(format!("join: {e}"))).into_response(),
     }
 }
 

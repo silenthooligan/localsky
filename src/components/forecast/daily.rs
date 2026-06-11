@@ -3,6 +3,7 @@
 // gets a highlight ring so it's the visual anchor.
 
 use crate::components::forecast::glyph::weather_code_glyph;
+use crate::components::units_fmt::{fmt_rain_amount, fmt_temp_short, use_unit_prefs, UnitPrefs};
 use crate::forecast::snapshot::{DailyEntry, ForecastSnapshot};
 use chrono::{DateTime, Local, TimeZone};
 use leptos::prelude::*;
@@ -10,6 +11,7 @@ use leptos::tachys::view::any_view::IntoAny;
 
 #[component]
 pub fn DailyForecast(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
+    let unit_prefs = use_unit_prefs();
     view! {
         <section class="forecast-daily">
             <header class="forecast-section-head">
@@ -26,13 +28,14 @@ pub fn DailyForecast(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
             <div class="daily-row">
                 {move || {
                     let s = snap.get();
+                    let prefs = unit_prefs.get();
                     if s.daily.is_empty() {
                         (0..7).map(|_| {
                             view! { <crate::components::ui::Skeleton variant="block"/> }.into_any()
                         }).collect::<Vec<_>>().into_any()
                     } else {
                         s.daily.iter().enumerate().take(7).map(|(idx, d)| {
-                            view! { <DailyCard entry=d.clone() is_today={idx == 0}/> }.into_any()
+                            view! { <DailyCard entry=d.clone() is_today={idx == 0} prefs/> }.into_any()
                         }).collect::<Vec<_>>().into_any()
                     }
                 }}
@@ -42,7 +45,7 @@ pub fn DailyForecast(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
 }
 
 #[component]
-fn DailyCard(entry: DailyEntry, is_today: bool) -> impl IntoView {
+fn DailyCard(entry: DailyEntry, is_today: bool, prefs: UnitPrefs) -> impl IntoView {
     let (g, label) = weather_code_glyph(entry.weather_code, true);
     let day_label = if is_today {
         "Today".to_string()
@@ -74,12 +77,12 @@ fn DailyCard(entry: DailyEntry, is_today: bool) -> impl IntoView {
                 <crate::components::ui::Icon name=g size=30/>
             </div>
             <div class="daily-card-temps">
-                <span class="daily-card-temp-hi">{format!("{:.0}°", entry.temp_max_f)}</span>
+                <span class="daily-card-temp-hi">{fmt_temp_short(entry.temp_max_f, prefs)}</span>
                 <span class="daily-card-temp-sep">"/"</span>
-                <span class="daily-card-temp-lo">{format!("{:.0}°", entry.temp_min_f)}</span>
+                <span class="daily-card-temp-lo">{fmt_temp_short(entry.temp_min_f, prefs)}</span>
             </div>
             <div class="daily-card-rain">
-                <span class="daily-card-rain-amt">{format!("{:.2}\"", entry.precip_sum_in)}</span>
+                <span class="daily-card-rain-amt">{fmt_rain_amount(entry.precip_sum_in, prefs)}</span>
                 <span class="daily-card-rain-pct">{format!("{}%", entry.precip_probability_max)}</span>
             </div>
             <dl class="daily-card-meta">

@@ -14,7 +14,7 @@
 //
 // Server clamp: actions cap at 120 minutes (Phase 4 will enforce server-side).
 
-use crate::components::irrigation::controls::post_action;
+use crate::components::irrigation::controls::{post_action_then, toast_on_err};
 use leptos::prelude::*;
 use serde_json::json;
 
@@ -28,10 +28,14 @@ pub fn DurationSheet(
 
     let close = move |_| visible.set(false);
 
+    let run_done = toast_on_err("Zone run failed");
     let confirm = move |_| {
         let m = minutes.get().min(120).max(1);
         if let Some(slug) = zone_slug.get() {
-            post_action(json!({"kind": "run", "zone": slug, "seconds": (m as u64) * 60}));
+            post_action_then(
+                json!({"kind": "run", "zone": slug, "seconds": (m as u64) * 60}),
+                run_done,
+            );
         }
         visible.set(false);
     };

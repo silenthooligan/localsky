@@ -181,14 +181,35 @@ impl WizardStore {
     /// no sources -> Tempest UDP (zero-config LAN listener) + Open-Meteo
     /// (uses the location from the Location step); no timezone -> infer
     /// from lat/lon so sunrise scheduling lands at the right wall-clock
-    /// hour even when the container TZ is UTC. Called by apply after
-    /// validation passes, before the config is written.
+    /// hour even when the container TZ is UTC; units -> pre-select from
+    /// the timezone (US keeps imperial, everywhere else gets metric).
+    /// Called by apply after validation passes, before the config is
+    /// written.
     pub fn finalize_for_apply(draft: &mut WizardDraft) {
         if draft.config.deployment.timezone.is_none() {
             let loc = &draft.config.deployment.location;
             draft.config.deployment.timezone = crate::timeutil::tz_name_for(loc.lat, loc.lon);
         }
+        Self::finalize_units(draft);
         Self::finalize_sources(draft);
+    }
+
+    /// The wizard never asks about units, so a draft always carries the
+    /// serde default (imperial). Pre-select from the deployment timezone
+    /// instead: US timezones keep imperial, the rest of the world gets
+    /// metric. A draft already carrying an explicit non-default choice
+    /// (metric) is left alone, and when no timezone could be derived the
+    /// serde default stands.
+    fn finalize_units(draft: &mut WizardDraft) {
+        use crate::config::schema::Units;
+        if draft.config.deployment.units != Units::Imperial {
+            return;
+        }
+        if let Some(tz) = draft.config.deployment.timezone.as_deref() {
+            if !is_us_timezone(tz) {
+                draft.config.deployment.units = Units::Metric;
+            }
+        }
     }
 
     fn finalize_sources(draft: &mut WizardDraft) {
@@ -204,12 +225,14 @@ impl WizardStore {
             draft.config.sources.push(SourceEntry {
                 id: "tempest_lan".into(),
                 priority: 100,
+                max_age_s: None,
                 enabled: true,
                 source: SourceKind::TempestUdp(tempest),
             });
             draft.config.sources.push(SourceEntry {
                 id: "open_meteo".into(),
                 priority: 50,
+                max_age_s: None,
                 enabled: true,
                 source: SourceKind::OpenMeteo(open_meteo),
             });
@@ -217,9 +240,48 @@ impl WizardStore {
     }
 }
 
+/// Pragmatic US-timezone check for the units pre-selection: the IANA
+/// names covering the 50 states, plus the legacy `US/` aliases. Anything
+/// else (including the rest of the Americas) is treated as metric
+/// territory. Only the US, Liberia, and Myanmar are non-metric, so a
+/// false negative here just means a US user flips one toggle in
+/// Settings > Units.
+fn is_us_timezone(tz: &str) -> bool {
+    if tz.starts_with("US/") {
+        return true;
+    }
+    if tz.starts_with("America/Indiana/")
+        || tz.starts_with("America/Kentucky/")
+        || tz.starts_with("America/North_Dakota/")
+    {
+        return true;
+    }
+    matches!(
+        tz,
+        "America/New_York"
+            | "America/Chicago"
+            | "America/Denver"
+            | "America/Phoenix"
+            | "America/Los_Angeles"
+            | "America/Anchorage"
+            | "Pacific/Honolulu"
+            | "America/Detroit"
+            | "America/Boise"
+            | "America/Adak"
+            | "America/Juneau"
+            | "America/Sitka"
+            | "America/Metlakatla"
+            | "America/Yakutat"
+            | "America/Nome"
+            | "America/Menominee"
+            | "America/Indianapolis"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::schema::Units;
 
     #[test]
     fn step_navigation_roundtrips() {
@@ -259,5 +321,93 @@ mod tests {
         let store = WizardStore::new("/tmp/nope");
         let err = store.validate_for_apply(&draft).unwrap_err();
         assert!(matches!(err, WizardError::LicenseNotAccepted));
+    }
+
+    fn draft_at(lat: f64, lon: f64) -> WizardDraft {
+        let mut d = WizardDraft::default();
+        d.config.deployment.location.lat = lat;
+        d.config.deployment.location.lon = lon;
+        d
+    }
+
+    #[test]
+    fn finalize_units_metric_outside_us() {
+        // Berlin: timezone inferred from lat/lon, units flip to metric.
+        let mut d = draft_at(52.52, 13.40);
+        WizardStore::finalize_for_apply(&mut d);
+        assert_eq!(
+            d.config.deployment.timezone.as_deref(),
+            Some("Europe/Berlin")
+        );
+        assert_eq!(d.config.deployment.units, Units::Metric);
+
+        // Sydney: metric too.
+        let mut d = draft_at(-33.87, 151.21);
+        WizardStore::finalize_for_apply(&mut d);
+        assert_eq!(d.config.deployment.units, Units::Metric);
+    }
+
+    #[test]
+    fn finalize_units_imperial_inside_us() {
+        // Orlando: US timezone keeps the imperial default.
+        let mut d = draft_at(28.5, -81.4);
+        WizardStore::finalize_for_apply(&mut d);
+        assert_eq!(
+            d.config.deployment.timezone.as_deref(),
+            Some("America/New_York")
+        );
+        assert_eq!(d.config.deployment.units, Units::Imperial);
+
+        // Legacy US/ alias set explicitly also keeps imperial.
+        let mut d = draft_at(39.74, -104.99);
+        d.config.deployment.timezone = Some("US/Mountain".into());
+        WizardStore::finalize_for_apply(&mut d);
+        assert_eq!(d.config.deployment.units, Units::Imperial);
+    }
+
+    #[test]
+    fn finalize_units_never_overrides_explicit_metric() {
+        // An explicit metric choice in a US timezone is left alone.
+        let mut d = draft_at(41.88, -87.63);
+        d.config.deployment.units = Units::Metric;
+        WizardStore::finalize_for_apply(&mut d);
+        assert_eq!(
+            d.config.deployment.timezone.as_deref(),
+            Some("America/Chicago")
+        );
+        assert_eq!(d.config.deployment.units, Units::Metric);
+    }
+
+    #[test]
+    fn finalize_units_no_timezone_keeps_default() {
+        // lat/lon 0,0 derives no timezone; the serde default stands.
+        let mut d = WizardDraft::default();
+        WizardStore::finalize_for_apply(&mut d);
+        assert_eq!(d.config.deployment.timezone, None);
+        assert_eq!(d.config.deployment.units, Units::Imperial);
+    }
+
+    #[test]
+    fn us_timezone_heuristic() {
+        for tz in [
+            "America/New_York",
+            "America/Phoenix",
+            "Pacific/Honolulu",
+            "America/Indiana/Knox",
+            "US/Eastern",
+        ] {
+            assert!(is_us_timezone(tz), "{tz} should read as US");
+        }
+        for tz in [
+            "Europe/Berlin",
+            "Australia/Sydney",
+            "Europe/Madrid",
+            "Pacific/Auckland",
+            "America/Toronto",
+            "America/Mexico_City",
+            "America/Sao_Paulo",
+        ] {
+            assert!(!is_us_timezone(tz), "{tz} should read as non-US");
+        }
     }
 }

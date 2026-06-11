@@ -27,6 +27,7 @@
 //   registry.rs - SourceRegistry behind arc-swap
 
 pub mod ambient_weather;
+pub mod bus_recorder;
 pub mod davis_wll;
 pub mod demo_replay;
 pub mod ecowitt_gw_poll;
@@ -47,6 +48,7 @@ pub mod tuya_cloud;
 pub mod yolink;
 
 pub use ambient_weather::AmbientWeather;
+pub use bus_recorder::SourceLastSeen;
 pub use davis_wll::DavisWll;
 pub use demo_replay::DemoReplay;
 pub use ecowitt_local::EcowittLocal;

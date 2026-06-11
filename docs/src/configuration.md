@@ -1,6 +1,6 @@
-# Configuration Reference
+# Configuration reference
 
-LocalSky's configuration is a single TOML file at `/data/localsky.toml`. The first-run wizard writes it; the settings UI edits it; every PUT to `/api/config` snapshots the previous version before atomically writing the new one. Schema lives in [src/config/schema.rs](../src/config/schema.rs).
+LocalSky's configuration is a single TOML file at `/data/localsky.toml`. The first-run wizard writes it; the settings UI edits it; every `PUT /api/v1/config` validates and then writes it atomically (write to a temp file, rename). Schema lives in [src/config/schema.rs](../src/config/schema.rs).
 
 This document is the field-by-field reference. The wizard ([docs/getting-started.md](getting-started.md)) is the conversational walkthrough; this is the lookup table.
 
@@ -17,11 +17,27 @@ schema_version = 1
 [llm]
 [notifications]
 [engine]
+[[manual_schedules]]
+[scripting]
+[conditions]
+[auth]
+[network]
+[updates]
 ```
 
-Every section except `deployment` is optional (zero-source / zero-controller configs are valid for first boots before the wizard has been completed). `schema_version` is required; the migration runner uses it to apply schema changes between releases.
+Every section except `deployment` is optional (zero-source / zero-controller configs are valid for first boots before the wizard has been completed). `schema_version` is required; a config whose `schema_version` is higher than the binary supports is refused at load (see [Upgrading LocalSky](upgrading.md#downgrading-and-rollback)).
 
 ## `[deployment]`
+
+```toml
+[deployment]
+location = { lat = 52.52, lon = 13.40, elevation_m = 34 }   # your coordinates, decimal degrees
+units = "metric"
+timezone = "Europe/Berlin"                                  # your IANA timezone
+display_name = "My Yard"
+```
+
+Or, for a US install:
 
 ```toml
 [deployment]
@@ -33,7 +49,7 @@ display_name = "My Yard"
 
 - `location.lat` / `location.lon`: required, decimal degrees
 - `location.elevation_m`: optional, used by FAO-56 net-radiation
-- `units`: `"imperial"` (default) or `"metric"`. Per-field overrides live in browser localStorage, not here
+- `units`: `"metric"` or `"imperial"`. The setup wizard pre-selects this from your location; existing configs keep their value. Configs written without the field fall back to `"imperial"` for backward compatibility. Per-field overrides live in browser localStorage, not here
 - `timezone`: optional IANA name. Null derives from lat/lon at boot
 - `display_name`: surfaces in the MQTT discovery node_id (slugified) and the dashboard title
 
@@ -66,7 +82,12 @@ bind_addr = "0.0.0.0:50222"
 hub_serial = null  # filter to a specific Tempest hub; null = accept any
 ```
 
-Supported `kind` values: `tempest_udp`, `tempest_ws`, `open_meteo`, `ecowitt_local`, `nws`, `openweather`, `pirate_weather`, `met_norway`, `ambient_weather`, `ha_passthrough`, `demo_replay`. See [src/config/schema.rs](../src/config/schema.rs) `SourceKind` enum for per-kind config fields.
+Supported `kind` values: `tempest_udp`, `tempest_ws`, `open_meteo`, `ecowitt_local`, `ecowitt_gw_poll`, `davis_wll`, `nws`, `openweather`, `pirate_weather`, `met_norway`, `ambient_weather`, `netatmo`, `yolink`, `lacrosse`, `tuya_cloud`, `ha_passthrough`, `mqtt`, `http_webhook`, `demo_replay`. See [src/config/schema.rs](../src/config/schema.rs) `SourceKind` enum for per-kind config fields.
+
+Two kinds deserve a callout because they accept data from anything:
+
+- `mqtt` subscribes to broker topics (Tasmota, ESPHome, Zigbee2MQTT, any raw publisher). Config: `broker_host`, `broker_port` (default 1883), optional `username`/`password`, and a `subscriptions` list mapping each topic to a weather field with optional scale/offset.
+- `http_webhook` accepts JSON POSTs at a path you choose under `/ingest/` from anything that can speak HTTP (Arduino, a Pi script, a commercial gateway). Config: `path`, optional shared-secret `token` (sent as the `X-LocalSky-Token` header or `?token=` query parameter), and a `fields` mapping list.
 
 `priority` matters when multiple sources report the same field. Convention: 100 = LAN station; 50 = forecast model; 10 = fallback.
 
@@ -87,7 +108,7 @@ poll_interval_s = 10
 
 Exactly one controller should have `default = true`. The validator rejects PUTs that leave the system with zero defaults when any controller exists.
 
-Supported `kind` values: `opensprinkler_direct`, `ha_service_call`, `esphome_native`, `rachio`, `dry_run`.
+Supported `kind` values: `opensprinkler_direct`, `ha_service_call`, `esphome_native`, `rachio`, `hydrawise`, `bhyve`, `rainbird`, `mqtt_command`, `dry_run`.
 
 ## `[zones.<slug>]`
 
@@ -188,21 +209,108 @@ soak_minutes             = 30
 et0_method               = "auto"   # auto | penman_monteith | asce_simplified | hargreaves_samani | source_native
 
 [engine.skip_rules]
-already_wet_in              = 0.05
-rain_now_in_hr              = 0.01
-rain_next_4h_skip_in        = 0.10
+already_wet_in              = 0.05   # 1.3 mm
+rain_now_in_hr              = 0.01   # 0.25 mm/hr
+rain_next_4h_skip_in        = 0.10   # 2.5 mm
 rain_3day_factor            = 1.5
-heat_advisory_temp_f        = 95.0
+heat_advisory_temp_f        = 95.0   # 35 C
 heat_advisory_humidity_pct  = 60.0
 heat_advisory_dry_days      = 2
-wind_forecast_slack_mph     = 5.0
-max_wind_mph                = 10.0
-min_temp_f                  = 38.0
-rain_skip_in                = 0.25
-frost_skip_soil_f           = 35.0
+wind_forecast_slack_mph     = 5.0    # 8 km/h
+max_wind_mph                = 10.0   # 16 km/h
+min_temp_f                  = 38.0   # 3.3 C
+rain_skip_in                = 0.25   # 6.4 mm
+frost_skip_soil_f           = 35.0   # 1.7 C
 ```
 
 All values match v0.1 hardcoded constants. See [skip-rules.md](skip-rules.md) for what each one does.
+
+### Watering restrictions
+
+Rules from your water authority, municipality, or homeowners' association live under `[engine]` as a list. Empty list (the default) means no restrictions are enforced. When multiple restrictions are active, the engine ANDs them all; the strictest wins.
+
+Example: a Florida water-district rule, keyed to the daylight-saving switch:
+
+```toml
+[[engine.watering_restrictions]]
+id = "sjrwmd_dst"
+name = "SJRWMD daylight-saving rule"
+enabled = true                      # default: true
+effective = { kind = "dst_only" }   # all_year | dst_only | standard_only | date_range
+allowed_weekdays_odd  = [3, 6]      # 0 = Sunday .. 6 = Saturday; empty = no parity gate
+allowed_weekdays_even = [4, 0]
+forbidden_hour_start = 10           # inclusive start of the no-watering window (local hour)
+forbidden_hour_end   = 16           # exclusive end
+max_minutes_per_zone = 60           # optional per-session cap; min of all active caps wins
+```
+
+Example: an Australian-style summer stage restriction (no watering 10:00-16:00, December 1 to March 31, even-numbered houses Tuesday/Saturday, odd-numbered Wednesday/Sunday):
+
+```toml
+[[engine.watering_restrictions]]
+id = "summer_stage2"
+name = "Stage 2 summer restrictions"
+effective = { kind = "date_range", start_month = 12, start_day = 1, end_month = 3, end_day = 31 }
+allowed_weekdays_even = [2, 6]
+allowed_weekdays_odd  = [3, 0]
+forbidden_hour_start = 10
+forbidden_hour_end   = 16
+```
+
+`effective` decides when the rule applies: `all_year`, `dst_only`, `standard_only` (the complement), or `date_range` with `start_month`/`start_day`/`end_month`/`end_day` (wraparound ranges like Nov 15 to Feb 28 work). `dst_only` uses **US** daylight-saving dates (2nd Sunday of March to 1st Sunday of November); outside the US, use `date_range` for seasonal windows. The odd/even weekday gates only do anything when `[deployment]` sets `address_parity = "odd"` or `"even"`; the default `"not_applicable"` makes parity gates a no-op.
+
+## `[[manual_schedules]]`
+
+Fixed weekday-and-time schedules that coexist with the smart engine. Each schedule fires one zone:
+
+```toml
+[[manual_schedules]]
+id = "back_yard_mwf"
+name = "Back yard, Mon/Wed/Fri early"
+zone_slug = "back_yard"        # must match a key under [zones]
+enabled = true                 # default: true
+weekdays = [1, 3, 5]           # 0 = Sunday .. 6 = Saturday; empty = never fires
+start_hour = 5                 # local time, 0..23
+start_minute = 30              # 0..59
+duration_minutes = 20
+mode = "override"              # override (default) | floor
+```
+
+- `override` (default): while an enabled override schedule applies to a zone that day, smart-irrigation dispatch for that zone is suppressed. The smart math still computes for visibility.
+- `floor`: the schedule fires AND the smart engine may add more water if its deficit math justifies it. Useful for minimum-coverage requirements; can overwater if the scheduled run already covers the deficit.
+
+Manual schedules respect watering restrictions exactly like smart runs do: a blocked dispatch is skipped with the reason logged to run history.
+
+## `[auth]`
+
+Authentication policy. Identity itself (accounts, sessions, `lsk_` API tokens) lives in the SQLite database, not in this file; this block only sets the policy. Full walkthrough: [Authentication](authentication.md).
+
+```toml
+[auth]
+mode = "disabled"          # disabled (default) | required
+session_ttl_days = 30      # rolling browser-session lifetime
+trusted_networks = []      # CIDRs that skip auth while mode = "required", e.g. ["192.168.1.0/24"]
+```
+
+Configs without an `[auth]` block behave exactly as before (no login). With `mode = "required"`, static assets, `/api/v1/info`, and the `/ingest/*` receivers stay public; everything else needs a session or a Bearer token.
+
+## `[network]`
+
+```toml
+[network]
+mdns_enabled = true   # default: true
+```
+
+Announces `_localsky._tcp` via mDNS so the Home Assistant integration and LAN clients can discover the instance. Announce-only; needs host networking under Docker to be visible beyond the container.
+
+## `[updates]`
+
+```toml
+[updates]
+check_enabled = false   # default: false
+```
+
+Off by default; nothing phones home. When enabled (restart required), LocalSky polls the GitHub releases API about once a day and serves the comparison at `GET /api/v1/updates`. Nothing self-updates; `docker pull` stays the upgrade mechanism. See [Upgrading LocalSky](upgrading.md#update-notifications).
 
 ## Env var interpolation
 
@@ -218,7 +326,7 @@ Escape with `$${literal}` if you need a literal `${...}` in the value.
 
 ## Validation
 
-`/api/config` validates structurally (serde decode) and semantically:
+`PUT /api/v1/config` validates structurally (serde decode) and semantically:
 
 - `schema_version` must equal or be less than what the binary supports
 - Source ids and controller ids must be unique
@@ -228,69 +336,16 @@ Escape with `$${literal}` if you need a literal `${...}` in the value.
 
 Bad PUTs return 422 with the specific failure; on-disk file is untouched.
 
-## Migration + rollback
+## Migrations
 
-On boot, the runner replays any unapplied migrations from `schema_migrations`. Schema bumps live in [src/persistence/migrations/](../src/persistence/migrations/) as numbered SQL files.
+On boot, the migration runner replays any database migrations the file has not seen yet. Schema bumps live in [src/persistence/migrations/](../src/persistence/migrations/) as numbered SQL files, each applied in its own transaction and recorded in the `schema_migrations` table. The config file's own `schema_version` is currently `1`; older configs gain new fields via defaults, and a config newer than the binary is refused at load. Details: [Upgrading LocalSky](upgrading.md#what-happens-on-first-boot-after-an-upgrade).
 
-Every PUT snapshots the previous config into `config_snapshots` (M0002) with retention of 20 versions. Roll back via:
-
-```
-POST /api/config/rollback?to=<version>
-```
-
-Always reachable, even when the engine is in a `degraded` state (no valid controller, no enabled sources). The rollback endpoint never validates the target; if you saved a broken config, you can restore it. Use the safety net responsibly.
+A config rollback endpoint exists (`POST /api/v1/config/rollback?to=<version>`, snapshot list at `GET /api/v1/backup/snapshots`), but this beta does not record config snapshots on save yet, so it always returns 404. Keep backup bundles as your config history for now.
 
 ## Programmatic schema
 
-The JSON Schema is published at runtime: `GET /api/config/schema`. The settings UI uses it to generate form widgets and to validate input client-side. Schemars-derived, so it tracks the Rust struct definitions exactly.
+The JSON Schema is published at runtime: `GET /api/v1/config/schema`. The settings UI uses it to generate form widgets and to validate input client-side. Schemars-derived, so it tracks the Rust struct definitions exactly.
 
 ## Backup + restore
 
-LocalSky's persistent state lives in one SQLite file at `/data/irrigation.db` (mounted via the `localsky-data` volume in the default compose). It carries:
-
-- 365-day rolling run history (every intended, running, completed, aborted, or skipped irrigation event)
-- Verdict history with full input blobs (every skip-check decision is replayable through the current engine)
-- Sensor history (when `sensor_history` ingestion is enabled)
-- Config snapshots (the last 20 versions of `localsky.toml`)
-- Web Push subscriptions
-
-The configuration TOML itself lives next to the database at `/data/localsky.toml`. Together those two files plus the VAPID keypair (typically mounted from the host at `/keys/`) are the entire persistent state.
-
-### Nightly backup
-
-Add a cron or systemd-timer on the host that copies `/data/` to off-volume storage. The database is in WAL mode, so a plain file copy while the service is running is safe in practice; for paranoid integrity, take a SQLite-aware snapshot:
-
-```bash
-# Adjust the source path if you bind-mounted a different directory.
-sqlite3 /var/lib/docker/volumes/localsky-data/_data/irrigation.db \
-    ".backup '/backup/localsky/irrigation-$(date +%F).db'"
-cp /var/lib/docker/volumes/localsky-data/_data/localsky.toml \
-    /backup/localsky/localsky-$(date +%F).toml
-```
-
-The VAPID private key, if you generated one, also belongs in the backup. Treat it like a deploy secret.
-
-### Restore
-
-Stop the container, replace the files, restart:
-
-```bash
-docker stop localsky
-cp /backup/localsky/irrigation-2026-05-10.db \
-    /var/lib/docker/volumes/localsky-data/_data/irrigation.db
-cp /backup/localsky/localsky-2026-05-10.toml \
-    /var/lib/docker/volumes/localsky-data/_data/localsky.toml
-docker start localsky
-```
-
-LocalSky will replay schema migrations on boot if the restored database is from an older release, so cross-version restores work as long as the gap is within the migration window.
-
-### Config-only rollback
-
-If you only need to roll back a misbehaving configuration change (not the run history), use the snapshot endpoint instead:
-
-```
-POST /api/config/rollback?to=<version>
-```
-
-Lists available versions via `GET /api/config/snapshots` or the **Configuration history** panel in **Settings -> Advanced**.
+Covered in full in [Backup, restore, and recovery](backup-restore.md). The short version: all persistent state is `/data/localsky.toml` plus `/data/irrigation.db`, and `GET /api/v1/backup` hands you both as one consistent `.tar.gz` (also available as the Download backup button under Settings -> Advanced).

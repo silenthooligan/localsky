@@ -31,6 +31,7 @@ pub fn StopAllPanel(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
 
     let confirm_open: RwSignal<bool> = RwSignal::new(false);
 
+    let stop_done = toast_on_err("Stop all failed; zones may still be running");
     let on_click = move |_| {
         if !any_running() {
             return;
@@ -38,22 +39,32 @@ pub fn StopAllPanel(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         if is_mobile.map(|s| s.get()).unwrap_or(false) {
             confirm_open.set(true);
         } else {
-            post_action(json!({ "kind": "stop_all" }));
+            post_action_then(json!({ "kind": "stop_all" }), stop_done);
         }
     };
 
     view! {
-        <section class="stop-all">
-            <h3 class="stop-all-title">"Emergency Stop"</h3>
-            <p class="stop-all-help">
-                {move || if any_running() {
-                    "One or more zones are running. Tap to stop every active station immediately.".to_string()
-                } else {
-                    "No zones are running.".to_string()
-                }}
-            </p>
+        <section class="stop-all" class:stop-all--armed=any_running>
+            <div class="stop-all__lead">
+                <span class="stop-all__icon" aria-hidden="true">
+                    <crate::components::ui::Icon name="stop" size=18 stroke=2.0/>
+                </span>
+                <div class="stop-all__text">
+                    <h3 class="stop-all-title">"Emergency stop"</h3>
+                    <p class="stop-all-help">
+                        {move || {
+                            let n = running_count.get();
+                            match n {
+                                0 => "All zones idle. Arms by itself the moment anything runs.".to_string(),
+                                1 => "1 zone is running. Stops it instantly.".to_string(),
+                                n => format!("{n} zones are running. Stops every active station instantly."),
+                            }
+                        }}
+                    </p>
+                </div>
+            </div>
             <button
-                class="btn-clay btn-clay-hot stop-all-btn"
+                class="stop-all-btn"
                 on:click=on_click
                 disabled=move || !any_running()
             >
@@ -161,15 +172,27 @@ fn ThresholdControl(
         _ => format!("{}", v),
     };
 
+    let toast = crate::components::ui::use_toast();
+    let save_done = Callback::new(move |result: Result<(), String>| {
+        if let Err(e) = result {
+            // Re-arm the server follow so the next snapshot restores the
+            // real value; the optimistic local edit didn't stick.
+            user_touched.set(false);
+            toast.error(format!("Couldn't save {label}: {e}"));
+        }
+    });
     let commit = move |v: f64| {
         let clamped = v.clamp(min, max);
         user_touched.set(true);
         set_val.set(clamped);
-        post_action(json!({
-            "kind": "set_threshold",
-            "key": key,
-            "value": clamped,
-        }));
+        post_action_then(
+            json!({
+                "kind": "set_threshold",
+                "key": key,
+                "value": clamped,
+            }),
+            save_done,
+        );
     };
 
     view! {
@@ -230,51 +253,60 @@ fn ToggleControl(key: &'static str, label: &'static str, current: Signal<bool>) 
         }
     });
 
+    let toast = crate::components::ui::use_toast();
+    let save_done = Callback::new(move |result: Result<(), String>| {
+        if let Err(e) = result {
+            // Roll the switch back to the server value and re-arm the
+            // follow; the optimistic flip didn't stick.
+            user_touched.set(false);
+            set_is_on.set(current.get_untracked());
+            toast.error(format!("Couldn't switch {label}: {e}"));
+        }
+    });
     let on_click = move |_| {
         let next = !is_on.get();
         user_touched.set(true);
         set_is_on.set(next);
-        post_action(json!({"kind":"toggle","key":key,"on":next}));
+        post_action_then(json!({"kind":"toggle","key":key,"on":next}), save_done);
     };
+    // A real <button role="switch"> so the toggle is reachable and
+    // operable from the keyboard (the old span had tabindex but no
+    // key handling, so Space/Enter did nothing). Matches ui::Toggle.
     view! {
         <div class="toggle-pair">
             <label class="toggle-label">{label}</label>
-            <span
-                role="button"
-                tabindex="0"
+            <button
+                type="button"
+                role="switch"
+                aria-checked=move || if is_on.get() { "true" } else { "false" }
+                aria-label=label
                 class=move || if is_on.get() { "toggle-clay is-on" } else { "toggle-clay" }
                 on:click=on_click
-            ></span>
+            ></button>
         </div>
     }
 }
 
-/// Browser-side helper: POST a JSON body to /api/irrigation/action.
-/// On SSR this is a no-op (the server doesn't fire actions at
-/// itself); on the client it spawns a local task and ignores the
-/// response (the next 10s refresher cycle reflects the new state).
-#[cfg(feature = "hydrate")]
-pub(crate) fn post_action(body: serde_json::Value) {
-    use leptos::task::spawn_local;
-    spawn_local(async move {
-        let payload = body.to_string();
-        let _ = gloo_net::http::Request::post("/api/irrigation/action")
-            .header("Content-Type", "application/json")
-            .body(payload)
-            .ok()
-            .unwrap()
-            .send()
-            .await;
-    });
+/// Build the standard completion callback for action buttons: failures
+/// surface as an error toast, successes stay quiet (the next snapshot
+/// reflects the change). Must be called from component scope, where the
+/// ToastHub context resolves; the returned Callback is then safe to run
+/// from the detached async task inside `post_action_then`.
+pub(crate) fn toast_on_err(prefix: &'static str) -> Callback<Result<(), String>> {
+    let toast = crate::components::ui::use_toast();
+    Callback::new(move |result: Result<(), String>| {
+        if let Err(e) = result {
+            toast.error(format!("{prefix} ({e})"));
+        }
+    })
 }
 
-#[cfg(not(feature = "hydrate"))]
-#[allow(dead_code)]
-pub(crate) fn post_action(_body: serde_json::Value) {}
-
-/// Like `post_action`, but reports completion so callers can run
+/// Browser-side helper: POST a JSON body to /api/irrigation/action and
+/// report completion so callers can surface failure (toast) or run
 /// optimistic UI (pending state cleared by the next snapshot, or rolled
-/// back + toasted on HTTP failure).
+/// back on error). On SSR this is a no-op: the server doesn't fire
+/// actions at itself. There is deliberately no fire-and-forget variant;
+/// every mutating POST must report its outcome.
 #[cfg(feature = "hydrate")]
 pub(crate) fn post_action_then(body: serde_json::Value, done: Callback<Result<(), String>>) {
     use leptos::task::spawn_local;

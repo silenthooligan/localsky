@@ -190,13 +190,45 @@ pub fn SettingsAccount() -> impl IntoView {
 
     let revoke = move |id: i64| {
         #[cfg(feature = "hydrate")]
-        leptos::task::spawn_local(async move {
-            let _ = gloo_net::http::Request::delete(&format!("/api/auth/tokens/{id}"))
-                .send()
+        {
+            // Revoking cuts off whatever is using the token immediately
+            // and can't be undone, so gate it on an explicit confirm.
+            let confirmed = web_sys::window()
+                .map(|w| {
+                    w.confirm_with_message(
+                        "Revoke this token? Anything still using it (the Home \
+                         Assistant add-on, scripts) loses access immediately.",
+                    )
+                    .unwrap_or(false)
+                })
+                .unwrap_or(false);
+            if !confirmed {
+                return;
+            }
+            leptos::task::spawn_local(async move {
+                let result = async {
+                    let resp = gloo_net::http::Request::delete(&format!("/api/auth/tokens/{id}"))
+                        .send()
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    if resp.ok() {
+                        Ok(())
+                    } else {
+                        Err(format!("HTTP {}", resp.status()))
+                    }
+                }
                 .await;
-            crate::components::ui::use_toast().success("Token revoked.");
-            reload.update(|n| *n += 1);
-        });
+                match result {
+                    Ok(()) => {
+                        crate::components::ui::use_toast().success("Token revoked.");
+                        reload.update(|n| *n += 1);
+                    }
+                    Err(e) => {
+                        crate::components::ui::use_toast().error(format!("Revoke failed: {e}"));
+                    }
+                }
+            });
+        }
         #[cfg(not(feature = "hydrate"))]
         let _ = id;
     };

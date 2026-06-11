@@ -1,12 +1,10 @@
-// Zone tile grid. Phase 3a renders read-only tiles: name, state badge,
-// today's run-minutes, today's bucket. Phase 3b adds the Claymorphism
-// run buttons + stop control. Phase 3c adds the per-zone sparkline of
-// last-14-day run-minutes.
-//
-// Four zones are static (back_yard, front_yard, side_yard, shrubs) so
-// we unroll directly rather than using <For>. Each ZoneCard is type-
-// erased via .into_any() so rustc's query depth doesn't blow up on
-// the fully-monomorphized 4-card sibling tuple.
+// Zone tile grid. Renders one tile per zone in the streamed snapshot:
+// name, state badge, today's run-minutes, today's bucket, Claymorphism
+// run/stop buttons. Keyed <For> over the snapshot's zone slugs, so the
+// grid tracks the real config instead of a hardcoded count (the old
+// 4-slot unroll padded short fleets with default ZoneState cards whose
+// run buttons POSTed empty slugs). Each ZoneCard is type-erased via
+// .into_any() so rustc's query depth doesn't blow up.
 
 use crate::ha::snapshot::{IrrigationSnapshot, ZoneState};
 use leptos::prelude::*;
@@ -36,28 +34,32 @@ pub fn ZoneGrid(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         });
     }
 
-    let enrich = move |idx: usize| -> Signal<ZoneState> {
-        Signal::derive(move || {
-            let mut z = snap.get().zones.get(idx).cloned().unwrap_or_default();
-            if z.photo_url.is_none() {
-                if let Some(u) = photos.get().get(&z.slug).cloned() {
-                    z.photo_url = Some(u);
-                }
-            }
-            z
-        })
-    };
-    let zone0 = enrich(0);
-    let zone1 = enrich(1);
-    let zone2 = enrich(2);
-    let zone3 = enrich(3);
-
     view! {
         <section class="zone-grid">
-            {view! { <ZoneCard zone=zone0/> }.into_any()}
-            {view! { <ZoneCard zone=zone1/> }.into_any()}
-            {view! { <ZoneCard zone=zone2/> }.into_any()}
-            {view! { <ZoneCard zone=zone3/> }.into_any()}
+            <For
+                each=move || {
+                    snap.get().zones.iter().map(|z| z.slug.clone()).collect::<Vec<_>>()
+                }
+                key=|slug| slug.clone()
+                children=move |slug: String| {
+                    let zone = Signal::derive(move || {
+                        let mut z = snap
+                            .get()
+                            .zones
+                            .iter()
+                            .find(|z| z.slug == slug)
+                            .cloned()
+                            .unwrap_or_default();
+                        if z.photo_url.is_none() {
+                            if let Some(u) = photos.get().get(&z.slug).cloned() {
+                                z.photo_url = Some(u);
+                            }
+                        }
+                        z
+                    });
+                    view! { <ZoneCard zone/> }.into_any()
+                }
+            />
         </section>
     }
 }
@@ -165,6 +167,7 @@ fn ZoneActions(zone: Signal<ZoneState>, running: Signal<bool>) -> impl IntoView 
     // and the next poll updates the running flag, swapping the row.
     // Each button gets its own on:click closure so we don't have to
     // make a higher-order helper Clone-able through the move chain.
+    let action_done = super::controls::toast_on_err("Zone command failed");
     view! {
         <div class="zone-actions" class:zone-actions-running=move || running.get()>
             {move || if running.get() {
@@ -173,7 +176,10 @@ fn ZoneActions(zone: Signal<ZoneState>, running: Signal<bool>) -> impl IntoView 
                         class="btn-clay btn-clay-hot zone-stop-btn"
                         on:click=move |_| {
                             let slug = zone.get().slug;
-                            super::controls::post_action(json!({"kind":"stop","zone":slug}));
+                            super::controls::post_action_then(
+                                json!({"kind":"stop","zone":slug}),
+                                action_done,
+                            );
                         }
                     >
                         "STOP"
@@ -185,21 +191,30 @@ fn ZoneActions(zone: Signal<ZoneState>, running: Signal<bool>) -> impl IntoView 
                         class="btn-clay"
                         on:click=move |_| {
                             let slug = zone.get().slug;
-                            super::controls::post_action(json!({"kind":"run","zone":slug,"seconds":600}));
+                            super::controls::post_action_then(
+                                json!({"kind":"run","zone":slug,"seconds":600}),
+                                action_done,
+                            );
                         }
                     >"10m"</button>
                     <button
                         class="btn-clay"
                         on:click=move |_| {
                             let slug = zone.get().slug;
-                            super::controls::post_action(json!({"kind":"run","zone":slug,"seconds":1800}));
+                            super::controls::post_action_then(
+                                json!({"kind":"run","zone":slug,"seconds":1800}),
+                                action_done,
+                            );
                         }
                     >"30m"</button>
                     <button
                         class="btn-clay"
                         on:click=move |_| {
                             let slug = zone.get().slug;
-                            super::controls::post_action(json!({"kind":"run","zone":slug,"seconds":3600}));
+                            super::controls::post_action_then(
+                                json!({"kind":"run","zone":slug,"seconds":3600}),
+                                action_done,
+                            );
                         }
                     >"60m"</button>
                 }.into_any()

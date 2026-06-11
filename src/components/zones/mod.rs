@@ -83,7 +83,19 @@ pub fn ZonesPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                                 />
                             }.into_any();
                         }
-                        s.zones.into_iter().map(|z| view! { <ZoneCard zone=z selected/> }).collect_view().into_any()
+                        let soil: std::collections::HashMap<String, f64> = s
+                            .soil_forecasts
+                            .iter()
+                            .filter_map(|f| f.current_pct.map(|p| (f.zone_slug.clone(), p)))
+                            .collect();
+                        s.zones
+                            .into_iter()
+                            .map(|z| {
+                                let soil_pct = soil.get(&z.slug).copied();
+                                view! { <ZoneCard zone=z selected soil_pct=soil_pct/> }
+                            })
+                            .collect_view()
+                            .into_any()
                     }}
                 </div>
                 <div class="zones-detail">

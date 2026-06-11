@@ -10,7 +10,7 @@
 use leptos::prelude::*;
 
 use crate::components::settings_ui::SettingsResult;
-use crate::components::ui::{FormField, HelpHint, Panel, Slider};
+use crate::components::ui::{FormField, Panel, Slider};
 
 #[component]
 pub fn SettingsSkipRules() -> impl IntoView {
@@ -132,8 +132,7 @@ pub fn SettingsSkipRules() -> impl IntoView {
                 </p>
             </header>
 
-            <Panel title="Rain skips".to_string()>
-                <HelpHint topic="skip-breakdown"/>
+            <Panel title="Rain skips".to_string() help_topic="skip-breakdown">
                 <div class="grid settings-field-grid">
                     <FormField
                         label="Already-wet threshold (in)".to_string()
@@ -173,8 +172,7 @@ pub fn SettingsSkipRules() -> impl IntoView {
                 </div>
             </Panel>
 
-            <Panel title="Wind + temperature".to_string()>
-                <HelpHint topic="skip-breakdown"/>
+            <Panel title="Wind + temperature".to_string() help_topic="skip-breakdown">
                 <div class="grid settings-field-grid">
                     <FormField
                         label="Max wind (mph)".to_string()
@@ -207,8 +205,7 @@ pub fn SettingsSkipRules() -> impl IntoView {
                 </div>
             </Panel>
 
-            <Panel title="Heat advisory (run-extended trigger)".to_string()>
-                <HelpHint topic="skip-breakdown"/>
+            <Panel title="Heat advisory (run-extended trigger)".to_string() help_topic="skip-breakdown">
                 <p class="settings-page__subtitle" style="margin: 0 0 0.6rem">
                     "When ALL three conditions are met, the verdict flips to "
                     "run-extended and the engine applies the Steadman heat "

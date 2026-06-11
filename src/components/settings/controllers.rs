@@ -13,7 +13,7 @@ use leptos::tachys::view::any_view::IntoAny;
 
 use crate::components::controllers_form::ControllerEditorPanel;
 use crate::components::settings_ui::{
-    config_kvs, BadgeTone, SettingsBadge, SettingsCard, SettingsResult,
+    config_kvs, BadgeTone, SettingsBadge, SettingsCard, SettingsLoadError, SettingsResult,
 };
 use crate::components::ui::Panel;
 use crate::docs::doc_url;
@@ -26,13 +26,22 @@ pub fn SettingsControllers() -> impl IntoView {
     let result_ok = RwSignal::new(false);
     let add_open = RwSignal::new(false);
     let editing_id: RwSignal<Option<String>> = RwSignal::new(None);
+    // Initial-load state: Some(err) when the config GET failed. The
+    // editor body is replaced by a Retry banner in that case.
+    let load_error: RwSignal<Option<String>> = RwSignal::new(None);
+    let load_retry = RwSignal::new(0u32);
 
     #[cfg(feature = "hydrate")]
     {
         Effect::new(move |_| {
+            let _ = load_retry.get();
             wasm_bindgen_futures::spawn_local(async move {
-                if let Ok(cfg) = fetch_config().await {
-                    config_json.set(cfg);
+                match fetch_config().await {
+                    Ok(cfg) => {
+                        config_json.set(cfg);
+                        load_error.set(None);
+                    }
+                    Err(e) => load_error.set(Some(e)),
                 }
             });
         });
@@ -174,6 +183,10 @@ pub fn SettingsControllers() -> impl IntoView {
                 </p>
             </header>
 
+            <Show
+                when=move || load_error.get().is_none()
+                fallback=move || view! { <SettingsLoadError error=load_error retry=load_retry/> }
+            >
             <Panel title="Configured controllers".to_string()>
                 <ul class="settings-card-list">
                     {controllers_view}
@@ -240,6 +253,7 @@ pub fn SettingsControllers() -> impl IntoView {
             >
                 {move || if saving.get() { "Saving…" } else { "Save all changes" }}
             </button>
+            </Show>
 
             <SettingsResult result_msg=result_msg result_ok=result_ok/>
         </main>
@@ -284,6 +298,10 @@ async fn fetch_config() -> Result<serde_json::Value, String> {
         .send()
         .await
         .map_err(|e| e.to_string())?;
+    // A JSON error body must not be mistaken for the config.
+    if !resp.ok() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
     resp.json::<serde_json::Value>()
         .await
         .map_err(|e| e.to_string())

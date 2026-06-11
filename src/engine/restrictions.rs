@@ -52,8 +52,8 @@ pub fn is_in_effective_window(now: DateTime<Local>, w: &EffectiveWindow) -> bool
             end_day,
         } => {
             let yr = date.year();
-            let start = NaiveDate::from_ymd_opt(yr, *start_month as u32, *start_day as u32);
-            let end = NaiveDate::from_ymd_opt(yr, *end_month as u32, *end_day as u32);
+            let start = ymd_clamped_to_month_end(yr, *start_month as u32, *start_day as u32);
+            let end = ymd_clamped_to_month_end(yr, *end_month as u32, *end_day as u32);
             match (start, end) {
                 (Some(s), Some(e)) if s <= e => date >= s && date <= e,
                 // Wrap-around (e.g. Nov 15 → Feb 28): inside if before
@@ -157,6 +157,28 @@ fn format_reason(r: &WateringRestriction, bad_day: bool, bad_hour: bool) -> Stri
     }
 }
 
+/// Build a `NaiveDate`, clamping a day that overruns the month to the
+/// month's last valid day (Feb 30 → Feb 28/29, Jun 31 → Jun 30). User
+/// intent for a DateRange bound like "Feb 30" is "end of February";
+/// without the clamp the date fails to construct and the restriction
+/// silently never applies. An invalid month still yields `None`.
+fn ymd_clamped_to_month_end(year: i32, month: u32, day: u32) -> Option<NaiveDate> {
+    NaiveDate::from_ymd_opt(year, month, day).or_else(|| {
+        let last = last_day_of_month(year, month)?;
+        NaiveDate::from_ymd_opt(year, month, day.min(last))
+    })
+}
+
+/// Last valid day number of `month` in `year` (handles leap February).
+fn last_day_of_month(year: i32, month: u32) -> Option<u32> {
+    let (ny, nm) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    Some(NaiveDate::from_ymd_opt(ny, nm, 1)?.pred_opt()?.day())
+}
+
 /// Helper: returns the `n`-th occurrence of `weekday` in `month` of
 /// `year` (1-indexed). `nth_weekday_of_month(2026, 3, Sun, 2)` returns
 /// the second Sunday of March 2026 — i.e. DST start. Returns `None` if
@@ -253,6 +275,69 @@ mod tests {
             make(2026, 7, 4, 6, 0),
             &EffectiveWindow::StandardOnly
         ));
+    }
+
+    #[test]
+    fn date_range_clamps_feb_30_to_month_end() {
+        // "Dec 1 → Feb 30" means "through the end of February".
+        let w = EffectiveWindow::DateRange {
+            start_month: 12,
+            start_day: 1,
+            end_month: 2,
+            end_day: 30,
+        };
+        // 2026 is not a leap year: clamps to Feb 28.
+        assert!(is_in_effective_window(make(2026, 2, 28, 6, 0), &w));
+        assert!(!is_in_effective_window(make(2026, 3, 1, 6, 0), &w));
+        // 2028 is a leap year: clamps to Feb 29.
+        assert!(is_in_effective_window(make(2028, 2, 29, 6, 0), &w));
+        assert!(!is_in_effective_window(make(2028, 3, 1, 6, 0), &w));
+    }
+
+    #[test]
+    fn date_range_feb_29_end_works_on_leap_and_non_leap_years() {
+        let w = EffectiveWindow::DateRange {
+            start_month: 2,
+            start_day: 1,
+            end_month: 2,
+            end_day: 29,
+        };
+        // Leap year: Feb 29 exists and is the last in-window day.
+        assert!(is_in_effective_window(make(2028, 2, 29, 6, 0), &w));
+        assert!(!is_in_effective_window(make(2028, 3, 1, 6, 0), &w));
+        // Non-leap year: clamps to Feb 28, window still applies.
+        assert!(is_in_effective_window(make(2026, 2, 28, 6, 0), &w));
+        assert!(!is_in_effective_window(make(2026, 3, 1, 6, 0), &w));
+        assert!(!is_in_effective_window(make(2026, 1, 31, 6, 0), &w));
+    }
+
+    #[test]
+    fn date_range_clamps_jun_31_to_jun_30() {
+        let w = EffectiveWindow::DateRange {
+            start_month: 6,
+            start_day: 1,
+            end_month: 6,
+            end_day: 31,
+        };
+        assert!(is_in_effective_window(make(2026, 6, 30, 6, 0), &w));
+        assert!(is_in_effective_window(make(2026, 6, 1, 6, 0), &w));
+        assert!(!is_in_effective_window(make(2026, 7, 1, 6, 0), &w));
+        assert!(!is_in_effective_window(make(2026, 5, 31, 6, 0), &w));
+    }
+
+    #[test]
+    fn date_range_clamped_start_day() {
+        // Start day overruns too: "Feb 30 → Mar 15" behaves as Feb 28/29.
+        let w = EffectiveWindow::DateRange {
+            start_month: 2,
+            start_day: 30,
+            end_month: 3,
+            end_day: 15,
+        };
+        assert!(is_in_effective_window(make(2026, 2, 28, 6, 0), &w));
+        assert!(is_in_effective_window(make(2026, 3, 15, 6, 0), &w));
+        assert!(!is_in_effective_window(make(2026, 2, 27, 6, 0), &w));
+        assert!(!is_in_effective_window(make(2026, 3, 16, 6, 0), &w));
     }
 
     #[test]

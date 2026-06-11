@@ -32,12 +32,18 @@ pub fn AdvisorExplanation(verdict: Signal<String>) -> impl IntoView {
     {
         let _ = verdict; // future iteration: refetch eagerly on verdict change
         use leptos::task::spawn_local;
+        // spawn_local is detached, so without an abort flag every visit
+        // to this page leaves a 60s fetch loop polling forever. on_cleanup
+        // flips the flag on navigation and the loop exits at its next
+        // wake (try_get_value returns None once the owner is disposed).
+        let alive = StoredValue::new(true);
+        on_cleanup(move || alive.set_value(false));
         spawn_local(async move {
             // Yield once so hydration finishes attaching event handlers
             // (top-nav click handlers, SSE EventSource, etc) before we
             // start firing fetches.
             gloo_timers::future::TimeoutFuture::new(0).await;
-            loop {
+            while alive.try_get_value().unwrap_or(false) {
                 fetch_and_apply(set_state).await;
                 // Re-fetch every minute. Server-side cache absorbs the
                 // duplicates on the same input; this keeps us probing

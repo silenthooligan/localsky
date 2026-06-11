@@ -296,8 +296,12 @@ fn HeatStressBlock(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 <div class="kv">
                     <span class="k">"Overnight low (24h)"</span>
                     <span class=move || {
-                        if snap.get().forecast.temp_min_24h_f < 38.0
-                           && snap.get().forecast.temp_min_24h_f > 0.0 {
+                        // skip_check.temp_min_24h_valid carries the "is this
+                        // a real forecast low?" bit (same refresh fills both
+                        // structs), so a genuine <= 0 °F low still warns.
+                        let s = snap.get();
+                        if s.skip_check.temp_min_24h_valid
+                           && s.forecast.temp_min_24h_f < 38.0 {
                             "v v-warn"
                         } else { "v" }
                     }>

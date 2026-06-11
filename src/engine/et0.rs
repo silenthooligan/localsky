@@ -72,22 +72,19 @@ pub struct Et0Diagnostics {
 
 /// Top-level dispatch. With `Et0Method::Auto`, picks Penman-Monteith if
 /// all PM inputs are present, else Hargreaves-Samani.
+///
+/// `Et0Method::SourceNative` means "use the weather source's own ET0
+/// field", but no native value reaches this pure function; substituting
+/// it happens upstream. Until a caller does, SourceNative falls back to
+/// the computed Penman-Monteith value (reported via `method_used`) so a
+/// NaN can never escape into the water balance.
 pub fn compute(inputs: &Et0Inputs, method: Et0Method) -> Et0Result {
     use Et0Method::*;
     match method {
         PenmanMonteith | AsceSimplified => penman_monteith(inputs),
         HargreavesSamani => hargreaves_samani(inputs),
-        SourceNative => Et0Result {
-            et0_mm_day: f64::NAN,
-            method_used: SourceNative,
-            diagnostics: Et0Diagnostics {
-                extraterrestrial_rad_mj_m2_day: extraterrestrial_radiation(
-                    inputs.latitude_deg,
-                    inputs.doy,
-                ),
-                ..Default::default()
-            },
-        },
+        // Fallback for missing native ET0; see the doc comment above.
+        SourceNative => penman_monteith(inputs),
         Auto => {
             if has_full_pm_inputs(inputs) {
                 penman_monteith(inputs)
@@ -432,6 +429,35 @@ mod tests {
         let r = compute(&inputs, Et0Method::Auto);
         assert!(matches!(r.method_used, Et0Method::HargreavesSamani));
         assert!(r.et0_mm_day > 0.0);
+    }
+
+    #[test]
+    fn source_native_without_native_data_falls_back_non_nan() {
+        // No native ET0 ever reaches compute(); SourceNative must fall
+        // back to Penman-Monteith rather than emit NaN. Inputs are
+        // sparse on purpose (PM's internal defaults must carry it).
+        let inputs = Et0Inputs {
+            t_max_c: 30.0,
+            t_min_c: 20.0,
+            t_mean_c: None,
+            rh_max_pct: None,
+            rh_min_pct: None,
+            rh_mean_pct: None,
+            u2_ms: None,
+            solar_rad_mj_m2_day: None,
+            pressure_kpa: None,
+            elevation_m: 30.0,
+            latitude_deg: 28.5,
+            doy: 196,
+        };
+        let r = compute(&inputs, Et0Method::SourceNative);
+        assert!(
+            r.et0_mm_day.is_finite(),
+            "SourceNative leaked a non-finite ET0: {}",
+            r.et0_mm_day
+        );
+        assert!(r.et0_mm_day >= 0.0);
+        assert!(matches!(r.method_used, Et0Method::PenmanMonteith));
     }
 
     #[test]

@@ -22,7 +22,14 @@ pub fn zone_status(z: &ZoneState) -> (&'static str, &'static str, &'static str) 
 }
 
 #[component]
-pub fn ZoneCard(zone: ZoneState, selected: RwSignal<Option<String>>) -> impl IntoView {
+pub fn ZoneCard(
+    zone: ZoneState,
+    selected: RwSignal<Option<String>>,
+    /// Live soil moisture % from the zone's assigned probe (joined from
+    /// the snapshot's soil_forecasts by the caller). None = no probe.
+    #[prop(optional_no_strip)]
+    soil_pct: Option<f64>,
+) -> impl IntoView {
     let (status, label, color) = zone_status(&zone);
     let name = zone.name.clone();
     let slug = zone.slug.clone();
@@ -74,6 +81,24 @@ pub fn ZoneCard(zone: ZoneState, selected: RwSignal<Option<String>>) -> impl Int
         });
 
     let select_label = format!("Open {} details", zone.name);
+    // Selection pattern is form-factor aware: on desktop/tablet the card
+    // drives the side-by-side detail pane; on phones (where that pane
+    // would land below the fold) the tap pushes the standalone
+    // /zones/:slug page instead, the list -> detail flow phones expect.
+    let is_mobile = use_context::<RwSignal<bool>>();
+    let nav_slug = slug.clone();
+    let navigate = leptos_router::hooks::use_navigate();
+    let on_select = move |_| {
+        let mobile = is_mobile.map(|s| s.get_untracked()).unwrap_or(false);
+        if mobile {
+            navigate(
+                &format!("/zones/{nav_slug}"),
+                leptos_router::NavigateOptions::default(),
+            );
+        } else {
+            selected.set(Some(slug_sel.clone()));
+        }
+    };
     view! {
         <div
             class=format!("zone-card zone-card--{status}")
@@ -87,7 +112,7 @@ pub fn ZoneCard(zone: ZoneState, selected: RwSignal<Option<String>>) -> impl Int
                 type="button"
                 class="zone-card__hit"
                 aria-label=select_label
-                on:click=move |_| selected.set(Some(slug_sel.clone()))
+                on:click=on_select
             ></button>
             {photo.map(|src| view! {
                 <div class="zone-card__photo" style=format!("background-image:url('{src}')")></div>
@@ -113,6 +138,12 @@ pub fn ZoneCard(zone: ZoneState, selected: RwSignal<Option<String>>) -> impl Int
                         <span class="zone-card__k">"Deficit"</span>
                         <span class="zone-card__v">{deficit}<small>" mm"</small></span>
                     </div>
+                    {soil_pct.map(|pct| view! {
+                        <div class="zone-card__stat zone-card__stat--soil">
+                            <span class="zone-card__k">"Soil"</span>
+                            <span class="zone-card__v">{format!("{pct:.0}")}<small>"%"</small></span>
+                        </div>
+                    })}
                 </div>
                 {running.then(|| view! {
                     <div class="zone-card__foot">

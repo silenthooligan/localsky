@@ -33,7 +33,7 @@ fn day_buckets(runs: &[RunRecord], days: i64, zone: Option<&str>) -> Vec<f64> {
                 continue;
             }
         }
-        let back = ((today_mid - r.start_epoch) / 86_400).max(0);
+        let back = crate::components::time_bucket::days_back(today_mid, r.start_epoch).max(0);
         if (back as usize) < n {
             b[back as usize] += r.duration_s as f64 / 60.0;
         }
@@ -100,6 +100,13 @@ fn skip_breakdown(decisions: &[DecisionRecord]) -> Vec<(&'static str, usize, &'s
     v.retain(|(_, c, _)| *c > 0);
     v.sort_by(|a, b| b.1.cmp(&a.1));
     v
+}
+
+/// Format minutes with negative-zero normalized away ("-0" reads as a
+/// bug, and float sums love producing it).
+fn fmt_min(v: f64) -> String {
+    let v = if v == 0.0 { 0.0 } else { v };
+    format!("{v:.0}")
 }
 
 fn print_page() {
@@ -185,10 +192,10 @@ pub fn HistoryPage() -> impl IntoView {
                 let overall = day_buckets(&w.runs, days.get(), None);
                 view! {
                     <div class="hist-kpis">
-                        <StatTile label="Water applied" value=format!("{:.0}", total_min) unit="min" icon="droplet" spark=overall.clone() accent="var(--accent)".to_string()/>
+                        <StatTile label="Water applied" value=fmt_min(total_min) unit="min" icon="droplet" spark=overall.clone() accent="var(--accent)".to_string()/>
                         <StatTile label="Runs" value=run_count.to_string() icon="play" accent="var(--accent-good)".to_string()/>
                         <StatTile label="Skips" value=skip_count.to_string() icon="ban" accent="var(--accent-rain)".to_string()/>
-                        <StatTile label="Avg / day" value=format!("{:.0}", overall.iter().sum::<f64>() / overall.len().max(1) as f64) unit="min" icon="gauge" accent="var(--accent-warm)".to_string()/>
+                        <StatTile label="Avg / day" value=fmt_min(overall.iter().sum::<f64>() / overall.len().max(1) as f64) unit="min" icon="gauge" accent="var(--accent-warm)".to_string()/>
                     </div>
                 }
                 .into_any()
@@ -198,8 +205,20 @@ pub fn HistoryPage() -> impl IntoView {
             <section class="hist-panel">
                 <h2 class="hist-panel__title">"Watered minutes per day"</h2>
                 {move || {
+                    if !loaded.get() {
+                        return view! { <crate::components::ui::Skeleton variant="chart"/> }.into_any();
+                    }
                     let w = window.get();
                     let b = day_buckets(&w.runs, days.get(), None);
+                    if b.iter().all(|m| *m <= 0.0) {
+                        return view! {
+                            <div class="hist-empty">
+                                "No watering recorded in this window yet. Once zones run, every "
+                                "minute lands here automatically."
+                            </div>
+                        }
+                        .into_any();
+                    }
                     let pts: Vec<(f64, f64)> = b.iter().enumerate().map(|(i, m)| (i as f64, *m)).collect();
                     // Index i is "i days ago" (day_buckets orientation).
                     let today = Local::now().date_naive();
@@ -212,7 +231,7 @@ pub fn HistoryPage() -> impl IntoView {
                         })
                         .collect();
                     let series = vec![Series::new("Watered (min)", "var(--accent)", pts)];
-                    view! { <LineChart series height=200 y_unit=" min".to_string() x_labels=labels/> }
+                    view! { <LineChart series height=200 y_unit=" min".to_string() x_labels=labels/> }.into_any()
                 }}
             </section>
 

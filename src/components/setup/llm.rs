@@ -250,7 +250,7 @@ pub fn LlmStep() -> impl IntoView {
 
     view! {
         <div class="setup-step">
-            <h2 class="setup-step__title">"LLM advisor (optional)"</h2>
+            <h2 class="setup-step__title">"AI advisor "<span class="setup-step__optional">"optional"</span></h2>
             <p class="setup-step__body">
                 "LocalSky can call an LLM to explain today's verdict in plain "
                 "English and flag anomalies in the snapshot. The deterministic "

@@ -18,6 +18,9 @@ use serde_json::json;
 
 #[component]
 pub fn RunningBanner(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
+    // Created at component scope (context lookup), shared by every
+    // render of the inner closure.
+    let stop_done = super::controls::toast_on_err("Stop failed; zone may still be running");
     move || {
         let s = snap.get();
         let running: Vec<_> = s.zones.iter().filter(|z| z.running).cloned().collect();
@@ -39,10 +42,10 @@ pub fn RunningBanner(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             // Single running zone -> stop just that one. Multiple -> stop_all
             // to handle the overlap case without a per-zone dance.
             if count > 1 {
-                super::controls::post_action(json!({"kind": "stop_all"}));
+                super::controls::post_action_then(json!({"kind": "stop_all"}), stop_done);
             } else {
                 let slug = first_slug.clone();
-                super::controls::post_action(json!({"kind": "stop", "zone": slug}));
+                super::controls::post_action_then(json!({"kind": "stop", "zone": slug}), stop_done);
             }
         };
 

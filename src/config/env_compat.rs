@@ -39,6 +39,7 @@ pub fn synthesize() -> Config {
     cfg.sources.push(SourceEntry {
         id: "tempest_lan".into(),
         priority: 100,
+        max_age_s: None,
         enabled: true,
         source: SourceKind::TempestUdp(TempestUdpConfig {
             bind_addr: env::var("TEMPEST_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:50222".into()),
@@ -51,6 +52,7 @@ pub fn synthesize() -> Config {
     cfg.sources.push(SourceEntry {
         id: "open_meteo".into(),
         priority: 50,
+        max_age_s: None,
         enabled: true,
         source: SourceKind::OpenMeteo(OpenMeteoConfig {
             forecast_days: 7,
@@ -73,6 +75,7 @@ pub fn synthesize() -> Config {
         cfg.sources.push(SourceEntry {
             id: "ha_passthrough".into(),
             priority: 30,
+            max_age_s: None,
             enabled: true,
             source: SourceKind::HaPassthrough(HaPassthroughConfig {
                 base_url: url.clone(),
@@ -163,6 +166,7 @@ pub fn synthesize() -> Config {
         cfg.sources.push(SourceEntry {
             id: "demo_replay".into(),
             priority: 100,
+            max_age_s: None,
             enabled: true,
             source: SourceKind::DemoReplay(DemoReplayConfig {
                 rate: 10.0,

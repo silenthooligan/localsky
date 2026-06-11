@@ -119,3 +119,31 @@
   .ayu body { background: white; color: black; }
   .ayu pre { background: #f6f8fa !important; }
 }
+
+/* Home backlink in the menu bar (injected by theme/js/backlink.js). */
+#ls-home-link {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 12px;
+  font-size: 0.85em;
+  font-weight: 600;
+  color: var(--icons);
+  text-decoration: none;
+  line-height: var(--menu-bar-height);
+}
+#ls-home-link:hover { color: var(--icons-hover); }
+
+/* Brand chrome (injected by theme/js/branding.js). */
+.ls-brand { display: inline-flex; align-items: center; gap: 8px; }
+.ls-brand img { display: block; }
+.ls-wordmark { font-weight: 800; letter-spacing: 0.06em; }
+.ls-wordmark em { font-style: normal; color: #5ec8ff; }
+.ls-docs-tag {
+  font-size: 0.62em; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.08em; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid rgba(94, 200, 255, 0.4); color: #5ec8ff;
+}
+
+/* Accent links matched to the product palette. */
+.ayu { --links: #5ec8ff; }
+.ayu .menu-title { color: #e6ecf5; }

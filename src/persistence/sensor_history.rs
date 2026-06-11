@@ -2,13 +2,23 @@
 // triple via the composite PK in M0004. Idempotent inserts via INSERT
 // OR IGNORE. Used by the daily ET0 integrator + the merge layer's
 // last-seen tracker + dashboard sparkline ranges.
+//
+// Retention: ingest is unbounded (chatty Ecowitt consoles post every
+// 16s), so writes piggyback an at-most-hourly prune of rows older than
+// retention_days ([persistence].retention_days, default 90; 0 keeps
+// everything). The DELETE's `epoch < ?` predicate walks the composite
+// PK's leading column, so no extra index is needed.
 
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Mutex;
+
+/// Floor between piggybacked prune passes.
+const PRUNE_INTERVAL_S: i64 = 3600;
 
 #[derive(Debug, Error)]
 pub enum SensorHistoryError {
@@ -27,11 +37,28 @@ pub struct Reading {
 #[derive(Clone)]
 pub struct SensorHistoryStore {
     conn: Arc<Mutex<Connection>>,
+    /// Days of history to keep; 0 disables pruning.
+    retention_days: u32,
+    /// Epoch of the last piggybacked prune (shared across clones).
+    last_prune_epoch: Arc<AtomicI64>,
 }
 
 impl SensorHistoryStore {
     pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
-        Self { conn }
+        Self {
+            conn,
+            retention_days: crate::config::schema::default_retention_days(),
+            // Start the prune clock at construction so boot doesn't pay
+            // a potentially large DELETE before serving traffic; the
+            // first pass lands one interval after start.
+            last_prune_epoch: Arc::new(AtomicI64::new(chrono::Utc::now().timestamp())),
+        }
+    }
+
+    /// Override the retention window ([persistence].retention_days).
+    pub fn with_retention_days(mut self, days: u32) -> Self {
+        self.retention_days = days;
+        self
     }
 
     pub async fn insert(&self, r: Reading) -> Result<(), SensorHistoryError> {
@@ -47,13 +74,15 @@ impl SensorHistoryStore {
         })
         .await
         .map_err(|e| SensorHistoryError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| SensorHistoryError::Sqlite(e.to_string()))
+        .map_err(|e| SensorHistoryError::Sqlite(e.to_string()))?;
+        self.maybe_prune().await;
+        Ok(())
     }
 
     /// Batch insert. INSERT OR IGNORE on each row; one transaction.
     pub async fn insert_many(&self, rs: Vec<Reading>) -> Result<usize, SensorHistoryError> {
         let c = self.conn.clone();
-        tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
+        let inserted = tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
             let mut conn = c.blocking_lock();
             let mut inserted = 0usize;
             let tx = conn.transaction()?;
@@ -72,7 +101,54 @@ impl SensorHistoryStore {
         })
         .await
         .map_err(|e| SensorHistoryError::Sqlite(format!("join: {e}")))?
+        .map_err(|e| SensorHistoryError::Sqlite(e.to_string()))?;
+        self.maybe_prune().await;
+        Ok(inserted)
+    }
+
+    /// Delete every reading older than the cutoff. Returns rows removed.
+    pub async fn prune_older_than(&self, cutoff_epoch: i64) -> Result<usize, SensorHistoryError> {
+        let c = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
+            let conn = c.blocking_lock();
+            conn.execute(
+                "DELETE FROM sensor_history WHERE epoch < ?",
+                params![cutoff_epoch],
+            )
+        })
+        .await
+        .map_err(|e| SensorHistoryError::Sqlite(format!("join: {e}")))?
         .map_err(|e| SensorHistoryError::Sqlite(e.to_string()))
+    }
+
+    /// Retention pruning, piggybacked on writes: at most one pass per
+    /// PRUNE_INTERVAL_S across all clones (compare_exchange claims the
+    /// slot so concurrent writers don't stampede). Failures only warn;
+    /// pruning must never fail an ingest.
+    async fn maybe_prune(&self) {
+        if self.retention_days == 0 {
+            return;
+        }
+        let now = chrono::Utc::now().timestamp();
+        let last = self.last_prune_epoch.load(Ordering::Relaxed);
+        if now - last < PRUNE_INTERVAL_S {
+            return;
+        }
+        if self
+            .last_prune_epoch
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        let cutoff = now - i64::from(self.retention_days) * 86_400;
+        match self.prune_older_than(cutoff).await {
+            Ok(n) if n > 0 => {
+                tracing::debug!(rows = n, cutoff, "sensor_history retention prune");
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("sensor_history retention prune failed: {e}"),
+        }
     }
 
     /// All readings for a given key in [from, to). Most-recent first.
@@ -382,6 +458,79 @@ mod tests {
             !rows.iter().any(|r| r.key == "tempf"),
             "non-soil keys excluded"
         );
+    }
+
+    #[tokio::test]
+    async fn prune_older_than_deletes_only_old_rows() {
+        let s = fresh_store().await;
+        for epoch in [100i64, 200, 5000, 6000] {
+            s.insert(Reading {
+                epoch,
+                source_id: "src".into(),
+                key: "k".into(),
+                value: 1.0,
+            })
+            .await
+            .unwrap();
+        }
+        let removed = s.prune_older_than(1000).await.unwrap();
+        assert_eq!(removed, 2);
+        let series = s.series("k".into(), 0, i64::MAX, 100).await.unwrap();
+        assert_eq!(series.len(), 2);
+        assert!(series.iter().all(|r| r.epoch >= 1000));
+    }
+
+    #[tokio::test]
+    async fn insert_piggybacks_retention_prune() {
+        let now = chrono::Utc::now().timestamp();
+        let s = fresh_store().await.with_retention_days(1);
+        // Seed a row well past the 1-day window.
+        s.insert(Reading {
+            epoch: now - 10 * 86_400,
+            source_id: "src".into(),
+            key: "k".into(),
+            value: 1.0,
+        })
+        .await
+        .unwrap();
+        // Arm the prune clock (new() defers the first pass by an hour).
+        s.last_prune_epoch.store(0, Ordering::Relaxed);
+        s.insert(Reading {
+            epoch: now,
+            source_id: "src".into(),
+            key: "k".into(),
+            value: 2.0,
+        })
+        .await
+        .unwrap();
+        let series = s.series("k".into(), 0, i64::MAX, 100).await.unwrap();
+        assert_eq!(series.len(), 1, "expired row pruned on ingest");
+        assert_eq!(series[0].epoch, now);
+    }
+
+    #[tokio::test]
+    async fn retention_zero_disables_pruning() {
+        let now = chrono::Utc::now().timestamp();
+        let s = fresh_store().await.with_retention_days(0);
+        s.last_prune_epoch.store(0, Ordering::Relaxed);
+        s.insert(Reading {
+            epoch: now - 365 * 86_400,
+            source_id: "src".into(),
+            key: "k".into(),
+            value: 1.0,
+        })
+        .await
+        .unwrap();
+        s.insert(Reading {
+            epoch: now,
+            source_id: "src".into(),
+            key: "k".into(),
+            value: 2.0,
+        })
+        .await
+        .unwrap();
+        let series = s.series("k".into(), 0, i64::MAX, 100).await.unwrap();
+        assert_eq!(series.len(), 2, "retention 0 keeps everything");
     }
 
     #[tokio::test]

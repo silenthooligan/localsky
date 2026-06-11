@@ -14,15 +14,53 @@ session_ttl_days = 30    # rolling browser-session lifetime
 trusted_networks = []    # CIDRs that skip login, e.g. ["10.0.0.0/24"]
 ```
 
-- `disabled`: the pre-auth behavior. Right when a reverse proxy already
-  guards access, or on an isolated trusted network.
+- `disabled`: the pre-auth behavior. The right choice when a reverse
+  proxy already guards access, or on an isolated trusted network.
 - `required`: the UI redirects to `/login`; API calls need a session
   cookie or an API token. New wizard installs that create an owner
   account get this automatically.
 - `trusted_networks`: lets the home LAN stay frictionless while VPN/WAN
   clients must sign in. Each entry is a CIDR matched against the client
-  address (first `X-Forwarded-For` hop when present, so set your proxy
-  up to send it).
+  address. Read [the section below](#x-forwarded-for-and-trusted-networks)
+  before setting this on anything reachable from outside your LAN.
+
+## X-Forwarded-For and trusted networks
+
+How LocalSky determines the client address, exactly:
+
+1. If the request carries an `X-Forwarded-For` header, LocalSky uses the
+   **first hop** (the left-most entry) of that header.
+2. Otherwise it uses the TCP peer address of the connection.
+
+That address drives two things: the `trusted_networks` login bypass and
+the login/setup rate limiter.
+
+LocalSky has no trusted-proxy list, so it cannot tell a proxy-set
+`X-Forwarded-For` from a client-forged one. Any client that can reach
+the LocalSky port directly can send
+`X-Forwarded-For: 192.168.1.50` and, if `192.168.1.0/24` is in
+`trusted_networks`, walk straight past login. Deploy accordingly:
+
+- **Never expose the LocalSky port directly to the internet with
+  `trusted_networks` set.** Either leave `trusted_networks` empty on an
+  internet-reachable instance, or make sure the only route to LocalSky
+  is through your reverse proxy (bind LocalSky to localhost or an
+  internal Docker network, or firewall the port).
+- **Your proxy must overwrite the header, not append to it.** With
+  nginx, use the client address itself:
+
+  ```nginx
+  proxy_set_header X-Forwarded-For $remote_addr;
+  ```
+
+  Do **not** use `$proxy_add_x_forwarded_for` in front of LocalSky: it
+  appends the proxy-observed address to whatever the client sent, which
+  leaves a forged address in the first-hop position LocalSky reads.
+  Caddy (2.5+) and Traefik overwrite forwarded headers from untrusted
+  clients by default, so their stock configs are safe.
+- On a flat LAN with no proxy, the TCP peer address is used and there is
+  nothing to forge below L3; `trusted_networks` is fine there as long as
+  the network itself is trusted.
 
 ## What stays public
 
@@ -33,8 +71,8 @@ These paths never require credentials, by design:
 | `/pkg/*`, `/sw.js`, root static assets | Compiled assets; browsers fetch them without credentials |
 | `/api/v1/info` | Pairing probe; carries `auth_required` so clients know to ask for a token |
 | `/login`, `/api/v1/auth/{status,login,setup}` | The way in |
-| `/ingest/*` | Weather hardware (Ecowitt consoles, webhooks) cannot authenticate |
-| `/api/v1/health` | Liveness for Docker healthchecks; anonymous callers get a trimmed body (status/version/uptime only) |
+| `/ingest/*`, `/api/v1/ingest/*` | Weather hardware (Ecowitt consoles, webhooks) cannot authenticate; block at the proxy for internet-facing deployments ([details](reverse-proxy.md#what-to-expose)) |
+| `/api/v1/health` | Liveness for Docker healthchecks; anonymous callers get a trimmed body (no source, controller, or HA detail) |
 | `/setup` + wizard APIs | Only until the first account exists |
 
 ## Accounts
@@ -56,8 +94,10 @@ Integrations authenticate with long-lived API tokens sent as
    starts its reauthentication flow automatically on the next 401.
 
 SSE streams accept `?access_token=lsk_...` as a query parameter for
-clients that cannot set headers (the browser EventSource sends the
-session cookie automatically, so this is only for external consumers).
+clients that cannot set headers. It is honored only on paths ending in
+`/stream` and ignored everywhere else (the browser EventSource sends
+the session cookie automatically, so this is only for external
+consumers).
 
 ## Lockout recovery
 

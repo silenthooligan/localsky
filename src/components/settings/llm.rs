@@ -3,7 +3,7 @@
 use leptos::prelude::*;
 
 use crate::components::settings_ui::SettingsResult;
-use crate::components::ui::{FormField, HelpHint, Panel, SegmentedControl};
+use crate::components::ui::{FormField, Panel, SegmentedControl};
 
 #[component]
 pub fn SettingsLlm() -> impl IntoView {
@@ -98,8 +98,7 @@ pub fn SettingsLlm() -> impl IntoView {
                 </p>
             </header>
 
-            <Panel title="Provider".to_string()>
-                <HelpHint topic="llm"/>
+            <Panel title="Provider".to_string() help_topic="llm">
                 <SegmentedControl
                     value=provider
                     options=vec![
@@ -114,8 +113,7 @@ pub fn SettingsLlm() -> impl IntoView {
             </Panel>
 
             <Show when=show_url>
-                <Panel title="Endpoint".to_string()>
-                    <HelpHint topic="llm"/>
+                <Panel title="Endpoint".to_string() help_topic="llm">
                     <div class="grid settings-field-grid">
                         <FormField
                             label="Base URL".to_string()

@@ -3,6 +3,14 @@
 // is driven by config.controllers[]; the registry is hot-swappable so a
 // PUT /api/config that changes the default controller takes effect on
 // the next dispatch without restarting the runtime.
+//
+// IMPORTANT: the registry is only populated when BOTH a config file and
+// the persistence DB are available (build_controllers needs a RunsStore).
+// With no DB mounted the registry stays empty and ALL watering dispatch
+// (scheduled and manual) is dead: schedulers log "no default controller"
+// per attempt and POST /action answers 503. main.rs logs a boot-time
+// tracing::error! when controllers are configured but the DB is missing,
+// so the gap is loud instead of a silent dry lawn.
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -64,6 +64,24 @@ pub fn default_policy(field: WeatherField) -> MergePolicy {
     }
 }
 
+/// Drop candidates whose observation is older than their source's
+/// configured max_age_s (SourceEntry.max_age_s; None = no cap). Callers
+/// apply this before merge_field so a source past its freshness cap is
+/// excluded from the merge entirely instead of winning with stale data.
+pub fn exclude_stale_candidates(
+    candidates: Vec<(FieldValue, i32, Option<u64>)>,
+    now_epoch: i64,
+) -> Vec<(FieldValue, i32)> {
+    candidates
+        .into_iter()
+        .filter(|(fv, _, max_age)| match max_age {
+            Some(m) => now_epoch.saturating_sub(fv.observed_at) <= *m as i64,
+            None => true,
+        })
+        .map(|(fv, p, _)| (fv, p))
+        .collect()
+}
+
 /// Apply `policy` to a slice of candidate FieldValues and pick a winner.
 /// Caller passes priorities alongside each candidate so HighestPriority
 /// can break ties.
@@ -150,6 +168,38 @@ mod tests {
     fn empty_candidates_returns_none() {
         let r = merge_field(&[], MergePolicy::Max);
         assert!(r.is_none());
+    }
+
+    #[test]
+    fn exclude_stale_drops_only_capped_old_candidates() {
+        let now = 10_000i64;
+        let candidates = vec![
+            // Fresh + capped: kept.
+            (fv("fresh_capped", 21.0, now - 60), 100, Some(300u64)),
+            // Old + capped: dropped.
+            (fv("old_capped", 22.0, now - 600), 90, Some(300)),
+            // Old + uncapped: kept (no max_age_s configured).
+            (fv("old_uncapped", 23.0, now - 600), 80, None),
+            // Exactly at the cap boundary: kept (<=).
+            (fv("boundary", 24.0, now - 300), 70, Some(300)),
+        ];
+        let out = exclude_stale_candidates(candidates, now);
+        let ids: Vec<&str> = out.iter().map(|(v, _)| v.source_id.as_str()).collect();
+        assert_eq!(ids, vec!["fresh_capped", "old_uncapped", "boundary"]);
+    }
+
+    #[test]
+    fn exclude_stale_then_merge_picks_fresh_winner() {
+        let now = 10_000i64;
+        // The highest-priority source is past its cap; the merge must
+        // fall through to the fresh lower-priority source.
+        let candidates = vec![
+            (fv("stale_station", 70.0, now - 7200), 100, Some(900u64)),
+            (fv("fresh_forecast", 72.0, now - 60), 50, Some(900)),
+        ];
+        let alive = exclude_stale_candidates(candidates, now);
+        let w = merge_field(&alive, MergePolicy::HighestPriority).unwrap();
+        assert_eq!(w.source_id, "fresh_forecast");
     }
 
     #[test]

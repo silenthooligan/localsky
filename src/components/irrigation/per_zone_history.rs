@@ -141,7 +141,8 @@ fn PerZoneCard(slug: String, name: String, window: ReadSignal<HistoryWindow>) ->
             .iter()
             .filter(|r| r.skip_reason.is_none() && r.zone == bars_slug)
         {
-            let days_back = ((today_midnight - r.start_epoch) / 86400).max(0);
+            let days_back =
+                crate::components::time_bucket::days_back(today_midnight, r.start_epoch).max(0);
             if (0..14).contains(&days_back) {
                 buckets[days_back as usize] += r.duration_s;
             }

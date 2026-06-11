@@ -6,7 +6,7 @@
 use leptos::prelude::*;
 
 use crate::components::settings_ui::SettingsResult;
-use crate::components::ui::{FormField, HelpHint, Panel, Toggle};
+use crate::components::ui::{FormField, Panel, Toggle};
 
 #[component]
 pub fn SettingsNotifications() -> impl IntoView {
@@ -104,8 +104,7 @@ pub fn SettingsNotifications() -> impl IntoView {
                 </p>
             </header>
 
-            <Panel title="Web Push (per device)".to_string()>
-                <HelpHint topic="notifications"/>
+            <Panel title="Web Push (per device)".to_string() help_topic="notifications">
                 <Toggle
                     checked=web_push_enabled
                     label="Server-side push enabled".to_string()
@@ -113,8 +112,7 @@ pub fn SettingsNotifications() -> impl IntoView {
                 />
             </Panel>
 
-            <Panel title="MQTT (HA discovery)".to_string()>
-                <HelpHint topic="notifications"/>
+            <Panel title="MQTT (HA discovery)".to_string() help_topic="notifications">
                 <div class="grid settings-field-grid">
                     <FormField
                         label="Broker host".to_string()
@@ -196,8 +194,7 @@ pub fn SettingsNotifications() -> impl IntoView {
                 />
             </Panel>
 
-            <Panel title="ntfy".to_string()>
-                <HelpHint topic="notifications"/>
+            <Panel title="ntfy".to_string() help_topic="notifications">
                 <div class="grid settings-field-grid">
                     <FormField
                         label="Base URL".to_string()
@@ -227,8 +224,7 @@ pub fn SettingsNotifications() -> impl IntoView {
                 </div>
             </Panel>
 
-            <Panel title="Slack".to_string()>
-                <HelpHint topic="notifications"/>
+            <Panel title="Slack".to_string() help_topic="notifications">
                 <div class="grid settings-field-grid">
                     <FormField
                         label="Incoming webhook URL".to_string()

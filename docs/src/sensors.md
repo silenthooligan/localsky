@@ -29,7 +29,7 @@ Examples: Ecowitt WH51 / WH52 (battery), Aqara Zigbee, Sonoff Zigbee, capacitive
 - **Soil-moisture projection**: 7-day forward curve under no-irrigation, color-coded for "stays in healthy band" vs. "will dry out".
 - **Smarter dry-out detection**: catches the case where ET-based math underestimates actual drying (heavy clay holding water visibly longer than expected, or sandy spots draining faster).
 
-**Connect via**: any source that publishes `sensor.<zone_slug>_soil_moisture` (HA passthrough), or a direct adapter (Ecowitt GW1100/GW2000 native LAN poll, Aqara via HA, Tasmota via MQTT).
+**Connect via**: the native Ecowitt gateway poll, the Ecowitt LAN push receiver, or any Home Assistant soil entity. Once the readings are flowing, assign each probe to its zone; see [Assigning soil probes to zones](#assigning-soil-probes-to-zones) below.
 
 ### Soil temperature probes
 
@@ -69,6 +69,63 @@ Examples: PurpleAir, AirGradient, Ecowitt WH41.
 
 **Unlocks**:
 - Display tiles only. The engine doesn't make irrigation decisions on air quality (yet).
+
+## Assigning soil probes to zones
+
+Wire a moisture probe to a zone and the engine stops guessing: the probe's reading sits alongside the modeled bucket as the zone's gate.
+
+**Supported paths in:**
+
+- **Ecowitt soil probes (WH51 and friends) via a LAN gateway**: native, no cloud. The `ecowitt_gw_poll` source polls the gateway directly and records moisture, temperature, conductivity, and battery per probe; the `ecowitt_local` push receiver works too.
+- **Any Home Assistant soil sensor entity**: a Zigbee probe on ZHA, a Z-Wave probe, anything HA already knows about.
+
+**Assignment** happens in the zone's settings: **Settings > Zones > pick the zone > soil sensor**. One probe per zone. The picker lists every soil channel LocalSky has discovered: native gateway channels appear as `source:<source_id>:soilmoisture<N>`, HA entities as `ha:<entity_id>`. The Sensors hub shows which zones each source feeds.
+
+**How the engine uses it:**
+
+- Below the zone's target band: the zone is eligible; runs size to the deficit as usual.
+- Inside the band: healthy; scheduled runs still apply unless the saturation threshold says otherwise.
+- At or above saturation: the zone skips on its own, even when the day's verdict is Run, and the skip reason names the probe.
+
+The Sensors hub and each zone's detail show the probe's live reading, the target band, and a 7-day no-watering projection so you can sanity check that the moisture curve actually behaves like your yard. If the probe goes offline, the zone falls back to the modeled bucket automatically; nothing blocks.
+
+### Worked example: a Home Assistant sensor feeding LocalSky
+
+Say HA owns a Zigbee soil probe (`sensor.back_yard_soil_moisture`) and an outdoor thermometer (`sensor.patio_temperature`), and you want both in LocalSky.
+
+**Step 1: give LocalSky HA credentials.** HA-backed sensing uses the `HA_URL` and `HA_TOKEN` (or `HA_LONG_LIVED_TOKEN`) environment variables on the LocalSky container:
+
+```yaml
+# docker-compose.yml
+environment:
+  - HA_URL=http://192.168.1.10:8123
+  - HA_TOKEN=${HA_LONG_LIVED_TOKEN}
+```
+
+Create the long-lived token in HA under your profile > Security.
+
+**Step 2: weather fields go through the HA passthrough source.** The HA passthrough source (kind = `"ha_passthrough"`) maps weather fields to HA entity ids via `field_map` and polls HA's `/api/states` every 30 seconds:
+
+```toml
+[[sources]]
+id = "ha_bridge"
+priority = 30
+enabled = true
+kind = "ha_passthrough"
+[sources.config]
+base_url = "http://192.168.1.10:8123"
+bearer_token = "${HA_LONG_LIVED_TOKEN}"
+[sources.config.field_map]
+air_temp_f = "sensor.patio_temperature"
+```
+
+Field-map keys are LocalSky weather field names (`air_temp_f`, `rh_pct`, `wind_mph`, `rain_today_in`, and so on); values are HA entity ids. Passthrough values merge at priority 30: above raw forecast data, below any direct station adapter, since they're a routed copy of some other system's reading. Entities reporting `unavailable` or `unknown` are skipped, not zeroed.
+
+**Step 3: the soil probe is assigned per zone, not through field_map.** Open **Settings > Zones > Back Yard > soil sensor** and pick the probe; it appears in the list as `ha:sensor.back_yard_soil_moisture` (the picker reads HA's entity list using the credentials from step 1). From then on the probe gates that zone as described above.
+
+## Swapping hardware
+
+Replacing a station or probe with a new unit? Edit the **existing** source entry (keep its id) instead of deleting it and adding a fresh one. Sensor history is keyed by source id and channel, and zone run history is keyed by zone slug, so an in-place edit keeps your charts, calibration context, and history continuous. Deleting a source and re-adding it under a new id starts those series over.
 
 ## Empty states + progressive disclosure
 

@@ -146,7 +146,10 @@ fn build_scope(i: &Inputs) -> Scope<'static> {
     s.push("rain_tomorrow_prob_pct", i.rain_tomorrow_prob_pct as i64);
     s.push("rain_next_4h_in", i.rain_next_4h_in);
     s.push("wind_max_today_mph", i.wind_max_today_mph);
-    s.push("temp_min_24h_f", i.temp_min_24h_f);
+    // Rhai surface keeps the historical scalar shape: 0.0 stands in when
+    // the 24h forecast low is unavailable (user scripts predate the
+    // Option-ization and treat 0.0 as "no data").
+    s.push("temp_min_24h_f", i.temp_min_24h_f.unwrap_or(0.0));
     s.push("temp_max_3day_f", i.temp_max_3day_f);
     s.push(
         "days_since_significant_rain",
