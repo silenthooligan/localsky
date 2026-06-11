@@ -8,6 +8,7 @@
 use leptos::prelude::*;
 
 use crate::components::ui::Icon;
+#[cfg(feature = "hydrate")]
 use crate::docs::REPO_URL;
 
 #[component]

@@ -13,7 +13,9 @@ use chrono::{Local, TimeZone};
 use leptos::prelude::*;
 
 use crate::components::ui::{Button, LineChart, Series, Sparkline, StatTile};
-use crate::history::types::{DecisionRecord, DecisionWindow, HistoryWindow, RunRecord};
+#[cfg(feature = "hydrate")]
+use crate::history::types::DecisionWindow;
+use crate::history::types::{DecisionRecord, HistoryWindow, RunRecord};
 
 /// Daily watered-minutes buckets, oldest -> newest, length `days`.
 /// Skips are excluded (skip_reason is Some). Optional zone filter.
