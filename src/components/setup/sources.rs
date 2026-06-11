@@ -2,7 +2,7 @@
 // reusing the same inline editor as the Sensors hub. Sources are written
 // into the wizard draft (not the live config, which doesn't exist yet);
 // once you finish setup they go live and you validate them on the Sensors
-// hub. Skipping is fine — sensors can be added there any time, no wizard
+// hub. Skipping is fine, sensors can be added there any time, no wizard
 // required.
 
 use leptos::prelude::*;
@@ -125,7 +125,7 @@ pub fn SourcesStep() -> impl IntoView {
             <p class="setup-step__body">
                 "LocalSky merges across any number of sources. A live LAN station (Tempest, "
                 "Ecowitt) is the strongest signal; a forecast model (Open-Meteo, NWS) fills the "
-                "horizon. Add what you have — the engine picks per-field winners by priority."
+                "horizon. Add what you have, the engine picks per-field winners by priority."
             </p>
 
             <crate::components::setup::discover::NetworkScan mode="sources" draft=draft/>
@@ -149,7 +149,7 @@ pub fn SourcesStep() -> impl IntoView {
             <p class="sensors-section__hint" style="margin-top: var(--space-3)">
                 "Sources you add here go live when you finish setup. To confirm one is actually "
                 "ingesting (and see its live readings), open the "<a href="/sensors">"Sensors hub"</a>
-                " afterward — that's also where you can add or edit sensors any time, no wizard required. "
+                " afterward, that's also where you can add or edit sensors any time, no wizard required. "
                 "Skipping this step is fine: LocalSky will synthesize a Tempest UDP + Open-Meteo default."
             </p>
 

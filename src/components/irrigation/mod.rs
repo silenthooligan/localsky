@@ -111,7 +111,7 @@ fn IrrigationKpis(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             .to_string();
         let water_level = format!("{:.0}", s.water_level_pct);
         let deficit = if s.zones.is_empty() {
-            "—".to_string()
+            "-".to_string()
         } else {
             let avg = s.zones.iter().map(|z| z.bucket_mm).sum::<f64>() / s.zones.len() as f64;
             format!("{avg:.1}")
@@ -133,7 +133,7 @@ fn IrrigationKpis(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     }
 }
 
-/// /irrigation/zones — per-zone management surface. Manual run controls,
+/// /irrigation/zones, per-zone management surface. Manual run controls,
 /// per-zone water-balance math, soil-sensor readouts. Pulled out of the
 /// old dense bento so each surface has one job. Mobile reuses
 /// `MobileZones`, the same view that backs `/irrigation?tab=zones`.
@@ -160,7 +160,7 @@ pub fn IrrigationZonesPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoVie
     }
 }
 
-/// /irrigation/budget — weekly water-budget allocator per zone. The
+/// /irrigation/budget, weekly water-budget allocator per zone. The
 /// engine's deep-and-infrequent plan, separated from the daily verdict
 /// so the math is easier to read. Mobile reuses `MobileSchedule`.
 #[component]
@@ -184,7 +184,7 @@ pub fn IrrigationBudgetPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoVi
     }
 }
 
-/// /irrigation/history — historical record. 30/90/365-day Gantt at the
+/// /irrigation/history, historical record. 30/90/365-day Gantt at the
 /// top, then a per-zone run history strip. Mobile reuses `MobileSchedule`
 /// for now; a dedicated mobile history view can be peeled out later.
 #[component]

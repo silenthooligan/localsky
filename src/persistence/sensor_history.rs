@@ -253,6 +253,44 @@ impl SensorHistoryStore {
         .map_err(|e| SensorHistoryError::Sqlite(e.to_string()))
     }
 
+    /// The most recent reading for a channel with value strictly above
+    /// `threshold`. Powers soil-probe fault detection: a probe that
+    /// flatlines at exactly 0.0 keeps writing rows (so MAX(epoch) stays
+    /// fresh), and the last above-threshold epoch is what tells us how
+    /// long it has been dead.
+    pub async fn last_value_above(
+        &self,
+        source_id: String,
+        key: String,
+        threshold: f64,
+    ) -> Result<Option<Reading>, SensorHistoryError> {
+        let c = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<Option<Reading>> {
+            let conn = c.blocking_lock();
+            let mut stmt = conn.prepare(
+                "SELECT epoch, source_id, key, value FROM sensor_history
+                 WHERE source_id = ? AND key = ? AND value > ?
+                 ORDER BY epoch DESC LIMIT 1",
+            )?;
+            let mut rows = stmt.query_map(params![source_id, key, threshold], |r| {
+                Ok(Reading {
+                    epoch: r.get(0)?,
+                    source_id: r.get(1)?,
+                    key: r.get(2)?,
+                    value: r.get(3)?,
+                })
+            })?;
+            match rows.next() {
+                Some(Ok(r)) => Ok(Some(r)),
+                Some(Err(e)) => Err(e),
+                None => Ok(None),
+            }
+        })
+        .await
+        .map_err(|e| SensorHistoryError::Sqlite(format!("join: {e}")))?
+        .map_err(|e| SensorHistoryError::Sqlite(e.to_string()))
+    }
+
     /// Latest reading for every (source_id, key) whose key looks like a
     /// soil-moisture channel (e.g. Ecowitt `soilmoisture1..8`, or an
     /// `*_soil_moisture` mirror). Powers the zone soil-sensor picker so a
@@ -531,6 +569,35 @@ mod tests {
         .unwrap();
         let series = s.series("k".into(), 0, i64::MAX, 100).await.unwrap();
         assert_eq!(series.len(), 2, "retention 0 keeps everything");
+    }
+
+    #[tokio::test]
+    async fn last_value_above_skips_flatlined_zero_rows() {
+        let s = fresh_store().await;
+        // A probe that died after epoch 1000 keeps writing 0.0 rows.
+        for (epoch, val) in [(1000i64, 35.0), (1060, 0.0), (1120, 0.0)] {
+            s.insert(Reading {
+                epoch,
+                source_id: "ecowitt_gw".into(),
+                key: "soilmoisture2".into(),
+                value: val,
+            })
+            .await
+            .unwrap();
+        }
+        let last = s
+            .last_value_above("ecowitt_gw".into(), "soilmoisture2".into(), 0.0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(last.epoch, 1000, "last ABOVE-zero reading, not last row");
+        assert_eq!(last.value, 35.0);
+        // A channel with no valid rows at all reports None.
+        assert!(s
+            .last_value_above("ecowitt_gw".into(), "soilmoisture3".into(), 0.0)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

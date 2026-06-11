@@ -109,7 +109,7 @@ pub fn default_config_text(kind: &str) -> String {
 /// A self-contained add/edit form for one source. Seeds from `existing`
 /// (None = add a new source). On save it parses the config JSON, assembles
 /// the `{id, priority, enabled, kind, config}` entry, and hands it to
-/// `on_commit` — the caller persists. `on_cancel` dismisses the form.
+/// `on_commit`, the caller persists. `on_cancel` dismisses the form.
 #[component]
 pub fn SourceEditorPanel(
     #[prop(default = None)] existing: Option<serde_json::Value>,

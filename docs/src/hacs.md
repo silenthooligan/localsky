@@ -34,10 +34,10 @@ The integration is not yet in the HACS default catalog, so this step is required
 
 LocalSky announces itself on the LAN via mDNS as `_localsky._tcp.local.`, so in most cases HA discovers it on its own: a "LocalSky" card appears under **Settings > Devices & Services > Discovered**. Click **Configure** and confirm.
 
-If discovery does not fire (separate VLANs, mDNS blocked), add it manually:
+If discovery does not fire (separate subnets, mDNS blocked), add it manually:
 
 1. **Settings > Devices & Services > Add Integration**, search for **LocalSky**.
-2. Enter the host (for example `192.168.1.100`) and port (default `8090`).
+2. Enter the host (for example `10.0.0.100`) and port (default `8090`).
 
 **Pair against LocalSky directly on port 8090, not through a reverse proxy.** If you front LocalSky with Caddy/nginx plus an auth gate, the gate's redirects will break the integration's API calls and the SSE stream. The proxy is for your browser; HA should talk to the instance directly on the LAN.
 
@@ -192,7 +192,7 @@ Pause watering for three days when vacation mode turns on, resume on return:
 
 ## Troubleshooting
 
-**LocalSky is not discovered.** mDNS does not cross VLANs or Docker bridge networks by default. LocalSky's compose file runs with `network_mode: host` so the announcement reaches the LAN; if your HA and LocalSky sit on different subnets, skip discovery and add the integration manually with host and port.
+**LocalSky is not discovered.** mDNS does not cross subnets or Docker bridge networks by default. LocalSky's compose file runs with `network_mode: host` so the announcement reaches the LAN; if your HA and LocalSky sit on different subnets, skip discovery and add the integration manually with host and port.
 
 **Setup fails with "service too old".** The integration requires LocalSky 0.2.0 or newer. Upgrade the LocalSky container and retry.
 

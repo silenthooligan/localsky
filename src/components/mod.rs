@@ -1,5 +1,5 @@
 // Bespoke panels for the Tempest live page. Each renders directly off the
-// shared `Snapshot` signal — no API fetches at the component level. The
+// shared `Snapshot` signal, no API fetches at the component level. The
 // irrigation panels under `irrigation/` follow the same pattern with
 // IrrigationSnapshot.
 

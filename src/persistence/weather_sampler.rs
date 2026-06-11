@@ -45,6 +45,11 @@ pub fn spawn_weather_sampler(conn: Arc<Mutex<Connection>>, tempest: Arc<TempestS
                 mk("pressure_inhg", s.pressure_inhg),
                 mk("solar_w_m2", s.solar_w_m2),
                 mk("uv_index", s.uv_index),
+                // Rain history. rain_today_in doubles as the restart seed
+                // for the in-process accumulator (main.rs queries today's
+                // MAX so a mid-storm reboot doesn't zero the daily total).
+                mk("rain_today_in", s.rain_in_today),
+                mk("rain_intensity_in_hr", s.rain_intensity_in_hr),
             ];
             if let Err(err) = store.insert_many(readings).await {
                 tracing::warn!("weather sampler insert failed: {err:#}");

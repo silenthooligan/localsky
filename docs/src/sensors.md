@@ -98,7 +98,7 @@ Say HA owns a Zigbee soil probe (`sensor.back_yard_soil_moisture`) and an outdoo
 ```yaml
 # docker-compose.yml
 environment:
-  - HA_URL=http://192.168.1.10:8123
+  - HA_URL=http://10.0.0.10:8123
   - HA_TOKEN=${HA_LONG_LIVED_TOKEN}
 ```
 
@@ -113,7 +113,7 @@ priority = 30
 enabled = true
 kind = "ha_passthrough"
 [sources.config]
-base_url = "http://192.168.1.10:8123"
+base_url = "http://10.0.0.10:8123"
 bearer_token = "${HA_LONG_LIVED_TOKEN}"
 [sources.config.field_map]
 air_temp_f = "sensor.patio_temperature"

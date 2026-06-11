@@ -289,7 +289,7 @@ Authentication policy. Identity itself (accounts, sessions, `lsk_` API tokens) l
 [auth]
 mode = "disabled"          # disabled (default) | required
 session_ttl_days = 30      # rolling browser-session lifetime
-trusted_networks = []      # CIDRs that skip auth while mode = "required", e.g. ["192.168.1.0/24"]
+trusted_networks = []      # CIDRs that skip auth while mode = "required", e.g. ["10.0.0.0/24"]
 ```
 
 Configs without an `[auth]` block behave exactly as before (no login). With `mode = "required"`, static assets, `/api/v1/info`, and the `/ingest/*` receivers stay public; everything else needs a session or a Bearer token.

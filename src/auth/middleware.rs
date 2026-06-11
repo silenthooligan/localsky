@@ -493,7 +493,7 @@ mod tests {
     #[test]
     fn spoofed_xff_from_untrusted_peer_is_ignored() {
         // Attacker on the WAN claims to be on the trusted LAN via XFF.
-        let req = req_with_peer("203.0.113.5", Some("192.168.1.10"));
+        let req = req_with_peer("203.0.113.5", Some("10.0.0.10"));
         let ip = client_ip(&req, &[]).unwrap();
         assert_eq!(ip, "203.0.113.5".parse::<IpAddr>().unwrap());
         // Even with proxies configured, a peer outside the list keeps
@@ -531,29 +531,24 @@ mod tests {
         let none: &[String] = &[];
         // Same-origin passes (typical browser request).
         assert!(origin_allowed(
-            "http://192.168.1.20:3000",
-            Some("192.168.1.20:3000"),
+            "http://10.0.0.20:3000",
+            Some("10.0.0.20:3000"),
             None,
             none
         ));
         // Cross-origin (hostile site, DNS rebinding) rejected.
         assert!(!origin_allowed(
             "http://evil.example",
-            Some("192.168.1.20:3000"),
+            Some("10.0.0.20:3000"),
             None,
             none
         ));
         // Opaque "null" origin rejected.
-        assert!(!origin_allowed(
-            "null",
-            Some("192.168.1.20:3000"),
-            None,
-            none
-        ));
+        assert!(!origin_allowed("null", Some("10.0.0.20:3000"), None, none));
         // Reverse proxy: X-Forwarded-Host carries the public name.
         assert!(origin_allowed(
             "https://sky.example.com",
-            Some("192.168.1.20:3000"),
+            Some("10.0.0.20:3000"),
             Some("sky.example.com"),
             none
         ));
@@ -561,7 +556,7 @@ mod tests {
         let trusted = vec!["https://dash.example.com".to_string()];
         assert!(origin_allowed(
             "https://dash.example.com",
-            Some("192.168.1.20:3000"),
+            Some("10.0.0.20:3000"),
             None,
             &trusted
         ));

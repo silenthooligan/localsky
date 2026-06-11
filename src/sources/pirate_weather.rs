@@ -1,4 +1,4 @@
-// PirateWeather source — api.pirateweather.net, the open Dark-Sky-API
+// PirateWeather source, api.pirateweather.net, the open Dark-Sky-API
 // replacement. Same response shape as the original Dark Sky API, free
 // tier 10k/day. Useful for users who built tooling against Dark Sky
 // before Apple shut it down.

@@ -47,7 +47,7 @@ pub struct ZoneState {
     /// in Phase 3.
     pub last_run_epoch: i64,
 
-    /// Per-zone flex-math breakdown (Phase E followup — math transparency).
+    /// Per-zone flex-math breakdown (Phase E followup, math transparency).
     /// Surfaces SI's internal computation: bucket × Kc × heat_mult ÷
     /// throughput ÷ capture = need_seconds, then the maximum_duration
     /// safety ceiling. Renders the dashboard's "Why this duration?" tile.
@@ -88,7 +88,7 @@ pub struct ZoneState {
 /// with `heat_mult` carried from the snapshot's `forecast.heat_multiplier`
 /// (it's a global, not per-zone, but applies to every zone's ET
 /// calculation). `capture_efficiency` is the constant LocalSky uses in
-/// the Phase E water-balance projection — surfaced here so the displayed
+/// the Phase E water-balance projection, surfaced here so the displayed
 /// math matches the projection's math.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ZoneMath {
@@ -112,7 +112,7 @@ pub struct ZoneMath {
     /// SI's computed need, seconds. = (|bucket_mm| / throughput_mm_hr) × 3600 × kc.
     /// What SI would ship if maximum_duration didn't cap it.
     pub raw_seconds: u32,
-    /// SI's `maximum_duration` ceiling, seconds. Hard safety stop —
+    /// SI's `maximum_duration` ceiling, seconds. Hard safety stop
     /// prevents a misconfigured throughput from running for hours.
     pub max_duration_seconds: u32,
     /// What SI actually emits as `sensor.smart_irrigation_<slug>` state.
@@ -127,7 +127,7 @@ pub struct ZoneMath {
 
 /// Inputs and decision of the morning skip-check, rendered as a UI
 /// breakdown. Single source of truth for the evaluation lives in
-/// `skip_logic::evaluate` — both this dashboard and (Phase B) the HA
+/// `skip_logic::evaluate`, both this dashboard and (Phase B) the HA
 /// automation read the same verdict.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SkipCheck {
@@ -143,11 +143,11 @@ pub struct SkipCheck {
     pub forecast_in: f64,
     /// Tomorrow's max precipitation probability (0-100).
     pub rain_tomorrow_prob_pct: u32,
-    /// Σ daily[1..4] precip × prob/100 — probability-weighted 3-day rollup.
+    /// Σ daily[1..4] precip × prob/100, probability-weighted 3-day rollup.
     pub rain_3day_weighted_in: f64,
-    /// Σ daily[1..7] precip × prob/100 — probability-weighted 7-day rollup.
+    /// Σ daily[1..7] precip × prob/100, probability-weighted 7-day rollup.
     pub rain_7day_weighted_in: f64,
-    /// Σ hourly[0..4] precip — total expected rain in the next 4 hours.
+    /// Σ hourly[0..4] precip, total expected rain in the next 4 hours.
     pub rain_next_4h_in: f64,
     /// Today's forecast peak wind (Open-Meteo daily[0]).
     pub wind_max_today_mph: f64,
@@ -169,7 +169,7 @@ pub struct SkipCheck {
     pub days_since_significant_rain: u32,
     /// Heat index now (NOAA Steadman), used as input to the heat advisory.
     pub heat_index_now_f: f64,
-    /// Heat index for the 3-day forecast peak — drives the advisory rule
+    /// Heat index for the 3-day forecast peak, drives the advisory rule
     /// that pre-waters before a multi-day heat wave.
     pub heat_index_max_3day_f: f64,
 
@@ -218,7 +218,7 @@ pub struct SkipCheck {
 
 /// Live + forecast weather context. The dashboard surfaces both
 /// sources so the user can see when Tempest's local gauge disagrees
-/// with Open-Meteo's regional model — and the skip-check uses the
+/// with Open-Meteo's regional model, and the skip-check uses the
 /// LARGER of the two for `rain_today_in` so a stuck Tempest gauge
 /// can't mask actual rain.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -280,7 +280,7 @@ pub struct Forecast {
 
 /// One day in the 7-day forward verdict strip. Result of running the
 /// skip-check engine against synthetic Inputs derived from each future
-/// day's forecast — gives the user an at-a-glance preview of which
+/// day's forecast, gives the user an at-a-glance preview of which
 /// days are predicted to run, skip, or trigger heat-advisory pre-water.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DayVerdict {
@@ -307,7 +307,7 @@ pub struct DayVerdict {
 /// ET, add captured rain, no irrigation. The user reads this as "if I
 /// did nothing all week, would each zone stay in its healthy band?"
 ///
-/// Predicted % is informational only — no new skip rules fire on it.
+/// Predicted % is informational only, no new skip rules fire on it.
 /// The dashboard's job is to make the trajectory visible so the user
 /// can tune thresholds or queue manual runs ahead of dry stretches.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -319,7 +319,7 @@ pub struct SoilForecast {
     /// Current calibrated moisture %, today, from
     /// `sensor.<zone>_soil_moisture`. `None` when the probe is offline.
     pub current_pct: Option<f64>,
-    /// Lower bound of the healthy band — at-or-below this prediction
+    /// Lower bound of the healthy band, at-or-below this prediction
     /// for any of the next 3 days, the dashboard surfaces a "dry" badge.
     /// Pulled from `input_number.irrigation_<zone>_target_min_pct`.
     pub target_min_pct: f64,
@@ -329,7 +329,7 @@ pub struct SoilForecast {
     /// 7-day predicted moisture %. Index 0 = today (the live reading),
     /// then `today + N` for N in 1..=6. Each step:
     /// `next = prev - (et_mm × Kc) / soil_depth_mm × 100 + (rain_mm × CAPTURE) / soil_depth_mm × 100`,
-    /// clamped 0..100. Excludes any irrigation we might run — this is
+    /// clamped 0..100. Excludes any irrigation we might run, this is
     /// the "no-water baseline" projection.
     pub predicted_pct: Vec<f64>,
     /// Min predicted % across the 7-day window (for at-a-glance "will
@@ -340,7 +340,7 @@ pub struct SoilForecast {
     /// Days within the window predicted at or below `target_min_pct`.
     pub days_below_target: u32,
     /// Days within the window predicted above `target_max_pct` (over-
-    /// saturation — usually triggered by heavy forecast rain).
+    /// saturation, usually triggered by heavy forecast rain).
     pub days_above_max: u32,
     /// At-a-glance status: "dry" | "ok" | "wet" | "no_data".
     /// - "dry": min_predicted_pct <= target_min_pct OR days_below_target >= 2
@@ -350,7 +350,7 @@ pub struct SoilForecast {
     pub status: String,
 }
 
-/// Phase H — weekly water-budget plan per zone. When the operator flips
+/// Phase H, weekly water-budget plan per zone. When the operator flips
 /// `input_boolean.irrigation_<zone>_weekly_budget_mode` to `on`, the HA
 /// budget-override automation at 23:30:25 reads `today_seconds` from
 /// here and calls `irrigation_unlimited.adjust_time(actual=...)` to
@@ -384,7 +384,7 @@ pub struct WaterBudget {
     pub mm_per_session: f64,
     pub seconds_per_session: u32,
     /// True if seconds_per_session exceeded the zone's maximum_duration
-    /// — single-session can't deliver the target depth. Operator can
+    ///, single-session can't deliver the target depth. Operator can
     /// raise sessions_per_week, raise SI's max_duration, or accept it.
     pub session_capped: bool,
     /// Epoch of the most recent run for this zone (from SQLite history),
@@ -434,7 +434,7 @@ pub struct IrrigationSnapshot {
     pub skip_check: SkipCheck,
     pub forecast: Forecast,
 
-    /// 7-day forward verdict strip — predicted skip/run for today + 6
+    /// 7-day forward verdict strip, predicted skip/run for today + 6
     /// future days. Computed server-side by running `skip_logic::evaluate`
     /// against synthetic Inputs from each daily forecast entry.
     pub seven_day_verdicts: Vec<DayVerdict>,
@@ -488,6 +488,15 @@ pub struct IrrigationSnapshot {
     /// condition rules let zones diverge. Produced by `decide_per_zone`.
     #[serde(default)]
     pub zone_verdicts: Vec<ZoneVerdict>,
+
+    /// Soil probes that are configured for a zone but have produced no
+    /// valid (> 0%) reading in 24h or more. A flatlined probe resolves to
+    /// `None` upstream, which silently makes the yard-wide saturation
+    /// gate inapplicable; this names the dead hardware so the UI,
+    /// /api/health, and push can surface it. Additive; absent = no
+    /// known faults.
+    #[serde(default)]
+    pub soil_probe_faults: Vec<SoilProbeFault>,
 }
 
 /// One rule's evaluation in a decision trace. Lives here (the shared
@@ -566,6 +575,23 @@ impl Default for ZoneVerdict {
             multiplier: 1.0,
         }
     }
+}
+
+/// One faulted soil probe: configured on a zone but producing no valid
+/// (> 0%) reading. Detected by the refresher from sensor_history (a dead
+/// WH51 keeps writing 0.0 rows, so the last above-zero epoch is the
+/// persistence signal). Lives here (the shared serde contract) so the
+/// hydrate-side health banner can deserialize it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SoilProbeFault {
+    pub zone_slug: String,
+    pub zone_name: String,
+    /// The configured sensor spec (e.g. `source:ecowitt_gw:soilmoisture2`).
+    pub sensor_id: String,
+    /// Epoch of the channel's last reading above 0.0; None when the
+    /// channel has never produced a valid value.
+    #[serde(default)]
+    pub since_epoch: Option<i64>,
 }
 
 /// What-If overrides for the Simulator. Every field is an absolute value

@@ -111,7 +111,7 @@ fn PerZoneCard(slug: String, name: String, window: ReadSignal<HistoryWindow>) ->
     let avg_str = move || {
         let s = stats.get().2;
         if s == 0 {
-            "\u{2014}".to_string()
+            "-".to_string()
         } else {
             format!("{}", (s as f64 / 60.0).round() as i64)
         }
@@ -300,7 +300,7 @@ fn PerZoneCard(slug: String, name: String, window: ReadSignal<HistoryWindow>) ->
 /// "May 12, 5:42 AM". Compact for at-a-glance reads.
 fn format_relative_then_clock(epoch: i64) -> String {
     if epoch == 0 {
-        return "\u{2014}".to_string();
+        return "-".to_string();
     }
     let when = Utc.timestamp_opt(epoch, 0).single();
     let now = Utc::now();

@@ -1,5 +1,5 @@
 // Lightning panel: a small radar plot showing recent strikes (last hour),
-// plus stats — last strike time/distance and 1h/1m counts. Strikes plot
+// plus stats, last strike time/distance and 1h/1m counts. Strikes plot
 // at distance-scaled radii on concentric range rings (5/10/20/30 mi).
 
 use crate::tempest::state::Snapshot;
@@ -23,7 +23,7 @@ pub fn LightningPanel(snap: ReadSignal<Snapshot>) -> impl IntoView {
                     format!("{:.1}h ago", secs as f64 / 3600.0)
                 }
             }
-            _ => "—".to_string(),
+            _ => "-".to_string(),
         }
     };
 
@@ -48,7 +48,7 @@ pub fn LightningPanel(snap: ReadSignal<Snapshot>) -> impl IntoView {
                     {move || strikes.get().into_iter().map(|s| {
                         let mi = s.distance_km * 0.621371;
                         let r = (mi / MAX_RADIUS_MI * 48.0).min(48.0);
-                        // We don't know the bearing — Tempest only reports distance.
+                        // We don't know the bearing, Tempest only reports distance.
                         // Plot strikes at deterministic angles derived from time so
                         // re-renders don't reshuffle the dots.
                         let angle = ((s.time_epoch as f64) * 137.508).to_radians();
@@ -75,7 +75,7 @@ pub fn LightningPanel(snap: ReadSignal<Snapshot>) -> impl IntoView {
                         <span class="v">
                             {move || match snap.get().last_strike_distance_mi {
                                 Some(d) => format!("{:.1} mi", d),
-                                None => "—".to_string(),
+                                None => "-".to_string(),
                             }}
                         </span>
                     </div>

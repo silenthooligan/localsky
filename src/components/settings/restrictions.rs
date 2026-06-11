@@ -325,7 +325,7 @@ pub fn SettingsRestrictions() -> impl IntoView {
                 <p class="settings-page__subtitle" style="margin: 0 0 0.75rem">
                     "Many areas limit watering to certain days and hours. Start from a "
                     "common pattern, then edit the days, hours, and dates to match your "
-                    "local rules \u{2014} or build your own with +Add restriction below. "
+                    "local rules, or build your own with +Add restriction below. "
                     "Check your water utility or municipality for the exact rules where you live."
                 </p>
                 <div style="display:flex; gap:0.5rem; flex-wrap:wrap">
@@ -673,7 +673,7 @@ fn RestrictionForm(
             </Show>
 
             <FormField
-                label="Allowed weekdays — odd-numbered addresses".to_string()
+                label="Allowed weekdays, odd-numbered addresses".to_string()
                 helptext="Check the days odd addresses are allowed to water. Empty = no days.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
@@ -681,7 +681,7 @@ fn RestrictionForm(
             </FormField>
 
             <FormField
-                label="Allowed weekdays — even-numbered addresses".to_string()
+                label="Allowed weekdays, even-numbered addresses".to_string()
                 helptext="Same scheme. The engine picks the row that matches your address parity above.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
@@ -690,7 +690,7 @@ fn RestrictionForm(
 
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem">
                 <FormField
-                    label="Forbidden hour — start".to_string()
+                    label="Forbidden hour, start".to_string()
                     helptext="0..23. Blank = no time gate. Example: 10 (forbids 10:00 onward).".to_string()
                     error=Signal::derive(|| None::<String>)
                 >
@@ -706,7 +706,7 @@ fn RestrictionForm(
                 </FormField>
 
                 <FormField
-                    label="Forbidden hour — end".to_string()
+                    label="Forbidden hour, end".to_string()
                     helptext="0..24. Blank = no time gate. Example: 16 (re-allows watering at 16:00).".to_string()
                     error=Signal::derive(|| None::<String>)
                 >

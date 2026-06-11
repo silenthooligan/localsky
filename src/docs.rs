@@ -4,7 +4,7 @@
 // docs site evolves.
 //
 // localsky.io is the planned public docs site; pages don't exist
-// yet — these links are intentional placeholders so the URL contract
+// yet, these links are intentional placeholders so the URL contract
 // is wired across the UI before content lands. When a page ships at
 // localsky.io/docs/<slug>, every reference to that slug from this
 // app starts resolving with no code change.

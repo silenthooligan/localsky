@@ -1,4 +1,4 @@
-// Rain Bird LNK2 cloud controller — rdz-rest.rainbird.com.
+// Rain Bird LNK2 cloud controller, rdz-rest.rainbird.com.
 //
 // The LNK2 is the WiFi module that bolts onto ESP-Me / ARC8 / ESP-RZXe
 // controllers. This adapter targets the same cloud REST endpoint the
@@ -13,7 +13,7 @@
 //   POST /v1/controllers/{id}/command (Bearer)             -> issue command
 //   GET  /v1/controllers/{id}/state   (Bearer)             -> current state
 //
-// LAN-direct (AES-encrypted) is deferred — requires aes + cbc + pbkdf2
+// LAN-direct (AES-encrypted) is deferred, requires aes + cbc + pbkdf2
 // deps. HA users with a working RainBird LAN integration can route
 // through ha_service_call until then.
 //

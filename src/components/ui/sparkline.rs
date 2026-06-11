@@ -1,7 +1,7 @@
-// <Sparkline/> — inline single-series SVG trend line. Pure render: takes
+// <Sparkline/>, inline single-series SVG trend line. Pure render: takes
 // a pre-computed Vec<f64> and draws a normalized polyline that fills its
 // box (preserveAspectRatio=none so it stretches to any width). No axes,
-// no labels — it's a glance-distance shape, not a chart. The dashboard
+// no labels, it's a glance-distance shape, not a chart. The dashboard
 // workhorse; promoted from the `.sparkline` CSS class.
 //
 // SSR-safe: the path string is computed from owned data at render time,

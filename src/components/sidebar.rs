@@ -65,7 +65,7 @@ pub fn Sidebar() -> impl IntoView {
         <aside class=sidebar_class aria-label="Primary navigation">
             <a href="/" class="sidebar-brand" aria-label="LocalSky home">
                 <span class="sidebar-brand-mark" aria-hidden="true">
-                    // The brand mark lives in public/brand-mark.svg —
+                    // The brand mark lives in public/brand-mark.svg
                     // a background-stripped variant of favicon.svg so
                     // the same artwork shows in the sidebar pill, the
                     // mobile app bar, and the browser tab. The old
@@ -84,13 +84,13 @@ pub fn Sidebar() -> impl IntoView {
             // Three groups. The two live products (Weather + Irrigation)
             // and the spatial Zones view sit up top as peers. The three
             // cross-cutting analysis tools (Simulator / Rule Lab /
-            // History) get their own ANALYZE group — they reason ABOUT
+            // History) get their own ANALYZE group, they reason ABOUT
             // the live products rather than being sub-views of "today".
             // Settings collapses to a single quiet entry whose tabs live
             // inside the page.
             // ───────────────────────────────────────────────────────
 
-            // PRIMARY — the live products + the garden map.
+            // PRIMARY, the live products + the garden map.
             <NavSection title="">
                 <NavLink href="/" icon="weather" label="Weather" drawer=drawer_open/>
                 <NavLink href="/irrigation" icon="droplet" label="Irrigation" drawer=drawer_open/>
@@ -98,21 +98,21 @@ pub fn Sidebar() -> impl IntoView {
                 <NavLink href="/sensors" icon="activity" label="Sensors" drawer=drawer_open/>
             </NavSection>
 
-            // ANALYZE — the marquee reasoning tools.
+            // ANALYZE, the marquee reasoning tools.
             <NavSection title="Analyze">
                 <NavLink href="/simulator" icon="simulator" label="Simulator" drawer=drawer_open/>
                 <NavLink href="/rules" icon="rule-lab" label="Rule Lab" drawer=drawer_open/>
                 <NavLink href="/history" icon="history" label="History" drawer=drawer_open/>
             </NavSection>
 
-            // SETTINGS — set-once configuration, demoted to one entry.
+            // SETTINGS, set-once configuration, demoted to one entry.
             // The 12 sections live as tabs inside the settings page.
             <NavSection title="" compact=true>
                 <NavLink href="/settings" icon="settings" label="Settings" drawer=drawer_open/>
             </NavSection>
 
             // ───────────────────────────────────────────────────────
-            // Footer — low-traffic actions + external links. Re-run
+            // Footer, low-traffic actions + external links. Re-run
             // wizard moves down here from System because it's
             // configuration-recovery, not day-to-day.
             // ───────────────────────────────────────────────────────

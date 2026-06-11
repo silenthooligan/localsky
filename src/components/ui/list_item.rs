@@ -1,4 +1,4 @@
-// <ListItem/> — leading icon + title + optional subtitle + trailing slot
+// <ListItem/>, leading icon + title + optional subtitle + trailing slot
 // (control or chevron). The backbone of the new tabbed Settings rows and
 // any "label → value/action" list. If `href` is set it renders a
 // navigable <a> with a chevron; otherwise a plain row whose trailing

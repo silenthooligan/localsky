@@ -397,7 +397,7 @@ pub fn build_controllers(
 }
 
 /// Build a single controller adapter for the wizard's test/scan endpoints.
-/// No RunsStore and an empty zone map — these endpoints only need device
+/// No RunsStore and an empty zone map, these endpoints only need device
 /// reachability (`status()`) and zone enumeration (`discover_zones()`),
 /// neither of which depends on the zone mapping. Returns Err for kinds
 /// that can't be probed (fire-and-forget / HA-mediated / not-yet-built).

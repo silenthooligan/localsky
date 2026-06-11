@@ -2,7 +2,7 @@
 // the matching sub-view. Default (no query, or unknown value) is `now`.
 //
 // All sub-views read the same IrrigationSnapshot signal, so switching tabs
-// is a pure render swap — no fetch, no flash. The running banner is rendered
+// is a pure render swap, no fetch, no flash. The running banner is rendered
 // by the parent IrrigationPage above the dispatcher, so it persists across
 // tab swaps.
 

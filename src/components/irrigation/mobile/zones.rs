@@ -1,4 +1,4 @@
-// Mobile "Zones" tab — vertical list of zones, one row each. Tap a row to
+// Mobile "Zones" tab, vertical list of zones, one row each. Tap a row to
 // drill into MobileZoneDetail at /irrigation/zone/:slug. Each row also has
 // an inline "10m" quick-run chip on the right for the fastest-possible path
 // to start a zone (one tap, no detail view).
@@ -40,7 +40,7 @@ fn MobileZoneRow(zone: ZoneState) -> impl IntoView {
 
     let navigate = use_navigate();
     let on_row = move |ev: leptos::ev::MouseEvent| {
-        // Don't navigate if the user tapped the inline action button — those
+        // Don't navigate if the user tapped the inline action button, those
         // call stopPropagation themselves but be defensive.
         if ev.ctrl_key() || ev.meta_key() || ev.shift_key() || ev.button() != 0 {
             return;

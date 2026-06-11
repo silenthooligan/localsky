@@ -1,8 +1,9 @@
 // HealthBanner. Hydrate-only poll of /api/v1/health every 60s; when the
 // overall status is degraded, a dismissable banner names the offline
-// source(s) and links to the Sensors hub. Dismissing snoozes that exact
-// source set for the session (a new failure re-raises the banner). SSR
-// and the first hydrate frame render nothing, so the DOM matches.
+// input(s) (weather sources and faulted soil probes) and links to the
+// Sensors hub. Dismissing snoozes that exact set for the session (a new
+// failure re-raises the banner). SSR and the first hydrate frame render
+// nothing, so the DOM matches.
 
 use leptos::prelude::*;
 
@@ -10,7 +11,7 @@ use crate::components::ui::Icon;
 
 #[component]
 pub fn HealthBanner() -> impl IntoView {
-    // The offline-source list driving the banner; empty = healthy.
+    // The offline-input list driving the banner; empty = healthy.
     let offline: RwSignal<Vec<String>> = RwSignal::new(Vec::new());
     // Source set the user dismissed; compared as a joined key.
     let snoozed: RwSignal<String> = RwSignal::new(String::new());
@@ -28,7 +29,7 @@ pub fn HealthBanner() -> impl IntoView {
                     if v.get("status").and_then(|s| s.as_str()) != Some("degraded") {
                         return Some(Vec::new());
                     }
-                    let list = v
+                    let mut list = v
                         .get("sources")
                         .and_then(|s| s.as_array())
                         .map(|arr| {
@@ -39,10 +40,20 @@ pub fn HealthBanner() -> impl IntoView {
                                             == Some("offline")
                                 })
                                 .filter_map(|s| s.get("id").and_then(|i| i.as_str()))
-                                .map(str::to_string)
+                                .map(|id| format!("weather source {id}"))
                                 .collect::<Vec<_>>()
                         })
                         .unwrap_or_default();
+                    // Faulted soil probes degrade the engine the same way
+                    // an offline weather source does; name the zone.
+                    if let Some(faults) = v.get("soil_probe_faults").and_then(|f| f.as_array()) {
+                        list.extend(
+                            faults
+                                .iter()
+                                .filter_map(|f| f.get("zone_name").and_then(|n| n.as_str()))
+                                .map(|name| format!("soil probe {name}")),
+                        );
+                    }
                     Some(list)
                 }
                 .await;
@@ -64,13 +75,15 @@ pub fn HealthBanner() -> impl IntoView {
             return ().into_any();
         }
         let label = if list.len() == 1 {
-            format!("Weather source {} is offline", list[0])
+            // Entries arrive lowercase ("weather source x" / "soil probe
+            // Front Yard"); capitalize for the sentence opener.
+            let mut item = list[0].clone();
+            if let Some(first) = item.get_mut(0..1) {
+                first.make_ascii_uppercase();
+            }
+            format!("{item} is offline")
         } else {
-            format!(
-                "{} weather sources are offline: {}",
-                list.len(),
-                list.join(", ")
-            )
+            format!("{} inputs are offline: {}", list.len(), list.join(", "))
         };
         view! {
             <div class="health-banner" role="status">

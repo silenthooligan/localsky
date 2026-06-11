@@ -1,4 +1,4 @@
-// Zones — master-detail (marquee feature 3), mirroring the Sensors page:
+// Zones, master-detail (marquee feature 3), mirroring the Sensors page:
 // a top KPI strip, then a column of rich zone cards on the left and a
 // slide-out detail pane on the right that updates as you click a card (no
 // navigation). `/zones/:slug` still deep-links to the standalone detail.
@@ -37,7 +37,7 @@ pub fn ZonesPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             <header class="zones-page__header">
                 <p class="zones-page__eyebrow">"Irrigation"</p>
                 <h1 class="zones-page__title">"Zones"</h1>
-                <p class="zones-page__sub">"Every zone at a glance — click one for full detail and control."</p>
+                <p class="zones-page__sub">"Every zone at a glance, click one for full detail and control."</p>
             </header>
 
             // KPI summary strip.

@@ -1,10 +1,10 @@
-// "Why this duration?" — per-zone math-transparency tile. Surfaces the
+// "Why this duration?", per-zone math-transparency tile. Surfaces the
 // chain of inputs that produced the seconds SI shipped into IU at
 // 23:30, so the operator can see *why* the run is the length it is
 // (and whether the maximum_duration cap is shorting it).
 //
 // All values come from SI's per-zone attributes via the refresher (see
-// ZoneState.math). No new math here — the formula is restated as labels
+// ZoneState.math). No new math here, the formula is restated as labels
 // alongside the live values, matching SI's internal compute.
 
 use crate::components::ui::HelpHint;

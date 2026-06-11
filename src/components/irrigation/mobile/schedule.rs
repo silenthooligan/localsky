@@ -1,4 +1,4 @@
-// Mobile "Schedule" tab — vertical 7-day verdict strip + thresholds +
+// Mobile "Schedule" tab, vertical 7-day verdict strip + thresholds +
 // history + Phase 4 control surfaces (vacation pause until <date>,
 // one-day override, run sequence now).
 //
@@ -91,7 +91,7 @@ fn NotificationsCard() -> impl IntoView {
     {
         leptos::task::spawn_local(async move {
             // One-frame yield matches the rest of the file's hydration
-            // contract — never set signals before the initial hydrate sweep
+            // contract, never set signals before the initial hydrate sweep
             // that would change the DOM count.
             gloo_timers::future::TimeoutFuture::new(0).await;
             if let Ok(p) = crate::push_client::permission_state() {

@@ -45,7 +45,7 @@ impl IngestState {
                 // Start of a run.
                 self.seen_running.insert(zone.slug.clone(), now);
             } else if !zone.running && was_running {
-                // End of a run — emit the row.
+                // End of a run, emit the row.
                 let start = self.seen_running.remove(&zone.slug).unwrap_or(now);
                 let duration = (now - start).max(0);
                 let rec = RunRecord {

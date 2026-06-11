@@ -100,12 +100,18 @@ pub struct PersistenceConfig {
     /// pruning (keep everything forever).
     #[serde(default = "default_retention_days")]
     pub retention_days: u32,
+    /// Days of run/skip/decision history to keep. 0 (the default) keeps
+    /// everything forever, which is what makes year-over-year trends in
+    /// History possible. Set a cap only if disk is genuinely tight.
+    #[serde(default)]
+    pub runs_retention_days: u32,
 }
 
 impl Default for PersistenceConfig {
     fn default() -> Self {
         Self {
             retention_days: default_retention_days(),
+            runs_retention_days: 0,
         }
     }
 }
@@ -261,7 +267,7 @@ pub struct ScriptRule {
 //
 // `ManualMode::Override` is the default: smart-irrigation dispatch is
 // suppressed for any zone with an enabled override schedule today.
-// Smart math still computes for nerd visibility. `Floor` runs both —
+// Smart math still computes for nerd visibility. `Floor` runs both
 // useful for "minimum coverage" patterns where smart adds extra when
 // the deficit grows large.
 
@@ -569,7 +575,7 @@ pub struct EcowittGwPollConfig {
     pub poll_interval_s: u32,
     /// Per-channel raw-AD soil calibration, keyed by channel ("1".."N"). When
     /// present, the poller reads /get_cli_soilad and computes moisture from the
-    /// raw AD via (ad - ad_dry) / (ad_wet - ad_dry) * 100, clamped 0..100 —
+    /// raw AD via (ad - ad_dry) / (ad_wet - ad_dry) * 100, clamped 0..100
     /// matching whatever dry/wet endpoints you captured rather than the
     /// gateway's own (often unset) % value. Lets LocalSky own calibrated soil
     /// natively instead of leaning on a Home Assistant template sensor.
@@ -650,9 +656,9 @@ pub struct AmbientWeatherConfig {
 ///
 /// Most-relevant YoLink device types for LocalSky:
 ///   - THSensor (YS8003-UC outdoor temp/RH)
-///   - LeakSensor (YS7903-UC) — binary; map to a custom field via HA bridge if needed
-///   - WaterMeterController — flow + total volume reads via state.waterFlow / state.waterReading
-///   - GarageDoor / Hub / Switch — not weather/irrigation, skip
+///   - LeakSensor (YS7903-UC), binary; map to a custom field via HA bridge if needed
+///   - WaterMeterController, flow + total volume reads via state.waterFlow / state.waterReading
+///   - GarageDoor / Hub / Switch, not weather/irrigation, skip
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct YolinkConfig {
     /// UAID from the YoLink app developer settings.
@@ -696,7 +702,7 @@ fn default_one() -> f64 {
     1.0
 }
 
-/// Tuya cloud (openapi.tuya{us|eu|cn|in}.com) — the OEM ecosystem behind
+/// Tuya cloud (openapi.tuya{us|eu|cn|in}.com), the OEM ecosystem behind
 /// RainPoint, Smart Life-branded irrigation timers, dozens of consumer
 /// soil moisture / leak / temperature sensors, and most cheap WiFi
 /// flow meters. Auth is HMAC-SHA256 signed requests with an access_id
@@ -1013,7 +1019,7 @@ pub struct BhyveConfig {
 /// the official Rain Bird mobile app uses).
 ///
 /// The LAN-direct path (AES-encrypted JSON-RPC on port 80, documented
-/// by the pyrainbird community) is a future wave — requires bringing in
+/// by the pyrainbird community) is a future wave, requires bringing in
 /// aes + cbc + pbkdf2 deps. Until then, HA users can wire HA's existing
 /// RainBird LAN integration through `ha_service_call` instead.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1507,6 +1513,15 @@ pub struct SkipRuleParams {
     pub rain_skip_in: f64,
     #[serde(default = "default_frost_skip_soil_f")]
     pub frost_skip_soil_f: f64,
+    /// Built-in engine rules the operator has switched off, by rule id
+    /// (see `engine::skip_rules::builtin_rule_catalog()` for the full
+    /// catalog: "rain_now", "freeze_now", "already_wet", ...). Disabled
+    /// rules still appear in the decision trace for transparency but
+    /// never decide. Operator-control and compliance gates ("override",
+    /// "pause_until", "paused", "restrictions", "dry_run") are protected:
+    /// the engine hard-enforces them and ignores them if listed here.
+    #[serde(default)]
+    pub disabled_rules: Vec<String>,
 }
 
 impl Default for SkipRuleParams {
@@ -1524,6 +1539,7 @@ impl Default for SkipRuleParams {
             min_temp_f: default_min_temp_f(),
             rain_skip_in: default_rain_skip_in(),
             frost_skip_soil_f: default_frost_skip_soil_f(),
+            disabled_rules: Vec::new(),
         }
     }
 }

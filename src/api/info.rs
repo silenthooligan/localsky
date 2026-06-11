@@ -28,7 +28,10 @@ use serde::{Deserialize, Serialize};
 /// 1.7.0 (additive): SkipCheck.temp_min_24h_valid, DecisionTrace.degraded,
 /// GET /api/v1/config/snapshots + POST rollback {ts}, ha.hacs_streaming;
 /// action kind run_sequence_now retired (410 Gone).
-pub const API_VERSION: &str = "1.7.0";
+/// 1.8.0 (additive): IrrigationSnapshot.soil_probe_faults +
+/// /health.soil_probe_faults (configured soil probes with no valid
+/// reading for 24h+; non-empty degrades /health status).
+pub const API_VERSION: &str = "1.8.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {

@@ -1,6 +1,6 @@
-// /api/v1/sensors/manifest — declarative inventory of every entity
+// /api/v1/sensors/manifest, declarative inventory of every entity
 // LocalSky produces. The HACS integration consumes this so it can
-// create matching HA entities WITHOUT a hardcoded sensor list — adding
+// create matching HA entities WITHOUT a hardcoded sensor list, adding
 // a new source/zone in LocalSky surfaces in HA automatically.
 //
 // Schema version is bumped when descriptor shape changes (Music-Assistant
@@ -460,7 +460,7 @@ fn push_zone_entities(out: &mut Vec<EntityDescriptor>, zones: &[crate::ha::snaps
         // that object. Avoids the snapshot being a list-of-zones blocking
         // direct path traversal.
 
-        // Valve entity — open/close maps to run/stop irrigation action.
+        // Valve entity, open/close maps to run/stop irrigation action.
         out.push(EntityDescriptor {
             platform: "valve",
             id: slug.to_string(),
@@ -487,7 +487,7 @@ fn push_zone_entities(out: &mut Vec<EntityDescriptor>, zones: &[crate::ha::snaps
             ..Default::default()
         });
 
-        // Soil moisture % — the live calibrated probe reading the engine
+        // Soil moisture %, the live calibrated probe reading the engine
         // decides on (native Ecowitt poll or HA bridge). Lives in
         // skip_check.soil_<slug>_pct (top-level path, not zone-relative),
         // so no zone_slug. `null` when the probe is offline → HA shows the
@@ -504,7 +504,7 @@ fn push_zone_entities(out: &mut Vec<EntityDescriptor>, zones: &[crate::ha::snaps
             ..Default::default()
         });
 
-        // Native soil temperature (°F) — LocalSky polls the gateway directly,
+        // Native soil temperature (°F), LocalSky polls the gateway directly,
         // so HA no longer needs the ecowitt2mqtt MQTT entity. zone_slug +
         // path-into-zone reads zones[].soil_temp_f.
         out.push(EntityDescriptor {
@@ -520,7 +520,7 @@ fn push_zone_entities(out: &mut Vec<EntityDescriptor>, zones: &[crate::ha::snaps
             ..Default::default()
         });
 
-        // Native soil EC (µS/cm) — salinity / fertilizer drift. Display-only.
+        // Native soil EC (µS/cm), salinity / fertilizer drift. Display-only.
         out.push(EntityDescriptor {
             platform: "sensor",
             id: format!("{slug}_soil_ec"),

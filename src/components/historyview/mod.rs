@@ -1,4 +1,4 @@
-// History — "history that sings" (marquee feature 4, first cut). Reads the
+// History, "history that sings" (marquee feature 4, first cut). Reads the
 // existing /api/irrigation/history window and renders it on the new chart
 // primitives: KPI stat tiles, a daily-watered-minutes line chart across
 // the range, and per-zone rows each with a sparkline. A range switch
@@ -111,6 +111,95 @@ fn fmt_min(v: f64) -> String {
     format!("{v:.0}")
 }
 
+/// Chronological run log grouped by day, newest first: when each zone
+/// actually ran (or why it was skipped), so History answers "what
+/// happened" precisely instead of only in totals.
+fn run_log_days(runs: &[RunRecord]) -> Vec<(String, Vec<RunRecord>)> {
+    use std::collections::BTreeMap;
+    let mut by_day: BTreeMap<String, Vec<RunRecord>> = BTreeMap::new();
+    for r in runs {
+        let key = Local
+            .timestamp_opt(r.start_epoch, 0)
+            .single()
+            .map(|dt| dt.format("%Y-%m-%d").to_string())
+            .unwrap_or_default();
+        by_day.entry(key).or_default().push(r.clone());
+    }
+    let mut days: Vec<(String, Vec<RunRecord>)> = by_day.into_iter().collect();
+    days.reverse();
+    for (_, rs) in days.iter_mut() {
+        rs.sort_by_key(|r| r.start_epoch);
+    }
+    days
+}
+
+fn fmt_day_header(key: &str) -> String {
+    chrono::NaiveDate::parse_from_str(key, "%Y-%m-%d")
+        .map(|d| d.format("%A, %b %-d").to_string())
+        .unwrap_or_else(|_| key.to_string())
+}
+
+fn fmt_clock(epoch: i64) -> String {
+    Local
+        .timestamp_opt(epoch, 0)
+        .single()
+        .map(|dt| dt.format("%-I:%M %p").to_string())
+        .unwrap_or_default()
+}
+
+fn fmt_duration(s: i64) -> String {
+    let m = s / 60;
+    let sec = s % 60;
+    if m == 0 {
+        format!("{sec}s")
+    } else if sec == 0 {
+        format!("{m} min")
+    } else {
+        format!("{m}m {sec:02}s")
+    }
+}
+
+/// Local-time epoch bounds [start, end) of a calendar month, for the run
+/// log's month jump.
+fn month_bounds(y: i32, m: u32) -> (i64, i64) {
+    let start = Local
+        .with_ymd_and_hms(y, m, 1, 0, 0, 0)
+        .single()
+        .map(|dt| dt.timestamp())
+        .unwrap_or(0);
+    let (ny, nm) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+    let end = Local
+        .with_ymd_and_hms(ny, nm, 1, 0, 0, 0)
+        .single()
+        .map(|dt| dt.timestamp())
+        .unwrap_or(i64::MAX);
+    (start, end)
+}
+
+/// The last 24 months, newest first, as (year, month, "April 2026") for
+/// the month-jump select. Built client-side after hydration so the SSR
+/// frame never depends on the render clock.
+#[cfg(feature = "hydrate")]
+fn month_options() -> Vec<(i32, u32, String)> {
+    use chrono::Datelike;
+    let now = Local::now();
+    let (mut y, mut m) = (now.year(), now.month());
+    let mut out = Vec::with_capacity(24);
+    for _ in 0..24 {
+        let label = chrono::NaiveDate::from_ymd_opt(y, m, 1)
+            .map(|d| d.format("%B %Y").to_string())
+            .unwrap_or_default();
+        out.push((y, m, label));
+        if m == 1 {
+            y -= 1;
+            m = 12;
+        } else {
+            m -= 1;
+        }
+    }
+    out
+}
+
 fn print_page() {
     #[cfg(feature = "hydrate")]
     if let Some(win) = web_sys::window() {
@@ -121,6 +210,16 @@ fn print_page() {
 #[component]
 pub fn HistoryPage() -> impl IntoView {
     let days = RwSignal::new(30i64);
+    // Run-log display range (independent of the page window): 0 = all.
+    let runlog_days = RwSignal::new(7i64);
+    // Month jump overrides the range chips while set.
+    let runlog_month: RwSignal<Option<(i32, u32)>> = RwSignal::new(None);
+    let runlog_query = RwSignal::new(String::new());
+    let month_opts: RwSignal<Vec<(i32, u32, String)>> = RwSignal::new(Vec::new());
+    // The run log fetches its own window sized to the selection, so "All"
+    // and month jumps reach past the page-level 30/90/365 range.
+    let runlog_window = RwSignal::new(HistoryWindow::default());
+    let runlog_loaded = RwSignal::new(false);
     let window = RwSignal::new(HistoryWindow::default());
     let loaded = RwSignal::new(false);
     // Decisions feed: the skip *story* (rain/restriction/...) lives here, not
@@ -152,9 +251,32 @@ pub fn HistoryPage() -> impl IntoView {
                 }
             });
         });
+        Effect::new(move |_| {
+            let sel = runlog_days.get();
+            let fetch_days: i64 = match runlog_month.get() {
+                Some((y, m)) => {
+                    let (start, _) = month_bounds(y, m);
+                    ((chrono::Utc::now().timestamp() - start) / 86_400 + 2).max(1)
+                }
+                None if sel == 0 => 36_500,
+                None => sel,
+            };
+            leptos::task::spawn_local(async move {
+                let url = format!("/api/irrigation/history?days={fetch_days}");
+                if let Ok(resp) = gloo_net::http::Request::get(&url).send().await {
+                    if let Ok(w) = resp.json::<HistoryWindow>().await {
+                        runlog_window.set(w);
+                    }
+                }
+                runlog_loaded.set(true);
+            });
+        });
+        Effect::new(move |_| {
+            month_opts.set(month_options());
+        });
     }
     #[cfg(not(feature = "hydrate"))]
-    let _ = (window, decisions);
+    let _ = (window, decisions, runlog_window);
 
     view! {
         <div class="hist-page">
@@ -185,7 +307,7 @@ pub fn HistoryPage() -> impl IntoView {
                 let runs: Vec<&RunRecord> = w.runs.iter().filter(|r| r.skip_reason.is_none()).collect();
                 let total_min: f64 = runs.iter().map(|r| r.duration_s as f64 / 60.0).sum();
                 let run_count = runs.len();
-                // Skip *days* (from the decision feed), not run records — runs
+                // Skip *days* (from the decision feed), not run records, runs
                 // are only actual waterings, so that count is always ~0.
                 let skip_count: usize = skip_breakdown(&decisions.get())
                     .iter()
@@ -224,10 +346,12 @@ pub fn HistoryPage() -> impl IntoView {
                     let pts: Vec<(f64, f64)> = b.iter().enumerate().map(|(i, m)| (i as f64, *m)).collect();
                     // Index i is "i days ago" (day_buckets orientation).
                     let today = Local::now().date_naive();
-                    let labels: Vec<String> = (0..b.len())
+                    let n = b.len();
+                    let labels: Vec<String> = (0..n)
                         .map(|i| {
+                            // Buckets run oldest -> newest; label to match.
                             today
-                                .checked_sub_days(chrono::Days::new(i as u64))
+                                .checked_sub_days(chrono::Days::new((n - 1 - i) as u64))
                                 .map(|d| d.format("%b %-d").to_string())
                                 .unwrap_or_default()
                         })
@@ -237,7 +361,137 @@ pub fn HistoryPage() -> impl IntoView {
                 }}
             </section>
 
-            // Watering calendar heatmap — the at-a-glance "which days watered".
+            // Watering calendar heatmap, the at-a-glance "which days watered".
+            // Run log: the precise record, one row per run or skip. Its own
+            // range chips (default 7 days) so a long memory doesn't shove
+            // the rest of the page below the fold.
+            <section class="hist-panel">
+                <div class="hist-panel__head-row">
+                    <div>
+                        <h2 class="hist-panel__title">"Run log"</h2>
+                        <p class="hist-panel__sub">"Every start, duration, and skip, exactly as it happened."</p>
+                    </div>
+                    <div class="runlog-range" role="tablist" aria-label="Run log range">
+                        {[(7i64, "7d"), (30, "30d"), (90, "90d"), (0, "All")].into_iter().map(|(d, label)| view! {
+                            <button
+                                type="button"
+                                class="runlog-range__btn"
+                                class:is-active=move || runlog_month.get().is_none() && runlog_days.get() == d
+                                on:click=move |_| { runlog_month.set(None); runlog_days.set(d); }
+                            >{label}</button>
+                        }).collect_view()}
+                    </div>
+                </div>
+                <div class="runlog-tools">
+                    <input
+                        type="search"
+                        class="runlog-tools__search"
+                        placeholder="Search zone or reason"
+                        aria-label="Search run log"
+                        prop:value=move || runlog_query.get()
+                        on:input=move |ev| runlog_query.set(event_target_value(&ev))
+                    />
+                    <select
+                        class="runlog-tools__month"
+                        aria-label="Jump to a month"
+                        on:change=move |ev| {
+                            let v = event_target_value(&ev);
+                            match v.split_once('-').and_then(|(a, b)| Some((a.parse::<i32>().ok()?, b.parse::<u32>().ok()?))) {
+                                Some(ym) => runlog_month.set(Some(ym)),
+                                None => runlog_month.set(None),
+                            }
+                        }
+                    >
+                        <option value="" selected=move || runlog_month.get().is_none()>"All months"</option>
+                        {move || month_opts.get().into_iter().map(|(y, m, label)| view! {
+                            <option value=format!("{y}-{m:02}") selected=move || runlog_month.get() == Some((y, m))>{label}</option>
+                        }).collect_view()}
+                    </select>
+                </div>
+                {move || {
+                    if !runlog_loaded.get() {
+                        return view! { <crate::components::ui::SkeletonRows count=4/> }.into_any();
+                    }
+                    let mut runs: Vec<RunRecord> = match runlog_month.get() {
+                        Some((y, m)) => {
+                            let (lo, hi) = month_bounds(y, m);
+                            runlog_window.get().runs.into_iter()
+                                .filter(|r| r.start_epoch >= lo && r.start_epoch < hi)
+                                .collect()
+                        }
+                        None => {
+                            let sel = runlog_days.get();
+                            if sel == 0 {
+                                runlog_window.get().runs
+                            } else {
+                                let cutoff = chrono::Utc::now().timestamp() - sel * 86_400;
+                                runlog_window.get().runs.into_iter()
+                                    .filter(|r| r.start_epoch >= cutoff)
+                                    .collect()
+                            }
+                        }
+                    };
+                    let q = runlog_query.get().trim().to_lowercase();
+                    if !q.is_empty() {
+                        runs.retain(|r| {
+                            r.zone.to_lowercase().replace('_', " ").contains(&q.replace('_', " "))
+                                || r.skip_reason.as_deref().is_some_and(|s| s.to_lowercase().contains(&q))
+                                || (r.skip_reason.is_none() && "watered".contains(&q))
+                                || (r.skip_reason.is_some() && "skipped".contains(&q))
+                        });
+                    }
+                    let days = run_log_days(&runs);
+                    if days.is_empty() {
+                        if !q.is_empty() {
+                            return view! {
+                                <div class="hist-empty">"No runs or skips match that search in this range."</div>
+                            }.into_any();
+                        }
+                        return view! {
+                            <div class="hist-empty">"Nothing recorded in this range yet. Widen the range above, or wait: runs and skips land here the moment they happen."</div>
+                        }.into_any();
+                    }
+                    days.into_iter().map(|(day, rows)| {
+                        let watered_s: i64 = rows.iter().filter(|r| r.skip_reason.is_none()).map(|r| r.duration_s).sum();
+                        let header = fmt_day_header(&day);
+                        view! {
+                            <div class="runlog-day">
+                                <div class="runlog-day__head">
+                                    <span class="runlog-day__date">{header}</span>
+                                    <span class="runlog-day__total">{
+                                        if watered_s >= 60 {
+                                            format!("{} min watered", watered_s / 60)
+                                        } else if watered_s > 0 {
+                                            "under a minute watered".to_string()
+                                        } else {
+                                            "no watering".to_string()
+                                        }
+                                    }</span>
+                                </div>
+                                {rows.into_iter().map(|r| {
+                                    let skipped = r.skip_reason.is_some();
+                                    let detail = match &r.skip_reason {
+                                        Some(reason) => reason.clone(),
+                                        None => fmt_duration(r.duration_s),
+                                    };
+                                    view! {
+                                        <div class="runlog-row" class:runlog-row--skip=skipped>
+                                            <span class="runlog-row__time">{fmt_clock(r.start_epoch)}</span>
+                                            <span class="runlog-row__zone">{r.zone.replace('_', " ")}</span>
+                                            <span class="runlog-row__badge">{if skipped { "skipped" } else { "watered" }}</span>
+                                            <span class="runlog-row__detail">{detail}</span>
+                                        </div>
+                                    }
+                                }).collect_view()}
+                            </div>
+                        }
+                    }).collect_view().into_any()
+                }}
+                <p class="hist-panel__hint">
+                    "History is kept forever by default, which is what makes year-over-year trends possible. A retention cap is available under Settings if you ever want one."
+                </p>
+            </section>
+
             <section class="hist-panel">
                 <h2 class="hist-panel__title">"Watering calendar"</h2>
                 <p class="hist-panel__hint">"Each square is a day; greener = more watering, empty = a skip day."</p>
@@ -261,7 +515,7 @@ pub fn HistoryPage() -> impl IntoView {
                 }}
             </section>
 
-            // Why it skipped — the headline "story" of the period.
+            // Why it skipped, the headline "story" of the period.
             <section class="hist-panel">
                 <h2 class="hist-panel__title">"Why it skipped"</h2>
                 <p class="hist-panel__hint">"Days the engine chose to skip, by reason."</p>
@@ -269,7 +523,7 @@ pub fn HistoryPage() -> impl IntoView {
                     let bd = skip_breakdown(&decisions.get());
                     let total: usize = bd.iter().map(|(_, c, _)| *c).sum();
                     if total == 0 {
-                        return view! { <div class="hist-empty">"No skips in this window \u{2014} everything ran as planned."</div> }.into_any();
+                        return view! { <div class="hist-empty">"No skips in this window, everything ran as planned."</div> }.into_any();
                     }
                     view! {
                         <div class="hist-breakdown">

@@ -111,7 +111,7 @@ pub struct WateringPolicy {
     pub restrictions: Vec<crate::config::schema::WateringRestriction>,
     pub address_parity: crate::config::schema::AddressParity,
     pub manual_schedules: Vec<crate::config::schema::ManualSchedule>,
-    /// (lat, lon) — used by the refresher to compute the LocalSky-native
+    /// (lat, lon), used by the refresher to compute the LocalSky-native
     /// next_run_epoch from sunrise + sequence_total. (0.0, 0.0) keeps the
     /// pre-cutover semantics: next_run_epoch stays at whatever upstream
     /// produced (legacy IU path before strip; 0 after).
@@ -180,9 +180,9 @@ pub struct ZoneSoilCfg {
 
 /// Offline guard for a raw soil reading: a non-positive value (exactly 0% /
 /// negative) is a disconnected/faulty probe (e.g. a WH51 out of soil), NOT
-/// bone-dry soil — return None so the zone falls back to weather/modeled
+/// bone-dry soil, return None so the zone falls back to weather/modeled
 /// rather than over-watering. Real soil is essentially never exactly 0.00%.
-/// (Soil calibration itself lives at the source — see `parse_soilad`'s
+/// (Soil calibration itself lives at the source, see `parse_soilad`'s
 /// native AD-based dry/wet calibration in the Ecowitt poll adapter.)
 fn apply_soil_quality(raw: Option<f64>) -> Option<f64> {
     raw.filter(|v| *v > 0.0)
@@ -201,7 +201,7 @@ pub fn spawn_refresher(
     source: SnapshotSource,
     controllers: ControllerRegistry,
     // When set (HA source + shadow_native), the native snapshot is built
-    // each tick and written here for comparison — never drives dispatch.
+    // each tick and written here for comparison, never drives dispatch.
     shadow_store: Option<Arc<IrrigationStore>>,
     // Locally persisted pause + one-day override (A6). Read each tick so a
     // native build (and the shadow build) honors operator pauses. `None`
@@ -294,6 +294,11 @@ pub fn spawn_refresher(
         // Daily verdict push fires once per local-day; the date string
         // is the dedupe key.
         let mut last_verdict_day: Option<String> = None;
+        // Soil-probe fault push fires at most once per probe per process
+        // lifetime (the fault persists across refreshes; re-notifying
+        // every 10s tick would be noise).
+        let mut probe_fault_notified: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         // Circuit-breaker state. Single warn on first failure ("entering
         // degraded mode"), single info on recovery ("recovered"), with
         // exponential backoff between attempts while degraded.
@@ -319,6 +324,7 @@ pub fn spawn_refresher(
                         &watering_policy,
                         &scripts,
                         sensor_history.as_ref(),
+                        forecast_obs_store.as_ref(),
                     )
                     .await
                 }
@@ -330,6 +336,7 @@ pub fn spawn_refresher(
                     &watering_policy,
                     &scripts,
                     sensor_history.as_ref(),
+                    forecast_obs_store.as_ref(),
                     &controllers,
                     control.as_ref(),
                 )
@@ -348,6 +355,7 @@ pub fn spawn_refresher(
                             &watering_policy,
                             &scripts,
                             sensor_history.as_ref(),
+                            forecast_obs_store.as_ref(),
                             &controllers,
                             control.as_ref(),
                         )
@@ -390,6 +398,7 @@ pub fn spawn_refresher(
                         &mut prev_zone_running,
                         &mut zone_started_at,
                         &mut last_verdict_day,
+                        &mut probe_fault_notified,
                     );
                     store.store(snap);
                     if degraded {
@@ -447,12 +456,15 @@ fn backoff(n: u32) -> Duration {
 /// - ZoneStarted/ZoneStopped on each zone's running flag flip.
 /// - DailyVerdict once per local day, the first time we see a non-empty
 ///   verdict for that day.
+/// - SoilProbeFault when a probe first appears in soil_probe_faults
+///   (once per probe per process lifetime via `probe_fault_notified`).
 fn emit_push_events(
     push: &crate::push::PushDispatcher,
     snap: &IrrigationSnapshot,
     prev_running: &mut std::collections::HashMap<String, bool>,
     started_at: &mut std::collections::HashMap<String, i64>,
     last_verdict_day: &mut Option<String>,
+    probe_fault_notified: &mut std::collections::HashSet<String>,
 ) {
     use crate::push::PushEvent;
     let now = Utc::now().timestamp();
@@ -479,6 +491,18 @@ fn emit_push_events(
         prev_running.insert(z.slug.clone(), z.running);
     }
 
+    // Soil-probe faults: notify on the transition into faulted state,
+    // at most once per probe for the life of the process.
+    for f in &snap.soil_probe_faults {
+        if probe_fault_notified.insert(f.zone_slug.clone()) {
+            push.emit(PushEvent::SoilProbeFault {
+                zone_name: f.zone_name.clone(),
+                zone_slug: f.zone_slug.clone(),
+                since_epoch: f.since_epoch,
+            });
+        }
+    }
+
     // Daily verdict fires once per local day. The "today" label is the
     // local-date YYYY-MM-DD; on the first refresh after midnight rolls
     // we emit one event with the new verdict.
@@ -497,6 +521,7 @@ fn emit_push_events(
 /// stores, and build the snapshot. Pure read-only with respect to HA
 /// (we don't mutate any HA state from here). `zones` is the resolved
 /// active zone list (LOCALSKY_ZONES env var or legacy default).
+#[allow(clippy::too_many_arguments)]
 async fn refresh_once(
     client: &HaClient,
     forecast_store: &ForecastStore,
@@ -506,6 +531,7 @@ async fn refresh_once(
     watering_policy: &WateringPolicy,
     scripts: &CompiledScripts,
     sensor_history: Option<&crate::persistence::SensorHistoryStore>,
+    forecast_obs: Option<&crate::persistence::ForecastObservationsStore>,
 ) -> anyhow::Result<IrrigationSnapshot> {
     let states = client.states().await?;
     let map: HashMap<String, Value> = states
@@ -525,6 +551,7 @@ async fn refresh_once(
         watering_policy,
         scripts,
         sensor_history,
+        forecast_obs,
         None,
     )
     .await)
@@ -547,6 +574,10 @@ async fn build_from_map(
     watering_policy: &WateringPolicy,
     scripts: &CompiledScripts,
     sensor_history: Option<&crate::persistence::SensorHistoryStore>,
+    // Station-gauge daily rain history (forecast_observations rows). Used
+    // to floor days_since_significant_rain with what the local gauge
+    // actually measured; `None` on a v1 schema / no persistence DB.
+    forecast_obs: Option<&crate::persistence::ForecastObservationsStore>,
     // Native control surface. `Some` (standalone path) overrides the
     // HA-helper-derived pause/override below with locally persisted state;
     // `None` (HA path) reads them from the entity map as before.
@@ -626,7 +657,7 @@ async fn build_from_map(
     }
 
     // Pre-compute the heat multiplier here (the snapshot.forecast struct
-    // also recomputes this later — the dupe is intentional because the
+    // also recomputes this later, the dupe is intentional because the
     // zone loop needs it before forecast_store.snapshot() is consumed
     // below, and the cost is one heat-index calc per refresh).
     let zone_loop_heat_mult = {
@@ -718,7 +749,7 @@ async fn build_from_map(
                 slug: zone.slug.clone(),
                 hex: String::new(), // Populated in Phase 3 from device_registry if needed.
                 running: state_eq(&map, &running_id, "on"),
-                // HA path reads running from a binary_sensor — always a
+                // HA path reads running from a binary_sensor, always a
                 // trusted readback. Native may override to false.
                 running_known: true,
                 today_run_minutes: 0.0, // Populated by SQLite history in Phase 3.
@@ -730,8 +761,10 @@ async fn build_from_map(
                 // mount and joined to each zone by slug. Kept None here so
                 // the snapshot remains a pure runtime-state object.
                 photo_url: None,
-                // Per-zone verdict is back-filled after decide_per_zone runs
-                // (a follow-up commit); None until then.
+                // Per-zone verdict is back-filled by apply_engine (which
+                // runs decide_per_zone) before the snapshot is published;
+                // None only until that pass. The smart-morning dispatcher
+                // enforces these at dispatch time.
                 verdict: None,
                 // Native soil temp/EC/battery merged in after the gateway poll
                 // resolves them (resolve_soil_extras, below).
@@ -754,22 +787,10 @@ async fn build_from_map(
     snap.next_run_epoch = compute_next_run_epoch(watering_policy.location, &snap.zones);
 
     // Forecast block. Aggregates Tempest live + Open-Meteo regional
-    // forecast into one struct the UI can render directly. The
-    // Tempest precipitation entity reports in inches in this HA
-    // install (HA's WeatherFlow integration emits in user-display
-    // units when imperial is configured); do NOT divide by 25.4.
-    let rain_today_tempest = state_f64(&map, "sensor.st_00206451_precipitation").unwrap_or(0.0);
+    // forecast into one struct the UI can render directly.
     let rain_today_om = state_f64(&map, "sensor.open_meteo_rain_today")
         .map(|mm| mm / 25.4)
         .unwrap_or(0.0);
-    let rain_intensity =
-        state_f64(&map, "sensor.st_00206451_precipitation_intensity").unwrap_or(0.0);
-    let rain_type = map
-        .get("sensor.st_00206451_precipitation_type")
-        .and_then(|s| s.get("state"))
-        .and_then(Value::as_str)
-        .unwrap_or("none")
-        .to_string();
     let rain_tomorrow = state_f64(&map, "sensor.open_meteo_rain_tomorrow")
         .map(|mm| mm / 25.4)
         .unwrap_or(0.0);
@@ -778,12 +799,48 @@ async fn build_from_map(
         .unwrap_or(0.0);
     // Phase A: pull forecast intelligence directly from the in-process
     // ForecastStore (Open-Meteo 7-day + 48h + 3-day past) and the live
-    // Tempest store. No round-trip via HA REST sensors — single source,
+    // Tempest store. No round-trip via HA REST sensors, single source,
     // fewer moving parts.
     let fc = forecast_store.snapshot();
     let tempest = tempest_store.snapshot();
 
-    let rain_today_used = rain_today_tempest.max(rain_today_om);
+    // Rain comes from the in-process Tempest listener, which integrates
+    // the per-minute rain packets into a true daily total. The HA
+    // WeatherFlow `precipitation` entity is the rain in the LAST
+    // REPORTING MINUTE, not a daily accumulation; reading it as one
+    // capped storm days at ~0.05" (3 in/h over one minute) and let the
+    // engine schedule a full run the morning after heavy rain. Recency
+    // gated like every other live reading; the regional model is the
+    // floor either way, so a station outage degrades to model rain
+    // instead of silently to zero.
+    let station_now = Utc::now().timestamp();
+    let station_fresh = tempest.last_packet_epoch > 0
+        && station_now.saturating_sub(tempest.last_packet_epoch) < TEMPEST_LIVE_MAX_AGE_S;
+    let rain_today_station = if station_fresh {
+        tempest.rain_in_today
+    } else {
+        0.0
+    };
+    let rain_intensity = if station_fresh {
+        tempest.rain_intensity_in_hr
+    } else {
+        state_f64(&map, "sensor.st_00206451_precipitation_intensity").unwrap_or(0.0)
+    };
+    let rain_type = if station_fresh {
+        match tempest.precip_type {
+            1 => "rain".to_string(),
+            2 => "hail".to_string(),
+            _ => "none".to_string(),
+        }
+    } else {
+        map.get("sensor.st_00206451_precipitation_type")
+            .and_then(|s| s.get("state"))
+            .and_then(Value::as_str)
+            .unwrap_or("none")
+            .to_string()
+    };
+
+    let rain_today_used = rain_today_station.max(rain_today_om);
     // Live "now" readings. Prefer the in-process Tempest listener while
     // its packets are fresh (recency-gated: a station that stopped
     // reporting hours ago must not keep driving freeze/wind gates).
@@ -812,7 +869,29 @@ async fn build_from_map(
     let temp_min_24h: Option<f64> = fc.min_temp_next_24h_f();
     let temp_max_3day = fc.max_temp_next_3d_f().unwrap_or(0.0);
     let wind_max_today = fc.wind_max_today_mph().unwrap_or(0.0);
-    let days_since_rain = fc.days_since_significant_rain(rain_today_used);
+    // Days since significant rain: take the MIN of the regional model's
+    // counter and the station-gauge counter from forecast_observations.
+    // The gauge's memory beats the regional model for hyperlocal
+    // convection: a pop-up storm that soaked this yard but never showed
+    // in Open-Meteo's past_daily still counts as recent rain, so the
+    // heat-advisory extend can't fire the morning after a soaking.
+    let days_since_rain = {
+        let model_days = fc.days_since_significant_rain(rain_today_used);
+        let observed_days = match forecast_obs {
+            Some(store) => store
+                .days_since_observed_rain(crate::forecast::snapshot::SIGNIFICANT_RAIN_IN)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::debug!(error = %e, "days_since_observed_rain query failed");
+                    None
+                }),
+            None => None,
+        };
+        match observed_days {
+            Some(obs) => model_days.min(obs),
+            None => model_days,
+        }
+    };
 
     // Tomorrow's rain: prefer the live OM forecast snapshot over HA's
     // REST sensor (the latter only refreshes every 4h vs our 30 min).
@@ -827,7 +906,7 @@ async fn build_from_map(
     let heat_mult = et_heat_multiplier(heat_index_3day);
 
     let forecast = Forecast {
-        rain_today_tempest_in: rain_today_tempest,
+        rain_today_tempest_in: rain_today_station,
         rain_today_om_in: rain_today_om,
         rain_intensity_in_hr: rain_intensity,
         rain_type,
@@ -859,7 +938,7 @@ async fn build_from_map(
 
     // Native per-zone soil extras (temp/EC/battery) from the gateway poll.
     // Merge them onto the published zones[] and derive the frost gate's yard
-    // min/max soil temperature natively — no dependency on an HA soil-temp
+    // min/max soil temperature natively, no dependency on an HA soil-temp
     // aggregate (which used to come from the ecowitt2mqtt sidecar).
     let soil_extras = resolve_soil_extras(&watering_policy.soil_zones, sensor_history).await;
     for z in &mut snap.zones {
@@ -872,6 +951,25 @@ async fn build_from_map(
     let soil_temps: Vec<f64> = soil_extras.iter().filter_map(|e| e.temp_f).collect();
     let soil_temp_yard_min_f = soil_temps.iter().copied().reduce(f64::min);
     let soil_temp_yard_max_f = soil_temps.iter().copied().reduce(f64::max);
+
+    // Resolve each zone's live soil reading once; the engine inputs and
+    // the probe-fault detector consume the same list. Falls back to the
+    // legacy hardcoded reads when no zone config is present.
+    let soil_zones_resolved = if watering_policy.soil_zones.is_empty() {
+        build_legacy_soil_zones(&map)
+    } else {
+        resolve_soil_zones(&watering_policy.soil_zones, &map, sensor_history).await
+    };
+    // Probe health: a zone with a sensor configured but no usable reading
+    // silently widens the yard-wide saturation gate (it goes inapplicable
+    // when any zone lacks a reading). Name the dead hardware on the
+    // snapshot so the UI, /api/health, and push can surface it.
+    snap.soil_probe_faults = detect_soil_probe_faults(
+        &watering_policy.soil_zones,
+        &soil_zones_resolved,
+        sensor_history,
+    )
+    .await;
 
     let inputs = Inputs {
         temp_now_f: temp_now,
@@ -897,17 +995,12 @@ async fn build_from_map(
         rain_skip_in: state_f64(&map, "input_number.irrigation_rain_skip_in")
             .unwrap_or(watering_policy.skip_rules.rain_skip_in),
 
-        // Per-zone soil readings + thresholds. Resolved from each zone's
-        // assigned sensor (`ha:` entity or `source:<id>:<key>` channel) +
-        // ZoneConfig thresholds. Falls back to the legacy hardcoded reads
-        // when no zone config is present. None when a sensor is offline;
+        // Per-zone soil readings + thresholds. Resolved above from each
+        // zone's assigned sensor (`ha:` entity or `source:<id>:<key>`
+        // channel) + ZoneConfig thresholds. None when a sensor is offline;
         // the skip-logic rules silently no-op so missing data falls back
-        // to weather-only.
-        soil_zones: if watering_policy.soil_zones.is_empty() {
-            build_legacy_soil_zones(&map)
-        } else {
-            resolve_soil_zones(&watering_policy.soil_zones, &map, sensor_history).await
-        },
+        // to weather-only (with the fault surfaced via soil_probe_faults).
+        soil_zones: soil_zones_resolved,
         soil_temp_yard_min_f,
         soil_temp_yard_max_f,
         frost_skip_soil_f: watering_policy.skip_rules.frost_skip_soil_f,
@@ -984,6 +1077,7 @@ async fn refresh_once_native(
     watering_policy: &WateringPolicy,
     scripts: &CompiledScripts,
     sensor_history: Option<&crate::persistence::SensorHistoryStore>,
+    forecast_obs: Option<&crate::persistence::ForecastObservationsStore>,
     controllers: &ControllerRegistry,
     // Locally persisted pause + one-day override (A6). `None` only when no
     // persistence DB is mounted, in which case the snapshot falls back to
@@ -1000,6 +1094,7 @@ async fn refresh_once_native(
         watering_policy,
         scripts,
         sensor_history,
+        forecast_obs,
         control,
     )
     .await;
@@ -1032,7 +1127,7 @@ async fn refresh_once_native(
     // so size each zone's run from LocalSky's own weekly-budget allocator
     // (`compute_water_budgets` already ran inside build_from_map and is in
     // `snap.water_budgets`; its `today_seconds` is the capped per-zone
-    // recommendation — rain-defer, session spacing, and max-duration all
+    // recommendation, rain-defer, session spacing, and max-duration all
     // applied). A manual Override schedule for today still zeroes the smart
     // dispatch so it doesn't run on top of the operator's planned run.
     let planned_by_slug: HashMap<String, u32> = snap
@@ -1152,13 +1247,13 @@ fn apply_engine(
     snap.zone_verdicts = verdicts;
 }
 
-/// Phase H — weekly water-budget plan per zone. Replaces SI's daily-bucket
+/// Phase H, weekly water-budget plan per zone. Replaces SI's daily-bucket
 /// flex math with a deep-and-infrequent schedule that allocates a weekly
 /// water target across N sessions, defers when rain is forecast, and
 /// spaces sessions by `7 / sessions_per_week` days so each run is a real
 /// soak rather than a daily light sprinkle.
 ///
-/// Outputs `today_seconds` per zone — what the HA budget-override
+/// Outputs `today_seconds` per zone, what the HA budget-override
 /// automation at 23:30:25 calls `IU.adjust_time(actual=...)` with. Zero
 /// means "don't run this zone today" (rain incoming, recently watered,
 /// or mode is off).
@@ -1291,7 +1386,7 @@ fn compute_water_budgets(
         let session_capped = seconds_per_session > max_dur_s;
         let session_final = seconds_per_session.min(max_dur_s);
 
-        // Last run epoch for this zone — pulled from ZoneState (which the
+        // Last run epoch for this zone, pulled from ZoneState (which the
         // history ingest populates) so we don't have to round-trip SQLite.
         let last_run_epoch = zones
             .iter()
@@ -1307,7 +1402,7 @@ fn compute_water_budgets(
             i64::MAX / 2
         };
         let (today_seconds, today_reason) = if !mode_active {
-            // Defensive only — `mode_active` is hard-coded above. Kept for
+            // Defensive only, `mode_active` is hard-coded above. Kept for
             // future re-introduction of a per-zone pause toggle.
             (0u32, "budget mode off".to_string())
         } else if next_24h_rain_in >= SESSION_RAIN_DEFER_IN {
@@ -1322,7 +1417,7 @@ fn compute_water_budgets(
             (
                 0,
                 format!(
-                    "last run {} day(s) ago — minimum interval is {} days at {} sessions/wk",
+                    "last run {} day(s) ago, minimum interval is {} days at {} sessions/wk",
                     days_since_last_run, min_interval_days, sessions_per_week
                 ),
             )
@@ -1338,8 +1433,8 @@ fn compute_water_budgets(
             (
                 session_final,
                 format!(
-                    "scheduled session {} of {} this week — {:.2} mm depth = {:.0} min",
-                    1, // session_index — proper allocation logic deferred
+                    "scheduled session {} of {} this week, {:.2} mm depth = {:.0} min",
+                    1, // session_index, proper allocation logic deferred
                     sessions_per_week,
                     mm_per_session,
                     session_final as f64 / 60.0
@@ -1366,12 +1461,12 @@ fn compute_water_budgets(
     out
 }
 
-/// Phase E predictive — per-zone 7-day soil-moisture projection. Uses a
+/// Phase E predictive, per-zone 7-day soil-moisture projection. Uses a
 /// FAO-56-flavored water balance: today's calibrated reading is the
 /// starting point; each day subtracts the daily ET (scaled by zone Kc)
 /// and adds the probability-weighted forecast rain (scaled by a capture
 /// efficiency factor to account for runoff). Irrigation is not modeled
-/// — the curve answers "if I did nothing all week, would each zone stay
+///, the curve answers "if I did nothing all week, would each zone stay
 /// in its healthy band?"
 ///
 /// Assumptions baked into the heuristic:
@@ -1382,7 +1477,7 @@ fn compute_water_budgets(
 ///   - Per-zone soil depth + Kc are hardcoded to match SI's zone
 ///     multipliers (turf 1.08 / shrubs 0.50) so the predicted depletion
 ///     matches what SI would have computed in mm.
-///   - Rain capture efficiency 0.7 — empirical, accounts for runoff,
+///   - Rain capture efficiency 0.7, empirical, accounts for runoff,
 ///     slope, and canopy interception. Knock-down values not modeled.
 ///   - Probe placement at root depth (operator's responsibility).
 /// Effective Kc + root-zone depth (mm) for a zone, inferred from its slug.
@@ -1585,7 +1680,7 @@ fn fc_heat_multiplier(today: &Inputs) -> f64 {
 /// Compute the 7-day forward verdict strip. For each daily forecast
 /// entry (today + 6 future days), construct synthetic Inputs that
 /// answer "would I water on this day?" and run the same evaluate()
-/// the morning skip-check uses. Same engine, same rules — the strip
+/// the morning skip-check uses. Same engine, same rules, the strip
 /// is a *preview* of the actual decision, not a separate heuristic.
 ///
 /// Synthetic-input rules:
@@ -1752,6 +1847,71 @@ async fn resolve_soil_zones(
             pct,
             saturation_pct: z.saturation_pct,
             target_min_pct: z.target_min_pct,
+        });
+    }
+    out
+}
+
+/// How long a configured soil channel may go without a valid (> 0)
+/// reading before it is reported as faulted. One missed gateway poll is
+/// noise; a full day of zeros is dead hardware.
+const SOIL_PROBE_FAULT_AFTER_S: i64 = 24 * 3600;
+
+/// Detect configured-but-dead soil probes. A zone is faulted when it has
+/// a soil sensor configured, its resolved pct is None (missing or <= 0.0,
+/// see `apply_soil_quality`), AND sensor_history confirms persistence:
+/// the channel's last reading above 0.0 is older than 24h, or it never
+/// produced one. A dead WH51 keeps writing 0.0 rows, so the last
+/// above-zero epoch is the signal. Only `source:` channels are checked;
+/// an `ha:` entity has no local history to distinguish a flatline from a
+/// transient blip, so it is never flagged here.
+async fn detect_soil_probe_faults(
+    cfg: &[ZoneSoilCfg],
+    resolved: &[ZoneSoil],
+    history: Option<&crate::persistence::SensorHistoryStore>,
+) -> Vec<crate::ha::snapshot::SoilProbeFault> {
+    let Some(h) = history else {
+        return Vec::new();
+    };
+    let now = Utc::now().timestamp();
+    let mut out = Vec::new();
+    for z in cfg {
+        let Some(spec) = z.soil_sensor_id.as_deref() else {
+            continue;
+        };
+        // Healthy: the resolved reading is usable.
+        if resolved
+            .iter()
+            .find(|r| r.slug == z.slug)
+            .and_then(|r| r.pct)
+            .is_some()
+        {
+            continue;
+        }
+        let Some((sid, key)) = spec
+            .strip_prefix("source:")
+            .and_then(|rest| rest.split_once(':'))
+        else {
+            continue;
+        };
+        let since_epoch = h
+            .last_value_above(sid.to_string(), key.to_string(), 0.0)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.epoch);
+        let stale = match since_epoch {
+            Some(e) => now.saturating_sub(e) >= SOIL_PROBE_FAULT_AFTER_S,
+            None => true,
+        };
+        if !stale {
+            continue;
+        }
+        out.push(crate::ha::snapshot::SoilProbeFault {
+            zone_slug: z.slug.clone(),
+            zone_name: z.name.clone(),
+            sensor_id: spec.to_string(),
+            since_epoch,
         });
     }
     out

@@ -37,7 +37,7 @@ async fn listen(store: Arc<TempestStore>) -> std::io::Result<()> {
             Ok(pkt) => apply(&store, pkt),
             Err(e) => {
                 if let Ok(text) = std::str::from_utf8(slice) {
-                    tracing::debug!("unparseable packet ({} bytes): {} — {}", n, e, text);
+                    tracing::debug!("unparseable packet ({} bytes): {}, {}", n, e, text);
                 }
             }
         }

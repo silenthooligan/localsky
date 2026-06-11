@@ -1,4 +1,4 @@
-// Bottom strip — battery + station identity. Battery percent comes from
+// Bottom strip, battery + station identity. Battery percent comes from
 // the linear voltage map in `Snapshot::battery_pct_from_v`.
 
 use crate::tempest::state::Snapshot;
@@ -28,7 +28,7 @@ pub fn Footer(snap: ReadSignal<Snapshot>) -> impl IntoView {
         <footer class="site-footer">
             <span class="footer-station">{serial}</span>
             <span class={move || format!("footer-battery {}", bat_class())}>
-                {move || format!("battery {:.0}% — {:.3} V", snap.get().battery_pct, snap.get().battery_v)}
+                {move || format!("battery {:.0}%, {:.3} V", snap.get().battery_pct, snap.get().battery_v)}
             </span>
         </footer>
     }

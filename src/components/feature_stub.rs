@@ -21,7 +21,7 @@ pub fn FeatureStub(
             <p class="feature-stub__eyebrow">{eyebrow}</p>
             <h1 class="feature-stub__title">{title}</h1>
             <p class="feature-stub__blurb">{blurb}</p>
-            <p class="feature-stub__note">"Coming online — wiring up live data."</p>
+            <p class="feature-stub__note">"Coming online, wiring up live data."</p>
         </div>
     }
 }

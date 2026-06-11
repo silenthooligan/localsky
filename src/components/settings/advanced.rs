@@ -239,7 +239,7 @@ pub fn SettingsAdvanced() -> impl IntoView {
                                 <strong>{format!("v{}", s.version)}</strong>
                                 " applied "
                                 {format_epoch(s.applied_at_epoch)}
-                                {s.note.map(|n| format!(" — {n}"))}
+                                {s.note.map(|n| format!(", {n}"))}
                             </li>
                         }).collect_view()}
                     </ul>

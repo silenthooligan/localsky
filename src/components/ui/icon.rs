@@ -1,4 +1,4 @@
-// <Icon/> — the single app-wide inline-SVG registry. Every glyph is a
+// <Icon/>, the single app-wide inline-SVG registry. Every glyph is a
 // Lucide-style stroke icon drawn with `currentColor`, so it inherits
 // the surrounding text color and themes for free across dark / light /
 // high-contrast (emoji could not). This supersedes the old

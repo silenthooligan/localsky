@@ -5,7 +5,7 @@
 // after a few seconds; each is also manually dismissable.
 //
 // The stack starts empty on SSR (no toasts exist server-side), so the
-// SSR/hydrate first frame match — toasts only ever appear from
+// SSR/hydrate first frame match, toasts only ever appear from
 // client-side event handlers.
 
 use std::time::Duration;

@@ -1,5 +1,5 @@
 // Jurisdictional watering-restriction evaluator. Pure functions over
-// chrono::DateTime<Local> + the schema types — no I/O, no globals — so
+// chrono::DateTime<Local> + the schema types, no I/O, no globals, so
 // the rule logic is straightforward to unit-test against synthetic
 // datetimes (DST/EST × Odd/Even × in/out of forbidden hours).
 //
@@ -181,7 +181,7 @@ fn last_day_of_month(year: i32, month: u32) -> Option<u32> {
 
 /// Helper: returns the `n`-th occurrence of `weekday` in `month` of
 /// `year` (1-indexed). `nth_weekday_of_month(2026, 3, Sun, 2)` returns
-/// the second Sunday of March 2026 — i.e. DST start. Returns `None` if
+/// the second Sunday of March 2026, i.e. DST start. Returns `None` if
 /// the month has fewer than `n` matching weekdays.
 fn nth_weekday_of_month(year: i32, month: u32, weekday: Weekday, n: u32) -> Option<NaiveDate> {
     let first = NaiveDate::from_ymd_opt(year, month, 1)?;
@@ -353,7 +353,7 @@ mod tests {
     #[test]
     fn allowed_today_respects_parity() {
         let r = sjrwmd_dst();
-        // 2026-05-30 is a Saturday (DOW 6) — allowed for odd.
+        // 2026-05-30 is a Saturday (DOW 6), allowed for odd.
         assert!(allowed_today(
             make(2026, 5, 30, 6, 0),
             &r,
@@ -364,7 +364,7 @@ mod tests {
             &r,
             AddressParity::Even
         ));
-        // 2026-05-31 is Sunday (DOW 0) — allowed for even, not odd.
+        // 2026-05-31 is Sunday (DOW 0), allowed for even, not odd.
         assert!(allowed_today(
             make(2026, 5, 31, 6, 0),
             &r,
@@ -440,7 +440,7 @@ mod tests {
 
     #[test]
     fn out_of_effective_window_is_ignored() {
-        // sjrwmd_est is StandardOnly; ask in July (DST) — should not apply.
+        // sjrwmd_est is StandardOnly; ask in July (DST), should not apply.
         let v = evaluate(
             make(2026, 7, 15, 12, 0),
             &[sjrwmd_est()],

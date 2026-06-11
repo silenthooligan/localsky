@@ -1,11 +1,11 @@
-// Condition builder — the no-code half of Rule Lab. Lets you compose your
+// Condition builder, the no-code half of Rule Lab. Lets you compose your
 // own watering triggers ("if rain_prob > 60 AND soil > 65 -> skip this
 // zone") with dropdowns instead of Rhai. Reads/writes config.conditions
 // .rules via the same read-modify-write PUT every settings surface uses.
 //
 // The backend (engine/conditions.rs) supports an arbitrarily nested
-// AND/OR/NOT tree; this editor emits the common shape — match ALL or ANY
-// of a flat list of metric comparisons — which covers the great majority
+// AND/OR/NOT tree; this editor emits the common shape, match ALL or ANY
+// of a flat list of metric comparisons, which covers the great majority
 // of real rules. (Hand-authored nested trees still load + run; the editor
 // shows them read-only if it can't represent them.)
 
@@ -122,6 +122,48 @@ fn rule_summary(rule: &serde_json::Value) -> String {
     format!("if {} → {}", parts.join(joiner), action)
 }
 
+/// Curated starting points. Each instantiates as a normal editable rule;
+/// values are sensible defaults, not gospel.
+#[derive(Clone, Copy)]
+struct RuleTemplate {
+    name: &'static str,
+    desc: &'static str,
+    json: &'static str,
+}
+
+const RULE_TEMPLATES: &[RuleTemplate] = &[
+    RuleTemplate {
+        name: "Skip after heavy rain",
+        desc: "More than half an inch already today: the yard has had its drink.",
+        json: r#"{"id":"skip_heavy_rain","name":"Skip after heavy rain","enabled":true,"scope":"all_zones","condition":{"compare":{"metric":"rain_today_in","op":"gt","value":0.5}},"action":"skip"}"#,
+    },
+    RuleTemplate {
+        name: "Skip cold mornings",
+        desc: "Below 45 F at decision time: cold water on cold turf does nothing good.",
+        json: r#"{"id":"skip_cold_morning","name":"Skip cold mornings","enabled":true,"scope":"all_zones","condition":{"compare":{"metric":"temp_now_f","op":"lt","value":45.0}},"action":"skip"}"#,
+    },
+    RuleTemplate {
+        name: "Windy morning guard",
+        desc: "Wind above 12 mph: spray drifts instead of landing.",
+        json: r#"{"id":"skip_windy","name":"Windy morning guard","enabled":true,"scope":"all_zones","condition":{"compare":{"metric":"wind_now_mph","op":"gt","value":12.0}},"action":"skip"}"#,
+    },
+    RuleTemplate {
+        name: "Soil already comfortable",
+        desc: "Zone probe above 70 percent: let the model coast.",
+        json: r#"{"id":"skip_soil_wet","name":"Soil already comfortable","enabled":true,"scope":"all_zones","condition":{"compare":{"metric":"zone_soil_pct","op":"gt","value":70.0}},"action":"skip"}"#,
+    },
+    RuleTemplate {
+        name: "Heat wave boost",
+        desc: "Three-day forecast high above 95 F: stretch runs by a quarter.",
+        json: r#"{"id":"heat_boost","name":"Heat wave boost","enabled":true,"scope":"all_zones","condition":{"compare":{"metric":"temp_max3day_f","op":"gt","value":95.0}},"action":{"adjust_multiplier":{"factor":1.25}}}"#,
+    },
+    RuleTemplate {
+        name: "Dry spell extend",
+        desc: "No meaningful rain for a week: lean a little harder.",
+        json: r#"{"id":"dry_spell","name":"Dry spell extend","enabled":true,"scope":"all_zones","condition":{"compare":{"metric":"days_since_rain","op":"gt","value":7.0}},"action":"extend"}"#,
+    },
+];
+
 #[component]
 pub fn ConditionsSection(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     let config = RwSignal::new(serde_json::Value::Null);
@@ -164,25 +206,63 @@ pub fn ConditionsSection(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView 
                     .unwrap_or_else(|| "rule".to_string());
                 let enabled = r.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
                 let summary = rule_summary(&r);
-                let del = move |_| {
+                let mutate_save = move |f: &dyn Fn(&mut Vec<serde_json::Value>)| {
                     config.update(|cfg| {
                         if let Some(arr) = cfg.get_mut("conditions").and_then(|c| c.get_mut("rules")).and_then(|v| v.as_array_mut()) {
-                            if idx < arr.len() { arr.remove(idx); }
+                            f(arr);
                         }
                     });
                     let candidate = config.get_untracked();
                     #[cfg(feature = "hydrate")]
-                    leptos::task::spawn_local(async move { let _ = save_config(candidate).await; });
+                    leptos::task::spawn_local(async move {
+                        if let Err(e) = save_config(candidate).await {
+                            crate::components::ui::use_toast().error(format!("Rule save failed: {e}"));
+                        }
+                    });
                     #[cfg(not(feature = "hydrate"))]
                     let _ = candidate;
                 };
+                let del = move |_| {
+                    #[cfg(feature = "hydrate")]
+                    {
+                        let ok = web_sys::window()
+                            .and_then(|w| w.confirm_with_message("Delete this rule? This takes effect on the next decision.").ok())
+                            .unwrap_or(false);
+                        if !ok { return; }
+                    }
+                    mutate_save(&|arr| { if idx < arr.len() { arr.remove(idx); } });
+                };
+                let toggle = move |_| {
+                    mutate_save(&|arr| {
+                        if let Some(r) = arr.get_mut(idx) {
+                            let cur = r.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+                            r["enabled"] = serde_json::Value::Bool(!cur);
+                        }
+                    });
+                };
+                let up = move |_| { mutate_save(&|arr| { if idx > 0 && idx < arr.len() { arr.swap(idx, idx - 1); } }); };
+                let down = move |_| { mutate_save(&|arr| { if idx + 1 < arr.len() { arr.swap(idx, idx + 1); } }); };
                 view! {
-                    <li class="cond-row">
+                    <li class="cond-row" class:cond-row--off=!enabled>
+                        <div class="cond-row__order">
+                            <button type="button" class="cond-row__arrow" aria-label="Move rule earlier" title="Evaluated sooner" on:click=up disabled=move || idx == 0>{"\u{25B2}"}</button>
+                            <button type="button" class="cond-row__arrow" aria-label="Move rule later" title="Evaluated later" on:click=down>{"\u{25BC}"}</button>
+                        </div>
                         <span class="cond-row__dot" class:is-off=!enabled></span>
                         <div class="cond-row__text">
                             <span class="cond-row__name">{name}</span>
                             <span class="cond-row__sum">{summary}</span>
                         </div>
+                        <button
+                            type="button"
+                            class="toggle-pill"
+                            role="switch"
+                            aria-checked=enabled.to_string()
+                            on:click=toggle
+                        >
+                            <span class="toggle-pill__opt toggle-pill__opt--on" class:is-active=enabled>"On"</span>
+                            <span class="toggle-pill__opt toggle-pill__opt--off" class:is-active=!enabled>"Off"</span>
+                        </button>
                         <button type="button" class="setup-footer__btn setup-footer__btn--ghost" on:click=move |_| editing.set(Some(idx))>"Edit"</button>
                         <button type="button" class="setup-footer__btn setup-footer__btn--danger" on:click=del>"Delete"</button>
                     </li>
@@ -200,9 +280,58 @@ pub fn ConditionsSection(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView 
                     on:click=move |_| editing.set(Some(usize::MAX))>"+ New rule"</button>
             </div>
             <p class="sensors-section__hint">
-                "Structured triggers, augment-only: a rule can add a skip, extend, or scale a zone's run — it can never override a safety gate (freeze / wind / restriction / rain). Soil rules apply per zone."
+                "Structured triggers, augment-only: a rule can add a skip, extend, or scale a zone's run; it can never override a safety gate (freeze, wind, restriction, rain). Rules run top to bottom and the first skip wins, so order them by priority with the arrows."
             </p>
             <ul class="cond-list">{rules_view}</ul>
+
+            <details class="rule-templates">
+                <summary class="rule-templates__summary">"Template farm: proven rules, one click to make live"</summary>
+                <div class="rule-templates__grid">
+                    {RULE_TEMPLATES.iter().map(|t| {
+                        let tpl = *t;
+                        let add = move |_| {
+                            let rule: serde_json::Value = serde_json::from_str(tpl.json).expect("template json");
+                            config.update(|cfg| {
+                                let conditions = cfg
+                                    .as_object_mut()
+                                    .map(|o| o.entry("conditions").or_insert(serde_json::json!({"rules": []})));
+                                if let Some(c) = conditions {
+                                    let arr = c
+                                        .as_object_mut()
+                                        .map(|o| o.entry("rules").or_insert(serde_json::json!([])));
+                                    if let Some(serde_json::Value::Array(arr)) = arr {
+                                        let mut r = rule.clone();
+                                        // Unique id per instantiation.
+                                        let base = r.get("id").and_then(|v| v.as_str()).unwrap_or("rule").to_string();
+                                        let n = arr.len();
+                                        r["id"] = serde_json::Value::String(format!("{base}_{n}"));
+                                        arr.push(r);
+                                    }
+                                }
+                            });
+                            let candidate = config.get_untracked();
+                            #[cfg(feature = "hydrate")]
+                            leptos::task::spawn_local(async move {
+                                match save_config(candidate).await {
+                                    Ok(()) => crate::components::ui::use_toast().success("Rule added and live. Tune it with Edit."),
+                                    Err(e) => crate::components::ui::use_toast().error(format!("Add failed: {e}")),
+                                }
+                            });
+                            #[cfg(not(feature = "hydrate"))]
+                            let _ = candidate;
+                        };
+                        view! {
+                            <div class="rule-template">
+                                <div class="rule-template__text">
+                                    <span class="rule-template__name">{t.name}</span>
+                                    <span class="rule-template__desc">{t.desc}</span>
+                                </div>
+                                <button type="button" class="setup-footer__btn setup-footer__btn--primary" on:click=add>"Add"</button>
+                            </div>
+                        }
+                    }).collect_view()}
+                </div>
+            </details>
 
             {move || editing.get().map(|idx| {
                 let existing = if idx == usize::MAX {
@@ -226,7 +355,7 @@ pub fn ConditionsSection(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView 
 }
 
 #[cfg(feature = "hydrate")]
-async fn save_config(cfg: serde_json::Value) -> Result<(), String> {
+pub(crate) async fn save_config(cfg: serde_json::Value) -> Result<(), String> {
     use gloo_net::http::Request;
     let resp = Request::put("/api/config")
         .json(&cfg)
@@ -427,7 +556,7 @@ fn ConditionRuleEditor(
         on_done.run(());
     };
 
-    // Live "would fire now?" — evaluate the flat rows against skip_check.
+    // Live "would fire now?", evaluate the flat rows against skip_check.
     let would_fire = move || {
         let s = snap.get();
         let sc = &s.skip_check;
@@ -542,7 +671,7 @@ fn ConditionRuleEditor(
                 {move || match would_fire() {
                     Some(true) => view! { <span class="cond-fire cond-fire--yes">"Would fire now"</span> }.into_any(),
                     Some(false) => view! { <span class="cond-fire cond-fire--no">"Would not fire now"</span> }.into_any(),
-                    None => view! { <span class="cond-fire">"Per-zone — evaluated live per zone"</span> }.into_any(),
+                    None => view! { <span class="cond-fire">"Per-zone, evaluated live per zone"</span> }.into_any(),
                 }}
             </div>
 
@@ -553,5 +682,20 @@ fn ConditionRuleEditor(
                 <button type="button" class="setup-footer__btn setup-footer__btn--primary" on:click=on_save>"Save rule"</button>
             </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod template_tests {
+    use super::RULE_TEMPLATES;
+    use crate::engine::conditions::ConditionRule;
+
+    #[test]
+    fn every_template_deserializes_into_a_real_rule() {
+        for t in RULE_TEMPLATES {
+            let r: ConditionRule = serde_json::from_str(t.json)
+                .unwrap_or_else(|e| panic!("template '{}' invalid: {e}", t.name));
+            assert!(r.enabled, "{} should instantiate enabled", t.name);
+        }
     }
 }

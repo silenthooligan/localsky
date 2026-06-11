@@ -1,4 +1,4 @@
-// Tuya cloud source — openapi.tuya{us|eu|cn|in}.com.
+// Tuya cloud source, openapi.tuya{us|eu|cn|in}.com.
 //
 // Tuya is the white-label OEM behind RainPoint, Smart Life-branded
 // irrigation timers, and a vast catalog of cheap WiFi soil moisture
@@ -22,7 +22,7 @@
 //    {code: "humi_current", value: 60},
 //    {code: "water_total",  value: 1234},
 //    {code: "battery_percentage", value: 95}]
-// Some codes return integers scaled by 10 or 100 — user provides the
+// Some codes return integers scaled by 10 or 100, user provides the
 // scale + offset per mapping to normalize.
 //
 // 60s poll. Token cached and refreshed on expiry / 401.
@@ -132,7 +132,7 @@ impl TuyaCloud {
     /// `token` is "" when fetching a new access_token, or the current
     /// access_token for authenticated requests.
     fn sign(&self, method: &str, path_with_query: &str, body: &str, t: i64, token: &str) -> String {
-        // sha256_hex(body) — empty body = e3b0c44...
+        // sha256_hex(body), empty body = e3b0c44...
         let mut body_hasher = Sha256::new();
         body_hasher.update(body.as_bytes());
         let body_hash: String = body_hasher.finalize().encode_hex();

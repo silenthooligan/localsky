@@ -3,7 +3,7 @@
 // added wrinkle that the `default` flag is mutually exclusive across
 // controllers: toggling it on for one clears it on every other entry.
 //
-// The list view uses the SettingsCard UI kit — each controller is an
+// The list view uses the SettingsCard UI kit, each controller is an
 // expandable card with status badges and a read-only details panel.
 // The user can browse what's configured without clicking "Edit"; the
 // edit form only opens when they actually want to change something.

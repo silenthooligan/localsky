@@ -1,4 +1,4 @@
-// ZoneCard — a rich, scannable card per zone for the Zones master-detail.
+// ZoneCard, a rich, scannable card per zone for the Zones master-detail.
 // Clicking the card selects it (the detail slides into the right pane, no
 // navigation). Shows live status (color-coded), the key numbers, an
 // optional zone photo, and an inline Stop when running.

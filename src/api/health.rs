@@ -58,6 +58,12 @@ pub struct HealthResponse {
     pub sources: Vec<SourceFreshness>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub controllers: Vec<ControllerSummary>,
+    /// Configured soil probes with no valid reading for 24h+ (see the
+    /// refresher's probe-fault detection). Non-empty marks the overall
+    /// status degraded so the UI health banner surfaces the dead
+    /// hardware. Same anonymous-caller trimming as sources/controllers.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub soil_probe_faults: Vec<crate::ha::snapshot::SoilProbeFault>,
     /// The Home Assistant relationship, both directions. None for
     /// anonymous callers on auth-required instances (same trimming as
     /// sources/controllers).
@@ -314,12 +320,21 @@ pub async fn health(
         })
     };
 
+    // Faulted soil probes (computed by the refresher onto the snapshot).
+    // Dead hardware degrades the engine's soil awareness, so it degrades
+    // the reported status the same way an offline source does.
+    let mut soil_probe_faults = state
+        .irrigation_store
+        .as_ref()
+        .map(|s| s.snapshot().soil_probe_faults.clone())
+        .unwrap_or_default();
+
     let status = match (config_present, config_status) {
         (true, "ok") => {
             let any_offline = sources_freshness
                 .iter()
                 .any(|s| s.enabled && s.status == "offline");
-            if any_offline {
+            if any_offline || !soil_probe_faults.is_empty() {
                 "degraded"
             } else {
                 "ok"
@@ -333,6 +348,7 @@ pub async fn health(
     if !full_detail {
         sources_freshness.clear();
         controller_summaries.clear();
+        soil_probe_faults.clear();
         schema_version = None;
         ha = None;
     }
@@ -349,6 +365,7 @@ pub async fn health(
         },
         sources: sources_freshness,
         controllers: controller_summaries,
+        soil_probe_faults,
         ha,
     })
 }

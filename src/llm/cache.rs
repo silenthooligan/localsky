@@ -1,6 +1,6 @@
 // Tiny TTL cache for advisor responses. Keys are short strings
 // derived from the snapshot inputs that would change the answer;
-// values are owned T's. Single Mutex around a HashMap is plenty —
+// values are owned T's. Single Mutex around a HashMap is plenty
 // reads are infrequent (at most a few per minute under any realistic
 // dashboard load), so contention is irrelevant.
 
@@ -31,7 +31,7 @@ impl<T: Clone> TtlCache<T> {
     }
 
     /// Read a cached value if it's still fresh. None otherwise.
-    /// Doesn't evict on miss — eviction happens on the next put().
+    /// Doesn't evict on miss, eviction happens on the next put().
     pub fn get(&self, key: &str) -> Option<T> {
         let now = chrono::Utc::now().timestamp();
         let guard = self.inner.lock().ok()?;

@@ -3,7 +3,7 @@
 // advisor. Lazy: SSR renders an empty placeholder, hydrate fetches
 // once on mount, refreshes when the cached snapshot input changes
 // (signalled by the verdict signal flipping). Quiet on offline/
-// disabled — tile renders a small badge instead of a wall of "loading"
+// disabled, tile renders a small badge instead of a wall of "loading"
 // text.
 
 use leptos::prelude::*;

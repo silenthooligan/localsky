@@ -5,13 +5,13 @@
 // Each tab is a plain <a href> so default-action fallback works if
 // the WASM intercept fails to attach, AND an inline on:click that
 // calls leptos_router::use_navigate. The handler shape is the
-// minimal pattern from the leptos book — a single closure per link
+// minimal pattern from the leptos book, a single closure per link
 // capturing its own navigate clone directly, no helper indirection.
 //
 // Diagnostic step recorded into the global "navlog" debug signal
 // (provide_context'd in app.rs and rendered in a fixed strip at
-// the bottom of the page) so any failure point — handler firing,
-// prevent_default, navigate call, route swap — is visible without
+// the bottom of the page) so any failure point, handler firing,
+// prevent_default, navigate call, route swap, is visible without
 // needing browser dev tools, which are awkward to use on mobile.
 
 use crate::nav_log::log_nav;
@@ -69,7 +69,7 @@ pub fn TopNav() -> impl IntoView {
         <header class="header">
             <a href="/" class="header-brand" aria-label="LocalSky home">
                 <span class="header-brand__mark" aria-hidden="true">
-                    // Inline brand logomark — actual vector trace of the
+                    // Inline brand logomark, actual vector trace of the
                     // canonical brand-reference artwork (see
                     // docs/assets/brand/build_logo.py). The ink layer
                     // (cloud outline + pin V) uses var(--accent-good) so
@@ -78,7 +78,7 @@ pub fn TopNav() -> impl IntoView {
                     // explicitly var(--accent) so it stays brand-blue
                     // across all themes.
                     //
-                    // Paths intentionally NOT hand-edited — they come
+                    // Paths intentionally NOT hand-edited, they come
                     // straight from the build_logo.py potrace pass.
                     // Regenerate by running `python3
                     // docs/assets/brand/build_logo.py` and updating

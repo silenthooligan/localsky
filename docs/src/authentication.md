@@ -38,7 +38,7 @@ the login/setup rate limiter.
 LocalSky has no trusted-proxy list, so it cannot tell a proxy-set
 `X-Forwarded-For` from a client-forged one. Any client that can reach
 the LocalSky port directly can send
-`X-Forwarded-For: 192.168.1.50` and, if `192.168.1.0/24` is in
+`X-Forwarded-For: 10.0.0.50` and, if `10.0.0.0/24` is in
 `trusted_networks`, walk straight past login. Deploy accordingly:
 
 - **Never expose the LocalSky port directly to the internet with

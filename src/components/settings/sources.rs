@@ -290,7 +290,7 @@ fn SourceForm(
                     {
                         *slot = entry;
                     } else {
-                        // Editing target vanished — append as a new entry rather than lose the change.
+                        // Editing target vanished, append as a new entry rather than lose the change.
                         arr.push(entry);
                     }
                 } else {

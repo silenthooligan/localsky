@@ -1,4 +1,4 @@
-// Mobile "Now" tab — single-column stack of the most-glanceable cells:
+// Mobile "Now" tab, single-column stack of the most-glanceable cells:
 // next-run hero (which already nests AdvisorExplanation + SkipBreakdown),
 // today/tomorrow forecast, and a compact stop-all area. The persistent
 // running banner is at the top of IrrigationPage, so when something is

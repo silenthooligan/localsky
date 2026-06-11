@@ -1,4 +1,4 @@
-// Simulator — the What-If lab (marquee feature 1, first cut). Sliders for
+// Simulator, the What-If lab (marquee feature 1, first cut). Sliders for
 // the weather drivers (seeded from today's live readings); on change we
 // POST the hypothetical to /api/irrigation/simulate, which re-runs the
 // EXACT production ladder (decide_traced) on baseline vs hypothetical and
@@ -160,7 +160,7 @@ pub fn SimulatorPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                                     <li><code>"temp_min_24h_f"</code>" / "<code>"temp_max_3day_f"</code>" temp extremes (\u{b0}F)"</li>
                                     <li><code>"days_since_significant_rain"</code>" dry-spell length (days)"</li>
                                 </ul>
-                                <p class="rhai-help__h">"Templates \u{2014} click to try"</p>
+                                <p class="rhai-help__h">"Templates: click to try"</p>
                                 <ul class="rhai-help__templates">
                                     {[
                                         ("rain_today_in > 0.5", "skip after heavy rain today"),
@@ -234,7 +234,7 @@ fn SimVerdict(r: SimResult) -> impl IntoView {
     let blab = verdict_label(&bv);
     let hlab = verdict_label(&hv);
     let hreason = if r.hypothetical.reason.is_empty() {
-        "All clear — no skip rule fired.".to_string()
+        "All clear, no skip rule fired.".to_string()
     } else {
         r.hypothetical.reason.clone()
     };
@@ -277,7 +277,7 @@ fn SimVerdict(r: SimResult) -> impl IntoView {
         view! {
             <div class="sim-verdict__single">
                 <span class="sim-verdict__pill sim-verdict__pill--lg" style=format!("--v:{htok}")>{hlab}</span>
-                <span class="sim-verdict__samenote">"Same as today \u{2014} your changes don\u{2019}t flip the decision."</span>
+                <span class="sim-verdict__samenote">"Same as today: your changes don\u{2019}t flip the decision."</span>
             </div>
         }
         .into_any()

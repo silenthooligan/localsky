@@ -240,7 +240,7 @@ pub fn extraterrestrial_radiation(lat_deg: f64, doy: u16) -> f64 {
     // around the solstices (polar day/night); clamp the cosine argument.
     let cos_arg = (-phi.tan() * delta.tan()).clamp(-1.0, 1.0);
     let omega_s = cos_arg.acos();
-    // 24*60/π * 0.0820 ≈ 37.586 — Gsc * conversion in FAO-56 units.
+    // 24*60/π * 0.0820 ≈ 37.586, Gsc * conversion in FAO-56 units.
     (24.0 * 60.0 / std::f64::consts::PI)
         * 0.0820
         * dr

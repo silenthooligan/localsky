@@ -42,7 +42,7 @@ struct SourceReading {
     age_s: i64,
 }
 
-/// GET /api/v1/weather/readings?source=ID — the latest value per key a
+/// GET /api/v1/weather/readings?source=ID, the latest value per key a
 /// source has reported, newest first. Powers the Sensors page's
 /// per-integration live-data view: "is it posting, and what?" Used to
 /// validate that a local source (Ecowitt, Tempest, webhook) is actually

@@ -1,4 +1,4 @@
-// <Button/> — the one button primitive. Variants unify the old ad-hoc
+// <Button/>, the one button primitive. Variants unify the old ad-hoc
 // `.btn-clay*` family and bespoke range buttons. Sizes sm/md/lg. A
 // `loading` flag swaps the label for a spinner and disables the button.
 //
@@ -23,7 +23,7 @@ pub fn Button(
     /// Disabled state.
     #[prop(into, optional)]
     disabled: Signal<bool>,
-    /// Loading state — shows a spinner and blocks clicks.
+    /// Loading state, shows a spinner and blocks clicks.
     #[prop(into, optional)]
     loading: Signal<bool>,
     /// Full-width block button.

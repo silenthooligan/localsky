@@ -112,7 +112,7 @@ pub fn router(
         .merge(info::router())
         .merge(manifest_router);
 
-    // Observed-weather history (sparklines) — only when persistence is mounted.
+    // Observed-weather history (sparklines), only when persistence is mounted.
     if let Some(h) = history {
         router = router
             .nest("/weather", weather::router(h.clone()))

@@ -1,4 +1,4 @@
-// SettingsShell — master-detail settings. The section list lives on the
+// SettingsShell, master-detail settings. The section list lives on the
 // left; picking a section slides its editor into the detail pane on the
 // right (filling the dead space on wide screens) with NO page navigation.
 // On narrow screens it collapses to list -> detail -> back. Rebuilt on the
@@ -35,7 +35,7 @@ struct SectionGroup {
 const GROUPS: &[SectionGroup] = &[
     SectionGroup {
         title: "Hardware",
-        subtitle: "Wire up the physical world — set once, mostly.",
+        subtitle: "Wire up the physical world, set once, mostly.",
         links: &[
             SectionLink {
                 key: "devices",

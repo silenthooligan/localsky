@@ -1,4 +1,4 @@
-// Library entry — Leptos app shell. The same module tree is used for both
+// Library entry, Leptos app shell. The same module tree is used for both
 // the SSR binary (compiled with feature `ssr`, runs in the axum server)
 // and the WASM client (compiled with feature `hydrate`, attaches to the
 // HTML the server already streamed).
@@ -26,6 +26,7 @@ pub mod app;
 pub mod components;
 pub mod docs;
 pub mod forecast;
+pub mod gates_catalog;
 pub mod ha;
 pub mod history;
 pub mod nav_log;
@@ -141,7 +142,7 @@ fn register_service_worker() {
     messages_cb.forget();
 
     // Kick the registration. The Promise resolves to a ServiceWorkerRegistration;
-    // we don't need to do anything with it here — the browser maintains the
+    // we don't need to do anything with it here, the browser maintains the
     // registration in storage and we just want the install/activate cycle to run.
     let promise = container.register("/sw.js");
     wasm_bindgen_futures::spawn_local(async move {

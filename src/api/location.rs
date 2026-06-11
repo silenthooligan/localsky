@@ -1,4 +1,4 @@
-// GET /api/v1/location — the configured map center (lat/lon/zoom).
+// GET /api/v1/location, the configured map center (lat/lon/zoom).
 //
 // The radar renders its center from #radar-map data-* attrs, which are
 // correct on a server-rendered load but fall back to a hardcoded default

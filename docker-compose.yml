@@ -61,15 +61,15 @@ services:
         max-file: "5"
         tag: "localsky"
 
-  # Demo sidecar. Same image as prod (`:latest`); only the env vars differ
+  # Demo sidecar (demo.localsky.io). Same image as prod (`:latest`); only the env vars differ
   # (LOCALSKY_DEMO=1 + verbose RUST_LOG). Post-cutover there's no longer a
   # separate v2 image to maintain, and the build workflow only refreshes
   # `:latest` + `:${sha}` on push so pinning `:v2` here would freeze the
   # demo at whatever was last tagged. Synthetic data, no HA, no LLM, no
   # real hardware: used to capture screenshots + smoke-test changes.
-  localsky-v2:
+  localsky-demo:
     image: ghcr.io/silenthooligan/localsky:latest
-    container_name: localsky-v2
+    container_name: localsky-demo
     restart: unless-stopped
     ports:
       - "8091:8091"
@@ -100,4 +100,4 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
-        tag: "localsky-v2"
+        tag: "localsky-demo"

@@ -8,7 +8,7 @@
 // SAFETY BOUNDARY (identical to scripting): these run in
 // `decide_per_zone` AFTER the deterministic safety + weather gates, and
 // ONLY when those gates left the zone running. So a rule can ADD a skip,
-// shrink the run, or extend it — it can never clear a freeze / wind /
+// shrink the run, or extend it, it can never clear a freeze / wind /
 // restriction / rain gate or force a run. `AdjustMultiplier` is hard-
 // clamped to [0.5, 1.5] in code here, never trusted from config. A metric
 // with no data (e.g. ZoneSoilPct when the probe is offline) evaluates as
@@ -436,7 +436,7 @@ mod tests {
         let z = zone("a", None);
         let c = ctx_for(&i, &z);
         // Any comparison on a missing soil reading must be false, in both
-        // directions — missing data never causes a skip.
+        // directions, missing data never causes a skip.
         for op in [CmpOp::Gt, CmpOp::Gte, CmpOp::Lt, CmpOp::Lte] {
             assert!(!eval_expr(
                 &ConditionExpr::Compare {
@@ -459,7 +459,7 @@ mod tests {
             op: CmpOp::Lt,
             value: 30.0,
         };
-        // Not(Unknown) is Unknown, which coerces to false at the root —
+        // Not(Unknown) is Unknown, which coerces to false at the root
         // a probe outage must not fire a skip rule through negation.
         assert!(!eval_expr(
             &ConditionExpr::Not(Box::new(missing_cmp.clone())),

@@ -1,10 +1,10 @@
-// ZoneDetail — the single, responsive per-zone view at /zones/:slug
+// ZoneDetail, the single, responsive per-zone view at /zones/:slug
 // (reached from the Zone Canvas rail). Replaces the mobile-only detail on
 // this route with one built on the v2 primitives: status header, KPI
 // StatTiles, a 30-day watered-minutes LineChart, a Run (with duration
 // stepper) / Stop control, and the "why this duration?" math breakdown.
 // Reads the live IrrigationSnapshot + the existing /api/irrigation/history
-// endpoint — no new backend.
+// endpoint, no new backend.
 
 use chrono::{Local, TimeZone};
 use leptos::prelude::*;
@@ -175,9 +175,9 @@ pub fn ZoneDetailView(
                     .timestamp_opt(z.last_run_epoch, 0)
                     .single()
                     .map(|dt| dt.format("%b %-d, %-I:%M %p").to_string())
-                    .unwrap_or_else(|| "—".into())
+                    .unwrap_or_else(|| "-".into())
             } else {
-                "—".into()
+                "-".into()
             };
             let name = z.name.clone();
             let zslug = z.slug.clone();
@@ -335,11 +335,22 @@ pub fn ZoneDetailView(
                     }
 
                     <section class="zone-detail__panel">
-                        <h2 class="zone-detail__panel-title">"Watered minutes — last 30 days"</h2>
+                        <h2 class="zone-detail__panel-title">"Watered minutes, last 30 days"</h2>
                         {move || {
                             let b = zone_day_buckets(&history.get(), &chart_slug, 30);
                             let pts: Vec<(f64, f64)> = b.iter().enumerate().map(|(i, m)| (i as f64, *m)).collect();
-                            view! { <LineChart series=vec![Series::new("min", "var(--accent)", pts)] height=180 legend=false y_unit=" min".to_string()/> }
+                            let n = b.len();
+                            let today = Local::now().date_naive();
+                            let labels: Vec<String> = (0..n)
+                                .map(|i| {
+                                    // Buckets run oldest -> newest; label to match.
+                                    today
+                                        .checked_sub_days(chrono::Days::new((n - 1 - i) as u64))
+                                        .map(|d| d.format("%b %-d").to_string())
+                                        .unwrap_or_default()
+                                })
+                                .collect();
+                            view! { <LineChart series=vec![Series::new("min", "var(--accent)", pts)] height=180 legend=false y_unit=" min".to_string() x_labels=labels/> }
                         }}
                     </section>
 
@@ -399,7 +410,7 @@ fn ZoneMathPanel(m: ZoneMath) -> impl IntoView {
     }
 }
 
-/// Route wrapper for /zones/:slug — reads the slug param and shows the
+/// Route wrapper for /zones/:slug, reads the slug param and shows the
 /// detail standalone with a back link.
 #[component]
 pub fn ZoneDetailPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {

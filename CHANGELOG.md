@@ -4,6 +4,41 @@ All notable changes to LocalSky are documented here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.3.0-beta.1] - 2026-06-11
+
+### Features
+
+- History run log: per-day rows for every start, duration, and skip, with day watered totals
+- Run log search (zone, reason, watered/skipped), 7/30/90/All range chips, and a month jump; the log fetches its own window so All is genuinely all
+- Dated x-axes on History and zone charts (oldest to newest), zero-floored y-axis
+- Rule manager: enable/disable, reorder, delete; template farm with six curated starting points
+- Built-in skip gates are operator-controllable per gate behind a warning acknowledgement; control and legal gates stay locked; the trace marks gates disabled by operator
+- Segmented On|Off toggle pills on gates and rules
+- History retention setting (`persistence.runs_retention_days`, default keep forever) with daily prune
+- Soil probe fault detection: 24h without a valid reading surfaces in `/api/health` (degraded), the health banner, and a one-time push naming the zone
+- Per-zone verdict enforcement at dispatch: zones whose own verdict says skip are logged with the reason and not watered
+- Operator-opt-in analytics tag (`LOCALSKY_ANALYTICS_*` env, off by default)
+- Demo mode seeds 30 days of synthetic run history
+- API contract 1.8.0: additive `soil_probe_faults` on snapshot and health
+
+### Bug fixes
+
+- Rain today reads the native Tempest daily accumulator (local-midnight rollover, restart-safe reseed, persisted to history); the HA WeatherFlow per-minute precipitation entity is no longer misread as a daily total
+- Days-since-rain takes the min of the regional model and the station's own observed history
+- The yard-wide saturation gate names zones missing soil readings instead of going silently inapplicable
+- Scheduler no longer double-records completed runs
+- Em dashes removed from all product copy, including unicode-escaped ones
+- Title/subtitle spacing normalized across page headers, panels, and gate rows
+
+### CI (public repository)
+
+- Native multi-arch runners (amd64 + arm64) replace QEMU emulation: builds drop from 2h10m to about 16m
+- Trivy scans the published multi-arch tag with registry auth, gating on fixable HIGH/CRITICAL only
+- Pushing a `v*` tag auto-publishes a GitHub release with generated notes
+- Concurrency auto-cancel, job timeouts, pinned action releases, zero-warning clippy baseline
+
+## [0.2.0-beta.1] - 2026-06-10
+
 The v2 burndown. Lays a ports-and-adapters foundation underneath the existing v0.1 deployment without changing observable behavior, plus the standalone, UI, and ops work to make LocalSky a viable open-source product.
 
 ### Added

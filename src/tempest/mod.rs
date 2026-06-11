@@ -1,4 +1,4 @@
-// Tempest UDP packet handling — types, parser, listener, shared state.
+// Tempest UDP packet handling, types, parser, listener, shared state.
 
 pub mod packets;
 pub mod state;

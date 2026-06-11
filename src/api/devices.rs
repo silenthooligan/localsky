@@ -17,12 +17,12 @@ pub fn router(registry: DeviceRegistry) -> Router {
         .with_state(registry)
 }
 
-/// GET /api/v1/devices — every known device, sorted by id.
+/// GET /api/v1/devices, every known device, sorted by id.
 async fn list(State(registry): State<DeviceRegistry>) -> Json<Vec<Device>> {
     Json(registry.all())
 }
 
-/// GET /api/v1/devices/discover — broadcast LAN discovery (Ecowitt for now)
+/// GET /api/v1/devices/discover, broadcast LAN discovery (Ecowitt for now)
 /// and return the gateways found, each with a suggested host the UI's "Add"
 /// button pre-fills into an ecowitt_gw_poll source. ~3s while it listens.
 async fn discover() -> Json<Vec<DiscoveredGateway>> {

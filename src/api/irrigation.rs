@@ -260,7 +260,7 @@ async fn shadow_diff(State(live): State<Arc<IrrigationStore>>) -> Json<Value> {
 /// What-If: seed engine Inputs from the live SkipCheck, override the
 /// Some fields from the request, re-run the EXACT production ladder
 /// (`decide_traced`) on baseline + hypothetical, return both traces.
-/// Pure read — writes nothing.
+/// Pure read, writes nothing.
 async fn simulate(
     State(store): State<Arc<IrrigationStore>>,
     Json(req): Json<crate::ha::snapshot::SimRequest>,
@@ -312,7 +312,7 @@ async fn simulate(
     let mut hypothetical = decide_traced(&hypo, &p);
 
     // Optional ad-hoc script test: augment-only, same boundary as the
-    // live engine — only consulted when the hypothetical verdict is "run".
+    // live engine, only consulted when the hypothetical verdict is "run".
     if let Some(src) = req.test_script.as_ref().filter(|s| !s.trim().is_empty()) {
         if hypothetical.verdict == "run" {
             use crate::config::schema::ScriptRule;

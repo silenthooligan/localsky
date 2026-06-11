@@ -109,7 +109,7 @@ pub trait IrrigationController: Send + Sync {
     async fn run_history(&self, since_epoch: i64) -> ControllerResult<Vec<RunRecord>>;
 
     /// Enumerate the controller's zones/stations for onboarding (the
-    /// wizard's "scan zones" — auto-populates ZoneConfig). Adapters that
+    /// wizard's "scan zones", auto-populates ZoneConfig). Adapters that
     /// can't enumerate (MQTT/ESPHome/HA) return `Unsupported` by default.
     async fn discover_zones(&self) -> ControllerResult<Vec<DiscoveredZone>> {
         Err(ControllerError::Unsupported("zone discovery".into()))

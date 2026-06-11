@@ -48,7 +48,7 @@ pub fn MobileZoneDetail(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     let sheet_zone: RwSignal<Option<String>> = RwSignal::new(None);
     let sheet_label: RwSignal<String> = RwSignal::new(String::new());
 
-    // History fetch — reuses the /api/irrigation/history endpoint and
+    // History fetch, reuses the /api/irrigation/history endpoint and
     // filters client-side. 30-day window; SSR shows empty skeleton.
     let (history, set_history) = signal::<HistoryWindow>(HistoryWindow::default());
     #[cfg(not(feature = "hydrate"))]
@@ -57,8 +57,8 @@ pub fn MobileZoneDetail(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     {
         Effect::new(move |_| {
             // Re-run if slug changes (so back/forward between zones triggers
-            // a refetch). We don't actually use the slug in the URL — the
-            // backend returns all zones — but reading it here registers the
+            // a refetch). We don't actually use the slug in the URL, the
+            // backend returns all zones, but reading it here registers the
             // dependency.
             let _ = slug();
             leptos::task::spawn_local(async move {
@@ -103,7 +103,7 @@ pub fn MobileZoneDetail(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         let last_run_str = if z.last_run_epoch > 0 {
             format_relative_past(z.last_run_epoch)
         } else {
-            "—".to_string()
+            "-".to_string()
         };
         let running = z.running;
         let today_min = z.today_run_minutes;
@@ -389,7 +389,7 @@ fn HistoryRow(run: RunRecord) -> impl IntoView {
                 }}
             </div>
             <div class="mobile-history-marker" aria-hidden="true">
-                {if skipped { "—" } else { "●" }}
+                {if skipped { "-" } else { "●" }}
             </div>
         </div>
     }

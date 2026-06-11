@@ -220,7 +220,7 @@ pub fn build_ha_devices(devs: &[Value], ents: &[Value]) -> Vec<Device> {
         ) else {
             continue;
         };
-        // Skip disabled/hidden entities — they're not live.
+        // Skip disabled/hidden entities, they're not live.
         if e.get("disabled_by").map(|v| !v.is_null()).unwrap_or(false) {
             continue;
         }
@@ -250,8 +250,8 @@ pub fn build_ha_devices(devs: &[Value], ents: &[Value]) -> Vec<Device> {
         // Skip HA "service" devices. HACS frontend plugins (button-card, the
         // Irrigation Unlimited Lovelace card) and integration meta-entries
         // register in the device registry with entry_type="service". They're
-        // not physical hardware — real gateways/controllers have no entry_type
-        // — so they're pure noise in a device list.
+        // not physical hardware, real gateways/controllers have no entry_type
+        //, so they're pure noise in a device list.
         if d.get("entry_type").and_then(Value::as_str) == Some("service") {
             continue;
         }
@@ -376,12 +376,12 @@ mod tests {
     #[test]
     fn skips_localsky_own_and_unrelated_devices() {
         let devs = vec![
-            // LocalSky's own HACS device — must be skipped (echo guard).
+            // LocalSky's own HACS device, must be skipped (echo guard).
             json!({"id":"ls","name":"LocalSky","manufacturer":"LocalSky","model":"","identifiers":[["localsky","entry123"]]}),
-            // A laptop / alarm panel with only a battery+temp sensor — no
+            // A laptop / alarm panel with only a battery+temp sensor, no
             // vendor, no soil/irrigation entity, so it's dropped.
             json!({"id":"laptop","name":"Travel Laptop","manufacturer":"Microsoft","model":"Surface","identifiers":[]}),
-            // A real Ecowitt — kept by vendor.
+            // A real Ecowitt, kept by vendor.
             json!({"id":"gw","name":"GW1100B","manufacturer":"Ecowitt","model":"GW1100B","identifiers":[["ecowitt","abc"]]}),
             // A HACS Lovelace plugin (Irrigation Unlimited Card). It matches
             // "irrigation" by name but is entry_type=service, so it must be

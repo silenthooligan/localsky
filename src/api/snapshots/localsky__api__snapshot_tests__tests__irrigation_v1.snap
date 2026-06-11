@@ -85,5 +85,6 @@ expression: "IrrigationSnapshot::default()"
   "override_tomorrow": "",
   "override_helpers_present": false,
   "decision_trace": null,
-  "zone_verdicts": []
+  "zone_verdicts": [],
+  "soil_probe_faults": []
 }

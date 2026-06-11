@@ -1,7 +1,7 @@
 // SQLite schema, open, and CRUD for the run-history table.
 //
 // The connection is held inside an `Arc<Mutex<Connection>>` so handlers
-// can grab it from spawn_blocking. Single writer + readers — no need
+// can grab it from spawn_blocking. Single writer + readers, no need
 // for a real pool at irrigation-traffic levels (a few inserts a day,
 // a few reads per page-load).
 
@@ -246,4 +246,18 @@ mod tests {
             .unwrap();
         assert!(w.decisions[0].trace.is_none());
     }
+}
+
+/// Prune runs and decisions older than the retention horizon. Invoked
+/// from a daily task only when [persistence] runs_retention_days > 0;
+/// the default keeps everything forever (long-trend friendly).
+pub async fn prune_older_than(conn: Arc<Mutex<Connection>>, cutoff_epoch: i64) -> Result<usize> {
+    tokio::task::spawn_blocking(move || -> Result<usize> {
+        let conn = conn.blocking_lock();
+        let a = conn.execute("DELETE FROM runs WHERE start_epoch < ?1", [cutoff_epoch])?;
+        let b = conn.execute("DELETE FROM decisions WHERE epoch < ?1", [cutoff_epoch])?;
+        Ok(a + b)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("join: {e}"))?
 }

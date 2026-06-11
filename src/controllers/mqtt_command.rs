@@ -13,7 +13,7 @@
 //   - DIY relay boards (ESP32, Raspberry Pi GPIO bridges)
 //   - OpenSprinkler's MQTT plug-in
 //
-// No state subscription — commands are fire-and-forget. For confirmed
+// No state subscription, commands are fire-and-forget. For confirmed
 // state with feedback, use ESPHome native or HaServiceCall instead.
 //
 // run_zone fires the on-publish, spawns a shutoff timer that publishes
@@ -138,7 +138,7 @@ impl IrrigationController for MqttCommand {
             rain_sensor: false,
             master_valve: false,
             // MQTT is fire-and-forget per topic, so concurrent zones run
-            // fine — the broker handles each publish independently.
+            // fine, the broker handles each publish independently.
             multi_zone_parallel: true,
             history_query: false,
             remote_program_upload: false,

@@ -27,8 +27,12 @@ pub fn spawn(
     tempest: Arc<TempestStore>,
     irrigation: Arc<IrrigationStore>,
     forecast: Arc<ForecastStore>,
+    history: Option<Arc<tokio::sync::Mutex<rusqlite::Connection>>>,
 ) {
     info!("demo_data: spawning synthetic data feeder (LOCALSKY_DEMO=1)");
+    if let Some(conn) = history {
+        tokio::spawn(seed_history(conn));
+    }
     tokio::spawn(async move {
         let mut tick = interval(Duration::from_secs(3));
         forecast.store(synth_forecast());
@@ -393,4 +397,111 @@ fn synth_forecast() -> ForecastSnapshot {
         })
         .collect();
     f
+}
+
+/// Seed ~30 days of plausible runs, skips, and decisions so the demo's
+/// History page (run log, charts, calendar, skip breakdown) tells a
+/// story instead of rendering empty states. Idempotent: only fires
+/// when the runs table is empty.
+async fn seed_history(conn: Arc<tokio::sync::Mutex<rusqlite::Connection>>) {
+    use crate::history::db::{record_decision, record_run};
+    use crate::history::types::{DecisionRecord, RunRecord};
+
+    let existing: i64 = {
+        let c = conn.lock().await;
+        c.query_row("SELECT COUNT(*) FROM runs", [], |r| r.get(0))
+            .unwrap_or(0)
+    };
+    if existing > 0 {
+        return;
+    }
+    info!("demo_data: seeding 30 days of synthetic history");
+
+    let zones: [(&str, i64); 4] = [
+        ("back_yard", 3600),
+        ("front_yard", 1800),
+        ("side_yard", 1800),
+        ("back_yard_shrubs", 1320),
+    ];
+    let now = chrono::Utc::now().timestamp();
+    let day = 86_400i64;
+    // Deterministic pseudo-random pattern keyed by day index: roughly
+    // every other day waters, with rain and wind skip days mixed in.
+    for back in (1..=30).rev() {
+        let midnight = now - back * day - (now % day);
+        let start = midnight + 6 * 3600 + (back % 3) * 600;
+        let kind = back % 7;
+        match kind {
+            2 => {
+                let _ = record_decision(
+                    conn.clone(),
+                    DecisionRecord {
+                        epoch: start,
+                        verdict: "skip".into(),
+                        reason: "Rain expected within 4h (0.31 in forecast)".into(),
+                        trace: None,
+                    },
+                    String::new(),
+                )
+                .await;
+                for (slug, _) in zones {
+                    let _ = record_run(
+                        conn.clone(),
+                        RunRecord {
+                            zone: slug.into(),
+                            start_epoch: start,
+                            duration_s: 0,
+                            skip_reason: Some("Rain expected within 4h".into()),
+                        },
+                    )
+                    .await;
+                }
+            }
+            5 => {
+                let _ = record_decision(
+                    conn.clone(),
+                    DecisionRecord {
+                        epoch: start,
+                        verdict: "skip".into(),
+                        reason: "Wind 14 mph above 10 mph threshold".into(),
+                        trace: None,
+                    },
+                    String::new(),
+                )
+                .await;
+            }
+            0 | 3 => {
+                // Rest day: bucket still comfortable, no rows.
+            }
+            _ => {
+                let _ = record_decision(
+                    conn.clone(),
+                    DecisionRecord {
+                        epoch: start,
+                        verdict: "run".into(),
+                        reason: String::new(),
+                        trace: None,
+                    },
+                    String::new(),
+                )
+                .await;
+                let mut t = start;
+                for (slug, dur) in zones {
+                    let jitter = ((back * 37 + t) % 90) - 45;
+                    let d = (dur + jitter).max(300);
+                    let _ = record_run(
+                        conn.clone(),
+                        RunRecord {
+                            zone: slug.into(),
+                            start_epoch: t,
+                            duration_s: d,
+                            skip_reason: None,
+                        },
+                    )
+                    .await;
+                    t += d + 300;
+                }
+            }
+        }
+    }
 }

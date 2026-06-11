@@ -8537,7 +8537,7 @@ button.mobile-tab {
 // Zones — KPI summary + rich card grid (marquee feature 3)
 // ═══════════════════════════════════════════════════════════════════════
 .zones-page { display: flex; flex-direction: column; gap: var(--space-4); }
-.zones-page__header { display: flex; flex-direction: column; gap: 2px; }
+.zones-page__header { display: flex; flex-direction: column; gap: var(--space-2); }
 .zones-page__eyebrow {
   margin: 0; font-size: var(--text-meta); letter-spacing: var(--tracking-eyebrow);
   text-transform: uppercase; color: var(--accent); font-weight: 700;
@@ -8699,7 +8699,7 @@ button.mobile-tab {
 // Sensors page
 // ═══════════════════════════════════════════════════════════════════════
 .sensors-page { display: flex; flex-direction: column; gap: var(--space-7); max-width: 1000px; }
-.sensors-page__header { display: flex; flex-direction: column; gap: 2px; }
+.sensors-page__header { display: flex; flex-direction: column; gap: var(--space-2); }
 .sensors-page__eyebrow {
   margin: 0; font-size: var(--text-meta); letter-spacing: var(--tracking-eyebrow);
   text-transform: uppercase; color: var(--accent); font-weight: 700;
@@ -9290,7 +9290,7 @@ button.mobile-tab {
   .rulelab-history { position: static; flex-direction: row; flex-wrap: wrap; }
   .rulelab-history__item { flex: 1 1 200px; }
 }
-.rulelab-page__header { display: flex; flex-direction: column; gap: 2px; }
+.rulelab-page__header { display: flex; flex-direction: column; gap: var(--space-2); }
 .rulelab-page__eyebrow {
   margin: 0; font-size: var(--text-meta); letter-spacing: var(--tracking-eyebrow);
   text-transform: uppercase; color: var(--accent); font-weight: 700;
@@ -9359,7 +9359,7 @@ button.mobile-tab {
 // Simulator (marquee feature 1)
 // ═══════════════════════════════════════════════════════════════════════
 .sim-page { display: flex; flex-direction: column; gap: var(--space-6); max-width: 1280px; width: 100%; margin-inline: auto; }
-.sim-page__header { display: flex; flex-direction: column; gap: 2px; }
+.sim-page__header { display: flex; flex-direction: column; gap: var(--space-2); }
 .sim-page__eyebrow {
   margin: 0; font-size: var(--text-meta); letter-spacing: var(--tracking-eyebrow);
   text-transform: uppercase; color: var(--accent); font-weight: 700;
@@ -9553,7 +9553,7 @@ button.mobile-tab {
   gap: var(--space-6);
   max-width: 760px;
 }
-.settings-hub__header { display: flex; flex-direction: column; gap: 2px; }
+.settings-hub__header { display: flex; flex-direction: column; gap: var(--space-2); }
 .settings-hub__eyebrow {
   margin: 0; font-size: var(--text-meta); letter-spacing: var(--tracking-eyebrow);
   text-transform: uppercase; color: var(--accent); font-weight: 700;
@@ -9561,7 +9561,7 @@ button.mobile-tab {
 .settings-hub__title { margin: 0; font-size: var(--text-h1); letter-spacing: var(--tracking-display); color: var(--text-bright); }
 .settings-hub__sub { margin: 0; color: var(--text-dim); max-width: 60ch; }
 .settings-group { display: flex; flex-direction: column; gap: var(--space-3); }
-.settings-group__head { display: flex; flex-direction: column; gap: 1px; }
+.settings-group__head { display: flex; flex-direction: column; gap: var(--space-1); }
 .settings-group__title { margin: 0; font-size: var(--text-h3); color: var(--text-bright); }
 .settings-group__sub { margin: 0; font-size: var(--text-meta); color: var(--text-faint); }
 .settings-card {
@@ -9826,4 +9826,135 @@ html[data-readonly="true"] .beta-fb,
 html[data-kiosk="true"] .beta-fb,
 .app-shell:has(.login-page) .beta-fb {
   display: none;
+}
+
+// ------------------------------------------------------------------
+// History run log: day groups with per-run rows.
+// ------------------------------------------------------------------
+.hist-panel__sub { margin: var(--space-1) 0 var(--space-3); color: var(--text-faint); font-size: var(--text-body-sm); line-height: 1.45; }
+.runlog-day { margin-bottom: var(--space-4); }
+.runlog-day__head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  padding: var(--space-2) 0; border-bottom: 1px solid var(--elev-border);
+  margin-bottom: var(--space-1);
+}
+.runlog-day__date { font-weight: 700; color: var(--text-bright); }
+.runlog-day__total { font-family: var(--font-mono); font-size: var(--text-meta); color: var(--accent); }
+.runlog-row {
+  display: grid;
+  grid-template-columns: 84px minmax(120px, 1fr) 76px 2fr;
+  gap: var(--space-3);
+  align-items: baseline;
+  padding: 6px var(--space-2);
+  border-radius: var(--radius-sm);
+}
+.runlog-row:nth-child(even) { background: rgba(255, 255, 255, 0.02); }
+.runlog-row__time { font-family: var(--font-mono); font-size: var(--text-meta); color: var(--text-dim); }
+.runlog-row__zone { color: var(--text); font-weight: 600; }
+.runlog-row__badge {
+  justify-self: start;
+  font-size: var(--text-micro); font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+  padding: 1px 8px; border-radius: 999px;
+  color: var(--verdict-run); background: color-mix(in oklab, var(--verdict-run) 12%, transparent);
+}
+.runlog-row--skip .runlog-row__badge { color: var(--verdict-skip); background: color-mix(in oklab, var(--verdict-skip) 12%, transparent); }
+.runlog-row__detail { color: var(--text-faint); font-size: var(--text-body-sm); }
+@media (max-width: 760px) {
+  .runlog-row { grid-template-columns: 70px 1fr 70px; }
+  .runlog-row__detail { grid-column: 2 / -1; margin-top: -2px; }
+}
+
+// Chart x-axis tick row.
+.ui-line-chart__xaxis {
+  display: flex; justify-content: space-between;
+  margin-top: 2px; padding: 0 2px;
+  font-family: var(--font-mono); font-size: var(--text-micro); color: var(--text-faint);
+}
+
+// ------------------------------------------------------------------
+// Rule Lab: order arrows, on/off switch, template farm.
+// ------------------------------------------------------------------
+.cond-row--off .cond-row__name, .cond-row--off .cond-row__sum { opacity: 0.55; }
+.cond-row__order { display: flex; flex-direction: column; gap: 2px; }
+.cond-row__arrow {
+  border: 1px solid var(--elev-border-strong); background: none; color: var(--text-faint);
+  border-radius: 4px; width: 22px; height: 18px; line-height: 1; font-size: 9px; cursor: pointer;
+}
+.cond-row__arrow:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+.cond-row__arrow:disabled { opacity: 0.3; cursor: default; }
+// Segmented On|Off pill: both states visible so it reads as togglable
+// at a glance, active side lit in the verdict color.
+.toggle-pill {
+  display: inline-flex; align-items: center; gap: 2px; padding: 2px;
+  border: 1px solid var(--elev-border-strong); border-radius: 999px;
+  background: var(--elev-1); cursor: pointer;
+}
+.toggle-pill:hover { border-color: var(--accent); }
+.toggle-pill__opt {
+  border-radius: 999px; padding: 2px 10px;
+  font-size: var(--text-micro); font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
+.toggle-pill__opt--on.is-active { color: var(--verdict-run); background: color-mix(in oklab, var(--verdict-run) 16%, transparent); }
+.toggle-pill__opt--off.is-active { color: var(--verdict-skip); background: color-mix(in oklab, var(--verdict-skip) 16%, transparent); }
+
+.rule-templates { margin-top: var(--space-5); }
+.rule-templates__summary {
+  cursor: pointer; font-weight: 700; color: var(--text-dim);
+  padding: var(--space-3) var(--space-4);
+  border: 1px dashed var(--elev-border-strong); border-radius: var(--radius-md);
+  list-style: none;
+}
+.rule-templates__summary::-webkit-details-marker { display: none; }
+.rule-templates__summary:hover { color: var(--text); border-color: var(--accent); }
+.rule-templates[open] .rule-templates__summary { border-style: solid; margin-bottom: var(--space-3); }
+.rule-templates__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: var(--space-3); }
+.rule-template {
+  display: flex; align-items: center; gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--elev-1); border: 1px solid var(--elev-border); border-radius: var(--radius-md);
+}
+.rule-template__text { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.rule-template__name { font-weight: 700; color: var(--text-bright); }
+.rule-template__desc { font-size: var(--text-body-sm); color: var(--text-faint); line-height: 1.4; }
+
+.hist-panel__head-row { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--space-3); flex-wrap: wrap; }
+.runlog-range { display: flex; gap: 4px; }
+.runlog-tools { display: flex; gap: var(--space-2); margin-top: var(--space-3); flex-wrap: wrap; }
+.runlog-tools__search {
+  flex: 1; min-width: 200px; padding: 6px 12px;
+  background: var(--elev-1); border: 1px solid var(--elev-border); border-radius: var(--radius-sm);
+  color: var(--text); font-size: var(--text-body-sm);
+  &::placeholder { color: var(--text-faint); }
+  &:focus { outline: none; border-color: var(--accent); }
+}
+.runlog-tools__month {
+  padding: 6px 12px; cursor: pointer;
+  background: var(--elev-1); border: 1px solid var(--elev-border); border-radius: var(--radius-sm);
+  color: var(--text); font-size: var(--text-body-sm);
+  &:focus { outline: none; border-color: var(--accent); }
+}
+.runlog-range__btn {
+  border: 1px solid var(--elev-border-strong); background: none; color: var(--text-faint);
+  border-radius: 999px; padding: 3px 12px; cursor: pointer;
+  font-size: var(--text-meta); font-weight: 600;
+}
+.runlog-range__btn.is-active { color: var(--accent); border-color: var(--accent); background: color-mix(in oklab, var(--accent) 10%, transparent); }
+.hist-panel__hint { margin: var(--space-3) 0 0; font-size: var(--text-meta); color: var(--text-faint); }
+
+// Built-in gate manager: per-gate rows with switch or always-on lock.
+.gate-list { display: flex; flex-direction: column; gap: var(--space-2); margin-top: var(--space-3); }
+.gate-row {
+  display: flex; align-items: center; gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: var(--elev-2); border-radius: var(--radius-sm);
+}
+.gate-row--off .gate-row__label { color: var(--text-faint); text-decoration: line-through; }
+.gate-row__text { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.gate-row__label { font-weight: 600; color: var(--text); font-size: var(--text-body-sm); }
+.gate-row__meaning { font-size: var(--text-micro); color: var(--text-faint); line-height: 1.4; }
+.gate-row__lock {
+  font-size: var(--text-micro); font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-faint); border: 1px dashed var(--elev-border-strong);
+  border-radius: 999px; padding: 3px 10px; white-space: nowrap;
 }

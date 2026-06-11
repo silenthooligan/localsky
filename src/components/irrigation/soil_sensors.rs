@@ -1,4 +1,4 @@
-// Phase E soil sensor visibility — per-zone tile showing current
+// Phase E soil sensor visibility, per-zone tile showing current
 // calibrated moisture, a 7-day projection sparkline, and a colored
 // status pill. The projection comes from
 // `snap.soil_forecasts[N].predicted_pct` (computed server-side in
@@ -7,7 +7,7 @@
 // operator can see at a glance whether each zone stays in its healthy
 // range on rain + ET alone.
 //
-// No interaction — these tiles are observational. The user tunes the
+// No interaction, these tiles are observational. The user tunes the
 // target band via the input_numbers exposed in the HA UI (or, longer
 // term, an inline slider on this tile). When a probe is offline
 // (current_pct is None) the tile collapses to a "(probe offline)"
@@ -36,7 +36,7 @@ pub fn SoilSensors(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             <p class="soil-grid-sub">
                 "If no irrigation runs this week, here\u{2019}s where each zone lands. \
                  Green band is the healthy range (target min \u{2192} saturation). \
-                 Rain + ET only \u{2014} the live skip-check still gates real runs."
+                 Rain + ET only; the live skip-check still gates real runs."
             </p>
             <div class="soil-tile-grid">
                 {view! { <SoilTile zone=zone0/> }.into_any()}
@@ -74,17 +74,17 @@ fn SoilTile(zone: Signal<SoilForecast>) -> impl IntoView {
     };
     let current_display = move || match zone.get().current_pct {
         Some(p) => format!("{:.1}%", p),
-        None => "\u{2014}".to_string(),
+        None => "-".to_string(),
     };
     let band_display = move || {
         let z = zone.get();
-        format!("{:.0}\u{2013}{:.0}%", z.target_min_pct, z.target_max_pct)
+        format!("{:.0}-{:.0}%", z.target_min_pct, z.target_max_pct)
     };
     let trend_display = move || {
         let z = zone.get();
         let p = &z.predicted_pct;
         if p.len() < 2 {
-            return "\u{2014}".to_string();
+            return "-".to_string();
         }
         let delta = p[p.len() - 1] - p[0];
         // Right-arrow + signed delta. > 1 pct = "up/down", otherwise "flat".
@@ -179,7 +179,7 @@ fn SoilSparkline(zone: Signal<SoilForecast>) -> impl IntoView {
                 y=move || format!("{:.1}", band_y.get().0)
                 height=move || format!("{:.1}", band_y.get().1)
             />
-            // Today marker — vertical tick at x=0
+            // Today marker, vertical tick at x=0
             <line
                 class="soil-sparkline-today"
                 x1="0" x2="0" y1="0" y2="60"

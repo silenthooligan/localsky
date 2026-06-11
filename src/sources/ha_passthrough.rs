@@ -1,4 +1,4 @@
-// HaPassthrough source — pulls any Home-Assistant sensor entity into
+// HaPassthrough source, pulls any Home-Assistant sensor entity into
 // LocalSky as a WeatherField. This is the meta-adapter that makes the
 // "LocalSky owns everything" architecture self-extending: if HA already
 // has a working integration for some weather hardware we don't natively
@@ -208,7 +208,7 @@ impl WeatherSource for HaPassthrough {
                                 });
                                 last_reachable = Some(true);
                             }
-                            // O(states * mapping) on every tick — both
+                            // O(states * mapping) on every tick, both
                             // are small (HA: a few hundred entities;
                             // mapping: handful of fields). Building a
                             // HashMap pays for itself once mapping > 1.

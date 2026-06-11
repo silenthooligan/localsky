@@ -1,4 +1,4 @@
-// Weather telemetry strip for the Weather home. A row of v2 StatTiles —
+// Weather telemetry strip for the Weather home. A row of v2 StatTiles
 // the big number is the live reading from the Tempest snapshot, the
 // sparkline is the last 24h from /api/v1/weather/history (populated by the
 // weather sampler). Brings the data-dense, trend-aware dashboard look to

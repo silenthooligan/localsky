@@ -1,4 +1,4 @@
-// AmbientWeather cloud source — api.ambientweather.net REST API.
+// AmbientWeather cloud source, api.ambientweather.net REST API.
 //
 // AmbientWeather sells consumer weather stations (WS-2902, WS-5000,
 // PWS) that auto-upload to ambientweather.net. Their REST API exposes
@@ -11,7 +11,7 @@
 //   GET /v1/devices/{mac}?applicationKey={app}&apiKey={api}&limit=1
 //
 // The response is an array of recent observations; the first entry is
-// the most recent. We poll every 60s — well within the 1 req/sec rate
+// the most recent. We poll every 60s, well within the 1 req/sec rate
 // limit. Fields include tempf, humidity, baromrelin, windspeedmph,
 // windgustmph, winddir, uv, solarradiation, hourlyrainin, dailyrainin.
 
@@ -176,7 +176,7 @@ impl WeatherSource for AmbientWeather {
                             }
                         }
                         Ok(None) => {
-                            // Successful API call, no observations yet — station
+                            // Successful API call, no observations yet, station
                             // is online but new (or device MAC is wrong).
                             warn!(source_id = %self.id, "AmbientWeather returned 0 observations; check mac_address");
                         }

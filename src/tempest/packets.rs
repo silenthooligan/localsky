@@ -1,4 +1,4 @@
-// Tempest UDP packet wire format — every payload arrives as JSON with a
+// Tempest UDP packet wire format, every payload arrives as JSON with a
 // `type` discriminator. Only the kinds we actually render are modeled;
 // the rest are silently ignored by the listener.
 //
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "type")]
 pub enum TempestPacket {
     /// Once-per-minute full observation. The `obs` array is a single
-    /// 18-element snapshot — see `ObsSt::from_array` for the field map.
+    /// 18-element snapshot, see `ObsSt::from_array` for the field map.
     #[serde(rename = "obs_st")]
     ObsSt {
         serial_number: String,

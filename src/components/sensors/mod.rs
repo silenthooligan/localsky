@@ -1,4 +1,4 @@
-// Sensors — an integrations explorer. Pick any sensor on the left, see its
+// Sensors, an integrations explorer. Pick any sensor on the left, see its
 // TRUE live data on the right: the Tempest station's full readout, each
 // soil probe's real moisture + 7-day projection, and every configured
 // integration's health + what it provides. Reads the live snapshots; the
@@ -276,8 +276,8 @@ pub fn SensorsPage(
                     <summary>"Where do sensors come from?"</summary>
                     <div class="sensors-howto__body">
                         <p><strong>"It doesn't matter where a device lives."</strong>" LocalSky and Home Assistant mirror each other, so a sensor added in either place shows up in both. You don't add probes here one by one."</p>
-                        <p><strong>"From Home Assistant:"</strong>" anything HA already sees — Ecowitt soil probes, a Tempest, any weather or moisture entity — is imported automatically and appears here and on the "<a href="/settings/devices">"Devices"</a>" page. Pair a new probe in its own app first (for Ecowitt that's the Ecowitt / WS View app); once HA sees it, it shows up with no per-probe setup. Assign soil probes to zones in the "<a href="/settings/zones">"zone editor"</a>"."</p>
-                        <p><strong>"From LocalSky directly:"</strong>" add a source LocalSky talks to itself — a LAN Ecowitt gateway, a webhook, MQTT — with \"Add a data source\" below. Receiver sources show live readings here the moment data arrives, so you can confirm it's working. Discovered gateways and controllers are listed on the "<a href="/settings/devices">"Devices"</a>" page."</p>
+                        <p><strong>"From Home Assistant:"</strong>" anything HA already sees, Ecowitt soil probes, a Tempest, any weather or moisture entity, is imported automatically and appears here and on the "<a href="/settings/devices">"Devices"</a>" page. Pair a new probe in its own app first (for Ecowitt that's the Ecowitt / WS View app); once HA sees it, it shows up with no per-probe setup. Assign soil probes to zones in the "<a href="/settings/zones">"zone editor"</a>"."</p>
+                        <p><strong>"From LocalSky directly:"</strong>" add a source LocalSky talks to itself, a LAN Ecowitt gateway, a webhook, MQTT, with \"Add a data source\" below. Receiver sources show live readings here the moment data arrives, so you can confirm it's working. Discovered gateways and controllers are listed on the "<a href="/settings/devices">"Devices"</a>" page."</p>
                     </div>
                 </details>
                 <div class="sensors-page__actions">
@@ -304,7 +304,7 @@ pub fn SensorsPage(
                             let rows = items.as_array().cloned().unwrap_or_default().into_iter().map(|s| {
                                 let label = s.get("label").and_then(|v| v.as_str()).unwrap_or("").to_string();
                                 let unit = s.get("unit").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                let val = s.get("current_pct").and_then(|v| v.as_f64()).map(|v| format!("{v:.1} {unit}")).unwrap_or_else(|| "—".into());
+                                let val = s.get("current_pct").and_then(|v| v.as_f64()).map(|v| format!("{v:.1} {unit}")).unwrap_or_else(|| "-".into());
                                 view! { <div class="sensors-discovered__row"><span class="sensors-discovered__name">{label}</span><span class="sensors-discovered__val">{val}</span></div> }
                             }).collect_view();
                             view! {
@@ -575,12 +575,12 @@ fn TempestDetail(s: ReadSignal<Snapshot>) -> impl IntoView {
                         <F k="Last minute" v=d.lightning_count_last_min.to_string()/>
                         <F k="Last hour" v=d.lightning_strikes_last_hour.to_string()/>
                         <F k="Avg distance" v=format!("{:.1} mi", d.lightning_avg_dist_mi)/>
-                        <F k="Last strike" v=d.last_strike_distance_mi.map(|m| format!("{m:.1} mi")).unwrap_or_else(|| "—".into())/>
+                        <F k="Last strike" v=d.last_strike_distance_mi.map(|m| format!("{m:.1} mi")).unwrap_or_else(|| "-".into())/>
                     </FieldGroup>
                     <FieldGroup title="Station">
                         <F k="Battery" v=format!("{:.2} V ({:.0}%)", d.battery_v, d.battery_pct)/>
-                        <F k="Station" v=if d.station_serial.is_empty() { "—".into() } else { d.station_serial.clone() }/>
-                        <F k="Hub" v=if d.hub_serial.is_empty() { "—".into() } else { d.hub_serial.clone() }/>
+                        <F k="Station" v=if d.station_serial.is_empty() { "-".into() } else { d.station_serial.clone() }/>
+                        <F k="Hub" v=if d.hub_serial.is_empty() { "-".into() } else { d.hub_serial.clone() }/>
                     </FieldGroup>
                 </div>
             </div>
@@ -592,7 +592,7 @@ fn TempestDetail(s: ReadSignal<Snapshot>) -> impl IntoView {
 fn SoilDetail(z: SoilForecast) -> impl IntoView {
     let name = z.zone_name.clone();
     let (cur, status, color) = match z.current_pct {
-        None => ("— offline".to_string(), "OFFLINE", "var(--verdict-off)"),
+        None => ("offline".to_string(), "OFFLINE", "var(--verdict-off)"),
         Some(c) => {
             let s = if c >= z.target_max_pct {
                 ("SATURATED", "var(--verdict-skip)")
@@ -614,7 +614,7 @@ fn SoilDetail(z: SoilForecast) -> impl IntoView {
             <div class="sensor-detail-card__big">{cur}</div>
             <div class="sensor-groups">
                 <FieldGroup title="Moisture">
-                    <F k="Current" v=z.current_pct.map(|c| format!("{c:.0} %")).unwrap_or_else(|| "—".into())/>
+                    <F k="Current" v=z.current_pct.map(|c| format!("{c:.0} %")).unwrap_or_else(|| "-".into())/>
                     <F k="Healthy band" v=format!("{:.0}–{:.0} %", z.target_min_pct, z.target_max_pct)/>
                     <F k="Saturation (skip)" v=format!("{:.0} %", z.target_max_pct)/>
                 </FieldGroup>
@@ -779,7 +779,7 @@ fn SourceDetail(
                 </FieldGroup>
             </div>
 
-            // Live readings — the actual values this source has posted.
+            // Live readings, the actual values this source has posted.
             {move || {
                 let rows = readings.get();
                 if !rows.is_empty() {
@@ -802,7 +802,7 @@ fn SourceDetail(
                         <p class="sensors-section__hint">
                             "No readings recorded yet for this source. If it's a receiver (Ecowitt, webhook), point the device at "
                             <code>{format!("/ingest/{}", if is_local(&kind) { "ecowitt" } else { "webhook/<id>" })}</code>
-                            " — values appear here within one reporting cycle. Polled cloud sources feed the merged Weather/Soil views above rather than per-field readings."
+                            ", values appear here within one reporting cycle. Polled cloud sources feed the merged Weather/Soil views above rather than per-field readings."
                         </p>
                     }.into_any();
                 }

@@ -50,7 +50,7 @@ pub fn NextRunHero(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         } else if s.zones.iter().any(|z| z.running) {
             "RUNNING NOW".to_string()
         } else if s.next_run_epoch == 0 {
-            "—".to_string()
+            "-".to_string()
         } else {
             format_relative_time(s.next_run_epoch)
         }
@@ -257,7 +257,7 @@ fn SkipRow(
 fn format_relative_time(epoch: i64) -> String {
     let dt: DateTime<Local> = match Local.timestamp_opt(epoch, 0).single() {
         Some(dt) => dt,
-        None => return "—".to_string(),
+        None => return "-".to_string(),
     };
     let now = Local::now();
     let today = now.date_naive();

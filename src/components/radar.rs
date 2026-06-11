@@ -1,8 +1,8 @@
-// Live precipitation radar — Leaflet map + multi-layer overlay set
+// Live precipitation radar, Leaflet map + multi-layer overlay set
 // (RainViewer precip animation, RainViewer IR satellite, IEM NEXRAD
 // for high-res US reflectivity, plus a local Tempest strike-ring layer
 // drawn from /api/snapshot). The actual Leaflet bootstrap and the
-// layer toggle wiring live in /public/radar.js — this component just
+// layer toggle wiring live in /public/radar.js, this component just
 // renders the target div + control row and pipes lat/lon/zoom in via
 // data-* attrs read at SSR from the WEATHER_APP_LAT / LON / ZOOM env
 // vars (sourced from HA's /api/config when the env was seeded).
@@ -29,7 +29,7 @@ fn coords() -> (f64, f64, u32) {
     // center. Earlier this read env vars only; env_compat seeds the
     // config from WEATHER_APP_LAT/LON at first boot, but later edits via
     // the settings page never updated the env, so the radar kept
-    // recentering on the env defaults (40.0, -75.0 — NYC area) regardless
+    // recentering on the env defaults (40.0, -75.0, NYC area) regardless
     // of what the user configured.
     let from_config: Option<(f64, f64)> = use_context::<Arc<FileConfigStore>>()
         .and_then(|store| store.load_blocking())

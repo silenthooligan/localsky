@@ -23,7 +23,7 @@
 //     }
 //   }
 //
-// We poll every 10s — well within the WLL's documented 10s sampling
+// We poll every 10s, well within the WLL's documented 10s sampling
 // cadence. Fast enough for irrigation decisions, slow enough that one
 // LocalSky tick doesn't crowd out wakeups from other adapters.
 //
@@ -93,7 +93,7 @@ struct Condition {
     // Barometer (type 3) fields
     #[serde(default)]
     bar_sea_level: Option<f64>, // inHg already
-                                // Indoor (type 4) — currently unused, kept for documentation.
+                                // Indoor (type 4), currently unused, kept for documentation.
 }
 
 impl DavisWll {
@@ -121,7 +121,7 @@ fn extract_fields(resp: &CurrentConditionsResponse, txid: u32) -> Vec<(WeatherFi
     for c in &resp.data.conditions {
         match c.data_structure_type {
             1 => {
-                // ISS — only emit if txid matches.
+                // ISS, only emit if txid matches.
                 if c.txid != Some(txid) {
                     continue;
                 }
@@ -198,7 +198,7 @@ impl WeatherSource for DavisWll {
     }
 
     fn priority(&self, field: WeatherField) -> i32 {
-        // Direct LAN station, no cloud round-trip. Priority 80 —
+        // Direct LAN station, no cloud round-trip. Priority 80
         // equal to Tempest UDP / Ecowitt LAN. Beats every cloud
         // source (forecast or cloud-routed station) but ties with
         // other direct-LAN stations; the merge engine breaks ties

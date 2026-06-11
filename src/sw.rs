@@ -44,7 +44,7 @@ pub async fn sw_js() -> impl IntoResponse {
     );
     // Service-Worker-Allowed lets the registration claim the entire origin
     // even though the script lives at /sw.js (which would otherwise scope it
-    // to the root only by default — that happens to match what we want, but
+    // to the root only by default, that happens to match what we want, but
     // being explicit avoids surprises if we ever move the file).
     headers.insert("Service-Worker-Allowed", HeaderValue::from_static("/"));
 

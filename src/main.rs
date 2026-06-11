@@ -1,4 +1,4 @@
-// SSR binary entry — boots the Tempest UDP listener, then runs the Axum
+// SSR binary entry, boots the Tempest UDP listener, then runs the Axum
 // HTTP server. The shared TempestStore is created here, populated by the
 // listener, and read by the API endpoints + the SSR pass for the Leptos
 // app (via `provide_context`).
@@ -8,7 +8,7 @@
 // the `localsky` BINARY, where leptos_axum's generate_route_list +
 // LeptosRoutes + the SSR shell monomorphize the whole component tree in
 // one place. recursion_limit is per-crate, so the copy in lib.rs does NOT
-// cover this crate root — the bin needs its own. (Three release builds
+// cover this crate root, the bin needs its own. (Three release builds
 // failed before this was caught, because the attribute was only in lib.rs.)
 // Compile-time query budget only, no runtime cost.
 #![recursion_limit = "512"]
@@ -64,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
         spawn_listener(tempest_store.clone());
     }
 
-    // SQLite-backed run history. Optional — if /data isn't mounted
+    // SQLite-backed run history. Optional, if /data isn't mounted
     // or the file can't be opened, we log and run without history
     // (the rest of the irrigation page works fine).
     let history_path =
@@ -99,9 +99,62 @@ async fn main() -> anyhow::Result<()> {
 
     // Sample the live Tempest snapshot into sensor_history so the Weather
     // home telemetry strip has real trend sparklines (and /api/health has
-    // freshness). Spawned in demo too — the demo feeder fills the store.
+    // freshness). Spawned in demo too, the demo feeder fills the store.
     if let Some(hc) = history_conn.clone() {
         localsky::persistence::spawn_weather_sampler(hc, tempest_store.clone());
+    }
+
+    // Restart resilience for the rain-today accumulator: Tempest UDP
+    // packets carry per-minute deltas, so a mid-storm restart would zero
+    // the daily total the skip rules read. Seed it from today's persisted
+    // MAX(rain_today_in) (recorded by the weather sampler above).
+    // Best-effort and non-blocking: any failure just leaves the
+    // accumulator to rebuild from live packets.
+    if !demo_mode {
+        if let Some(hc) = history_conn.clone() {
+            let seed_store = tempest_store.clone();
+            tokio::spawn(async move {
+                use chrono::TimeZone;
+                let hist = localsky::persistence::SensorHistoryStore::new(hc);
+                let now_epoch = chrono::Utc::now().timestamp();
+                let Some(from) = chrono::Local::now()
+                    .date_naive()
+                    .and_hms_opt(0, 0, 0)
+                    .and_then(|d| chrono::Local.from_local_datetime(&d).single())
+                    .map(|m| m.timestamp())
+                else {
+                    return;
+                };
+                // series() filters by key only; a local day of per-minute
+                // samples is ~1440 rows, so 5000 leaves ample headroom.
+                match hist
+                    .series("rain_today_in".to_string(), from, now_epoch + 1, 5000)
+                    .await
+                {
+                    Ok(rows) => {
+                        let best = rows
+                            .into_iter()
+                            .filter(|r| r.source_id == "tempest")
+                            .max_by(|a, b| {
+                                a.value
+                                    .partial_cmp(&b.value)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                        if let Some(r) = best {
+                            if seed_store.seed_rain_today(r.value, r.epoch) {
+                                tracing::info!(
+                                    rain_in = r.value,
+                                    epoch = r.epoch,
+                                    "seeded rain-today accumulator from sensor history"
+                                );
+                            }
+                        }
+                    }
+                    // v1 schema has no sensor_history table; stay quiet.
+                    Err(e) => tracing::debug!(error = %e, "rain-today seed query failed"),
+                }
+            });
+        }
     }
 
     let forecast_store = Arc::new(ForecastStore::new());
@@ -110,7 +163,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Push dispatcher. Background task that drains PushEvents from the
     // HA refresher and fans them out to subscribed PWAs via VAPID.
-    // Non-fatal if VAPID env is missing — the dispatcher logs once and
+    // Non-fatal if VAPID env is missing, the dispatcher logs once and
     // drops every event, so the rest of the app keeps running.
     let push_dispatcher = push::spawn_dispatcher(history_conn.clone());
 
@@ -240,7 +293,7 @@ async fn main() -> anyhow::Result<()> {
             // Controllers are configured but the persistence DB is not
             // available, so build_controllers cannot run and the registry
             // stays EMPTY: no watering (scheduled or manual) will dispatch.
-            // Loud by design — a silent empty registry is a dry lawn.
+            // Loud by design, a silent empty registry is a dry lawn.
             tracing::error!(
                 history_db = %history_path,
                 "controllers are configured but the persistence DB failed to open; the controller \
@@ -316,6 +369,28 @@ async fn main() -> anyhow::Result<()> {
                     Some(runs_store.clone()),
                 );
             }
+            // Optional run-history retention: prune daily when capped. The
+            // default (0) keeps everything forever for long-range trends.
+            let runs_retention = cfg.persistence.runs_retention_days;
+            if runs_retention > 0 {
+                if let Some(hc) = history_conn.clone() {
+                    tokio::spawn(async move {
+                        let mut tick =
+                            tokio::time::interval(std::time::Duration::from_secs(86_400));
+                        loop {
+                            tick.tick().await;
+                            let cutoff =
+                                chrono::Utc::now().timestamp() - (runs_retention as i64) * 86_400;
+                            match localsky::history::db::prune_older_than(hc.clone(), cutoff).await
+                            {
+                                Ok(n) if n > 0 => tracing::info!(rows = n, "runs retention prune"),
+                                Ok(_) => {}
+                                Err(e) => tracing::warn!(error = %e, "runs retention prune failed"),
+                            }
+                        }
+                    });
+                }
+            }
             let dry_run = std::env::var("LOCALSKY_SMART_DRY_RUN").ok().as_deref() == Some("1");
             localsky::scheduler::smart_morning::spawn(
                 irrigation_store.clone(),
@@ -333,6 +408,7 @@ async fn main() -> anyhow::Result<()> {
             tempest_store.clone(),
             irrigation_store.clone(),
             forecast_store.clone(),
+            history_conn.clone(),
         );
         tracing::info!("LOCALSKY_DEMO=1: live data paths disabled; demo feeder active");
     }
@@ -605,7 +681,7 @@ async fn main() -> anyhow::Result<()> {
         .fallback(leptos_axum::file_and_error_handler(shell))
         .with_state(leptos_options)
         // Service worker. Lives at the origin root so its scope is the entire
-        // app — registering /sw.js scopes to /, which is what we want. The
+        // app, registering /sw.js scopes to /, which is what we want. The
         // handler interpolates SW_VERSION at request time so every deploy
         // forces install -> waiting -> activate and old caches get nuked.
         .route("/sw.js", get(sw::sw_js))

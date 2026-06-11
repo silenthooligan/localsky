@@ -4,7 +4,7 @@
 //
 // Seeds from `existing` (None = add). On save it parses the config JSON,
 // assembles the `{id, default, enabled, kind, config}` entry, and hands it to
-// `on_commit` — the caller persists (and is responsible for the `default`
+// `on_commit`, the caller persists (and is responsible for the `default`
 // mutual-exclusivity across controllers). `on_cancel` dismisses the form.
 //
 // Keeps the "Scan zones" probe (POST /api/v1/wizard/scan_zones) so the user can

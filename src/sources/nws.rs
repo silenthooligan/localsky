@@ -1,4 +1,4 @@
-// National Weather Service (US) weather source — api.weather.gov.
+// National Weather Service (US) weather source, api.weather.gov.
 //
 // Free, no API key. US-only coverage. Requires a descriptive
 // User-Agent header per the api.weather.gov terms of service.

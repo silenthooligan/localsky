@@ -1,4 +1,4 @@
-// Rule Lab — the skip-ladder provenance view (marquee feature 2, first
+// Rule Lab, the skip-ladder provenance view (marquee feature 2, first
 // cut). Reads the structured DecisionTrace the refresher now attaches to
 // the live IrrigationSnapshot and renders the ladder top-to-bottom: every
 // rule, the data values it saw, and which one fired. The deciding rule is
@@ -25,7 +25,7 @@ fn fmt_day(epoch: i64) -> String {
         .timestamp_opt(epoch, 0)
         .single()
         .map(|dt| dt.format("%a %b %-d").to_string())
-        .unwrap_or_else(|| "—".into())
+        .unwrap_or_else(|| "-".into())
 }
 
 fn day_key(epoch: i64) -> String {
@@ -83,7 +83,7 @@ pub fn RuleLabPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         });
     }
 
-    // Two tabs: Rules (configure — front and center) and Decisions (audit).
+    // Two tabs: Rules (configure, front and center) and Decisions (audit).
     let tab = RwSignal::new("rules");
 
     view! {
@@ -166,41 +166,29 @@ pub fn RuleLabPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             } else {
                 view! {
                     <ConditionsSection snap=snap/>
-                    <SafetyGates snap=snap/>
+                    <SafetyGates/>
                 }.into_any()
             }}
         </div>
     }
 }
 
-/// Read-only reference of the built-in safety + weather gates (always on,
-/// not removable). Shown under the custom-rule editor so users understand
-/// what their rules layer on top of. Derived from the live decision trace.
+/// The built-in gate ladder, shown under the custom-rule editor so users
+/// understand what their rules layer on top of. Weather gates are operator
+/// togglable via BuiltinGateManager; control and legal gates stay locked.
 #[component]
-fn SafetyGates(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
+fn SafetyGates() -> impl IntoView {
     view! {
         <details class="rulelab-gates" open>
-            <summary>"Built-in skip rules — always on, run before your rules"</summary>
+            <summary>"Built-in skip rules, run before your rules"</summary>
             <div class="rulelab-gates__body">
                 <p class="sensors-section__hint">
-                    "These deterministic gates (freeze, wind, watering restriction, rain, soil saturation) decide first and can't be disabled. Your custom rules above only run when these leave a zone watering — they can add a skip or scale a run, never override a gate."
+                    "These deterministic gates decide first, in this order. Each weather gate can be disabled if you know what you are doing; control and legal gates (override, pause, restrictions) are always on. Disabling is config, not code: a snapshot is kept and one click re-enables."
                 </p>
                 <a class="setup-footer__btn setup-footer__btn--primary rulelab-gates__cta" href="/settings/skip-rules">
-                    "Configure thresholds (rain inches, wind mph, freeze °F…)"
+                    "Configure thresholds (rain inches, wind mph, freeze temperature)"
                 </a>
-                {move || {
-                    match snap.get().decision_trace {
-                        Some(t) => t.rules.into_iter()
-                            .filter(|r| r.category != "condition" && r.category != "script")
-                            .map(|r| view! {
-                                <div class="rulelab-gates__row">
-                                    <span class=format!("rulelab-gates__cat rulelab-gates__cat--{}", r.category)>{r.category.clone()}</span>
-                                    <span class="rulelab-gates__label">{r.label.clone()}</span>
-                                </div>
-                            }).collect_view().into_any(),
-                        None => view! { <p class="sensors-section__hint">"The ladder appears after the first decision of the day."</p> }.into_any(),
-                    }
-                }}
+                <BuiltinGateManager/>
             </div>
         </details>
     }
@@ -211,7 +199,7 @@ fn TraceView(trace: DecisionTrace) -> impl IntoView {
     let vtoken = verdict_token(&trace.verdict);
     let vlabel = verdict_label(&trace.verdict);
     let reason = if trace.reason.is_empty() {
-        "All clear — no skip rule fired.".to_string()
+        "All clear, no skip rule fired.".to_string()
     } else {
         trace.reason.clone()
     };
@@ -250,7 +238,7 @@ fn RuleRow(r: RuleEval) -> impl IntoView {
             "var(--text-faint)",
         ),
         _ => (
-            "—".to_string(),
+            "-".to_string(),
             "rule-row__badge rule-row__badge--skipped",
             "var(--text-faint)",
         ),
@@ -272,5 +260,126 @@ fn RuleRow(r: RuleEval) -> impl IntoView {
             </div>
             <span class=badge_class>{badge_label}</span>
         </li>
+    }
+}
+
+/// Operator control over the built-in ladder. Catalog comes from the
+/// engine (id, label, what-disabling-means, protected); the disable set
+/// lives at engine.skip_rules.disabled_rules. Disabling demands an
+/// explicit acknowledgement that names the consequence.
+#[component]
+fn BuiltinGateManager() -> impl IntoView {
+    let config = RwSignal::new(serde_json::Value::Null);
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        leptos::task::spawn_local(async move {
+            if let Ok(resp) = gloo_net::http::Request::get("/api/config").send().await {
+                if let Ok(v) = resp.json::<serde_json::Value>().await {
+                    config.set(v);
+                }
+            }
+        });
+    });
+    #[cfg(not(feature = "hydrate"))]
+    let _ = config;
+
+    let disabled_now = move || -> Vec<String> {
+        config
+            .get()
+            .pointer("/engine/skip_rules/disabled_rules")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let set_disabled = move |id: String, disable: bool, meaning: &'static str| {
+        #[cfg(feature = "hydrate")]
+        {
+            if disable {
+                let msg = format!(
+                    "Disable the built-in '{id}' gate?\n\nWhat this means: {meaning}\n\nThe engine will no longer protect against this on its own. You can re-enable it here at any time."
+                );
+                let ok = web_sys::window()
+                    .and_then(|w| w.confirm_with_message(&msg).ok())
+                    .unwrap_or(false);
+                if !ok {
+                    return;
+                }
+            }
+            config.update(|cfg| {
+                let Some(sr) = cfg.pointer_mut("/engine/skip_rules") else {
+                    return;
+                };
+                let arr = sr
+                    .as_object_mut()
+                    .map(|o| o.entry("disabled_rules").or_insert(serde_json::json!([])));
+                if let Some(serde_json::Value::Array(arr)) = arr {
+                    arr.retain(|x| x.as_str() != Some(id.as_str()));
+                    if disable {
+                        arr.push(serde_json::Value::String(id.clone()));
+                    }
+                }
+            });
+            let candidate = config.get_untracked();
+            leptos::task::spawn_local(async move {
+                match crate::components::rules::conditions::save_config(candidate).await {
+                    Ok(()) => crate::components::ui::use_toast().success(if disable {
+                        "Gate disabled. The trace will show it as disabled by operator."
+                    } else {
+                        "Gate re-enabled."
+                    }),
+                    Err(e) => crate::components::ui::use_toast().error(format!("Save failed: {e}")),
+                }
+            });
+        }
+        #[cfg(not(feature = "hydrate"))]
+        let _ = (id, disable, meaning);
+    };
+
+    view! {
+        <div class="gate-list">
+            {crate::gates_catalog::builtin_rule_catalog().iter().map(|(id, label, meaning, protected)| {
+                let id_s = id.to_string();
+                let on_click = {
+                    let id_c = id_s.clone();
+                    move |_| {
+                        let currently_disabled = disabled_now().contains(&id_c);
+                        set_disabled(id_c.clone(), !currently_disabled, meaning);
+                    }
+                };
+                let id_chk = id_s.clone();
+                view! {
+                    <div class="gate-row" class:gate-row--off=move || disabled_now().contains(&id_chk)>
+                        <div class="gate-row__text">
+                            <span class="gate-row__label">{label.to_string()}</span>
+                            <span class="gate-row__meaning">{meaning.to_string()}</span>
+                        </div>
+                        {if *protected {
+                            view! { <span class="gate-row__lock" title="Control and legal gates stay on">"always on"</span> }.into_any()
+                        } else {
+                            let id_sw = id_s.clone();
+                            let id_on = id_s.clone();
+                            let id_off = id_s.clone();
+                            view! {
+                                <button
+                                    type="button"
+                                    class="toggle-pill"
+                                    role="switch"
+                                    aria-checked=move || (!disabled_now().contains(&id_sw)).to_string()
+                                    on:click=on_click
+                                >
+                                    <span class="toggle-pill__opt toggle-pill__opt--on" class:is-active=move || !disabled_now().contains(&id_on)>"On"</span>
+                                    <span class="toggle-pill__opt toggle-pill__opt--off" class:is-active=move || disabled_now().contains(&id_off)>"Off"</span>
+                                </button>
+                            }.into_any()
+                        }}
+                    </div>
+                }
+            }).collect_view()}
+        </div>
     }
 }

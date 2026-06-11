@@ -94,7 +94,7 @@ pub fn parse_livedata(body: &Value, source_id: &str, epoch: i64) -> Vec<Reading>
         });
     };
 
-    // common_list — outdoor temp / humidity / wind / solar / uv.
+    // common_list, outdoor temp / humidity / wind / solar / uv.
     if let Some(arr) = body.get("common_list").and_then(Value::as_array) {
         for item in arr {
             let (Some(id), Some(val)) = (
@@ -109,7 +109,7 @@ pub fn parse_livedata(body: &Value, source_id: &str, epoch: i64) -> Vec<Reading>
         }
     }
 
-    // rain block — daily/rate/etc.
+    // rain block, daily/rate/etc.
     if let Some(arr) = body.get("rain").and_then(Value::as_array) {
         for item in arr {
             let (Some(id), Some(val)) = (
@@ -124,7 +124,7 @@ pub fn parse_livedata(body: &Value, source_id: &str, epoch: i64) -> Vec<Reading>
         }
     }
 
-    // wh25 — the gateway's own indoor temp / humidity / pressure block.
+    // wh25, the gateway's own indoor temp / humidity / pressure block.
     if let Some(arr) = body.get("wh25").and_then(Value::as_array) {
         if let Some(item) = arr.first() {
             if let Some(v) = item
@@ -192,7 +192,7 @@ pub fn parse_livedata(body: &Value, source_id: &str, epoch: i64) -> Vec<Reading>
         }
     }
 
-    // ch_temp / ch_aisle — WH31 temp+humidity channels. Best-effort extras.
+    // ch_temp / ch_aisle, WH31 temp+humidity channels. Best-effort extras.
     for block in ["ch_temp", "ch_aisle"] {
         if let Some(arr) = body.get(block).and_then(Value::as_array) {
             for item in arr {

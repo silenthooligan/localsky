@@ -1,4 +1,4 @@
-// <Stepper/> — compact +/- integer-ish spinner bound to an f64 signal.
+// <Stepper/>, compact +/- integer-ish spinner bound to an f64 signal.
 // Used for zone durations, budget days, etc. where a slider is overkill
 // and a bare number input is fiddly on touch.
 

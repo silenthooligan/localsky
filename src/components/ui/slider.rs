@@ -18,7 +18,7 @@ pub fn Slider(
     #[prop(default = 1.0)]
     step: f64,
     /// Optional suffix rendered after the value (e.g. " mph", " °F", "%").
-    /// Encode your own leading space — it is rendered verbatim next to
+    /// Encode your own leading space, it is rendered verbatim next to
     /// the number box.
     #[prop(into, optional)]
     suffix: String,

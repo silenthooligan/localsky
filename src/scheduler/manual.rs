@@ -38,7 +38,7 @@ use crate::persistence::runs::{NewRun, RunsStore};
 
 /// Spawn the manual schedule tick. Returns immediately; the background
 /// task lives for the lifetime of the process. Safe to call with empty
-/// schedules — the tick early-returns when the list is empty.
+/// schedules, the tick early-returns when the list is empty.
 pub fn spawn(
     schedules: Vec<ManualSchedule>,
     watering_policy: WateringPolicy,
@@ -171,7 +171,7 @@ pub fn spawn(
 
 /// Returns true when any enabled `Override` schedule fires for `zone_slug`
 /// on `weekday`. The refresher uses this to decide whether to suppress the
-/// smart engine's dispatch for the zone — manual takes precedence under
+/// smart engine's dispatch for the zone, manual takes precedence under
 /// Override, but smart math still computes for nerd visibility.
 pub fn override_active_today(schedules: &[ManualSchedule], zone_slug: &str, weekday: u8) -> bool {
     schedules.iter().any(|s| {

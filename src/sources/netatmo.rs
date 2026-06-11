@@ -1,4 +1,4 @@
-// Netatmo Weather Station cloud source — api.netatmo.com.
+// Netatmo Weather Station cloud source, api.netatmo.com.
 //
 // Netatmo sells consumer weather stations + outdoor modules + rain
 // gauges + anemometers that auto-upload to api.netatmo.com. The cloud
@@ -28,7 +28,7 @@
 //   - Rain gauge (NAModule3):             Rain (1h sum in mm)
 //   - Anemometer (NAModule2):             WindStrength (km/h), WindAngle, GustStrength
 //
-// We poll every 10 min — Netatmo's docs cap refresh at every 10 min
+// We poll every 10 min, Netatmo's docs cap refresh at every 10 min
 // per device anyway, so faster polling just wastes API quota.
 
 use std::sync::Arc;

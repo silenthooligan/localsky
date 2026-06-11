@@ -1,4 +1,4 @@
-// YoLink (YoSmart) cloud source — api.yosmart.com.
+// YoLink (YoSmart) cloud source, api.yosmart.com.
 //
 // YoLink sells LoRa-based 915MHz consumer sensors (THSensor outdoor
 // temp/RH, LeakSensor, WaterMeterController, etc) that report via a
@@ -10,12 +10,12 @@
 //   POST /open/yolink/v2/api             { method, params, msgid, time, targetDevice }
 //
 // Common methods used here:
-//   Home.getDeviceList   — list devices once at startup (logged, not used for queries today)
-//   {Type}.getState      — pull current device state per mapping
+//   Home.getDeviceList  , list devices once at startup (logged, not used for queries today)
+//   {Type}.getState     , pull current device state per mapping
 //
 // The adapter polls each configured device every 60s. Token is cached
 // and refreshed automatically on 401. The user maps LocalSky
-// WeatherFields onto specific (device_id, state_path) pairs — same
+// WeatherFields onto specific (device_id, state_path) pairs, same
 // pattern as ha_passthrough but talking to YoLink instead of HA.
 
 use std::sync::Arc;

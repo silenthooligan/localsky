@@ -3,7 +3,7 @@
 // resulting origin=HomeAssistant devices into the DeviceRegistry, so HA's
 // hardware shows up in LocalSky's Devices view next to the native devices.
 //
-// No-op when HA isn't configured (HA_URL/HA_TOKEN absent) — the import is
+// No-op when HA isn't configured (HA_URL/HA_TOKEN absent), the import is
 // the LocalSky analogue of Music Assistant's "Home Assistant provider".
 
 use std::time::Duration;

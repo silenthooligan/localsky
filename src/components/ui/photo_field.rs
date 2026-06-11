@@ -1,4 +1,4 @@
-// <PhotoField/> — drop-zone + browse button + URL fallback for the
+// <PhotoField/>, drop-zone + browse button + URL fallback for the
 // Zones form's photo_url field. Replaces a bare text input.
 //
 // Browse: hidden <input type="file"> is clicked from a styled button.

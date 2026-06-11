@@ -1,4 +1,4 @@
-// POST /api/zones/photo — multipart image upload for the zone form's
+// POST /api/zones/photo, multipart image upload for the zone form's
 // Photo URL field. The browser uploads a chosen or dropped image; the
 // server validates it, writes the bytes into the configured photos
 // directory under a sanitized, timestamped filename, and returns the

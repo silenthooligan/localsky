@@ -1,7 +1,7 @@
 // Weather + forecast panel. Surfaces every input the skip-check
 // uses so the user can see the data, not just the verdict. Two
 // sources for rain (Tempest local, Open-Meteo regional) shown
-// side-by-side with the larger one — used by the skip-check —
+// side-by-side with the larger one, used by the skip-check
 // highlighted. When the gap between them is large (Tempest gauge
 // underreporting), a "Tempest sheltered" hint flags it.
 

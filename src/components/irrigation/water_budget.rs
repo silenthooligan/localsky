@@ -1,4 +1,4 @@
-// Phase H — Weekly water-budget panel. Per-zone tile that shows the
+// Phase H, Weekly water-budget panel. Per-zone tile that shows the
 // allocated weekly budget, expected rain credit, computed session
 // depth + duration, and today's recommendation (run N min, or skip
 // with a reason). The HA budget-override automation at 23:30:25 calls
@@ -70,7 +70,7 @@ fn WaterBudgetTile(zone: Signal<WaterBudget>) -> impl IntoView {
         if z.today_seconds > 0 {
             format!("{} min", ((z.today_seconds as f64) / 60.0).round() as u32)
         } else {
-            "\u{2014}".to_string()
+            "-".to_string()
         }
     };
 
@@ -92,7 +92,7 @@ fn WaterBudgetTile(zone: Signal<WaterBudget>) -> impl IntoView {
                     };
                     format!("{stamp}  ({}d ago)", age.num_days())
                 }
-                None => "—".to_string(),
+                None => "-".to_string(),
             }
         }
     };

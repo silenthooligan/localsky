@@ -1,4 +1,4 @@
-// OpenWeatherMap weather source — api.openweathermap.org "One Call API 3.0".
+// OpenWeatherMap weather source, api.openweathermap.org "One Call API 3.0".
 //
 // Requires a paid API key (free tier covers 1000 calls/day = poll
 // every ~90 seconds). Global coverage. Standard pick for users without

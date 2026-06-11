@@ -1,7 +1,7 @@
 // Top-level Leptos shell. The SSR pass reads the current Tempest +
 // Irrigation snapshots out of context (the axum side `provide_context`s
 // both Arc<TempestStore> and Arc<IrrigationStore>) so the first render
-// is fully hydrated with live values — no spinner, no flash. After
+// is fully hydrated with live values, no spinner, no flash. After
 // hydration, the browser subscribes to the matching SSE streams and
 // replaces each signal on every server-pushed snapshot.
 
@@ -35,7 +35,7 @@ use leptos_router::{
     path,
 };
 
-// (forecast/irrigation/tempest store imports removed — the SSR initial
+// (forecast/irrigation/tempest store imports removed, the SSR initial
 // snapshot helpers don't read from the stores anymore; see comment on
 // initial_*_ssr below for the rationale.)
 
@@ -44,7 +44,7 @@ use leptos_router::{
 // view tree whose CHILD COUNT depends on Vec length (the 7-day
 // forecast row, the 48-hour hourly chart, the 7-day verdict strip,
 // etc.) will produce different numbers of DOM children on SSR vs on
-// hydrate's first render — which crashes tachys's hydration walker
+// hydrate's first render, which crashes tachys's hydration walker
 // at `tachys-0.2.15/src/hydration.rs:227` with `internal error:
 // entered unreachable code`. The fix is to make the *initial* render
 // identical between SSR and hydrate; the SSE streams (/api/stream,
@@ -84,7 +84,7 @@ pub fn App() -> impl IntoView {
     #[allow(unused_variables)]
     let (forecast, set_forecast) = signal(initial_forecast_ssr());
 
-    // Nav debug ring buffer is preserved as a developer affordance — log_nav()
+    // Nav debug ring buffer is preserved as a developer affordance, log_nav()
     // calls scattered through the app no-op when the sink isn't installed, so
     // we can re-enable the in-page strip by reinstalling install_sink() and
     // re-rendering <NavLogStrip/> in the view tree below if we ever need it.
@@ -96,12 +96,12 @@ pub fn App() -> impl IntoView {
     // Viewport flag for layout decisions. SSR + hydrate's first frame both
     // see `false` (desktop), so the initial DOM tree matches and tachys
     // hydrates cleanly. Post-hydrate we read window.matchMedia and flip the
-    // signal — descendants reading via use_context::<RwSignal<bool>> get a
+    // signal, descendants reading via use_context::<RwSignal<bool>> get a
     // signal-driven update, no remount.
     let is_mobile: RwSignal<bool> = RwSignal::new(false);
     provide_context(is_mobile);
 
-    // Toast hub — provided once here so any component can call
+    // Toast hub, provided once here so any component can call
     // use_toast().success(...). The <ToastViewport/> in the shell renders
     // the live stack. Empty on SSR + hydrate's first frame (toasts only
     // ever arrive from client event handlers), so no hydration mismatch.
@@ -200,7 +200,7 @@ pub fn App() -> impl IntoView {
 
     // Mode banner: one-shot fetch of /api/v1/info on hydrate. If the
     // server reports LOCALSKY_SMART_DRY_RUN=1 we set data-dry-run on
-    // <html> so the stylesheet drops in a fixed warning bar — the
+    // <html> so the stylesheet drops in a fixed warning bar, the
     // morning scheduler logs dispatch but never waters, and without
     // this banner "nothing happened at 6 AM" looks like a regression
     // instead of an intentional override. Same treatment for the demo
@@ -521,7 +521,7 @@ fn render_footer(snap: ReadSignal<Snapshot>) -> impl IntoView {
 
 #[component]
 fn NotFound() -> impl IntoView {
-    view! { <div class="not-found">"404 — no such page"</div> }
+    view! { <div class="not-found">"404, no such page"</div> }
 }
 
 /// Server-side HTML shell that wraps the app render in a full <html>

@@ -55,7 +55,7 @@ impl AdvisorState {
         let client = LlmClient::from_env().unwrap_or_else(|e| {
             tracing::error!("llm client init failed (will run disabled): {e:#}");
             // Construct a "disabled" client by setting the env var and
-            // re-trying — but simpler: re-run with the disabled flag set.
+            // re-trying, but simpler: re-run with the disabled flag set.
             // If from_env fails twice, we rebuild manually.
             std::env::set_var("LLM_ADVISOR_DISABLED", "1");
             LlmClient::from_env().expect("disabled client never errors")
@@ -75,7 +75,7 @@ impl AdvisorState {
 
     /// Generate or fetch a cached 1-2 sentence explanation for the
     /// current snapshot. Returns Err(AdvisorError) when the LLM is
-    /// unreachable or disabled — the dashboard hides the tile in that
+    /// unreachable or disabled, the dashboard hides the tile in that
     /// case rather than showing a stale value.
     pub async fn explain_today(&self, snap: &IrrigationSnapshot) -> Result<String, AdvisorError> {
         let key = explain_cache_key(snap);
@@ -118,7 +118,7 @@ impl AdvisorState {
     }
 
     /// Look for inconsistencies in the snapshot. Returns Ok(empty) when
-    /// the data is consistent — the prompt is explicit about not
+    /// the data is consistent, the prompt is explicit about not
     /// fabricating false positives.
     pub async fn detect_anomalies(
         &self,
@@ -174,7 +174,7 @@ impl AdvisorState {
 }
 
 /// Cache key for explanations: prompt version + verdict + reason +
-/// rounded forecast inputs. Coarse on purpose — we don't want a 0.01
+/// rounded forecast inputs. Coarse on purpose, we don't want a 0.01
 /// drift in heat index to invalidate the explanation.
 fn explain_cache_key(s: &IrrigationSnapshot) -> String {
     let sk = &s.skip_check;
@@ -197,7 +197,7 @@ fn explain_cache_key(s: &IrrigationSnapshot) -> String {
 }
 
 /// Anomaly cache key: epoch hour + zone count + ha_reachable. Coarser
-/// than the explanation key — anomalies are about cross-signal
+/// than the explanation key, anomalies are about cross-signal
 /// consistency, hourly granularity is plenty.
 fn anomaly_cache_key(s: &IrrigationSnapshot) -> String {
     let hour_bucket = s.last_refresh_epoch / 3600;
@@ -243,7 +243,7 @@ fn build_explainer_prompt(s: &IrrigationSnapshot) -> String {
          - min_temp: {mt:.0}°F\n\
          \n\
          Write a 1-2 sentence explanation a homeowner would find useful. \
-         Don't repeat 'Reason' verbatim — add concrete context from the data.",
+         Don't repeat 'Reason' verbatim, add concrete context from the data.",
         verdict = sk.verdict,
         reason = if sk.reason.is_empty() {
             "running normally"
@@ -297,7 +297,7 @@ fn build_anomaly_prompt(s: &IrrigationSnapshot) -> String {
          - heat index 3d peak: {hi3:.0}°F\n\
          - days since significant rain: {days}\n\
          \n\
-         Engine verdict: {verdict} — {reason}\n\
+         Engine verdict: {verdict}, {reason}\n\
          \n\
          Return [] if everything is consistent.",
         epoch = s.last_refresh_epoch,
@@ -328,7 +328,7 @@ fn build_anomaly_prompt(s: &IrrigationSnapshot) -> String {
 
 /// Strip a fenced code block (```json ... ```) if the model wrapped
 /// its JSON in one. The system prompt tells it not to, but defense
-/// in depth — single-shot models still wrap occasionally.
+/// in depth, single-shot models still wrap occasionally.
 fn strip_json_fence(s: &str) -> &str {
     let s = s.trim();
     if let Some(rest) = s.strip_prefix("```json") {

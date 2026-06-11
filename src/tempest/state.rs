@@ -108,7 +108,22 @@ struct RollingBuffers {
     pressure: VecDeque<(i64, f64)>, // last 6h of pressure samples
     strikes: VecDeque<StrikeEvent>, // last hour of strikes
     rain_today: f64,                // sum of rain_mm_last_min, day-bucket
-    rain_today_day: i32,            // current day bucket (1970-01-01-relative)
+    rain_today_day: i32,            // current LOCAL calendar-day bucket (num_days_from_ce)
+}
+
+/// Local calendar-day ordinal for a UNIX epoch: num_days_from_ce of the
+/// local date, so the rain-today bucket rolls over at LOCAL midnight.
+/// The previous `(epoch / 86400)` bucket was a UTC day despite its
+/// comment, which zeroed the accumulator mid-evening for any tz west of
+/// UTC and split overnight storms across two "days". Falls back to the
+/// integer UTC day when the timestamp doesn't resolve to a local time.
+#[cfg(feature = "ssr")]
+fn local_day_ordinal(epoch: i64) -> i32 {
+    use chrono::{Datelike, TimeZone};
+    match chrono::Local.timestamp_opt(epoch, 0).single() {
+        Some(dt) => dt.date_naive().num_days_from_ce(),
+        None => (epoch / 86400) as i32,
+    }
 }
 
 #[cfg(feature = "ssr")]
@@ -150,6 +165,34 @@ impl TempestStore {
         let _ = self.tx.send(arc);
     }
 
+    /// Seed the rain-today accumulator from persisted history after a
+    /// restart, so a mid-storm reboot doesn't zero the daily total (the
+    /// per-minute UDP packets carry deltas, not the accumulation). No-op
+    /// unless `day_epoch` falls on the current local day. Only ever
+    /// raises the accumulator: packets that landed since boot stay
+    /// counted when they already exceed the seed. Returns true when the
+    /// seed was applied.
+    pub fn seed_rain_today(&self, rain_in: f64, day_epoch: i64) -> bool {
+        let bucket = local_day_ordinal(day_epoch);
+        let today = local_day_ordinal(chrono::Utc::now().timestamp());
+        if bucket != today || rain_in <= 0.0 {
+            return false;
+        }
+        let rain_mm = rain_in * 25.4;
+        let mut roll = self.rolling.lock().unwrap();
+        if roll.rain_today_day == bucket {
+            if roll.rain_today >= rain_mm {
+                return false;
+            }
+            roll.rain_today = rain_mm;
+        } else {
+            // A stale (or default-zero) bucket never carries into today.
+            roll.rain_today_day = bucket;
+            roll.rain_today = rain_mm;
+        }
+        true
+    }
+
     pub fn apply_obs(&self, station_serial: &str, hub_serial: &str, obs: &ObsSt) {
         let mut roll = self.rolling.lock().unwrap();
 
@@ -166,8 +209,9 @@ impl TempestStore {
         let pressure_inhg = obs.pressure_mb * 0.02953;
         roll.pressure.push_back((now, pressure_inhg));
 
-        // Today rain accumulation, day bucketed in local-naive UNIX-day.
-        let day_bucket = (now / 86400) as i32;
+        // Today rain accumulation, bucketed by the LOCAL calendar day of
+        // the observation so the total resets at local midnight.
+        let day_bucket = local_day_ordinal(now);
         if roll.rain_today_day != day_bucket {
             roll.rain_today_day = day_bucket;
             roll.rain_today = 0.0;
@@ -306,6 +350,72 @@ fn wet_bulb_c(t_c: f64, rh: f64) -> f64 {
     t_c * (0.151_977 * (rh + 8.313_659).sqrt()).atan() + (t_c + rh).atan() - (rh - 1.676_331).atan()
         + 0.003_918_38 * rh.powf(1.5) * (0.023_101 * rh).atan()
         - 4.686_035
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod rain_day_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    /// UNIX epoch for a LOCAL wall-clock instant. Test times stay clear
+    /// of the 02:00-03:00 DST-transition window so `.single()` is safe.
+    fn local_epoch(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> i64 {
+        chrono::Local
+            .with_ymd_and_hms(y, mo, d, h, mi, 0)
+            .single()
+            .unwrap()
+            .timestamp()
+    }
+
+    fn obs(epoch: i64, rain_mm: f64) -> ObsSt {
+        ObsSt {
+            time_epoch: epoch,
+            rain_mm_last_min: rain_mm,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn local_day_ordinal_buckets_by_local_date() {
+        let d1a = local_epoch(2026, 3, 3, 0, 30);
+        let d1b = local_epoch(2026, 3, 3, 23, 30);
+        let d2 = local_epoch(2026, 3, 4, 0, 30);
+        assert_eq!(local_day_ordinal(d1a), local_day_ordinal(d1b));
+        assert_eq!(local_day_ordinal(d2), local_day_ordinal(d1b) + 1);
+    }
+
+    #[test]
+    fn rain_today_accumulates_within_a_local_day_and_resets_at_local_midnight() {
+        let store = TempestStore::new();
+        // 23:30 local: 5.08 mm = 0.20".
+        store.apply_obs("ST", "HB", &obs(local_epoch(2026, 1, 15, 23, 30), 5.08));
+        assert!((store.snapshot().rain_in_today - 0.20).abs() < 1e-9);
+        // 23:50 same local day: accumulates to 0.30".
+        store.apply_obs("ST", "HB", &obs(local_epoch(2026, 1, 15, 23, 50), 2.54));
+        assert!((store.snapshot().rain_in_today - 0.30).abs() < 1e-9);
+        // 00:30 the NEXT local day: bucket rolls, total restarts at 0.10".
+        // With the old UTC bucketing this either kept accumulating or had
+        // already reset hours before local midnight, tz-dependent.
+        store.apply_obs("ST", "HB", &obs(local_epoch(2026, 1, 16, 0, 30), 2.54));
+        assert!((store.snapshot().rain_in_today - 0.10).abs() < 1e-9);
+    }
+
+    #[test]
+    fn seed_rain_today_applies_only_for_the_current_local_day() {
+        let store = TempestStore::new();
+        let now = chrono::Utc::now().timestamp();
+        // A reading from two days ago must not seed today's bucket.
+        assert!(!store.seed_rain_today(0.5, now - 2 * 86_400));
+        // Today's persisted total seeds the accumulator.
+        assert!(store.seed_rain_today(0.5, now));
+        // A live packet accumulates ON TOP of the seed (0.5" + 0.10").
+        store.apply_obs("ST", "HB", &obs(now, 2.54));
+        assert!((store.snapshot().rain_in_today - 0.60).abs() < 1e-6);
+        // A smaller re-seed never lowers the accumulator.
+        assert!(!store.seed_rain_today(0.10, now));
+        // Zero / negative seeds are rejected outright.
+        assert!(!store.seed_rain_today(0.0, now));
+    }
 }
 
 /// NWS heat-index formula above 80 °F / 40% RH; NWS wind-chill below 50 °F

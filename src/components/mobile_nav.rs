@@ -7,7 +7,7 @@
 //   History    -> /history
 //   More       -> opens a sheet (Simulator / Rule Lab / Settings / About)
 //
-// The Analyze tools + Settings live behind "More" — reachable on mobile
+// The Analyze tools + Settings live behind "More", reachable on mobile
 // but not bottom-tab-worthy. Glyphs use the shared <Icon/> registry so
 // they tint with the active state across themes (emoji could not).
 

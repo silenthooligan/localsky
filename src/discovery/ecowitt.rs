@@ -83,7 +83,7 @@ fn subnet_broadcast(ip: Ipv4Addr, mask: Ipv4Addr) -> Option<Ipv4Addr> {
 }
 
 /// Broadcast the Ecowitt discovery request on every IPv4 interface and
-/// collect replies for `timeout`. Each interface is probed concurrently — a
+/// collect replies for `timeout`. Each interface is probed concurrently, a
 /// dual-homed host has several NICs and doing them sequentially would
 /// multiply the timeout. A single 255.255.255.255 send only leaves the
 /// default-route NIC and would miss a gateway on a secondary subnet, so we

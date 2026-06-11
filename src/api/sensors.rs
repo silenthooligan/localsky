@@ -3,8 +3,8 @@
 // people add devices to Home Assistant first, so we discover straight from
 // HA by device_class (plus any local-POST channels in sensor_history).
 //
-//   GET /api/v1/sensors/soil       — soil-moisture channels (zone picker)
-//   GET /api/v1/sensors/discovered — every relevant HA entity, grouped by
+//   GET /api/v1/sensors/soil      , soil-moisture channels (zone picker)
+//   GET /api/v1/sensors/discovered, every relevant HA entity, grouped by
 //                                    role, so the Sensors hub can show the
 //                                    full picture.
 //
@@ -50,7 +50,7 @@ struct DiscoveredSensor {
 /// the hub shows weather/soil-relevant sensors rather than every battery %.
 fn classify(entity_id: &str, device_class: &str) -> Option<&'static str> {
     // Only numeric `sensor.*` entities. Leak detectors are
-    // `binary_sensor.*` with device_class=moisture — explicitly NOT soil.
+    // `binary_sensor.*` with device_class=moisture, explicitly NOT soil.
     if !entity_id.starts_with("sensor.") {
         return None;
     }
@@ -162,7 +162,7 @@ async fn discover_local_soil(db: Arc<Mutex<Connection>>) -> Vec<DiscoveredSensor
         .collect()
 }
 
-/// Soil channels only — powers the zone soil-sensor picker.
+/// Soil channels only, powers the zone soil-sensor picker.
 async fn soil(
     axum::extract::State(db): axum::extract::State<Arc<Mutex<Connection>>>,
 ) -> Json<Vec<DiscoveredSensor>> {
@@ -175,7 +175,7 @@ async fn soil(
     Json(out)
 }
 
-/// Everything LocalSky could use, grouped by role — the hub's full picture.
+/// Everything LocalSky could use, grouped by role, the hub's full picture.
 async fn discovered(
     axum::extract::State(db): axum::extract::State<Arc<Mutex<Connection>>>,
 ) -> Json<std::collections::BTreeMap<String, Vec<DiscoveredSensor>>> {

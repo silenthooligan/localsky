@@ -9,6 +9,8 @@
 // the previous const values so existing call sites pass without changes.
 // src/ha/skip_logic.rs is now a thin re-export shim for back-compat.
 
+use std::collections::HashSet;
+
 use chrono::{Local, TimeZone};
 
 use crate::config::schema::{AddressParity, SkipRuleParams, WateringRestriction};
@@ -160,6 +162,44 @@ pub fn et_heat_multiplier(heat_idx_f: f64) -> f64 {
     1.0 + bonus
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Operator-controllable built-in rules.
+//
+// `SkipRuleParams::disabled_rules` lists built-in rule ids the operator
+// has switched off. A disabled rule still appears in the decision trace
+// (transparency) but never decides. Operator-control and compliance
+// gates are PROTECTED: the engine hard-enforces them regardless of
+// config, so a hand-edited config can never disable a vacation pause,
+// a manual override, dry-run, or a legal watering restriction.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Rule ids that can never be disabled via `disabled_rules`. These are
+/// the operator-control gates (override / pauses / dry-run) plus the
+/// jurisdictional watering-restrictions compliance gate. Entries naming
+/// them in config are silently ignored.
+pub const PROTECTED_RULES: &[&str] = &[
+    "override",
+    "pause_until",
+    "paused",
+    "restrictions",
+    "dry_run",
+];
+
+// builtin_rule_catalog lives in crate::gates_catalog (plain data, no
+// ssr-only deps) so the WASM Rule Lab UI renders the same source of
+// truth; re-exported here for the engine and its tests.
+pub use crate::gates_catalog::builtin_rule_catalog;
+
+/// The effective disable set: operator-listed ids minus the protected
+/// ones. Unknown ids are harmless (they never match a gate).
+fn disabled_set(p: &SkipRuleParams) -> HashSet<&str> {
+    p.disabled_rules
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !PROTECTED_RULES.contains(id))
+        .collect()
+}
+
 /// Back-compat entrypoint using `SkipRuleParams::default()`. Defaults
 /// reproduce the v0.1 hardcoded thresholds.
 pub fn evaluate(i: &Inputs) -> SkipCheck {
@@ -231,26 +271,31 @@ pub fn evaluate_with(i: &Inputs, params: &SkipRuleParams) -> SkipCheck {
 /// pieces so the per-zone path (`decide_per_zone`) can reuse the global
 /// gates while substituting its own per-zone soil logic.
 fn decide(i: &Inputs, p: &SkipRuleParams) -> (&'static str, String) {
-    if let Some(v) = pre_soil(i, p) {
+    let disabled = disabled_set(p);
+    if let Some(v) = pre_soil(i, p, &disabled) {
         return v;
     }
-    if let Some(v) = soil_saturation(i) {
+    if let Some(v) = soil_saturation(i, &disabled) {
         return v;
     }
-    post_soil(i, p)
+    post_soil(i, p, &disabled)
 }
 
 /// The global verdict EXCLUDING the per-zone soil-saturation gate. Used by
 /// `decide_per_zone` as the yard-wide baseline that binds every zone;
 /// each zone then layers its own soil + custom-condition gates on top.
-fn global_verdict(i: &Inputs, p: &SkipRuleParams) -> (&'static str, String) {
-    pre_soil(i, p).unwrap_or_else(|| post_soil(i, p))
+fn global_verdict(
+    i: &Inputs,
+    p: &SkipRuleParams,
+    disabled: &HashSet<&str>,
+) -> (&'static str, String) {
+    pre_soil(i, p, disabled).unwrap_or_else(|| post_soil(i, p, disabled))
 }
 
 /// Per-zone verdicts. The global gates (safety + weather) bind every zone
 /// identically; then each zone layers its own soil-saturation gate and the
 /// user's custom condition rules (augment-only). Safety boundary: this can
-/// only ADD a skip, extend, or shrink a zone's run — never clear a global
+/// only ADD a skip, extend, or shrink a zone's run, never clear a global
 /// gate or force a run. Returns one verdict per entry in `i.soil_zones`.
 ///
 /// Note vs the aggregate `decide()`: there, yard-wide soil saturation is
@@ -264,7 +309,8 @@ pub fn decide_per_zone(
     p: &SkipRuleParams,
     rules: &[ConditionRule],
 ) -> Vec<ZoneVerdict> {
-    let (gverdict, greason) = global_verdict(i, p);
+    let disabled = disabled_set(p);
+    let (gverdict, greason) = global_verdict(i, p, &disabled);
     i.soil_zones
         .iter()
         .map(|z| {
@@ -280,8 +326,10 @@ pub fn decide_per_zone(
                 };
             }
             // Global verdict is run / run_extended. Per-zone soil saturation
-            // can still skip this individual zone.
-            if let Some(pct) = z.pct {
+            // can still skip this individual zone. Honors the same operator
+            // disable id as the yard-wide gate: disabling "soil_saturation"
+            // disables soil-saturation skips everywhere.
+            if let Some(pct) = z.pct.filter(|_| !disabled.contains("soil_saturation")) {
                 if pct >= z.saturation_pct {
                     return ZoneVerdict {
                         zone_slug: z.slug.clone(),
@@ -330,7 +378,13 @@ pub fn decide_per_zone(
 /// Gates that run before the soil-saturation block: override, pause,
 /// restriction, rain-now, freeze, soil-frost, wind, already-wet. `Some`
 /// = a gate fired (first wins); `None` = fall through to soil/weather.
-fn pre_soil(i: &Inputs, p: &SkipRuleParams) -> Option<(&'static str, String)> {
+/// The control + restriction gates ignore `disabled` (PROTECTED_RULES,
+/// hard-enforced); every weather/safety gate consults it.
+fn pre_soil(
+    i: &Inputs,
+    p: &SkipRuleParams,
+    disabled: &HashSet<&str>,
+) -> Option<(&'static str, String)> {
     if i.is_tomorrow {
         match i.override_tomorrow.as_str() {
             "skip" => return Some(("skip", "Manual override (skip tomorrow)".to_string())),
@@ -364,13 +418,13 @@ fn pre_soil(i: &Inputs, p: &SkipRuleParams) -> Option<(&'static str, String)> {
     // Live-data integrity. When neither the station nor the forecast can
     // supply current conditions, the freeze/wind gates below would be
     // judging fabricated numbers. Prefer a skip over a phantom run.
-    if i.live_readings == LiveReadings::Unavailable {
+    if !disabled.contains("live_data") && i.live_readings == LiveReadings::Unavailable {
         return Some((
             "skip",
             "Live weather unavailable (no station data or forecast); failing safe".to_string(),
         ));
     }
-    if i.rain_intensity_now_in_hr > p.rain_now_in_hr {
+    if !disabled.contains("rain_now") && i.rain_intensity_now_in_hr > p.rain_now_in_hr {
         return Some((
             "skip",
             format!(
@@ -379,7 +433,7 @@ fn pre_soil(i: &Inputs, p: &SkipRuleParams) -> Option<(&'static str, String)> {
             ),
         ));
     }
-    if i.temp_now_f < i.min_temp_f {
+    if !disabled.contains("freeze_now") && i.temp_now_f < i.min_temp_f {
         return Some((
             "skip",
             format!(
@@ -390,7 +444,10 @@ fn pre_soil(i: &Inputs, p: &SkipRuleParams) -> Option<(&'static str, String)> {
     }
     // Applicability is "do we have a forecast low at all" (Option), not a
     // numeric sentinel: a genuine low of 0 °F or colder must still skip.
-    if let Some(t24) = i.temp_min_24h_f {
+    if let Some(t24) = i
+        .temp_min_24h_f
+        .filter(|_| !disabled.contains("overnight_freeze"))
+    {
         if t24 < i.min_temp_f {
             return Some((
                 "skip",
@@ -401,7 +458,10 @@ fn pre_soil(i: &Inputs, p: &SkipRuleParams) -> Option<(&'static str, String)> {
             ));
         }
     }
-    if let Some(t) = i.soil_temp_yard_min_f {
+    if let Some(t) = i
+        .soil_temp_yard_min_f
+        .filter(|_| !disabled.contains("soil_frost"))
+    {
         if t < i.frost_skip_soil_f {
             return Some((
                 "skip",
@@ -412,7 +472,7 @@ fn pre_soil(i: &Inputs, p: &SkipRuleParams) -> Option<(&'static str, String)> {
             ));
         }
     }
-    if i.wind_now_mph > i.max_wind_mph {
+    if !disabled.contains("wind_now") && i.wind_now_mph > i.max_wind_mph {
         return Some((
             "skip",
             format!(
@@ -421,7 +481,9 @@ fn pre_soil(i: &Inputs, p: &SkipRuleParams) -> Option<(&'static str, String)> {
             ),
         ));
     }
-    if i.wind_max_today_mph > i.max_wind_mph + p.wind_forecast_slack_mph {
+    if !disabled.contains("wind_forecast")
+        && i.wind_max_today_mph > i.max_wind_mph + p.wind_forecast_slack_mph
+    {
         return Some((
             "skip",
             format!(
@@ -430,7 +492,7 @@ fn pre_soil(i: &Inputs, p: &SkipRuleParams) -> Option<(&'static str, String)> {
             ),
         ));
     }
-    if i.rain_today_in >= p.already_wet_in {
+    if !disabled.contains("already_wet") && i.rain_today_in >= p.already_wet_in {
         return Some((
             "skip",
             format!("Already wet ({:.2}\" today)", i.rain_today_in),
@@ -444,7 +506,10 @@ fn pre_soil(i: &Inputs, p: &SkipRuleParams) -> Option<(&'static str, String)> {
 /// saturation threshold. Generalized from the former hardcoded 4-zone
 /// array to iterate `i.soil_zones`. `None` when not all zones report or
 /// any zone is below threshold.
-fn soil_saturation(i: &Inputs) -> Option<(&'static str, String)> {
+fn soil_saturation(i: &Inputs, disabled: &HashSet<&str>) -> Option<(&'static str, String)> {
+    if disabled.contains("soil_saturation") {
+        return None;
+    }
     if i.soil_zones.is_empty() || i.soil_zones.iter().any(|z| z.pct.is_none()) {
         return None;
     }
@@ -475,9 +540,10 @@ fn soil_saturation(i: &Inputs) -> Option<(&'static str, String)> {
 }
 
 /// Gates that run after soil saturation: rain-within-4h, tomorrow rain,
-/// 3-day rain, heat advisory, dry-run, default run.
-fn post_soil(i: &Inputs, p: &SkipRuleParams) -> (&'static str, String) {
-    if i.rain_next_4h_in >= p.rain_next_4h_skip_in {
+/// 3-day rain, heat advisory, dry-run, default run. The dry-run gate
+/// ignores `disabled` (PROTECTED_RULES, hard-enforced).
+fn post_soil(i: &Inputs, p: &SkipRuleParams, disabled: &HashSet<&str>) -> (&'static str, String) {
+    if !disabled.contains("rain_next_4h") && i.rain_next_4h_in >= p.rain_next_4h_skip_in {
         return (
             "skip",
             format!(
@@ -487,7 +553,7 @@ fn post_soil(i: &Inputs, p: &SkipRuleParams) -> (&'static str, String) {
         );
     }
     let tomorrow_weighted = i.forecast_in * (i.rain_tomorrow_prob_pct as f64) / 100.0;
-    if tomorrow_weighted >= i.rain_skip_in {
+    if !disabled.contains("tomorrow_rain") && tomorrow_weighted >= i.rain_skip_in {
         return (
             "skip",
             format!(
@@ -496,7 +562,9 @@ fn post_soil(i: &Inputs, p: &SkipRuleParams) -> (&'static str, String) {
             ),
         );
     }
-    if i.rain_3day_weighted_in >= p.rain_3day_factor * i.rain_skip_in {
+    if !disabled.contains("rain_3day")
+        && i.rain_3day_weighted_in >= p.rain_3day_factor * i.rain_skip_in
+    {
         return (
             "skip",
             format!(
@@ -505,7 +573,8 @@ fn post_soil(i: &Inputs, p: &SkipRuleParams) -> (&'static str, String) {
             ),
         );
     }
-    if i.temp_max_3day_f >= p.heat_advisory_temp_f
+    if !disabled.contains("heat_advisory")
+        && i.temp_max_3day_f >= p.heat_advisory_temp_f
         && i.humidity_now_pct >= p.heat_advisory_humidity_pct
         && i.days_since_significant_rain >= p.heat_advisory_dry_days
         && i.rain_3day_weighted_in < 0.5 * i.rain_skip_in
@@ -545,6 +614,7 @@ fn post_soil(i: &Inputs, p: &SkipRuleParams) -> (&'static str, String) {
 fn gate(
     rules: &mut Vec<RuleEval>,
     decided: &mut Option<(String, String)>,
+    disabled: &HashSet<&str>,
     id: &str,
     label: &str,
     category: &str,
@@ -554,6 +624,21 @@ fn gate(
     verdict: &str,
     reason: String,
 ) {
+    // Operator-disabled rules stay visible in the trace (transparency)
+    // but never decide. Checked before not_reached so the trace always
+    // explains WHY the rule is inert. Protected ids never reach here
+    // (filtered out of the set by `disabled_set`).
+    if disabled.contains(id) {
+        rules.push(RuleEval {
+            id: id.into(),
+            label: label.into(),
+            category: category.into(),
+            detail: "disabled by operator".into(),
+            outcome: "skipped".into(),
+            verdict: None,
+        });
+        return;
+    }
     if decided.is_some() {
         rules.push(RuleEval {
             id: id.into(),
@@ -592,7 +677,7 @@ fn gate(
 /// Reconstruct engine `Inputs` from a snapshot's `SkipCheck` for the
 /// Simulator's "what-if". The control gates (pause / restriction /
 /// dry-run / tomorrow-override) are intentionally neutralized so the
-/// hypothetical reflects pure weather + soil logic — otherwise a dry-run
+/// hypothetical reflects pure weather + soil logic, otherwise a dry-run
 /// or pause would mask every weather slider behind the same skip.
 pub fn inputs_from_skipcheck(s: &SkipCheck) -> Inputs {
     Inputs {
@@ -672,6 +757,12 @@ pub fn inputs_from_skipcheck(s: &SkipCheck) -> Inputs {
 pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
     let mut rules: Vec<RuleEval> = Vec::with_capacity(18);
     let mut decided: Option<(String, String)> = None;
+    // Operator-disabled built-in rules (protected ids already filtered
+    // out by `disabled_set`). Threaded into every gate() so a disabled
+    // rule still surfaces in the trace as "disabled by operator" but can
+    // never decide. Mirrors the checks in pre_soil/soil_saturation/
+    // post_soil exactly; the parity tests pin the two ladders together.
+    let disabled = disabled_set(p);
 
     // Manual override (tomorrow cell only).
     if i.is_tomorrow {
@@ -679,6 +770,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
             "skip" => gate(
                 &mut rules,
                 &mut decided,
+                &disabled,
                 "override",
                 "Manual override",
                 "control",
@@ -691,6 +783,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
             "run" => gate(
                 &mut rules,
                 &mut decided,
+                &disabled,
                 "override",
                 "Manual override",
                 "control",
@@ -703,6 +796,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
             _ => gate(
                 &mut rules,
                 &mut decided,
+                &disabled,
                 "override",
                 "Manual override",
                 "control",
@@ -717,6 +811,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
         gate(
             &mut rules,
             &mut decided,
+            &disabled,
             "override",
             "Manual override",
             "control",
@@ -732,6 +827,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
     gate(
         &mut rules,
         &mut decided,
+        &disabled,
         "pause_until",
         "Vacation pause (timed)",
         "control",
@@ -749,6 +845,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
     gate(
         &mut rules,
         &mut decided,
+        &disabled,
         "paused",
         "Vacation pause",
         "control",
@@ -784,6 +881,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
         gate(
             &mut rules,
             &mut decided,
+            &disabled,
             "restrictions",
             "Watering restrictions",
             "safety",
@@ -800,6 +898,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
     gate(
         &mut rules,
         &mut decided,
+        &disabled,
         "live_data",
         "Live weather availability",
         "safety",
@@ -820,6 +919,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
     gate(
         &mut rules,
         &mut decided,
+        &disabled,
         "rain_now",
         "Currently raining",
         "safety",
@@ -840,6 +940,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
     gate(
         &mut rules,
         &mut decided,
+        &disabled,
         "freeze_now",
         "Freeze risk now",
         "safety",
@@ -860,6 +961,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
         gate(
             &mut rules,
             &mut decided,
+            &disabled,
             "overnight_freeze",
             "Overnight freeze",
             "safety",
@@ -884,6 +986,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
         gate(
             &mut rules,
             &mut decided,
+            &disabled,
             "soil_frost",
             "Soil frost",
             "safety",
@@ -906,6 +1009,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
     gate(
         &mut rules,
         &mut decided,
+        &disabled,
         "wind_now",
         "Wind too high now",
         "safety",
@@ -923,6 +1027,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
     gate(
         &mut rules,
         &mut decided,
+        &disabled,
         "wind_forecast",
         "Windy day forecast",
         "weather",
@@ -943,6 +1048,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
     gate(
         &mut rules,
         &mut decided,
+        &disabled,
         "already_wet",
         "Already wet today",
         "weather",
@@ -989,12 +1095,27 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
                     tightest.saturation_pct
                 ),
             )
+        } else if i.soil_zones.is_empty() {
+            ("no soil zones configured".to_string(), String::new())
         } else {
-            ("not all zones have soil sensors".to_string(), String::new())
+            // Name the zones holding the gate inapplicable: a flatlined
+            // probe resolves to None upstream, and the old generic "not
+            // all zones have soil sensors" hid which hardware was dead.
+            let missing: Vec<&str> = i
+                .soil_zones
+                .iter()
+                .filter(|z| z.pct.is_none())
+                .map(|z| z.slug.as_str())
+                .collect();
+            (
+                format!("no soil reading: {}", missing.join(", ")),
+                String::new(),
+            )
         };
         gate(
             &mut rules,
             &mut decided,
+            &disabled,
             "soil_saturation",
             "Yard-wide soil saturation",
             "soil",
@@ -1010,6 +1131,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
     gate(
         &mut rules,
         &mut decided,
+        &disabled,
         "rain_next_4h",
         "Rain within 4 hours",
         "weather",
@@ -1032,6 +1154,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
         gate(
             &mut rules,
             &mut decided,
+            &disabled,
             "tomorrow_rain",
             "Tomorrow rain",
             "weather",
@@ -1053,6 +1176,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
     gate(
         &mut rules,
         &mut decided,
+        &disabled,
         "rain_3day",
         "Heavy rain (3 day)",
         "weather",
@@ -1074,6 +1198,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
     gate(
         &mut rules,
         &mut decided,
+        &disabled,
         "heat_advisory",
         "Heat advisory",
         "heat",
@@ -1097,6 +1222,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
     gate(
         &mut rules,
         &mut decided,
+        &disabled,
         "dry_run",
         "Dry-run mode",
         "control",
@@ -1195,11 +1321,10 @@ mod tests {
         ]
     }
 
-    #[test]
-    fn decide_traced_matches_decide() {
-        // The trace's verdict + reason must always equal decide()'s, across
-        // every rule. If this fails, the two ladders have drifted.
-        let p = SkipRuleParams::default();
+    /// Scenario battery shared by the decide vs decide_traced parity
+    /// tests: one entry per rule in the ladder, so a drift anywhere in
+    /// the ladder trips the parity assertions.
+    fn parity_scenarios() -> Vec<Inputs> {
         let mut scenarios: Vec<Inputs> = vec![base()];
         let mut push = |f: fn(&mut Inputs)| {
             let mut i = base();
@@ -1245,15 +1370,65 @@ mod tests {
             i.override_tomorrow = "run".to_string();
             i.rain_today_in = 0.5;
         });
+        scenarios
+    }
 
-        for (n, i) in scenarios.iter().enumerate() {
-            let (v, r) = decide(i, &p);
-            let t = decide_traced(i, &p);
+    /// Parity assertions shared by the default-params and disabled-rules
+    /// parity tests.
+    fn assert_parity(p: &SkipRuleParams) {
+        for (n, i) in parity_scenarios().iter().enumerate() {
+            let (v, r) = decide(i, p);
+            let t = decide_traced(i, p);
             assert_eq!(t.verdict, v, "verdict drift in scenario {n}");
             assert_eq!(t.reason, r, "reason drift in scenario {n}");
             // Exactly one fired rule (or zero when the default 'run' applies).
             let fired = t.rules.iter().filter(|e| e.outcome == "fired").count();
             assert!(fired <= 1, "more than one fired rule in scenario {n}");
+        }
+    }
+
+    #[test]
+    fn decide_traced_matches_decide() {
+        // The trace's verdict + reason must always equal decide()'s, across
+        // every rule. If this fails, the two ladders have drifted.
+        assert_parity(&SkipRuleParams::default());
+    }
+
+    #[test]
+    fn decide_traced_matches_decide_with_disabled_rules() {
+        // Same battery, with a representative operator disable set: every
+        // category of disableable gate, a protected id (must be ignored),
+        // and an unknown id (must be harmless). Parity must still hold,
+        // and no disabled rule may ever fire or decide in the trace.
+        let mut p = SkipRuleParams::default();
+        p.disabled_rules = vec![
+            "rain_now".into(),
+            "overnight_freeze".into(),
+            "already_wet".into(),
+            "soil_saturation".into(),
+            "tomorrow_rain".into(),
+            "heat_advisory".into(),
+            "live_data".into(),
+            "paused".into(),          // protected: ignored
+            "not_a_real_rule".into(), // unknown: harmless
+        ];
+        assert_parity(&p);
+
+        for (n, i) in parity_scenarios().iter().enumerate() {
+            let t = decide_traced(i, &p);
+            for e in &t.rules {
+                if !p.disabled_rules.contains(&e.id) || PROTECTED_RULES.contains(&e.id.as_str()) {
+                    continue;
+                }
+                // Disabled rules stay visible but never decide.
+                assert_eq!(
+                    e.outcome, "skipped",
+                    "disabled rule {} not inert in scenario {n}",
+                    e.id
+                );
+                assert_eq!(e.detail, "disabled by operator", "scenario {n}");
+                assert!(e.verdict.is_none(), "scenario {n}");
+            }
         }
     }
 
@@ -1594,7 +1769,7 @@ mod tests {
         // With a UNIFORM soil state across zones, every per-zone verdict
         // must equal decide()'s aggregate verdict. (Reasons may differ:
         // the aggregate orders soil before rain-forecast, the per-zone
-        // path orders global weather first — but the VERDICT agrees.)
+        // path orders global weather first, but the VERDICT agrees.)
         let p = SkipRuleParams::default();
         let mut scenarios = vec![];
         let mut push = |f: fn(&mut Inputs)| {
@@ -1639,6 +1814,30 @@ mod tests {
         assert_eq!(back.verdict, "skip");
         assert_eq!(back.source, "soil_saturation");
         assert_eq!(front.verdict, "run");
+    }
+
+    #[test]
+    fn soil_gate_detail_names_zones_missing_readings() {
+        // Two probes offline (front_yard flatlined, shrubs unassigned):
+        // the inapplicable gate's detail must name them, not the old
+        // generic "not all zones have soil sensors".
+        let mut i = base();
+        i.soil_zones = soil4(Some(80.0), None, Some(80.0), None);
+        let t = decide_traced(&i, &SkipRuleParams::default());
+        let g = t.rules.iter().find(|r| r.id == "soil_saturation").unwrap();
+        assert_eq!(g.outcome, "skipped");
+        assert_eq!(g.detail, "no soil reading: front_yard, back_yard_shrubs");
+    }
+
+    #[test]
+    fn soil_gate_detail_distinguishes_unconfigured_from_dead_probes() {
+        // No soil zones configured at all (weather-only deployment) is a
+        // different inapplicability than a dead probe.
+        let i = base();
+        let t = decide_traced(&i, &SkipRuleParams::default());
+        let g = t.rules.iter().find(|r| r.id == "soil_saturation").unwrap();
+        assert_eq!(g.outcome, "skipped");
+        assert_eq!(g.detail, "no soil zones configured");
     }
 
     #[test]
@@ -1706,5 +1905,185 @@ mod tests {
         assert!(zv
             .iter()
             .all(|z| z.verdict == "skip" && z.source == "global"));
+    }
+
+    // ── Operator-disabled built-in rules ──
+
+    #[test]
+    fn disabled_rain_now_allows_run_while_raining() {
+        let mut i = base();
+        i.rain_intensity_now_in_hr = 0.05;
+        // Sanity: default params skip on active rain.
+        assert_eq!(evaluate(&i).verdict, "skip");
+
+        let mut p = SkipRuleParams::default();
+        p.disabled_rules = vec!["rain_now".into()];
+        let s = evaluate_with(&i, &p);
+        assert_eq!(s.verdict, "run", "disabled rain_now must allow the run");
+
+        // Trace transparency: the disabled rule is still listed, marked
+        // inert, and the verdict comes from the rest of the ladder.
+        let t = decide_traced(&i, &p);
+        assert_eq!(t.verdict, "run");
+        let r = t.rules.iter().find(|r| r.id == "rain_now").unwrap();
+        assert_eq!(r.outcome, "skipped");
+        assert_eq!(r.detail, "disabled by operator");
+        assert!(r.verdict.is_none());
+    }
+
+    #[test]
+    fn disabled_rule_still_listed_in_trace_after_decision() {
+        // Even when an earlier rule already decided, a disabled rule shows
+        // "disabled by operator" (not "not_reached") so the operator can
+        // always see which rules they have switched off.
+        let mut i = base();
+        i.is_paused = true; // decides early
+        let mut p = SkipRuleParams::default();
+        p.disabled_rules = vec!["already_wet".into()];
+        let t = decide_traced(&i, &p);
+        assert_eq!(t.verdict, "skip");
+        let r = t.rules.iter().find(|r| r.id == "already_wet").unwrap();
+        assert_eq!(r.detail, "disabled by operator");
+        assert_eq!(r.outcome, "skipped");
+    }
+
+    #[test]
+    fn protected_paused_cannot_be_disabled() {
+        let mut i = base();
+        i.is_paused = true;
+        let mut p = SkipRuleParams::default();
+        p.disabled_rules = vec!["paused".into()];
+        let s = evaluate_with(&i, &p);
+        assert_eq!(s.verdict, "skip");
+        assert_eq!(s.reason, "Paused (vacation mode)");
+        // The trace shows the protected gate firing normally.
+        let t = decide_traced(&i, &p);
+        let r = t.rules.iter().find(|r| r.id == "paused").unwrap();
+        assert_eq!(r.outcome, "fired");
+    }
+
+    #[test]
+    fn protected_control_gates_cannot_be_disabled() {
+        // Listing EVERY protected id changes nothing: dry-run, the timed
+        // pause, and the tomorrow override all keep deciding.
+        let mut p = SkipRuleParams::default();
+        p.disabled_rules = PROTECTED_RULES.iter().map(|s| s.to_string()).collect();
+
+        let mut i = base();
+        i.is_dry_run = true;
+        let s = evaluate_with(&i, &p);
+        assert_eq!(s.verdict, "skip");
+        assert_eq!(s.reason, "Dry-run mode");
+
+        let mut i = base();
+        i.pause_until_epoch = i.now_epoch + 3600;
+        assert_eq!(evaluate_with(&i, &p).verdict, "skip");
+
+        let mut i = base();
+        i.is_tomorrow = true;
+        i.override_tomorrow = "skip".to_string();
+        let s = evaluate_with(&i, &p);
+        assert_eq!(s.verdict, "skip");
+        assert!(s.reason.contains("Manual override"));
+    }
+
+    #[test]
+    fn protected_restrictions_cannot_be_disabled() {
+        use crate::config::schema::EffectiveWindow;
+        let mut i = base();
+        // A restriction that forbids every hour of every day.
+        i.watering_restrictions = vec![WateringRestriction {
+            id: "test_total_ban".into(),
+            name: "Total ban".into(),
+            enabled: true,
+            effective: EffectiveWindow::AllYear,
+            allowed_weekdays_odd: Vec::new(),
+            allowed_weekdays_even: Vec::new(),
+            forbidden_hour_start: Some(0),
+            forbidden_hour_end: Some(24),
+            max_minutes_per_zone: None,
+        }];
+        let mut p = SkipRuleParams::default();
+        p.disabled_rules = vec!["restrictions".into()];
+        let s = evaluate_with(&i, &p);
+        assert_eq!(s.verdict, "skip");
+        assert!(s.reason.contains("Watering restriction"));
+    }
+
+    #[test]
+    fn unknown_disabled_ids_are_harmless() {
+        let mut p = SkipRuleParams::default();
+        p.disabled_rules = vec!["definitely_not_a_rule".into()];
+        let mut i = base();
+        i.rain_today_in = 0.10;
+        // Real gates keep working; the unknown id matches nothing.
+        assert_eq!(evaluate_with(&i, &p).verdict, "skip");
+        assert_eq!(evaluate_with(&base(), &p).verdict, "run");
+    }
+
+    #[test]
+    fn disabled_soil_saturation_disables_per_zone_gate_too() {
+        let mut i = base();
+        i.soil_zones = soil4(Some(80.0), Some(25.0), None, None);
+        // Sanity: under defaults the saturated zone skips on soil.
+        let zv = decide_per_zone(&i, &SkipRuleParams::default(), &[]);
+        let back = zv.iter().find(|z| z.zone_slug == "back_yard").unwrap();
+        assert_eq!(back.verdict, "skip");
+        assert_eq!(back.source, "soil_saturation");
+        // Disabling "soil_saturation" clears BOTH the yard-wide gate and
+        // the per-zone gate: same operator id, one behavior everywhere.
+        let mut p = SkipRuleParams::default();
+        p.disabled_rules = vec!["soil_saturation".into()];
+        let zv = decide_per_zone(&i, &p, &[]);
+        assert!(zv.iter().all(|z| z.verdict == "run"), "{zv:?}");
+        // The aggregate path agrees.
+        let mut i2 = base();
+        i2.soil_zones = soil4(Some(80.0), Some(80.0), Some(80.0), Some(90.0));
+        assert_eq!(evaluate_with(&i2, &p).verdict, "run");
+    }
+
+    #[test]
+    fn decide_per_zone_inherits_disabled_rules() {
+        // A disabled GLOBAL gate (already_wet) no longer binds the zones:
+        // the per-zone path flows through the same shared helpers.
+        let mut i = base();
+        i.soil_zones = soil4(Some(20.0), Some(20.0), Some(20.0), Some(20.0));
+        i.rain_today_in = 0.10;
+        // Default: global weather skip binds all zones.
+        let zv = decide_per_zone(&i, &SkipRuleParams::default(), &[]);
+        assert!(zv.iter().all(|z| z.verdict == "skip"));
+        // Disabled: every zone runs, matching the aggregate verdict.
+        let mut p = SkipRuleParams::default();
+        p.disabled_rules = vec!["already_wet".into()];
+        let zv = decide_per_zone(&i, &p, &[]);
+        assert!(zv.iter().all(|z| z.verdict == "run"), "{zv:?}");
+        assert_eq!(decide(&i, &p).0, "run");
+    }
+
+    #[test]
+    fn catalog_covers_every_traced_gate() {
+        // The catalog must list exactly the gates the traced ladder emits,
+        // in evaluation order, with protected flags agreeing with
+        // PROTECTED_RULES. Pins the UI catalog to the real ladder.
+        let t = decide_traced(&base(), &SkipRuleParams::default());
+        let trace_ids: Vec<&str> = t.rules.iter().map(|r| r.id.as_str()).collect();
+        let catalog = builtin_rule_catalog();
+        let cat_ids: Vec<&str> = catalog.iter().map(|(id, _, _, _)| *id).collect();
+        assert_eq!(cat_ids, trace_ids, "catalog vs traced ladder drift");
+
+        for (id, label, desc, protected) in catalog {
+            assert_eq!(
+                *protected,
+                PROTECTED_RULES.contains(id),
+                "protected flag mismatch for {id}"
+            );
+            assert!(!label.is_empty(), "{id} missing label");
+            assert!(!desc.is_empty(), "{id} missing description");
+            assert!(!desc.contains('\u{2014}'), "em dash in {id} description");
+        }
+        // Every protected id is a real catalog entry (no orphans).
+        for id in PROTECTED_RULES {
+            assert!(cat_ids.contains(id), "protected id {id} not in catalog");
+        }
     }
 }

@@ -1,4 +1,4 @@
-// Orbit B-hyve cloud controller — WiFi Timer / Smart Indoor / XR / XD.
+// Orbit B-hyve cloud controller, WiFi Timer / Smart Indoor / XR / XD.
 //
 // Talks to api.orbitbhyve.com. There's no official documentation; the
 // endpoint set used here is the same one the official mobile + web
@@ -157,7 +157,7 @@ impl Bhyve {
                 .await
                 .map_err(|e| ControllerError::Transport(format!("bhyve decode: {e}")));
         }
-        // Unreachable — the loop returns or errors on every iteration.
+        // Unreachable, the loop returns or errors on every iteration.
         Err(ControllerError::Remote("bhyve retry exhausted".into()))
     }
 }

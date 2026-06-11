@@ -10,7 +10,7 @@
 // already the source of truth and the action POST tells HA to catch
 // up. The 10s refresher cycle's eventual snap arrival is a no-op
 // (same value). External-to-the-dashboard HA changes won't reflect
-// until page refresh — acceptable for thresholds set once a season.
+// until page refresh, acceptable for thresholds set once a season.
 
 use crate::ha::snapshot::IrrigationSnapshot;
 use leptos::prelude::*;

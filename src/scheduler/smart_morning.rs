@@ -25,7 +25,11 @@
 //      closes.
 //   6. If snapshot.skip_check.will_skip, log a skip row per zone with
 //      source = "smart_morning" + the verdict reason, mark fired, return.
-//   7. Otherwise iterate zones with planned_run_seconds > 0. For each:
+//   7. Otherwise iterate zones with planned_run_seconds > 0. A zone
+//      whose per-zone verdict is a non-global "skip" (soil saturation,
+//      custom condition) is recorded as a skip row with that reason and
+//      NOT dispatched; global skips never reach here (step 6). For each
+//      remaining zone:
 //      split the zone's runtime via engine::cycle_soak so clay-soil
 //      zones get cycle-and-soak treatment, then dispatch each segment
 //      sequentially via controller.run_zone(slug, seg.run_seconds).
@@ -107,7 +111,7 @@ fn snapshot_is_fresh(last_refresh_epoch: i64, now_epoch: i64) -> bool {
 
 /// Spawn the smart-morning dispatcher. Returns immediately; the task
 /// runs for the lifetime of the process. Safe to call with location
-/// = (0.0, 0.0) — the formula still produces a finite sunrise; in
+/// = (0.0, 0.0), the formula still produces a finite sunrise; in
 /// practice main.rs always passes a real lat/lon from the loaded toml.
 pub fn spawn(
     irrigation_store: Arc<IrrigationStore>,
@@ -244,7 +248,7 @@ pub fn spawn(
 
             // Freshness gate: never water (or record a verdict) from a
             // stale or never-populated snapshot. Do NOT mark the day
-            // fired — the refresher usually recovers within seconds of
+            // fired, the refresher usually recovers within seconds of
             // boot, and the catch-up path retries until grace expires.
             if !snapshot_is_fresh(snap.last_refresh_epoch, now_utc.timestamp()) {
                 if stale_row_date != Some(today) {
@@ -290,7 +294,7 @@ pub fn spawn(
             if late {
                 info!(
                     past_finish_s,
-                    "smart morning: catch-up — missed today's window, attempting late dispatch"
+                    "smart morning: catch-up, missed today's window, attempting late dispatch"
                 );
             }
             dispatch_today(
@@ -382,8 +386,29 @@ async fn dispatch_today(
             return;
         }
     };
+
+    // Per-zone verdict enforcement (2026-06-11 incident): decide_per_zone
+    // correctly marked saturated zones "skip", but dispatch used to run
+    // every zone with planned seconds anyway. Resolve the skip set up
+    // front so the announced totals count only zones that will water;
+    // the loop below records each skip in the runs history.
+    let per_zone_skip_count = snap
+        .zones
+        .iter()
+        .filter(|z| z.planned_run_seconds > 0 && zone_skip_verdict(snap, z).is_some())
+        .count();
+    let per_zone_skip_secs: u64 = snap
+        .zones
+        .iter()
+        .filter(|z| z.planned_run_seconds > 0 && zone_skip_verdict(snap, z).is_some())
+        .map(|z| z.planned_run_seconds as u64)
+        .sum();
+    let zones_to_run = zones_to_run.saturating_sub(per_zone_skip_count);
+    let total_dispatch_s = total_dispatch_s.saturating_sub(per_zone_skip_secs);
+
     info!(
         zones = zones_to_run,
+        zone_verdict_skips = per_zone_skip_count,
         total_s = total_dispatch_s,
         dry_run,
         is_catch_up,
@@ -420,6 +445,48 @@ async fn dispatch_today(
 
     for zone in snap.zones.iter() {
         if zone.planned_run_seconds == 0 {
+            continue;
+        }
+        // Per-zone verdict skip: this zone's own engine verdict (soil
+        // saturation, custom condition) says no, even though the
+        // yard-wide verdict was "run". Record it through the same runs
+        // mechanism as the other scheduler-only rows (skips, missed
+        // windows, manual stops) so History shows the per-zone reason.
+        // Skip enforcement only: multipliers/extends are not applied at
+        // dispatch, and manual runs (scheduler::manual) are untouched.
+        if let Some(v) = zone_skip_verdict(snap, zone) {
+            if dry_run {
+                info!(
+                    zone = %zone.slug,
+                    source = %v.source,
+                    reason = %v.reason,
+                    "smart morning [DRY_RUN]: would skip zone on per-zone verdict"
+                );
+            } else {
+                info!(
+                    zone = %zone.slug,
+                    source = %v.source,
+                    reason = %v.reason,
+                    "smart morning: per-zone verdict skip"
+                );
+            }
+            if let Some(rs) = runs {
+                let row = NewRun {
+                    zone_slug: zone.slug.clone(),
+                    start_epoch: now_utc.timestamp(),
+                    source: "smart_morning".into(),
+                    controller_id: controller.id().to_string(),
+                    planned_duration_s: zone.planned_run_seconds,
+                    skip_reason: None,
+                    et0_mm: None,
+                    etc_mm: None,
+                    cycle_index: None,
+                    cycle_count: None,
+                };
+                if let Err(e) = rs.insert_skipped(row, v.reason.clone()).await {
+                    warn!(zone = %zone.slug, error = %e, "smart morning: per-zone skip-row insert failed");
+                }
+            }
             continue;
         }
         let duration_s = zone.planned_run_seconds;
@@ -512,6 +579,22 @@ async fn dispatch_today(
             }
         }
     }
+}
+
+/// The per-zone skip verdict that must block this zone's dispatch, if
+/// any. Only non-global SKIP verdicts qualify: global-source skips were
+/// already handled for the whole run by the aggregate skip_check (so
+/// enforcing them here would double-record), and run/run_extended
+/// verdicts never block. Reads the zone's back-filled verdict first,
+/// falling back to the snapshot-level zone_verdicts list.
+fn zone_skip_verdict<'a>(
+    snap: &'a crate::ha::snapshot::IrrigationSnapshot,
+    zone: &'a crate::ha::snapshot::ZoneState,
+) -> Option<&'a crate::ha::snapshot::ZoneVerdict> {
+    zone.verdict
+        .as_ref()
+        .or_else(|| snap.zone_verdicts.iter().find(|v| v.zone_slug == zone.slug))
+        .filter(|v| v.verdict == "skip" && v.source != "global")
 }
 
 /// Sleep `secs`, polling the dispatch gate every couple of seconds.
@@ -667,6 +750,76 @@ mod tests {
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].run_seconds, 1500);
         assert_eq!(plan[0].soak_seconds, 0);
+    }
+
+    fn verdict(slug: &str, verdict: &str, source: &str) -> crate::ha::snapshot::ZoneVerdict {
+        crate::ha::snapshot::ZoneVerdict {
+            zone_slug: slug.into(),
+            zone_name: slug.into(),
+            verdict: verdict.into(),
+            reason: "Soil saturated (76% at or above the 65% threshold)".into(),
+            source: source.into(),
+            multiplier: 1.0,
+        }
+    }
+
+    fn zone_with(
+        slug: &str,
+        v: Option<crate::ha::snapshot::ZoneVerdict>,
+    ) -> crate::ha::snapshot::ZoneState {
+        crate::ha::snapshot::ZoneState {
+            slug: slug.into(),
+            name: slug.into(),
+            planned_run_seconds: 600,
+            verdict: v,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn zone_skip_verdict_enforces_soil_and_condition_skips_only() {
+        let snap = crate::ha::snapshot::IrrigationSnapshot::default();
+        // Soil-saturation skip blocks dispatch (the incident case).
+        let z = zone_with(
+            "back_yard_shrubs",
+            Some(verdict("back_yard_shrubs", "skip", "soil_saturation")),
+        );
+        assert!(zone_skip_verdict(&snap, &z).is_some());
+        // Custom-condition skip blocks too.
+        let z = zone_with(
+            "front_yard",
+            Some(verdict("front_yard", "skip", "condition")),
+        );
+        assert!(zone_skip_verdict(&snap, &z).is_some());
+        // Global-source skip is the aggregate ladder's job, not the
+        // per-zone loop's (skip_check.will_skip already returned).
+        let z = zone_with("back_yard", Some(verdict("back_yard", "skip", "global")));
+        assert!(zone_skip_verdict(&snap, &z).is_none());
+        // Run / run_extended verdicts never block.
+        let z = zone_with("side_yard", Some(verdict("side_yard", "run", "global")));
+        assert!(zone_skip_verdict(&snap, &z).is_none());
+        let z = zone_with(
+            "side_yard",
+            Some(verdict("side_yard", "run_extended", "condition")),
+        );
+        assert!(zone_skip_verdict(&snap, &z).is_none());
+        // No verdict anywhere: nothing to enforce.
+        let z = zone_with("side_yard", None);
+        assert!(zone_skip_verdict(&snap, &z).is_none());
+    }
+
+    #[test]
+    fn zone_skip_verdict_falls_back_to_snapshot_zone_verdicts() {
+        // The zone's own back-filled copy is absent but the snapshot-level
+        // list has the skip: enforcement still applies.
+        let mut snap = crate::ha::snapshot::IrrigationSnapshot::default();
+        snap.zone_verdicts = vec![verdict("back_yard_shrubs", "skip", "soil_saturation")];
+        let z = zone_with("back_yard_shrubs", None);
+        let v = zone_skip_verdict(&snap, &z).expect("fallback lookup must hit");
+        assert_eq!(v.source, "soil_saturation");
+        // A different zone is unaffected.
+        let z = zone_with("front_yard", None);
+        assert!(zone_skip_verdict(&snap, &z).is_none());
     }
 
     #[test]

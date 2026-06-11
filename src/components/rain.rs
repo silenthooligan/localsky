@@ -10,7 +10,7 @@ pub fn RainPanel(snap: ReadSignal<Snapshot>) -> impl IntoView {
         2 => "hail",
         _ => "none",
     };
-    // Cap the visual gauge at 1 in/hr — heavier than that pegs the meter.
+    // Cap the visual gauge at 1 in/hr, heavier than that pegs the meter.
     let pct = move || (snap.get().rain_intensity_in_hr / 1.0 * 100.0).clamp(0.0, 100.0);
 
     view! {

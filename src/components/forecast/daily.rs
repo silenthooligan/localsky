@@ -54,7 +54,7 @@ fn DailyCard(entry: DailyEntry, is_today: bool, prefs: UnitPrefs) -> impl IntoVi
             .timestamp_opt(entry.time_epoch, 0)
             .single()
             .map(|d: DateTime<Local>| d.format("%a").to_string())
-            .unwrap_or_else(|| "—".to_string())
+            .unwrap_or_else(|| "-".to_string())
     };
     let date_label = Local
         .timestamp_opt(entry.time_epoch, 0)

@@ -1,4 +1,4 @@
-// SettingsDevices — the Music-Assistant-style unified device hub. Every
+// SettingsDevices, the Music-Assistant-style unified device hub. Every
 // gateway, hub, controller, cloud account, and HA bridge LocalSky knows about,
 // each an expandable card. Native devices (sources + controllers) are editable
 // in place via the shared SourceEditorPanel / ControllerEditorPanel; HA-origin

@@ -1,7 +1,7 @@
-// <LineChart/> — multi-series SVG line chart. SVG draws the paths +
+// <LineChart/>, multi-series SVG line chart. SVG draws the paths +
 // gridlines; HTML draws the legend and axis labels (the pattern the
 // history panel already documents: vector data in SVG, text in HTML so
-// it inherits fonts/tokens and stays crisp). Pure render — every series
+// it inherits fonts/tokens and stays crisp). Pure render, every series
 // is pre-computed (x, y) data, auto-scaled across all series so they
 // share one coordinate space. Reused by History (YoY, correlation),
 // Simulator (baseline vs hypothetical), and zone soil-moisture history.
@@ -111,6 +111,17 @@ pub fn LineChart(
     // when the pointer is outside. Hover only ever changes client-side,
     // so SSR and the first hydrate frame render no crosshair (DOM match).
     let hover: RwSignal<Option<f64>> = RwSignal::new(None);
+    // Up to five evenly spaced x labels rendered as a real axis row
+    // (the full label set still drives the scrub tooltip).
+    let x_ticks: Vec<String> = if x_labels.len() >= 2 {
+        let n = x_labels.len();
+        let count = 5.min(n);
+        (0..count)
+            .map(|i| x_labels[(i * (n - 1)) / (count - 1)].clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
     let lookup = StoredValue::new((series.clone(), x_labels, y_unit.clone()));
 
     let on_move = move |ev: leptos::ev::PointerEvent| {
@@ -215,6 +226,11 @@ pub fn LineChart(
                 })}
                 {scrub}
             </div>
+            {(!empty && !x_ticks.is_empty()).then(|| view! {
+                <div class="ui-line-chart__xaxis">
+                    {x_ticks.into_iter().map(|t| view! { <span>{t}</span> }).collect_view()}
+                </div>
+            })}
             {(legend && !legend_items.is_empty()).then(|| view! {
                 <div class="ui-line-chart__legend">
                     {legend_items.into_iter().map(|(label, color, dashed)| view! {
@@ -247,7 +263,14 @@ fn bounds(pts: &[(f64, f64)]) -> (f64, f64, f64, f64) {
         ymin = ymin.min(y);
         ymax = ymax.max(y);
     }
-    // Pad the y-range a touch so peaks don't clip the top edge.
+    // Pad the y-range a touch so peaks don't clip the top edge; never
+    // pad below zero for non-negative data (a "-11 min" axis label is
+    // nonsense).
     let pad = (ymax - ymin) * 0.08;
-    (xmin, xmax, ymin - pad, ymax + pad)
+    let padded_min = if ymin >= 0.0 {
+        (ymin - pad).max(0.0)
+    } else {
+        ymin - pad
+    };
+    (xmin, xmax, padded_min, ymax + pad)
 }

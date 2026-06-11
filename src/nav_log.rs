@@ -1,8 +1,8 @@
 // In-page nav debug log. A small ring buffer of recent step strings
 // rendered in a fixed strip at the bottom of every page, so a user
 // on a phone (where dev tools is awkward) can see exactly what
-// happens when they tap a route tab — handler fire, prevent_default,
-// navigate call, return, route render — without leaving the page.
+// happens when they tap a route tab, handler fire, prevent_default,
+// navigate call, return, route render, without leaving the page.
 //
 // Wire-up: app.rs creates a single (read, write) signal at top
 // level, provides the ReadSignal as context for the rendered

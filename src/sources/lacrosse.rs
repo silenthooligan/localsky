@@ -1,4 +1,4 @@
-// LaCrosse View cloud source — lacrosseview.com.
+// LaCrosse View cloud source, lacrosseview.com.
 //
 // LaCrosse Technology stations with the View Gateway (or "View" badge
 // on newer all-in-one stations like the LTV-WSDTH04) upload to
@@ -20,7 +20,7 @@
 // open-source HACS/HA integrations have surfaced it; we hard-code it
 // here as well. Same trade-off as the Bhyve mobile-app endpoints.
 //
-// Cadence: 5 minutes — LaCrosse stations themselves only update the
+// Cadence: 5 minutes, LaCrosse stations themselves only update the
 // cloud every 5-10 min, so faster polling produces dupes.
 
 use std::sync::Arc;

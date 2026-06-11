@@ -1,8 +1,8 @@
-// MetNorway (met.no) weather source — api.met.no/weatherapi/locationforecast.
+// MetNorway (met.no) weather source, api.met.no/weatherapi/locationforecast.
 //
 // Free, no API key. Global coverage. Requires a descriptive User-Agent
 // per met.no terms of service. The compact endpoint returns ~9 days of
-// hourly forecast in a single response — generous for free data.
+// hourly forecast in a single response, generous for free data.
 //
 // Endpoint:
 //   GET /weatherapi/locationforecast/2.0/compact?lat={lat}&lon={lon}

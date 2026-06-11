@@ -1,4 +1,4 @@
-// <StatTile/> — label + big number + unit, with an optional delta arrow
+// <StatTile/>, label + big number + unit, with an optional delta arrow
 // and an optional inline sparkline. The unit of the new dense dashboards
 // (weather telemetry + irrigation KPIs). Pure render.
 

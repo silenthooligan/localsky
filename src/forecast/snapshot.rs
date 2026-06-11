@@ -62,8 +62,10 @@ pub struct ForecastSnapshot {
 
 /// "Significant" rain threshold for the days-since-rain counter, in
 /// inches. Same floor as the existing already-wet rule so the
-/// counter and the skip-check agree on what counts as "wet."
-const SIGNIFICANT_RAIN_IN: f64 = 0.05;
+/// counter and the skip-check agree on what counts as "wet." Pub so the
+/// refresher's observed-rain counter (forecast_observations) applies
+/// the exact same floor as the model-based counter below.
+pub const SIGNIFICANT_RAIN_IN: f64 = 0.05;
 
 impl ForecastSnapshot {
     /// Sum of precipitation over the next `n` hourly entries, in inches.
@@ -121,9 +123,9 @@ impl ForecastSnapshot {
     /// Days since the last day with significant rain (≥ 0.05"). Walks
     /// `past_daily` newest-first, then folds in today's accumulated
     /// rain via `today_rain_in`. Returns:
-    ///   0  — already wet today,
-    ///   1  — yesterday was wet but today isn't yet,
-    ///   N  — N consecutive past days dry, today dry,
+    ///   0 , already wet today,
+    ///   1 , yesterday was wet but today isn't yet,
+    ///   N , N consecutive past days dry, today dry,
     ///   past_daily.len() + 1 (saturating) when no past day was wet.
     pub fn days_since_significant_rain(&self, today_rain_in: f64) -> u32 {
         if today_rain_in >= SIGNIFICANT_RAIN_IN {

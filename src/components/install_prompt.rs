@@ -4,7 +4,7 @@
 //   1. The browser fired a `beforeinstallprompt` event (Chrome / Edge /
 //      Samsung Internet on Android + desktop Chrome). We capture the event,
 //      stash it, and reveal a "Install app" button that calls .prompt()
-//      on tap — that's the only way to invoke the native UA install dialog.
+//      on tap, that's the only way to invoke the native UA install dialog.
 //
 //   2. We're on iOS Safari, not yet running standalone, and the user hasn't
 //      dismissed the banner. iOS doesn't fire beforeinstallprompt; the only
@@ -164,7 +164,7 @@ fn trigger_native_install(mode: RwSignal<Mode>) {
         .ok()
         .filter(|v| !v.is_undefined() && !v.is_null());
     let Some(bip) = bip else {
-        // Lost the event somehow — fall back to iOS hint copy.
+        // Lost the event somehow, fall back to iOS hint copy.
         mode.set(Mode::Ios);
         return;
     };

@@ -148,7 +148,7 @@ impl LlmClient {
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
             return Err(ClientError::BadStatus(format!(
-                "{} — {}",
+                "{}, {}",
                 status,
                 truncate(&text, 240)
             )));

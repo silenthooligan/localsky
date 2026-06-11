@@ -1,4 +1,4 @@
-// Tempest cloud source — swd.weatherflow.com (WeatherFlow Tempest REST).
+// Tempest cloud source, swd.weatherflow.com (WeatherFlow Tempest REST).
 //
 // This adapter covers the use case where LocalSky can't reach the
 // Tempest hub on the same LAN (the Tempest hub is local; many users

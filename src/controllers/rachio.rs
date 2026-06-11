@@ -1,4 +1,4 @@
-// Rachio cloud controller — Gen 2 / Gen 3 / Smart Hose Timer.
+// Rachio cloud controller, Gen 2 / Gen 3 / Smart Hose Timer.
 //
 // Talks to api.rach.io/1/public via Bearer-token auth. Each LocalSky
 // zone slug is mapped to a Rachio zone UUID (the controller exposes
@@ -16,11 +16,11 @@
 //   - The public API has NO per-zone stop. The only stop op is
 //     `device/stop_water` (stops the whole controller). `stop_zone`
 //     here calls stop_water and emits a tracing::warn so operators
-//     know other concurrent zones (rare on Rachio — typically single
+//     know other concurrent zones (rare on Rachio, typically single
 //     active) will also stop.
 //   - Rate limit: ~1700 req/day per token. The status() poll honors
 //     the configured poll_interval_s (the schema doesn't expose it
-//     for Rachio yet — falls back to 60s here. Future: add field).
+//     for Rachio yet, falls back to 60s here. Future: add field).
 //   - Auth failures (401/403) map to ControllerError::AuthFailed.
 
 use std::collections::HashMap;
@@ -47,7 +47,7 @@ pub struct Rachio {
     config: RachioConfig,
     client: Client,
     /// Reverse map (zone uuid -> slug) computed from config at construction
-    /// for fast lookup during status() — Rachio returns zones by uuid.
+    /// for fast lookup during status(), Rachio returns zones by uuid.
     uuid_to_slug: HashMap<String, String>,
     /// Last successful status snapshot, used as a fallback when the
     /// device endpoint times out (Rachio's API can be flaky during
@@ -154,7 +154,7 @@ impl IrrigationController for Rachio {
             rain_sensor: true,
             master_valve: true,
             // Rachio fires zones sequentially by default but the
-            // `start_multiple` endpoint takes a sortOrder — the engine
+            // `start_multiple` endpoint takes a sortOrder, the engine
             // treats this as "sequential queue" not "parallel".
             multi_zone_parallel: false,
             history_query: true,
@@ -198,7 +198,7 @@ impl IrrigationController for Rachio {
             slug = %slug,
             "Rachio public API has no per-zone stop; calling device/stop_water (affects all running zones on this device)"
         );
-        // Validate slug is mapped — fail fast on typos rather than
+        // Validate slug is mapped, fail fast on typos rather than
         // surprise-stop the whole controller for an unknown zone.
         self.uuid_for(slug)?;
         self.put_json("/device/stop_water", json!({ "id": self.config.device_id }))
@@ -232,7 +232,7 @@ impl IrrigationController for Rachio {
             }
         };
 
-        // Parse Rachio's device shape — zones[].id (uuid), .zoneNumber,
+        // Parse Rachio's device shape, zones[].id (uuid), .zoneNumber,
         // .name, .enabled, .currentZone (currently running uuid at
         // device level).
         let current_zone_uuid = device
@@ -253,7 +253,7 @@ impl IrrigationController for Rachio {
             };
             let slug = match self.uuid_to_slug.get(&uuid) {
                 Some(s) => s.clone(),
-                None => continue, // zone not mapped — ignore
+                None => continue, // zone not mapped, ignore
             };
             let running = current_zone_uuid.as_deref() == Some(&uuid);
             let remaining_s = z
@@ -268,7 +268,7 @@ impl IrrigationController for Rachio {
                 last_run_epoch: z
                     .get("lastWateredDate")
                     .and_then(|v| v.as_i64())
-                    // Rachio returns ms — convert.
+                    // Rachio returns ms, convert.
                     .map(|ms| ms / 1000),
             });
         }
@@ -389,7 +389,7 @@ impl IrrigationController for Rachio {
             let Some(uuid) = z.get("id").and_then(|v| v.as_str()) else {
                 continue;
             };
-            // Skip disabled zones — they can't be watered.
+            // Skip disabled zones, they can't be watered.
             if z.get("enabled").and_then(|v| v.as_bool()) == Some(false) {
                 continue;
             }

@@ -39,13 +39,22 @@ pub enum PushEvent {
     /// Daily verdict computed (sent once per day on first verdict
     /// computation). `verdict` = "skip" | "run" | "run_extended".
     DailyVerdict { verdict: String, reason: String },
+    /// A configured soil probe stopped producing valid readings (see
+    /// the refresher's probe-fault detection). Sent once per probe per
+    /// process lifetime. `since_epoch` is the last valid reading; None
+    /// when the channel never produced one.
+    SoilProbeFault {
+        zone_name: String,
+        zone_slug: String,
+        since_epoch: Option<i64>,
+    },
 }
 
 #[derive(Clone, Serialize)]
 struct PushPayload {
     title: String,
     body: String,
-    /// Notification grouping tag — same tag replaces previous notification
+    /// Notification grouping tag, same tag replaces previous notification
     /// instead of stacking.
     tag: String,
     /// URL the notification opens when tapped. Defaults to /irrigation.
@@ -87,7 +96,7 @@ pub fn spawn_dispatcher(conn: Option<Arc<Mutex<Connection>>>) -> PushDispatcher 
 
         if cfg.is_none() {
             tracing::warn!(
-                "push: VAPID_* env vars missing — dispatcher running, but every event will be dropped silently. Generate keys + set env to enable."
+                "push: VAPID_* env vars missing, dispatcher running, but every event will be dropped silently. Generate keys + set env to enable."
             );
         }
 
@@ -184,6 +193,30 @@ fn render_payload(ev: &PushEvent) -> PushPayload {
                 body,
                 tag: "daily-verdict".to_string(),
                 url: "/irrigation".to_string(),
+            }
+        }
+        PushEvent::SoilProbeFault {
+            zone_name,
+            zone_slug,
+            since_epoch,
+        } => {
+            use chrono::TimeZone;
+            let body = match since_epoch
+                .and_then(|e| chrono::Local.timestamp_opt(e, 0).single())
+            {
+                Some(dt) => format!(
+                    "{zone_name} has reported no valid reading since {}. The saturation gate is running without it.",
+                    dt.format("%b %-d")
+                ),
+                None => format!(
+                    "{zone_name} has never reported a valid reading. The saturation gate is running without it."
+                ),
+            };
+            PushPayload {
+                title: "Soil probe offline".to_string(),
+                body,
+                tag: format!("probe-fault-{zone_slug}"),
+                url: "/sensors".to_string(),
             }
         }
     }

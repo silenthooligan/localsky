@@ -35,7 +35,7 @@ pub fn VerdictStrip(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                     // and the hydrate-initial Vec wouldn't reconcile cleanly
                     // through <For>'s keyed reconciler (SSR has 7 cells,
                     // hydrate starts with an empty Vec until the SSE
-                    // snapshot arrives — that's a structural mismatch the
+                    // snapshot arrives, that's a structural mismatch the
                     // <For> reconciler can't bridge without nuking the
                     // root subtree's other event handlers, which was
                     // killing the top-nav click handlers).

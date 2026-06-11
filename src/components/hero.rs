@@ -1,4 +1,4 @@
-// Weather hero — dense data strip, not a giant temperature billboard.
+// Weather hero, dense data strip, not a giant temperature billboard.
 //
 // Design: a single tier-1 panel that fits in ~140px vertical at desktop
 // widths. Two rows:
@@ -8,13 +8,13 @@
 //     │ ⛅   │ 72°  PARTLY SUNNY        │ feels 70°  · UV 4    │
 //     └──────┴──────────────────────────┴──────────────────────┘
 //
-//   row 2 (telemetry strip — single horizontal line of stats)
+//   row 2 (telemetry strip, single horizontal line of stats)
 //     ────────────────────────────────────────────────────────────
 //     HUM 58%   DEW 56°   WET 64°   WIND 8mph NE   RAIN 0.0in/hr
 //     PRESS 29.92↗
 //
 // The strip wraps to multiple rows on narrow viewports, but never adds
-// vertical breathing room inside the card — every pixel of card height
+// vertical breathing room inside the card, every pixel of card height
 // is used by data. Brand gradient accent stripe at the top.
 
 use crate::components::ui::Icon;
@@ -28,7 +28,7 @@ pub fn Hero(snap: ReadSignal<Snapshot>) -> impl IntoView {
     // Choose the headline glyph + label + accent from the live state.
     // Order matters: lightning > rain > hail > sun-by-irradiance > night.
     // Glyphs are themeable stroke icons (currentColor) tinted by accent,
-    // not multicolor emoji — they read correctly in dark/light/hc.
+    // not multicolor emoji, they read correctly in dark/light/hc.
     let condition = move || -> (&'static str, &'static str, &'static str) {
         let s = snap.get();
         if s.lightning_count_last_min > 0 || s.lightning_strikes_last_hour > 0 {
@@ -88,7 +88,7 @@ pub fn Hero(snap: ReadSignal<Snapshot>) -> impl IntoView {
 
     view! {
         <section class="hero panel is-tier-1" aria-label="Current weather">
-            // Row 1: the focal info — glyph + temp + condition + the
+            // Row 1: the focal info, glyph + temp + condition + the
             // two most-asked secondary stats inline.
             <div class="hero-focal">
                 {move || {
@@ -121,7 +121,7 @@ pub fn Hero(snap: ReadSignal<Snapshot>) -> impl IntoView {
                 </div>
             </div>
 
-            // Row 2: the telemetry strip. Six high-density stats —
+            // Row 2: the telemetry strip. Six high-density stats
             // monospace nums + uppercase meta labels. Single horizontal
             // line on wide screens, wraps to 2-3 rows on phones.
             <div class="hero-strip" role="list" aria-label="Current readings">

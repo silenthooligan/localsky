@@ -3,16 +3,16 @@
 // schedules...) shares a consistent visual language instead of every
 // page rolling its own list + button salad. Three pieces:
 //
-//   SettingsCard   — expandable item with header (name, badges) +
+//   SettingsCard  , expandable item with header (name, badges) +
 //                    click-to-expand details + action bar.
 //                    Replaces the old "settings-list__item--row" with
 //                    a real card surface that lets the user browse
 //                    config without entering edit mode.
-//   SettingsBadge  — semantic status pill (default, enabled, disabled,
+//   SettingsBadge , semantic status pill (default, enabled, disabled,
 //                    warning, danger). Color + text in one component.
-//   SettingsKv     — key-value display row for inside the expanded
+//   SettingsKv    , key-value display row for inside the expanded
 //                    details, monospace value, dimmed label.
-//   SettingsResult — the save-status message line shared verbatim by
+//   SettingsResult, the save-status message line shared verbatim by
 //                    every settings page (ok/err styling + role=status).
 
 use leptos::prelude::*;

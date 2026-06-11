@@ -1,7 +1,7 @@
-// Hunter Hydrawise cloud controller — HC v3 / HPC v6 / Pro-C upgrade
+// Hunter Hydrawise cloud controller, HC v3 / HPC v6 / Pro-C upgrade
 // module. Talks to app.hydrawise.com via the v1.5 "RESTful" API. Auth
 // is a per-account API key (Account > Settings > API in the customer
-// portal — surfaced after the user pastes the key into the wizard).
+// portal, surfaced after the user pastes the key into the wizard).
 //
 // Endpoints:
 //   GET /api/v1/setallzones.php?period_id=999&controller_id=X&api_key=K
@@ -22,7 +22,7 @@
 //     status() poll is on the engine's cadence; the engine adds its
 //     own minimum interval before re-polling, so we don't add our
 //     own here.
-//   - relay_id values are NOT zone numbers — they're stable Hydrawise
+//   - relay_id values are NOT zone numbers, they're stable Hydrawise
 //     relay IDs surfaced in statusschedule.php. The wizard's zone-scan
 //     populates `zone_relay_map`.
 
@@ -128,7 +128,7 @@ impl Hydrawise {
         // Hydrawise returns 200 OK with {"message":"error blah"} for
         // failures. Surface those as Remote.
         if let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
-            // Some success paths also include "message" — only treat
+            // Some success paths also include "message", only treat
             // as an error if the body lacks expected success keys.
             if v.get("relay_id").is_none()
                 && v.get("relays").is_none()

@@ -809,7 +809,7 @@ fn ZoneForm(
                     on:change=move |ev| new_soil_sensor.set(event_target_value(&ev))
                 >
                     <option value="" selected=move || new_soil_sensor.get().is_empty()>
-                        "(none — modeled bucket)"
+                        "(none, modeled bucket)"
                     </option>
                     {move || soil_sensor_opts.get().into_iter().map(|(id, label, _, _)| {
                         let cur = new_soil_sensor.get();
@@ -817,7 +817,7 @@ fn ZoneForm(
                         view! { <option value=id.clone() selected=sel>{label}</option> }
                     }).collect_view()}
                 </select>
-                // Live reading + origin of the assigned sensor — the "full
+                // Live reading + origin of the assigned sensor, the "full
                 // data picture" right in the zone, with a jump to manage it.
                 {move || {
                     let sel = new_soil_sensor.get();
@@ -826,13 +826,13 @@ fn ZoneForm(
                         ().into_any()
                     }; }
                     // Zones store the bare entity (sensor.x) while the soil feed
-                    // ids HA channels as ha:sensor.x — match on the bare id.
+                    // ids HA channels as ha:sensor.x, match on the bare id.
                     let bare = |s: &str| s.strip_prefix("ha:").unwrap_or(s).to_string();
                     let sel_bare = bare(&sel);
                     let opt = soil_sensor_opts.get().into_iter().find(|(id, ..)| bare(id) == sel_bare);
                     let (reading, origin) = match opt {
                         Some((_, _, pct, source)) => {
-                            let r = pct.map(|p| format!("{p:.0}%")).unwrap_or_else(|| "—".into());
+                            let r = pct.map(|p| format!("{p:.0}%")).unwrap_or_else(|| "-".into());
                             let o = if source == "home_assistant" { "Home Assistant" } else if source.is_empty() { "manual / HA entity" } else { "LocalSky native" };
                             (r, o.to_string())
                         }
@@ -1122,7 +1122,7 @@ fn ZoneCard(
                 .unwrap_or(70.0);
             format!("{s} (skip ≥ {sat:.0}%)")
         }
-        _ => "(none — modeled bucket)".to_string(),
+        _ => "(none, modeled bucket)".to_string(),
     };
     let ctrl_id_for_badges = ctrl_id.clone();
     let slug_kv = slug.clone();
