@@ -27,7 +27,6 @@ All notable changes to LocalSky are documented here. Format follows [Keep a Chan
 - Days-since-rain takes the min of the regional model and the station's own observed history
 - The yard-wide saturation gate names zones missing soil readings instead of going silently inapplicable
 - Scheduler no longer double-records completed runs
-- Em dashes removed from all product copy, including unicode-escaped ones
 - Title/subtitle spacing normalized across page headers, panels, and gate rows
 
 ## [0.2.0-beta.1] - 2026-06-10
