@@ -106,13 +106,22 @@
 .ayu .content { color: var(--ls-text); }
 .ayu blockquote {
   background: rgba(94, 200, 255, 0.04);
+  /* A closed panel: mdBook's base style draws only top/bottom rules,
+     which left the callout visually open on the right, reading as an
+     overflow. Full border + radius closes the shape. */
+  border: 1px solid rgba(94, 200, 255, 0.25);
   border-left: 3px solid var(--ls-accent);
+  border-radius: 8px;
+  padding-top: 4px;
+  padding-bottom: 4px;
   color: var(--ls-text-dim);
   /* Never wider than the content column regardless of contents. */
   max-width: 100%;
   box-sizing: border-box;
   overflow-wrap: anywhere;
+  overflow: hidden;
 }
+.ayu blockquote img { max-width: 100%; height: auto; }
 
 /* Tables: panel header + alternating row tint. */
 .ayu table thead {

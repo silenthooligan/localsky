@@ -108,7 +108,7 @@ Most home irrigation systems are either dumb timers or cloud tethered too. The c
 ### Controllers and integrations
 
 - **Multi-controller HAL**: OpenSprinkler direct, HA service call, ESPHome native (community), Rachio cloud (planned), DryRun for demo and tests
-- **Home Assistant optional**: outbound MQTT discovery auto-creates `sensor.localsky_*` entities; inbound passthrough is opt-in
+- **Home Assistant optional**: a native [HACS integration](https://localsky.io/docs/hacs) with zeroconf discovery and sub-second push entities, plus outbound MQTT discovery for integration-free setups
 - **Standalone sensor paths** (no HA needed): MQTT subscribe with JSON-path extraction, Ecowitt gateway local POST, and a generic HTTP webhook ingester for ESPHome or custom scripts
 - **Local LLM advisor**: Ollama auto-detect, llama.cpp, OpenAI-compatible (LM Studio, vLLM, any private gateway). Optional, never required.
 
@@ -142,6 +142,16 @@ Visit <http://localhost:8090>. The `LOCALSKY_DEMO=1` flag boots with simulated d
 For a real install, drop `LOCALSKY_DEMO`, mount your config volume, and visit `/setup`. The first-run wizard walks you through location, weather sources, controllers, and zones. See [the quick start](https://localsky.io/docs/getting-started) for a full walkthrough.
 
 If you only want the weather dashboard, leave the controllers list empty in the wizard. LocalSky will skip the irrigation surfaces entirely and run as a pure weather product.
+
+### Using Home Assistant?
+
+LocalSky stays the brain; Home Assistant gets the entities. Install the companion integration and a running LocalSky is discovered automatically, with sub-second push updates, a full weather entity, zone valves, and irrigation services:
+
+[![Open your Home Assistant instance and add the LocalSky integration repository to HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=silenthooligan&repository=localsky-hacs&category=integration)
+
+On Home Assistant OS or Supervised, the LocalSky server itself can also run as a one-click app instead of a separate Docker host:
+
+[![Add the LocalSky app repository to my Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fsilenthooligan%2Flocalsky-apps)
 
 ## Hardware compatibility
 
@@ -185,7 +195,7 @@ Full docs live in [`docs/`](docs/) and are built into an mdBook for online viewi
 - [Irrigation engine](https://localsky.io/docs/irrigation-engine), FAO-56 walkthrough with citations
 - [Grass species](https://localsky.io/docs/grass-species) and [soil textures](https://localsky.io/docs/soil-textures)
 - [Skip rules](https://localsky.io/docs/skip-rules), every rule in the ladder, explained
-- [HACS integration](https://localsky.io/docs/hacs), Home Assistant Community Store roadmap
+- [HACS integration](https://localsky.io/docs/hacs), pairing Home Assistant with a running LocalSky
 - [UX journey](https://localsky.io/docs/ux-journey), first-run, upgrades, hardware changes, config changes
 - [Launch checklist](https://localsky.io/docs/launch-checklist), gating criteria for the 0.1.0 cut
 
