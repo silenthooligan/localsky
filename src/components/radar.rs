@@ -60,9 +60,47 @@ fn coords() -> (f64, f64, u32) {
     (40.0, -75.0, 8)
 }
 
+/// True when the station sits inside IEM's n0r NEXRAD composite, which
+/// covers the contiguous US only (Alaska, Hawaii, and Puerto Rico have
+/// WSR-88D sites but are not in the composite). A generous CONUS
+/// bounding box rather than a coastline polygon: border users (southern
+/// Canada, northern Mexico) still get usable reflectivity from nearby
+/// US radars, while everyone else skips a layer that would only ever
+/// render empty tiles. radar.js reads the verdict from data-nexrad.
+fn nexrad_applicable(lat: f64, lon: f64) -> bool {
+    (21.0..=50.0).contains(&lat) && (-127.0..=-65.0).contains(&lon)
+}
+
+#[cfg(feature = "ssr")]
+fn default_layers() -> String {
+    use crate::config::FileConfigStore;
+    use std::sync::Arc;
+
+    // Same store-from-context read as coords(). The configured list
+    // (ui.radar.default_layers) seeds the layer set for browsers with
+    // no stored preference; radar.js persists per-browser toggles to
+    // localStorage, which then win over this list.
+    use_context::<Arc<FileConfigStore>>()
+        .and_then(|store| store.load_blocking())
+        .map(|cfg| cfg.ui.radar.default_layers.join(","))
+        .unwrap_or_else(|| "precip,nexrad,lightning".to_string())
+}
+
+#[cfg(not(feature = "ssr"))]
+fn default_layers() -> String {
+    "precip,nexrad,lightning".to_string()
+}
+
 #[component]
 pub fn RadarPanel() -> impl IntoView {
     let (lat, lon, zoom) = coords();
+    // The non-ssr coords() fallback (40.0, -75.0) sits inside the CONUS
+    // box, so the hydrate-side attribute mirrors the ssr default ("1").
+    let nexrad = if nexrad_applicable(lat, lon) {
+        "1"
+    } else {
+        "0"
+    };
     view! {
         <section class="panel radar-panel">
             <h2 class="panel-title">"Live Radar"</h2>
@@ -72,7 +110,9 @@ pub fn RadarPanel() -> impl IntoView {
                 aria-label="Precipitation radar centered on the station"
                 data-lat=lat.to_string()
                 data-lon=lon.to_string()
-                data-zoom=zoom.to_string()>
+                data-zoom=zoom.to_string()
+                data-nexrad=nexrad
+                data-default-layers=default_layers()>
             </div>
             // Mobile layer-chip row. radar.js populates this with one chip
             // per overlay when the viewport is <=760px and skips the in-map
@@ -92,5 +132,30 @@ pub fn RadarPanel() -> impl IntoView {
                 </a>
             </div>
         </section>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nexrad_applicable;
+
+    #[test]
+    fn conus_stations_get_nexrad() {
+        assert!(nexrad_applicable(28.5, -81.4)); // Orlando
+        assert!(nexrad_applicable(47.6, -122.3)); // Seattle
+    }
+
+    #[test]
+    fn southern_canada_kept_inside_the_box() {
+        // Toronto sits inside the bounding box on purpose: border users
+        // still get usable returns from nearby US radars.
+        assert!(nexrad_applicable(43.7, -79.4));
+    }
+
+    #[test]
+    fn outside_the_composite_skips_nexrad() {
+        assert!(!nexrad_applicable(38.7, -9.1)); // Lisbon
+        assert!(!nexrad_applicable(21.3, -157.9)); // Honolulu
+        assert!(!nexrad_applicable(61.2, -149.9)); // Anchorage
     }
 }

@@ -203,6 +203,21 @@ pub fn validate(cfg: &Config) -> ValidationReport {
         }
     }
 
+    // Radar default layers must come from the known overlay set. The
+    // frontend silently ignores unknown ids, so warn rather than block.
+    const VALID_RADAR_LAYERS: [&str; 4] = ["precip", "nexrad", "satellite", "lightning"];
+    for id in &cfg.ui.radar.default_layers {
+        if !VALID_RADAR_LAYERS.contains(&id.as_str()) {
+            r.warn(
+                "radar_layer_unknown",
+                format!(
+                    "ui.radar.default_layers entry '{id}' is not a known layer id \
+                     (valid: precip, nexrad, satellite, lightning) and is ignored"
+                ),
+            );
+        }
+    }
+
     r
 }
 
@@ -250,6 +265,23 @@ mod tests {
         );
         let r = validate(&cfg);
         assert!(r.errors.iter().any(|i| i.code == "zone_controller_missing"));
+    }
+
+    #[test]
+    fn unknown_radar_layer_warns_not_errors() {
+        let mut cfg = base();
+        cfg.ui.radar.default_layers.push("sharknado".into());
+        let r = validate(&cfg);
+        assert!(r.ok());
+        assert!(r.warnings.iter().any(|i| i.code == "radar_layer_unknown"));
+    }
+
+    #[test]
+    fn known_radar_layers_pass_clean() {
+        let mut cfg = base();
+        cfg.ui.radar.default_layers = vec!["precip".into(), "satellite".into()];
+        let r = validate(&cfg);
+        assert!(!r.warnings.iter().any(|i| i.code == "radar_layer_unknown"));
     }
 
     #[test]

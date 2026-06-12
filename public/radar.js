@@ -11,6 +11,12 @@
 // strike layer pulls from /api/snapshot every 30s — Tempest reports
 // distance to a strike but not bearing, so each strike is plotted as a
 // distance ring centered on the station rather than a point.
+//
+// Layer visibility persists per-browser via localStorage (PREFS_KEY
+// below), seeded from data-default-layers (config ui.radar.default_layers).
+// NEXRAD is region-gated server-side via data-nexrad: IEM's n0r composite
+// covers the contiguous US only, so outside that box the layer is never
+// even constructed.
 
 (function () {
   // The radar lives on a Leptos route that gets mounted/unmounted on
@@ -57,6 +63,24 @@
     var lat = parseFloat(el.dataset.lat || '40.0');
     var lon = parseFloat(el.dataset.lon || '-75.0');
     var zoom = parseInt(el.dataset.zoom || '8', 10);
+
+    // Server-side region verdict: data-nexrad="0" means the configured
+    // location sits outside IEM's n0r composite footprint (contiguous US
+    // only; Alaska, Hawaii, and Puerto Rico don't count). The "1"
+    // fallback mirrors the 40/-75 CONUS defaults above so a non-SSR
+    // mount stays self-consistent.
+    var nexradOk = (el.dataset.nexrad || '1') !== '0';
+    // Config-driven default layer ids (ui.radar.default_layers). The
+    // fallback matches the stock config, which in turn matches the old
+    // hardcoded precip + NEXRAD + strikes behavior. Only attribute
+    // ABSENCE falls back: a deliberately empty configured list renders
+    // data-default-layers="" and means start with everything off.
+    var defaultLayersAttr = el.dataset.defaultLayers;
+    if (defaultLayersAttr == null) defaultLayersAttr = 'precip,nexrad,lightning';
+    var defaultLayerIds = defaultLayersAttr
+      .split(',')
+      .map(function (s) { return s.trim(); })
+      .filter(function (s) { return s.length > 0; });
 
     // Mobile detection: the bottom-tab breakpoint matches the rest of the
     // app (760px). On a phone we move the zoom control to the bottom-right
@@ -173,10 +197,15 @@
     // pulls in. Outside that range the layer with no detail is faded
     // to near-zero so it doesn't muddy the picture.
     function rvOpacityForZoom(z) {
+      // Outside NEXRAD coverage there is nothing to crossfade into, so
+      // RainViewer holds full strength at every zoom (pixelated past
+      // z=7, but pixelated beats a blank map).
+      if (!nexradOk) return 0.65;
       var t = Math.max(0, Math.min(1, (z - 6) / 3));
       return 0.65 * (1 - t * 0.78);  // 0.65 at z=6 → 0.14 at z=9
     }
     function nxOpacityForZoom(z) {
+      if (!nexradOk) return 0;
       var t = Math.max(0, Math.min(1, (z - 6) / 3));
       return 0.75 * t;                // 0.0 at z=6 → 0.75 at z=9
     }
@@ -288,23 +317,30 @@
 
     // ---------- Layer 3: NEXRAD via Iowa Environmental Mesonet WMS ----------
 
-    var nexradLayer = L.tileLayer.wms(
-      'https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0r-t.cgi',
-      {
-        layers: 'nexrad-n0r-wmst',
-        format: 'image/png',
-        transparent: true,
-        opacity: 0,  // Zoom-blended below; starts hidden, fades in at z>=7.
-        minZoom: 0,
-        maxZoom: 19,
-        // WMS reprojects to whatever bounding box you ask, so this
-        // works at any zoom — but at z>=10 the source pixels are
-        // already past native NEXRAD resolution. The errorTileUrl
-        // covers the occasional Iowa Mesonet timeout.
-        errorTileUrl: TRANSPARENT_TILE,
-        attribution: 'NEXRAD via Iowa Mesonet',
-      }
-    );
+    // Outside the CONUS box the layer is never constructed: the WMS
+    // would just burn requests to paint nothing. Gating at construction
+    // (rather than hiding a control entry) also keeps it out of the
+    // chips and turns the zoom crossfade above into a no-op.
+    var nexradLayer = null;
+    if (nexradOk) {
+      nexradLayer = L.tileLayer.wms(
+        'https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0r-t.cgi',
+        {
+          layers: 'nexrad-n0r-wmst',
+          format: 'image/png',
+          transparent: true,
+          opacity: 0,  // Zoom-blended below; starts hidden, fades in at z>=7.
+          minZoom: 0,
+          maxZoom: 19,
+          // WMS reprojects to whatever bounding box you ask, so this
+          // works at any zoom, but at z>=10 the source pixels are
+          // already past native NEXRAD resolution. The errorTileUrl
+          // covers the occasional Iowa Mesonet timeout.
+          errorTileUrl: TRANSPARENT_TILE,
+          attribution: 'NEXRAD via Iowa Mesonet',
+        }
+      );
+    }
 
     // ---------- Layer 4: Local Tempest strike rings ----------
     //
@@ -369,12 +405,71 @@
     // doubles as documentation. The dedicated legend control below
     // explains the dBZ color ramp + glyph meaning in one place.
 
+    // Stable short ids per overlay label. Persistence below and the
+    // SSR'd default list both speak these ids, so the long display
+    // labels can be reworded freely without invalidating stored prefs.
+    var LAYER_IDS = {
+      'Precipitation (RainViewer · animated nowcast)': 'precip',
+      'NEXRAD reflectivity (US · Iowa Mesonet)': 'nexrad',
+      'Satellite IR (cloud cover, synoptic scale)': 'satellite',
+      'Tempest lightning rings ⚡ (last hour)': 'lightning',
+    };
+
     var overlays = {
       'Precipitation (RainViewer · animated nowcast)': radarLayer,
-      'NEXRAD reflectivity (US · Iowa Mesonet)': nexradLayer,
-      'Satellite IR (cloud cover, synoptic scale)': satLayer,
-      'Tempest lightning rings ⚡ (last hour)': strikeLayer,
     };
+    if (nexradLayer) {
+      overlays['NEXRAD reflectivity (US · Iowa Mesonet)'] = nexradLayer;
+    }
+    overlays['Satellite IR (cloud cover, synoptic scale)'] = satLayer;
+    overlays['Tempest lightning rings ⚡ (last hour)'] = strikeLayer;
+
+    // Layer visibility prefs, persisted per-browser. The key carries a
+    // .v1 suffix so a future schema change can move to .v2 and start
+    // clean instead of migrating (or mis-parsing) old blobs. Storage is
+    // best-effort throughout: private browsing throws on access, and a
+    // map with amnesia beats a map that crashed.
+    var PREFS_KEY = 'localsky.radar.layers.v1';
+
+    function loadLayerPrefs() {
+      try {
+        var raw = window.localStorage.getItem(PREFS_KEY);
+        if (!raw) return null;
+        var parsed = JSON.parse(raw);
+        // Shape check: must be a plain {id: bool} object. Arrays also
+        // typeof 'object' and would read every id as undefined (all
+        // layers off), so they fall back to defaults like any other
+        // malformed blob.
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return parsed;
+        }
+      } catch (e) { /* unavailable or unparseable: fall back to defaults */ }
+      return null;
+    }
+
+    var storedPrefs = loadLayerPrefs();
+
+    function saveLayerPrefs() {
+      // Write the full {id: bool} map, not a diff, so the stored blob
+      // is always a complete, self-describing snapshot.
+      var prefs = {};
+      Object.keys(LAYER_IDS).forEach(function (label) {
+        var id = LAYER_IDS[label];
+        if (overlays[label]) {
+          prefs[id] = map.hasLayer(overlays[label]);
+        } else if (storedPrefs && typeof storedPrefs[id] === 'boolean') {
+          // Region-gated layer (NEXRAD outside CONUS): carry the stored
+          // value through untouched so the pref survives a location
+          // change back into coverage.
+          prefs[id] = storedPrefs[id];
+        } else {
+          prefs[id] = false;
+        }
+      });
+      try {
+        window.localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+      } catch (e) { /* no storage: toggles still work, they just won't stick */ }
+    }
     // On mobile we ditch the in-map L.control.layers entirely (even
     // collapsed it covered the map when the user tapped the toggle, which
     // defeats the purpose of an interactive map). Instead we render a
@@ -440,22 +535,30 @@
       }
     }
 
-    // Default ON: animated precipitation + NEXRAD + Tempest strikes.
-    // The two reflectivity layers crossfade by zoom (RainViewer
-    // dominant at z<=7 for animation, NEXRAD dominant at z>=9 for
-    // detail) so the radar stays sharp wherever the user pans/zooms.
-    // IR is left off because it's a different visualization
-    // (cloud-top temp, not precipitation) and stacking it on top
-    // muddies the reflectivity colors.
-    radarLayer.addTo(map);
-    nexradLayer.addTo(map);
-    strikeLayer.addTo(map);
+    // Initial layer set: stored prefs win when present and parseable
+    // (the user's own toggles, written on every change below), else the
+    // SSR'd config defaults (ui.radar.default_layers; stock config is
+    // precip + NEXRAD + strikes). IR normally stays off because it's a
+    // different visualization (cloud-top temp, not precipitation) and
+    // stacking it on top muddies the reflectivity colors. The two
+    // reflectivity layers crossfade by zoom (RainViewer dominant at
+    // z<=7 for animation, NEXRAD dominant at z>=9 for detail) so the
+    // radar stays sharp wherever the user pans/zooms. A stored or
+    // defaulted nexrad pref is silently ignored when the layer is
+    // region-gated off, since it never made it into `overlays`.
+    Object.keys(overlays).forEach(function (label) {
+      var id = LAYER_IDS[label];
+      var on = storedPrefs
+        ? storedPrefs[id] === true
+        : defaultLayerIds.indexOf(id) !== -1;
+      if (on) overlays[label].addTo(map);
+    });
 
     // Refresh blend opacities whenever the map zoom settles. Also
     // run once on init so the initial render uses the right values.
     function applyZoomBlend() {
       var z = map.getZoom();
-      if (map.hasLayer(nexradLayer)) {
+      if (nexradLayer && map.hasLayer(nexradLayer)) {
         nexradLayer.setOpacity(nxOpacityForZoom(z));
       }
       if (map.hasLayer(radarLayer) && radarFrames.length > 0) {
@@ -467,10 +570,34 @@
     map.on('zoomend', applyZoomBlend);
     applyZoomBlend();
 
-    // Re-apply when the user toggles a layer back on so it picks up
-    // the right zoom-based opacity instead of the layer's default.
-    map.on('overlayadd', function (e) {
+    // Persist + re-blend on every layer toggle. Desktop's layer control
+    // fires the map-level overlayadd/overlayremove pair; the mobile
+    // chips call addLayer/removeLayer directly, which only guarantees
+    // layeradd/layerremove (overlay* is emitted by L.control.layers,
+    // which mobile doesn't build). Listening to all four and filtering
+    // to our own overlays covers both paths; LayerGroup children (radar
+    // frames, strike rings) also fire layeradd on the map and the
+    // filter drops them. Registered after the initial set is applied
+    // above so first paint doesn't count as a user toggle.
+    function isOverlayLayer(layer) {
+      return Object.keys(overlays).some(function (label) {
+        return overlays[label] === layer;
+      });
+    }
+    // Leaflet's map.remove() (the route-swap teardown path) detaches
+    // every layer one by one with this handler still attached, so
+    // without a guard each SPA nav away from the radar would persist a
+    // progressively-emptier snapshot and end by clobbering the real
+    // prefs with all-false. The map fires 'unload' before that removal
+    // loop; latch it and stop persisting.
+    var tearingDown = false;
+    map.on('unload', function () { tearingDown = true; });
+    map.on('overlayadd overlayremove layeradd layerremove', function (e) {
+      if (tearingDown || !isOverlayLayer(e.layer)) return;
+      // Re-apply blend when a reflectivity layer comes back so it picks
+      // up the right zoom-based opacity instead of the layer's default.
       if (e.layer === nexradLayer || e.layer === radarLayer) applyZoomBlend();
+      saveLayerPrefs();
     });
 
     // Custom legend control. Always visible, bottom-left on desktop —

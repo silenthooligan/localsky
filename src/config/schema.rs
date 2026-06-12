@@ -66,6 +66,10 @@ pub struct Config {
     /// Local history retention knobs (SQLite sensor_history pruning).
     #[serde(default)]
     pub persistence: PersistenceConfig,
+    /// UI presentation defaults (radar layer set today). Server-side
+    /// defaults only; per-browser overrides persist in localStorage.
+    #[serde(default)]
+    pub ui: UiConfig,
 }
 
 impl Default for Config {
@@ -87,8 +91,44 @@ impl Default for Config {
             network: NetworkConfig::default(),
             updates: UpdatesConfig::default(),
             persistence: PersistenceConfig::default(),
+            ui: UiConfig::default(),
         }
     }
+}
+
+// ----- UI preferences -----
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct UiConfig {
+    #[serde(default)]
+    pub radar: RadarUiConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RadarUiConfig {
+    /// Radar overlays enabled by default for a browser with no stored
+    /// preference. Valid ids: precip, nexrad, satellite, lightning.
+    /// Once a user toggles layers, their choice persists per-browser in
+    /// localStorage and wins over this list. The three-id default
+    /// matches the pre-config hardcoded behavior.
+    #[serde(default = "default_radar_layers")]
+    pub default_layers: Vec<String>,
+}
+
+impl Default for RadarUiConfig {
+    fn default() -> Self {
+        Self {
+            default_layers: default_radar_layers(),
+        }
+    }
+}
+
+fn default_radar_layers() -> Vec<String> {
+    vec![
+        "precip".to_string(),
+        "nexrad".to_string(),
+        "lightning".to_string(),
+    ]
 }
 
 // ----- Persistence retention -----
@@ -1579,4 +1619,42 @@ fn default_rain_skip_in() -> f64 {
 }
 fn default_frost_skip_soil_f() -> f64 {
     35.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn radar_ui_default_layers_match_legacy_hardcoded_trio() {
+        assert_eq!(
+            RadarUiConfig::default().default_layers,
+            ["precip", "nexrad", "lightning"]
+        );
+    }
+
+    #[test]
+    fn ui_block_deserializes_from_empty_toml() {
+        // Everything under [ui] is serde-defaulted, so a config written
+        // before the block existed must keep parsing unchanged.
+        let ui: UiConfig = toml::from_str("").unwrap();
+        assert_eq!(ui.radar.default_layers, ["precip", "nexrad", "lightning"]);
+    }
+
+    #[test]
+    fn config_without_ui_block_gets_radar_defaults() {
+        let cfg: Config = toml::from_str(
+            r#"
+            schema_version = 1
+            [deployment.location]
+            lat = 28.5
+            lon = -81.4
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.ui.radar.default_layers,
+            ["precip", "nexrad", "lightning"]
+        );
+    }
 }
