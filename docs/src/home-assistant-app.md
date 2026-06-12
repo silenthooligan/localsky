@@ -11,11 +11,13 @@
 >   instead; it is the exact same software, and everything else in these
 >   docs applies unchanged.
 
-If you run Home Assistant OS, you can skip Docker entirely: LocalSky ships
-as a Home Assistant app. One click adds the repository, one click installs,
-and the Supervisor manages the container, updates, and backups from then
-on. It is the same released LocalSky image documented everywhere else in
-these docs, packaged for the app store.
+Docker is LocalSky's preferred install method (the
+[quick start](getting-started.md)), but several platforms are supported,
+and this app is the convenience option for Home Assistant OS: one click
+adds the repository, one click installs, and the Supervisor manages the
+container, updates, and backups from then on. It is the exact same
+released LocalSky image documented everywhere else in these docs, packaged
+for the app store.
 
 ## Which piece is which
 

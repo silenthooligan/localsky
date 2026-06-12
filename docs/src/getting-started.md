@@ -2,7 +2,7 @@
 
 This guide takes you from "no LocalSky installed" to "watching real weather and managing real zones" in about 15 minutes. Two paths: **Demo mode** if you just want to see the UI, and **Real install** if you have hardware.
 
-> **Running Home Assistant OS?** Skip Docker entirely: LocalSky installs as a [Home Assistant app](home-assistant-app.md) in one click, wizard and all. (Home Assistant OS and Supervised installs only; the app store does not exist on HA Container/Core, so those stay with the Docker install below.)
+> **Docker is the preferred way to run LocalSky**, and it is what this guide covers. That said, several platforms are supported, and if you run Home Assistant OS there is a convenience option: LocalSky also installs as a [Home Assistant app](home-assistant-app.md) in one click, wizard and all, using the exact same image. (Home Assistant OS and Supervised installs only; the app store does not exist on HA Container/Core, so those use the Docker install below.)
 >
 > [![Add the LocalSky app repository to my Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fsilenthooligan%2Flocalsky-apps)
 
