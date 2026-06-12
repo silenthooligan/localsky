@@ -83,7 +83,7 @@ pub fn LoginPage() -> impl IntoView {
             match result {
                 Ok(()) => {
                     if let Some(win) = web_sys::window() {
-                        let _ = win.location().set_href("/");
+                        let _ = win.location().set_href(&crate::base::url("/"));
                     }
                 }
                 Err(e) => {

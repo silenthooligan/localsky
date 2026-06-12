@@ -1,20 +1,18 @@
 // Single source of truth for the irrigation zone list.
 //
 // The runtime learns the zones at boot from one of three sources, in
-// priority order:
+// priority order (resolved in main.rs, passed into spawn_refresher):
 //
 //   1. The config file (config.zones) when /data/localsky.toml exists.
-//      The wizard writes this on first-run. Future iterations will
-//      consume the per-zone metadata directly; today the refresher
-//      uses only the keys.
+//      The wizard writes this on first-run; `from_pairs` normalizes the
+//      keys (hyphens -> underscores) so the list matches the snapshot
+//      and scheduler slugs.
 //   2. The LOCALSKY_ZONES env var. CSV of either bare slugs
 //      ("back_yard,front_yard") or "slug:Display Name" pairs
-//      ("back_yard:Back Yard,front_yard:Front Yard"). Operators with
-//      more or fewer than the default four zones can override without
-//      a recompile.
-//   3. The four legacy slugs the homelab fleet was originally written
-//      against. Used when neither of the above is present so existing
-//      deployments stay working.
+//      ("back_yard:Back Yard,front_yard:Front Yard"). Lets operators
+//      override without a recompile.
+//   3. Nothing. A fresh unconfigured install resolves zero zones; the
+//      UI shows empty states until the wizard writes the config.
 
 use std::env;
 
@@ -33,15 +31,22 @@ impl ZoneIdent {
     }
 }
 
-/// Default zone list used when nothing else is configured. Matches the
-/// legacy hardcoded fleet.
-fn legacy_default() -> Vec<ZoneIdent> {
-    vec![
-        ZoneIdent::new("back_yard", "Back Yard"),
-        ZoneIdent::new("front_yard", "Front Yard"),
-        ZoneIdent::new("side_yard", "Side Yard"),
-        ZoneIdent::new("back_yard_shrubs", "Back Yard Shrubs"),
-    ]
+/// Build the zone list from config (slug, display_name) pairs. Slugs are
+/// underscore-normalized so the list matches the snapshot + schedulers
+/// (config keys may be hyphenated, e.g. "back-yard"). An empty display
+/// name falls back to a humanized slug.
+pub fn from_pairs<'a>(pairs: impl Iterator<Item = (&'a str, &'a str)>) -> Vec<ZoneIdent> {
+    pairs
+        .map(|(slug, name)| {
+            let slug = slug.replace('-', "_");
+            let display = if name.trim().is_empty() {
+                humanize(&slug)
+            } else {
+                name.trim().to_string()
+            };
+            ZoneIdent::new(slug, display)
+        })
+        .collect()
 }
 
 /// Derive a human-friendly display name from a slug by replacing
@@ -77,19 +82,13 @@ fn parse_env(raw: &str) -> Vec<ZoneIdent> {
         .collect()
 }
 
-/// Resolve the active zone list. Reads LOCALSKY_ZONES first; otherwise
-/// returns the legacy default.
+/// Resolve the active zone list from the environment. Reads LOCALSKY_ZONES;
+/// returns an empty list when unset (fresh unconfigured install). Callers
+/// with a parsed config should prefer `from_pairs(config.zones)`.
 pub fn configured() -> Vec<ZoneIdent> {
     match env::var("LOCALSKY_ZONES") {
-        Ok(s) => {
-            let parsed = parse_env(&s);
-            if parsed.is_empty() {
-                legacy_default()
-            } else {
-                parsed
-            }
-        }
-        Err(_) => legacy_default(),
+        Ok(s) => parse_env(&s),
+        Err(_) => Vec::new(),
     }
 }
 

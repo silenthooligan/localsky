@@ -48,7 +48,7 @@ fn MobileZoneRow(zone: ZoneState) -> impl IntoView {
         ev.prevent_default();
         log_nav(format!("zone-row tap: {}", &slug_for_nav));
         navigate(
-            &format!("/irrigation/zone/{}", &slug_for_nav),
+            &crate::base::url(&format!("/irrigation/zone/{}", &slug_for_nav)),
             NavigateOptions::default(),
         );
     };

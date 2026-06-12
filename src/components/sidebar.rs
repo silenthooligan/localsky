@@ -170,7 +170,9 @@ fn NavLink(
 ) -> impl IntoView {
     let loc = use_location();
     let active_class = move || {
-        let path = loc.pathname.get();
+        // route_path strips any ingress/base prefix so the compare against
+        // route literals holds in both serving modes.
+        let path = crate::base::route_path(&loc.pathname.get());
         // Exact match for the root route to keep Weather from
         // light-housing on /irrigation/zone/* and /settings/*.
         let is_active = if href == "/" {
@@ -198,7 +200,7 @@ fn NavLink(
         }
         ev.prevent_default();
         drawer.set(false);
-        navigate(href, NavigateOptions::default());
+        navigate(&crate::base::url(href), NavigateOptions::default());
     };
 
     view! {

@@ -92,7 +92,7 @@ pub fn ZoneCard(
         let mobile = is_mobile.map(|s| s.get_untracked()).unwrap_or(false);
         if mobile {
             navigate(
-                &format!("/zones/{nav_slug}"),
+                &crate::base::url(&format!("/zones/{nav_slug}")),
                 leptos_router::NavigateOptions::default(),
             );
         } else {

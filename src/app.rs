@@ -255,11 +255,20 @@ pub fn App() -> impl IntoView {
         });
     }
 
+    // Router base: under an ingress prefix the browser's location includes
+    // the prefix, so the client router must strip it before matching. The
+    // server receives prefix-stripped paths and must match with no base.
+    let router_base = if cfg!(feature = "ssr") {
+        String::new()
+    } else {
+        crate::base::base_path()
+    };
+
     view! {
-        <Stylesheet id="leptos" href="/pkg/localsky.css"/>
+        <Stylesheet id="leptos" href=crate::base::url("/pkg/localsky.css")/>
         <Title text="LocalSky"/>
 
-        <Router>
+        <Router base=router_base>
             <div class="app-shell">
                 // Skip link lives inside the hydration root. Putting it as a
                 // sibling of <App/> in the body shell desyncs SSR vs hydrate
@@ -556,18 +565,78 @@ fn analytics_tag() -> Option<impl IntoView> {
 }
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {
+    // Ingress/prefix support (see src/base.rs). The prefix is read from the
+    // per-request X-Ingress-Path header; "" for direct access. It feeds:
+    //   - HydrationScripts root (prefixed /pkg/* asset URLs),
+    //   - the head's static asset links,
+    //   - a <meta> tag the hydrated client reads back,
+    //   - a fetch/EventSource shim so the WASM app's root-relative network
+    //     calls are translated at the boundary (no per-call-site changes).
+    // The PWA manifest is only linked unprefixed: installing the PWA from
+    // inside an embedded ingress panel is not a meaningful flow, and the
+    // service worker is likewise skipped under a prefix (see lib.rs).
+    let base = crate::base::base_path();
+    let manifest_link = base
+        .is_empty()
+        .then(|| view! { <link rel="manifest" href="/manifest.webmanifest"/> });
+    // base is sanitized to [A-Za-z0-9/_-.] so single-quoted embedding is
+    // injection-safe.
+    let shim = if base.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "(function(){{\
+               var B='{base}';\
+               var f=window.fetch;\
+               window.fetch=function(i,n){{\
+                 try{{\
+                   if(typeof i==='string'||i instanceof URL){{\
+                     var s=String(i);\
+                     if(s[0]==='/'&&s[1]!=='/'&&s.indexOf(B+'/')!==0)i=B+s;\
+                   }}else if(i instanceof Request){{\
+                     var u=new URL(i.url);\
+                     if(u.origin===location.origin&&u.pathname.indexOf(B+'/')!==0&&u.pathname!==B){{\
+                       i=new Request(B+u.pathname+u.search+u.hash,i);\
+                     }}\
+                   }}\
+                 }}catch(e){{}}\
+                 return f.call(this,i,n);\
+               }};\
+               var E=window.EventSource;\
+               if(E){{\
+                 var W=function(u,c){{\
+                   var s=String(u);\
+                   if(s[0]==='/'&&s[1]!=='/'&&s.indexOf(B+'/')!==0)s=B+s;\
+                   return new E(s,c);\
+                 }};\
+                 W.prototype=E.prototype;\
+                 window.EventSource=W;\
+               }}\
+               document.addEventListener('click',function(ev){{\
+                 var a=ev.target&&ev.target.closest?ev.target.closest('a[href]'):null;\
+                 if(!a)return;\
+                 var h=a.getAttribute('href');\
+                 if(h&&h[0]==='/'&&h[1]!=='/'&&h.indexOf(B+'/')!==0&&h!==B){{\
+                   a.setAttribute('href',B+h);\
+                 }}\
+               }},true);\
+             }})();"
+        )
+    };
     view! {
         <!DOCTYPE html>
         <html lang="en">
             <head>
                 <meta charset="utf-8"/>
                 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+                <meta name="localsky-base" content=base.clone()/>
+                <script>{shim}</script>
                 <AutoReload options=options.clone() />
-                <HydrationScripts options/>
+                <HydrationScripts options root=base.clone()/>
                 <MetaTags/>
-                <link rel="icon" type="image/svg+xml" href="/favicon.svg"/>
-                <link rel="apple-touch-icon" href="/icons/apple-touch-180.png"/>
-                <link rel="manifest" href="/manifest.webmanifest"/>
+                <link rel="icon" type="image/svg+xml" href=crate::base::url("/favicon.svg")/>
+                <link rel="apple-touch-icon" href=crate::base::url("/icons/apple-touch-180.png")/>
+                {manifest_link}
                 <meta name="theme-color" content="#0b1220"/>
                 <meta name="apple-mobile-web-app-capable" content="yes"/>
                 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
@@ -592,7 +661,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                     integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
                     crossorigin=""
                     defer></script>
-                <script src="/radar.js" defer></script>
+                <script src=crate::base::url("/radar.js") defer></script>
                 // Theme + kiosk-mode bootstrap. Runs synchronously before
                 // first paint so [data-theme="..."] and [data-readonly]
                 // attributes apply with no flash. Theme reads

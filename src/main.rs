@@ -196,6 +196,19 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // Active zone list for the refresher: config zones when localsky.toml
+    // exists (the wizard is the source of truth), LOCALSKY_ZONES env as the
+    // no-config override, empty on a fresh unconfigured install (the UI
+    // shows empty states until the wizard runs).
+    let boot_zones = match boot_cfg.as_ref() {
+        Some(cfg) => localsky::zones::from_pairs(
+            cfg.zones
+                .iter()
+                .map(|(slug, z)| (slug.as_str(), z.display_name.as_str())),
+        ),
+        None => localsky::zones::configured(),
+    };
+
     let zone_runtime = match boot_cfg.as_ref() {
         Some(cfg) => {
             let mut m = std::collections::HashMap::new();
@@ -204,9 +217,9 @@ async fn main() -> anyhow::Result<()> {
                     z.sprinkler_type,
                     z.precip_rate_mm_hr,
                 );
-                // The refresher enumerates zones via crate::zones::configured()
-                // which underscore-normalizes slugs ("back-yard" -> "back_yard");
-                // mirror that here so the lookup hits.
+                // zones::from_pairs underscore-normalizes slugs
+                // ("back-yard" -> "back_yard"); mirror that here so the
+                // lookup hits.
                 m.insert(
                     slug.replace('-', "_"),
                     localsky::ha::ZoneRuntime {
@@ -346,6 +359,7 @@ async fn main() -> anyhow::Result<()> {
             registry.clone(),
             shadow_store,
             control_store,
+            boot_zones,
         );
 
         // Manual schedule dispatcher + smart-morning dispatcher.

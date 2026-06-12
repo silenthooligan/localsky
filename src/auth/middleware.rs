@@ -420,7 +420,10 @@ pub async fn enforce(
     }
 
     if wants_html(&req) {
-        return Redirect::temporary("/login").into_response();
+        // Prefix-aware: under HA ingress (or any prefix proxy setting
+        // X-Ingress-Path) the browser-facing login URL carries the prefix.
+        let login = format!("{}/login", crate::base::from_headers(req.headers()));
+        return Redirect::temporary(&login).into_response();
     }
     unauthorized_api()
 }

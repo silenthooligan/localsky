@@ -9,6 +9,7 @@
 
 # Home Assistant
 
+- [Install as a Home Assistant App](home-assistant-app.md)
 - [Home Assistant integration](hacs.md)
 - [Migrating watering off Home Assistant](migrating-from-ha.md)
 

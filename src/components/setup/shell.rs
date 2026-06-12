@@ -76,7 +76,9 @@ pub fn SetupShell() -> impl IntoView {
                 .unwrap_or(false);
             if ok {
                 if let Some(win) = web_sys::window() {
-                    let _ = win.location().set_href("/setup/location");
+                    let _ = win
+                        .location()
+                        .set_href(&crate::base::url("/setup/location"));
                 }
                 gate.set(false);
             }

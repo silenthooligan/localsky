@@ -123,7 +123,7 @@ pub fn SettingsAccount() -> impl IntoView {
                 .send()
                 .await;
             if let Some(win) = web_sys::window() {
-                let _ = win.location().set_href("/login");
+                let _ = win.location().set_href(&crate::base::url("/login"));
             }
         });
     };

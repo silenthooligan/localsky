@@ -23,14 +23,14 @@ use leptos_router::NavigateOptions;
 pub fn TopNav() -> impl IntoView {
     let loc = use_location();
     let weather_class = move || {
-        if loc.pathname.get().starts_with("/irrigation") {
+        if crate::base::route_path(&loc.pathname.get()).starts_with("/irrigation") {
             "top-nav-tab".to_string()
         } else {
             "top-nav-tab is-on".to_string()
         }
     };
     let irrigation_class = move || {
-        if loc.pathname.get().starts_with("/irrigation") {
+        if crate::base::route_path(&loc.pathname.get()).starts_with("/irrigation") {
             "top-nav-tab is-on".to_string()
         } else {
             "top-nav-tab".to_string()
@@ -48,7 +48,7 @@ pub fn TopNav() -> impl IntoView {
         }
         ev.prevent_default();
         log_nav("calling navigate(/)");
-        n1("/", NavigateOptions::default());
+        n1(&crate::base::url("/"), NavigateOptions::default());
         log_nav("navigate(/) returned");
     };
 
@@ -61,7 +61,7 @@ pub fn TopNav() -> impl IntoView {
         }
         ev.prevent_default();
         log_nav("calling navigate(/irrigation)");
-        n2("/irrigation", NavigateOptions::default());
+        n2(&crate::base::url("/irrigation"), NavigateOptions::default());
         log_nav("navigate(/irrigation) returned");
     };
 

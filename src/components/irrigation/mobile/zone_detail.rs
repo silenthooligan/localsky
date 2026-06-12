@@ -78,7 +78,7 @@ pub fn MobileZoneDetail(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     let on_back = move |ev: leptos::ev::MouseEvent| {
         ev.prevent_default();
         log_nav("zone-detail back");
-        navigate("/zones", NavigateOptions::default());
+        navigate(&crate::base::url("/zones"), NavigateOptions::default());
     };
 
     move || {

@@ -65,7 +65,7 @@ fn Tab(
 ) -> impl IntoView {
     let loc = use_location();
     let cls = move || {
-        if active_tab(&loc.pathname.get()) == tab {
+        if active_tab(&crate::base::route_path(&loc.pathname.get())) == tab {
             "mobile-tab is-on"
         } else {
             "mobile-tab"
@@ -78,7 +78,7 @@ fn Tab(
             return;
         }
         ev.prevent_default();
-        navigate(href, NavigateOptions::default());
+        navigate(&crate::base::url(href), NavigateOptions::default());
     };
     view! {
         <a href=href class=cls on:click=on_click>
@@ -92,7 +92,7 @@ fn Tab(
 fn MoreTab(more_open: RwSignal<bool>) -> impl IntoView {
     let loc = use_location();
     let cls = move || {
-        if active_tab(&loc.pathname.get()) == "more" {
+        if active_tab(&crate::base::route_path(&loc.pathname.get())) == "more" {
             "mobile-tab is-on"
         } else {
             "mobile-tab"
@@ -126,7 +126,7 @@ fn MoreLink(
         }
         ev.prevent_default();
         open.set(false);
-        navigate(href, NavigateOptions::default());
+        navigate(&crate::base::url(href), NavigateOptions::default());
     };
     view! {
         <a href=href class="mobile-more__link" on:click=on_click>

@@ -4,6 +4,18 @@ All notable changes to LocalSky are documented here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.3.0-beta.2] - 2026-06-11
+
+### Features
+
+- Install as a Home Assistant App: one-click server install on Home Assistant OS from the new [app repository](https://github.com/silenthooligan/localsky-apps), with automatic Supervisor-based HA connection (no access token setup) and the UI embedded in the HA sidebar
+- Serve under a URL prefix: LocalSky honors the `X-Ingress-Path` header from prefix-stripping reverse proxies (this is what powers the sidebar embed), while direct port access keeps working unchanged
+
+### Bug fixes
+
+- Fresh installs no longer show four phantom irrigation zones; zones come from your configuration (the wizard), and a pristine instance starts empty
+- Web Push subscriptions work on fresh installs (the subscription table was only created on databases carried over from v1)
+
 ## [0.3.0-beta.1] - 2026-06-11
 
 ### Features

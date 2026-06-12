@@ -30,7 +30,7 @@ pub fn IrrigationTabNav() -> impl IntoView {
 fn TabChip(href: &'static str, label: &'static str) -> impl IntoView {
     let loc = use_location();
     let class = move || {
-        let path = loc.pathname.get();
+        let path = crate::base::route_path(&loc.pathname.get());
         // Exact match for /irrigation so it doesn't stay lit on
         // /irrigation/zones etc.; everything else uses prefix match.
         let is_active = if href == "/irrigation" {
@@ -51,7 +51,7 @@ fn TabChip(href: &'static str, label: &'static str) -> impl IntoView {
             return;
         }
         ev.prevent_default();
-        navigate(href, NavigateOptions::default());
+        navigate(&crate::base::url(href), NavigateOptions::default());
     };
     view! {
         <a class=class href=href on:click=on_click>{label}</a>

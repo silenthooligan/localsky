@@ -23,6 +23,7 @@
 #![allow(clippy::manual_clamp)]
 
 pub mod app;
+pub mod base;
 pub mod components;
 pub mod docs;
 pub mod forecast;
@@ -108,6 +109,14 @@ fn register_service_worker() {
     // mid-hydration. Bail cleanly so HTTP access still boots the app fully.
     if !win.is_secure_context() {
         log_nav("sw: skipped (insecure context)");
+        return;
+    }
+
+    // Under an ingress/base prefix the app is an embedded panel on someone
+    // else's origin; a service worker there would fight the host app's own
+    // SW and the PWA flows are meaningless. Direct access keeps the PWA.
+    if !crate::base::base_path().is_empty() {
+        log_nav("sw: skipped (ingress prefix)");
         return;
     }
 

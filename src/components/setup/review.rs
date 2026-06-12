@@ -180,7 +180,7 @@ pub fn ReviewStep() -> impl IntoView {
                             if let Ok(Some(storage)) = win.local_storage() {
                                 let _ = storage.set_item("first_run_done", "0");
                             }
-                            let _ = win.location().set_href("/");
+                            let _ = win.location().set_href(&crate::base::url("/"));
                         }
                     }
                     Err(e) => {

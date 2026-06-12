@@ -23,8 +23,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
-// Zone list is resolved at refresher spawn time via crate::zones::configured()
-// (LOCALSKY_ZONES env var, falling back to the legacy 4-zone default).
+// Zone list is resolved by the caller and passed into spawn_refresher
+// (config.zones when localsky.toml exists, LOCALSKY_ZONES otherwise,
+// empty on a fresh unconfigured install).
 // Snapshot zones are computed by iterating the resolved list rather than
 // a compile-time constant; operators with more or fewer zones can override
 // without recompiling.
@@ -207,6 +208,11 @@ pub fn spawn_refresher(
     // native build (and the shadow build) honors operator pauses. `None`
     // only when no persistence DB is mounted.
     control_store: Option<crate::persistence::IrrigationControlStore>,
+    // Active zone list, resolved by the caller (config.zones when
+    // localsky.toml exists, LOCALSKY_ZONES otherwise, empty on a fresh
+    // unconfigured install). Resolved once at spawn time; changing it
+    // requires a restart, the same contract every deploy-time input has.
+    zones: Vec<crate::zones::ZoneIdent>,
 ) {
     tokio::spawn(async move {
         // HA client only when sourcing from Home Assistant. Native builds
@@ -223,10 +229,6 @@ pub fn spawn_refresher(
         };
         tracing::info!(?source, "irrigation refresher snapshot source");
 
-        // Resolve the active zone list once at spawn time. Changing
-        // LOCALSKY_ZONES requires a container restart, which is the same
-        // contract every other deploy-time env var has.
-        let zones = crate::zones::configured();
         tracing::info!(
             zone_count = zones.len(),
             zones = ?zones.iter().map(|z| z.slug.as_str()).collect::<Vec<_>>(),
@@ -520,7 +522,7 @@ fn emit_push_events(
 /// Pull /api/states once, blend with the in-process forecast + tempest
 /// stores, and build the snapshot. Pure read-only with respect to HA
 /// (we don't mutate any HA state from here). `zones` is the resolved
-/// active zone list (LOCALSKY_ZONES env var or legacy default).
+/// active zone list passed down from spawn_refresher.
 #[allow(clippy::too_many_arguments)]
 async fn refresh_once(
     client: &HaClient,
@@ -1265,35 +1267,14 @@ fn compute_water_budgets(
     zone_runtime: &HashMap<String, ZoneRuntime>,
     restriction_cap_seconds: Option<u32>,
     // A5b: per-zone budget config from cfg.zones. Drives which zones the
-    // allocator plans for (so any configured zone gets a run-time, not just
-    // the legacy four). Empty = no config -> fall back to the legacy four.
+    // allocator plans for (so any configured zone gets a run-time). Empty =
+    // unconfigured install -> nothing to plan until the wizard writes zones.
     budget_zones: &[ZoneBudgetCfg],
 ) -> Vec<WaterBudget> {
-    // Iteration list. With config present, plan every configured zone (A5b);
-    // otherwise the legacy four (matches docs/MANUAL.md St. Augustine FL
-    // guidance). Per-zone budget/sessions are None here and resolved below
-    // from HA input_number -> config -> agronomic slug default, so the
-    // legacy slugs reproduce their historical 1.0"/2 (turf) and 0.5"/1
-    // (shrubs) values byte-for-byte.
-    const LEGACY_ZONES: [(&str, &str); 4] = [
-        ("back_yard", "Back Yard"),
-        ("front_yard", "Front Yard"),
-        ("side_yard", "Side Yard"),
-        ("back_yard_shrubs", "Back Yard Shrubs"),
-    ];
-    let iter_zones: Vec<ZoneBudgetCfg> = if budget_zones.is_empty() {
-        LEGACY_ZONES
-            .iter()
-            .map(|(slug, name)| ZoneBudgetCfg {
-                slug: slug.to_string(),
-                name: name.to_string(),
-                weekly_budget_in: None,
-                sessions_per_week: None,
-            })
-            .collect()
-    } else {
-        budget_zones.to_vec()
-    };
+    // Iteration list: every configured zone (A5b). Per-zone budget/sessions
+    // are None here and resolved below from HA input_number -> config ->
+    // agronomic slug default.
+    let iter_zones: Vec<ZoneBudgetCfg> = budget_zones.to_vec();
     const CAPTURE_EFFICIENCY: f64 = 0.7;
     const SESSION_RAIN_DEFER_IN: f64 = 0.10; // ≥0.10" forecast next 24h → defer
 
@@ -1526,46 +1507,23 @@ async fn compute_soil_forecasts(
     zone_cfg: &[ZoneSoilCfg],
     history: Option<&crate::persistence::SensorHistoryStore>,
 ) -> Vec<SoilForecast> {
-    // Build the working zone list from config; fall back to the legacy
-    // four (reading their hardcoded HA entities) when no zones configured.
-    let zones: Vec<ForecastZone> = if zone_cfg.is_empty() {
-        [
-            ("back_yard", "Back Yard", 70.0, 30.0),
-            ("front_yard", "Front Yard", 70.0, 30.0),
-            ("side_yard", "Side Yard", 70.0, 30.0),
-            ("back_yard_shrubs", "Back Yard Shrubs", 85.0, 25.0),
-        ]
-        .into_iter()
-        .map(|(slug, name, sat, tmin)| {
-            let (kc, depth) = kc_depth_for(slug);
+    // Build the working zone list from config. Empty config = unconfigured
+    // install -> no soil forecasts until the wizard writes zones.
+    let zones: Vec<ForecastZone> = zone_cfg
+        .iter()
+        .map(|z| {
+            let (kc, depth) = kc_depth_for(&z.slug);
             ForecastZone {
-                slug: slug.into(),
-                name: name.into(),
-                sensor: Some(format!("ha:sensor.{slug}_soil_moisture")),
-                target_min: tmin,
-                target_max: sat,
+                slug: z.slug.clone(),
+                name: z.name.clone(),
+                sensor: z.soil_sensor_id.clone(),
+                target_min: z.target_min_pct,
+                target_max: z.saturation_pct,
                 kc,
                 depth,
             }
         })
-        .collect()
-    } else {
-        zone_cfg
-            .iter()
-            .map(|z| {
-                let (kc, depth) = kc_depth_for(&z.slug);
-                ForecastZone {
-                    slug: z.slug.clone(),
-                    name: z.name.clone(),
-                    sensor: z.soil_sensor_id.clone(),
-                    target_min: z.target_min_pct,
-                    target_max: z.saturation_pct,
-                    kc,
-                    depth,
-                }
-            })
-            .collect()
-    };
+        .collect();
     const CAPTURE_EFFICIENCY: f64 = 0.7;
 
     // Daily ET, mm. Today's value carries across the window. heat_multiplier

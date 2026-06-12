@@ -4,7 +4,7 @@ LocalSky ships a native Home Assistant integration, distributed through HACS fro
 
 LocalSky stays the brain. The integration is a thin client over LocalSky's REST and SSE API; if HA goes down, watering continues unaffected.
 
-> **Two pieces, in this order.** LocalSky is a server you run yourself (one Docker container, see the [Quick start](getting-started.md)); this integration is only the bridge that surfaces it inside Home Assistant. Installing the integration without a running LocalSky gives you nothing to pair with. Server first, integration second.
+> **Two pieces, in this order.** LocalSky is a server you run yourself (one Docker container, see the [Quick start](getting-started.md), or one click as a [Home Assistant App](home-assistant-app.md) on HAOS); this integration is only the bridge that surfaces it inside Home Assistant. Installing the integration without a running LocalSky gives you nothing to pair with. Server first, integration second.
 
 > **Pick one path into HA, never both.** LocalSky can also publish entities through MQTT discovery (`sensor.localsky_*` via your broker). Running MQTT discovery *and* the HACS integration at the same time creates two copies of every entity. New setups should use the HACS integration; if you previously used MQTT discovery, disable LocalSky's MQTT publishing and clear the retained `homeassistant/.../config` discovery topics before adding the integration (see [Troubleshooting](#troubleshooting) below).
 
@@ -22,7 +22,11 @@ One HA device per LocalSky instance, populated from LocalSky's live entity manif
 
 ### 1. Add the custom repository
 
-The integration is not yet in the HACS default catalog, so this step is required first:
+The integration is not yet in the HACS default catalog, so this step is required first. The button does it in one click:
+
+[![Open your Home Assistant instance and add this repository to HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=silenthooligan&repository=localsky-hacs&category=integration)
+
+Or manually:
 
 1. In Home Assistant, open **HACS**.
 2. Open the three-dot menu (top right) and choose **Custom repositories**.
