@@ -14,8 +14,9 @@ use leptos::tachys::view::any_view::IntoAny;
 use super::help::SettingsHelp;
 use super::{
     SettingsAccount, SettingsAdvanced, SettingsControllers, SettingsDevices, SettingsHomeAssistant,
-    SettingsLlm, SettingsLocation, SettingsNotifications, SettingsRestrictions, SettingsSchedules,
-    SettingsSkipRules, SettingsSources, SettingsTheme, SettingsUnits, SettingsZones,
+    SettingsLlm, SettingsLocation, SettingsNotifications, SettingsRadar, SettingsRestrictions,
+    SettingsSchedules, SettingsSkipRules, SettingsSources, SettingsTheme, SettingsUnits,
+    SettingsZones,
 };
 use crate::components::ui::Icon;
 
@@ -126,6 +127,12 @@ const GROUPS: &[SectionGroup] = &[
                 label: "Units",
                 helptext: "Imperial, metric, or per-field overrides",
                 icon: "units",
+            },
+            SectionLink {
+                key: "radar",
+                label: "Radar",
+                helptext: "Imagery providers + default map layers",
+                icon: "sources",
             },
             SectionLink {
                 key: "theme",
@@ -414,6 +421,7 @@ fn section_view(key: &str) -> leptos::prelude::AnyView {
         "account" => view! { <SettingsAccount/> }.into_any(),
         "notifications" => view! { <SettingsNotifications/> }.into_any(),
         "units" => view! { <SettingsUnits/> }.into_any(),
+        "radar" => view! { <SettingsRadar/> }.into_any(),
         "theme" => view! { <SettingsTheme/> }.into_any(),
         "advanced" => view! { <SettingsAdvanced/> }.into_any(),
         _ => view! { <div/> }.into_any(),

@@ -31,6 +31,7 @@ pub mod gates_catalog;
 pub mod ha;
 pub mod history;
 pub mod nav_log;
+pub mod radar_catalog;
 pub mod tempest;
 
 #[cfg(feature = "hydrate")]

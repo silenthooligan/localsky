@@ -426,6 +426,11 @@ pub fn App() -> impl IntoView {
                             <Title text="LocalSky · Manual schedules"/>
                             <crate::components::settings::SettingsSchedules/>
                         }/>
+                    <Route path=path!("/settings/radar")
+                        view=|| view! {
+                            <Title text="LocalSky · Radar"/>
+                            <crate::components::settings::SettingsRadar/>
+                        }/>
                     <Route path=path!("/settings/advanced")
                         view=|| view! {
                             <Title text="LocalSky · Advanced"/>

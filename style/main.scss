@@ -9958,3 +9958,57 @@ html[data-kiosk="true"] .beta-fb,
   color: var(--text-faint); border: 1px dashed var(--elev-border-strong);
   border-radius: 999px; padding: 3px 10px; white-space: nowrap;
 }
+
+// ------------------------------------------------------------------
+// Radar settings: provider menu (Auto | Custom) + default-layer chips.
+// Provider rows follow the gate-row recipe; the mode pill reuses the
+// Rule Lab toggle-pill chassis but lights the active side in the
+// accent, because Auto/Custom is a mode choice, not an on/off verdict.
+// ------------------------------------------------------------------
+.radar-settings__mode {
+  display: flex; align-items: center; gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+.radar-settings__mode-label { font-weight: 600; color: var(--text); font-size: var(--text-body-sm); }
+.radar-settings__mode .toggle-pill__opt.is-active {
+  color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 14%, transparent);
+}
+.radar-settings__hint {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-body-sm); color: var(--text-dim); line-height: 1.5;
+  max-width: 60ch;
+}
+.radar-settings__rows {
+  list-style: none; display: flex; flex-direction: column; gap: var(--space-2);
+  margin: 0; padding: 0;
+}
+.radar-settings__row {
+  display: flex; align-items: center; gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: var(--elev-2); border-radius: var(--radius-sm);
+}
+.radar-settings__row-text { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.radar-settings__row-label { font-weight: 600; color: var(--text); font-size: var(--text-body-sm); }
+.radar-settings__row-meta { font-size: var(--text-micro); color: var(--text-faint); line-height: 1.4; }
+// Default-layer picker: a Providers group and a Feature-overlays group
+// of toggle chips. Lit chip = layer starts visible for browsers with
+// no stored per-browser preference.
+.radar-settings__group { margin-top: var(--space-4); }
+.radar-settings__group:first-of-type { margin-top: 0; }
+.radar-settings__group-title {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-micro); font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-faint);
+}
+.radar-settings__chips { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.radar-settings__chip {
+  border: 1px solid var(--elev-border-strong); background: var(--elev-1); color: var(--text-dim);
+  border-radius: 999px; padding: 5px 14px; cursor: pointer;
+  font-size: var(--text-body-sm); font-weight: 600;
+}
+.radar-settings__chip:hover { border-color: var(--accent); }
+.radar-settings__chip.is-on {
+  color: var(--accent); border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 10%, transparent);
+}

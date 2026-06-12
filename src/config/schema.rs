@@ -106,11 +106,20 @@ pub struct UiConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RadarUiConfig {
+    /// Radar tile providers offered in the layer menu, by catalog id
+    /// (see radar_catalog::providers()). Empty (the default) means
+    /// Auto: the region-smart recommended set for the configured
+    /// station location. Non-empty means exactly this menu, in this
+    /// order; ANY catalog provider is allowed anywhere, so a user in
+    /// Europe can deliberately switch on a US source to compare.
+    #[serde(default)]
+    pub providers: Vec<String>,
     /// Radar overlays enabled by default for a browser with no stored
-    /// preference. Valid ids: precip, nexrad, satellite, lightning.
-    /// Once a user toggles layers, their choice persists per-browser in
-    /// localStorage and wins over this list. The three-id default
-    /// matches the pre-config hardcoded behavior.
+    /// preference. Accepts provider ids AND feature ids from
+    /// radar_catalog (legacy precip/nexrad/lightning ids are still
+    /// accepted and normalized to their catalog successors). Once a
+    /// user toggles layers, their choice persists per-browser in
+    /// localStorage and wins over this list.
     #[serde(default = "default_radar_layers")]
     pub default_layers: Vec<String>,
 }
@@ -118,17 +127,20 @@ pub struct RadarUiConfig {
 impl Default for RadarUiConfig {
     fn default() -> Self {
         Self {
+            providers: Vec::new(),
             default_layers: default_radar_layers(),
         }
     }
 }
 
 fn default_radar_layers() -> Vec<String> {
-    vec![
-        "precip".to_string(),
-        "nexrad".to_string(),
-        "lightning".to_string(),
-    ]
+    // Catalog successors of the old hardcoded precip + NEXRAD +
+    // strikes trio; sourced from the catalog so the radar panel's
+    // non-ssr fallback can never drift from the config default.
+    crate::radar_catalog::default_layer_ids()
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 // ----- Persistence retention -----
@@ -1626,10 +1638,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn radar_ui_default_layers_match_legacy_hardcoded_trio() {
+    fn radar_ui_default_layers_are_the_catalog_trio() {
+        // The catalog successors of the old hardcoded precip + NEXRAD
+        // + strikes trio.
         assert_eq!(
             RadarUiConfig::default().default_layers,
-            ["precip", "nexrad", "lightning"]
+            ["rainviewer", "nexrad_iem", "lightning_tempest"]
         );
     }
 
@@ -1638,7 +1652,12 @@ mod tests {
         // Everything under [ui] is serde-defaulted, so a config written
         // before the block existed must keep parsing unchanged.
         let ui: UiConfig = toml::from_str("").unwrap();
-        assert_eq!(ui.radar.default_layers, ["precip", "nexrad", "lightning"]);
+        assert_eq!(
+            ui.radar.default_layers,
+            ["rainviewer", "nexrad_iem", "lightning_tempest"]
+        );
+        // Absent providers list means Auto (region-recommended set).
+        assert!(ui.radar.providers.is_empty());
     }
 
     #[test]
@@ -1654,7 +1673,22 @@ mod tests {
         .unwrap();
         assert_eq!(
             cfg.ui.radar.default_layers,
-            ["precip", "nexrad", "lightning"]
+            ["rainviewer", "nexrad_iem", "lightning_tempest"]
         );
+        assert!(cfg.ui.radar.providers.is_empty());
+    }
+
+    #[test]
+    fn radar_ui_explicit_providers_parse_in_order() {
+        let ui: UiConfig = toml::from_str(
+            r#"
+            [radar]
+            providers = ["geomet_ca", "rainviewer"]
+            default_layers = ["rainviewer", "warnings_us"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(ui.radar.providers, ["geomet_ca", "rainviewer"]);
+        assert_eq!(ui.radar.default_layers, ["rainviewer", "warnings_us"]);
     }
 }

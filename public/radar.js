@@ -1,22 +1,33 @@
 // Multi-layer Leaflet bootstrap for the Live Radar panel.
 //
-// Layers:
-//   • Precipitation (RainViewer animated tiles, current + nowcast)
-//   • Satellite IR (RainViewer most-recent IR frame)
-//   • NEXRAD reflectivity (Iowa Mesonet WMS, US-only but high-res)
-//   • Tempest strike rings (local, sourced from /api/snapshot)
+// The layer menu is built DYNAMICALLY from two JSON attributes that the
+// server renders on #radar-map from the Rust radar catalog
+// (src/radar_catalog.rs):
+//
+//   data-radar-providers : effective provider descriptors (config-resolved
+//                          or recommended-by-region). kind "rainviewer"
+//                          drives the animated frame machinery; kind "wms"
+//                          becomes an L.tileLayer.wms overlay.
+//   data-radar-features  : feature descriptors. Known ids:
+//                          nowcast          RainViewer forecast frames
+//                          warnings_us      NWS active-alert polygons
+//                          hurricanes       NHC storms + track/cone
+//                          lightning_tempest local Tempest strike rings
 //
 // Center/zoom default to data-lat / data-lon / data-zoom on #radar-map
-// (set by SSR from the WEATHER_APP_LAT/LON/ZOOM env vars). The Tempest
-// strike layer pulls from /api/snapshot every 30s — Tempest reports
-// distance to a strike but not bearing, so each strike is plotted as a
-// distance ring centered on the station rather than a point.
+// (set by SSR from the configured station location). The Tempest strike
+// layer pulls from /api/snapshot, Tempest reports distance to a strike
+// but not bearing, so each strike is plotted as a distance ring centered
+// on the station rather than a point.
 //
 // Layer visibility persists per-browser via localStorage (PREFS_KEY
 // below), seeded from data-default-layers (config ui.radar.default_layers).
-// NEXRAD is region-gated server-side via data-nexrad: IEM's n0r composite
-// covers the contiguous US only, so outside that box the layer is never
-// even constructed.
+// The stored blob extends naturally to any catalog id; unknown stored ids
+// are ignored on read and carried through on write so a pref survives the
+// layer temporarily leaving the effective set (e.g. a region change).
+//
+// Every external source degrades silently to whatever still works: at most
+// one console.warn per failed source per page lifetime, never a broken map.
 
 (function () {
   // The radar lives on a Leptos route that gets mounted/unmounted on
@@ -33,16 +44,188 @@
   var currentMap = null;
   var radarPollTimer = null;
   var strikePollTimer = null;
+  var warningsPollTimer = null;
+  var hurricanePollTimer = null;
   var animationTimer = null;
+
+  // One console.warn per failed source per page lifetime (not per init):
+  // a flaky upstream on a 2-minute refresh loop must not spam the console.
+  var warnedSources = {};
+  function warnOnce(key, msg, err) {
+    if (warnedSources[key]) return;
+    warnedSources[key] = true;
+    console.warn(msg, err || '');
+  }
 
   function teardownExisting() {
     if (animationTimer) { clearTimeout(animationTimer); animationTimer = null; }
     if (radarPollTimer) { clearInterval(radarPollTimer); radarPollTimer = null; }
     if (strikePollTimer) { clearInterval(strikePollTimer); strikePollTimer = null; }
+    if (warningsPollTimer) { clearInterval(warningsPollTimer); warningsPollTimer = null; }
+    if (hurricanePollTimer) { clearInterval(hurricanePollTimer); hurricanePollTimer = null; }
     if (currentMap) {
       try { currentMap.remove(); } catch (e) { /* swallow */ }
       currentMap = null;
     }
+  }
+
+  // Descriptor field access tolerant of either serde casing. The Rust
+  // catalog serializes camelCase to match the recon catalog, but a
+  // snake_case slip on the Rust side must not blank the whole menu.
+  function dget(obj, camel, snake) {
+    if (obj == null) return undefined;
+    if (obj[camel] != null) return obj[camel];
+    return obj[snake];
+  }
+
+  function normalizeProvider(raw) {
+    return {
+      id: raw.id,
+      label: raw.label || raw.id,
+      kind: raw.kind || 'wms',
+      coverageLabel: dget(raw, 'coverageLabel', 'coverage_label') || '',
+      url: raw.url || '',
+      wmsLayer: dget(raw, 'wmsLayer', 'wms_layer') || '',
+      attribution: raw.attribution || '',
+      crossfade: raw.crossfade === true,
+    };
+  }
+
+  function normalizeFeature(raw) {
+    // The catalog serializes `endpoints` as an array (possibly empty),
+    // in a feature-specific order documented per entry in
+    // radar_catalog.rs. Tolerate a singular `endpoint` string from
+    // older descriptors by promoting it to a one-element array.
+    var endpoints = Array.isArray(raw.endpoints)
+      ? raw.endpoints.filter(function (e) { return typeof e === 'string' && e.length > 0; })
+      : (typeof raw.endpoint === 'string' && raw.endpoint.length > 0 ? [raw.endpoint] : []);
+    return {
+      id: raw.id,
+      label: raw.label || raw.id,
+      endpoints: endpoints,
+      attribution: raw.attribution || '',
+    };
+  }
+
+  function parseDescriptorAttr(attrValue, normalize) {
+    if (attrValue == null || attrValue === '') return null;
+    try {
+      var parsed = JSON.parse(attrValue);
+      if (!Array.isArray(parsed)) return null;
+      return parsed
+        .filter(function (d) { return d && typeof d === 'object' && typeof d.id === 'string'; })
+        .map(normalize);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // Non-SSR safety net mirroring what the Rust catalog resolves for the
+  // stock config at the 40/-75 CONUS fallback coordinates (RainViewer
+  // plus both US reflectivity sources) and the full feature catalog.
+  // The Rust component renders identical attribute strings for the
+  // default config, so this only fires when the attributes are missing
+  // or unparseable.
+  var FALLBACK_PROVIDERS = [
+    {
+      id: 'rainviewer',
+      label: 'RainViewer (global composite)',
+      kind: 'rainviewer',
+      coverageLabel: 'Global',
+      url: 'https://api.rainviewer.com/public/weather-maps.json',
+      attribution: 'RainViewer.com',
+      crossfade: false,
+    },
+    {
+      id: 'nexrad_iem',
+      label: 'IEM NEXRAD Base Reflectivity (CONUS)',
+      kind: 'wms',
+      coverageLabel: 'US (CONUS)',
+      url: 'https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0r-t.cgi',
+      wmsLayer: 'nexrad-n0r-wmst',
+      attribution: 'Iowa Environmental Mesonet / NWS NEXRAD',
+      crossfade: true,
+    },
+    {
+      id: 'nowcoast',
+      label: 'NOAA nowCOAST Radar Mosaic (US incl. AK/HI/PR/Guam)',
+      kind: 'wms',
+      coverageLabel: 'US (CONUS, Alaska, Hawaii, Caribbean, Guam)',
+      url: 'https://nowcoast.noaa.gov/geoserver/observations/weather_radar/wms',
+      wmsLayer: 'base_reflectivity_mosaic',
+      attribution: 'NOAA/NWS nowCOAST (MRMS)',
+      crossfade: true,
+    },
+  ];
+  var FALLBACK_FEATURES = [
+    { id: 'nowcast', label: 'Forecast frames (RainViewer nowcast)', endpoints: [], attribution: 'RainViewer.com' },
+    { id: 'warnings_us', label: 'NWS severe weather alerts (US)', endpoints: [], attribution: 'NOAA/NWS' },
+    { id: 'hurricanes', label: 'Hurricanes (NOAA NHC track + cone)', endpoints: [], attribution: 'NOAA/NHC' },
+    { id: 'lightning_tempest', label: 'Lightning (Tempest station)', endpoints: [], attribution: 'Tempest (local station)' },
+  ];
+
+  // Pre-catalog stored prefs and default lists spoke short ids. Map them
+  // onto catalog ids so a returning browser keeps its toggles. "satellite"
+  // has no successor (RainViewer's IR arrays come back empty key-free) and
+  // falls out as an unknown id like any other.
+  var LEGACY_IDS = {
+    precip: 'rainviewer',
+    nexrad: 'nexrad_iem',
+    lightning: 'lightning_tempest',
+  };
+
+  // Compact chip labels for the mobile row, keyed by catalog id. Anything
+  // not listed falls back to the descriptor label with the parenthetical
+  // stripped, so a brand-new provider still gets a usable chip.
+  var SHORT_LABELS = {
+    rainviewer: 'Precip',
+    nexrad_iem: 'NEXRAD',
+    nowcoast: 'NOAA Mosaic',
+    geomet_ca: 'Radar CA',
+    dwd_de: 'Radar DE',
+    fmi_fi: 'Radar FI',
+    nowcast: 'Forecast',
+    warnings_us: 'Alerts',
+    hurricanes: 'Hurricanes',
+    lightning_tempest: 'Strikes',
+  };
+
+  function shortLabelFor(id, label) {
+    if (SHORT_LABELS[id]) return SHORT_LABELS[id];
+    return String(label || id).replace(/\s*\(.*$/, '');
+  }
+
+  // NWS alert etiquette: api.weather.gov wants a meaningful User-Agent
+  // identifying the app and a contact. Browsers that treat User-Agent as
+  // a forbidden header silently drop the override and send their own UA,
+  // which still satisfies the "never empty" requirement.
+  var NWS_USER_AGENT = 'LocalSky/1.0 (self-hosted weather app; https://github.com/silenthooligan/localsky)';
+  var NWS_ALERTS_URL =
+    'https://api.weather.gov/alerts/active?status=actual&severity=Severe,Extreme';
+
+  // NHC aggregate summary service (recon-verified): layer 6 = forecast
+  // track lines, layer 7 = forecast cones. The per-storm service uses
+  // per-slot layer groups, the summary service answers in one query each.
+  var NHC_STORMS_URL = 'https://www.nhc.noaa.gov/CurrentStorms.json';
+  var NHC_SUMMARY_BASE =
+    'https://mapservices.weather.noaa.gov/tropical/rest/services/tropical/NHC_tropical_weather_summary/MapServer';
+  var NHC_TRACK_URL = NHC_SUMMARY_BASE + '/6/query?where=1%3D1&outFields=*&f=geojson';
+  var NHC_CONE_URL = NHC_SUMMARY_BASE + '/7/query?where=1%3D1&outFields=*&f=geojson';
+
+  // NWS alert severity ramp. Fill + stroke share the color; opacity keeps
+  // the radar readable underneath.
+  var SEVERITY_COLORS = {
+    Extreme: '#ff4d6d',
+    Severe: '#ff9f1c',
+    Moderate: '#ffd166',
+    Minor: '#8ecae6',
+    Unknown: '#9aa0a6',
+  };
+
+  function escHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
   }
 
   function init() {
@@ -64,31 +247,45 @@
     var lon = parseFloat(el.dataset.lon || '-75.0');
     var zoom = parseInt(el.dataset.zoom || '8', 10);
 
-    // Server-side region verdict: data-nexrad="0" means the configured
-    // location sits outside IEM's n0r composite footprint (contiguous US
-    // only; Alaska, Hawaii, and Puerto Rico don't count). The "1"
-    // fallback mirrors the 40/-75 CONUS defaults above so a non-SSR
-    // mount stays self-consistent.
-    var nexradOk = (el.dataset.nexrad || '1') !== '0';
+    // Effective layer catalog, resolved server-side (config providers list
+    // or recommended-by-region) and serialized onto the element. The
+    // fallbacks mirror the stock config at the 40/-75 defaults above so a
+    // non-SSR mount stays self-consistent.
+    var providers =
+      parseDescriptorAttr(el.dataset.radarProviders, normalizeProvider) ||
+      FALLBACK_PROVIDERS.map(normalizeProvider);
+    var features =
+      parseDescriptorAttr(el.dataset.radarFeatures, normalizeFeature) ||
+      FALLBACK_FEATURES.map(normalizeFeature);
+
+    function featureById(id) {
+      for (var i = 0; i < features.length; i++) {
+        if (features[i].id === id) return features[i];
+      }
+      return null;
+    }
+
     // Config-driven default layer ids (ui.radar.default_layers). The
-    // fallback matches the stock config, which in turn matches the old
-    // hardcoded precip + NEXRAD + strikes behavior. Only attribute
-    // ABSENCE falls back: a deliberately empty configured list renders
-    // data-default-layers="" and means start with everything off.
+    // fallback matches the stock config trio (the catalog successors of
+    // the old hardcoded precip + NEXRAD + strikes behavior). Only
+    // attribute ABSENCE falls back: a deliberately empty configured list
+    // renders data-default-layers="" and means start with everything off.
     var defaultLayersAttr = el.dataset.defaultLayers;
-    if (defaultLayersAttr == null) defaultLayersAttr = 'precip,nexrad,lightning';
+    if (defaultLayersAttr == null) {
+      defaultLayersAttr = 'rainviewer,nexrad_iem,lightning_tempest';
+    }
     var defaultLayerIds = defaultLayersAttr
       .split(',')
       .map(function (s) { return s.trim(); })
-      .filter(function (s) { return s.length > 0; });
+      .filter(function (s) { return s.length > 0; })
+      .map(function (id) { return LEGACY_IDS[id] || id; });
 
     // Mobile detection: the bottom-tab breakpoint matches the rest of the
     // app (760px). On a phone we move the zoom control to the bottom-right
-    // (easier thumb reach), tighten the layer toggle (collapsed by default
-    // — at full width it covered most of the map), and turn off `tap` so
-    // single-tap-then-drag doesn't get eaten by Leaflet's tap-handler quirk
-    // on iOS Safari. attributionControl moves to bottom-right out of the
-    // way of the play button.
+    // (easier thumb reach), replace the in-map layer toggle with the chip
+    // row, and turn off `tap` so single-tap-then-drag doesn't get eaten by
+    // Leaflet's tap-handler quirk on iOS Safari. attributionControl moves
+    // to bottom-left out of the way of the play button.
     var isMobile = (typeof window.matchMedia === 'function')
       ? window.matchMedia('(max-width: 760px)').matches
       : false;
@@ -130,6 +327,9 @@
     L.control
       .zoom({ position: isMobile ? 'bottomright' : 'topleft' })
       .addTo(map);
+    // The attribution control aggregates the `attribution` option of every
+    // layer currently ON the map, so the credit line tracks the active
+    // descriptor set instead of hardcoding any one provider.
     L.control
       .attribution({ position: 'bottomleft', prefix: false })
       .addTo(map);
@@ -173,46 +373,97 @@
       })
       .catch(function () { /* keep the data-* center on failure */ });
 
-    // ---------- Layer 1: Precipitation (RainViewer animated) ----------
-
     currentMap = map;
 
-    var radarLayer = L.layerGroup();
+    // 1x1 transparent PNG, base64. Served when a tile URL fails so
+    // we silently degrade instead of showing the upstream error tile.
+    var TRANSPARENT_TILE =
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkAAIAAAoAAv/lxKUAAAAASUVORK5CYII=';
+
+    // ---------- Providers: RainViewer animated frames ----------
+    //
+    // Exactly one rainviewer-kind provider gets the frame machinery (the
+    // catalog only defines one; extras would double-animate, so they are
+    // skipped). The nowcast FEATURE extends the frame array with the
+    // API's forecast frames when toggled on.
+
+    var rainviewerDesc = null;
+    for (var pi = 0; pi < providers.length; pi++) {
+      if (providers[pi].kind === 'rainviewer') { rainviewerDesc = providers[pi]; break; }
+    }
+
+    var radarLayer = rainviewerDesc ? L.layerGroup() : null;
     var radarTiles = {};
     var radarFrames = [];
     var radarPastCount = 0;
     var radarCurrent = 0;
     var radarPlaying = true;
+    var lastRadarData = null;
     // Aliases the outer-scope animationTimer so teardownExisting()
     // can clear it on route swap. Same goes for the polling timers
     // assigned at the bottom of init.
     var radarTimer = null;
 
-    // Zoom-driven opacity: at low zoom RainViewer's animated reflectivity
-    // is dominant (it caps at z=7 native, so above that it'd just be
-    // pixelated). At high zoom NEXRAD takes over because Iowa Mesonet's
-    // WMS reprojects at any scale with native ~250m source detail.
-    // Linear blend between z=6 (RainViewer-only) and z=9 (NEXRAD-only)
-    // gives a 3-zoom-level crossfade that reads naturally as the user
-    // pulls in. Outside that range the layer with no detail is faded
-    // to near-zero so it doesn't muddy the picture.
-    function rvOpacityForZoom(z) {
-      // Outside NEXRAD coverage there is nothing to crossfade into, so
-      // RainViewer holds full strength at every zoom (pixelated past
-      // z=7, but pixelated beats a blank map).
-      if (!nexradOk) return 0.65;
-      var t = Math.max(0, Math.min(1, (z - 6) / 3));
-      return 0.65 * (1 - t * 0.78);  // 0.65 at z=6 → 0.14 at z=9
+    // ---------- Providers: WMS overlays ----------
+    //
+    // Every wms-kind descriptor becomes a tile overlay, no region gating
+    // here: the server already resolved the effective set, and a custom
+    // config may deliberately enable an out-of-region provider for
+    // comparison. Painting nothing over an uncovered area is the worst
+    // case and that's fine.
+
+    var wmsProviders = providers
+      .filter(function (p) { return p.kind === 'wms' && p.url && p.wmsLayer; })
+      .map(function (p) {
+        var layer = L.tileLayer.wms(p.url, {
+          layers: p.wmsLayer,
+          format: 'image/png',
+          transparent: true,
+          opacity: 0.7,  // Standalone strength; crossfade-flagged sources are re-blended on zoom below.
+          zIndex: 95,
+          minZoom: 0,
+          maxZoom: 19,
+          // WMS reprojects to whatever bounding box you ask, so this
+          // works at any zoom; past the source's native resolution it
+          // just goes soft. The errorTileUrl covers upstream timeouts.
+          errorTileUrl: TRANSPARENT_TILE,
+          attribution: p.attribution,
+        });
+        return { desc: p, layer: layer };
+      });
+
+    // Zoom-driven crossfade, ONLY between the RainViewer layer and a
+    // VISIBLE crossfade-flagged wms provider (the CONUS reflectivity
+    // sources). RainViewer's animated tiles cap at z=7 native, so above
+    // that they pixelate; the WMS source reprojects at any scale with
+    // ~250m native detail. Linear blend between z=6 (RainViewer-only)
+    // and z=9 (WMS-only) reads naturally as the user pulls in. With no
+    // visible crossfade partner, RainViewer holds full strength at every
+    // zoom (pixelated past z=7, but pixelated beats a blank map), and a
+    // crossfade-flagged wms shown WITHOUT RainViewer paints at its
+    // standalone opacity so it never fades to nothing at low zoom.
+    function crossfadeActive() {
+      if (!radarLayer || !map.hasLayer(radarLayer)) return false;
+      return wmsProviders.some(function (p) {
+        return p.desc.crossfade && map.hasLayer(p.layer);
+      });
     }
-    function nxOpacityForZoom(z) {
-      if (!nexradOk) return 0;
+    function rvOpacityForZoom(z) {
+      if (!crossfadeActive()) return 0.65;
       var t = Math.max(0, Math.min(1, (z - 6) / 3));
-      return 0.75 * t;                // 0.0 at z=6 → 0.75 at z=9
+      return 0.65 * (1 - t * 0.78);  // 0.65 at z=6 down to 0.14 at z=9
+    }
+    function wmsOpacityForZoom(desc, z) {
+      if (desc.crossfade && radarLayer && map.hasLayer(radarLayer)) {
+        var t = Math.max(0, Math.min(1, (z - 6) / 3));
+        return 0.75 * t;             // 0.0 at z=6 up to 0.75 at z=9
+      }
+      return 0.7;
     }
 
     // RainViewer's public API caps tile generation at z=7 regardless
     // of tileSize (verified empirically: both 256 and 512 sizes
-    // return a "Zoom Level Not Supported" placeholder PNG for z≥8).
+    // return a "Zoom Level Not Supported" placeholder PNG for z>=8).
     // We use the standard 256 size + maxNativeZoom:7 below so Leaflet
     // stretches the z=7 tile across higher zooms instead of fetching
     // unsupported levels. errorTileUrl handles the rare miss with a
@@ -221,11 +472,6 @@
     function radarTileUrl(host, frame) {
       return host + frame.path + '/256/{z}/{x}/{y}/2/1_1.png';
     }
-
-    // 1x1 transparent PNG, base64. Served when a tile URL fails so
-    // we silently degrade instead of showing the upstream error tile.
-    var TRANSPARENT_TILE =
-      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkAAIAAAoAAv/lxKUAAAAASUVORK5CYII=';
 
     function showRadarFrame(idx) {
       var visibleOp = rvOpacityForZoom(map.getZoom());
@@ -236,36 +482,44 @@
       if (f) {
         var d = new Date(f.time * 1000);
         var label = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        var tag =
-          idx === radarPastCount - 1
-            ? ' (now)'
-            : f.time > Date.now() / 1000
-            ? ' (forecast)'
-            : '';
+        // Frames past the observed set are RainViewer nowcast: tag them
+        // with lead time so forecast frames are never mistaken for
+        // observations.
+        var tag = '';
+        if (idx === radarPastCount - 1) {
+          tag = ' (now)';
+        } else if (idx >= radarPastCount) {
+          var mins = Math.max(1, Math.round((f.time - Date.now() / 1000) / 60));
+          tag = ' (+' + mins + 'm forecast)';
+        }
         var timeEl = document.getElementById('radar-time');
         if (timeEl) timeEl.textContent = label + tag;
       }
     }
 
     function radarTick() {
-      if (!radarPlaying) return;
+      if (!radarPlaying || radarFrames.length === 0) return;
       radarCurrent = (radarCurrent + 1) % radarFrames.length;
       showRadarFrame(radarCurrent);
       radarTimer = animationTimer = setTimeout(radarTick, 600);
     }
 
     function loadRainViewer() {
-      return fetch('https://api.rainviewer.com/public/weather-maps.json').then(function (r) {
-        return r.json();
-      });
+      return fetch(rainviewerDesc.url).then(function (r) { return r.json(); });
     }
 
+    // (Re)build the animated frame set from the cached weather-maps.json
+    // payload. The nowcast feature toggle decides whether forecast frames
+    // join the loop; recon note: nowcast arrays have been observed empty
+    // on the key-free tier, in which case the toggle is a benign no-op.
     function rebuildRadarFrames(data) {
+      lastRadarData = data;
       var host = data.host;
       var past = (data.radar && data.radar.past) || [];
       var nowcast = (data.radar && data.radar.nowcast) || [];
+      var includeNowcast = nowcastLayer != null && map.hasLayer(nowcastLayer);
       radarPastCount = past.length;
-      radarFrames = past.concat(nowcast);
+      radarFrames = includeNowcast ? past.concat(nowcast) : past.slice();
 
       Object.keys(radarTiles).forEach(function (k) {
         radarLayer.removeLayer(radarTiles[k]);
@@ -279,76 +533,143 @@
           maxZoom: 19,
           // RainViewer caps real tile data at z=7. At map zoom > 7
           // Leaflet upscales the z=7 tile (gets pixelated but never
-          // errors). Switch to NEXRAD for high-res US detail.
+          // errors). The crossfade WMS source takes over for detail.
           maxNativeZoom: 7,
           errorTileUrl: TRANSPARENT_TILE,
+          attribution: rainviewerDesc.attribution,
         });
         radarTiles[i] = t;
         radarLayer.addLayer(t);
       });
-      radarCurrent = Math.max(0, past.length - 1);
+      radarCurrent = Math.max(0, radarPastCount - 1);
       showRadarFrame(radarCurrent);
       if (radarTimer) clearTimeout(radarTimer);
       if (radarPlaying) radarTimer = animationTimer = setTimeout(radarTick, 1500);
     }
 
-    // ---------- Layer 2: Satellite IR (RainViewer most-recent) ----------
+    // ---------- Feature: RainViewer nowcast (forecast frames) ----------
+    //
+    // A "virtual" layer: an empty group whose on-map presence flags
+    // whether forecast frames are spliced into the animation. Riding the
+    // normal overlay machinery keeps the toggle, chips, and persistence
+    // uniform with real layers.
 
-    var satLayer = L.layerGroup();
-    var satTile = null;
+    var nowcastDesc = rainviewerDesc ? featureById('nowcast') : null;
+    var nowcastLayer = nowcastDesc ? L.layerGroup() : null;
 
-    function rebuildSat(data) {
-      var host = data.host;
-      var ir = (data.satellite && data.satellite.infrared) || [];
-      if (!ir.length) return;
-      var latest = ir[ir.length - 1];
-      if (satTile) satLayer.removeLayer(satTile);
-      satTile = L.tileLayer(host + latest.path + '/256/{z}/{x}/{y}/0/0_0.png', {
-        opacity: 0.6,
-        zIndex: 90,
-        minZoom: 0,
-        maxZoom: 19,
-        // RainViewer IR also caps at z=7; same upscale behavior.
-        maxNativeZoom: 7,
-        errorTileUrl: TRANSPARENT_TILE,
-      });
-      satLayer.addLayer(satTile);
+    // ---------- Feature: NWS active alerts ----------
+    //
+    // Severity-filtered alert polygons, refreshed every 2 minutes while
+    // visible. Many NWS alerts are zone-coded with null geometry; only
+    // polygon-bearing features are drawn. Popup carries event + headline.
+
+    var warningsDesc = featureById('warnings_us');
+    var warningsGroup = warningsDesc ? L.layerGroup() : null;
+
+    function alertStyle(feature) {
+      var sev = (feature.properties && feature.properties.severity) || 'Unknown';
+      var color = SEVERITY_COLORS[sev] || SEVERITY_COLORS.Unknown;
+      return { color: color, weight: 1.4, fillColor: color, fillOpacity: 0.18 };
     }
 
-    // ---------- Layer 3: NEXRAD via Iowa Environmental Mesonet WMS ----------
+    function refreshWarnings() {
+      if (!warningsGroup || !map.hasLayer(warningsGroup)) return;
+      fetch(warningsDesc.endpoints[0] || NWS_ALERTS_URL, {
+        headers: {
+          Accept: 'application/geo+json',
+          'User-Agent': NWS_USER_AGENT,
+        },
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (geo) {
+          if (!geo || !Array.isArray(geo.features)) return;
+          warningsGroup.clearLayers();
+          L.geoJSON(geo, {
+            filter: function (f) { return !!f.geometry; },
+            style: alertStyle,
+            attribution: warningsDesc.attribution || 'NOAA/NWS',
+            onEachFeature: function (f, layer) {
+              var p = f.properties || {};
+              layer.bindPopup(
+                '<strong>' + escHtml(p.event || 'Alert') + '</strong><br>' +
+                escHtml(p.headline || '')
+              );
+            },
+          }).addTo(warningsGroup);
+        })
+        .catch(function (e) { warnOnce('nws-alerts', 'NWS alerts fetch failed', e); });
+    }
 
-    // Outside the CONUS box the layer is never constructed: the WMS
-    // would just burn requests to paint nothing. Gating at construction
-    // (rather than hiding a control entry) also keeps it out of the
-    // chips and turns the zoom crossfade above into a no-op.
-    var nexradLayer = null;
-    if (nexradOk) {
-      nexradLayer = L.tileLayer.wms(
-        'https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0r-t.cgi',
-        {
-          layers: 'nexrad-n0r-wmst',
-          format: 'image/png',
-          transparent: true,
-          opacity: 0,  // Zoom-blended below; starts hidden, fades in at z>=7.
-          minZoom: 0,
-          maxZoom: 19,
-          // WMS reprojects to whatever bounding box you ask, so this
-          // works at any zoom, but at z>=10 the source pixels are
-          // already past native NEXRAD resolution. The errorTileUrl
-          // covers the occasional Iowa Mesonet timeout.
-          errorTileUrl: TRANSPARENT_TILE,
-          attribution: 'NEXRAD via Iowa Mesonet',
+    // ---------- Feature: NHC hurricanes ----------
+    //
+    // Three sources merged per refresh: forecast cones (polygons), forecast
+    // tracks (polylines), and CurrentStorms.json for named position markers.
+    // Each fetch fails independently; a quiet basin (zero features) renders
+    // nothing at all, silently. 15-minute cadence: advisories move slowly.
+
+    var hurricanesDesc = featureById('hurricanes');
+    var hurricanesGroup = hurricanesDesc ? L.layerGroup() : null;
+
+    function refreshHurricanes() {
+      if (!hurricanesGroup || !map.hasLayer(hurricanesGroup)) return;
+      // Descriptor endpoints in catalog order: storm summary JSON,
+      // forecast track query, forecast cone query. The recon constants
+      // cover descriptors that arrive without endpoints.
+      var eps = hurricanesDesc.endpoints;
+      var coneP = fetch(eps[2] || NHC_CONE_URL)
+        .then(function (r) { return r.json(); })
+        .catch(function (e) { warnOnce('nhc-cone', 'NHC forecast cone fetch failed', e); return null; });
+      var trackP = fetch(eps[1] || NHC_TRACK_URL)
+        .then(function (r) { return r.json(); })
+        .catch(function (e) { warnOnce('nhc-track', 'NHC forecast track fetch failed', e); return null; });
+      var stormsP = fetch(eps[0] || NHC_STORMS_URL)
+        .then(function (r) { return r.json(); })
+        .catch(function (e) { warnOnce('nhc-storms', 'NHC CurrentStorms fetch failed', e); return null; });
+      Promise.all([coneP, trackP, stormsP]).then(function (res) {
+        var cone = res[0], track = res[1], storms = res[2];
+        hurricanesGroup.clearLayers();
+        var attribution = hurricanesDesc.attribution || 'NOAA/NHC';
+        if (cone && Array.isArray(cone.features) && cone.features.length) {
+          L.geoJSON(cone, {
+            style: { color: '#ff6b81', weight: 1, fillColor: '#ff6b81', fillOpacity: 0.12 },
+            attribution: attribution,
+          }).addTo(hurricanesGroup);
         }
-      );
+        if (track && Array.isArray(track.features) && track.features.length) {
+          L.geoJSON(track, {
+            style: { color: '#ff6b81', weight: 2 },
+            attribution: attribution,
+          }).addTo(hurricanesGroup);
+        }
+        var active = (storms && storms.activeStorms) || [];
+        active.forEach(function (s) {
+          var sLat = s.latitudeNumeric;
+          var sLon = s.longitudeNumeric;
+          if (!isFinite(sLat) || !isFinite(sLon)) return;
+          var name = s.name || 'Storm';
+          if (s.classification) name += ' (' + s.classification + ')';
+          L.circleMarker([sLat, sLon], {
+            radius: 6,
+            color: '#ff4757',
+            fillColor: '#ff4757',
+            fillOpacity: 0.9,
+            weight: 2,
+            attribution: attribution,
+          })
+            .bindTooltip(name, { direction: 'top' })
+            .addTo(hurricanesGroup);
+        });
+      });
     }
 
-    // ---------- Layer 4: Local Tempest strike rings ----------
+    // ---------- Feature: local Tempest strike rings ----------
     //
     // Tempest reports distance-to-strike but not bearing, so we draw a
     // pulsing ring at the reported radius around the station for each
     // strike from the last hour. The newest strike is highlighted.
 
-    var strikeLayer = L.layerGroup();
+    var lightningDesc = featureById('lightning_tempest');
+    var strikeLayer = lightningDesc ? L.layerGroup() : null;
     var lastStrikeIds = new Set();
 
     function strikeRadiusMeters(distanceMi) {
@@ -356,6 +677,7 @@
     }
 
     function refreshStrikes() {
+      if (!strikeLayer) return;
       fetch('/api/snapshot')
         .then(function (r) { return r.json(); })
         .then(function (snap) {
@@ -401,28 +723,34 @@
 
     // ---------- Layer toggle + legend ----------
     //
-    // Each overlay name is explanatory enough that the toggle label
-    // doubles as documentation. The dedicated legend control below
-    // explains the dBZ color ramp + glyph meaning in one place.
+    // The overlay list is generated from the descriptor arrays: providers
+    // first (catalog order), then features. Both the desktop control and
+    // the mobile chip row are built from this one list, and persistence
+    // speaks descriptor ids so display labels can be reworded freely
+    // without invalidating stored prefs.
 
-    // Stable short ids per overlay label. Persistence below and the
-    // SSR'd default list both speak these ids, so the long display
-    // labels can be reworded freely without invalidating stored prefs.
-    var LAYER_IDS = {
-      'Precipitation (RainViewer · animated nowcast)': 'precip',
-      'NEXRAD reflectivity (US · Iowa Mesonet)': 'nexrad',
-      'Satellite IR (cloud cover, synoptic scale)': 'satellite',
-      'Tempest lightning rings ⚡ (last hour)': 'lightning',
-    };
-
-    var overlays = {
-      'Precipitation (RainViewer · animated nowcast)': radarLayer,
-    };
-    if (nexradLayer) {
-      overlays['NEXRAD reflectivity (US · Iowa Mesonet)'] = nexradLayer;
+    var overlayDefs = [];
+    if (radarLayer) {
+      overlayDefs.push({ id: rainviewerDesc.id, label: rainviewerDesc.label, layer: radarLayer, desc: rainviewerDesc });
     }
-    overlays['Satellite IR (cloud cover, synoptic scale)'] = satLayer;
-    overlays['Tempest lightning rings ⚡ (last hour)'] = strikeLayer;
+    wmsProviders.forEach(function (p) {
+      overlayDefs.push({ id: p.desc.id, label: p.desc.label, layer: p.layer, desc: p.desc });
+    });
+    if (nowcastLayer) {
+      overlayDefs.push({ id: nowcastDesc.id, label: nowcastDesc.label, layer: nowcastLayer, desc: nowcastDesc });
+    }
+    if (warningsGroup) {
+      overlayDefs.push({ id: warningsDesc.id, label: warningsDesc.label, layer: warningsGroup, desc: warningsDesc });
+    }
+    if (hurricanesGroup) {
+      overlayDefs.push({ id: hurricanesDesc.id, label: hurricanesDesc.label, layer: hurricanesGroup, desc: hurricanesDesc });
+    }
+    if (strikeLayer) {
+      overlayDefs.push({ id: lightningDesc.id, label: lightningDesc.label, layer: strikeLayer, desc: lightningDesc });
+    }
+
+    var overlays = {};
+    overlayDefs.forEach(function (d) { overlays[d.label] = d.layer; });
 
     // Layer visibility prefs, persisted per-browser. The key carries a
     // .v1 suffix so a future schema change can move to .v2 and start
@@ -441,6 +769,14 @@
         // layers off), so they fall back to defaults like any other
         // malformed blob.
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          // Migrate pre-catalog short ids in place; the legacy keys are
+          // dropped on the next save.
+          Object.keys(LEGACY_IDS).forEach(function (oldId) {
+            var newId = LEGACY_IDS[oldId];
+            if (typeof parsed[oldId] === 'boolean' && typeof parsed[newId] !== 'boolean') {
+              parsed[newId] = parsed[oldId];
+            }
+          });
           return parsed;
         }
       } catch (e) { /* unavailable or unparseable: fall back to defaults */ }
@@ -453,27 +789,29 @@
       // Write the full {id: bool} map, not a diff, so the stored blob
       // is always a complete, self-describing snapshot.
       var prefs = {};
-      Object.keys(LAYER_IDS).forEach(function (label) {
-        var id = LAYER_IDS[label];
-        if (overlays[label]) {
-          prefs[id] = map.hasLayer(overlays[label]);
-        } else if (storedPrefs && typeof storedPrefs[id] === 'boolean') {
-          // Region-gated layer (NEXRAD outside CONUS): carry the stored
-          // value through untouched so the pref survives a location
-          // change back into coverage.
-          prefs[id] = storedPrefs[id];
-        } else {
-          prefs[id] = false;
-        }
+      overlayDefs.forEach(function (d) {
+        prefs[d.id] = map.hasLayer(d.layer);
       });
+      // Carry through stored ids that aren't in the current effective set
+      // (e.g. a region-gated provider after a location change) so the pref
+      // survives a round trip. Migrated legacy keys are intentionally
+      // dropped; anything else unknown rides along untouched.
+      if (storedPrefs) {
+        Object.keys(storedPrefs).forEach(function (id) {
+          if (!(id in prefs) && !(id in LEGACY_IDS) && typeof storedPrefs[id] === 'boolean') {
+            prefs[id] = storedPrefs[id];
+          }
+        });
+      }
       try {
         window.localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
       } catch (e) { /* no storage: toggles still work, they just won't stick */ }
     }
+
     // On mobile we ditch the in-map L.control.layers entirely (even
     // collapsed it covered the map when the user tapped the toggle, which
     // defeats the purpose of an interactive map). Instead we render a
-    // horizontal chip row in #radar-layer-chips below the map — same
+    // horizontal chip row in #radar-layer-chips below the map, same
     // toggles, just outside the canvas where they don't obscure anything.
     // Desktop keeps the in-map control because the side margin makes it
     // free real estate.
@@ -488,25 +826,19 @@
       var chipsContainer = document.getElementById('radar-layer-chips');
       if (chipsContainer) {
         // Build one chip per overlay. Short label drives display; the
-        // long label from `overlays` becomes the aria-label so screen
-        // readers still get the context. Each chip toggles between
-        // .is-on / not-on, mirroring the actual map state, and addLayer
-        // / removeLayer drive the visibility.
-        var shortLabels = {
-          'Precipitation (RainViewer · animated nowcast)': '🌧 Precip',
-          'NEXRAD reflectivity (US · Iowa Mesonet)':       '⌬ NEXRAD',
-          'Satellite IR (cloud cover, synoptic scale)':    '☁ Sat IR',
-          'Tempest lightning rings ⚡ (last hour)':         '⚡ Strikes',
-        };
+        // descriptor label becomes the aria-label so screen readers still
+        // get the context. Each chip toggles between .is-on / not-on,
+        // mirroring the actual map state, and addLayer / removeLayer
+        // drive the visibility.
         chipsContainer.innerHTML = '';
-        Object.keys(overlays).forEach(function (longLabel) {
-          var layer = overlays[longLabel];
+        overlayDefs.forEach(function (d) {
+          var layer = d.layer;
           var btn = document.createElement('button');
           btn.type = 'button';
           btn.className = 'radar-layer-chip';
-          btn.setAttribute('aria-label', longLabel);
+          btn.setAttribute('aria-label', d.label);
           btn.setAttribute('aria-pressed', 'false');
-          btn.textContent = shortLabels[longLabel] || longLabel;
+          btn.textContent = shortLabelFor(d.id, d.label);
 
           function syncOn() {
             var on = map.hasLayer(layer);
@@ -535,33 +867,30 @@
       }
     }
 
-    // Initial layer set: stored prefs win when present and parseable
+    // Initial layer set, resolved per id: a stored pref wins when present
     // (the user's own toggles, written on every change below), else the
-    // SSR'd config defaults (ui.radar.default_layers; stock config is
-    // precip + NEXRAD + strikes). IR normally stays off because it's a
-    // different visualization (cloud-top temp, not precipitation) and
-    // stacking it on top muddies the reflectivity colors. The two
-    // reflectivity layers crossfade by zoom (RainViewer dominant at
-    // z<=7 for animation, NEXRAD dominant at z>=9 for detail) so the
-    // radar stays sharp wherever the user pans/zooms. A stored or
-    // defaulted nexrad pref is silently ignored when the layer is
-    // region-gated off, since it never made it into `overlays`.
-    Object.keys(overlays).forEach(function (label) {
-      var id = LAYER_IDS[label];
-      var on = storedPrefs
-        ? storedPrefs[id] === true
-        : defaultLayerIds.indexOf(id) !== -1;
-      if (on) overlays[label].addTo(map);
+    // SSR'd config default (ui.radar.default_layers). Per-id fallback
+    // matters: a provider added to the catalog after the user last saved
+    // gets its config default instead of silently starting off. Stored or
+    // defaulted ids with no layer in the current effective set are
+    // silently ignored, since they never made it into overlayDefs.
+    overlayDefs.forEach(function (d) {
+      var on = (storedPrefs && typeof storedPrefs[d.id] === 'boolean')
+        ? storedPrefs[d.id]
+        : defaultLayerIds.indexOf(d.id) !== -1;
+      if (on) d.layer.addTo(map);
     });
 
     // Refresh blend opacities whenever the map zoom settles. Also
     // run once on init so the initial render uses the right values.
     function applyZoomBlend() {
       var z = map.getZoom();
-      if (nexradLayer && map.hasLayer(nexradLayer)) {
-        nexradLayer.setOpacity(nxOpacityForZoom(z));
-      }
-      if (map.hasLayer(radarLayer) && radarFrames.length > 0) {
+      wmsProviders.forEach(function (p) {
+        if (map.hasLayer(p.layer)) {
+          p.layer.setOpacity(wmsOpacityForZoom(p.desc, z));
+        }
+      });
+      if (radarLayer && map.hasLayer(radarLayer) && radarFrames.length > 0) {
         // Re-apply opacity to the currently-visible RainViewer frame.
         // showRadarFrame computes from rvOpacityForZoom internally.
         showRadarFrame(radarCurrent);
@@ -580,9 +909,7 @@
     // filter drops them. Registered after the initial set is applied
     // above so first paint doesn't count as a user toggle.
     function isOverlayLayer(layer) {
-      return Object.keys(overlays).some(function (label) {
-        return overlays[label] === layer;
-      });
+      return overlayDefs.some(function (d) { return d.layer === layer; });
     }
     // Leaflet's map.remove() (the route-swap teardown path) detaches
     // every layer one by one with this handler still attached, so
@@ -594,57 +921,91 @@
     map.on('unload', function () { tearingDown = true; });
     map.on('overlayadd overlayremove layeradd layerremove', function (e) {
       if (tearingDown || !isOverlayLayer(e.layer)) return;
-      // Re-apply blend when a reflectivity layer comes back so it picks
-      // up the right zoom-based opacity instead of the layer's default.
-      if (e.layer === nexradLayer || e.layer === radarLayer) applyZoomBlend();
+      // Nowcast toggled: splice the forecast frames in or out of the
+      // cached payload; the next animation tick picks up the new set.
+      if (nowcastLayer && e.layer === nowcastLayer && lastRadarData) {
+        rebuildRadarFrames(lastRadarData);
+      }
+      // Data features fetch lazily: nothing is requested while the layer
+      // is hidden, so kick a refresh when one comes back on.
+      if (warningsGroup && e.layer === warningsGroup && map.hasLayer(warningsGroup)) {
+        refreshWarnings();
+      }
+      if (hurricanesGroup && e.layer === hurricanesGroup && map.hasLayer(hurricanesGroup)) {
+        refreshHurricanes();
+      }
+      // Re-apply blend so reflectivity layers coming back pick up the
+      // right zoom-based opacity instead of the layer's default.
+      applyZoomBlend();
       saveLayerPrefs();
     });
 
-    // Custom legend control. Always visible, bottom-left on desktop —
-    // briefly collapsible if it gets in the way of mobile zoom controls.
-    // On mobile we skip it entirely; the chip row's labels are enough,
-    // and the legend's verbose dBZ-ramp prose was just covering the map.
-    // (If a future revision wants the legend on mobile, render it as a
-    // <details> element below the chip row instead of overlaying the map.)
+    // Custom legend control, generated from the active descriptors so it
+    // never describes a layer that isn't in the menu. Always visible,
+    // bottom-left on desktop. On mobile we skip it entirely; the chip
+    // row's labels are enough, and the legend's verbose prose was just
+    // covering the map. Swatch colors are inline so new catalog entries
+    // need no CSS changes.
+    var LEGEND_SWATCH = {
+      rainviewer: '#58a6ff',
+      nowcast: '#58e0ff',
+      warnings_us: '#ff9f1c',
+      hurricanes: '#ff4757',
+      lightning_tempest: '#ffe066',
+    };
+    function legendText(d) {
+      if (d.id === 'nowcast') {
+        return 'Extends the precipitation animation with RainViewer forecast frames, tagged "+Nm forecast" in the time readout.';
+      }
+      if (d.id === 'warnings_us') {
+        return 'NWS active alert polygons. Fill color is severity: red extreme, orange severe. Tap a polygon for the headline. Refreshes every 2 min.';
+      }
+      if (d.id === 'hurricanes') {
+        return 'NHC active storms: position markers, forecast track lines, and the forecast cone. Empty when the basins are quiet.';
+      }
+      if (d.id === 'lightning_tempest') {
+        return 'Yellow ring = strike from your station. Tempest reports distance, not bearing, so each strike is a ring at the reported radius.';
+      }
+      if (d.desc && d.desc.kind === 'rainviewer') {
+        return 'Animated recent frames. dBZ scale: blue light · green moderate · yellow to orange to red heavy.';
+      }
+      if (d.desc && d.desc.kind === 'wms') {
+        var text = 'Reflectivity mosaic via WMS, coverage: ' + (d.desc.coverageLabel || 'regional') + '.';
+        if (d.desc.crossfade) {
+          text += ' Crossfades in past z=7 so detail stays sharp at street scale.';
+        }
+        if (d.desc.attribution) {
+          text += ' Source: ' + d.desc.attribution + '.';
+        }
+        return text;
+      }
+      return '';
+    }
+    function legendSwatchColor(d) {
+      if (LEGEND_SWATCH[d.id]) return LEGEND_SWATCH[d.id];
+      if (d.desc && d.desc.kind === 'wms') return '#7ed957';
+      return '#9aa0a6';
+    }
     var Legend = L.Control.extend({
       options: { position: 'bottomleft' },
       onAdd: function () {
         var div = L.DomUtil.create('div', 'radar-legend');
+        var rows = overlayDefs.map(function (d) {
+          return ''
+            + '<div class="radar-legend-row">'
+            +   '<span class="radar-legend-swatch" style="background:' + legendSwatchColor(d) + '"></span>'
+            +   '<div class="radar-legend-text">'
+            +     '<strong>' + escHtml(d.label) + '</strong>'
+            +     '<span>' + escHtml(legendText(d)) + '</span>'
+            +   '</div>'
+            + '</div>';
+        }).join('');
         div.innerHTML = ''
           + '<div class="radar-legend-head">'
           +   '<span>Legend</span>'
           +   '<button type="button" class="radar-legend-toggle" aria-label="Toggle legend">−</button>'
           + '</div>'
-          + '<div class="radar-legend-body">'
-          +   '<div class="radar-legend-row">'
-          +     '<span class="radar-legend-swatch radar-swatch-precip"></span>'
-          +     '<div class="radar-legend-text">'
-          +       '<strong>Precipitation</strong>'
-          +       '<span>RainViewer animated past + nowcast. dBZ scale: blue light · green moderate · yellow → orange → red heavy. Dominant at zoom ≤ 7.</span>'
-          +     '</div>'
-          +   '</div>'
-          +   '<div class="radar-legend-row">'
-          +     '<span class="radar-legend-swatch radar-swatch-nexrad"></span>'
-          +     '<div class="radar-legend-text">'
-          +       '<strong>NEXRAD reflectivity</strong>'
-          +       '<span>Iowa Mesonet WMS. US-only, higher native resolution; same dBZ ramp. Crossfades in as you zoom past z=7 so detail stays sharp at street scale.</span>'
-          +     '</div>'
-          +   '</div>'
-          +   '<div class="radar-legend-row">'
-          +     '<span class="radar-legend-swatch radar-swatch-ir"></span>'
-          +     '<div class="radar-legend-text">'
-          +       '<strong>Satellite IR</strong>'
-          +       '<span>Cloud-top temperature. Whiter = colder = taller storm tops. Continental-scale only.</span>'
-          +     '</div>'
-          +   '</div>'
-          +   '<div class="radar-legend-row">'
-          +     '<span class="radar-legend-swatch radar-swatch-strike"></span>'
-          +     '<div class="radar-legend-text">'
-          +       '<strong>Tempest lightning</strong>'
-          +       '<span>Yellow ring = strike from your station. Tempest reports distance, not bearing, so each strike is a ring at the reported radius.</span>'
-          +     '</div>'
-          +   '</div>'
-          + '</div>';
+          + '<div class="radar-legend-body">' + rows + '</div>';
 
         // Collapse toggle.
         L.DomEvent.disableClickPropagation(div);
@@ -664,13 +1025,11 @@
 
     // ---------- Bootstrap ----------
 
-    function refreshAll() {
+    function refreshRainViewer() {
+      if (!rainviewerDesc) return;
       loadRainViewer()
-        .then(function (data) {
-          rebuildRadarFrames(data);
-          rebuildSat(data);
-        })
-        .catch(function (e) { console.error('rainviewer load failed', e); });
+        .then(function (data) { rebuildRadarFrames(data); })
+        .catch(function (e) { warnOnce('rainviewer', 'RainViewer load failed', e); });
     }
 
     var btn = document.getElementById('radar-play');
@@ -683,17 +1042,32 @@
       });
     }
 
-    refreshAll();
+    refreshRainViewer();
     refreshStrikes();
-    radarPollTimer = setInterval(refreshAll, 5 * 60 * 1000);
-    // Strike poll: 60s. Was 30s, doubled to halve the per-IP request
-    // pressure on the OAuth-gated /api/snapshot endpoint. CF's bot
-    // challenges can fire on a remote IP that issues many cookie-bearing
-    // requests in quick succession, and the live SSE stream already
-    // delivers the same Tempest snapshot in real time — this polling
-    // loop is only the radar.js fallback path for environments where
-    // the SSE stream isn't open yet (cold load on the weather route).
-    strikePollTimer = setInterval(refreshStrikes, 60 * 1000);
+    refreshWarnings();
+    refreshHurricanes();
+    if (rainviewerDesc) {
+      radarPollTimer = setInterval(refreshRainViewer, 5 * 60 * 1000);
+    }
+    if (strikeLayer) {
+      // Strike poll: 60s. Was 30s, doubled to halve the per-IP request
+      // pressure on the OAuth-gated /api/snapshot endpoint. CF's bot
+      // challenges can fire on a remote IP that issues many cookie-bearing
+      // requests in quick succession, and the live SSE stream already
+      // delivers the same Tempest snapshot in real time; this polling
+      // loop is only the radar.js fallback path for environments where
+      // the SSE stream isn't open yet (cold load on the weather route).
+      strikePollTimer = setInterval(refreshStrikes, 60 * 1000);
+    }
+    if (warningsGroup) {
+      // Alert cadence per the catalog contract: 2 minutes. refreshWarnings
+      // no-ops while the layer is hidden so a toggled-off layer costs
+      // api.weather.gov nothing.
+      warningsPollTimer = setInterval(refreshWarnings, 2 * 60 * 1000);
+    }
+    if (hurricanesGroup) {
+      hurricanePollTimer = setInterval(refreshHurricanes, 15 * 60 * 1000);
+    }
   }
 
   // Watch for the radar element appearing/disappearing as Leptos

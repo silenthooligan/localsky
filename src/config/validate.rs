@@ -203,16 +203,33 @@ pub fn validate(cfg: &Config) -> ValidationReport {
         }
     }
 
-    // Radar default layers must come from the known overlay set. The
-    // frontend silently ignores unknown ids, so warn rather than block.
-    const VALID_RADAR_LAYERS: [&str; 4] = ["precip", "nexrad", "satellite", "lightning"];
+    // Radar layer + provider ids must come from the radar catalog
+    // (legacy pre-catalog ids normalize and pass; the retired satellite
+    // IR layer does not). The frontend silently ignores unknown ids, so
+    // warn rather than block.
     for id in &cfg.ui.radar.default_layers {
-        if !VALID_RADAR_LAYERS.contains(&id.as_str()) {
+        if crate::radar_catalog::canonical_layer_id(id).is_none() {
             r.warn(
                 "radar_layer_unknown",
                 format!(
-                    "ui.radar.default_layers entry '{id}' is not a known layer id \
-                     (valid: precip, nexrad, satellite, lightning) and is ignored"
+                    "ui.radar.default_layers entry '{id}' is not a known radar provider or \
+                     feature id and is ignored"
+                ),
+            );
+        }
+    }
+    for id in &cfg.ui.radar.providers {
+        if crate::radar_catalog::provider_by_id(id).is_none() {
+            let valid = crate::radar_catalog::providers()
+                .iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>()
+                .join(", ");
+            r.warn(
+                "radar_provider_unknown",
+                format!(
+                    "ui.radar.providers entry '{id}' is not a catalog provider id \
+                     (valid: {valid}) and is ignored"
                 ),
             );
         }
@@ -278,10 +295,52 @@ mod tests {
 
     #[test]
     fn known_radar_layers_pass_clean() {
+        // Catalog provider ids, feature ids, and the legacy
+        // pre-catalog trio all pass without a warning.
         let mut cfg = base();
-        cfg.ui.radar.default_layers = vec!["precip".into(), "satellite".into()];
+        cfg.ui.radar.default_layers = vec![
+            "rainviewer".into(),
+            "warnings_us".into(),
+            "precip".into(),
+            "nexrad".into(),
+            "lightning".into(),
+        ];
         let r = validate(&cfg);
         assert!(!r.warnings.iter().any(|i| i.code == "radar_layer_unknown"));
+    }
+
+    #[test]
+    fn retired_satellite_layer_warns() {
+        // RainViewer no longer serves the key-free IR frames, so the
+        // old `satellite` id has no catalog successor.
+        let mut cfg = base();
+        cfg.ui.radar.default_layers = vec!["satellite".into()];
+        let r = validate(&cfg);
+        assert!(r.warnings.iter().any(|i| i.code == "radar_layer_unknown"));
+    }
+
+    #[test]
+    fn unknown_radar_provider_warns_not_errors() {
+        let mut cfg = base();
+        // A feature id is not a provider id either.
+        cfg.ui.radar.providers = vec!["rainviewer".into(), "warnings_us".into()];
+        let r = validate(&cfg);
+        assert!(r.ok());
+        assert!(r
+            .warnings
+            .iter()
+            .any(|i| i.code == "radar_provider_unknown"));
+    }
+
+    #[test]
+    fn known_radar_providers_pass_clean() {
+        let mut cfg = base();
+        cfg.ui.radar.providers = vec!["geomet_ca".into(), "nexrad_iem".into()];
+        let r = validate(&cfg);
+        assert!(!r
+            .warnings
+            .iter()
+            .any(|i| i.code == "radar_provider_unknown"));
     }
 
     #[test]
