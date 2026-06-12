@@ -648,12 +648,12 @@ html[data-demo="true"]::after {
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
 }
 html[data-dry-run="true"]::before {
-  content: "Dry-run mode — irrigation dispatch is silenced (LOCALSKY_SMART_DRY_RUN=1)";
+  content: "Dry-run mode: irrigation dispatch is silenced (LOCALSKY_SMART_DRY_RUN=1)";
   top: 0;
   background: var(--accent-warm, #f5a623);
 }
 html[data-demo="true"]::after {
-  content: "Demo mode — synthetic weather, controllers in record-only mode";
+  content: "Demo mode: synthetic weather, controllers in record-only mode";
   top: 0;
   background: var(--accent, #4dd2ff);
 }

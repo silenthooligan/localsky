@@ -66,7 +66,7 @@ Most home irrigation systems are either dumb timers or cloud tethered too. The c
     </td>
     <td align="center" width="50%">
       <img src="docs/assets/screenshots/wizard-zones.png" alt="First-run wizard showing the 13-species grass catalog with Kc, root depth, and MAD" width="100%"><br>
-      <em>First-run wizard: full 13-species grass catalog with Kc range, root depth, and MAD per species. Drop photos in <code>public/grass-species/</code> to populate the cards.</em>
+      <em>First-run wizard: full 13-species grass catalog, photo cards with Kc range, root depth, and MAD per species, ready out of the box.</em>
     </td>
   </tr>
 </table>
