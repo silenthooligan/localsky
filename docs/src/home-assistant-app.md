@@ -1,22 +1,40 @@
 # Install as a Home Assistant App
 
-If you run Home Assistant OS (or a Supervised install), you can skip Docker
-entirely: LocalSky ships as a Home Assistant app. One click adds the
-repository, one click installs, and the Supervisor manages the container,
-updates, and backups from then on. It is the same released LocalSky image
-documented everywhere else in these docs, packaged for the app store.
+> **This page is for Home Assistant OS (and Supervised) only.** Apps
+> (formerly add-ons) are a Supervisor feature, and the Supervisor exists
+> only on those two installation types. Check yours in Home Assistant under
+> **Settings > About**, the **Installation method** line:
+>
+> - **Home Assistant OS** or **Supervised**: you are in the right place.
+> - **Container** or **Core**: there is no app store on your install. Run
+>   the LocalSky server with the [Docker quick start](getting-started.md)
+>   instead; it is the exact same software, and everything else in these
+>   docs applies unchanged.
 
-> **Two pieces, same as always.** The app runs the LocalSky *server* on your
-> Home Assistant machine. The [HACS integration](hacs.md) is still the piece
-> that turns it into HA entities. Install the app first, then the
-> integration; the integration discovers the running app automatically over
-> mDNS.
+If you run Home Assistant OS, you can skip Docker entirely: LocalSky ships
+as a Home Assistant app. One click adds the repository, one click installs,
+and the Supervisor manages the container, updates, and backups from then
+on. It is the same released LocalSky image documented everywhere else in
+these docs, packaged for the app store.
+
+## Which piece is which
+
+LocalSky on Home Assistant is always two pieces, and it is worth being
+precise about them:
+
+| Piece | What it is | Works on |
+|---|---|---|
+| **This app** | The LocalSky *server*: data collection, irrigation engine, web UI | Home Assistant OS / Supervised only |
+| [HACS integration](hacs.md) | The *bridge* that turns a running server into HA entities | Every HA installation type |
+| [Docker install](getting-started.md) | The same server, run anywhere Docker runs | Any machine, HA optional |
+
+You always run exactly one server (this app **or** Docker, never both),
+plus the integration if you want entities in Home Assistant. Install the
+server first; the integration discovers it automatically over mDNS.
 
 ## Requirements
 
-- Home Assistant OS or a Supervised installation (the app store is a
-  Supervisor feature; Container and Core installs should use the
-  [Docker quick start](getting-started.md) instead)
+- Home Assistant OS or a Supervised installation (see the callout above)
 - An `amd64` or `aarch64` machine (Raspberry Pi 4/5, ODROID, generic x86)
 - A free TCP port **8090** on the host
 

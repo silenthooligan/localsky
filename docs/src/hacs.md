@@ -4,6 +4,8 @@ LocalSky ships a native Home Assistant integration, distributed through HACS fro
 
 LocalSky stays the brain. The integration is a thin client over LocalSky's REST and SSE API; if HA goes down, watering continues unaffected.
 
+The integration installs through HACS and works on **every** Home Assistant installation type (OS, Supervised, Container, Core). Only the *server* half differs by installation type: the [Home Assistant app](home-assistant-app.md) exists solely for OS/Supervised installs, while [Docker](getting-started.md) covers every other setup.
+
 > **Two pieces, in this order.** LocalSky is a server you run yourself (one Docker container, see the [Quick start](getting-started.md), or one click as a [Home Assistant App](home-assistant-app.md) on HAOS); this integration is only the bridge that surfaces it inside Home Assistant. Installing the integration without a running LocalSky gives you nothing to pair with. Server first, integration second.
 
 > **Pick one path into HA, never both.** LocalSky can also publish entities through MQTT discovery (`sensor.localsky_*` via your broker). Running MQTT discovery *and* the HACS integration at the same time creates two copies of every entity. New setups should use the HACS integration; if you previously used MQTT discovery, disable LocalSky's MQTT publishing and clear the retained `homeassistant/.../config` discovery topics before adding the integration (see [Troubleshooting](#troubleshooting) below).
