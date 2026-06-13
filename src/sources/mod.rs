@@ -2,6 +2,8 @@
 //
 // Adapters shipped:
 //   ambient_weather.rs - api.ambientweather.net (cloud-routed LAN station)
+//   blitzortung.rs   - Blitzortung.org community lightning (opt-in,
+//                      display-only; feeds TempestStore, not the bus)
 //   davis_wll.rs     - Davis WeatherLink Live LAN gateway (VP2 / Vue)
 //   demo_replay.rs   - synthetic data for demo mode
 //   ecowitt_local.rs - LAN gateway POST receiver
@@ -27,6 +29,7 @@
 //   registry.rs - SourceRegistry behind arc-swap
 
 pub mod ambient_weather;
+pub mod blitzortung;
 pub mod bus_recorder;
 pub mod davis_wll;
 pub mod demo_replay;

@@ -69,6 +69,48 @@ mod tests {
         assert_json_snapshot!("forecast_v1", ForecastSnapshot::default());
     }
 
+    /// `/api/v1/sources/openmeteo/models`. The whole static catalog:
+    /// locks ids, labels, agencies, and regions, so a model id rename
+    /// (which would break saved configs) shows up as a snapshot diff.
+    #[test]
+    fn openmeteo_models_v1_shape() {
+        assert_json_snapshot!(
+            "openmeteo_models_v1",
+            crate::forecast::model_catalog::models()
+        );
+    }
+
+    /// `/api/v1/radar/windgrid` record shape. Locks the grib2json-style
+    /// envelope leaflet-velocity parses (camelCase header keys, U then
+    /// V, parameterCategory 2 / parameterNumber 2 and 3). Two-value
+    /// data arrays keep the snapshot readable; the real handler always
+    /// emits nx*ny values (asserted in api::windgrid's unit tests).
+    #[test]
+    fn radar_windgrid_v1_shape() {
+        let records = super::super::windgrid::make_records(
+            &super::super::windgrid::test_fixture_grid(),
+            "2026-06-12T14:00:00Z",
+            vec![1.25, -0.5],
+            vec![0.0, 3.5],
+        );
+        assert_json_snapshot!("radar_windgrid_v1", records);
+    }
+
+    /// `/api/v1/radar/tropical` shape. Locks the normalized GeoJSON
+    /// FeatureCollection contract radar.js renders: uniform per-storm
+    /// property bag (kind/id/name/term/agency/basin/classification/
+    /// intensity_kt/pressure_mb/movement/updated) over Point/
+    /// LineString/Polygon geometry, plus the per-source health array.
+    /// Built deterministically from the embedded recon fixtures so all
+    /// three agency normalizers (NHC/CPHC, JMA, JTWC) are exercised.
+    #[test]
+    fn radar_tropical_v1_shape() {
+        assert_json_snapshot!(
+            "radar_tropical_v1",
+            super::super::tropical::test_fixture_collection()
+        );
+    }
+
     /// Sanity-check the action POST envelope (the HACS integration's
     /// run_zone / stop_all services write JSON matching this shape).
     #[test]

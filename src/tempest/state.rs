@@ -94,6 +94,10 @@ impl Snapshot {
     }
 }
 
+/// Cap on the recent-strike ring buffer (see apply_strikes for why).
+#[cfg(feature = "ssr")]
+const MAX_RECENT_STRIKES: usize = 500;
+
 #[cfg(feature = "ssr")]
 pub struct TempestStore {
     current: ArcSwap<Snapshot>,
@@ -293,11 +297,25 @@ impl TempestStore {
     }
 
     pub fn apply_strike(&self, evt: &StrikeEvent) {
-        {
+        self.apply_strikes(std::slice::from_ref(evt));
+    }
+
+    /// Batch strike insert: one lock, one snapshot swap, one SSE event
+    /// for the whole slice. The Tempest UDP path delegates here one
+    /// strike at a time; the Blitzortung feed batches because the
+    /// community network can deliver several strikes per second during
+    /// an outbreak and each swap broadcasts a full snapshot.
+    pub fn apply_strikes(&self, evts: &[StrikeEvent]) {
+        let Some(newest) = evts.iter().max_by_key(|e| e.time_epoch).cloned() else {
+            return;
+        };
+        let strikes: Vec<StrikeEvent> = {
             let mut roll = self.rolling.lock().unwrap();
-            roll.strikes.push_back(evt.clone());
-            // trim to last hour
-            let one_hour_ago = evt.time_epoch - 3600;
+            for evt in evts {
+                roll.strikes.push_back(evt.clone());
+            }
+            // Trim to last hour.
+            let one_hour_ago = newest.time_epoch - 3600;
             while roll
                 .strikes
                 .front()
@@ -305,17 +323,23 @@ impl TempestStore {
             {
                 roll.strikes.pop_front();
             }
-        }
-        let roll = self.rolling.lock().unwrap();
-        let strikes: Vec<_> = roll.strikes.iter().cloned().collect();
-        drop(roll);
+            // Hard cap. The local Tempest alone never gets near it
+            // (strikes are rare per-minute events), but the Blitzortung
+            // community feed can keep hundreds in the hour window, and
+            // the buffer is serialized into every snapshot/SSE payload,
+            // so it must stay bounded regardless of storm size.
+            while roll.strikes.len() > MAX_RECENT_STRIKES {
+                roll.strikes.pop_front();
+            }
+            roll.strikes.iter().cloned().collect()
+        };
         let prev = self.current.load_full();
         let count = strikes.len() as u32;
         let new = Arc::new(Snapshot {
             lightning_strikes_last_hour: count,
             lightning_recent: strikes,
-            last_strike_distance_mi: Some(evt.distance_km * 0.621371),
-            last_strike_epoch: Some(evt.time_epoch),
+            last_strike_distance_mi: Some(newest.distance_km * 0.621371),
+            last_strike_epoch: Some(newest.time_epoch),
             ..(*prev).clone()
         });
         self.current.store(new.clone());
@@ -415,6 +439,87 @@ mod rain_day_tests {
         assert!(!store.seed_rain_today(0.10, now));
         // Zero / negative seeds are rejected outright.
         assert!(!store.seed_rain_today(0.0, now));
+    }
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod strike_buffer_tests {
+    use super::*;
+
+    fn strike(epoch: i64, dist_km: f64) -> StrikeEvent {
+        StrikeEvent {
+            time_epoch: epoch,
+            distance_km: dist_km,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ring_prunes_strikes_older_than_one_hour() {
+        let store = TempestStore::new();
+        let t0 = 1_700_000_000;
+        store.apply_strike(&strike(t0, 5.0));
+        store.apply_strike(&strike(t0 + 60, 8.0));
+        assert_eq!(store.snapshot().lightning_strikes_last_hour, 2);
+        // A strike >1h later evicts both earlier ones.
+        store.apply_strike(&strike(t0 + 3700, 12.0));
+        let snap = store.snapshot();
+        assert_eq!(snap.lightning_strikes_last_hour, 1);
+        assert_eq!(snap.lightning_recent.len(), 1);
+        assert_eq!(snap.last_strike_epoch, Some(t0 + 3700));
+    }
+
+    #[test]
+    fn ring_caps_at_500_strikes() {
+        // A Blitzortung-scale burst (600 strikes inside the hour) must
+        // not grow the snapshot beyond the cap; the oldest fall off.
+        let store = TempestStore::new();
+        let t0 = 1_700_000_000;
+        let batch: Vec<StrikeEvent> = (0..600).map(|i| strike(t0 + i, 10.0)).collect();
+        store.apply_strikes(&batch);
+        let snap = store.snapshot();
+        assert_eq!(snap.lightning_recent.len(), 500);
+        assert_eq!(snap.lightning_strikes_last_hour, 500);
+        // Oldest 100 evicted, newest kept.
+        assert_eq!(snap.lightning_recent[0].time_epoch, t0 + 100);
+        assert_eq!(snap.last_strike_epoch, Some(t0 + 599));
+    }
+
+    #[test]
+    fn batch_apply_swaps_snapshot_once_and_mixes_sources() {
+        let store = TempestStore::new();
+        let mut rx = store.subscribe();
+        rx.mark_unchanged();
+        let community = StrikeEvent {
+            time_epoch: 1_700_000_100,
+            distance_km: 42.0,
+            source: crate::tempest::packets::STRIKE_SOURCE_BLITZORTUNG.to_string(),
+            lat: Some(28.5),
+            lon: Some(-81.4),
+            ..Default::default()
+        };
+        store.apply_strikes(&[strike(1_700_000_000, 7.0), community]);
+        // Exactly one watch notification for the batch.
+        assert!(rx.has_changed().unwrap());
+        rx.mark_unchanged();
+        assert!(!rx.has_changed().unwrap());
+        let snap = store.snapshot();
+        assert_eq!(snap.lightning_recent.len(), 2);
+        assert_eq!(snap.lightning_recent[0].source, "tempest");
+        assert_eq!(snap.lightning_recent[1].source, "blitzortung");
+        assert_eq!(snap.lightning_recent[1].lat, Some(28.5));
+        // last_strike_* follows the newest of the batch.
+        assert_eq!(snap.last_strike_epoch, Some(1_700_000_100));
+    }
+
+    #[test]
+    fn empty_batch_is_a_noop() {
+        let store = TempestStore::new();
+        let mut rx = store.subscribe();
+        rx.mark_unchanged();
+        store.apply_strikes(&[]);
+        assert!(!rx.has_changed().unwrap());
+        assert_eq!(store.snapshot().last_strike_epoch, None);
     }
 }
 

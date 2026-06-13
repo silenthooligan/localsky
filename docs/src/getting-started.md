@@ -274,4 +274,3 @@ LocalSky's advisor produces plain-English explanations of why today's verdict is
 - [docs/grass-species.md](grass-species.md): species catalog
 - [docs/skip-rules.md](skip-rules.md): every rule in the ladder
 - [docs/configuration.md](configuration.md): field-by-field config reference
-- [docs/migration.md](migration.md): internal Aperture Labs operator path

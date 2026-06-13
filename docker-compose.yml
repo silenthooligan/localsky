@@ -36,7 +36,7 @@ services:
       # LLM advisor (Phase F). Talks to the configured OpenAI-compatible LLM endpoint over its
       # OpenAI-compatible endpoint. Set LLM_ADVISOR_DISABLED=1 to kill
       # advisor calls fleet-wide without redeploying.
-      - LLM_BASE_URL=${LLM_BASE_URL:-${OMEGA_ROUTER_URL}}
+      - LLM_BASE_URL=${LLM_BASE_URL:-}
       - LLM_ADVISOR_MODEL=${LLM_ADVISOR_MODEL}
       - LLM_ADVISOR_DISABLED=${LLM_ADVISOR_DISABLED}
       # Web Push (Phase PWA-5). VAPID keypair for signing notifications.

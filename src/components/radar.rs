@@ -139,7 +139,9 @@ pub fn RadarPanel() -> impl IntoView {
     // from the serialized JSON and never needs the catalog itself.
     let effective = radar_catalog::effective_providers(&inputs.providers, inputs.lat, inputs.lon);
     let providers_attr = radar_catalog::providers_json(&effective);
-    let features_attr = radar_catalog::features_json();
+    // Feature catalog localizes to the station: the tropical entry's
+    // label/endpoint order follow the home basin for these coords.
+    let features_attr = radar_catalog::features_json(inputs.lat, inputs.lon);
     let layers_attr = default_layers_attr(&inputs.default_layers);
     // Attribution for the offered providers, rendered server-side so
     // it is correct before (and without) radar.js running.
@@ -151,23 +153,25 @@ pub fn RadarPanel() -> impl IntoView {
     view! {
         <section class="panel radar-panel">
             <h2 class="panel-title">"Live Radar"</h2>
-            <div id="radar-map"
-                class="radar-map"
-                role="img"
-                aria-label="Precipitation radar centered on the station"
-                data-lat=inputs.lat.to_string()
-                data-lon=inputs.lon.to_string()
-                data-zoom=inputs.zoom.to_string()
-                data-radar-providers=providers_attr
-                data-radar-features=features_attr
-                data-default-layers=layers_attr>
+            // Positioned shell for the JS-built Layers chip + drawer
+            // (public/radar.js): they anchor here, OUTSIDE #radar-map,
+            // because the map div's role="img" makes its descendants
+            // presentational to assistive tech and the drawer is a real
+            // dialog. The drawer overlays the map; the map itself never
+            // resizes when it slides in.
+            <div class="radar-map-shell">
+                <div id="radar-map"
+                    class="radar-map"
+                    role="img"
+                    aria-label="Precipitation radar centered on the station"
+                    data-lat=inputs.lat.to_string()
+                    data-lon=inputs.lon.to_string()
+                    data-zoom=inputs.zoom.to_string()
+                    data-radar-providers=providers_attr
+                    data-radar-features=features_attr
+                    data-default-layers=layers_attr>
+                </div>
             </div>
-            // Mobile layer-chip row. radar.js populates this with one chip
-            // per overlay when the viewport is <=760px and skips the in-map
-            // L.control.layers entirely. On desktop the row is hidden via
-            // SCSS and the in-map control wins. Putting the toggles outside
-            // the map means they don't cover content at phone widths.
-            <div id="radar-layer-chips" class="radar-layer-chips" aria-label="Radar layers"></div>
             <div class="radar-controls">
                 <button id="radar-play" class="radar-btn">"⏸ pause"</button>
                 <span id="radar-time" class="radar-time"></span>

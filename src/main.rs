@@ -614,6 +614,31 @@ async fn main() -> anyhow::Result<()> {
         sensor_history.clone(),
         source_last_seen.clone(),
     );
+    // Blitzortung community lightning (Blitzortung.org, CC BY-SA 4.0).
+    // Spawned directly like the ecowitt_gw_poll pollers because it
+    // feeds the TempestStore lightning buffer (display layer only),
+    // not the merge bus, and never irrigation logic. Double opt-in:
+    // the entry's enabled flag AND the config's own enabled (default
+    // false) must both be true before spawn() connects; frame arrivals
+    // are recorded into source_last_seen so /api/health shows feed
+    // liveness even while no strikes land inside the radius.
+    if !demo_mode {
+        if let Some(cfg) = boot_cfg.as_ref() {
+            let station = (cfg.deployment.location.lat, cfg.deployment.location.lon);
+            for entry in cfg.sources.iter().filter(|s| s.enabled) {
+                if let localsky::config::schema::SourceKind::Blitzortung(c) = &entry.source {
+                    localsky::sources::blitzortung::spawn(
+                        entry.id.clone(),
+                        c.clone(),
+                        tempest_store.clone(),
+                        station,
+                        Some(source_last_seen.clone()),
+                    );
+                }
+            }
+        }
+    }
+
     // The watch sender must stay alive for the process lifetime:
     // dropping it closes the channel and every source's select loop
     // would spin on the closed receiver.
@@ -737,6 +762,17 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/v1/health", mk_health())
         .nest("/api/v1/ingest", mk_ingest())
         .nest("/api/v1/zones", mk_photos())
+        // Radar map data services, canonical-prefix only (both shipped
+        // after the /api/v1 split, so there is no legacy /api alias to
+        // honor). windgrid: leaflet-velocity U/V field (config store
+        // for the pinned model + 30-minute cache). tropical: all-basin
+        // tropical cyclone GeoJSON normalized from the verified
+        // NHC/CPHC + JMA + JTWC feeds (own 10-minute cache).
+        .nest(
+            "/api/v1/radar",
+            api::windgrid::router(api::windgrid::WindGridState::new(Some(cfg_store.clone())))
+                .merge(api::tropical::router(api::tropical::TropicalState::new())),
+        )
         .nest(
             "/api/v1/backup",
             api::backup::router(api::backup::BackupApiState {

@@ -1,0 +1,50 @@
+---
+source: src/api/snapshot_tests.rs
+expression: records
+---
+[
+  {
+    "header": {
+      "parameterCategory": 2,
+      "parameterNumber": 2,
+      "parameterUnit": "m.s-1",
+      "parameterNumberName": "eastward_wind",
+      "nx": 8,
+      "ny": 8,
+      "lo1": -82.0,
+      "la1": 29.0,
+      "lo2": -81.3,
+      "la2": 28.3,
+      "dx": 0.1,
+      "dy": 0.1,
+      "refTime": "2026-06-12T14:00:00Z",
+      "forecastTime": 0
+    },
+    "data": [
+      1.25,
+      -0.5
+    ]
+  },
+  {
+    "header": {
+      "parameterCategory": 2,
+      "parameterNumber": 3,
+      "parameterUnit": "m.s-1",
+      "parameterNumberName": "northward_wind",
+      "nx": 8,
+      "ny": 8,
+      "lo1": -82.0,
+      "la1": 29.0,
+      "lo2": -81.3,
+      "la2": 28.3,
+      "dx": 0.1,
+      "dy": 0.1,
+      "refTime": "2026-06-12T14:00:00Z",
+      "forecastTime": 0
+    },
+    "data": [
+      0.0,
+      3.5
+    ]
+  }
+]

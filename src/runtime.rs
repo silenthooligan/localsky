@@ -292,6 +292,10 @@ pub fn build_sources(cfg: &Config) -> Vec<Arc<dyn WeatherSource>> {
             // EcowittGwPoll is a standalone sensor_history poller (not a
             // WeatherSource); main.rs spawns it directly. Skip here.
             SourceKind::EcowittGwPoll(_) => None,
+            // Blitzortung is a standalone display-only feed into the
+            // TempestStore lightning buffer (never the merge bus, never
+            // irrigation input); main.rs spawns it directly. Skip here.
+            SourceKind::Blitzortung(_) => None,
             // Already-wired v0.1 paths: TempestUdp + OpenMeteo run as
             // their own tasks in main.rs; they are not yet expressed
             // via WeatherSource. Silent skip is correct.

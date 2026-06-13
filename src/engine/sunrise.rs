@@ -72,25 +72,25 @@ mod tests {
     use chrono::Timelike;
 
     #[test]
-    fn sunrise_known_date_aperture_labs() {
-        // 2026-05-26 sunrise at 30.0738, -81.4716 is ~10:25 UTC per
-        // timeanddate.com (NOAA-based). Same regression test as
-        // smart_morning's pre-extraction copy.
+    fn sunrise_known_date_new_york() {
+        // 2026-05-26 sunrise at New York City (40.7128, -74.006) is
+        // ~09:31 UTC (05:31 EDT) per timeanddate.com (NOAA-based).
         let date = NaiveDate::from_ymd_opt(2026, 5, 26).unwrap();
-        let sr = sunrise_utc(date, 30.0737788, -81.4715974).expect("sunrise exists");
+        let sr = sunrise_utc(date, 40.7128, -74.006).expect("sunrise exists");
         let total_min = sr.hour() as i32 * 60 + sr.minute() as i32;
-        let expected = 10 * 60 + 25;
+        let expected = 9 * 60 + 31;
         assert!((total_min - expected).abs() <= 3);
     }
 
     #[test]
     fn target_start_is_finish_minus_sequence() {
-        // sunrise 10:25 UTC, sequence 25 min, target_finish = 10:10 UTC,
-        // target_start = 09:45 UTC.
+        // Asserts the finish-before + sequence delta, which is
+        // independent of the actual sunrise time: 15 min finish-before +
+        // 25 min sequence = 40 min before sunrise.
         let date = NaiveDate::from_ymd_opt(2026, 5, 26).unwrap();
-        let sr = sunrise_utc(date, 30.0737788, -81.4715974).unwrap();
-        let target = smart_morning_target_start(date, 30.0737788, -81.4715974, 25 * 60)
-            .expect("target exists");
+        let sr = sunrise_utc(date, 40.7128, -74.006).unwrap();
+        let target =
+            smart_morning_target_start(date, 40.7128, -74.006, 25 * 60).expect("target exists");
         let delta = (sr - target).num_minutes();
         // 15 min finish-before + 25 min sequence = 40 min.
         assert_eq!(delta, 40);

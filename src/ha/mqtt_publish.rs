@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn slugify_basic() {
-        assert_eq!(slugify("Aperture Yard"), "aperture_yard");
+        assert_eq!(slugify("Front Yard"), "front_yard");
         assert_eq!(slugify("Casa-Bonita 2!"), "casa_bonita_2");
         assert_eq!(slugify("  weird   spaces  "), "weird_spaces");
         assert_eq!(slugify(""), "localsky");

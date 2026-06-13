@@ -29,11 +29,11 @@
 
 LocalSky is two products in one Docker container.
 
-**A self-hosted weather dashboard** that reads your Tempest or Ecowitt station over the LAN, merges in Open-Meteo (global) and NWS (US) forecasts with per-field provenance, and renders the result in a fast, installable PWA with built-in radar (RainViewer worldwide, NEXRAD in the US) and lightning rings. Useful on its own, even if you never irrigate anything.
+**A self-hosted weather dashboard** that reads your Tempest or Ecowitt station over the LAN, blends in worldwide and regional forecasts with per-field provenance (Open-Meteo everywhere, with NWS, MET Norway, OpenWeather, and Pirate Weather as alternatives), and renders it in a fast, installable PWA in metric or imperial units. The built-in radar map is global: worldwide precipitation playback, high-resolution national reflectivity (United States, Canada, Germany, Finland, and more), tropical-cyclone tracking across every basin, animated wind flow, and lightning. Useful on its own, even if you never irrigate anything.
 
 **A smart irrigation engine** that pairs the same weather data with peer-reviewed agronomy (FAO-56 reference ET, USDA soil textures, species-aware Kc curves, a 17-rule skip ladder) and drives OpenSprinkler, ESPHome, or Home Assistant. Optional. Off until you wire a controller.
 
-Home Assistant is supported as a peer, never required. Everything runs on your own hardware. Open-Meteo is the only optional outbound network call, and it can be swapped for NWS (US), MET Norway, OpenWeather, Pirate Weather, or any other compatible source.
+Home Assistant is supported as a peer, never required. Everything runs on your own hardware. A worldwide forecast (Open-Meteo) is the only optional outbound call, and you can choose the national weather model behind it, swap it for NWS (US), MET Norway, OpenWeather, or Pirate Weather, or blend several sources with per-field provenance.
 
 ## Why LocalSky
 
@@ -44,8 +44,8 @@ Most home irrigation systems are either dumb timers or cloud tethered too. The c
 ## Screenshots
 
 <p align="center">
-  <img src="docs/assets/screenshots/radar-desktop.png" alt="Live radar with RainViewer precipitation (worldwide), IEM NEXRAD reflectivity (US), satellite IR, and Tempest lightning rings" width="92%"><br>
-  <em>Live radar: RainViewer precipitation (worldwide), IEM NEXRAD reflectivity (US), satellite IR, Tempest lightning rings, layer toggles, legend, playback</em>
+  <img src="docs/assets/screenshots/radar-desktop.png" alt="Live radar map with worldwide precipitation, regional reflectivity, tropical-cyclone tracking, wind flow, and lightning" width="92%"><br>
+  <em>Live radar map: a region-aware provider catalog (worldwide precipitation, national high-resolution reflectivity), tropical-cyclone tracking, animated wind flow, alerts, and lightning, all behind one Layers panel</em>
 </p>
 
 <p align="center">
@@ -90,8 +90,8 @@ Most home irrigation systems are either dumb timers or cloud tethered too. The c
 
 - **Live station observations** from Tempest WeatherFlow over UDP 50222 (rapid wind, obs, lightning, battery)
 - **Ecowitt LAN ingestion** for the GW1100 / GW2000 family and any attached WH51 / WH52 soil probes
-- **Multi-source forecast merge** with per-field provenance (Open-Meteo, MET Norway, OpenWeather, and Pirate Weather worldwide; NWS in the US; plus generic MQTT subscribe and HTTP webhook for custom sources anywhere)
-- **Live radar** with RainViewer precipitation playback (worldwide), IEM NEXRAD reflectivity (US), satellite IR, and Tempest lightning rings
+- **Multi-source forecast merge** with per-field provenance and a selectable national weather model (Open-Meteo, MET Norway, OpenWeather, and Pirate Weather worldwide; NWS in the US; plus generic MQTT subscribe and HTTP webhook for custom sources anywhere)
+- **Global radar map** with a region-aware provider catalog: RainViewer precipitation worldwide; high-resolution national reflectivity (NEXRAD and nowCOAST in the US, Environment Canada, Germany's DWD, Finland's FMI, more easily added); worldwide tropical-cyclone tracking across all basins (NHC, JMA, JTWC); animated wind flow; NWS alert overlays; satellite imagery; and opt-in Blitzortung community lightning
 - **Hourly + daily forecast** with rain probability, wind, dew point, apparent temperature, solar irradiance, UV index
 - **Historical persistence** via local SQLite, with the verdict-history table replayable through the current engine
 
@@ -115,6 +115,7 @@ Most home irrigation systems are either dumb timers or cloud tethered too. The c
 ### UI and operability
 
 - **Installable PWA** on iOS, Android, and desktop with VAPID-signed push notifications
+- **Metric or imperial units**, system-wide or per field (temperature, wind, rainfall), so the dashboard reads naturally wherever you are
 - **Built-in authentication**: owner account, sessions, and show-once API tokens for integrations; trusted-network CIDRs keep the home LAN frictionless while remote access requires sign-in
 - **Network discovery**: one-click setup finds your Tempest broadcast, Ecowitt gateways, and OpenSprinkler on the LAN; LocalSky announces itself over mDNS so Home Assistant discovers it right back
 - **First-run wizard** + in-app settings; no editing config files by hand (address search, timezone autofill, live controller test + zone import)
@@ -197,7 +198,6 @@ Full docs live in [`docs/`](docs/) and are built into an mdBook for online viewi
 - [Skip rules](https://localsky.io/docs/skip-rules), every rule in the ladder, explained
 - [HACS integration](https://localsky.io/docs/hacs), pairing Home Assistant with a running LocalSky
 - [UX journey](https://localsky.io/docs/ux-journey), first-run, upgrades, hardware changes, config changes
-- [Launch checklist](https://localsky.io/docs/launch-checklist), gating criteria for the 0.1.0 cut
 
 ## Architecture at a glance
 
@@ -217,13 +217,9 @@ components/    Leptos UI primitives plus the irrigation, forecast, weather, and 
 
 ## Roadmap
 
-**0.1** (initial public release): demo mode, full weather dashboard (Tempest UDP + Open-Meteo + radar), OpenSprinkler direct irrigation, MQTT subscribe, Ecowitt local, Ollama and OpenAI-compatible LLM, first-run wizard, full settings UI, mobile parity.
+**Shipped**: the full weather dashboard (Tempest UDP, Ecowitt LAN, Open-Meteo plus regional forecast sources with selectable weather models); a global radar map (worldwide precipitation, national high-resolution reflectivity, tropical-cyclone tracking, wind flow, alerts, and community lightning); the FAO-56 irrigation engine driving OpenSprinkler, ESPHome, and Home Assistant; local LLM advisor; built-in authentication, network discovery, and backup and restore; an installable PWA with push; and a published Home Assistant integration.
 
-**Shipped since 0.1**: NWS (US), Ambient Weather, Tempest cloud WebSocket, MET Norway (global), OpenWeather (global), and Pirate Weather (global) forecast sources.
-
-**0.2**: ESPHome sprinkler controller, ntfy + Slack notification sinks, hosted demo site.
-
-**0.3**: Rachio cloud controller, HACS publishing for the inbound HA integration, telemetry opt-in.
+**Planned**: Rachio cloud controller, ntfy and Slack notification sinks, an in-app forecast-model picker, and broader regional radar coverage. Contributions of new weather sources, radar providers, grass species, and controllers are especially welcome.
 
 ## Acknowledgements
 

@@ -1,0 +1,385 @@
+---
+source: src/api/snapshot_tests.rs
+expression: "super::super::tropical::test_fixture_collection()"
+---
+{
+  "features": [
+    {
+      "geometry": {
+        "coordinates": [
+          -144.5,
+          16.1
+        ],
+        "type": "Point"
+      },
+      "properties": {
+        "agency": "NOAA CPHC",
+        "basin": "central_pacific",
+        "classification": "HU",
+        "id": "ep082025",
+        "intensity_kt": 75.0,
+        "kind": "position",
+        "movement": "WNW at 10 kt",
+        "name": "Henriette",
+        "pressure_mb": 988.0,
+        "term": "hurricane",
+        "updated": "2025-08-11T15:00:00.000Z"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          -61.2,
+          24.8
+        ],
+        "type": "Point"
+      },
+      "properties": {
+        "agency": "NOAA NHC",
+        "basin": "north_atlantic",
+        "classification": "TS",
+        "id": "al052025",
+        "intensity_kt": 60.0,
+        "kind": "position",
+        "movement": "WNW at 14 kt",
+        "name": "Erin",
+        "pressure_mb": 997.0,
+        "term": "hurricane",
+        "updated": "2025-08-11T15:00:00.000Z"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            -144.5,
+            16.1
+          ],
+          [
+            -146.2,
+            16.9
+          ],
+          [
+            -148.0,
+            17.6
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "agency": "NOAA CPHC",
+        "basin": "central_pacific",
+        "classification": null,
+        "id": "ep082025",
+        "intensity_kt": null,
+        "kind": "forecast_track",
+        "movement": null,
+        "name": "Henriette",
+        "pressure_mb": null,
+        "term": "hurricane",
+        "updated": null
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            [
+              -144.0,
+              15.6
+            ],
+            [
+              -148.6,
+              16.9
+            ],
+            [
+              -148.2,
+              18.4
+            ],
+            [
+              -143.9,
+              16.4
+            ],
+            [
+              -144.0,
+              15.6
+            ]
+          ]
+        ],
+        "type": "Polygon"
+      },
+      "properties": {
+        "agency": "NOAA CPHC",
+        "basin": "central_pacific",
+        "classification": null,
+        "id": "ep082025",
+        "intensity_kt": null,
+        "kind": "cone",
+        "movement": null,
+        "name": "Henriette",
+        "pressure_mb": null,
+        "term": "hurricane",
+        "updated": null
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          126.6,
+          23.3
+        ],
+        "type": "Point"
+      },
+      "properties": {
+        "agency": "JMA / RSMC Tokyo",
+        "basin": "west_pacific",
+        "classification": "TY",
+        "id": "TC2105",
+        "intensity_kt": 80.0,
+        "kind": "position",
+        "movement": null,
+        "name": "IN-FA",
+        "pressure_mb": 950.0,
+        "term": "typhoon",
+        "updated": "2021-07-21T13:10:00Z"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            131.9,
+            21.4
+          ],
+          [
+            130.1,
+            22.0
+          ],
+          [
+            128.4,
+            22.7
+          ],
+          [
+            126.6,
+            23.3
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "agency": "JMA / RSMC Tokyo",
+        "basin": "west_pacific",
+        "classification": null,
+        "id": "TC2105",
+        "intensity_kt": null,
+        "kind": "track",
+        "movement": null,
+        "name": "IN-FA",
+        "pressure_mb": null,
+        "term": "typhoon",
+        "updated": "2021-07-21T13:10:00Z"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            126.6,
+            23.3
+          ],
+          [
+            124.9,
+            23.9
+          ],
+          [
+            122.9,
+            24.6
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "agency": "JMA / RSMC Tokyo",
+        "basin": "west_pacific",
+        "classification": null,
+        "id": "TC2105",
+        "intensity_kt": null,
+        "kind": "forecast_track",
+        "movement": null,
+        "name": "IN-FA",
+        "pressure_mb": null,
+        "term": "typhoon",
+        "updated": "2021-07-21T13:10:00Z"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            [
+              121.813,
+              24.6
+            ],
+            [
+              121.896,
+              24.222
+            ],
+            [
+              122.132,
+              23.901
+            ],
+            [
+              122.484,
+              23.687
+            ],
+            [
+              122.9,
+              23.612
+            ],
+            [
+              124.9,
+              23.271
+            ],
+            [
+              126.6,
+              23.3
+            ],
+            [
+              125.386,
+              24.345
+            ],
+            [
+              125.163,
+              24.481
+            ],
+            [
+              123.316,
+              25.513
+            ],
+            [
+              122.9,
+              25.588
+            ],
+            [
+              122.484,
+              25.513
+            ],
+            [
+              122.132,
+              25.299
+            ],
+            [
+              121.896,
+              24.978
+            ],
+            [
+              121.813,
+              24.6
+            ]
+          ]
+        ],
+        "type": "Polygon"
+      },
+      "properties": {
+        "agency": "JMA / RSMC Tokyo",
+        "basin": "west_pacific",
+        "classification": null,
+        "id": "TC2105",
+        "intensity_kt": null,
+        "kind": "cone",
+        "movement": null,
+        "name": "IN-FA",
+        "pressure_mb": null,
+        "term": "typhoon",
+        "updated": "2021-07-21T13:10:00Z"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          63.3,
+          -12.1
+        ],
+        "type": "Point"
+      },
+      "properties": {
+        "agency": "JTWC",
+        "basin": "southwest_indian",
+        "classification": null,
+        "id": "sh0226",
+        "intensity_kt": 45.0,
+        "kind": "position",
+        "movement": null,
+        "name": "Anahita",
+        "pressure_mb": null,
+        "term": "tropical cyclone",
+        "updated": null
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            63.3,
+            -12.1
+          ],
+          [
+            62.1,
+            -12.8
+          ],
+          [
+            60.7,
+            -13.7
+          ],
+          [
+            58.5,
+            -15.5
+          ]
+        ],
+        "type": "LineString"
+      },
+      "properties": {
+        "agency": "JTWC",
+        "basin": "southwest_indian",
+        "classification": null,
+        "id": "sh0226",
+        "intensity_kt": null,
+        "kind": "forecast_track",
+        "movement": null,
+        "name": "Anahita",
+        "pressure_mb": null,
+        "term": "tropical cyclone",
+        "updated": null
+      },
+      "type": "Feature"
+    }
+  ],
+  "generated_at": "2026-06-12T00:00:00Z",
+  "sources": [
+    {
+      "agency": "NOAA NHC + CPHC",
+      "ok": true,
+      "storms": 2
+    },
+    {
+      "agency": "JMA / RSMC Tokyo",
+      "ok": true,
+      "storms": 1
+    },
+    {
+      "agency": "JTWC",
+      "ok": true,
+      "storms": 1
+    }
+  ],
+  "type": "FeatureCollection"
+}

@@ -203,6 +203,72 @@ pub fn validate(cfg: &Config) -> ValidationReport {
         }
     }
 
+    // Blitzortung community lightning: surface the licensing boundary
+    // at config time so the opt-in is informed. Warning, not error,
+    // because enabling it is a legitimate operator choice; the codes
+    // below also catch a config that can never match or connect.
+    for s in &cfg.sources {
+        if let SourceKind::Blitzortung(c) = &s.source {
+            if s.enabled && c.enabled {
+                r.warn(
+                    "blitzortung_terms",
+                    format!(
+                        "source '{}' enables Blitzortung.org community lightning: data is \
+                         CC BY-SA 4.0 from a volunteer network, for private non-commercial \
+                         use with visible attribution; it is a display layer only and must \
+                         never be used for storm warnings or automation",
+                        s.id
+                    ),
+                );
+            }
+            if c.radius_mi <= 0.0 {
+                r.error(
+                    "blitzortung_radius_nonpositive",
+                    format!(
+                        "source '{}' (blitzortung) has radius_mi {}; no strike could ever match",
+                        s.id, c.radius_mi
+                    ),
+                );
+            }
+            for h in &c.hosts {
+                if !(h.starts_with("ws://") || h.starts_with("wss://")) {
+                    r.warn(
+                        "blitzortung_host_invalid",
+                        format!(
+                            "source '{}' (blitzortung) host '{h}' is not a ws:// or wss:// \
+                             URL and will fail to connect",
+                            s.id
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    // Open-Meteo model ids must come from the forecast model catalog.
+    // The refresher appends `&models=<id>` verbatim, and an unknown id
+    // makes upstream return HTTP 400 on every refresh, so warn loudly;
+    // a typo should not block saving the rest of the config.
+    for s in &cfg.sources {
+        if let SourceKind::OpenMeteo(c) = &s.source {
+            if crate::forecast::model_catalog::model_by_id(&c.model).is_none() {
+                let valid = crate::forecast::model_catalog::models()
+                    .iter()
+                    .map(|m| m.id)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                r.warn(
+                    "open_meteo_model_unknown",
+                    format!(
+                        "source '{}' open_meteo model '{}' is not a known model id \
+                         (valid: {valid}); the forecast fetch will fail upstream",
+                        s.id, c.model
+                    ),
+                );
+            }
+        }
+    }
+
     // Radar layer + provider ids must come from the radar catalog
     // (legacy pre-catalog ids normalize and pass; the retired satellite
     // IR layer does not). The frontend silently ignores unknown ids, so
@@ -341,6 +407,89 @@ mod tests {
             .warnings
             .iter()
             .any(|i| i.code == "radar_provider_unknown"));
+    }
+
+    fn open_meteo_source(model: &str) -> SourceEntry {
+        serde_json::from_value(serde_json::json!({
+            "id": "open_meteo",
+            "kind": "open_meteo",
+            "config": { "model": model },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn unknown_open_meteo_model_warns_not_errors() {
+        let mut cfg = base();
+        cfg.sources.push(open_meteo_source("ecmwf_seamless"));
+        let r = validate(&cfg);
+        assert!(r.ok());
+        assert!(r
+            .warnings
+            .iter()
+            .any(|i| i.code == "open_meteo_model_unknown"));
+    }
+
+    #[test]
+    fn known_open_meteo_models_pass_clean() {
+        for model in ["best_match", "icon_seamless", "ecmwf_ifs025"] {
+            let mut cfg = base();
+            cfg.sources.push(open_meteo_source(model));
+            let r = validate(&cfg);
+            assert!(
+                !r.warnings
+                    .iter()
+                    .any(|i| i.code == "open_meteo_model_unknown"),
+                "model '{model}' should validate clean"
+            );
+        }
+    }
+
+    fn blitzortung_source(config: serde_json::Value) -> SourceEntry {
+        serde_json::from_value(serde_json::json!({
+            "id": "blitz",
+            "kind": "blitzortung",
+            "config": config,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn enabled_blitzortung_warns_about_terms() {
+        let mut cfg = base();
+        cfg.sources
+            .push(blitzortung_source(serde_json::json!({"enabled": true})));
+        let r = validate(&cfg);
+        assert!(r.ok(), "terms reminder must not block saving");
+        assert!(r.warnings.iter().any(|i| i.code == "blitzortung_terms"));
+    }
+
+    #[test]
+    fn opted_out_blitzortung_stays_quiet() {
+        // Default config (enabled=false) is the parked state; no nag.
+        let mut cfg = base();
+        cfg.sources.push(blitzortung_source(serde_json::json!({})));
+        let r = validate(&cfg);
+        assert!(!r.warnings.iter().any(|i| i.code == "blitzortung_terms"));
+    }
+
+    #[test]
+    fn blitzortung_field_hygiene() {
+        let mut cfg = base();
+        cfg.sources.push(blitzortung_source(serde_json::json!({
+            "enabled": true,
+            "radius_mi": 0.0,
+            "hosts": ["https://not-a-websocket.example"],
+        })));
+        let r = validate(&cfg);
+        assert!(r
+            .errors
+            .iter()
+            .any(|i| i.code == "blitzortung_radius_nonpositive"));
+        assert!(r
+            .warnings
+            .iter()
+            .any(|i| i.code == "blitzortung_host_invalid"));
     }
 
     #[test]

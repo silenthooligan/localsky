@@ -1,5 +1,5 @@
 LocalSky
-Copyright 2026 Erik Skean (silenthooligan)
+Copyright 2026 silenthooligan
 
 This product includes software developed at LocalSky
 (https://github.com/silenthooligan/localsky).
@@ -32,3 +32,12 @@ This product uses (but does not redistribute the source of):
   * Open-Meteo (https://open-meteo.com/) for forecast data.
   * RainViewer (https://www.rainviewer.com/api.html) for radar tiles.
   * Leaflet (https://leafletjs.com/) for map rendering.
+
+This product redistributes (vendored, license header retained):
+
+  * leaflet-velocity v2.1.4 (https://github.com/onaci/leaflet-velocity),
+    at public/vendor/leaflet-velocity.min.js, for the animated wind
+    layer. CSIRO Open Source Software Licence Agreement (a BSD/MIT-style
+    permissive license), including animation code derived from the
+    "earth" project (https://github.com/cambecc/earth), MIT License,
+    Copyright (c) 2013 Cameron Beccario.

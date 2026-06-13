@@ -1,0 +1,96 @@
+---
+source: src/api/snapshot_tests.rs
+expression: "crate::forecast::model_catalog::models()"
+---
+[
+  {
+    "id": "best_match",
+    "label": "Best Match (auto composite)",
+    "agency": "Open-Meteo default",
+    "region": "global"
+  },
+  {
+    "id": "icon_seamless",
+    "label": "DWD ICON (Germany)",
+    "agency": "DWD Germany",
+    "region": "global (ICON Global + ICON-EU + ICON-D2 nests)"
+  },
+  {
+    "id": "gfs_seamless",
+    "label": "NOAA GFS (US)",
+    "agency": "NOAA US",
+    "region": "global (GFS + HRRR US nest)"
+  },
+  {
+    "id": "meteofrance_seamless",
+    "label": "Meteo-France ARPEGE/AROME",
+    "agency": "Meteo-France",
+    "region": "global (ARPEGE global + AROME France high-res nest)"
+  },
+  {
+    "id": "ecmwf_ifs025",
+    "label": "ECMWF IFS 0.25",
+    "agency": "ECMWF",
+    "region": "global"
+  },
+  {
+    "id": "ukmo_seamless",
+    "label": "UK Met Office UKMO",
+    "agency": "UK Met Office",
+    "region": "global (UKMO Global 10km + UK 2km UKV nest)"
+  },
+  {
+    "id": "jma_seamless",
+    "label": "JMA GSM/MSM (Japan)",
+    "agency": "JMA Japan",
+    "region": "global (GSM) + Japan high-res (MSM) nest"
+  },
+  {
+    "id": "gem_seamless",
+    "label": "GEM (Canada)",
+    "agency": "ECCC Canada",
+    "region": "global (GEM Global + HRDPS Canada nest)"
+  },
+  {
+    "id": "cma_grapes_global",
+    "label": "CMA GRAPES (China)",
+    "agency": "CMA China",
+    "region": "global"
+  },
+  {
+    "id": "metno_seamless",
+    "label": "MET Norway Nordic",
+    "agency": "MET Norway",
+    "region": "Nordic high-res + global fallback"
+  },
+  {
+    "id": "knmi_seamless",
+    "label": "KNMI HARMONIE (Netherlands)",
+    "agency": "KNMI Netherlands",
+    "region": "Benelux/Europe high-res + global fallback"
+  },
+  {
+    "id": "dmi_seamless",
+    "label": "DMI HARMONIE (Denmark)",
+    "agency": "DMI Denmark",
+    "region": "Northern/central Europe high-res + global fallback"
+  },
+  {
+    "id": "geosphere_seamless",
+    "label": "GeoSphere AROME (Austria)",
+    "agency": "GeoSphere Austria",
+    "region": "Austria/Alps high-res + global fallback"
+  },
+  {
+    "id": "meteoswiss_icon_seamless",
+    "label": "MeteoSwiss ICON CH1/CH2",
+    "agency": "MeteoSwiss",
+    "region": "Switzerland/Alps + central Europe only (HTTP 400 outside domain)"
+  },
+  {
+    "id": "italia_meteo_arpae_icon_2i",
+    "label": "ItaliaMeteo ICON-2I (Italy)",
+    "agency": "ItaliaMeteo/ARPAE",
+    "region": "Italy + surrounding only (HTTP 400 outside domain)"
+  }
+]

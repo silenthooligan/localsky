@@ -666,6 +666,16 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                     integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
                     crossorigin=""
                     defer></script>
+                // leaflet-velocity 2.1.4 (the wind feature's particle
+                // layer), vendored under /vendor/ and served by us:
+                // local-first like everything else (CSIRO BSD-style +
+                // MIT windy core, header retained in the file; see
+                // NOTICE). Deferred scripts execute in document order,
+                // so it runs after leaflet.js (it extends window.L) and
+                // before radar.js; radar.js only builds the layer when
+                // L.velocityLayer exists, so a failed load degrades to
+                // the wind feature being skipped.
+                <script src=crate::base::url("/vendor/leaflet-velocity.min.js") defer></script>
                 <script src=crate::base::url("/radar.js") defer></script>
                 // Theme + kiosk-mode bootstrap. Runs synchronously before
                 // first paint so [data-theme="..."] and [data-readonly]

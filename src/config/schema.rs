@@ -549,6 +549,9 @@ pub enum SourceKind {
     /// (Arduino, Pi script, custom commercial gateway) feeds LocalSky
     /// without needing MQTT or HA.
     HttpWebhook(HttpWebhookConfig),
+    /// Blitzortung.org community lightning network (display-only map/
+    /// dashboard layer). Opt-in, default OFF: see BlitzortungConfig.
+    Blitzortung(BlitzortungConfig),
     DemoReplay(DemoReplayConfig),
 }
 
@@ -582,6 +585,12 @@ pub struct OpenMeteoConfig {
     pub past_days: u32,
     #[serde(default)]
     pub include_radar: bool,
+    /// Open-Meteo weather model id (`&models=` parameter), from the
+    /// forecast::model_catalog. The default "best_match" keeps the
+    /// fetch URL byte-identical to the pre-model-selection one, so
+    /// configs written before this field existed behave unchanged.
+    #[serde(default = "default_open_meteo_model")]
+    pub model: String,
 }
 
 fn default_open_meteo_forecast_days() -> u32 {
@@ -592,6 +601,9 @@ fn default_open_meteo_forecast_hours() -> u32 {
 }
 fn default_open_meteo_past_days() -> u32 {
     1
+}
+fn default_open_meteo_model() -> String {
+    crate::forecast::model_catalog::DEFAULT_MODEL.to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -919,6 +931,70 @@ pub struct HttpWebhookField {
     pub scale: f64,
     #[serde(default)]
     pub offset: f64,
+}
+
+/// Blitzortung.org community lightning feed: the volunteer-run global
+/// detection network behind map.blitzortung.org. LocalSky connects to
+/// the same public websocket firehose their map uses, keeps strikes
+/// near the station, and renders them as a map/dashboard layer.
+///
+/// This is a DISPLAY-ONLY layer with hard boundaries set by the
+/// project's terms (blitzortung.org contact page, captured 2026-06-12):
+/// non-commercial private use, mandatory visible attribution
+/// ("Lightning data: Blitzortung.org contributors, CC BY-SA 4.0"), and
+/// explicitly NEVER a storm-warning/safety feature; LocalSky also never
+/// feeds these strikes into irrigation or automation logic, and never
+/// rebroadcasts them from project infrastructure.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BlitzortungConfig {
+    /// Explicit opt-in, default FALSE, on top of the entry-level
+    /// `enabled` flag (which defaults true for every source kind).
+    /// Merely adding a blitzortung entry must not open a connection to
+    /// the volunteer-run servers; the operator flips this consciously
+    /// after reading the terms (config validation surfaces them).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Keep only strikes within this distance of the station, in miles.
+    /// The feed is a global firehose with no server-side geo filter, so
+    /// the radius is applied locally before buffering.
+    #[serde(default = "default_blitzortung_radius_mi")]
+    pub radius_mi: f64,
+    /// WebSocket endpoints, rotated on failure. User-editable config
+    /// rather than constants because the active host subset churns
+    /// across Blitzortung web-client releases (the protocol is
+    /// unversioned and serves their own map app first). An empty list
+    /// falls back to these same defaults.
+    #[serde(default = "default_blitzortung_hosts")]
+    pub hosts: Vec<String>,
+}
+
+impl Default for BlitzortungConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            radius_mi: default_blitzortung_radius_mi(),
+            hosts: default_blitzortung_hosts(),
+        }
+    }
+}
+
+fn default_blitzortung_radius_mi() -> f64 {
+    100.0
+}
+
+/// The four hosts the blitzortung.org web client (V5.4) actually uses,
+/// verified live 2026-06-12. ws1-ws8 all resolve in DNS but only this
+/// subset is active in the current client release.
+pub fn default_blitzortung_hosts() -> Vec<String> {
+    [
+        "wss://ws1.blitzortung.org/",
+        "wss://ws2.blitzortung.org/",
+        "wss://ws7.blitzortung.org/",
+        "wss://ws8.blitzortung.org/",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
@@ -1676,6 +1752,60 @@ mod tests {
             ["rainviewer", "nexrad_iem", "lightning_tempest"]
         );
         assert!(cfg.ui.radar.providers.is_empty());
+    }
+
+    #[test]
+    fn open_meteo_model_defaults_to_best_match() {
+        // Every OpenMeteoConfig field is serde-defaulted, so an empty
+        // table yields the catalog default model.
+        let om: OpenMeteoConfig = toml::from_str("").unwrap();
+        assert_eq!(om.model, "best_match");
+    }
+
+    #[test]
+    fn pre_model_config_loads_with_best_match() {
+        // A config written before the `model` field existed must keep
+        // parsing and land on best_match (identical fetch behavior).
+        let cfg: Config = toml::from_str(
+            r#"
+            schema_version = 1
+            [deployment.location]
+            lat = 28.5
+            lon = -81.4
+            [[sources]]
+            id = "open_meteo"
+            kind = "open_meteo"
+            [sources.config]
+            forecast_days = 7
+            "#,
+        )
+        .unwrap();
+        let SourceKind::OpenMeteo(om) = &cfg.sources[0].source else {
+            panic!("expected an open_meteo source");
+        };
+        assert_eq!(om.model, "best_match");
+    }
+
+    #[test]
+    fn explicit_open_meteo_model_round_trips() {
+        let cfg: Config = toml::from_str(
+            r#"
+            schema_version = 1
+            [deployment.location]
+            lat = 48.14
+            lon = 11.58
+            [[sources]]
+            id = "open_meteo"
+            kind = "open_meteo"
+            [sources.config]
+            model = "icon_seamless"
+            "#,
+        )
+        .unwrap();
+        let SourceKind::OpenMeteo(om) = &cfg.sources[0].source else {
+            panic!("expected an open_meteo source");
+        };
+        assert_eq!(om.model, "icon_seamless");
     }
 
     #[test]

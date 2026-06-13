@@ -28,6 +28,14 @@
 //   POST /wizard/apply               write the draft as the live config
 //   GET  /health                     per-source freshness + controller summary
 //   GET  /sensors/manifest           declarative entity inventory for HACS
+//   GET  /sources/openmeteo/models   Open-Meteo forecast model catalog
+//   GET  /radar/windgrid             U/V wind grid for the map's velocity layer
+//                                    (wired in main.rs: it needs the config
+//                                    store for the model + its own cache)
+//   GET  /radar/tropical             all-basin tropical cyclone GeoJSON
+//                                    (NHC/CPHC + JMA + JTWC normalized
+//                                    server-side; wired in main.rs with its
+//                                    own 10-minute cache)
 
 pub mod auth;
 pub mod backup;
@@ -42,7 +50,10 @@ pub mod location;
 pub mod manifest;
 pub mod photos;
 pub mod sensors;
+pub mod sources;
+pub mod tropical;
 pub mod weather;
+pub mod windgrid;
 pub mod wizard;
 
 #[cfg(test)]
@@ -110,6 +121,7 @@ pub fn router(
         )
         .nest("/devices", devices::router(devices))
         .merge(info::router())
+        .merge(sources::router())
         .merge(manifest_router);
 
     // Observed-weather history (sparklines), only when persistence is mounted.

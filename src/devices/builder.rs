@@ -109,6 +109,11 @@ fn classify_source(kind: &SourceKind, id: &str) -> (DeviceKind, Option<String>, 
         K::Netatmo(_) => (DeviceKind::WeatherCloud, "Netatmo", "Netatmo"),
         K::TuyaCloud(_) => (DeviceKind::WeatherCloud, "Tuya", "Tuya Cloud"),
         K::HaPassthrough(_) => (DeviceKind::HaBridge, "Home Assistant", "Home Assistant"),
+        K::Blitzortung(_) => (
+            DeviceKind::WeatherCloud,
+            "Blitzortung.org",
+            "Blitzortung lightning",
+        ),
         K::Mqtt(_) => (DeviceKind::Virtual, "MQTT", "MQTT source"),
         K::HttpWebhook(_) => (DeviceKind::Virtual, "HTTP", "HTTP webhook"),
         K::DemoReplay(_) => (DeviceKind::Virtual, "Demo", "Demo feed"),
@@ -199,6 +204,10 @@ fn kind_fields(kind: &SourceKind) -> Vec<WeatherField> {
         // Bridge + generic ingest: children come from what's mapped (F) or
         // posted, not from the kind. Empty until those land.
         K::HaPassthrough(_) | K::Mqtt(_) | K::HttpWebhook(_) => Vec::new(),
+        // Display-only map/dashboard layer: strikes feed the snapshot's
+        // lightning buffer, not sensor_history, so it has no per-field
+        // sensor children to enumerate.
+        K::Blitzortung(_) => Vec::new(),
     }
 }
 

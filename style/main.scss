@@ -1391,6 +1391,14 @@ a { color: var(--accent); }
     display: flex;
     flex-direction: column;
   }
+  // The shell sits between panel and map in the flex chain now; keep
+  // the grow behavior flowing through it.
+  .weather-side > .radar .radar-map-shell {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
   .weather-side > .radar .radar-map {
     flex: 1;
     height: auto;
@@ -2113,6 +2121,20 @@ a { color: var(--accent); }
   gap: 0.45rem;
 }
 
+// Shown only while Blitzortung community strikes are in the buffer:
+// their CC BY-SA terms require the source be identified wherever the
+// data renders, and this panel shares the radar layer's strike buffer.
+.lightning-attribution {
+  margin: 0.6rem 0 0;
+  font-size: var(--text-meta);
+  color: var(--text-dim);
+
+  a {
+    color: inherit;
+    text-decoration: underline;
+  }
+}
+
 // ---------------- Pressure ----------------
 
 .pressure-row {
@@ -2228,6 +2250,14 @@ a { color: var(--accent); }
 
 .radar-panel .panel-title {
   padding: 1rem 1.2rem 0;
+}
+
+// Positioned wrapper around #radar-map. The JS-built Layers chip +
+// drawer (public/radar.js) are absolutely positioned against it: they
+// can't live inside the map div because its role="img" makes
+// descendants presentational to assistive tech.
+.radar-map-shell {
+  position: relative;
 }
 
 .radar-map {
@@ -4342,48 +4372,169 @@ html { scroll-behavior: smooth; }
 }
 
 // ------------------------------------------------------------------
-// Radar legend control. Bottom-left overlay inside the Leaflet map.
-// Collapsible via the +/− button so it doesn't block mobile zoom
-// controls when the user wants the map full-bleed.
+// Radar Layers drawer. ONE glassy "Layers" chip (top-right over the
+// map, with an active-count badge) replaces the old in-map layer
+// control, the mobile chip row, AND the legend rail; per-layer legend
+// copy lives in each row's inline expander instead. Chip + drawer are
+// anchored to .radar-map-shell so they overlay the map without
+// displacing it and stay out of #radar-map's role="img" subtree.
+// Desktop drawer is a 320px right-edge panel; under the 760px
+// breakpoint it becomes a full-width sheet. Slide is ~200ms and
+// disabled under prefers-reduced-motion.
 // ------------------------------------------------------------------
 
-.radar-legend {
-  background: var(--surface-frosted);
-  -webkit-backdrop-filter: blur(10px) saturate(140%);
-  backdrop-filter: blur(10px) saturate(140%);
-  border: 1px solid var(--glass-border);
-  border-radius: 10px;
-  padding: 0.5rem 0.7rem;
-  color: var(--text);
-  font-family: var(--font-sans);
-  font-size: 0.78rem;
-  max-width: 280px;
-  box-shadow: var(--shadow);
+.radar-layers-anchor {
+  position: absolute;
+  top: 10px; // matches Leaflet's default control-corner margins
+  right: 10px;
+  z-index: 2; // above .radar-map's z-index:1 stacking context
 }
 
-.radar-legend-head {
+.radar-layers-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.7rem 0.4rem 0.6rem;
+  min-height: 36px;
+  border-radius: 999px;
+  // Standing accent outline (not just on hover) so the chip reads as a
+  // control with things to pick, not passive chrome over the map.
+  border: 1px solid color-mix(in oklab, var(--accent) 55%, var(--glass-border));
+  background: var(--surface-frosted-strong);
+  -webkit-backdrop-filter: blur(10px) saturate(140%);
+  backdrop-filter: blur(10px) saturate(140%);
+  color: var(--text-bright);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  box-shadow: var(--shadow);
+  transition: border-color 0.12s ease, background 0.12s ease,
+    box-shadow 0.12s ease;
+
+  &:hover {
+    border-color: var(--accent);
+    box-shadow: var(--shadow),
+      0 0 0 3px color-mix(in oklab, var(--accent) 20%, transparent);
+  }
+  &:focus-visible {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: var(--shadow),
+      0 0 0 3px color-mix(in oklab, var(--accent) 35%, transparent);
+  }
+  // Open: glow stays lit so the chip and its drawer read as one control.
+  &[aria-expanded="true"] {
+    border-color: var(--accent);
+    box-shadow: var(--shadow),
+      0 0 0 3px color-mix(in oklab, var(--accent) 28%, transparent);
+  }
+}
+
+.radar-layers-icon {
+  display: inline-flex;
+  color: var(--accent);
+
+  svg {
+    width: 17px;
+    height: 17px;
+    display: block;
+  }
+}
+
+.radar-layers-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 0.32rem;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #ffffff;
+  font-size: 0.68rem;
+  font-weight: 600;
+  line-height: 1;
+
+  // No active layers: drop to a quiet outline so the chip still invites
+  // a click instead of advertising a zero.
+  &.is-empty {
+    background: transparent;
+    border: 1px solid var(--glass-border);
+    color: var(--text-dim);
+    font-weight: 500;
+  }
+}
+
+.radar-drawer {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  // No bottom anchor and no max-height: the panel is exactly as tall as
+  // its content (header, the layers actually present, footer). It never
+  // spans the full map, never scrolls, and never hides a row, so the
+  // Settings link always sits directly under the last layer. The shell
+  // does not clip, so even a dense panel stays fully visible.
+  z-index: 3; // over the chip while open
+  width: 320px;
+  max-width: calc(100% - 20px);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-frosted-strong);
+  -webkit-backdrop-filter: blur(14px) saturate(150%);
+  backdrop-filter: blur(14px) saturate(150%);
+  border: 1px solid var(--glass-border);
+  border-radius: 14px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  color: var(--text);
+  font-family: var(--font-sans);
+  // Closed: parked off the right edge (plus its 10px inset), unfocusable
+  // and click-proof. The visibility flip is delayed so the slide-out
+  // stays visible on the way off.
+  transform: translateX(calc(100% + 10px));
+  visibility: hidden;
+  transition:
+    transform 0.2s cubic-bezier(0.2, 0.7, 0.3, 1),
+    visibility 0s linear 0.2s;
+}
+
+.radar-drawer.is-open {
+  transform: translateX(0);
+  visibility: visible;
+  transition-delay: 0s;
+}
+
+// The fleet-wide reduced-motion guard zeroes durations but not delays;
+// without this the just-closed drawer would keep eating clicks for the
+// 200ms visibility delay.
+@media (prefers-reduced-motion: reduce) {
+  .radar-drawer { transition: none; }
+}
+
+.radar-drawer-head {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  padding: 0.7rem 0.9rem 0.55rem;
+  border-bottom: 1px solid var(--glass-border);
   font-family: var(--font-mono);
   font-size: 0.7rem;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--text-dim);
-  margin-bottom: 0.4rem;
 }
 
-.radar-legend-toggle {
-  background: transparent;
+.radar-drawer-close {
+  width: 26px;
+  height: 26px;
+  padding: 0;
   border: 1px solid var(--border);
-  color: var(--text-dim);
-  width: 22px;
-  height: 22px;
   border-radius: 6px;
-  cursor: pointer;
+  background: transparent;
+  color: var(--text-dim);
   font-size: 1rem;
   line-height: 1;
-  padding: 0;
+  cursor: pointer;
 
   &:hover {
     background: rgba(255, 255, 255, 0.05);
@@ -4391,88 +4542,182 @@ html { scroll-behavior: smooth; }
   }
 }
 
-.radar-legend.is-collapsed {
-  .radar-legend-head {
-    margin-bottom: 0;
+.radar-drawer-body {
+  // Sizes to its content: no flex-grow, no scroll. The panel height is
+  // the sum of its rows, so nothing is ever clipped or hidden.
+  flex: 0 0 auto;
+  padding: 0.6rem 0.9rem 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+// Footer link to Settings > Radar, pinned below the scrolling body.
+.radar-drawer-foot {
+  flex: none;
+  padding: 0.6rem 0.9rem 0.8rem;
+  border-top: 1px solid var(--glass-border);
+}
+
+.radar-drawer-settings {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.55rem 0.65rem;
+  border-radius: 10px;
+  border: 1px solid var(--glass-border);
+  background: var(--surface-soft);
+  color: var(--text);
+  text-decoration: none;
+  transition: border-color 0.12s ease, background 0.12s ease;
+
+  &:hover,
+  &:focus-visible {
+    outline: none;
+    border-color: var(--accent);
+    background: color-mix(in oklab, var(--accent) 10%, transparent);
   }
 }
 
-.radar-legend-body {
-  display: flex;
-  flex-direction: column;
-  gap: 0.55rem;
+.radar-drawer-settings-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--accent);
+
+  svg {
+    width: 18px;
+    height: 18px;
+    display: block;
+  }
 }
 
-.radar-legend-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.6rem;
-}
-
-.radar-legend-swatch {
-  flex-shrink: 0;
-  width: 32px;
-  height: 12px;
-  border-radius: 3px;
-  margin-top: 0.2rem;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.radar-swatch-precip,
-.radar-swatch-nexrad {
-  background: linear-gradient(
-    90deg,
-    #3a8fd6 0%,
-    #4dd2ff 25%,
-    #7ed957 45%,
-    #ffe066 65%,
-    #ffb84a 80%,
-    #ff5a5a 100%
-  );
-}
-
-.radar-swatch-ir {
-  background: linear-gradient(90deg, #1a2236 0%, #6b7484 50%, #ffffff 100%);
-}
-
-.radar-swatch-strike {
-  background: var(--accent-lightning);
-  box-shadow: 0 0 6px rgba(255, 224, 102, 0.6);
-}
-
-.radar-legend-text {
+.radar-drawer-settings-text {
   display: flex;
   flex-direction: column;
   gap: 0.05rem;
-  line-height: 1.3;
+  flex: 1;
+  min-width: 0;
+}
+
+.radar-drawer-settings-label {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-bright);
+}
+
+.radar-drawer-settings-sub {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+}
+
+.radar-drawer-settings-go {
+  display: inline-flex;
+  flex: none;
+  color: var(--text-dim);
+
+  svg {
+    width: 16px;
+    height: 16px;
+    display: block;
+  }
+}
+
+.radar-drawer-settings:hover .radar-drawer-settings-go,
+.radar-drawer-settings:focus-visible .radar-drawer-settings-go {
+  color: var(--accent);
+}
+
+.radar-drawer-group-title {
+  margin: 0 0 0.3rem;
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.radar-drawer-row-main {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0;
+}
+
+.radar-drawer-swatch {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.radar-drawer-label {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.radar-drawer-info {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-style: italic; // the bare "i" reads as the info glyph
+  line-height: 1;
+  cursor: pointer;
+
+  &:hover {
+    border-color: var(--accent);
+    color: var(--text);
+  }
+  &[aria-expanded='true'] {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+}
+
+.radar-drawer-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  // Indent under the label so the expander reads as the row's detail.
+  padding: 0.1rem 0 0.45rem calc(14px + 0.5rem);
+  line-height: 1.35;
 
   strong {
     color: var(--text);
-    font-size: 0.78rem;
+    font-size: 0.74rem;
     font-weight: 700;
   }
   span {
     color: var(--text-dim);
     font-size: 0.7rem;
   }
+  .radar-drawer-attr {
+    color: var(--text-faint);
+    font-size: 0.66rem;
+  }
 }
 
-// Style the layer-control too so it matches the legend aesthetically.
-.leaflet-control-layers {
-  background: var(--surface-frosted) !important;
-  -webkit-backdrop-filter: blur(10px) saturate(140%);
-  backdrop-filter: blur(10px) saturate(140%);
-  border: 1px solid var(--glass-border) !important;
-  border-radius: 10px !important;
-  color: var(--text);
-  font-family: var(--font-sans);
-}
+// display:flex above would defeat the hidden attribute the JS toggles.
+.radar-drawer-legend[hidden] { display: none; }
 
 @media (max-width: 760px) {
-  .radar-legend {
-    max-width: 220px;
-    font-size: 0.72rem;
-    padding: 0.4rem 0.5rem;
+  .radar-drawer {
+    left: 10px;
+    right: 10px;
+    width: auto;
+    max-width: none;
   }
 }
 
@@ -5514,34 +5759,6 @@ html:not([data-nerd="true"]) .skip-breakdown:not(:has(.sk-row-tripped)) {
   &:hover { color: var(--text-dim); }
 }
 
-// Re-skin Leaflet's stock layer control to match the dark panel.
-.leaflet-control-layers {
-  background: var(--surface-frosted-strong) !important;
-  color: var(--text);
-  border: 1px solid var(--border) !important;
-  border-radius: 10px !important;
-  box-shadow: var(--shadow);
-  font-family: var(--font-mono);
-  font-size: 0.75rem;
-}
-
-.leaflet-control-layers-expanded {
-  padding: 0.6rem 0.8rem !important;
-}
-
-.leaflet-control-layers label {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  margin: 0.15rem 0;
-  cursor: pointer;
-  color: var(--text);
-}
-
-.leaflet-control-layers-separator {
-  border-top: 1px solid var(--border) !important;
-}
-
 .leaflet-control-attribution {
   background: rgba(0, 0, 0, 0.55) !important;
   color: var(--text-faint) !important;
@@ -6522,11 +6739,10 @@ html:not([data-nerd="true"]) .skip-breakdown:not(:has(.sk-row-tripped)) {
 // Radar mobile polish. Leaflet ships light-theme controls by default
 // (white-background buttons, black borders) which look harsh on top of
 // the dark map at phone widths. Dark-theme the chrome and bump touch
-// target sizes for the zoom control + layer toggle.
+// target sizes for the zoom control.
 // ─────────────────────────────────────────────────────────────────────────
 
 .radar-map .leaflet-bar a,
-.radar-map .leaflet-control-layers,
 .radar-map .leaflet-control-attribution {
   background: var(--surface-frosted-strong);
   -webkit-backdrop-filter: blur(10px);
@@ -6551,26 +6767,6 @@ html:not([data-nerd="true"]) .skip-breakdown:not(:has(.sk-row-tripped)) {
   color: var(--text-dim);
 }
 
-.radar-map .leaflet-control-layers-toggle {
-  background-color: var(--surface-frosted-strong);
-  // Default Leaflet ships a layers-icon background-image on the toggle;
-  // keep that and just darken the surrounding chip.
-}
-
-.radar-map .leaflet-control-layers-expanded {
-  padding: 0.6rem 0.8rem;
-  font-size: 0.78rem;
-  line-height: 1.5;
-}
-
-.radar-map .leaflet-control-layers label {
-  color: var(--text-bright);
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  margin: 0.15rem 0;
-}
-
 .radar-map .leaflet-control-attribution {
   font-size: 9px;
   padding: 1px 5px;
@@ -6581,50 +6777,6 @@ html:not([data-nerd="true"]) .skip-breakdown:not(:has(.sk-row-tripped)) {
   color: var(--text-dim);
 }
 
-// Mobile layer-chip row, rendered below the map by radar.js when isMobile.
-// On desktop this div is empty (radar.js skips the chip render and uses
-// the in-map L.control.layers instead) so :empty hides it cleanly.
-.radar-layer-chips {
-  display: none;
-}
-.radar-layer-chips:not(:empty) {
-  display: flex;
-  gap: 0.4rem;
-  padding: 0.55rem 0.85rem 0;
-  // Horizontal scroll for very narrow phones; on most widths all four
-  // chips fit on one row.
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-  scrollbar-width: none; // Firefox
-}
-.radar-layer-chips::-webkit-scrollbar { display: none; }
-
-.radar-layer-chip {
-  appearance: none;
-  flex: 0 0 auto;
-  padding: 0.45rem 0.85rem;
-  border-radius: 999px;
-  border: 1px solid var(--glass-border);
-  background: var(--surface-soft);
-  color: var(--text-dim);
-  font-family: var(--font-mono);
-  font-size: 0.78rem;
-  letter-spacing: 0.04em;
-  min-height: 36px;
-  cursor: pointer;
-  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease, transform 0.08s ease;
-}
-
-.radar-layer-chip.is-on {
-  background: rgba(74, 200, 255, 0.18);
-  border-color: rgba(74, 200, 255, 0.55);
-  color: #cfeefb;
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .radar-layer-chip:active { transform: scale(0.94); }
-}
-
 @media (max-width: 760px) {
   // Bigger touch targets for zoom +/- on mobile (Leaflet's default 26px
   // is below the HIG/Material 44px floor).
@@ -6633,17 +6785,6 @@ html:not([data-nerd="true"]) .skip-breakdown:not(:has(.sk-row-tripped)) {
     height: 40px !important;
     line-height: 40px !important;
     font-size: 1.25rem;
-  }
-  .radar-map .leaflet-control-layers-toggle {
-    width: 40px !important;
-    height: 40px !important;
-  }
-  // The in-map L.control.layers is suppressed on mobile by radar.js, so
-  // these constraints exist only as defense-in-depth in case the chip
-  // row fails to render and the user falls back to the in-map control.
-  .radar-map .leaflet-control-layers-expanded {
-    max-height: calc(100vh - 200px);
-    overflow-y: auto;
   }
   .radar-controls {
     flex-wrap: wrap;

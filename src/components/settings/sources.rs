@@ -370,6 +370,7 @@ fn SourceForm(
                         ("mqtt".into(), "MQTT".into()),
                         ("http_webhook".into(), "HTTP webhook".into()),
                         ("ha_passthrough".into(), "HA passthrough".into()),
+                        ("blitzortung".into(), "Blitzortung lightning".into()),
                         ("demo_replay".into(), "Demo".into()),
                     ]
                     aria_label="Source kind".to_string()

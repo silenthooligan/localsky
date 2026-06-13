@@ -59,6 +59,7 @@ pub fn synthesize() -> Config {
             forecast_hours: 48,
             past_days: 1,
             include_radar: false,
+            model: crate::forecast::model_catalog::DEFAULT_MODEL.to_string(),
         }),
     });
     log_lines.push("synthesized open_meteo source (7-day forecast)".into());

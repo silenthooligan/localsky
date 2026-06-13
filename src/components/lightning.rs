@@ -2,6 +2,7 @@
 // plus stats, last strike time/distance and 1h/1m counts. Strikes plot
 // at distance-scaled radii on concentric range rings (5/10/20/30 mi).
 
+use crate::tempest::packets::STRIKE_SOURCE_BLITZORTUNG;
 use crate::tempest::state::Snapshot;
 use leptos::prelude::*;
 
@@ -10,6 +11,16 @@ const MAX_RADIUS_MI: f64 = 30.0;
 #[component]
 pub fn LightningPanel(snap: ReadSignal<Snapshot>) -> impl IntoView {
     let strikes = Memo::new(move |_| snap.get().lightning_recent.clone());
+    // This panel renders the same lightning_recent buffer the radar
+    // layer does, so when the opt-in Blitzortung source contributes,
+    // their CC BY-SA terms require the source be identified here too.
+    // The credit renders only while community strikes are buffered.
+    let has_community = Memo::new(move |_| {
+        snap.get()
+            .lightning_recent
+            .iter()
+            .any(|s| s.source == STRIKE_SOURCE_BLITZORTUNG)
+    });
     let last_age = move || {
         let s = snap.get();
         match s.last_strike_epoch {
@@ -85,6 +96,15 @@ pub fn LightningPanel(snap: ReadSignal<Snapshot>) -> impl IntoView {
                     </div>
                 </div>
             </div>
+            <Show when=move || has_community.get()>
+                <p class="lightning-attribution">
+                    "Includes lightning data from "
+                    <a href="https://www.blitzortung.org/" target="_blank" rel="noopener">
+                        "Blitzortung.org"
+                    </a>
+                    " contributors, CC BY-SA 4.0"
+                </p>
+            </Show>
         </section>
     }
 }

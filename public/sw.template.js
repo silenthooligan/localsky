@@ -5,7 +5,7 @@
 // stops getting fresh data):
 //
 // - SW_VERSION is interpolated at request time by the Rust /sw.js handler from
-//   CARGO_PKG_VERSION + GITEA_SHA. Every deploy gets a new SW which forces
+//   CARGO_PKG_VERSION + GIT_SHA. Every deploy gets a new SW which forces
 //   install -> activate -> old caches deleted, so we never serve stale JS/WASM.
 // - Caches are namespaced by version, never reused across versions. Old caches
 //   are nuked on activate. No "fall through to a previous version" logic.

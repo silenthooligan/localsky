@@ -232,7 +232,11 @@ pub async fn health(
                         sources_freshness.push(SourceFreshness {
                             id: entry.id.clone(),
                             kind: source_kind_label(&entry.source),
-                            enabled: entry.enabled,
+                            // Effective, not entry-level: a parked
+                            // blitzortung entry (inner opt-in off) is
+                            // intentionally silent and must not trip
+                            // the any-offline degraded check below.
+                            enabled: source_effectively_enabled(entry),
                             last_seen_epoch,
                             stale_for_s,
                             status,
@@ -391,8 +395,23 @@ fn source_kind_label(kind: &crate::config::schema::SourceKind) -> &'static str {
         HaPassthrough(_) => "ha_passthrough",
         Mqtt(_) => "mqtt",
         HttpWebhook(_) => "http_webhook",
+        Blitzortung(_) => "blitzortung",
         DemoReplay(_) => "demo_replay",
     }
+}
+
+/// Whether a source entry is actually supposed to be producing data.
+/// Most kinds run whenever the entry-level `enabled` is set, but
+/// blitzortung adds an inner opt-in (default false, licensing gate): an
+/// entry whose inner flag is off is PARKED by design, never connects,
+/// and must not count as an offline source that degrades overall
+/// health. The shipped UI template creates exactly that parked state.
+fn source_effectively_enabled(entry: &crate::config::schema::SourceEntry) -> bool {
+    entry.enabled
+        && match &entry.source {
+            crate::config::schema::SourceKind::Blitzortung(c) => c.enabled,
+            _ => true,
+        }
 }
 
 fn controller_kind_label(kind: &crate::config::schema::ControllerKind) -> &'static str {
@@ -407,5 +426,41 @@ fn controller_kind_label(kind: &crate::config::schema::ControllerKind) -> &'stat
         Rainbird(_) => "rainbird",
         MqttCommand(_) => "mqtt_command",
         DryRun(_) => "dry_run",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::source_effectively_enabled;
+    use crate::config::schema::SourceEntry;
+
+    fn entry(json: serde_json::Value) -> SourceEntry {
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn parked_blitzortung_is_not_effectively_enabled() {
+        // Entry-level enabled defaults true; the inner opt-in defaults
+        // false. That parked state (exactly what the UI template
+        // creates) must not look like an offline source.
+        let parked = entry(serde_json::json!({
+            "id": "blitz", "kind": "blitzortung", "config": {},
+        }));
+        assert!(parked.enabled, "entry-level enabled should default true");
+        assert!(!source_effectively_enabled(&parked));
+        // Both flags on: effectively enabled.
+        let live = entry(serde_json::json!({
+            "id": "blitz", "kind": "blitzortung", "config": {"enabled": true},
+        }));
+        assert!(source_effectively_enabled(&live));
+        // Other kinds follow the entry-level flag alone.
+        let demo = entry(serde_json::json!({
+            "id": "demo", "kind": "demo_replay", "config": {},
+        }));
+        assert!(source_effectively_enabled(&demo));
+        let off = entry(serde_json::json!({
+            "id": "demo", "kind": "demo_replay", "enabled": false, "config": {},
+        }));
+        assert!(!source_effectively_enabled(&off));
     }
 }

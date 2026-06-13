@@ -7,6 +7,7 @@
 // weather page cares about hour-by-hour conditions + WMO codes for
 // iconography).
 
+pub mod model_catalog;
 pub mod snapshot;
 
 #[cfg(feature = "ssr")]

@@ -29,6 +29,7 @@ pub fn kind_options() -> Vec<(String, String)> {
         ("mqtt", "MQTT"),
         ("http_webhook", "HTTP webhook"),
         ("ha_passthrough", "HA passthrough"),
+        ("blitzortung", "Blitzortung lightning"),
         ("demo_replay", "Demo"),
     ]
     .into_iter()
@@ -51,6 +52,7 @@ pub fn kind_icon(kind: &str) -> &'static str {
         "yolink" => "sources",
         "lacrosse" => "cloud-sun",
         "tuya_cloud" => "zap",
+        "blitzortung" => "zap",
         "demo_replay" => "play",
         _ => "sources",
     }
@@ -76,6 +78,7 @@ pub fn kind_pretty(kind: &str) -> &'static str {
         "yolink" => "YoLink cloud",
         "lacrosse" => "La Crosse cloud",
         "tuya_cloud" => "Tuya / Smart Life cloud",
+        "blitzortung" => "Blitzortung community lightning",
         "demo_replay" => "Demo replay (synthetic)",
         _ => "Unknown",
     }
@@ -101,6 +104,10 @@ pub fn default_config_text(kind: &str) -> String {
         "mqtt" => "{\n  \"broker_host\": \"broker.local\",\n  \"broker_port\": 1883,\n  \"username\": null,\n  \"password\": null,\n  \"subscriptions\": [\n    {\n      \"topic\": \"sensors/+/soil\",\n      \"field\": \"rh_pct\",\n      \"json_path\": \"moisture\",\n      \"scale\": 1.0,\n      \"offset\": 0.0\n    }\n  ]\n}".into(),
         "http_webhook" => "{\n  \"path\": \"/ingest/webhook/myhook\",\n  \"token\": \"changeme\",\n  \"fields\": [\n    {\"field\": \"air_temp_f\", \"json_path\": \"temperature\", \"scale\": 1.0, \"offset\": 0.0}\n  ]\n}".into(),
         "ha_passthrough" => "{\n  \"base_url\": \"http://homeassistant.local:8123\",\n  \"bearer_token\": \"${HA_LONG_LIVED_TOKEN}\",\n  \"field_map\": {}\n}".into(),
+        // enabled defaults false on purpose: Blitzortung.org community
+        // data is CC BY-SA 4.0, private/non-commercial, display-only.
+        // The operator flips it consciously; validation explains terms.
+        "blitzortung" => "{\n  \"enabled\": false,\n  \"radius_mi\": 100.0\n}".into(),
         "demo_replay" => "{\n  \"rate\": 10.0\n}".into(),
         _ => "{}".into(),
     }

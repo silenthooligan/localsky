@@ -31,7 +31,14 @@ use serde::{Deserialize, Serialize};
 /// 1.8.0 (additive): IrrigationSnapshot.soil_probe_faults +
 /// /health.soil_probe_faults (configured soil probes with no valid
 /// reading for 24h+; non-empty degrades /health status).
-pub const API_VERSION: &str = "1.8.0";
+/// 1.9.0 (additive): GET /sources/openmeteo/models (forecast model
+/// catalog backing sources[].config.model) + GET /radar/windgrid
+/// (leaflet-velocity U/V wind grid for the radar map's wind layer).
+/// 1.10.0 (additive): GET /radar/tropical (basin-aware tropical
+/// cyclone tracking: all verified agency feeds, NHC/CPHC + JMA +
+/// JTWC, normalized server-side into one GeoJSON FeatureCollection
+/// with per-storm term/agency/basin properties and per-source health).
+pub const API_VERSION: &str = "1.10.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {

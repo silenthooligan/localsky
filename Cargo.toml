@@ -1,6 +1,6 @@
 [package]
 name = "localsky"
-version = "0.3.0-beta.2"
+version = "0.4.0-beta.1"
 edition = "2021"
 license = "Apache-2.0"
 description = "Local-first weather and irrigation control with native FAO-56 ET, multi-source weather merge, multi-controller HAL, optional Home Assistant, and optional local LLM advisor."
@@ -46,10 +46,12 @@ arc-swap = { version = "1", optional = true }
 # Ecowitt UDP discovery can broadcast on every NIC of a dual-homed host.
 if-addrs = { version = "0.15", optional = true }
 
-# HA WebSocket client (Phase F1): HA's device/entity registries are only
-# available over the WS API. Default features (no TLS) suffice for the
-# on-LAN ws:// HA endpoint and keep the runtime image OpenSSL-free.
-tokio-tungstenite = { version = "0.29", optional = true }
+# WebSocket client. HA's device/entity registries (Phase F1) ride the
+# on-LAN ws:// endpoint, which needs no TLS; the Blitzortung community
+# lightning feed is wss:// on 443, so the rustls-webpki feature is on
+# (same rustls/webpki-roots stack reqwest already pulls, so the runtime
+# image stays OpenSSL-free).
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"], optional = true }
 
 # Async helpers
 futures = "0.3"
@@ -116,7 +118,7 @@ hmac = { version = "0.13", optional = true }
 hex = { version = "0.4", optional = true }
 
 # WASM
-wasm-bindgen = { version = "=0.2.123", optional = true }
+wasm-bindgen = { version = "=0.2.125", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
 gloo-net = { version = "0.7", features = ["http", "eventsource"], optional = true }

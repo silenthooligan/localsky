@@ -37,13 +37,13 @@ COPY src ./src
 COPY style ./style
 COPY public ./public
 
-# Commit sha for the service-worker cache namespace. option_env!("GITEA_SHA")
+# Commit sha for the service-worker cache namespace. option_env!("GIT_SHA")
 # in src/sw.rs reads this at compile time so every deploy emits a byte-different
 # /sw.js, which is what forces browsers to install the new SW and nuke the old
 # caches (otherwise the SW version is a static "-dev" and clients freeze on
-# stale WASM). Passed as a --build-arg by .gitea/workflows/build.yml.
-ARG GITEA_SHA=dev
-ENV GITEA_SHA=${GITEA_SHA}
+# stale WASM). Passed as a --build-arg by the CI build workflow.
+ARG GIT_SHA=dev
+ENV GIT_SHA=${GIT_SHA}
 
 RUN cargo leptos build --release
 

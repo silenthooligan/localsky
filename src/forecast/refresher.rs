@@ -13,7 +13,9 @@
 // Timezone is auto-detected by Open-Meteo from the coordinates so
 // daily windows match the user's local clock.
 
+use crate::config::schema::{Config, SourceKind};
 use crate::config::FileConfigStore;
+use crate::forecast::model_catalog::DEFAULT_MODEL;
 use crate::forecast::snapshot::{DailyEntry, ForecastSnapshot, HourlyEntry};
 use crate::forecast::store::ForecastStore;
 use crate::ports::config_store::ConfigStore;
@@ -60,7 +62,8 @@ pub fn spawn_forecast_refresher(
 
         loop {
             let (lat, lon) = resolve_coords(cfg_store.as_deref(), boot_coords).await;
-            let sleep_for = match refresh_once(&client, lat, lon).await {
+            let model = resolve_model(cfg_store.as_deref()).await;
+            let sleep_for = match refresh_once(&client, lat, lon, &model).await {
                 Ok(snap) => {
                     store.store(snap);
                     if degraded {
@@ -120,6 +123,34 @@ async fn resolve_coords(
     env_coords()
 }
 
+/// Resolve the Open-Meteo model for one refresh tick, live-config
+/// first (a model change in settings applies on the next tick, no
+/// restart, same contract as resolve_coords).
+async fn resolve_model(cfg_store: Option<&FileConfigStore>) -> String {
+    if let Some(store) = cfg_store {
+        if let Ok(cfg) = store.load().await {
+            return configured_open_meteo_model(&cfg);
+        }
+    }
+    DEFAULT_MODEL.to_string()
+}
+
+/// The configured Open-Meteo model: the first open_meteo source entry's
+/// `model`, defaulting to best_match when none is configured. Enabled
+/// state is deliberately ignored: the refresher runs unconditionally
+/// today regardless of the source flag, and the model should travel
+/// with the entry the operator edited. Shared with the /radar/windgrid
+/// handler so both fetches pin the same model.
+pub fn configured_open_meteo_model(cfg: &Config) -> String {
+    cfg.sources
+        .iter()
+        .find_map(|s| match &s.source {
+            SourceKind::OpenMeteo(c) => Some(c.model.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string())
+}
+
 /// Legacy v0.1 coordinate source: WEATHER_APP_LAT/LON env vars with the
 /// historical 40.0 / -75.0 fallback.
 fn env_coords() -> (f64, f64) {
@@ -156,8 +187,11 @@ fn backoff(n: u32) -> Duration {
 /// without depending on the SQLite history layer.
 const PAST_DAYS: usize = 3;
 
-async fn refresh_once(client: &Client, lat: f64, lon: f64) -> Result<ForecastSnapshot> {
-    let url = format!(
+/// Build the forecast URL. `&models=` is appended ONLY for a
+/// non-default model so the best_match URL stays byte-identical to the
+/// pre-model-selection one (same upstream behavior, same cache keys).
+fn forecast_url(lat: f64, lon: f64, model: &str) -> String {
+    let mut url = format!(
         "https://api.open-meteo.com/v1/forecast?\
          latitude={lat}&longitude={lon}&\
          daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,wind_speed_10m_max,uv_index_max,sunrise,sunset&\
@@ -170,6 +204,20 @@ async fn refresh_once(client: &Client, lat: f64, lon: f64) -> Result<ForecastSna
          forecast_hours=48&\
          timezone=auto"
     );
+    if model != DEFAULT_MODEL {
+        url.push_str("&models=");
+        url.push_str(model);
+    }
+    url
+}
+
+async fn refresh_once(
+    client: &Client,
+    lat: f64,
+    lon: f64,
+    model: &str,
+) -> Result<ForecastSnapshot> {
+    let url = forecast_url(lat, lon, model);
     let resp: Raw = client
         .get(&url)
         .send()
@@ -339,6 +387,44 @@ mod tests {
     #[test]
     fn empty_string_returns_zero() {
         assert_eq!(parse_om_local(""), 0);
+    }
+
+    #[test]
+    fn default_model_url_is_byte_identical_to_pre_model_url() {
+        // The exact URL the refresher fetched before model selection
+        // existed. best_match MUST keep producing these bytes.
+        let expected = concat!(
+            "https://api.open-meteo.com/v1/forecast?latitude=28.5&longitude=-81.4",
+            "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,",
+            "precipitation_probability_max,wind_speed_10m_max,uv_index_max,sunrise,sunset",
+            "&hourly=weather_code,temperature_2m,apparent_temperature,precipitation,",
+            "precipitation_probability,wind_speed_10m,wind_direction_10m,",
+            "relative_humidity_2m,cloud_cover",
+            "&temperature_unit=fahrenheit&wind_speed_unit=mph&precipitation_unit=inch",
+            "&past_days=3&forecast_days=7&forecast_hours=48&timezone=auto"
+        );
+        assert_eq!(forecast_url(28.5, -81.4, "best_match"), expected);
+    }
+
+    #[test]
+    fn non_default_model_appends_models_param_only() {
+        let base = forecast_url(48.14, 11.58, "best_match");
+        let pinned = forecast_url(48.14, 11.58, "icon_seamless");
+        assert_eq!(pinned, format!("{base}&models=icon_seamless"));
+    }
+
+    #[test]
+    fn configured_model_reads_first_open_meteo_source() {
+        let mut cfg = crate::config::schema::Config::default();
+        assert_eq!(configured_open_meteo_model(&cfg), "best_match");
+        let entry: crate::config::schema::SourceEntry = serde_json::from_value(serde_json::json!({
+            "id": "open_meteo",
+            "kind": "open_meteo",
+            "config": { "model": "gfs_seamless" },
+        }))
+        .unwrap();
+        cfg.sources.push(entry);
+        assert_eq!(configured_open_meteo_model(&cfg), "gfs_seamless");
     }
 
     #[tokio::test]

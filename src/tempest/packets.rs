@@ -136,11 +136,48 @@ impl RapidWindOb {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// Detection-network tags for StrikeEvent::source. Tempest is the local
+/// station (distance-only); Blitzortung is the community network
+/// (located strikes with lat/lon), fed by sources::blitzortung.
+pub const STRIKE_SOURCE_TEMPEST: &str = "tempest";
+pub const STRIKE_SOURCE_BLITZORTUNG: &str = "blitzortung";
+
+fn default_strike_source() -> String {
+    STRIKE_SOURCE_TEMPEST.to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StrikeEvent {
     pub time_epoch: i64,
     pub distance_km: f64,
     pub energy: u64,
+    /// Which detection network produced this strike ("tempest" or
+    /// "blitzortung"). Always serialized so the radar layer can
+    /// attribute per-strike (Blitzortung's terms require visible
+    /// attribution); payloads recorded before this field existed
+    /// deserialize to "tempest".
+    #[serde(default = "default_strike_source")]
+    pub source: String,
+    /// True strike position, present only for networks that locate
+    /// strikes (Blitzortung). Tempest reports distance but not bearing,
+    /// so its strikes stay None and render as distance rings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lat: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lon: Option<f64>,
+}
+
+impl Default for StrikeEvent {
+    fn default() -> Self {
+        Self {
+            time_epoch: 0,
+            distance_km: 0.0,
+            energy: 0,
+            source: default_strike_source(),
+            lat: None,
+            lon: None,
+        }
+    }
 }
 
 impl StrikeEvent {
@@ -149,6 +186,7 @@ impl StrikeEvent {
             time_epoch: arr.first()?.as_i64()?,
             distance_km: arr.get(1)?.as_f64().unwrap_or(0.0),
             energy: arr.get(2)?.as_u64().unwrap_or(0),
+            ..Self::default()
         })
     }
 }

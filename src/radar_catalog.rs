@@ -57,17 +57,261 @@ pub struct RadarProvider {
 /// One non-tile overlay (vector/timeline features). Serialized
 /// (camelCase) into `data-radar-features`; behavior is keyed by `id`
 /// in radar.js, so these descriptors carry display metadata plus any
-/// fetchable endpoints the layer needs.
+/// fetchable endpoints the layer needs. Owned strings (not &'static)
+/// because the tropical entry is assembled per-station: its label and
+/// endpoint order follow the home basin resolved from the lat/lon.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RadarFeature {
     pub id: &'static str,
-    pub label: &'static str,
+    pub label: String,
     /// Fetchable endpoints, in feature-specific order (see each entry).
     /// Empty when the feature rides an existing fetch (nowcast reuses
     /// the rainviewer weather-maps.json) or a local source (lightning).
+    pub endpoints: Vec<String>,
+    pub attribution: String,
+}
+
+// ---- Tropical cyclone basins ---------------------------------------------
+//
+// The single "hurricanes" feature (id kept verbatim for persisted layer
+// prefs and configs) is basin-aware: the same storms render anywhere on
+// the map, but the label, terminology, and endpoint ordering follow the
+// station's HOME basin so a Brisbane user sees "Cyclones (BOM)" and a
+// Tokyo user sees "Typhoons (JMA / RSMC Tokyo)". Every endpoint below
+// was verified live (2026-06-12 recon): key-free, valid quiet-basin
+// states confirmed. Where a basin has no verified RSMC machine feed
+// (N Indian, S Pacific, SW Indian), the JTWC RSS + per-storm products
+// are the documented fallback; we never scrape unverified sources, so
+// a basin with nothing verified would simply render empty.
+
+/// The server-side normalizer (api::tropical). It fetches every
+/// verified agency feed, normalizes them into one GeoJSON
+/// FeatureCollection, and caches 10 minutes; radar.js consumes ONLY
+/// this endpoint, so it stays first in the feature's endpoint list.
+/// The raw agency endpoints follow for provenance and attribution.
+pub const TROPICAL_NORMALIZED_ENDPOINT: &str = "/api/v1/radar/tropical";
+
+/// One tropical-cyclone basin: identity, the local term for a mature
+/// storm, the issuing agency, the feature label used when this is the
+/// station's home basin, and the verified upstream endpoints (primary
+/// feed first, cross-checks after).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TropicalBasin {
+    pub id: &'static str,
+    /// What a mature tropical cyclone is CALLED here ("hurricane",
+    /// "typhoon", "tropical cyclone", "cyclonic storm"); drives the
+    /// per-storm tooltip wording and the home-basin feature label.
+    pub term: &'static str,
+    /// Issuing agency label, as shown in attribution.
+    pub agency: &'static str,
+    /// Feature label when this is the home basin.
+    pub label: &'static str,
+    /// Verified upstream endpoints for this basin, primary first.
     pub endpoints: &'static [&'static str],
-    pub attribution: &'static str,
+}
+
+/// NHC/CPHC feed trio shared by the three RSMC Miami/Honolulu basins.
+/// CurrentStorms.json carries Central Pacific storms with binNumber
+/// CP1-CP5 (verified: archived 2025-08-11 production copy shows
+/// ep082025 Henriette as "CP3" after crossing 140W), and the same
+/// MapServer hosts live CP track/cone layers, so CPHC coverage needs
+/// NO extra integration: accept CP bins and cp* ids on these feeds.
+const NHC_ENDPOINTS: &[&str] = &[
+    "https://www.nhc.noaa.gov/CurrentStorms.json",
+    "https://mapservices.weather.noaa.gov/tropical/rest/services/tropical/NHC_tropical_weather_summary/MapServer/6/query?where=1%3D1&outFields=*&f=geojson",
+    "https://mapservices.weather.noaa.gov/tropical/rest/services/tropical/NHC_tropical_weather_summary/MapServer/7/query?where=1%3D1&outFields=*&f=geojson",
+];
+
+/// JTWC RSS index: the only verified key-free all-basin safety net.
+/// Per-storm warning products ({sh|io}NNYY.tcw etc.) hang off it.
+const JTWC_RSS: &str = "https://www.metoc.navy.mil/jtwc/rss/jtwc.rss";
+
+/// Catalog of every basin with a verified source, in fixed order (the
+/// first matching basin wins the home label when a station borders
+/// two). The terminology and agency assignments follow the WMO RSMC
+/// responsibility map; where the RSMC has no verified machine feed the
+/// agency below is the verified fallback issuer (JTWC).
+pub fn tropical_basins() -> &'static [TropicalBasin] {
+    &[
+        TropicalBasin {
+            id: "north_atlantic",
+            term: "hurricane",
+            agency: "NOAA NHC",
+            label: "Hurricanes (NOAA NHC)",
+            endpoints: NHC_ENDPOINTS,
+        },
+        TropicalBasin {
+            id: "east_pacific",
+            term: "hurricane",
+            agency: "NOAA NHC",
+            label: "Hurricanes (NOAA NHC)",
+            endpoints: NHC_ENDPOINTS,
+        },
+        TropicalBasin {
+            id: "central_pacific",
+            term: "hurricane",
+            agency: "NOAA CPHC",
+            label: "Hurricanes (NOAA CPHC)",
+            endpoints: NHC_ENDPOINTS,
+        },
+        TropicalBasin {
+            // RSMC Tokyo bosai JSON, verified incl. real archived
+            // per-storm payloads; JTWC RSS as the secondary cross-check.
+            id: "west_pacific",
+            term: "typhoon",
+            agency: "JMA / RSMC Tokyo",
+            label: "Typhoons (JMA / RSMC Tokyo)",
+            endpoints: &[
+                "https://www.jma.go.jp/bosai/typhoon/data/targetTc.json",
+                "https://www.jma.go.jp/bosai/typhoon/data/pastTracks.json",
+                JTWC_RSS,
+            ],
+        },
+        TropicalBasin {
+            // "Cyclonic storm" is the IMD/RSMC New Delhi term, but New
+            // Delhi has no verified machine feed; JTWC io-sector
+            // products are the verified fallback issuer.
+            id: "north_indian",
+            term: "cyclonic storm",
+            agency: "JTWC",
+            label: "Cyclonic Storms (JTWC)",
+            endpoints: &[
+                JTWC_RSS,
+                "https://www.metoc.navy.mil/jtwc/products/abioweb.txt",
+            ],
+        },
+        TropicalBasin {
+            // BOM's anonymous FTP is the sanctioned machine channel
+            // (api.weather.bom.gov.au works key-free but its own
+            // metadata forbids reuse, so it is deliberately absent).
+            // The FTP products are listed for provenance; server-side
+            // normalization of Southern Hemisphere storms rides the
+            // verified JTWC sh-sector products (reqwest is HTTP-only).
+            id: "australian",
+            term: "tropical cyclone",
+            agency: "BOM",
+            label: "Cyclones (BOM)",
+            endpoints: &["ftp://ftp.bom.gov.au/anon/gen/fwo/", JTWC_RSS],
+        },
+        TropicalBasin {
+            // RSMC Nadi has no verified feed; JTWC's TWA explicitly
+            // covers the South Pacific (verified).
+            id: "south_pacific",
+            term: "tropical cyclone",
+            agency: "JTWC",
+            label: "Cyclones (JTWC)",
+            endpoints: &[
+                JTWC_RSS,
+                "https://www.metoc.navy.mil/jtwc/products/abpwweb.txt",
+            ],
+        },
+        TropicalBasin {
+            // RSMC La Reunion is WMS raster only (no verified vector
+            // feed); JTWC sh-sector fallback.
+            id: "southwest_indian",
+            term: "tropical cyclone",
+            agency: "JTWC",
+            label: "Cyclones (JTWC)",
+            endpoints: &[
+                JTWC_RSS,
+                "https://www.metoc.navy.mil/jtwc/products/abioweb.txt",
+            ],
+        },
+    ]
+}
+
+pub fn tropical_basin_by_id(id: &str) -> Option<&'static TropicalBasin> {
+    tropical_basins().iter().find(|b| b.id == id)
+}
+
+/// Home basin(s) for a station. Bounding regions are deliberately
+/// generous and OVERLAP at the seams so a station bordering two basins
+/// gets both (Cancun sits in the Atlantic box and the East Pacific box;
+/// the first catalog match wins the label). Boxes, in catalog order:
+///
+///   north_atlantic   lat   5..55,  lon -100..-15   (Gulf, Caribbean,
+///                    US/Canada east coast, out to the Azores)
+///   east_pacific     lat   5..35,  lon -145..-85   (Mexico/C. America
+///                    west coast to the 140W CPHC handoff fringe)
+///   central_pacific  lat   0..35,  lon -180..-140  (140W to dateline,
+///                    Hawaii; CPHC responsibility)
+///   west_pacific     lat   0..50,  lon   98..180   (incl. South China
+///                    Sea; overlaps NIO at the Malay Peninsula)
+///   north_indian     lat   0..30,  lon   45..100   (Arabian Sea + Bay
+///                    of Bengal)
+///   australian       lat -45..0,   lon   90..160   (90E-160E TCWC
+///                    Australia region)
+///   south_pacific    lat -40..0,   lon  158..180 and -180..-130
+///                    (east of ~160E, RSMC Nadi area; overlaps the
+///                    Australian box at the Coral Sea seam)
+///   southwest_indian lat -40..0,   lon   30..93    (RSMC La Reunion
+///                    area; overlaps the Australian box at 90E)
+///
+/// A station inside no box (London, inland Eurasia, high latitudes)
+/// defaults to the North Atlantic: it matches the pre-basin-aware
+/// behavior, and the Atlantic basin is the one English-language
+/// "hurricane" framing fits least badly everywhere.
+pub fn home_basins(lat: f64, lon: f64) -> Vec<&'static TropicalBasin> {
+    let inside = |b: &TropicalBasin| match b.id {
+        "north_atlantic" => in_box(lat, lon, 5.0, 55.0, -100.0, -15.0),
+        "east_pacific" => in_box(lat, lon, 5.0, 35.0, -145.0, -85.0),
+        "central_pacific" => in_box(lat, lon, 0.0, 35.0, -180.0, -140.0),
+        "west_pacific" => in_box(lat, lon, 0.0, 50.0, 98.0, 180.0),
+        "north_indian" => in_box(lat, lon, 0.0, 30.0, 45.0, 100.0),
+        "australian" => in_box(lat, lon, -45.0, 0.0, 90.0, 160.0),
+        "south_pacific" => {
+            in_box(lat, lon, -40.0, 0.0, 158.0, 180.0)
+                || in_box(lat, lon, -40.0, 0.0, -180.0, -130.0)
+        }
+        "southwest_indian" => in_box(lat, lon, -40.0, 0.0, 30.0, 93.0),
+        _ => false,
+    };
+    let homes: Vec<&'static TropicalBasin> =
+        tropical_basins().iter().filter(|b| inside(b)).collect();
+    if homes.is_empty() {
+        vec![tropical_basin_by_id("north_atlantic").expect("atlantic basin in catalog")]
+    } else {
+        homes
+    }
+}
+
+/// Build the basin-aware "hurricanes" feature for a station. The
+/// normalized endpoint radar.js actually fetches comes first; the raw
+/// agency endpoints follow for provenance, home basin(s) first, every
+/// other verified basin after (storms anywhere render when the user
+/// pans; the LABEL is what localizes). Attribution lists each
+/// contributing agency once, home agency first.
+fn tropical_feature(lat: f64, lon: f64) -> RadarFeature {
+    let homes = home_basins(lat, lon);
+    let mut endpoints: Vec<String> = vec![TROPICAL_NORMALIZED_ENDPOINT.to_string()];
+    let mut agencies: Vec<&'static str> = Vec::new();
+    let ordered = homes
+        .iter()
+        .copied()
+        .chain(
+            tropical_basins()
+                .iter()
+                .filter(|b| !homes.iter().any(|h| h.id == b.id)),
+        )
+        .collect::<Vec<_>>();
+    for basin in ordered {
+        for ep in basin.endpoints {
+            if !endpoints.iter().any(|e| e == ep) {
+                endpoints.push((*ep).to_string());
+            }
+        }
+        if !agencies.contains(&basin.agency) {
+            agencies.push(basin.agency);
+        }
+    }
+    RadarFeature {
+        id: "hurricanes",
+        label: homes[0].label.to_string(),
+        endpoints,
+        attribution: agencies.join(" · "),
+    }
 }
 
 /// Catalog of every radar tile provider, in menu order (global first,
@@ -157,10 +401,14 @@ pub fn providers() -> &'static [RadarProvider] {
     ]
 }
 
-/// Catalog of every feature layer (always offered; `default_layers`
-/// and per-browser prefs control which start visible).
-pub fn features() -> &'static [RadarFeature] {
-    &[
+/// Catalog of every feature layer for a station (always offered;
+/// `default_layers` and per-browser prefs control which start
+/// visible). Takes the station lat/lon because the tropical entry is
+/// basin-aware (label + endpoint order localize to the home basin);
+/// every other entry is identical everywhere. Ids are fixed and listed
+/// in `feature_ids()`.
+pub fn features(lat: f64, lon: f64) -> Vec<RadarFeature> {
+    vec![
         RadarFeature {
             // Extends the RainViewer timeline into future frames, which
             // the time scrubber/label must clearly mark as forecast.
@@ -170,9 +418,9 @@ pub fn features() -> &'static [RadarFeature] {
             // was empty on every key-free fetch, so the layer has to
             // degrade gracefully to "no forecast frames".
             id: "nowcast",
-            label: "Forecast frames (RainViewer nowcast)",
-            endpoints: &[],
-            attribution: "RainViewer.com",
+            label: "Forecast frames (RainViewer nowcast)".to_string(),
+            endpoints: Vec::new(),
+            attribution: "RainViewer.com".to_string(),
         },
         RadarFeature {
             // Severity-colored NWS alert polygons, refreshed every
@@ -180,42 +428,69 @@ pub fn features() -> &'static [RadarFeature] {
             // meaningful User-Agent identifying the app and a contact;
             // requests without one risk 403. Accept: application/geo+json.
             id: "warnings_us",
-            label: "NWS severe weather alerts (US)",
-            endpoints: &["https://api.weather.gov/alerts/active?status=actual&severity=Severe,Extreme"],
-            attribution: "NOAA/NWS",
-        },
-        RadarFeature {
-            // Endpoints in order: active-storm summary JSON, then the
-            // aggregate forecast track (layer 6) and cone (layer 7)
-            // GeoJSON queries from the NHC summary MapServer. All three
-            // return valid (possibly empty) payloads when the basin is
-            // quiet, so the layer needs a graceful empty state.
-            id: "hurricanes",
-            label: "Hurricanes (NOAA NHC track + cone)",
-            endpoints: &[
-                "https://www.nhc.noaa.gov/CurrentStorms.json",
-                "https://mapservices.weather.noaa.gov/tropical/rest/services/tropical/NHC_tropical_weather_summary/MapServer/6/query?where=1%3D1&outFields=*&f=geojson",
-                "https://mapservices.weather.noaa.gov/tropical/rest/services/tropical/NHC_tropical_weather_summary/MapServer/7/query?where=1%3D1&outFields=*&f=geojson",
+            label: "NWS severe weather alerts (US)".to_string(),
+            endpoints: vec![
+                "https://api.weather.gov/alerts/active?status=actual&severity=Severe,Extreme"
+                    .to_string(),
             ],
-            attribution: "NOAA/NHC",
+            attribution: "NOAA/NWS".to_string(),
+        },
+        // Basin-aware tropical tracking ("hurricanes" id kept for
+        // persistence compat). radar.js fetches endpoints[0], the
+        // server-side normalizer; the agency feeds follow for
+        // provenance. See the tropical basin section above.
+        tropical_feature(lat, lon),
+        RadarFeature {
+            // Strike layer fed by /api/snapshot's lightning_recent.
+            // Two contributing networks, distinguished per-strike by
+            // the `source` tag: the on-prem Tempest station (distance
+            // only, rendered as rings) and, when a blitzortung source
+            // is enabled, the Blitzortung.org community network (true
+            // lat/lon, rendered as point markers). radar.js derives
+            // the visible legend/attribution from which sources the
+            // snapshot actually reports; Blitzortung attribution (CC
+            // BY-SA 4.0 + link) is mandatory whenever its strikes
+            // show. The id keeps its historical name so persisted
+            // layer prefs and configs survive the generalization.
+            id: "lightning_tempest",
+            label: "Lightning strikes".to_string(),
+            endpoints: Vec::new(),
+            attribution: "Tempest (local station) / Blitzortung.org contributors (CC BY-SA 4.0)"
+                .to_string(),
         },
         RadarFeature {
-            // Existing local strike-ring layer fed by the on-prem
-            // Tempest station via /api/snapshot; carried forward as-is.
-            id: "lightning_tempest",
-            label: "Lightning (Tempest station)",
-            endpoints: &[],
-            attribution: "Tempest (local station)",
+            // Animated leaflet-velocity particle field. The endpoint
+            // is our own server: it makes ONE batched Open-Meteo call
+            // per bbox grid (cached ~30 min) and returns grib2json-
+            // style U/V records, so the browser never talks to
+            // Open-Meteo directly. radar.js appends ?bbox=<map bounds>
+            // and skips the feature when the vendored plugin failed to
+            // load (no window.L.velocityLayer). Default OFF: it is a
+            // forecast-model field, not radar truth.
+            id: "wind",
+            label: "Wind flow (Open-Meteo)".to_string(),
+            endpoints: vec!["/api/v1/radar/windgrid".to_string()],
+            attribution: "Open-Meteo".to_string(),
         },
+    ]
+}
+
+/// The fixed feature-id set, independent of station location (only
+/// labels/endpoints localize, never identity). This is what id
+/// validation and `canonical_layer_id` key off, so persisted layer
+/// prefs resolve without needing a lat/lon.
+pub fn feature_ids() -> &'static [&'static str] {
+    &[
+        "nowcast",
+        "warnings_us",
+        "hurricanes",
+        "lightning_tempest",
+        "wind",
     ]
 }
 
 pub fn provider_by_id(id: &str) -> Option<&'static RadarProvider> {
     providers().iter().find(|p| p.id == id)
-}
-
-pub fn feature_by_id(id: &str) -> Option<&'static RadarFeature> {
-    features().iter().find(|f| f.id == id)
 }
 
 fn in_box(lat: f64, lon: f64, south: f64, north: f64, west: f64, east: f64) -> bool {
@@ -312,7 +587,7 @@ pub fn canonical_layer_id(id: &str) -> Option<&'static str> {
     if let Some(p) = provider_by_id(id) {
         return Some(p.id);
     }
-    feature_by_id(id).map(|f| f.id)
+    feature_ids().iter().find(|f| **f == id).copied()
 }
 
 /// Stock default-visible layer set: the catalog successors of the old
@@ -332,9 +607,12 @@ pub fn providers_json(set: &[&'static RadarProvider]) -> String {
     serde_json::to_string(set).unwrap_or_else(|_| "[]".to_string())
 }
 
-/// Serialize the full feature catalog for `data-radar-features`.
-pub fn features_json() -> String {
-    serde_json::to_string(features()).unwrap_or_else(|_| "[]".to_string())
+/// Serialize the full feature catalog for `data-radar-features`. Takes
+/// the station coordinates because the tropical entry localizes to the
+/// home basin; same byte-stability contract as `providers_json` (serde
+/// emits fields in declaration order on both targets).
+pub fn features_json(lat: f64, lon: f64) -> String {
+    serde_json::to_string(&features(lat, lon)).unwrap_or_else(|_| "[]".to_string())
 }
 
 #[cfg(test)]
@@ -347,8 +625,27 @@ mod tests {
         for p in providers() {
             assert!(seen.insert(p.id), "duplicate catalog id '{}'", p.id);
         }
-        for f in features() {
-            assert!(seen.insert(f.id), "duplicate catalog id '{}'", f.id);
+        for f in feature_ids() {
+            assert!(seen.insert(*f), "duplicate catalog id '{f}'");
+        }
+    }
+
+    #[test]
+    fn feature_ids_match_the_built_catalog_everywhere() {
+        // Identity never localizes: only labels/endpoints do. Probe a
+        // station per basin plus the no-basin default.
+        for (lat, lon) in [
+            (28.5, -81.4),  // Orlando
+            (35.7, 139.7),  // Tokyo
+            (-27.5, 153.0), // Brisbane
+            (21.3, -157.9), // Honolulu
+            (51.5, -0.1),   // London
+            (19.1, 72.9),   // Mumbai
+            (-18.1, 178.4), // Suva
+            (-20.2, 57.5),  // Mauritius
+        ] {
+            let built: Vec<&str> = features(lat, lon).iter().map(|f| f.id).collect();
+            assert_eq!(built, feature_ids(), "feature ids drifted at ({lat},{lon})");
         }
     }
 
@@ -472,7 +769,10 @@ mod tests {
 
     #[test]
     fn feature_json_shape_is_pinned() {
-        let json = features_json();
+        // Orlando: the Atlantic home basin, so the tropical label is
+        // the NHC one. The serialization contract radar.js parses from
+        // data-radar-features is camelCase keys in declaration order.
+        let json = features_json(28.5, -81.4);
         assert!(json.starts_with("[{\"id\":\"nowcast\","));
         assert!(json.contains(concat!(
             "{\"id\":\"warnings_us\",\"label\":\"NWS severe weather alerts (US)\",",
@@ -480,11 +780,181 @@ mod tests {
             "?status=actual&severity=Severe,Extreme\"],",
             "\"attribution\":\"NOAA/NWS\"}"
         )));
-        // Hurricanes carries summary JSON + track + cone, in that order.
-        let hur = feature_by_id("hurricanes").unwrap();
-        assert_eq!(hur.endpoints.len(), 3);
-        assert!(hur.endpoints[1].contains("/MapServer/6/query"));
-        assert!(hur.endpoints[2].contains("/MapServer/7/query"));
+        assert!(json.contains("{\"id\":\"hurricanes\",\"label\":\"Hurricanes (NOAA NHC)\","));
+        // The wind feature points at our own windgrid endpoint.
+        assert!(json.contains(concat!(
+            "{\"id\":\"wind\",\"label\":\"Wind flow (Open-Meteo)\",",
+            "\"endpoints\":[\"/api/v1/radar/windgrid\"],",
+            "\"attribution\":\"Open-Meteo\"}"
+        )));
+    }
+
+    #[test]
+    fn wind_feature_is_cataloged_but_not_default_on() {
+        assert!(feature_ids().contains(&"wind"));
+        assert!(!default_layer_ids().contains(&"wind"));
+    }
+
+    // ---- Tropical basin picker --------------------------------------
+
+    fn tropical_for(lat: f64, lon: f64) -> RadarFeature {
+        features(lat, lon)
+            .into_iter()
+            .find(|f| f.id == "hurricanes")
+            .expect("hurricanes feature present")
+    }
+
+    fn home_ids(lat: f64, lon: f64) -> Vec<&'static str> {
+        home_basins(lat, lon).iter().map(|b| b.id).collect()
+    }
+
+    #[test]
+    fn orlando_is_hurricane_country() {
+        assert_eq!(home_ids(28.5, -81.4), ["north_atlantic"]);
+        let f = tropical_for(28.5, -81.4);
+        assert_eq!(f.label, "Hurricanes (NOAA NHC)");
+        // Normalizer first, then the home-basin NHC feeds.
+        assert_eq!(f.endpoints[0], TROPICAL_NORMALIZED_ENDPOINT);
+        assert_eq!(
+            f.endpoints[1],
+            "https://www.nhc.noaa.gov/CurrentStorms.json"
+        );
+        // Every other verified basin's feeds follow (panning renders
+        // storms anywhere), e.g. the JMA enumerator is in the tail.
+        assert!(f
+            .endpoints
+            .iter()
+            .any(|e| e.ends_with("/typhoon/data/targetTc.json")));
+        // Home agency leads the attribution.
+        assert!(f.attribution.starts_with("NOAA NHC"));
+    }
+
+    #[test]
+    fn tokyo_gets_typhoons_from_jma() {
+        assert_eq!(home_ids(35.7, 139.7), ["west_pacific"]);
+        let f = tropical_for(35.7, 139.7);
+        assert_eq!(f.label, "Typhoons (JMA / RSMC Tokyo)");
+        assert_eq!(f.endpoints[0], TROPICAL_NORMALIZED_ENDPOINT);
+        assert!(f.endpoints[1].ends_with("/typhoon/data/targetTc.json"));
+        assert!(f.attribution.starts_with("JMA / RSMC Tokyo"));
+    }
+
+    #[test]
+    fn brisbane_gets_cyclones_from_bom() {
+        assert_eq!(home_ids(-27.5, 153.0), ["australian"]);
+        let f = tropical_for(-27.5, 153.0);
+        assert_eq!(f.label, "Cyclones (BOM)");
+        // The sanctioned BOM channel (anonymous FTP) leads the raw
+        // endpoints; the undocumented app API is deliberately absent.
+        assert_eq!(f.endpoints[1], "ftp://ftp.bom.gov.au/anon/gen/fwo/");
+        assert!(!f.endpoints.iter().any(|e| e.contains("api.weather.bom")));
+        assert!(f.attribution.starts_with("BOM"));
+    }
+
+    #[test]
+    fn honolulu_is_cphc_hurricane_coverage_on_the_shipped_nhc_feeds() {
+        assert_eq!(home_ids(21.3, -157.9), ["central_pacific"]);
+        let f = tropical_for(21.3, -157.9);
+        assert_eq!(f.label, "Hurricanes (NOAA CPHC)");
+        let basin = tropical_basin_by_id("central_pacific").unwrap();
+        assert_eq!(basin.term, "hurricane");
+        // CPHC coverage rides the SAME verified NHC feeds (CP1-CP5
+        // bins in CurrentStorms.json + CP MapServer layers): the
+        // central_pacific endpoints are byte-identical to the Atlantic
+        // basin's, no new integration.
+        assert_eq!(
+            basin.endpoints,
+            tropical_basin_by_id("north_atlantic").unwrap().endpoints
+        );
+    }
+
+    #[test]
+    fn london_defaults_to_the_atlantic_basin() {
+        // Inside no basin box: the documented default applies.
+        assert_eq!(home_ids(51.5, -0.1), ["north_atlantic"]);
+        assert_eq!(tropical_for(51.5, -0.1).label, "Hurricanes (NOAA NHC)");
+    }
+
+    #[test]
+    fn cancun_borders_two_basins_and_gets_both() {
+        // Atlantic and East Pacific boxes overlap across Mexico and
+        // Central America on purpose; catalog order picks the label.
+        assert_eq!(home_ids(21.2, -86.8), ["north_atlantic", "east_pacific"]);
+        assert_eq!(tropical_for(21.2, -86.8).label, "Hurricanes (NOAA NHC)");
+    }
+
+    #[test]
+    fn mumbai_and_suva_and_mauritius_fall_back_to_jtwc() {
+        // Basins with no verified RSMC machine feed use the verified
+        // JTWC fallback (never an unverified scrape) and keep their
+        // local term.
+        for (lat, lon, basin, term, label) in [
+            (
+                19.1,
+                72.9,
+                "north_indian",
+                "cyclonic storm",
+                "Cyclonic Storms (JTWC)",
+            ),
+            (
+                -18.1,
+                178.4,
+                "south_pacific",
+                "tropical cyclone",
+                "Cyclones (JTWC)",
+            ),
+            (
+                -20.2,
+                57.5,
+                "southwest_indian",
+                "tropical cyclone",
+                "Cyclones (JTWC)",
+            ),
+        ] {
+            assert_eq!(home_ids(lat, lon), [basin], "({lat},{lon})");
+            let f = tropical_for(lat, lon);
+            assert_eq!(f.label, label, "({lat},{lon})");
+            assert_eq!(tropical_basin_by_id(basin).unwrap().term, term);
+            assert!(f.endpoints[1].contains("metoc.navy.mil/jtwc"));
+        }
+    }
+
+    #[test]
+    fn basin_catalog_is_sane() {
+        let mut seen = std::collections::HashSet::new();
+        for b in tropical_basins() {
+            assert!(seen.insert(b.id), "duplicate basin id '{}'", b.id);
+            assert!(!b.term.is_empty() && !b.agency.is_empty());
+            assert!(!b.endpoints.is_empty(), "{} has no endpoints", b.id);
+            for ep in b.endpoints {
+                assert!(
+                    ep.starts_with("https://") || ep.starts_with("ftp://"),
+                    "{} endpoint '{}' is neither https nor ftp",
+                    b.id,
+                    ep
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tropical_endpoints_are_deduped_and_cover_every_basin() {
+        let f = tropical_for(28.5, -81.4);
+        let mut seen = std::collections::HashSet::new();
+        for e in &f.endpoints {
+            assert!(seen.insert(e.clone()), "duplicate endpoint '{e}'");
+        }
+        // Every verified basin's every endpoint is represented.
+        for b in tropical_basins() {
+            for ep in b.endpoints {
+                assert!(
+                    f.endpoints.iter().any(|e| e == ep),
+                    "{} endpoint '{}' missing from the feature",
+                    b.id,
+                    ep
+                );
+            }
+        }
     }
 
     #[test]

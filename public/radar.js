@@ -11,14 +11,29 @@
 //   data-radar-features  : feature descriptors. Known ids:
 //                          nowcast          RainViewer forecast frames
 //                          warnings_us      NWS active-alert polygons
-//                          hurricanes       NHC storms + track/cone
-//                          lightning_tempest local Tempest strike rings
+//                          hurricanes       tropical cyclones, all basins
+//                                           (id kept for pref persistence;
+//                                           label is basin-localized:
+//                                           hurricanes/typhoons/cyclones;
+//                                           data via the normalized
+//                                           /api/v1/radar/tropical feed)
+//                          lightning_tempest lightning strikes (id kept
+//                                           for pref persistence; covers
+//                                           Tempest rings AND Blitzortung
+//                                           positioned dots)
+//                          wind             Open-Meteo particle wind flow
 //
 // Center/zoom default to data-lat / data-lon / data-zoom on #radar-map
-// (set by SSR from the configured station location). The Tempest strike
-// layer pulls from /api/snapshot, Tempest reports distance to a strike
-// but not bearing, so each strike is plotted as a distance ring centered
-// on the station rather than a point.
+// (set by SSR from the configured station location). The lightning layer
+// pulls from /api/snapshot. Tempest reports distance to a strike but not
+// bearing, so Tempest strikes plot as distance rings centered on the
+// station. Strikes carrying real lat/lon (the opt-in Blitzortung
+// community source, merged server-side into lightning_recent with a
+// source tag) plot as small positioned dots that fade with age. The
+// lightning legend copy in the Layers drawer and the Leaflet
+// attribution line adapt to whichever networks actually contributed;
+// the Blitzortung credit (CC BY-SA 4.0) is required by their terms
+// whenever community strikes are shown.
 //
 // Layer visibility persists per-browser via localStorage (PREFS_KEY
 // below), seeded from data-default-layers (config ui.radar.default_layers).
@@ -46,6 +61,8 @@
   var strikePollTimer = null;
   var warningsPollTimer = null;
   var hurricanePollTimer = null;
+  var windPollTimer = null;
+  var windMoveTimer = null;
   var animationTimer = null;
 
   // One console.warn per failed source per page lifetime (not per init):
@@ -63,6 +80,8 @@
     if (strikePollTimer) { clearInterval(strikePollTimer); strikePollTimer = null; }
     if (warningsPollTimer) { clearInterval(warningsPollTimer); warningsPollTimer = null; }
     if (hurricanePollTimer) { clearInterval(hurricanePollTimer); hurricanePollTimer = null; }
+    if (windPollTimer) { clearInterval(windPollTimer); windPollTimer = null; }
+    if (windMoveTimer) { clearTimeout(windMoveTimer); windMoveTimer = null; }
     if (currentMap) {
       try { currentMap.remove(); } catch (e) { /* swallow */ }
       currentMap = null;
@@ -160,8 +179,9 @@
   var FALLBACK_FEATURES = [
     { id: 'nowcast', label: 'Forecast frames (RainViewer nowcast)', endpoints: [], attribution: 'RainViewer.com' },
     { id: 'warnings_us', label: 'NWS severe weather alerts (US)', endpoints: [], attribution: 'NOAA/NWS' },
-    { id: 'hurricanes', label: 'Hurricanes (NOAA NHC track + cone)', endpoints: [], attribution: 'NOAA/NHC' },
-    { id: 'lightning_tempest', label: 'Lightning (Tempest station)', endpoints: [], attribution: 'Tempest (local station)' },
+    { id: 'hurricanes', label: 'Hurricanes (NOAA NHC)', endpoints: [], attribution: 'NOAA NHC/CPHC · JMA · BOM · JTWC' },
+    { id: 'lightning_tempest', label: 'Lightning strikes', endpoints: [], attribution: 'Tempest (local station) · Blitzortung.org contributors (CC BY-SA 4.0)' },
+    { id: 'wind', label: 'Wind flow (Open-Meteo)', endpoints: [], attribution: 'Open-Meteo' },
   ];
 
   // Pre-catalog stored prefs and default lists spoke short ids. Map them
@@ -174,9 +194,10 @@
     lightning: 'lightning_tempest',
   };
 
-  // Compact chip labels for the mobile row, keyed by catalog id. Anything
-  // not listed falls back to the descriptor label with the parenthetical
-  // stripped, so a brand-new provider still gets a usable chip.
+  // Compact row labels for the Layers drawer, keyed by catalog id.
+  // Anything not listed falls back to the descriptor label with the
+  // parenthetical stripped, so a brand-new provider still gets a usable
+  // row name (the full label lives in the row's legend expander).
   var SHORT_LABELS = {
     rainviewer: 'Precip',
     nexrad_iem: 'NEXRAD',
@@ -186,8 +207,12 @@
     fmi_fi: 'Radar FI',
     nowcast: 'Forecast',
     warnings_us: 'Alerts',
-    hurricanes: 'Hurricanes',
+    // hurricanes is intentionally unlisted: the descriptor label is
+    // basin-localized ("Hurricanes (NOAA NHC)", "Typhoons (JMA / RSMC
+    // Tokyo)", "Cyclones (BOM)"), so the parenthetical-stripping
+    // fallback below yields the right local term for the row.
     lightning_tempest: 'Strikes',
+    wind: 'Wind',
   };
 
   function shortLabelFor(id, label) {
@@ -203,14 +228,22 @@
   var NWS_ALERTS_URL =
     'https://api.weather.gov/alerts/active?status=actual&severity=Severe,Extreme';
 
-  // NHC aggregate summary service (recon-verified): layer 6 = forecast
-  // track lines, layer 7 = forecast cones. The per-storm service uses
-  // per-slot layer groups, the summary service answers in one query each.
-  var NHC_STORMS_URL = 'https://www.nhc.noaa.gov/CurrentStorms.json';
-  var NHC_SUMMARY_BASE =
-    'https://mapservices.weather.noaa.gov/tropical/rest/services/tropical/NHC_tropical_weather_summary/MapServer';
-  var NHC_TRACK_URL = NHC_SUMMARY_BASE + '/6/query?where=1%3D1&outFields=*&f=geojson';
-  var NHC_CONE_URL = NHC_SUMMARY_BASE + '/7/query?where=1%3D1&outFields=*&f=geojson';
+  // LocalSky's own normalized tropical feed. The server fetches every
+  // verified basin agency (NOAA NHC/CPHC, JMA RSMC Tokyo, BOM, JTWC
+  // fallback basins), normalizes them into ONE GeoJSON FeatureCollection
+  // (Point = storm position, LineString = track, Polygon = forecast cone,
+  // with term/name/agency/intensity_kt properties on each feature) and
+  // caches it ~10 minutes, windgrid-style. The browser never talks to
+  // the agencies directly, so basin quirks (JMA's [lat, lon] coordinate
+  // order, JTWC's ATCF fixed-width text) stay server-side.
+  var TROPICAL_URL = '/api/v1/radar/tropical';
+
+  // Our own wind grid endpoint. The server batches one Open-Meteo call
+  // per cache window (~30 min, keyed on the rounded grid) and answers in
+  // leaflet-velocity's grib2json-style two-record [U, V] format, so the
+  // browser never talks to Open-Meteo directly. Fallback for descriptors
+  // that arrive without endpoints, same pattern as the NWS constant.
+  var WINDGRID_URL = '/api/v1/radar/windgrid';
 
   // NWS alert severity ramp. Fill + stroke share the color; opacity keeps
   // the radar readable underneath.
@@ -282,10 +315,10 @@
 
     // Mobile detection: the bottom-tab breakpoint matches the rest of the
     // app (760px). On a phone we move the zoom control to the bottom-right
-    // (easier thumb reach), replace the in-map layer toggle with the chip
-    // row, and turn off `tap` so single-tap-then-drag doesn't get eaten by
-    // Leaflet's tap-handler quirk on iOS Safari. attributionControl moves
-    // to bottom-left out of the way of the play button.
+    // (easier thumb reach) and turn off `tap` so single-tap-then-drag
+    // doesn't get eaten by Leaflet's tap-handler quirk on iOS Safari. The
+    // Layers drawer is the same at every width; only its geometry changes
+    // (CSS turns it into a full-width sheet under 760px).
     var isMobile = (typeof window.matchMedia === 'function')
       ? window.matchMedia('(max-width: 760px)').matches
       : false;
@@ -600,80 +633,271 @@
         .catch(function (e) { warnOnce('nws-alerts', 'NWS alerts fetch failed', e); });
     }
 
-    // ---------- Feature: NHC hurricanes ----------
+    // ---------- Feature: tropical cyclones (all basins) ----------
     //
-    // Three sources merged per refresh: forecast cones (polygons), forecast
-    // tracks (polylines), and CurrentStorms.json for named position markers.
-    // Each fetch fails independently; a quiet basin (zero features) renders
-    // nothing at all, silently. 15-minute cadence: advisories move slowly.
+    // ONE fetch per refresh against LocalSky's own normalized endpoint
+    // (TROPICAL_URL above); the same code path serves every basin. The
+    // descriptor's endpoints list documents the upstream agency feeds
+    // (home basin first) and is deliberately NOT fetched from here: the
+    // raw feeds are not browser-friendly, so normalization lives on the
+    // server and this layer stays dumb. Geometry type decides rendering:
+    //
+    //   Polygon / MultiPolygon        forecast cone (translucent fill;
+    //                                 only where the agency provides one)
+    //   LineString / MultiLineString  track polyline
+    //   Point                         storm position marker, tooltip
+    //                                 built from the term-aware
+    //                                 properties the normalizer attaches
+    //                                 (term/name/agency/intensity_kt),
+    //                                 e.g. "Typhoon NANMADOL (JMA)"
+    //
+    // Cones draw first, then tracks, then markers, so positions stay on
+    // top. A quiet planet (zero features) renders nothing at all,
+    // silently; a failed fetch warns once and keeps whatever is already
+    // drawn. 15-minute cadence: advisories move slowly.
 
     var hurricanesDesc = featureById('hurricanes');
     var hurricanesGroup = hurricanesDesc ? L.layerGroup() : null;
 
-    function refreshHurricanes() {
-      if (!hurricanesGroup || !map.hasLayer(hurricanesGroup)) return;
-      // Descriptor endpoints in catalog order: storm summary JSON,
-      // forecast track query, forecast cone query. The recon constants
-      // cover descriptors that arrive without endpoints.
-      var eps = hurricanesDesc.endpoints;
-      var coneP = fetch(eps[2] || NHC_CONE_URL)
-        .then(function (r) { return r.json(); })
-        .catch(function (e) { warnOnce('nhc-cone', 'NHC forecast cone fetch failed', e); return null; });
-      var trackP = fetch(eps[1] || NHC_TRACK_URL)
-        .then(function (r) { return r.json(); })
-        .catch(function (e) { warnOnce('nhc-track', 'NHC forecast track fetch failed', e); return null; });
-      var stormsP = fetch(eps[0] || NHC_STORMS_URL)
-        .then(function (r) { return r.json(); })
-        .catch(function (e) { warnOnce('nhc-storms', 'NHC CurrentStorms fetch failed', e); return null; });
-      Promise.all([coneP, trackP, stormsP]).then(function (res) {
-        var cone = res[0], track = res[1], storms = res[2];
-        hurricanesGroup.clearLayers();
-        var attribution = hurricanesDesc.attribution || 'NOAA/NHC';
-        if (cone && Array.isArray(cone.features) && cone.features.length) {
-          L.geoJSON(cone, {
-            style: { color: '#ff6b81', weight: 1, fillColor: '#ff6b81', fillOpacity: 0.12 },
-            attribution: attribution,
-          }).addTo(hurricanesGroup);
-        }
-        if (track && Array.isArray(track.features) && track.features.length) {
-          L.geoJSON(track, {
-            style: { color: '#ff6b81', weight: 2 },
-            attribution: attribution,
-          }).addTo(hurricanesGroup);
-        }
-        var active = (storms && storms.activeStorms) || [];
-        active.forEach(function (s) {
-          var sLat = s.latitudeNumeric;
-          var sLon = s.longitudeNumeric;
-          if (!isFinite(sLat) || !isFinite(sLon)) return;
-          var name = s.name || 'Storm';
-          if (s.classification) name += ' (' + s.classification + ')';
-          L.circleMarker([sLat, sLon], {
-            radius: 6,
-            color: '#ff4757',
-            fillColor: '#ff4757',
-            fillOpacity: 0.9,
-            weight: 2,
-            attribution: attribution,
-          })
-            .bindTooltip(name, { direction: 'top' })
-            .addTo(hurricanesGroup);
-        });
-      });
+    // "Typhoon NANMADOL (JMA) · 85 kt", degrading gracefully when the
+    // normalizer had no term/agency/intensity_kt for a storm. The
+    // server sends terms lowercase ("typhoon"); capitalize for display.
+    // escHtml because bindTooltip interprets its string as HTML.
+    function stormTooltip(p) {
+      p = p || {};
+      var term = p.term ? p.term.charAt(0).toUpperCase() + p.term.slice(1) + ' ' : '';
+      var label = term + (p.name || 'Storm');
+      if (p.agency) label += ' (' + p.agency + ')';
+      var kt = Number(p.intensity_kt);
+      if (isFinite(kt) && kt > 0) label += ' · ' + Math.round(kt) + ' kt';
+      return escHtml(label);
     }
 
-    // ---------- Feature: local Tempest strike rings ----------
+    function refreshHurricanes() {
+      if (!hurricanesGroup || !map.hasLayer(hurricanesGroup)) return;
+      // endpoints[0] is the normalizer per the descriptor contract; the
+      // constant covers descriptors that arrive without endpoints
+      // (windgrid precedent).
+      var url = (hurricanesDesc.endpoints && hurricanesDesc.endpoints[0]) || TROPICAL_URL;
+      fetch(url)
+        .then(function (r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.json();
+        })
+        .then(function (geo) {
+          if (tearingDown) return;
+          if (!geo || !Array.isArray(geo.features)) return;
+          // An all-agencies-down sweep is served (never cached) as an
+          // empty collection whose sources are all ok:false; that is a
+          // dead feed, not a quiet globe, so keep whatever is already
+          // drawn instead of clearing good storms.
+          var srcs = Array.isArray(geo.sources) ? geo.sources : [];
+          if (srcs.length && !srcs.some(function (s) { return s && s.ok; })) {
+            warnOnce('tropical', 'Tropical cyclone feed: all upstream agencies down');
+            return;
+          }
+          hurricanesGroup.clearLayers();
+          var attribution = hurricanesDesc.attribution || 'NOAA NHC/CPHC · JMA · BOM · JTWC';
+          var cones = [];
+          var tracks = [];
+          var points = [];
+          geo.features.forEach(function (f) {
+            var t = (f && f.geometry && f.geometry.type) || '';
+            if (t === 'Polygon' || t === 'MultiPolygon') cones.push(f);
+            else if (t === 'LineString' || t === 'MultiLineString') tracks.push(f);
+            else if (t === 'Point' || t === 'MultiPoint') points.push(f);
+          });
+          if (cones.length) {
+            L.geoJSON({ type: 'FeatureCollection', features: cones }, {
+              style: { color: '#ff6b81', weight: 1, fillColor: '#ff6b81', fillOpacity: 0.12 },
+              attribution: attribution,
+            }).addTo(hurricanesGroup);
+          }
+          if (tracks.length) {
+            L.geoJSON({ type: 'FeatureCollection', features: tracks }, {
+              style: { color: '#ff6b81', weight: 2 },
+              attribution: attribution,
+            }).addTo(hurricanesGroup);
+          }
+          if (points.length) {
+            L.geoJSON({ type: 'FeatureCollection', features: points }, {
+              pointToLayer: function (f, latlng) {
+                return L.circleMarker(latlng, {
+                  radius: 6,
+                  color: '#ff4757',
+                  fillColor: '#ff4757',
+                  fillOpacity: 0.9,
+                  weight: 2,
+                  attribution: attribution,
+                }).bindTooltip(stormTooltip(f.properties), { direction: 'top' });
+              },
+              attribution: attribution,
+            }).addTo(hurricanesGroup);
+          }
+        })
+        .catch(function (e) { warnOnce('tropical', 'Tropical cyclone feed fetch failed', e); });
+    }
+
+    // ---------- Feature: lightning strikes ----------
     //
-    // Tempest reports distance-to-strike but not bearing, so we draw a
-    // pulsing ring at the reported radius around the station for each
-    // strike from the last hour. The newest strike is highlighted.
+    // Two render modes, decided per strike by what the snapshot reports:
+    //
+    //   ring  Tempest reports distance-to-strike but not bearing, so the
+    //         strike draws as a pulsing ring at the reported radius
+    //         around the station.
+    //   dot   Blitzortung community strikes (opt-in server source) carry
+    //         real lat/lon, so they draw as small positioned markers
+    //         that fade as they age toward the 1-hour prune line.
+    //
+    // Both ride the same snapshot array (lightning_recent); the server
+    // tags each strike with `source` ("tempest" / "blitzortung").
+    // Strikes missing the tag (older server) are inferred from shape:
+    // lat/lon present means blitzortung. Per-marker Leaflet attribution
+    // makes the credit line track what is actually on screen; the
+    // CC BY-SA credit is mandatory under Blitzortung's terms whenever
+    // their strikes are shown.
 
     var lightningDesc = featureById('lightning_tempest');
     var strikeLayer = lightningDesc ? L.layerGroup() : null;
-    var lastStrikeIds = new Set();
+    // key -> { layer, point } for every strike currently drawn, so dots
+    // can be re-faded each poll and aged-out strikes removed one by one
+    // instead of nuking the whole group.
+    var strikeEntries = {};
+    // Fingerprint of the last contributing-source set ('t', 'b', 'tb',
+    // or ''), so the legend only rewrites when the networks change.
+    var strikeSourceKey = null;
+
+    var TEMPEST_STRIKE_ATTR = 'Lightning: Tempest (local station)';
+    var BLITZ_STRIKE_ATTR =
+      'Lightning data: <a href="https://www.blitzortung.org/" target="_blank" rel="noopener">Blitzortung.org</a> contributors, CC BY-SA 4.0';
 
     function strikeRadiusMeters(distanceMi) {
       return Math.max(distanceMi, 0.1) * 1609.34;
+    }
+
+    // Subtle age fade for positioned dots: near full strength when
+    // fresh, dim but still readable at the 1-hour prune line.
+    function dotOpacityForAge(ageMin) {
+      var t = Math.max(0, Math.min(1, ageMin / 60));
+      return 0.9 - t * 0.65;
+    }
+
+    function strikeSource(s, hasPos) {
+      if (s.source === 'blitzortung' || s.source === 'tempest') return s.source;
+      return hasPos ? 'blitzortung' : 'tempest';
+    }
+
+    // Source-aware legend copy. The drawer row's name stays the
+    // catalog's generic short label; the row's legend expander is ours
+    // and tracks the networks that actually contributed.
+    function lightningLegendLabel(sources) {
+      if (sources.tempest && sources.blitzortung) {
+        return 'Lightning (Tempest station + Blitzortung community network)';
+      }
+      if (sources.blitzortung) return 'Lightning (Blitzortung community network)';
+      if (sources.tempest) return 'Lightning (Tempest station)';
+      return lightningDesc ? lightningDesc.label : 'Lightning strikes';
+    }
+
+    function lightningLegendText(sources) {
+      var ringText = 'Yellow ring = Tempest strike at the reported ' +
+        'distance (Tempest gives no bearing).';
+      var dotText = 'Yellow dot = Blitzortung community strike at its ' +
+        'true position, fading with age. Data: Blitzortung.org ' +
+        'contributors, CC BY-SA 4.0.';
+      if (sources.tempest && sources.blitzortung) {
+        return ringText + ' ' + dotText;
+      }
+      if (sources.blitzortung) return dotText;
+      if (sources.tempest) return ringText;
+      // No strikes buffered yet: describe both possible renderings.
+      return 'Tempest strikes draw as distance rings around the station ' +
+        '(distance, no bearing); Blitzortung community strikes, when ' +
+        'that source is enabled, draw as positioned dots that fade ' +
+        'with age.';
+    }
+
+    // Rewrite the lightning legend block in place when the contributing
+    // networks change (legend expanders carry a data-legend-id; see the
+    // Layers drawer below). The block is in the DOM whether collapsed
+    // or expanded, so the rewrite always lands; missing DOM is a clean
+    // no-op. textContent keeps this injection-safe without escaping.
+    function updateLightningLegend(sources) {
+      var row = document.querySelector(
+        '.radar-drawer-legend[data-legend-id="lightning_tempest"]'
+      );
+      if (!row) return;
+      var strongEl = row.querySelector('strong');
+      var spanEl = row.querySelector('span');
+      if (strongEl) strongEl.textContent = lightningLegendLabel(sources);
+      if (spanEl) spanEl.textContent = lightningLegendText(sources);
+    }
+
+    function addStrikeRing(s) {
+      var miles = s.distance_km * 0.621371;
+      var ring = L.circle([lat, lon], {
+        radius: strikeRadiusMeters(miles),
+        color: '#ffe066',
+        weight: 1.4,
+        fill: false,
+        opacity: 0.0,
+        attribution: TEMPEST_STRIKE_ATTR,
+      }).addTo(strikeLayer);
+      // Pulse-in then settle.
+      var t0 = Date.now();
+      var pulse = setInterval(function () {
+        var age = (Date.now() - t0) / 1500;
+        if (age >= 1) {
+          ring.setStyle({ opacity: 0.55 });
+          clearInterval(pulse);
+        } else {
+          ring.setStyle({ opacity: 0.85 - age * 0.3 });
+        }
+      }, 60);
+      ring.bindTooltip(
+        miles.toFixed(1) + ' mi · ' +
+          new Date(s.time_epoch * 1000).toLocaleTimeString() +
+          ' · Tempest station',
+        { sticky: true }
+      );
+      return ring;
+    }
+
+    function addStrikeDot(s, ageMin) {
+      var settled = dotOpacityForAge(ageMin);
+      var dot = L.circleMarker([s.lat, s.lon], {
+        radius: 4,
+        color: '#ffe066',
+        weight: 1,
+        fillColor: '#ffe066',
+        opacity: settled,
+        fillOpacity: settled,
+        attribution: BLITZ_STRIKE_ATTR,
+      }).addTo(strikeLayer);
+      dot.bindTooltip(
+        new Date(s.time_epoch * 1000).toLocaleTimeString() +
+          ' · Blitzortung community',
+        { sticky: true }
+      );
+      // Flash-in only for strikes that are actually fresh: the first
+      // poll can hydrate hundreds of buffered strikes at once, and
+      // pulsing them all would just spawn a pile of pointless timers.
+      if (ageMin < 2) {
+        var t0 = Date.now();
+        var pulse = setInterval(function () {
+          var p = (Date.now() - t0) / 1200;
+          if (p >= 1) {
+            dot.setRadius(4);
+            dot.setStyle({ opacity: settled, fillOpacity: settled });
+            clearInterval(pulse);
+          } else {
+            var o = 1 - p * (1 - settled);
+            dot.setRadius(4 + 3 * (1 - p));
+            dot.setStyle({ opacity: o, fillOpacity: o });
+          }
+        }, 60);
+      }
+      return dot;
     }
 
     function refreshStrikes() {
@@ -683,74 +907,170 @@
         .then(function (snap) {
           var strikes = snap.lightning_recent || [];
           var seen = new Set();
-          strikes.forEach(function (s, i) {
-            var key = s.time_epoch + '_' + s.distance_km;
+          var sources = { tempest: false, blitzortung: false };
+          var nowSec = Date.now() / 1000;
+          strikes.forEach(function (s) {
+            var hasPos = isFinite(s.lat) && isFinite(s.lon);
+            var source = strikeSource(s, hasPos);
+            sources[source] = true;
+            var key = source + '_' + s.time_epoch + '_' +
+              (hasPos ? s.lat + '_' + s.lon : s.distance_km);
             seen.add(key);
-            if (lastStrikeIds.has(key)) return;
-            lastStrikeIds.add(key);
-            var miles = s.distance_km * 0.621371;
-            var ring = L.circle([lat, lon], {
-              radius: strikeRadiusMeters(miles),
-              color: '#ffe066',
-              weight: 1.4,
-              fill: false,
-              opacity: 0.0,
-            }).addTo(strikeLayer);
-            // Pulse-in then settle.
-            var t0 = Date.now();
-            var pulse = setInterval(function () {
-              var age = (Date.now() - t0) / 1500;
-              if (age >= 1) {
-                ring.setStyle({ opacity: 0.55 });
-                clearInterval(pulse);
-              } else {
-                ring.setStyle({ opacity: 0.85 - age * 0.3 });
+            var ageMin = Math.max(0, (nowSec - s.time_epoch) / 60);
+            var entry = strikeEntries[key];
+            if (entry) {
+              // Re-fade existing dots on every poll so the age fade
+              // stays honest between strikes; rings keep their settled
+              // opacity.
+              if (entry.point) {
+                var o = dotOpacityForAge(ageMin);
+                entry.layer.setStyle({ opacity: o, fillOpacity: o });
               }
-            }, 60);
-            ring.bindTooltip(
-              miles.toFixed(1) + ' mi · ' + new Date(s.time_epoch * 1000).toLocaleTimeString(),
-              { sticky: true }
-            );
+              return;
+            }
+            strikeEntries[key] = (hasPos && source === 'blitzortung')
+              ? { layer: addStrikeDot(s, ageMin), point: true }
+              : { layer: addStrikeRing(s), point: false };
           });
-          // Drop rings for strikes that aged out of the last-hour buffer.
-          if (seen.size < lastStrikeIds.size) {
-            strikeLayer.clearLayers();
-            lastStrikeIds = seen;
+          // Drop markers for strikes that aged out of the snapshot
+          // buffer (server prunes at 1 hour).
+          Object.keys(strikeEntries).forEach(function (k) {
+            if (!seen.has(k)) {
+              strikeLayer.removeLayer(strikeEntries[k].layer);
+              delete strikeEntries[k];
+            }
+          });
+          var srcKey = (sources.tempest ? 't' : '') +
+            (sources.blitzortung ? 'b' : '');
+          if (srcKey !== strikeSourceKey) {
+            strikeSourceKey = srcKey;
+            updateLightningLegend(sources);
           }
         })
         .catch(function () {});
     }
 
-    // ---------- Layer toggle + legend ----------
+    // ---------- Feature: Open-Meteo wind flow ----------
+    //
+    // Animated particle wind via leaflet-velocity (vendored at
+    // /vendor/leaflet-velocity.min.js, loaded after Leaflet in the SSR
+    // shell). The toggle handle is an empty group (the nowcast precedent)
+    // so the menu/chips/persistence machinery stays uniform; the real
+    // L.velocityLayer is built lazily inside it on the first enable, so
+    // no windgrid request leaves the browser while the layer is off. The
+    // grid tracks the viewport: debounced moveend refetch while visible,
+    // plus a 15-minute timer so the current-hour sample doesn't go stale
+    // on an idle map. If the vendored script failed to load (no
+    // L.velocityLayer), the feature is skipped entirely: no menu entry,
+    // no errors, the rest of the map is untouched.
+
+    var windDesc = featureById('wind');
+    var windGroup = (windDesc && typeof L.velocityLayer === 'function')
+      ? L.layerGroup()
+      : null;
+    var windVelocity = null;  // the real L.velocityLayer, built on first data
+    var windFetchSeq = 0;     // drops out-of-order responses after a pan
+
+    function windGridUrl() {
+      // Round to 2 decimals so small pans land on the same server cache
+      // entry, and clamp to plausible degrees (worldCopyJump can hand
+      // back longitudes past the antimeridian; the server 400s those).
+      var b = map.getBounds();
+      var minLat = Math.max(-85, Math.min(85, b.getSouth()));
+      var maxLat = Math.max(-85, Math.min(85, b.getNorth()));
+      var minLon = Math.max(-180, Math.min(180, b.getWest()));
+      var maxLon = Math.max(-180, Math.min(180, b.getEast()));
+      // Degenerate after clamping (e.g. a fully wrapped view): skip the
+      // round trip rather than burn the warnOnce on a known 400.
+      if (!(maxLat > minLat && maxLon > minLon)) return null;
+      var base = (windDesc.endpoints && windDesc.endpoints[0]) || WINDGRID_URL;
+      return base + '?bbox=' +
+        [minLon, minLat, maxLon, maxLat]
+          .map(function (v) { return v.toFixed(2); })
+          .join(',');
+    }
+
+    function refreshWind() {
+      if (!windGroup || !map.hasLayer(windGroup)) return;
+      var url = windGridUrl();
+      if (!url) return;
+      var seq = ++windFetchSeq;
+      fetch(url)
+        .then(function (r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.json();
+        })
+        .then(function (data) {
+          // A newer fetch superseded this one, or the map is mid
+          // route-swap teardown: either way, don't touch layers.
+          if (seq !== windFetchSeq || tearingDown) return;
+          if (!Array.isArray(data) || data.length < 2 || !data[0] || !data[0].header) return;
+          if (windVelocity) {
+            windVelocity.setData(data);
+            return;
+          }
+          windVelocity = L.velocityLayer({
+            data: data,
+            // velocityScale 0.01 is 2x the library default (0.005, which
+            // was tuned for whole-globe demos and reads near-static at
+            // the regional zooms this map lives at). maxVelocity 15 m/s
+            // saturates the color ramp around strong-breeze rather than
+            // hurricane scale, so ordinary days still show contrast.
+            velocityScale: 0.01,
+            minVelocity: 0,
+            maxVelocity: 15,
+            // No mouseover speed readout: its control defaults to the
+            // bottom-left corner the legend + attribution already use.
+            displayValues: false,
+            attribution: windDesc.attribution || 'Open-Meteo',
+          });
+          windGroup.addLayer(windVelocity);
+        })
+        .catch(function (e) { warnOnce('windgrid', 'Wind grid fetch failed', e); });
+    }
+
+    if (windGroup) {
+      // Viewport changed: refetch for the new bounds, debounced 2s so a
+      // pan gesture's intermediate moveends collapse into one request.
+      // refreshWind no-ops while the layer is hidden, so a stray timer
+      // after toggling off costs nothing and needs no cancellation here.
+      map.on('moveend', function () {
+        if (!map.hasLayer(windGroup)) return;
+        if (windMoveTimer) clearTimeout(windMoveTimer);
+        windMoveTimer = setTimeout(refreshWind, 2000);
+      });
+    }
+
+    // ---------- Layer toggles: the Layers drawer ----------
     //
     // The overlay list is generated from the descriptor arrays: providers
-    // first (catalog order), then features. Both the desktop control and
-    // the mobile chip row are built from this one list, and persistence
-    // speaks descriptor ids so display labels can be reworded freely
-    // without invalidating stored prefs.
+    // first (catalog order, drawer group "imagery"), then features
+    // (group "overlays"). The drawer is built from this one list, and
+    // persistence speaks descriptor ids so display labels can be
+    // reworded freely without invalidating stored prefs.
 
     var overlayDefs = [];
     if (radarLayer) {
-      overlayDefs.push({ id: rainviewerDesc.id, label: rainviewerDesc.label, layer: radarLayer, desc: rainviewerDesc });
+      overlayDefs.push({ id: rainviewerDesc.id, label: rainviewerDesc.label, layer: radarLayer, desc: rainviewerDesc, group: 'imagery' });
     }
     wmsProviders.forEach(function (p) {
-      overlayDefs.push({ id: p.desc.id, label: p.desc.label, layer: p.layer, desc: p.desc });
+      overlayDefs.push({ id: p.desc.id, label: p.desc.label, layer: p.layer, desc: p.desc, group: 'imagery' });
     });
     if (nowcastLayer) {
-      overlayDefs.push({ id: nowcastDesc.id, label: nowcastDesc.label, layer: nowcastLayer, desc: nowcastDesc });
+      overlayDefs.push({ id: nowcastDesc.id, label: nowcastDesc.label, layer: nowcastLayer, desc: nowcastDesc, group: 'overlays' });
     }
     if (warningsGroup) {
-      overlayDefs.push({ id: warningsDesc.id, label: warningsDesc.label, layer: warningsGroup, desc: warningsDesc });
+      overlayDefs.push({ id: warningsDesc.id, label: warningsDesc.label, layer: warningsGroup, desc: warningsDesc, group: 'overlays' });
     }
     if (hurricanesGroup) {
-      overlayDefs.push({ id: hurricanesDesc.id, label: hurricanesDesc.label, layer: hurricanesGroup, desc: hurricanesDesc });
+      overlayDefs.push({ id: hurricanesDesc.id, label: hurricanesDesc.label, layer: hurricanesGroup, desc: hurricanesDesc, group: 'overlays' });
     }
     if (strikeLayer) {
-      overlayDefs.push({ id: lightningDesc.id, label: lightningDesc.label, layer: strikeLayer, desc: lightningDesc });
+      overlayDefs.push({ id: lightningDesc.id, label: lightningDesc.label, layer: strikeLayer, desc: lightningDesc, group: 'overlays' });
     }
-
-    var overlays = {};
-    overlayDefs.forEach(function (d) { overlays[d.label] = d.layer; });
+    if (windGroup) {
+      overlayDefs.push({ id: windDesc.id, label: windDesc.label, layer: windGroup, desc: windDesc, group: 'overlays' });
+    }
 
     // Layer visibility prefs, persisted per-browser. The key carries a
     // .v1 suffix so a future schema change can move to .v2 and start
@@ -808,64 +1128,376 @@
       } catch (e) { /* no storage: toggles still work, they just won't stick */ }
     }
 
-    // On mobile we ditch the in-map L.control.layers entirely (even
-    // collapsed it covered the map when the user tapped the toggle, which
-    // defeats the purpose of an interactive map). Instead we render a
-    // horizontal chip row in #radar-layer-chips below the map, same
-    // toggles, just outside the canvas where they don't obscure anything.
-    // Desktop keeps the in-map control because the side margin makes it
-    // free real estate.
-    if (!isMobile) {
-      L.control
-        .layers(null, overlays, {
-          position: 'topright',
-          collapsed: false,
-        })
-        .addTo(map);
-    } else {
-      var chipsContainer = document.getElementById('radar-layer-chips');
-      if (chipsContainer) {
-        // Build one chip per overlay. Short label drives display; the
-        // descriptor label becomes the aria-label so screen readers still
-        // get the context. Each chip toggles between .is-on / not-on,
-        // mirroring the actual map state, and addLayer / removeLayer
-        // drive the visibility.
-        chipsContainer.innerHTML = '';
-        overlayDefs.forEach(function (d) {
-          var layer = d.layer;
-          var btn = document.createElement('button');
-          btn.type = 'button';
-          btn.className = 'radar-layer-chip';
-          btn.setAttribute('aria-label', d.label);
-          btn.setAttribute('aria-pressed', 'false');
-          btn.textContent = shortLabelFor(d.id, d.label);
+    // ---------- Layers drawer ----------
+    //
+    // ONE glassy "Layers" chip (top-right over the map, with an active-
+    // count badge) replaces the old desktop L.control.layers AND the
+    // mobile chip row, and the legend rail's per-layer copy moves into
+    // an inline expander on each drawer row. Chip and drawer anchor to
+    // .radar-map-shell (the positioned wrapper around #radar-map), NOT
+    // the map container: the map div carries role="img", whose
+    // descendants are presentational to assistive tech, and the drawer
+    // is a real dialog. Living outside the Leaflet container also means
+    // drawer interactions never reach the map's own handlers, so no
+    // DomEvent propagation plumbing is needed.
+    //
+    // The pills drive the exact addLayer/removeLayer paths the old
+    // surfaces used, so the toggle handler below (persistence, lazy
+    // fetches, crossfade) and its teardown latch keep working
+    // untouched. Open/closed state is deliberately NOT persisted (the
+    // drawer always starts closed), and expanded legends reset when
+    // the drawer closes.
 
-          function syncOn() {
-            var on = map.hasLayer(layer);
-            btn.classList.toggle('is-on', on);
-            btn.setAttribute('aria-pressed', on ? 'true' : 'false');
-          }
+    // Swatch colors are inline so new catalog entries need no CSS edits.
+    var LEGEND_SWATCH = {
+      rainviewer: '#58a6ff',
+      nowcast: '#58e0ff',
+      warnings_us: '#ff9f1c',
+      hurricanes: '#ff4757',
+      lightning_tempest: '#ffe066',
+      wind: '#9d8cff',
+    };
+    function legendText(d) {
+      if (d.id === 'nowcast') {
+        return 'Extends the precipitation animation with RainViewer forecast frames, tagged "+Nm forecast" in the time readout.';
+      }
+      if (d.id === 'warnings_us') {
+        return 'NWS active alert polygons. Fill color is severity: red extreme, orange severe. Tap a polygon for the headline. Refreshes every 2 min.';
+      }
+      if (d.id === 'hurricanes') {
+        return 'Active tropical cyclones worldwide, normalized server-side from the responsible agencies (NOAA NHC/CPHC, JMA, BOM, JTWC): position markers, track lines, and forecast cones where the agency provides them. Empty when the basins are quiet.';
+      }
+      if (d.id === 'lightning_tempest') {
+        // Initial render is the no-strikes-yet copy; refreshStrikes
+        // rewrites the expander in place once the snapshot says which
+        // networks are contributing.
+        return lightningLegendText({ tempest: false, blitzortung: false });
+      }
+      if (d.id === 'wind') {
+        return 'Animated particle flow of current 10 m winds, sampled on a grid over the visible map via Open-Meteo. Warmer particle colors = stronger wind. Refetches as you pan and every 15 min.';
+      }
+      if (d.desc && d.desc.kind === 'rainviewer') {
+        return 'Animated recent frames. dBZ scale: blue light · green moderate · yellow to orange to red heavy.';
+      }
+      if (d.desc && d.desc.kind === 'wms') {
+        // No attribution sentence here: every expander gets a dedicated
+        // source line from the descriptor in buildDrawerRow below.
+        var text = 'Reflectivity mosaic via WMS, coverage: ' + (d.desc.coverageLabel || 'regional') + '.';
+        if (d.desc.crossfade) {
+          text += ' Crossfades in past z=7 so detail stays sharp at street scale.';
+        }
+        return text;
+      }
+      return '';
+    }
+    function legendSwatchColor(d) {
+      if (LEGEND_SWATCH[d.id]) return LEGEND_SWATCH[d.id];
+      if (d.desc && d.desc.kind === 'wms') return '#7ed957';
+      return '#9aa0a6';
+    }
 
-          btn.addEventListener('click', function () {
-            if (map.hasLayer(layer)) {
-              map.removeLayer(layer);
-            } else {
-              layer.addTo(map);
-            }
-            syncOn();
-          });
+    var shell = el.closest('.radar-map-shell') || el;
 
-          // Re-sync when the map adds/removes the layer from elsewhere
-          // (e.g. defaults below). Bound to the map so we capture both
-          // directions without the chip listening on every layer.
-          map.on('layeradd layerremove', syncOn);
-          chipsContainer.appendChild(btn);
+    var drawer = document.createElement('div');
+    drawer.id = 'radar-layers-drawer';
+    drawer.className = 'radar-drawer';
+    drawer.setAttribute('role', 'dialog');
+    drawer.setAttribute('aria-label', 'Radar layers');
+    drawer.setAttribute('aria-hidden', 'true');
 
-          // Initial state: layer not yet added at construction time;
-          // the syncOn after defaults below picks up the right state.
-        });
+    var drawerHead = document.createElement('div');
+    drawerHead.className = 'radar-drawer-head';
+    var drawerTitle = document.createElement('span');
+    drawerTitle.className = 'radar-drawer-title';
+    drawerTitle.textContent = 'Layers';
+    var closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'radar-drawer-close';
+    closeBtn.setAttribute('aria-label', 'Close layers');
+    closeBtn.textContent = '×';
+    drawerHead.appendChild(drawerTitle);
+    drawerHead.appendChild(closeBtn);
+    drawer.appendChild(drawerHead);
+
+    var drawerBody = document.createElement('div');
+    drawerBody.className = 'radar-drawer-body';
+    drawer.appendChild(drawerBody);
+
+    // Footer: a standing link to Settings > Radar so operators jump
+    // straight to the provider/default-layer catalog from the picker
+    // instead of hunting through Settings. A real anchor to a same-
+    // origin SSR route: leptos_router intercepts it for client-side nav
+    // when mounted, and it still resolves as a normal navigation
+    // otherwise, so both paths are correct. Pinned below the scrolling
+    // body by the drawer's flex column.
+    var drawerFoot = document.createElement('div');
+    drawerFoot.className = 'radar-drawer-foot';
+    var settingsLink = document.createElement('a');
+    settingsLink.className = 'radar-drawer-settings';
+    settingsLink.href = '/settings/radar';
+    settingsLink.innerHTML =
+      '<span class="radar-drawer-settings-icon" aria-hidden="true">' +
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+      'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
+      '<line x1="21" x2="14" y1="4" y2="4"></line>' +
+      '<line x1="10" x2="3" y1="4" y2="4"></line>' +
+      '<line x1="21" x2="12" y1="12" y2="12"></line>' +
+      '<line x1="8" x2="3" y1="12" y2="12"></line>' +
+      '<line x1="21" x2="16" y1="20" y2="20"></line>' +
+      '<line x1="12" x2="3" y1="20" y2="20"></line>' +
+      '<line x1="14" x2="14" y1="2" y2="6"></line>' +
+      '<line x1="8" x2="8" y1="10" y2="14"></line>' +
+      '<line x1="16" x2="16" y1="18" y2="22"></line></svg></span>' +
+      '<span class="radar-drawer-settings-text">' +
+      '<span class="radar-drawer-settings-label">Radar settings</span>' +
+      '<span class="radar-drawer-settings-sub">Add providers, set default layers</span>' +
+      '</span>' +
+      '<span class="radar-drawer-settings-go" aria-hidden="true">' +
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+      'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+      '<polyline points="9 18 15 12 9 6"></polyline></svg></span>';
+    drawerFoot.appendChild(settingsLink);
+    drawer.appendChild(drawerFoot);
+
+    var rowSyncs = [];          // per-row pill repaints, run by syncLayersUi
+    var legendCollapsers = [];  // per-row expander resets, run on close
+
+    function buildDrawerRow(d) {
+      var row = document.createElement('div');
+      row.className = 'radar-drawer-row';
+
+      var main = document.createElement('div');
+      main.className = 'radar-drawer-row-main';
+
+      var swatch = document.createElement('span');
+      swatch.className = 'radar-drawer-swatch';
+      swatch.style.background = legendSwatchColor(d);
+
+      // Short name on the row (chip-label heritage); the expander's
+      // <strong> carries the full descriptor label.
+      var label = document.createElement('span');
+      label.className = 'radar-drawer-label';
+      label.id = 'radar-drawer-label-' + d.id;
+      label.textContent = shortLabelFor(d.id, d.label);
+
+      var legend = document.createElement('div');
+      legend.className = 'radar-drawer-legend';
+      legend.id = 'radar-drawer-legend-' + d.id;
+      // data-legend-id lets dynamic features (lightning's source-aware
+      // copy) find and rewrite their own expander.
+      legend.setAttribute('data-legend-id', d.id);
+      legend.hidden = true;
+      var legendStrong = document.createElement('strong');
+      legendStrong.textContent = d.label;
+      var legendSpan = document.createElement('span');
+      legendSpan.textContent = legendText(d);
+      legend.appendChild(legendStrong);
+      legend.appendChild(legendSpan);
+      if (d.desc && d.desc.attribution) {
+        var attr = document.createElement('span');
+        attr.className = 'radar-drawer-attr';
+        attr.textContent = 'Source: ' + d.desc.attribution;
+        legend.appendChild(attr);
+      }
+
+      var info = document.createElement('button');
+      info.type = 'button';
+      info.className = 'radar-drawer-info';
+      info.setAttribute('aria-expanded', 'false');
+      info.setAttribute('aria-controls', legend.id);
+      info.setAttribute('aria-label', 'About ' + d.label);
+      info.textContent = 'i';
+
+      function setLegendExpanded(open) {
+        legend.hidden = !open;
+        info.setAttribute('aria-expanded', open ? 'true' : 'false');
+      }
+      info.addEventListener('click', function () {
+        setLegendExpanded(legend.hidden);
+      });
+      legendCollapsers.push(function () { setLegendExpanded(false); });
+
+      // House toggle idiom: the segmented On|Off pill from main.scss,
+      // same markup the settings pages render.
+      var pill = document.createElement('button');
+      pill.type = 'button';
+      pill.className = 'toggle-pill';
+      pill.setAttribute('role', 'switch');
+      pill.setAttribute('aria-checked', 'false');
+      pill.setAttribute('aria-labelledby', label.id);
+      var optOn = document.createElement('span');
+      optOn.className = 'toggle-pill__opt toggle-pill__opt--on';
+      optOn.textContent = 'On';
+      var optOff = document.createElement('span');
+      optOff.className = 'toggle-pill__opt toggle-pill__opt--off';
+      optOff.textContent = 'Off';
+      pill.appendChild(optOn);
+      pill.appendChild(optOff);
+      pill.addEventListener('click', function () {
+        // Same add/remove calls the old surfaces made; the map-level
+        // toggle handler below does persistence, lazy fetches, and
+        // crossfade, and syncLayersUi repaints this pill.
+        if (map.hasLayer(d.layer)) {
+          map.removeLayer(d.layer);
+        } else {
+          d.layer.addTo(map);
+        }
+      });
+
+      rowSyncs.push(function () {
+        var on = map.hasLayer(d.layer);
+        pill.setAttribute('aria-checked', on ? 'true' : 'false');
+        optOn.classList.toggle('is-active', on);
+        optOff.classList.toggle('is-active', !on);
+      });
+
+      main.appendChild(swatch);
+      main.appendChild(label);
+      main.appendChild(info);
+      main.appendChild(pill);
+      row.appendChild(main);
+      row.appendChild(legend);
+      return row;
+    }
+
+    [
+      { key: 'imagery', title: 'Imagery' },
+      { key: 'overlays', title: 'Overlays' },
+    ].forEach(function (g) {
+      var defs = overlayDefs.filter(function (d) { return d.group === g.key; });
+      if (defs.length === 0) return;
+      var section = document.createElement('div');
+      section.className = 'radar-drawer-group';
+      var sectionTitle = document.createElement('h3');
+      sectionTitle.className = 'radar-drawer-group-title';
+      sectionTitle.textContent = g.title;
+      section.appendChild(sectionTitle);
+      defs.forEach(function (d) { section.appendChild(buildDrawerRow(d)); });
+      drawerBody.appendChild(section);
+    });
+
+    // The chip. aria-label (set in syncLayersUi) carries the count for
+    // screen readers; the visual badge is hidden from them so the name
+    // isn't read twice.
+    var btnWrap = document.createElement('div');
+    btnWrap.className = 'radar-layers-anchor';
+    var layersBtn = document.createElement('button');
+    layersBtn.type = 'button';
+    layersBtn.className = 'radar-layers-btn';
+    layersBtn.setAttribute('aria-expanded', 'false');
+    layersBtn.setAttribute('aria-controls', drawer.id);
+    layersBtn.setAttribute('aria-haspopup', 'dialog');
+    // Stacked-sheets glyph (Lucide "layers"): the chip reads as a layer
+    // picker at a glance, not just a word. Presentational, so hidden
+    // from assistive tech (the button's aria-label already names it).
+    var layersBtnIcon = document.createElement('span');
+    layersBtnIcon.className = 'radar-layers-icon';
+    layersBtnIcon.setAttribute('aria-hidden', 'true');
+    layersBtnIcon.innerHTML =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+      'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
+      '<polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>' +
+      '<polyline points="2 17 12 22 22 17"></polyline>' +
+      '<polyline points="2 12 12 17 22 12"></polyline></svg>';
+    var layersBtnText = document.createElement('span');
+    layersBtnText.textContent = 'Layers';
+    var layersBtnCount = document.createElement('span');
+    layersBtnCount.className = 'radar-layers-count';
+    layersBtnCount.setAttribute('aria-hidden', 'true');
+    layersBtn.appendChild(layersBtnIcon);
+    layersBtn.appendChild(layersBtnText);
+    layersBtn.appendChild(layersBtnCount);
+    btnWrap.appendChild(layersBtn);
+
+    var drawerOpen = false;
+    function setDrawerOpen(open) {
+      if (open === drawerOpen) return;
+      drawerOpen = open;
+      layersBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      if (open) {
+        drawer.classList.add('is-open');
+        drawer.setAttribute('aria-hidden', 'false');
+        // Focus moves into the dialog: the close affordance is its
+        // first control in tab order.
+        closeBtn.focus();
+      } else {
+        // Hand focus back to the chip BEFORE aria-hidden flips so the
+        // hidden subtree never holds focus. Only when focus was inside
+        // the drawer: a click-outside already moved it where the user
+        // aimed, and yanking it back would be hostile.
+        if (drawer.contains(document.activeElement)) layersBtn.focus();
+        drawer.classList.remove('is-open');
+        drawer.setAttribute('aria-hidden', 'true');
+        legendCollapsers.forEach(function (f) { f(); });
       }
     }
+
+    layersBtn.addEventListener('click', function () { setDrawerOpen(!drawerOpen); });
+    closeBtn.addEventListener('click', function () { setDrawerOpen(false); });
+    // Esc + click-outside close, both document-level. Esc cannot live
+    // on the drawer alone: Firefox and Safari don't move focus to a
+    // button on click, so a pill tap can leave focus on <body> and a
+    // drawer-scoped keydown would never hear the key. Both listeners
+    // no-op while closed and are removed on the map's own unload so
+    // SPA route swaps don't stack them (the same event the teardown
+    // latch below rides).
+    function onDocumentKeydown(ev) {
+      if (!drawerOpen) return;
+      if (ev.key === 'Escape' || ev.key === 'Esc') setDrawerOpen(false);
+    }
+    function onDocumentClick(ev) {
+      if (!drawerOpen) return;
+      if (drawer.contains(ev.target) || btnWrap.contains(ev.target)) return;
+      setDrawerOpen(false);
+    }
+    document.addEventListener('keydown', onDocumentKeydown);
+    document.addEventListener('click', onDocumentClick);
+    map.on('unload', function () {
+      document.removeEventListener('keydown', onDocumentKeydown);
+      document.removeEventListener('click', onDocumentClick);
+    });
+
+    // Same-element re-init defense (the old chip row reset its
+    // container's innerHTML for the same reason): if a prior init's
+    // chip + drawer are still hanging off this shell, drop them before
+    // appending the fresh pair so the UI can't stack.
+    var staleUi = shell.querySelectorAll('.radar-layers-anchor, .radar-drawer');
+    for (var sui = 0; sui < staleUi.length; sui++) {
+      staleUi[sui].parentNode.removeChild(staleUi[sui]);
+    }
+    shell.appendChild(btnWrap);
+    shell.appendChild(drawer);
+    if (shell === el) {
+      // Shell missing (markup older than this script): the UI fell back
+      // to living inside the Leaflet container, so keep its clicks and
+      // wheel away from the map's handlers, and out-z-index Leaflet's
+      // panes (100-700) and controls (800-1000). The stylesheet's 2/3
+      // assume the shell stacking context; inside the map container
+      // they'd paint underneath the tiles.
+      L.DomEvent.disableClickPropagation(btnWrap);
+      L.DomEvent.disableClickPropagation(drawer);
+      L.DomEvent.disableScrollPropagation(drawer);
+      btnWrap.style.zIndex = '1100';
+      drawer.style.zIndex = '1101';
+    }
+
+    // Badge + pill repaints. LayerGroup children (radar frames, strike
+    // rings) also fire layeradd/layerremove on the map; the resync is
+    // just a handful of hasLayer checks, so no filtering (the old chip
+    // row took the same shortcut). Registered before the initial layer
+    // set below so first paint lands the right states.
+    function syncLayersUi() {
+      rowSyncs.forEach(function (f) { f(); });
+      var n = 0;
+      overlayDefs.forEach(function (d) { if (map.hasLayer(d.layer)) n++; });
+      // Accent count badge; muted when nothing's on so the chip still
+      // invites a click rather than reading as a stat.
+      layersBtnCount.textContent = n;
+      layersBtnCount.classList.toggle('is-empty', n === 0);
+      layersBtn.setAttribute('aria-label', 'Layers, ' + n + ' active');
+    }
+    map.on('layeradd layerremove', syncLayersUi);
+    syncLayersUi();
 
     // Initial layer set, resolved per id: a stored pref wins when present
     // (the user's own toggles, written on every change below), else the
@@ -899,15 +1531,13 @@
     map.on('zoomend', applyZoomBlend);
     applyZoomBlend();
 
-    // Persist + re-blend on every layer toggle. Desktop's layer control
-    // fires the map-level overlayadd/overlayremove pair; the mobile
-    // chips call addLayer/removeLayer directly, which only guarantees
-    // layeradd/layerremove (overlay* is emitted by L.control.layers,
-    // which mobile doesn't build). Listening to all four and filtering
-    // to our own overlays covers both paths; LayerGroup children (radar
-    // frames, strike rings) also fire layeradd on the map and the
-    // filter drops them. Registered after the initial set is applied
-    // above so first paint doesn't count as a user toggle.
+    // Persist + re-blend on every layer toggle. The drawer pills call
+    // addLayer/removeLayer directly, which fires layeradd/layerremove
+    // on the map (the overlayadd/overlayremove pair died with
+    // L.control.layers). LayerGroup children (radar frames, strike
+    // rings) also fire layeradd on the map and the filter drops them.
+    // Registered after the initial set is applied above so first paint
+    // doesn't count as a user toggle.
     function isOverlayLayer(layer) {
       return overlayDefs.some(function (d) { return d.layer === layer; });
     }
@@ -919,7 +1549,7 @@
     // loop; latch it and stop persisting.
     var tearingDown = false;
     map.on('unload', function () { tearingDown = true; });
-    map.on('overlayadd overlayremove layeradd layerremove', function (e) {
+    map.on('layeradd layerremove', function (e) {
       if (tearingDown || !isOverlayLayer(e.layer)) return;
       // Nowcast toggled: splice the forecast frames in or out of the
       // cached payload; the next animation tick picks up the new set.
@@ -934,94 +1564,16 @@
       if (hurricanesGroup && e.layer === hurricanesGroup && map.hasLayer(hurricanesGroup)) {
         refreshHurricanes();
       }
+      // First enable is also where the velocity layer gets built: the
+      // group goes on empty and refreshWind populates it from the grid.
+      if (windGroup && e.layer === windGroup && map.hasLayer(windGroup)) {
+        refreshWind();
+      }
       // Re-apply blend so reflectivity layers coming back pick up the
       // right zoom-based opacity instead of the layer's default.
       applyZoomBlend();
       saveLayerPrefs();
     });
-
-    // Custom legend control, generated from the active descriptors so it
-    // never describes a layer that isn't in the menu. Always visible,
-    // bottom-left on desktop. On mobile we skip it entirely; the chip
-    // row's labels are enough, and the legend's verbose prose was just
-    // covering the map. Swatch colors are inline so new catalog entries
-    // need no CSS changes.
-    var LEGEND_SWATCH = {
-      rainviewer: '#58a6ff',
-      nowcast: '#58e0ff',
-      warnings_us: '#ff9f1c',
-      hurricanes: '#ff4757',
-      lightning_tempest: '#ffe066',
-    };
-    function legendText(d) {
-      if (d.id === 'nowcast') {
-        return 'Extends the precipitation animation with RainViewer forecast frames, tagged "+Nm forecast" in the time readout.';
-      }
-      if (d.id === 'warnings_us') {
-        return 'NWS active alert polygons. Fill color is severity: red extreme, orange severe. Tap a polygon for the headline. Refreshes every 2 min.';
-      }
-      if (d.id === 'hurricanes') {
-        return 'NHC active storms: position markers, forecast track lines, and the forecast cone. Empty when the basins are quiet.';
-      }
-      if (d.id === 'lightning_tempest') {
-        return 'Yellow ring = strike from your station. Tempest reports distance, not bearing, so each strike is a ring at the reported radius.';
-      }
-      if (d.desc && d.desc.kind === 'rainviewer') {
-        return 'Animated recent frames. dBZ scale: blue light · green moderate · yellow to orange to red heavy.';
-      }
-      if (d.desc && d.desc.kind === 'wms') {
-        var text = 'Reflectivity mosaic via WMS, coverage: ' + (d.desc.coverageLabel || 'regional') + '.';
-        if (d.desc.crossfade) {
-          text += ' Crossfades in past z=7 so detail stays sharp at street scale.';
-        }
-        if (d.desc.attribution) {
-          text += ' Source: ' + d.desc.attribution + '.';
-        }
-        return text;
-      }
-      return '';
-    }
-    function legendSwatchColor(d) {
-      if (LEGEND_SWATCH[d.id]) return LEGEND_SWATCH[d.id];
-      if (d.desc && d.desc.kind === 'wms') return '#7ed957';
-      return '#9aa0a6';
-    }
-    var Legend = L.Control.extend({
-      options: { position: 'bottomleft' },
-      onAdd: function () {
-        var div = L.DomUtil.create('div', 'radar-legend');
-        var rows = overlayDefs.map(function (d) {
-          return ''
-            + '<div class="radar-legend-row">'
-            +   '<span class="radar-legend-swatch" style="background:' + legendSwatchColor(d) + '"></span>'
-            +   '<div class="radar-legend-text">'
-            +     '<strong>' + escHtml(d.label) + '</strong>'
-            +     '<span>' + escHtml(legendText(d)) + '</span>'
-            +   '</div>'
-            + '</div>';
-        }).join('');
-        div.innerHTML = ''
-          + '<div class="radar-legend-head">'
-          +   '<span>Legend</span>'
-          +   '<button type="button" class="radar-legend-toggle" aria-label="Toggle legend">−</button>'
-          + '</div>'
-          + '<div class="radar-legend-body">' + rows + '</div>';
-
-        // Collapse toggle.
-        L.DomEvent.disableClickPropagation(div);
-        var btn = div.querySelector('.radar-legend-toggle');
-        var body = div.querySelector('.radar-legend-body');
-        btn.addEventListener('click', function () {
-          var collapsed = div.classList.toggle('is-collapsed');
-          btn.textContent = collapsed ? '+' : '−';
-          body.style.display = collapsed ? 'none' : '';
-        });
-        return div;
-      },
-    });
-    if (!isMobile) {
-      new Legend().addTo(map);
-    }
 
     // ---------- Bootstrap ----------
 
@@ -1046,6 +1598,10 @@
     refreshStrikes();
     refreshWarnings();
     refreshHurricanes();
+    // Covers a stored "wind: on" pref: the initial layer set is applied
+    // before the toggle handler exists, so the lazy build has to be
+    // kicked here. No-op when the layer starts hidden (the default).
+    refreshWind();
     if (rainviewerDesc) {
       radarPollTimer = setInterval(refreshRainViewer, 5 * 60 * 1000);
     }
@@ -1067,6 +1623,13 @@
     }
     if (hurricanesGroup) {
       hurricanePollTimer = setInterval(refreshHurricanes, 15 * 60 * 1000);
+    }
+    if (windGroup) {
+      // The windgrid serves the current hour and the server caches the
+      // grid ~30 minutes; a 15-minute client cadence stays ahead of the
+      // hour rollover without hammering anything. refreshWind no-ops
+      // while the layer is hidden, so a toggled-off layer costs nothing.
+      windPollTimer = setInterval(refreshWind, 15 * 60 * 1000);
     }
   }
 

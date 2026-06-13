@@ -4,12 +4,30 @@ All notable changes to LocalSky are documented here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.4.0-beta.1] - 2026-06-13
+
+Live Radar grows from a single precipitation layer into a full weather map: choose your imagery providers, overlay national alerts and worldwide tropical systems, add community lightning and wind flow, and manage all of it from one Layers panel.
+
+### Features
+
+- Radar provider catalog with a Settings > Radar control: pick which imagery providers the map offers (Auto chooses the best regional source, or define a custom menu) and which layers start on. Sources are region-aware, and your layer choices persist per browser
+- National Weather Service alert overlay: severity-colored warning polygons (red extreme, orange severe), tap any polygon for the headline, refreshed every couple of minutes
+- Worldwide tropical cyclone tracking: hurricanes, typhoons, and cyclones normalized from the responsible agencies (NOAA NHC/CPHC, JMA, JTWC) into position markers, track lines, and forecast cones; empty when the basins are quiet
+- Choose your national forecast model: the weather model behind your forecast is now configurable, from a built-in catalog of national and global models
+- Wind flow layer: animated particle flow of current 10 m winds over the visible map, warmer colors for stronger wind, refetched as you pan
+- Opt-in Blitzortung community lightning strikes, off by default
+- Layers panel: one Layers chip opens a drawer of Imagery and Overlays, each with a toggle, an expandable legend, and source attribution; it overlays the map without resizing it and replaces the old legend rail and layer control. A stacked-layers icon, accent outline, and active-count badge make the picker unmistakable, and a footer link jumps straight to Settings > Radar
+- API contract 1.10.0: additive radar endpoints for the tropical-cyclone feed, the wind grid, and the forecast-model catalog
+
+### Bug fixes
+
+- Outbound National Weather Service requests now identify LocalSky by its project URL instead of a personal contact, per the NWS API policy
+
 ## [0.3.0-beta.2] - 2026-06-11
 
 ### Features
 
-- Install as a Home Assistant App: one-click server install on Home Assistant OS from the new [app repository](https://github.com/silenthooligan/localsky-apps), with automatic Supervisor-based HA connection (no access token setup) and the UI embedded in the HA sidebar
-- Serve under a URL prefix: LocalSky honors the `X-Ingress-Path` header from prefix-stripping reverse proxies (this is what powers the sidebar embed), while direct port access keeps working unchanged
+- Serve under a URL prefix: LocalSky honors the `X-Ingress-Path` header from prefix-stripping reverse proxies, so it runs correctly behind a subpath, while direct port access keeps working unchanged
 
 ### Bug fixes
 
@@ -123,7 +141,7 @@ The v2 burndown. Lays a ports-and-adapters foundation underneath the existing v0
   - **Ecowitt local source**: POST receiver at `/ingest/ecowitt` for GW1100/GW2000 gateways
   - **HTTP webhook source**: generic JSON POST at `/ingest/webhook/<id>` for ESPHome, custom integrations, scripts
 
-#### LLM (replaces internal Aperture router)
+#### LLM provider abstraction
 
 - `LlmProvider` port with two adapters: OllamaProvider (native `/api/chat`) and OpenaiCompatProvider (`/v1/chat/completions`, covers OpenAI, Anthropic-compat shims, vLLM, LM Studio, llama.cpp `/v1`, and any private gateway)
 - Boot-time `auto_detect` probes `localhost:11434`, `:8080`, `:1234`; first success wins
@@ -150,8 +168,7 @@ The v2 burndown. Lays a ports-and-adapters foundation underneath the existing v0
 
 - Apache-2.0 license, NOTICE with citations, `.env.example`, expanded `.gitignore`
 - Public README, CONTRIBUTING, SECURITY, CODE_OF_CONDUCT, this CHANGELOG
-- Docs site under `docs/` covering getting-started, standalone, controllers, sensors, irrigation-engine, grass-species, soil-textures, skip-rules, configuration, api, ux-journey, hacs, migration
-- `scripts/sanitize-for-public.sh` codifies the internal-to-public scrub
+- Docs site under `docs/` covering getting-started, standalone, controllers, sensors, irrigation-engine, grass-species, soil-textures, skip-rules, configuration, api, ux-journey, hacs
 
 ### Internal
 

@@ -287,8 +287,8 @@ mod tests {
                 user_agent: "LocalSky test (test@example.com)".into(),
             },
             Location {
-                lat: 30.0738,
-                lon: -81.4716,
+                lat: 40.7128,
+                lon: -74.006,
                 elevation_m: None,
             },
         )

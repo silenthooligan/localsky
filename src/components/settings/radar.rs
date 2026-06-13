@@ -99,7 +99,11 @@ pub fn SettingsRadar() -> impl IntoView {
         let layers_out: Vec<String> = provider_rows()
             .into_iter()
             .map(|(id, ..)| id)
-            .chain(feature_rows().into_iter().map(|(id, _)| id))
+            .chain(
+                feature_rows(lat.get(), lon.get())
+                    .into_iter()
+                    .map(|(id, _)| id),
+            )
             .filter(|id| chosen_defaults.contains(id))
             .collect();
         #[cfg(feature = "hydrate")]
@@ -275,8 +279,10 @@ pub fn SettingsRadar() -> impl IntoView {
                 </div>
                 <div class="radar-settings__group">
                     <h3 class="radar-settings__group-title">"Feature overlays"</h3>
+                    // Reactive on lat/lon: the tropical chip's label
+                    // localizes once the configured station loads.
                     <div class="radar-settings__chips">
-                        {feature_rows()
+                        {move || feature_rows(lat.get(), lon.get())
                             .into_iter()
                             .map(|(id, label)| layer_chip(defaults, id, label))
                             .collect_view()}
@@ -352,11 +358,14 @@ fn provider_rows() -> Vec<(String, String, String, String)> {
         .collect()
 }
 
-/// (id, label) per feature overlay, catalog order.
-fn feature_rows() -> Vec<(String, String)> {
-    crate::radar_catalog::features()
-        .iter()
-        .map(|f| (f.id.to_string(), f.label.to_string()))
+/// (id, label) per feature overlay, catalog order. Takes the station
+/// coordinates because the tropical entry's label localizes to the
+/// home basin ("Hurricanes (NOAA NHC)" / "Typhoons (JMA / RSMC
+/// Tokyo)" / "Cyclones (BOM)"); ids never vary.
+fn feature_rows(lat: f64, lon: f64) -> Vec<(String, String)> {
+    crate::radar_catalog::features(lat, lon)
+        .into_iter()
+        .map(|f| (f.id.to_string(), f.label))
         .collect()
 }
 

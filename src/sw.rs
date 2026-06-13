@@ -20,9 +20,7 @@ const SW_TEMPLATE: &str = include_str!("../public/sw.template.js");
 
 fn sw_version() -> String {
     let pkg = env!("CARGO_PKG_VERSION");
-    let sha = option_env!("GITEA_SHA")
-        .or_else(|| option_env!("GIT_SHA"))
-        .unwrap_or("dev");
+    let sha = option_env!("GIT_SHA").unwrap_or("dev");
     let short = sha.chars().take(8).collect::<String>();
     format!("{pkg}-{short}")
 }
