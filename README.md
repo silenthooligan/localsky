@@ -177,7 +177,8 @@ On Home Assistant OS or Supervised, the LocalSky server itself can also run as a
 | LLM | Ollama (any tool-capable model) | Tested |
 | LLM | llama.cpp HTTP server | Community |
 | LLM | OpenAI / Anthropic compatible | Tested |
-| LLM | LM Studio, vLLM | Community |
+| LLM | vLLM | Tested |
+| LLM | LM Studio | Community |
 | Push | Web Push (VAPID) | Tested |
 | Push | ntfy.sh / Slack webhook | Planned |
 
@@ -223,13 +224,17 @@ components/    Leptos UI primitives plus the irrigation, forecast, weather, and 
 
 ## Acknowledgements
 
-LocalSky stands on the shoulders of decades of agronomy and meteorology research, and on the work of a vibrant open-source community:
+LocalSky builds on peer-reviewed science and a broad open-source ecosystem.
+
+Special thanks to **[OpenSprinkler](https://opensprinkler.com/)**. Its open hardware and firmware put irrigation control back in the owner's hands, free of any vendor cloud, and gave LocalSky a foundation genuinely worth building a dashboard and scheduling engine around.
+
+The science and projects LocalSky relies on:
 
 - FAO Irrigation and Drainage Paper No. 56 (Allen et al., 1998)
 - ASCE-EWRI Standardized Reference Evapotranspiration (2005)
 - UF/IFAS Extension publications on Florida turfgrass species (ENH6, ENH8, ENH11, ENH19, ENH62, ENH1115)
 - USDA NRCS National Irrigation Guide (Part 652)
-- The Home Assistant Smart Irrigation and Irrigation Unlimited integrations (prior art that inspired this clean-room rewrite)
+- The Home Assistant Smart Irrigation and Irrigation Unlimited integrations (prior work that inspired this rewrite)
 - Open-Meteo, RainViewer, Leaflet, Leptos, rumqttc, Axum, tokio
 
 ## Contributing
