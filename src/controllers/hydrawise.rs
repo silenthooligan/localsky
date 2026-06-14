@@ -236,6 +236,13 @@ impl IrrigationController for Hydrawise {
                     current_program: None,
                     zone_states,
                     flow_gpm: resp.flow_gpm,
+                    // Hydrawise has no explicit "sensor present" bit, but it
+                    // only surfaces flow_gpm at all on accounts with the HC Flow
+                    // Meter accessory paired. A present reading IS the presence
+                    // signal here, so treat flow_gpm.is_some() as connected;
+                    // otherwise the Sensors flow card would show the real gpm as
+                    // "None connected" with a dash.
+                    flow_connected: resp.flow_gpm.is_some(),
                     firmware: None,
                 };
                 *self.last_status.lock().await = Some(status.clone());

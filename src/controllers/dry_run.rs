@@ -135,6 +135,7 @@ impl IrrigationController for DryRunController {
                 })
                 .collect(),
             flow_gpm: None,
+            flow_connected: false,
             firmware: Some("dry_run".into()),
         })
     }

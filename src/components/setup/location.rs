@@ -9,7 +9,7 @@
 use leptos::prelude::*;
 
 use crate::components::setup::shell::{next_step_href, prev_step_href, SetupFooter};
-use crate::components::ui::FormField;
+use crate::components::ui::{FormField, HelpHint};
 
 #[cfg(feature = "hydrate")]
 async fn fetch_draft() -> Option<serde_json::Value> {
@@ -257,7 +257,7 @@ pub fn LocationStep() -> impl IntoView {
 
     view! {
         <div class="setup-step">
-            <h2 class="setup-step__title">"Where are you?"</h2>
+            <h2 class="setup-step__title">"Where are you?"<HelpHint topic="location"/></h2>
             <p class="setup-step__body">
                 "LocalSky uses latitude and longitude for the radar center, the "
                 "Open-Meteo forecast, sunrise/sunset, and the FAO-56 ET0 "

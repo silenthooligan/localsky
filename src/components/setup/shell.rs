@@ -19,6 +19,7 @@ const STEPS: &[(&str, &str, bool)] = &[
     ("sources", "Weather", false),
     ("controllers", "Controller", false),
     ("zones", "Zones", false),
+    ("sensors", "Sensors", true),
     ("llm", "AI advisor", true),
     ("notifications", "Notifications", true),
     ("account", "Account", true),
@@ -210,7 +211,7 @@ where
 fn render_step(step: &str) -> impl IntoView {
     use crate::components::setup::{
         AccountStep, ControllersStep, LlmStep, LocationStep, NotificationsStep, ReviewStep,
-        SourcesStep, WelcomeStep, ZonesStep,
+        SensorsStep, SourcesStep, WelcomeStep, ZonesStep,
     };
     match step {
         "welcome" => view! { <WelcomeStep/> }.into_any(),
@@ -218,6 +219,7 @@ fn render_step(step: &str) -> impl IntoView {
         "sources" => view! { <SourcesStep/> }.into_any(),
         "controllers" => view! { <ControllersStep/> }.into_any(),
         "zones" => view! { <ZonesStep/> }.into_any(),
+        "sensors" => view! { <SensorsStep/> }.into_any(),
         "llm" => view! { <LlmStep/> }.into_any(),
         "notifications" => view! { <NotificationsStep/> }.into_any(),
         "account" => view! { <AccountStep/> }.into_any(),

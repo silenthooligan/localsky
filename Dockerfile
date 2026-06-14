@@ -18,6 +18,12 @@ RUN arch="$(uname -m)" \
     && rm "cargo-binstall-${arch}-unknown-linux-musl.tgz" cargo-binstall
 
 RUN cargo binstall cargo-leptos -y
+# mdbook builds the bundled documentation (docs/ -> docs/book) that the
+# server serves same-origin at /docs. Pinned to a version compatible with
+# docs/book.toml (mdbook >= 0.5; the book uses [output.html] search/fold/
+# print + preprocessor.links/index, all stable in the 0.5 line). binstall
+# fetches the prebuilt release binary, no source compile.
+RUN cargo binstall mdbook --version "^0.5" -y
 RUN rustup target add wasm32-unknown-unknown
 
 # Pin the dart-sass version cargo-leptos pulls. 1.86.0's binary
@@ -36,6 +42,9 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY style ./style
 COPY public ./public
+# Documentation sources for the in-app /docs server. `mdbook build docs`
+# (after the leptos build below) renders docs/src/*.md -> docs/book.
+COPY docs ./docs
 
 # Commit sha for the service-worker cache namespace. option_env!("GIT_SHA")
 # in src/sw.rs reads this at compile time so every deploy emits a byte-different
@@ -46,6 +55,12 @@ ARG GIT_SHA=dev
 ENV GIT_SHA=${GIT_SHA}
 
 RUN cargo leptos build --release
+
+# Render the bundled docs AFTER the app build so a docs change alone does
+# not invalidate the (slow) cargo build cache layer above. Output lands
+# in /build/docs/book and is copied into the site root in the runtime
+# stage so the server serves it at /docs.
+RUN mdbook build docs
 
 # ── Runtime ──
 FROM debian:trixie-slim@sha256:4e401d95de7083948053197a9c3913343cd06b706bf15eb6a0c3ccd26f436a0e
@@ -59,6 +74,10 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 COPY --from=builder --chown=10001:10001 /build/target/release/localsky /app/localsky
 COPY --from=builder --chown=10001:10001 /build/target/site /app/site
+# Bundled documentation, served same-origin at /docs (LEPTOS_SITE_ROOT=
+# "site" -> /app/site, the docs ServeDir roots at <site_root>/docs).
+# Placed after the site COPY so it lands inside the served static root.
+COPY --from=builder --chown=10001:10001 /build/docs/book /app/site/docs
 
 # /data and /keys are volume mounts; document the uid the container expects.
 # Bind-mount hosts should chown 10001:10001 or pass --user 0:0 to override.

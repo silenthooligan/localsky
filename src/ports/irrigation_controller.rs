@@ -73,6 +73,17 @@ pub struct ControllerStatus {
     pub current_program: Option<String>,
     pub zone_states: Vec<ZoneRuntimeStatus>,
     pub flow_gpm: Option<f64>,
+    /// A flow sensor is physically CONNECTED to the controller, distinct from
+    /// the type-level `Capabilities.flow_meter` (does the controller *support*
+    /// flow) and from `flow_gpm` (is it reading flow *right now*). True only
+    /// when the controller's own configuration reports a flow sensor wired in
+    /// (OpenSprinkler: sensor input 1 set to flow type, `sn1t` == 2,
+    /// corroborated by a present click-rate). Controllers that can't report
+    /// presence leave this false, so a user with no flow meter never sees a
+    /// phantom "detected" sensor. `#[serde(default)]` keeps older snapshots and
+    /// any partial JSON deserializing to false.
+    #[serde(default)]
+    pub flow_connected: bool,
     pub firmware: Option<String>,
 }
 

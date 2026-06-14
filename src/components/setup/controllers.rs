@@ -12,6 +12,7 @@ use leptos::prelude::*;
 
 use crate::components::controllers_form::{controller_kind_options, ControllerEditorPanel};
 use crate::components::setup::shell::{next_step_href, prev_step_href, SetupFooter};
+use crate::components::ui::HelpHint;
 
 #[cfg(feature = "hydrate")]
 async fn fetch_draft() -> Option<serde_json::Value> {
@@ -181,7 +182,7 @@ pub fn ControllersStep() -> impl IntoView {
 
     view! {
         <div class="setup-step">
-            <h2 class="setup-step__title">"What runs your sprinklers?"</h2>
+            <h2 class="setup-step__title">"What runs your sprinklers?"<HelpHint topic="controllers"/></h2>
             <p class="setup-step__body">
                 "Which hardware fires your valves? OpenSprinkler talks directly on the LAN; "
                 "Rachio, Hydrawise, B-hyve and Rain Bird connect through their cloud APIs; "

@@ -272,6 +272,7 @@ impl IrrigationController for Rainbird {
                     current_program: None,
                     zone_states,
                     flow_gpm: None,
+                    flow_connected: false,
                     firmware,
                 };
                 *self.last_status.lock().await = Some(status.clone());

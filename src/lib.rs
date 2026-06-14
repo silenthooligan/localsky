@@ -52,6 +52,8 @@ pub mod devices;
 #[cfg(feature = "ssr")]
 pub mod discovery;
 #[cfg(feature = "ssr")]
+pub mod docs_serve;
+#[cfg(feature = "ssr")]
 pub mod engine;
 #[cfg(feature = "ssr")]
 pub mod instance;

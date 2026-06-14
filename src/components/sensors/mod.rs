@@ -185,6 +185,31 @@ pub fn SensorsPage(
     #[cfg(not(feature = "hydrate"))]
     let _ = (sources, config, discovered);
 
+    // Zone (slug, display_name) list for the MQTT soil-subscription per-zone
+    // binding dropdown in the source editor. Derived from the loaded config so
+    // it tracks adds/renames without a separate fetch.
+    let zone_slugs = Memo::new(move |_| {
+        config
+            .get()
+            .get("zones")
+            .and_then(|z| z.as_object())
+            .map(|zones| {
+                zones
+                    .iter()
+                    .map(|(slug, z)| {
+                        (
+                            slug.clone(),
+                            z.get("display_name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(slug)
+                                .to_string(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
+
     // Persist one source entry (add or replace-by-id) via read-modify-write
     // on the full config, then re-load health and land on the source's live
     // readings so the user immediately sees it ingesting.
@@ -467,6 +492,7 @@ pub fn SensorsPage(
                             <SourceEditorPanel
                                 on_commit=persist_entry
                                 on_cancel=Callback::new(move |()| selected.set(Sel::Tempest))
+                                zone_slugs=zone_slugs
                             />
                         }.into_any(),
                         Sel::EditSource(id) => {
@@ -479,6 +505,7 @@ pub fn SensorsPage(
                                     existing=existing
                                     on_commit=persist_entry
                                     on_cancel=Callback::new(move |()| selected.set(Sel::Source(back.clone())))
+                                    zone_slugs=zone_slugs
                                 />
                             }.into_any()
                         }
@@ -653,7 +680,13 @@ fn reading_label(key: &str) -> String {
         "rainratein" => "Rain rate (in/hr)",
         "dailyrainin" => "Rain today (in)",
         _ if key.starts_with("soilmoisture") => {
-            return format!("Soil moisture ch{} (%)", &key[12..]);
+            // Zone-bound MQTT soil is keyed `soilmoisture_<zone_slug>`; native
+            // channels are `soilmoisture<N>`. Render the slug form by zone.
+            let rest = &key[12..];
+            if let Some(zone) = rest.strip_prefix('_') {
+                return format!("Soil moisture, {} (%)", zone.replace('_', " "));
+            }
+            return format!("Soil moisture ch{rest} (%)");
         }
         _ if key.starts_with("soilad") => {
             return format!("Soil raw ch{}", &key[6..]);

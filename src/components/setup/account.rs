@@ -8,7 +8,7 @@
 use leptos::prelude::*;
 
 use crate::components::setup::shell::{next_step_href, prev_step_href, SetupFooter};
-use crate::components::ui::{FormField, Panel};
+use crate::components::ui::{FormField, Panel, SecretInput};
 
 #[component]
 pub fn AccountStep() -> impl IntoView {
@@ -148,12 +148,10 @@ pub fn AccountStep() -> impl IntoView {
                             helptext="8+ characters. Stored as an argon2id hash, never plaintext.".to_string()
                             error=pw_error
                         >
-                            <input
-                                type="password"
-                                class="ui-input"
+                            <SecretInput
+                                value=password
                                 autocomplete="new-password"
-                                prop:value=move || password.get()
-                                on:input=move |ev| password.set(event_target_value(&ev))
+                                on_input=Callback::new(move |v: String| password.set(v))
                             />
                         </FormField>
                         <FormField
@@ -161,12 +159,10 @@ pub fn AccountStep() -> impl IntoView {
                             helptext="".to_string()
                             error=Signal::derive(|| None::<String>)
                         >
-                            <input
-                                type="password"
-                                class="ui-input"
+                            <SecretInput
+                                value=confirm
                                 autocomplete="new-password"
-                                prop:value=move || confirm.get()
-                                on:input=move |ev| confirm.set(event_target_value(&ev))
+                                on_input=Callback::new(move |v: String| confirm.set(v))
                             />
                         </FormField>
                         <div class="settings-form-actions" style="justify-content:flex-start">

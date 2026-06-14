@@ -13,11 +13,12 @@ use leptos::prelude::*;
 
 #[component]
 pub fn HelpHint(
-    /// Topic key from the static lookup table in help_topic. Also
-    /// used as the slug for the "Read full doc" link to localsky.io
-    /// (e.g. topic="verdict-strip" -> localsky.io/docs/verdict-strip).
-    /// Docs pages are still being authored; the link is a wired
-    /// placeholder so the URL contract is in place across the UI.
+    /// Topic key from the static lookup table in help_topic. Also used
+    /// as the slug for the "Read full doc" link, which `doc_url` resolves
+    /// to an app-local, ingress-aware, same-origin /docs/<topic> path
+    /// (e.g. topic="verdict-strip" -> /docs/verdict-strip) served from
+    /// the docs bundled into the image. The pages are authored; each
+    /// topic resolves to a real help_topic body and a real docs page.
     #[prop(into)]
     topic: String,
 ) -> impl IntoView {
@@ -58,6 +59,8 @@ pub fn help_topic(topic: &str) -> &'static str {
             "Step-by-step math for the next planned run: ET from the day's weather, multiplied by species Kc, capped at the controller's max duration.",
         "soil-sensors" =>
             "Live soil-moisture percentages from each zone's probe. The engine skips entirely when every zone is at or above its saturation threshold.",
+        "first-soil-sensor" =>
+            "Three ways to add a soil probe: an Ecowitt gateway on the LAN (native), any MQTT-published probe, or a Home Assistant soil entity. Then bind it to a zone.",
         "forecast" =>
             "Next-rain probability, expected amounts, and the heat-stress + wind metrics the skip rules check. Live, refreshed every 30 minutes.",
         "skip-breakdown" =>
@@ -72,6 +75,18 @@ pub fn help_topic(topic: &str) -> &'static str {
             "Outbound channels for run/skip alerts: Web Push, MQTT discovery, ntfy, and Slack. Each is independent; fill in only the ones you use.",
         "history" =>
             "What actually happened: completed runs and skipped evenings over the selected window. The timeline plots every run per zone; per-zone cards break down minutes, cadence, and recent events.",
+        "radar" =>
+            "Animated precipitation on your station, plus optional alert, storm, lightning, and wind overlays. Providers default by region (Auto); switch to Custom to pick your own.",
+        "restrictions" =>
+            "Encode local watering rules: allowed days by address parity, forbidden hours, seasonal windows, and a per-zone minute cap. They gate the verdict before the weather rules.",
+        "advanced" =>
+            "Debug and recovery: Nerd mode shows the raw engine math, Kiosk mode hides controls on shared screens, plus config-rollback snapshots and full backup/restore.",
+        "controllers" =>
+            "The hardware that fires your valves. OpenSprinkler talks direct on the LAN; Rachio, Hydrawise, B-hyve and Rain Bird use cloud APIs; MQTT and HA cover the rest.",
+        "devices" =>
+            "Every controller, source, and sensor LocalSky uses, native or mirrored from Home Assistant. Add a source or controller here, or scan the LAN to adopt a gateway.",
+        "schedules" =>
+            "Fire a zone at a fixed weekday and time. Override replaces the smart engine for that zone; Floor fires alongside it. Restrictions still gate and cap each run.",
         _ => "(no help topic configured)",
     }
 }

@@ -6,7 +6,61 @@
 
 use leptos::prelude::*;
 
-use crate::components::ui::{FormField, SegmentedControl};
+use crate::components::ui::{FormField, Panel, SegmentedControl};
+use crate::docs::doc_url;
+
+pub mod field_schema;
+pub mod soil_forms;
+pub use field_schema::{source_fields, SourceConfigForm};
+pub use soil_forms::{EcowittSoilCalibration, MqttSoilSubscriptions};
+
+/// Short, vendor-specific soil setup hint for the source kinds that carry soil
+/// data. Returns nothing for kinds without a soil path, so the form stays lean.
+/// Each hint names the exact LocalSky steps for that path and links to the
+/// getting-started doc, so a rookie never has to guess at the wiring. Kept in
+/// lockstep with `first-soil-sensor.md`.
+fn soil_path_hint(kind: &str) -> impl IntoView {
+    let text: Option<&'static str> = match kind {
+        "ecowitt_gw_poll" => Some(
+            "Ecowitt soil path: LocalSky polls your gateway over the LAN (no cloud). \
+             Find the gateway's IP in the Ecowitt WS View app or your router, and pair \
+             your soil probes to the gateway there. Set that IP as the host below; the \
+             probes then appear as channels under Settings, Sensors, ready to bind to a zone.",
+        ),
+        "ecowitt_local" => Some(
+            "Ecowitt push path: this is a push source, so set the listen path in the Ingest path \
+             field above (and a Shared secret if you want one), then point the gateway's \
+             Customized server (Ecowitt protocol) at that path. Probes paired to the gateway then \
+             arrive as soil channels under Settings, Sensors, ready to bind to a zone.",
+        ),
+        "mqtt" => Some(
+            "MQTT soil path: have your probe publish soil moisture to a topic, then add a \
+             soil subscription below with that topic, the JSON field (if the payload is an \
+             object), and the zone it measures. Finish by picking this source's channel as \
+             the zone's soil sensor in the zone editor.",
+        ),
+        "ha_passthrough" => Some(
+            "Home Assistant soil path: fill the Home Assistant URL and Long-lived token fields \
+             above to bridge HA. Soil probes HA already owns are then bound straight from the \
+             zone editor (Settings, Zones, pick the zone, Soil moisture sensor): they list as \
+             ha:sensor.<entity>. The field_map (in the advanced JSON box) is for weather fields, \
+             not soil.",
+        ),
+        _ => None,
+    };
+    text.map(|t| {
+        view! {
+            <p class="sensors-section__hint" style="margin-bottom: var(--space-3)">
+                {t}
+                " "
+                <a href=doc_url("first-soil-sensor") target="_blank" rel="noopener noreferrer"
+                    style="color: var(--accent)">
+                    "Add your first soil sensor →"
+                </a>
+            </p>
+        }
+    })
+}
 
 /// The source kinds the form offers, as (value, label) pairs.
 pub fn kind_options() -> Vec<(String, String)> {
@@ -87,7 +141,7 @@ pub fn kind_pretty(kind: &str) -> &'static str {
 pub fn default_config_text(kind: &str) -> String {
     match kind {
         "tempest_udp" => "{\n  \"bind_addr\": \"0.0.0.0:50222\"\n}".into(),
-        "tempest_ws" => "{\n  \"access_token\": \"YOUR_TEMPEST_TOKEN\",\n  \"station_id\": 0\n}".into(),
+        "tempest_ws" => "{\n  \"access_token\": \"YOUR_TEMPEST_TOKEN\"\n}".into(),
         "davis_wll" => "{\n  \"host\": \"weatherlinklive.local\",\n  \"txid\": 1\n}".into(),
         "open_meteo" => "{\n  \"forecast_days\": 7,\n  \"forecast_hours\": 48,\n  \"past_days\": 1,\n  \"include_radar\": false\n}".into(),
         "nws" => "{\n  \"user_agent\": \"localsky/0.2 (you@example.com)\"\n}".into(),
@@ -102,7 +156,7 @@ pub fn default_config_text(kind: &str) -> String {
         "ecowitt_local" => "{\n  \"path\": \"/ingest/ecowitt\",\n  \"shared_secret\": null\n}".into(),
         "ecowitt_gw_poll" => "{\n  \"host\": \"192.0.2.50\",\n  \"poll_interval_s\": 30\n}".into(),
         "mqtt" => "{\n  \"broker_host\": \"broker.local\",\n  \"broker_port\": 1883,\n  \"username\": null,\n  \"password\": null,\n  \"subscriptions\": [\n    {\n      \"topic\": \"sensors/+/soil\",\n      \"field\": \"rh_pct\",\n      \"json_path\": \"moisture\",\n      \"scale\": 1.0,\n      \"offset\": 0.0\n    }\n  ]\n}".into(),
-        "http_webhook" => "{\n  \"path\": \"/ingest/webhook/myhook\",\n  \"token\": \"changeme\",\n  \"fields\": [\n    {\"field\": \"air_temp_f\", \"json_path\": \"temperature\", \"scale\": 1.0, \"offset\": 0.0}\n  ]\n}".into(),
+        "http_webhook" => "{\n  \"path\": \"/ingest/webhook/myhook\",\n  \"fields\": [\n    {\"field\": \"air_temp_f\", \"json_path\": \"temperature\", \"scale\": 1.0, \"offset\": 0.0}\n  ]\n}".into(),
         "ha_passthrough" => "{\n  \"base_url\": \"http://homeassistant.local:8123\",\n  \"bearer_token\": \"${HA_LONG_LIVED_TOKEN}\",\n  \"field_map\": {}\n}".into(),
         // enabled defaults false on purpose: Blitzortung.org community
         // data is CC BY-SA 4.0, private/non-commercial, display-only.
@@ -122,6 +176,11 @@ pub fn SourceEditorPanel(
     #[prop(default = None)] existing: Option<serde_json::Value>,
     on_commit: Callback<serde_json::Value>,
     on_cancel: Callback<()>,
+    /// Zone slugs (slug, display_name) offered in the MQTT soil-subscription
+    /// per-zone binding dropdown. Empty by default (the dropdown then offers
+    /// only "no zone"); the Sensors hub passes the live zone list.
+    #[prop(optional, into)]
+    zone_slugs: Option<Memo<Vec<(String, String)>>>,
 ) -> impl IntoView {
     // "edit" = the seed carries a real id (lock the id field). A seed with no
     // id but a kind/config (e.g. "adopt this discovered gateway") is a
@@ -169,6 +228,9 @@ pub fn SourceEditorPanel(
     let enabled = RwSignal::new(seed_enabled);
     let config_text = RwSignal::new(seed_config);
     let error = RwSignal::new(String::new());
+    // Zone slugs for the MQTT soil-subscription per-zone dropdown. None = no
+    // zone list supplied; default to empty so the dropdown still renders.
+    let zone_slugs = zone_slugs.unwrap_or_else(|| Memo::new(|_| Vec::new()));
 
     // When composing a fresh source (not editing, no seeded config), swap the
     // JSON template as the kind changes. Skip when a config was seeded (adopt)
@@ -266,9 +328,44 @@ pub fn SourceEditorPanel(
                 </label>
             </FormField>
 
+            // Structured soil forms for the kinds that previously required
+            // hand-edited TOML. Each operates on the same `config_text` signal
+            // the raw editor below uses, so the existing config PUT persists
+            // them. The sync is two-way for the section each form owns
+            // (subscriptions / soil_calibration): editing a card rewrites that
+            // key in the textarea, and editing that key in the textarea
+            // re-seeds the cards. The forms never touch the other keys
+            // (broker/auth, host/poll), so the raw editor stays authoritative
+            // for everything else.
+            // PRIMARY editing surface: labeled, per-kind base-config fields
+            // (host/port/base_url/tokens/api keys/poll cadence/model, ...),
+            // rendered from the declarative field_schema and two-way-synced to
+            // `config_text`. This is what an operator touches for every kind;
+            // the JSON-advanced textarea below is the escape hatch for keys not
+            // in the schema (and re-seeds these inputs when edited directly).
+            <Panel title="Connection".to_string()>
+                <SourceConfigForm config_text=config_text kind=Signal::derive(move || kind.get())/>
+            </Panel>
+
+            // Per-vendor soil setup hint, shown for the kinds that carry soil
+            // data. Short, accurate, and specific to the path the user picked,
+            // so a newcomer knows the exact steps before touching the form.
+            {move || soil_path_hint(&kind.get())}
+
+            {move || (kind.get() == "mqtt").then(|| view! {
+                <Panel title="Soil subscriptions".to_string()>
+                    <MqttSoilSubscriptions config_text=config_text zone_slugs=zone_slugs/>
+                </Panel>
+            })}
+            {move || (kind.get() == "ecowitt_gw_poll").then(|| view! {
+                <Panel title="Soil channel calibration".to_string()>
+                    <EcowittSoilCalibration config_text=config_text/>
+                </Panel>
+            })}
+
             <FormField
-                label="Config (JSON)".to_string()
-                helptext="Kind-specific configuration. The template auto-fills as you change Kind (when adding).".to_string()
+                label="Config (JSON, advanced — optional)".to_string()
+                helptext="Escape hatch for advanced keys not in the labeled Connection form above (and the nested soil forms). The labeled fields are the primary editor; this textarea stays in sync both ways, so you rarely need it. Use it for per-device maps (YoLink/Tuya), HA field_map, or hand-tuning. The template auto-fills as you change Kind (when adding).".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 <textarea

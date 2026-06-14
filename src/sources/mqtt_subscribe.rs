@@ -48,6 +48,18 @@ impl MqttSubscribe {
     fn fields_advertised(&self) -> HashSet<WeatherField> {
         let mut set = HashSet::new();
         for sub in &self.config.subscriptions {
+            // A zone-bound subscription emits a per-zone soil CHANNEL
+            // (KeyedReading), not a typed WeatherField Observation, so it
+            // must NOT advertise a merge field (it would falsely claim to
+            // produce e.g. RhPct).
+            if sub
+                .zone_slug
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|z| !z.is_empty())
+            {
+                continue;
+            }
             if let Some(field) = parse_weather_field(&sub.field) {
                 set.insert(field);
             }
@@ -174,6 +186,32 @@ impl MqttSubscribe {
                 continue;
             };
             let value = raw * sub.scale + sub.offset;
+
+            // Zone-bound subscription: emit a per-zone soil CHANNEL rather
+            // than a global typed Observation. The merge bus is keyed by
+            // WeatherField, which cannot tell "back yard soil" from "front
+            // yard soil" (both would be RhPct) and would clobber the global
+            // humidity field besides. Routing it as a KeyedReading writes a
+            // discoverable `soilmoisture_<zone_slug>` channel to
+            // sensor_history that the zone binds via
+            // `source:<id>:soilmoisture_<zone_slug>` exactly like a native
+            // Ecowitt channel. resolve_soil_pct + the soil discovery + the
+            // Sensors inventory then all work through the normal binding.
+            if let Some(zone) = sub
+                .zone_slug
+                .as_deref()
+                .map(str::trim)
+                .filter(|z| !z.is_empty())
+            {
+                let _ = bus.send(SourceEvent::KeyedReading {
+                    source_id: self.id.clone(),
+                    key: crate::sources::bus_recorder::zone_soil_key(zone),
+                    value,
+                    at_epoch: now_epoch(),
+                });
+                continue;
+            }
+
             let Some(field) = parse_weather_field(&sub.field) else {
                 debug!(
                     source = self.id,
@@ -371,5 +409,116 @@ mod tests {
             parse_weather_field("flow_total_gal_today"),
             Some(WeatherField::FlowTotalGalToday)
         ));
+    }
+
+    use crate::config::schema::{MqttSourceConfig, MqttSubscription};
+
+    fn sub(
+        topic: &str,
+        field: &str,
+        json_path: Option<&str>,
+        zone: Option<&str>,
+    ) -> MqttSubscription {
+        MqttSubscription {
+            topic: topic.to_string(),
+            field: field.to_string(),
+            json_path: json_path.map(str::to_string),
+            zone_slug: zone.map(str::to_string),
+            scale: 1.0,
+            offset: 0.0,
+        }
+    }
+
+    fn source_with(subs: Vec<MqttSubscription>) -> MqttSubscribe {
+        MqttSubscribe::new(
+            "garden_mqtt",
+            MqttSourceConfig {
+                broker_host: "broker.local".into(),
+                broker_port: 1883,
+                username: None,
+                password: None,
+                client_id: None,
+                subscriptions: subs,
+            },
+        )
+    }
+
+    // A zone-bound soil subscription must NOT emit a global typed Observation
+    // (which would clobber humidity and lose the zone). It emits a per-zone
+    // soil CHANNEL keyed `soilmoisture_<zone_slug>` so the zone can bind it
+    // via `source:<id>:soilmoisture_<zone_slug>` like a native channel.
+    #[test]
+    fn zone_bound_soil_emits_per_zone_channel() {
+        let src = source_with(vec![sub(
+            "esp/soil/back",
+            super::super::bus_recorder::zone_soil_key("back_yard").as_str(), // field ignored when zone-bound
+            None,
+            Some("back_yard"),
+        )]);
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<SourceEvent>(8);
+        src.handle_publish(&tx, "esp/soil/back", b"38.5");
+
+        match rx.try_recv().expect("an event was emitted") {
+            SourceEvent::KeyedReading {
+                source_id,
+                key,
+                value,
+                ..
+            } => {
+                assert_eq!(source_id, "garden_mqtt");
+                assert_eq!(key, "soilmoisture_back_yard");
+                assert_eq!(value, 38.5);
+            }
+            other => panic!("expected KeyedReading, got {other:?}"),
+        }
+        // And nothing else (no stray global Observation).
+        assert!(rx.try_recv().is_err(), "no second event");
+    }
+
+    // An UNbound soil subscription keeps the legacy behavior: a global typed
+    // Observation routed through rh_pct.
+    #[test]
+    fn unbound_soil_emits_global_observation() {
+        let src = source_with(vec![sub("esp/soil/loose", "rh_pct", None, None)]);
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<SourceEvent>(8);
+        src.handle_publish(&tx, "esp/soil/loose", b"41.0");
+
+        match rx.try_recv().expect("an event was emitted") {
+            SourceEvent::Observation { fields, .. } => {
+                assert_eq!(fields, vec![(WeatherField::RhPct, 41.0)]);
+            }
+            other => panic!("expected Observation, got {other:?}"),
+        }
+    }
+
+    // A blank/whitespace zone_slug is treated as unbound (matches the form's
+    // serialize-blank-to-null and the schema #[serde(default)] Option).
+    #[test]
+    fn blank_zone_slug_falls_back_to_global_observation() {
+        let src = source_with(vec![sub("esp/soil/x", "rh_pct", None, Some("   "))]);
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<SourceEvent>(8);
+        src.handle_publish(&tx, "esp/soil/x", b"50.0");
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            SourceEvent::Observation { .. }
+        ));
+    }
+
+    // The scale/offset transform applies to the zone-bound channel value too.
+    #[test]
+    fn zone_bound_soil_applies_scale_offset() {
+        let mut s = sub("esp/raw", "rh_pct", None, Some("front_yard"));
+        s.scale = 0.1;
+        s.offset = 5.0;
+        let src = source_with(vec![s]);
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<SourceEvent>(8);
+        src.handle_publish(&tx, "esp/raw", b"300"); // 300*0.1 + 5 = 35
+        match rx.try_recv().unwrap() {
+            SourceEvent::KeyedReading { key, value, .. } => {
+                assert_eq!(key, "soilmoisture_front_yard");
+                assert!((value - 35.0).abs() < 1e-9);
+            }
+            other => panic!("expected KeyedReading, got {other:?}"),
+        }
     }
 }

@@ -13,6 +13,8 @@ expression: "IrrigationSnapshot::default()"
   "iu_enabled": false,
   "iu_suspended": false,
   "water_level_pct": 0.0,
+  "flow_meter": false,
+  "flow_gpm": null,
   "zones": [],
   "skip_check": {
     "temp_now_f": 0.0,

@@ -7,6 +7,7 @@
 //   sources.rs      - weather source editor (shared with Sensors hub)
 //   controllers.rs  - controller editor + live test + zone scan/import
 //   zones.rs        - species gallery + per-zone tuning
+//   sensors.rs      - bind discovered soil probes to draft zones (optional)
 //   llm.rs          - optional advisor provider + live test
 //   notifications.rs- push/MQTT/ntfy/Slack channels
 //   account.rs      - owner account (built-in auth; skippable)
@@ -22,6 +23,7 @@ pub mod llm;
 pub mod location;
 pub mod notifications;
 pub mod review;
+pub mod sensors;
 pub mod shell;
 pub mod sources;
 pub mod welcome;
@@ -33,6 +35,7 @@ pub use llm::LlmStep;
 pub use location::LocationStep;
 pub use notifications::NotificationsStep;
 pub use review::ReviewStep;
+pub use sensors::SensorsStep;
 pub use shell::SetupShell;
 pub use sources::SourcesStep;
 pub use welcome::WelcomeStep;

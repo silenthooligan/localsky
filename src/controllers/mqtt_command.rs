@@ -245,6 +245,7 @@ impl IrrigationController for MqttCommand {
                 })
                 .collect(),
             flow_gpm: None,
+            flow_connected: false,
             firmware: None,
         })
     }

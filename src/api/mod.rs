@@ -49,6 +49,7 @@ pub mod irrigation;
 pub mod location;
 pub mod manifest;
 pub mod photos;
+pub mod precip;
 pub mod sensors;
 pub mod sources;
 pub mod tropical;

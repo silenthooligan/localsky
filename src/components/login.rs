@@ -6,7 +6,7 @@
 
 use leptos::prelude::*;
 
-use crate::components::ui::{FormField, Icon};
+use crate::components::ui::{FormField, Icon, SecretInput};
 
 #[component]
 pub fn LoginPage() -> impl IntoView {
@@ -139,12 +139,10 @@ pub fn LoginPage() -> impl IntoView {
                             helptext="".to_string()
                             error=Signal::derive(|| None::<String>)
                         >
-                            <input
-                                type="password"
-                                class="ui-input"
+                            <SecretInput
+                                value=password
                                 autocomplete=if exists { "current-password" } else { "new-password" }
-                                prop:value=move || password.get()
-                                on:input=move |ev| password.set(event_target_value(&ev))
+                                on_input=Callback::new(move |v: String| password.set(v))
                             />
                         </FormField>
                         <button

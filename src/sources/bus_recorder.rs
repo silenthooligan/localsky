@@ -48,6 +48,17 @@ impl SourceLastSeen {
     }
 }
 
+/// Canonical sensor_history key for a zone-bound soil-moisture channel.
+/// Prefixed `soilmoisture` so the `soil_channels` discovery LIKE query
+/// (`soilmoisture%`) finds it, and suffixed `_<zone_slug>` so a zone binds
+/// it via `source:<source_id>:soilmoisture_<zone_slug>` the same way a
+/// native Ecowitt `soilmoisture<N>` channel binds. Keeping the form, the
+/// engine emit, and the resolver in agreement on this one function is what
+/// makes the zone-bound MQTT soil path round-trip.
+pub fn zone_soil_key(zone_slug: &str) -> String {
+    format!("soilmoisture_{zone_slug}")
+}
+
 /// Canonical snake_case key for a WeatherField, matching the names the
 /// MQTT/webhook field mappings accept (`parse_weather_field`). Used as
 /// the sensor_history `key` column for bus observations.
@@ -111,6 +122,25 @@ pub fn spawn(
                             if let Err(e) = store.insert_many(readings).await {
                                 warn!(source = %source_id, "bus recorder history write failed: {e}");
                             }
+                        }
+                    }
+                }
+                Ok(SourceEvent::KeyedReading {
+                    source_id,
+                    key,
+                    value,
+                    at_epoch,
+                }) => {
+                    last_seen.record(&source_id, at_epoch);
+                    if let Some(store) = sensor_history.as_ref() {
+                        let reading = Reading {
+                            epoch: at_epoch,
+                            source_id: source_id.clone(),
+                            key,
+                            value,
+                        };
+                        if let Err(e) = store.insert(reading).await {
+                            warn!(source = %source_id, "bus recorder keyed history write failed: {e}");
                         }
                     }
                 }

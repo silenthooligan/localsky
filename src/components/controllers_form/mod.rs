@@ -13,6 +13,7 @@
 use leptos::prelude::*;
 
 use crate::components::ui::{FormField, Panel, SegmentedControl};
+use crate::docs::doc_url;
 
 /// Controller kinds offered in the Kind picker. (value, label) pairs.
 pub fn controller_kind_options() -> Vec<(String, String)> {
@@ -202,7 +203,7 @@ pub fn ControllerEditorPanel(
 
             <FormField
                 label="Kind".to_string()
-                helptext="See controllers.md for capabilities of each.".to_string()
+                helptext="Pick the controller backend that fires your valves.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 <SegmentedControl
@@ -210,6 +211,13 @@ pub fn ControllerEditorPanel(
                     options=controller_kind_options()
                     aria_label="Controller kind".to_string()
                 />
+                <p class="ui-form-field__helptext" style="margin-top: 0.4rem">
+                    "See the "
+                    <a href=doc_url("controllers")
+                        target="_blank" rel="noopener noreferrer"
+                        style="color: var(--accent)">"controller docs"</a>
+                    " for the capabilities of each."
+                </p>
             </FormField>
 
             <FormField

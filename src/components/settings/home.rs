@@ -15,8 +15,8 @@ use super::help::SettingsHelp;
 use super::{
     SettingsAccount, SettingsAdvanced, SettingsControllers, SettingsDevices, SettingsHomeAssistant,
     SettingsLlm, SettingsLocation, SettingsNotifications, SettingsRadar, SettingsRestrictions,
-    SettingsSchedules, SettingsSkipRules, SettingsSources, SettingsTheme, SettingsUnits,
-    SettingsZones,
+    SettingsSchedules, SettingsSensors, SettingsSkipRules, SettingsSources, SettingsTheme,
+    SettingsUnits, SettingsZones,
 };
 use crate::components::ui::Icon;
 
@@ -43,6 +43,12 @@ const GROUPS: &[SectionGroup] = &[
                 label: "Devices",
                 helptext: "Every gateway, controller, and service, with what it provides",
                 icon: "controllers",
+            },
+            SectionLink {
+                key: "sensors",
+                label: "Sensors",
+                helptext: "Soil probes and flow meters: live readings, battery, zone binding",
+                icon: "gauge",
             },
             SectionLink {
                 key: "home-assistant",
@@ -408,6 +414,7 @@ fn SettingsOverview(selected: RwSignal<Option<&'static str>>) -> impl IntoView {
 fn section_view(key: &str) -> leptos::prelude::AnyView {
     match key {
         "devices" => view! { <SettingsDevices/> }.into_any(),
+        "sensors" => view! { <SettingsSensors/> }.into_any(),
         "home-assistant" => view! { <SettingsHomeAssistant/> }.into_any(),
         "help" => view! { <SettingsHelp/> }.into_any(),
         "zones" => view! { <SettingsZones/> }.into_any(),

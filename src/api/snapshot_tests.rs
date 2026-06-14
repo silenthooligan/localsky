@@ -63,6 +63,51 @@ mod tests {
         assert_json_snapshot!("irrigation_v1", IrrigationSnapshot::default());
     }
 
+    /// Flow surfacing: the snapshot must carry the controller's flow_meter
+    /// capability flag and live flow_gpm reading. None (no meter) serializes
+    /// as JSON null so non-flow setups render nothing; a real value (incl.
+    /// 0.0 "meter present, zero flow") serializes as the number.
+    #[test]
+    fn snapshot_flow_serializes_present_and_none() {
+        // Default: no meter, no reading.
+        let none = IrrigationSnapshot::default();
+        let v = serde_json::to_value(&none).unwrap();
+        assert_eq!(v["flow_meter"], serde_json::json!(false));
+        assert_eq!(v["flow_gpm"], serde_json::Value::Null);
+
+        // Meter present, live reading.
+        let mut present = IrrigationSnapshot::default();
+        present.flow_meter = true;
+        present.flow_gpm = Some(3.5);
+        let v = serde_json::to_value(&present).unwrap();
+        assert_eq!(v["flow_meter"], serde_json::json!(true));
+        assert_eq!(v["flow_gpm"], serde_json::json!(3.5));
+
+        // Meter present but zero flow is distinct from "no meter": Some(0.0)
+        // serializes as 0.0, not null.
+        let mut zero = IrrigationSnapshot::default();
+        zero.flow_meter = true;
+        zero.flow_gpm = Some(0.0);
+        let v = serde_json::to_value(&zero).unwrap();
+        assert_eq!(v["flow_gpm"], serde_json::json!(0.0));
+    }
+
+    /// Round-trip: a snapshot serialized without the flow fields (older
+    /// producer) deserializes with flow_meter=false / flow_gpm=None thanks
+    /// to `#[serde(default)]`, so the additive fields don't break the SSE
+    /// contract the HA integration consumes.
+    #[test]
+    fn snapshot_flow_fields_default_when_absent() {
+        // Start from a fully-populated default, drop the two flow keys to
+        // simulate an older producer, and confirm it still deserializes.
+        let mut v = serde_json::to_value(IrrigationSnapshot::default()).unwrap();
+        v.as_object_mut().unwrap().remove("flow_meter");
+        v.as_object_mut().unwrap().remove("flow_gpm");
+        let snap: IrrigationSnapshot = serde_json::from_value(v).unwrap();
+        assert!(!snap.flow_meter);
+        assert_eq!(snap.flow_gpm, None);
+    }
+
     /// `/api/v1/forecast/snapshot`.
     #[test]
     fn forecast_v1_shape() {

@@ -61,6 +61,21 @@ pub enum SourceEvent {
         fields: Vec<(WeatherField, f64)>,
         at_epoch: i64,
     },
+    /// A zone-qualified channel reading that is NOT a global WeatherField:
+    /// a per-zone soil-moisture probe. The merge bus is typed by
+    /// WeatherField, which cannot disambiguate "the back yard's soil" from
+    /// "the front yard's soil" (both would be `RhPct`), so a zone-bound soil
+    /// subscription emits this instead. The bus recorder persists it to
+    /// sensor_history verbatim under `key`, making it a discoverable soil
+    /// channel that a zone binds via `source:<source_id>:<key>` exactly like
+    /// a native Ecowitt `soilmoisture<N>` channel. `key` is the canonical
+    /// soil-channel key (e.g. `soilmoisture_<zone_slug>`).
+    KeyedReading {
+        source_id: String,
+        key: String,
+        value: f64,
+        at_epoch: i64,
+    },
     /// Reachability change. The engine surfaces this in per-source status badges.
     Reachability { source_id: String, reachable: bool },
 }

@@ -290,6 +290,7 @@ impl IrrigationController for Rachio {
                 .map(|s| s.to_string()),
             zone_states,
             flow_gpm: None,
+            flow_connected: false,
             firmware: device
                 .get("firmwareVersion")
                 .and_then(|v| v.as_str())

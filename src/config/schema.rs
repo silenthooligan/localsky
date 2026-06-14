@@ -532,6 +532,14 @@ pub enum SourceKind {
     EcowittGwPoll(EcowittGwPollConfig),
     DavisWll(DavisWllConfig),
     Nws(NwsConfig),
+    // The whole codebase (kind_options, default_config_text, kind_pretty,
+    // kind_icon, source_fields, health/sensors kind labels) keys on the string
+    // `openweather`; the auto snake_case tag `open_weather` was the odd one out.
+    // Serialize as `openweather` so a persisted source round-trips into the same
+    // string every UI consumer expects (the labeled Connection form, icons, the
+    // segmented picker). Keep `open_weather` as a deserialize alias for any
+    // older on-disk config or engine-emitted value that used the snake_case tag.
+    #[serde(rename = "openweather", alias = "open_weather")]
     OpenWeather(OpenWeatherConfig),
     PirateWeather(PirateWeatherConfig),
     MetNorway(MetNorwayConfig),
@@ -887,9 +895,16 @@ pub struct MqttSubscription {
     /// "0.value"). When unset, the entire payload is parsed as a number.
     #[serde(default)]
     pub json_path: Option<String>,
-    /// Optional zone slug for per-zone fields (soil moisture, soil temp).
-    /// When set, the field is stored as "<field>_<zone_slug>" so the
-    /// engine can disambiguate.
+    /// Optional zone slug for per-zone soil moisture. When set, the MQTT
+    /// adapter does NOT emit a global typed Observation (which the merge bus
+    /// keys by WeatherField and so cannot disambiguate per zone, and which
+    /// would clobber the global humidity field). Instead it emits a per-zone
+    /// soil CHANNEL recorded in sensor_history under the canonical key
+    /// `soilmoisture_<zone_slug>` (see bus_recorder::zone_soil_key). A zone
+    /// binds it via `soil_sensor_id = "source:<source_id>:soilmoisture_<zone_slug>"`,
+    /// after which resolve_soil_pct, the /sensors/soil + /sensors/inventory
+    /// discovery, and the Sensors view all treat it like a native Ecowitt
+    /// `soilmoisture<N>` channel.
     #[serde(default)]
     pub zone_slug: Option<String>,
     /// Optional linear transform: published_value * scale + offset.
@@ -1714,12 +1729,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn radar_ui_default_layers_are_the_catalog_trio() {
-        // The catalog successors of the old hardcoded precip + NEXRAD
-        // + strikes trio.
+    fn radar_ui_default_layers_lead_with_librewxr() {
+        // LibreWXR leads (the region-aware default radar), then the
+        // catalog successors of the old precip + NEXRAD + strikes trio.
         assert_eq!(
             RadarUiConfig::default().default_layers,
-            ["rainviewer", "nexrad_iem", "lightning_tempest"]
+            ["librewxr", "rainviewer", "nexrad_iem", "lightning_tempest"]
         );
     }
 
@@ -1730,7 +1745,7 @@ mod tests {
         let ui: UiConfig = toml::from_str("").unwrap();
         assert_eq!(
             ui.radar.default_layers,
-            ["rainviewer", "nexrad_iem", "lightning_tempest"]
+            ["librewxr", "rainviewer", "nexrad_iem", "lightning_tempest"]
         );
         // Absent providers list means Auto (region-recommended set).
         assert!(ui.radar.providers.is_empty());
@@ -1749,7 +1764,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             cfg.ui.radar.default_layers,
-            ["rainviewer", "nexrad_iem", "lightning_tempest"]
+            ["librewxr", "rainviewer", "nexrad_iem", "lightning_tempest"]
         );
         assert!(cfg.ui.radar.providers.is_empty());
     }

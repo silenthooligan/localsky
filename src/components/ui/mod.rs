@@ -22,6 +22,7 @@
 //   toast.rs      - ToastHub context + ToastViewport stack
 //   help_hint.rs  - tooltip/popover wrapper
 //   photo_field.rs - file upload + preview
+//   secret_input.rs - masked input + show/hide reveal toggle
 
 pub mod button;
 pub mod card;
@@ -33,6 +34,7 @@ pub mod line_chart;
 pub mod list_item;
 pub mod panel;
 pub mod photo_field;
+pub mod secret_input;
 pub mod segmented;
 pub mod sheet;
 pub mod skeleton;
@@ -53,6 +55,7 @@ pub use line_chart::{LineChart, Series};
 pub use list_item::ListItem;
 pub use panel::Panel;
 pub use photo_field::PhotoField;
+pub use secret_input::SecretInput;
 pub use segmented::SegmentedControl;
 pub use sheet::Sheet;
 pub use skeleton::{Skeleton, SkeletonRows};

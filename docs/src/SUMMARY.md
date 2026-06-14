@@ -15,10 +15,13 @@
 
 # Connecting Hardware
 
+- [Devices hub](devices.md)
+- [Add your first soil sensor](first-soil-sensor.md)
 - [Weather and soil sensors](sensors.md)
 - [Soil probes and zones](soil-sensors.md)
 - [Irrigation controllers](controllers.md)
 - [Forecast sources and merge](forecast.md)
+- [Live radar](radar.md)
 
 # Using LocalSky
 
@@ -35,6 +38,8 @@
 
 - [Irrigation engine](irrigation-engine.md)
 - [Skip rules in depth](skip-rules.md)
+- [Watering restrictions](restrictions.md)
+- [Manual schedules](schedules.md)
 - [Grass species catalog](grass-species.md)
 - [Soil texture catalog](soil-textures.md)
 
@@ -44,6 +49,7 @@
 - [Reverse proxy and HTTPS](reverse-proxy.md)
 - [Upgrading LocalSky](upgrading.md)
 - [Backup, restore, and recovery](backup-restore.md)
+- [Advanced settings](advanced.md)
 
 # Help
 

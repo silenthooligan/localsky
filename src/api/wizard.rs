@@ -49,6 +49,7 @@ pub fn router(state: WizardApiState) -> Router {
         .route("/test_controller", post(post_test_controller))
         .route("/test_llm", post(post_test_llm))
         .route("/scan_zones", post(post_scan_zones))
+        .route("/probe_soil", post(post_probe_soil))
         .route("/discover", get(get_discover))
         .route("/state", get(get_state))
         .route("/seed_current", post(post_seed_current))
@@ -289,6 +290,167 @@ async fn post_scan_zones(
     }
 }
 
+// ---- Live soil enumeration for the Sensors step. ----
+//
+// The wizard draft is NOT applied while the wizard runs, so no
+// `ecowitt_gw_poll` source is actually polling and `/api/v1/sensors/inventory`
+// lists nothing for a gateway the user just added in the Weather step. To
+// still show real probes, this endpoint queries the gateway's local API
+// directly over the LAN (`GET http://<host>/get_livedata_info`) and reuses the
+// exact same parser the live poller uses, so the channel ids it returns
+// (`source:<src>:soilmoisture<N>`) are byte-identical to what the engine
+// resolves post-apply.
+
+#[derive(Debug, Deserialize)]
+struct ProbeSoilBody {
+    /// Gateway IP or hostname on the LAN (from the draft source's config.host).
+    host: String,
+    /// Draft source id, used to build canonical `source:<id>:soilmoisture<N>`
+    /// channel ids that match the eventual live binding. Defaults to
+    /// "ecowitt_gw" (the id the discovery "Add" button uses).
+    #[serde(default = "default_probe_source_id")]
+    source_id: String,
+}
+
+fn default_probe_source_id() -> String {
+    "ecowitt_gw".to_string()
+}
+
+#[derive(Debug, Serialize)]
+struct ProbeChannel {
+    /// Channel number as the gateway reports it ("1".."N").
+    channel: String,
+    /// Canonical engine address, identical to a live `soil_sensor_id`:
+    /// `source:<source_id>:soilmoisture<channel>`.
+    id: String,
+    /// Live moisture %, when the gateway reported it.
+    moisture_pct: Option<f64>,
+    /// Soil battery %, when present (already scaled 0..100 by the parser).
+    battery_pct: Option<f64>,
+    /// Soil temperature F, when present.
+    temp_f: Option<f64>,
+    /// Soil EC, when present.
+    ec: Option<f64>,
+}
+
+/// POST /api/wizard/probe_soil { host, source_id? } -> the gateway's current
+/// soil channels read live off its local API. User-initiated (the Sensors
+/// step calls it per configured gateway). A few seconds at worst.
+async fn post_probe_soil(
+    State(_s): State<WizardApiState>,
+    Json(body): Json<ProbeSoilBody>,
+) -> impl IntoResponse {
+    let host = body.host.trim();
+    if host.is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ApiError {
+                error: "missing_host".into(),
+                detail: Some("gateway host is required".into()),
+            }),
+        )
+            .into_response();
+    }
+    let url = format!("http://{host}/get_livedata_info");
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "client_build_failed".into(),
+                    detail: Some(e.to_string()),
+                }),
+            )
+                .into_response()
+        }
+    };
+    let body_json = match client
+        .get(&url)
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+    {
+        Ok(r) => match r.json::<serde_json::Value>().await {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(ApiError {
+                        error: "gateway_parse_error".into(),
+                        detail: Some(e.to_string()),
+                    }),
+                )
+                    .into_response()
+            }
+        },
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(ApiError {
+                    error: "gateway_unreachable".into(),
+                    detail: Some(e.to_string()),
+                }),
+            )
+                .into_response()
+        }
+    };
+
+    let channels = soil_channels_from_livedata(&body_json, &body.source_id);
+    Json(serde_json::json!({ "ok": true, "channels": channels })).into_response()
+}
+
+/// Reduce a `/get_livedata_info` body to one ProbeChannel per soil-moisture
+/// channel, gathering the battery/temp/EC siblings the parser emits under
+/// `soil{batt,temp,ec}<N>`. Reuses `ecowitt_gw_poll::parse_livedata` so the
+/// keys (and therefore the channel ids) match the live poller exactly.
+fn soil_channels_from_livedata(body: &serde_json::Value, source_id: &str) -> Vec<ProbeChannel> {
+    use std::collections::BTreeMap;
+    // epoch is irrelevant here (we only read keys/values), pass 0.
+    let readings = crate::sources::ecowitt_gw_poll::parse_livedata(body, source_id, 0);
+
+    // Collect by channel number parsed off the key suffix.
+    let mut by_ch: BTreeMap<String, ProbeChannel> = BTreeMap::new();
+    let ensure = |map: &mut BTreeMap<String, ProbeChannel>, ch: &str| {
+        map.entry(ch.to_string()).or_insert_with(|| ProbeChannel {
+            channel: ch.to_string(),
+            id: format!("source:{source_id}:soilmoisture{ch}"),
+            moisture_pct: None,
+            battery_pct: None,
+            temp_f: None,
+            ec: None,
+        });
+    };
+
+    for r in &readings {
+        if let Some(ch) = r.key.strip_prefix("soilmoisture") {
+            ensure(&mut by_ch, ch);
+            by_ch.get_mut(ch).unwrap().moisture_pct = Some(r.value);
+        } else if let Some(ch) = r.key.strip_prefix("soilbatt") {
+            ensure(&mut by_ch, ch);
+            by_ch.get_mut(ch).unwrap().battery_pct = Some(r.value);
+        } else if let Some(rest) = r.key.strip_prefix("soiltemp") {
+            // key shape is soiltemp<N>f.
+            let ch = rest.trim_end_matches('f');
+            ensure(&mut by_ch, ch);
+            by_ch.get_mut(ch).unwrap().temp_f = Some(r.value);
+        } else if let Some(ch) = r.key.strip_prefix("soilec") {
+            ensure(&mut by_ch, ch);
+            by_ch.get_mut(ch).unwrap().ec = Some(r.value);
+        }
+    }
+
+    // Only surface channels that actually reported a moisture reading (a bare
+    // battery/temp sibling without moisture is not a usable probe to bind).
+    by_ch
+        .into_values()
+        .filter(|c| c.moisture_pct.is_some())
+        .collect()
+}
+
 // ---- Re-entry support: state probe + seed-from-current. ----
 
 /// GET /api/wizard/state -> { config_present, draft_present }. The setup
@@ -432,4 +594,60 @@ fn urlencode(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod probe_soil_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn reduces_livedata_to_bindable_channels() {
+        // A real EC-soil gateway shape: two probes with moisture + siblings.
+        let body = json!({
+            "ch_ec": [
+                {"channel": "1", "name": "Back Yard", "battery": "5", "humidity": "32%", "temp": "79.2", "unit": "F", "ec": "40 uS/cm"},
+                {"channel": "3", "name": "Side Yard", "battery": "4", "humidity": "65%", "temp": "82.0", "unit": "F", "ec": "170 uS/cm"}
+            ]
+        });
+        let mut chans = soil_channels_from_livedata(&body, "ecowitt_gw");
+        chans.sort_by(|a, b| a.channel.cmp(&b.channel));
+        assert_eq!(chans.len(), 2);
+
+        let c1 = &chans[0];
+        assert_eq!(c1.channel, "1");
+        // The id must be byte-identical to a live `soil_sensor_id` binding.
+        assert_eq!(c1.id, "source:ecowitt_gw:soilmoisture1");
+        assert_eq!(c1.moisture_pct, Some(32.0));
+        // Ecowitt battery level 5 -> 100% (the parser scales x20, clamped).
+        assert_eq!(c1.battery_pct, Some(100.0));
+        assert_eq!(c1.temp_f, Some(79.2));
+        assert_eq!(c1.ec, Some(40.0));
+
+        let c3 = &chans[1];
+        assert_eq!(c3.channel, "3");
+        assert_eq!(c3.id, "source:ecowitt_gw:soilmoisture3");
+        assert_eq!(c3.moisture_pct, Some(65.0));
+    }
+
+    #[test]
+    fn ignores_non_soil_and_uses_source_id() {
+        // Classic WH51 ch_soil plus weather noise that must not surface.
+        let body = json!({
+            "common_list": [{"id": "0x02", "val": "71.6"}],
+            "ch_soil": [{"channel": "2", "name": "Front", "battery": "3", "humidity": "45%"}]
+        });
+        let chans = soil_channels_from_livedata(&body, "my_gw");
+        assert_eq!(chans.len(), 1, "only the soil channel is bindable");
+        assert_eq!(chans[0].id, "source:my_gw:soilmoisture2");
+        assert_eq!(chans[0].moisture_pct, Some(45.0));
+        // ch_soil carries no temp/EC.
+        assert_eq!(chans[0].temp_f, None);
+        assert_eq!(chans[0].ec, None);
+    }
+
+    #[test]
+    fn empty_body_has_no_channels() {
+        assert!(soil_channels_from_livedata(&json!({}), "gw").is_empty());
+    }
 }

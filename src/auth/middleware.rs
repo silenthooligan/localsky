@@ -203,6 +203,15 @@ fn is_info(path: &str) -> bool {
     path == "/api/info" || path == "/api/v1/info"
 }
 
+/// Bundled documentation, served same-origin at /docs (see
+/// docs_serve.rs). Public so in-app help is reachable pre-login and on
+/// fresh installs (a locked-out operator still needs the setup guide).
+/// Static doc HTML + assets carry no secrets. Precise prefix match so
+/// only /docs and paths beneath it are exempt, not e.g. /docsomething.
+fn is_docs(path: &str) -> bool {
+    path == "/docs" || path.starts_with("/docs/")
+}
+
 fn is_wizard_surface(path: &str) -> bool {
     path == "/setup"
         || path.starts_with("/setup/")
@@ -372,6 +381,7 @@ pub async fn enforce(
         || is_info(&path)
         || path.starts_with("/ingest")
         || path.starts_with("/api/v1/ingest")
+        || is_docs(&path)
         || (!setup_complete && is_wizard_surface(&path))
     {
         req.extensions_mut().insert(RequestIdentity::Anonymous);
@@ -455,6 +465,13 @@ mod tests {
         assert!(is_health("/api/v1/health"));
         assert!(is_wizard_surface("/setup/controllers"));
         assert!(is_wizard_surface("/api/v1/wizard/draft"));
+        // Bundled docs are public; the exemption is a precise prefix.
+        assert!(is_docs("/docs"));
+        assert!(is_docs("/docs/"));
+        assert!(is_docs("/docs/controllers"));
+        assert!(is_docs("/docs/css/general.css"));
+        assert!(!is_docs("/docsomething"));
+        assert!(!is_docs("/api/docs"));
     }
 
     #[test]

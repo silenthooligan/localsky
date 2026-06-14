@@ -9,6 +9,7 @@ use leptos::prelude::*;
 
 use crate::components::setup::shell::{next_step_href, prev_step_href, SetupFooter};
 use crate::components::sources_form::{kind_pretty, SourceEditorPanel};
+use crate::components::ui::HelpHint;
 
 #[cfg(feature = "hydrate")]
 async fn fetch_draft() -> Option<serde_json::Value> {
@@ -121,7 +122,7 @@ pub fn SourcesStep() -> impl IntoView {
 
     view! {
         <div class="setup-step">
-            <h2 class="setup-step__title">"Where should your weather come from?"</h2>
+            <h2 class="setup-step__title">"Where should your weather come from?"<HelpHint topic="forecast"/></h2>
             <p class="setup-step__body">
                 "LocalSky merges across any number of sources. A live LAN station (Tempest, "
                 "Ecowitt) is the strongest signal; a forecast model (Open-Meteo, NWS) fills the "

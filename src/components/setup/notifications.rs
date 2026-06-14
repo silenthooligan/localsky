@@ -4,7 +4,7 @@
 use leptos::prelude::*;
 
 use crate::components::setup::shell::{next_step_href, prev_step_href, SetupFooter};
-use crate::components::ui::{FormField, Panel, Toggle};
+use crate::components::ui::{FormField, HelpHint, Panel, Toggle};
 
 #[component]
 pub fn NotificationsStep() -> impl IntoView {
@@ -16,7 +16,7 @@ pub fn NotificationsStep() -> impl IntoView {
 
     view! {
         <div class="setup-step">
-            <h2 class="setup-step__title">"Notifications "<span class="setup-step__optional">"optional"</span></h2>
+            <h2 class="setup-step__title">"Notifications "<span class="setup-step__optional">"optional"</span><HelpHint topic="notifications"/></h2>
             <p class="setup-step__body">
                 "Where should LocalSky send zone-start, zone-stop, daily "
                 "verdict, and anomaly events? Every channel is independent; "

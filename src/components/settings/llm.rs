@@ -3,7 +3,7 @@
 use leptos::prelude::*;
 
 use crate::components::settings_ui::SettingsResult;
-use crate::components::ui::{FormField, Panel, SegmentedControl};
+use crate::components::ui::{FormField, Panel, SecretInput, SegmentedControl};
 
 #[component]
 pub fn SettingsLlm() -> impl IntoView {
@@ -149,11 +149,9 @@ pub fn SettingsLlm() -> impl IntoView {
                                 helptext="Required by OpenAI; leave blank for local providers.".to_string()
                                 error=Signal::derive(|| None::<String>)
                             >
-                                <input
-                                    type="password"
-                                    class="ui-input"
-                                    prop:value=move || api_key.get()
-                                    on:input=move |ev| api_key.set(event_target_value(&ev))
+                                <SecretInput
+                                    value=api_key
+                                    on_input=Callback::new(move |v: String| api_key.set(v))
                                 />
                             </FormField>
                         </Show>

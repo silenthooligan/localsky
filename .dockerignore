@@ -1,0 +1,23 @@
+# Keep the Docker build context lean. The Dockerfile copies Cargo.toml/lock,
+# src, style, public, and docs (docs/src is rendered by `mdbook build docs`
+# inside the builder). Everything below is a build/runtime artifact or local
+# state that the image build does not need.
+
+# Rust build output (rebuilt fresh in the builder stage).
+target/
+
+# Locally rendered mdBook output (regenerated in the builder; shipping the
+# stale copy bloats the context and could mask local-vs-CI drift).
+docs/book/
+
+# Runtime state and local data, never part of the image build.
+data/
+keys/
+
+# VCS metadata (CI workflow dirs are tiny and never COPYd by the Dockerfile).
+.git/
+
+# Editor / OS cruft.
+.vscode/
+.idea/
+.DS_Store

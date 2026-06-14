@@ -18,7 +18,9 @@ use leptos::tachys::view::any_view::IntoAny;
 use crate::components::settings_ui::{
     config_kvs, BadgeTone, SettingsBadge, SettingsCard, SettingsLoadError, SettingsResult,
 };
-use crate::components::sources_form::{default_config_text, kind_icon, kind_pretty};
+use crate::components::sources_form::{
+    default_config_text, kind_icon, kind_options, kind_pretty, SourceConfigForm,
+};
 use crate::components::ui::{FormField, Panel, SegmentedControl};
 
 #[component]
@@ -352,27 +354,7 @@ fn SourceForm(
             >
                 <SegmentedControl
                     value=new_kind
-                    options=vec![
-                        ("tempest_udp".into(), "Tempest UDP".into()),
-                        ("tempest_ws".into(), "Tempest cloud".into()),
-                        ("davis_wll".into(), "Davis WLL".into()),
-                        ("ecowitt_local".into(), "Ecowitt LAN".into()),
-                        ("ambient_weather".into(), "AmbientWeather".into()),
-                        ("netatmo".into(), "Netatmo".into()),
-                        ("yolink".into(), "YoLink".into()),
-                        ("lacrosse".into(), "LaCrosse View".into()),
-                        ("tuya_cloud".into(), "Tuya / RainPoint".into()),
-                        ("open_meteo".into(), "Open-Meteo".into()),
-                        ("nws".into(), "NWS (US)".into()),
-                        ("met_norway".into(), "Met.no".into()),
-                        ("openweather".into(), "OpenWeather".into()),
-                        ("pirate_weather".into(), "PirateWeather".into()),
-                        ("mqtt".into(), "MQTT".into()),
-                        ("http_webhook".into(), "HTTP webhook".into()),
-                        ("ha_passthrough".into(), "HA passthrough".into()),
-                        ("blitzortung".into(), "Blitzortung lightning".into()),
-                        ("demo_replay".into(), "Demo".into()),
-                    ]
+                    options=kind_options()
                     aria_label="Source kind".to_string()
                 />
             </FormField>
@@ -411,9 +393,16 @@ fn SourceForm(
                 </label>
             </FormField>
 
+            <Panel title="Connection".to_string()>
+                <SourceConfigForm
+                    config_text=new_config_text
+                    kind=Signal::derive(move || new_kind.get())
+                />
+            </Panel>
+
             <FormField
-                label="Config (JSON)".to_string()
-                helptext="Kind-specific configuration. The template auto-fills when you change Kind above (only while adding).".to_string()
+                label="Config (JSON, advanced — optional)".to_string()
+                helptext="Escape hatch for keys not in the labeled Connection form above (per-device maps, HA field_map, hand-tuning). Stays in sync with the labeled fields both ways. The template auto-fills when you change Kind above (only while adding).".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 <textarea

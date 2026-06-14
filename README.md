@@ -108,6 +108,7 @@ Most home irrigation systems are either dumb timers or cloud tethered too. The c
 ### Controllers and integrations
 
 - **Multi-controller HAL**: OpenSprinkler direct, HA service call, ESPHome native (community), Rachio cloud (planned), DryRun for demo and tests
+- **Flow metering**: reads a controller's flow sensor and shows live GPM during a run, with a capable / connected / live distinction so it only reports a meter you have actually wired
 - **Home Assistant optional**: a native [HACS integration](https://localsky.io/docs/hacs) with zeroconf discovery and sub-second push entities, plus outbound MQTT discovery for integration-free setups
 - **Standalone sensor paths** (no HA needed): MQTT subscribe with JSON-path extraction, Ecowitt gateway local POST, and a generic HTTP webhook ingester for ESPHome or custom scripts
 - **Local LLM advisor**: Ollama auto-detect, llama.cpp, OpenAI-compatible (LM Studio, vLLM, any private gateway). Optional, never required.
@@ -118,7 +119,9 @@ Most home irrigation systems are either dumb timers or cloud tethered too. The c
 - **Metric or imperial units**, system-wide or per field (temperature, wind, rainfall), so the dashboard reads naturally wherever you are
 - **Built-in authentication**: owner account, sessions, and show-once API tokens for integrations; trusted-network CIDRs keep the home LAN frictionless while remote access requires sign-in
 - **Network discovery**: one-click setup finds your Tempest broadcast, Ecowitt gateways, and OpenSprinkler on the LAN; LocalSky announces itself over mDNS so Home Assistant discovers it right back
-- **First-run wizard** + in-app settings; no editing config files by hand (address search, timezone autofill, live controller test + zone import)
+- **Sensors view**: every gateway and probe in one place with live readings, battery, and signal, and one-tap binding of a probe to a zone
+- **First-run wizard** + in-app settings; no editing config files by hand: labeled forms for every weather source, sensor, and controller (address search, timezone autofill, live controller test, zone import, and gateway probe discovery with zone binding)
+- **Documentation built in**: the full handbook ships inside the app at `/docs`, version-matched to your build and working offline or on a LAN with no public domain, with a contextual help popover and a "Read full doc" link on every settings screen
 - **One-file backup and restore**: config plus full history database as a single bundle, downloadable from Settings
 - **Opt-in update check** (off by default; nothing phones home unless you turn it on)
 - **Versioned JSON schema** published at `/api/config/schema` for the settings UI

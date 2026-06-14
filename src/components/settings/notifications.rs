@@ -6,7 +6,7 @@
 use leptos::prelude::*;
 
 use crate::components::settings_ui::SettingsResult;
-use crate::components::ui::{FormField, Panel, Toggle};
+use crate::components::ui::{FormField, Panel, SecretInput, Toggle};
 
 #[component]
 pub fn SettingsNotifications() -> impl IntoView {
@@ -165,11 +165,9 @@ pub fn SettingsNotifications() -> impl IntoView {
                         helptext="Optional.".to_string()
                         error=Signal::derive(|| None::<String>)
                     >
-                        <input
-                            type="password"
-                            class="ui-input"
-                            prop:value=move || mqtt_password.get()
-                            on:input=move |ev| mqtt_password.set(event_target_value(&ev))
+                        <SecretInput
+                            value=mqtt_password
+                            on_input=Callback::new(move |v: String| mqtt_password.set(v))
                         />
                     </FormField>
 

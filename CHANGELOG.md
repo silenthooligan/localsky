@@ -4,6 +4,36 @@ All notable changes to LocalSky are documented here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.4.0-beta.2] - 2026-06-14
+
+This release builds out the irrigation and sensor side and makes the whole product easy to set up and learn: flow metering, a first-class sensors experience, point-and-click setup for every data source, documentation built into the app, and contextual help on every screen.
+
+### Features
+
+- Sensors view: a first-class Sensors page showing every gateway and probe with live readings, battery, and signal, with one place to bind a probe to a zone.
+- Guided sensor setup: the first-run wizard discovers a gateway's probes and binds them to your zones in a single step.
+- Flow metering: LocalSky reads a controller's flow meter and shows live GPM during a run. A clear capable / connected / live distinction means it only reports a meter you actually have.
+- Soil sensors wired end to end: labeled forms for Ecowitt and MQTT soil, and an MQTT probe bound to a zone now feeds the engine's skip decisions directly.
+- Point-and-click setup for every data source: adding or editing any weather or sensor source (host, port, URL, tokens, API keys, model, poll cadence) is now a labeled form, with the raw JSON kept as an advanced escape hatch.
+- LibreWXR radar and smarter forecast sourcing: LibreWXR joins the catalog as a region-aware default radar provider and a forecast source, alongside an Open-Meteo precipitation-forecast layer.
+- Documentation built in: the full handbook ships inside the app and opens same-origin at /docs, so it matches your exact build and works offline or on a LAN with no public domain.
+- Help on every screen: a question-mark popover with a short explainer and a "Read full doc" link now sits on every complex screen, with new pages for radar, restrictions, advanced settings, the devices hub, and manual schedules. The controller picker links straight to the controller docs.
+- Show and hide on secret fields: API keys, tokens, and passwords have a reveal toggle so you can confirm what you pasted.
+
+### Bug fixes
+
+- Flow is no longer reported as present when no meter is connected; the reading now reflects the real device signal.
+- OpenWeather sources save correctly (they previously failed to persist).
+- The radar Layers panel sizes to its content so settings stay visible, and opens and closes more smoothly.
+
+### Security
+
+- Source credentials (app_key, client_secret, refresh_token) are redacted from the config API instead of returned in cleartext. OAuth client IDs are shown as the public identifiers they are.
+
+### API
+
+- Contract 1.11.0: additive `GET /api/v1/sensors/inventory` (gateways, soil probes, flow).
+
 ## [0.4.0-beta.1] - 2026-06-13
 
 Live Radar grows from a single precipitation layer into a full weather map: choose your imagery providers, overlay national alerts and worldwide tropical systems, add community lightning and wind flow, and manage all of it from one Layers panel.

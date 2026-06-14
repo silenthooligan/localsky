@@ -21,7 +21,7 @@ use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
 
 use crate::components::settings_ui::{BadgeTone, SettingsBadge, SettingsResult};
-use crate::components::ui::Panel;
+use crate::components::ui::{HelpHint, Panel};
 
 #[component]
 pub fn SettingsRadar() -> impl IntoView {
@@ -202,7 +202,7 @@ pub fn SettingsRadar() -> impl IntoView {
         <main id="main-content" class="settings-page">
             <header class="settings-page__header">
                 <a class="settings-page__back" href="/settings">"← Settings"</a>
-                <h1 class="settings-page__title">"Radar"</h1>
+                <h1 class="settings-page__title">"Radar"<HelpHint topic="radar"/></h1>
                 <p class="settings-page__subtitle">
                     "Choose which imagery providers the Live Radar map offers "
                     "and which layers start visible. Stored in /data/localsky.toml "
@@ -211,7 +211,7 @@ pub fn SettingsRadar() -> impl IntoView {
                 </p>
             </header>
 
-            <Panel title="Imagery providers".to_string()>
+            <Panel title="Imagery providers".to_string() help_topic="radar">
                 <div class="radar-settings__mode">
                     <span class="radar-settings__mode-label">"Provider menu"</span>
                     <button

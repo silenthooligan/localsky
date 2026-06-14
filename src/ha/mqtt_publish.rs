@@ -220,6 +220,45 @@ impl HaMqttPublisher {
         Ok(())
     }
 
+    /// Publish discovery for the controller's measured flow. Only call this
+    /// when the active controller advertises a flow meter
+    /// (`IrrigationSnapshot.flow_meter`); otherwise the entity would render
+    /// "unknown" forever on non-flow setups. Object id `flow` aligns with
+    /// the OpenSprinkler integration's `sensor.sprinkler_flow` naming.
+    pub async fn publish_flow_discovery(&self) -> Result<(), MqttPublishError> {
+        let entity_flow = DiscoveryEntity {
+            name: "LocalSky flow".into(),
+            unique_id: format!("{}_flow_gpm", self.node_id),
+            state_topic: self.state_topic("sensor", "flow"),
+            unit_of_measurement: Some("gpm".into()),
+            device_class: Some("volume_flow_rate".into()),
+            state_class: Some("measurement".into()),
+            icon: Some("mdi:water-pump".into()),
+            device: self.device(),
+            attribution: "LocalSky".into(),
+        };
+        let topic = self.config_topic("sensor", "flow");
+        let payload = serde_json::to_string(&entity_flow)
+            .map_err(|e| MqttPublishError::Client(format!("serialize: {e}")))?;
+        self.client
+            .publish(topic, QoS::AtLeastOnce, true, payload)
+            .await?;
+        Ok(())
+    }
+
+    /// Publish the current measured flow value (gpm). `None` (no meter /
+    /// no reading) publishes nothing so the entity holds its last value
+    /// rather than flapping to "unknown".
+    pub async fn publish_flow_state(&self, flow_gpm: Option<f64>) -> Result<(), MqttPublishError> {
+        if let Some(v) = flow_gpm {
+            let topic = self.state_topic("sensor", "flow");
+            self.client
+                .publish(topic, QoS::AtLeastOnce, true, format!("{v:.1}"))
+                .await?;
+        }
+        Ok(())
+    }
+
     pub async fn publish_zone_state(
         &self,
         zone_slug: &str,

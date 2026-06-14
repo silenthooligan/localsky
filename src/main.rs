@@ -318,6 +318,10 @@ async fn main() -> anyhow::Result<()> {
         // so manual zone Run/Stop/StopAll dispatch through the same
         // adapters the schedulers use (native installs have no HA scripts).
         localsky::api::irrigation::set_dispatch_handles(registry.clone(), runs_store.clone());
+        // Wire the config store + registry into GET /api/v1/sensors/inventory
+        // so the unified Sensors view can resolve zone bindings, per-source
+        // labels, and per-controller flow-meter capability + live GPM.
+        localsky::api::sensors::set_inventory_handles(cfg_store.clone(), registry.clone());
 
         // Shadow mode: when authoritative source is HA and shadow_native is
         // on, build the native snapshot alongside it for comparison via
@@ -431,6 +435,11 @@ async fn main() -> anyhow::Result<()> {
         .context("read Leptos configuration (check Cargo.toml [package.metadata.leptos] and LEPTOS_* env vars)")?;
     let leptos_options = conf.leptos_options;
     let addr = leptos_options.site_addr;
+    // Static-site root the Leptos fallback resolves against
+    // (LEPTOS_SITE_ROOT; "site" in-container -> /app/site, "target/site"
+    // in dev). The bundled docs live under <site_root>/docs; capture the
+    // string here because leptos_options is moved into the router state.
+    let site_root = leptos_options.site_root.to_string();
     let routes = generate_route_list(App);
 
     // LLM advisor: wraps an OpenAI-compatible client + a TTL cache
@@ -771,7 +780,10 @@ async fn main() -> anyhow::Result<()> {
         .nest(
             "/api/v1/radar",
             api::windgrid::router(api::windgrid::WindGridState::new(Some(cfg_store.clone())))
-                .merge(api::tropical::router(api::tropical::TropicalState::new())),
+                .merge(api::tropical::router(api::tropical::TropicalState::new()))
+                .merge(api::precip::router(api::precip::PrecipState::new(Some(
+                    cfg_store.clone(),
+                )))),
         )
         .nest(
             "/api/v1/backup",
@@ -793,6 +805,17 @@ async fn main() -> anyhow::Result<()> {
             "/site/photos",
             tower_http::services::ServeDir::new(&photos_dir),
         )
+        // Bundled documentation, served same-origin so in-app help is
+        // version-matched to the running build and works offline / on
+        // LAN-only / air-gapped installs. The Dockerfile runs
+        // `mdbook build docs` and copies the output into
+        // <site_root>/docs; this router resolves extensionless
+        // /docs/<slug> -> <slug>.html (try-files), matching what
+        // crate::docs::doc_url emits and what the public Caddy site
+        // serves. Mounted ahead of the Leptos SSR fallback so /docs/*
+        // never resolves to the app shell. Ingress strips the prefix
+        // before forwarding, so the server route stays plain /docs.
+        .nest("/docs", localsky::docs_serve::router(&site_root))
         // Force revalidation on every request. Without this, browsers
         // (notably mobile Chrome) apply heuristic caching to /pkg/*.css
         // and serve a stale stylesheet from a previous deploy. With

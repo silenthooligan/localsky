@@ -55,6 +55,14 @@ pub fn RunningBanner(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             "running".to_string()
         };
 
+        // Live measured flow from the controller's own flow sensor. Only
+        // shown when the controller advertises a meter AND reports a value,
+        // so non-flow setups render nothing here.
+        let flow_label = (s.flow_meter)
+            .then_some(s.flow_gpm)
+            .flatten()
+            .map(|gpm| format!("Flow: {gpm:.1} gpm"));
+
         view! {
             <div class="running-banner" role="status" aria-live="polite">
                 <div class="running-banner-pulse" aria-hidden="true"></div>
@@ -68,6 +76,9 @@ pub fn RunningBanner(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                             String::new()
                         }}
                     </div>
+                    {flow_label.map(|l| view! {
+                        <div class="running-banner-flow">{l}</div>
+                    })}
                 </div>
                 <button class="running-banner-stop btn-clay btn-clay-hot" on:click=on_stop>
                     {if count > 1 { "STOP ALL" } else { "STOP" }}

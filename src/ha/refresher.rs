@@ -1107,9 +1107,9 @@ async fn refresh_once_native(
     // directly (no HA binary_sensors). Best-effort: a controller that can't
     // report leaves running=false + running_known=false; a status() error
     // is swallowed so a flaky controller never stalls the refresh.
-    let (running, master, water) = native_controller_state(controllers).await;
+    let cs = native_controller_state(controllers).await;
     for z in snap.zones.iter_mut() {
-        match running.get(&z.slug) {
+        match cs.running.get(&z.slug) {
             Some(r) => {
                 z.running = *r;
                 z.running_known = true;
@@ -1122,8 +1122,12 @@ async fn refresh_once_native(
     }
     // Default to enabled / full when no controller reports, so a missing
     // readback never silently suppresses watering.
-    snap.master_enable = master.unwrap_or(true);
-    snap.water_level_pct = water.unwrap_or(100.0);
+    snap.master_enable = cs.master.unwrap_or(true);
+    snap.water_level_pct = cs.water.unwrap_or(100.0);
+    // Flow: capability flag + live GPM straight from the controller. Stays
+    // None when no meter so the UI / HA surface nothing for non-flow setups.
+    snap.flow_meter = cs.flow_meter;
+    snap.flow_gpm = cs.flow_gpm;
 
     // A5: native run-times. Without HA there's no Smart Irrigation bucket,
     // so size each zone's run from LocalSky's own weekly-budget allocator
@@ -1169,16 +1173,22 @@ async fn refresh_once_native(
 /// Query every configured controller once for live state and merge it:
 /// per-zone running (by slug), plus the first reported master-enable +
 /// water-level. Errors are swallowed (best-effort, never fails a refresh).
-async fn native_controller_state(
-    controllers: &ControllerRegistry,
-) -> (HashMap<String, bool>, Option<bool>, Option<f64>) {
+async fn native_controller_state(controllers: &ControllerRegistry) -> NativeControllerState {
     let mut running: HashMap<String, bool> = HashMap::new();
     let mut master: Option<bool> = None;
     let mut water: Option<f64> = None;
+    let mut flow_gpm: Option<f64> = None;
+    let mut flow_meter = false;
     for id in controllers.ids() {
         let Some(c) = controllers.get(&id) else {
             continue;
         };
+        // The capability flag comes from supports(), not status(), so a
+        // controller with a meter that momentarily reports flow_gpm=None
+        // still advertises the capability.
+        if c.supports().flow_meter {
+            flow_meter = true;
+        }
         if let Ok(st) = c.status().await {
             for z in st.zone_states {
                 running.insert(z.slug, z.running);
@@ -1189,9 +1199,31 @@ async fn native_controller_state(
             if water.is_none() {
                 water = st.water_level_pct;
             }
+            // First controller to report measured flow wins (matches the
+            // master/water "first non-None" merge above).
+            if flow_gpm.is_none() {
+                flow_gpm = st.flow_gpm;
+            }
         }
     }
-    (running, master, water)
+    NativeControllerState {
+        running,
+        master,
+        water,
+        flow_gpm,
+        flow_meter,
+    }
+}
+
+/// Merged live readback from all configured controllers, gathered once per
+/// native refresh. Best-effort: a controller that can't report contributes
+/// nothing rather than failing the refresh.
+struct NativeControllerState {
+    running: HashMap<String, bool>,
+    master: Option<bool>,
+    water: Option<f64>,
+    flow_gpm: Option<f64>,
+    flow_meter: bool,
 }
 
 /// Run the decision engine against `inputs` and write the results into the
@@ -2105,5 +2137,77 @@ mod budget_default_tests {
                 "shrub/garden/bed slug {slug} must reproduce the legacy 0.5\"/1 default"
             );
         }
+    }
+}
+
+/// End-to-end binding: a zone-bound MQTT soil subscription lands in
+/// sensor_history under the canonical `soilmoisture_<zone_slug>` key (the
+/// bus recorder does this from a KeyedReading event), and a zone whose
+/// `soil_sensor_id` points at `source:<mqtt_src>:soilmoisture_<zone_slug>`
+/// resolves it through the SAME `resolve_soil_pct` path native channels use.
+/// This is the engine half of the MQTT-soil fix; mqtt_subscribe.rs covers
+/// the parse->emit half.
+#[cfg(test)]
+mod mqtt_soil_binding_tests {
+    use super::resolve_soil_pct;
+    use crate::persistence::runner;
+    use crate::persistence::SensorHistoryStore;
+    use crate::sources::bus_recorder::zone_soil_key;
+    use rusqlite::Connection;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    async fn fresh_store() -> SensorHistoryStore {
+        let mut c = Connection::open_in_memory().unwrap();
+        runner::run(&mut c).unwrap();
+        SensorHistoryStore::new(Arc::new(Mutex::new(c)))
+    }
+
+    #[tokio::test]
+    async fn zone_bound_mqtt_soil_resolves_to_zone_reading() {
+        let store = fresh_store().await;
+        // Simulate the bus recorder persisting a KeyedReading from a
+        // zone-bound MQTT soil subscription on source "garden_mqtt".
+        let key = zone_soil_key("back_yard");
+        assert_eq!(key, "soilmoisture_back_yard");
+        store
+            .insert(crate::persistence::sensor_history::Reading {
+                epoch: 1_700_000_000,
+                source_id: "garden_mqtt".into(),
+                key: key.clone(),
+                value: 37.0,
+            })
+            .await
+            .unwrap();
+
+        // The zone binds the canonical channel id and resolves it exactly
+        // like a native `source:` channel.
+        let spec = format!("source:garden_mqtt:{key}");
+        let map: HashMap<String, serde_json::Value> = HashMap::new();
+        let pct = resolve_soil_pct(Some(&spec), &map, Some(&store)).await;
+        assert_eq!(pct, Some(37.0));
+    }
+
+    #[tokio::test]
+    async fn zone_bound_mqtt_soil_is_discoverable_as_soil_channel() {
+        let store = fresh_store().await;
+        store
+            .insert(crate::persistence::sensor_history::Reading {
+                epoch: 1_700_000_100,
+                source_id: "garden_mqtt".into(),
+                key: zone_soil_key("front_yard"),
+                value: 52.0,
+            })
+            .await
+            .unwrap();
+        // The soil-channel discovery (LIKE 'soilmoisture%') must surface it,
+        // so it shows up in /sensors/soil + the inventory + the picker.
+        let chans = store.soil_channels().await.unwrap();
+        let found = chans
+            .iter()
+            .find(|r| r.source_id == "garden_mqtt" && r.key == "soilmoisture_front_yard")
+            .expect("zone-bound MQTT soil channel is discoverable");
+        assert_eq!(found.value, 52.0);
     }
 }

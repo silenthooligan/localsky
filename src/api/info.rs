@@ -38,7 +38,10 @@ use serde::{Deserialize, Serialize};
 /// cyclone tracking: all verified agency feeds, NHC/CPHC + JMA +
 /// JTWC, normalized server-side into one GeoJSON FeatureCollection
 /// with per-storm term/agency/basin properties and per-source health).
-pub const API_VERSION: &str = "1.10.0";
+/// 1.11.0 (additive): GET /sensors/inventory (gateways, soil probes,
+/// and flow status: capable vs connected vs live GPM) backing the
+/// Sensors view and the wizard sensor step.
+pub const API_VERSION: &str = "1.11.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {

@@ -206,7 +206,10 @@ fn redact_secrets(v: &mut serde_json::Value) {
                     || lk == "webhook_url"
                     || lk == "token"
                     || lk == "shared_secret"
-                    || lk == "access_token";
+                    || lk == "access_token"
+                    || lk == "app_key"
+                    || lk == "client_secret"
+                    || lk == "refresh_token";
                 if is_secret {
                     if let Value::String(s) = val {
                         if !s.is_empty() {
@@ -684,6 +687,76 @@ mod tests {
             "deletion must not hand mqtt the deleted entry's secret"
         );
         // And nothing still carries the sentinel.
+        let mut leftover = Vec::new();
+        remaining_sentinels(&candidate, "$", &mut leftover);
+        assert!(leftover.is_empty(), "leftover sentinels: {leftover:?}");
+    }
+
+    #[test]
+    fn redact_and_roundtrip_new_source_oauth_secrets() {
+        // The OAuth-style source secrets (Ambient Weather app_key, Netatmo /
+        // YoLink / Tuya client_secret + refresh_token) must be redacted on the
+        // GET path and round-trip back on a PUT that sends the sentinel
+        // unchanged. client_id is a PUBLIC identifier and must NOT be redacted.
+        let original = serde_json::json!({
+            "schema_version": 1,
+            "sources": [{
+                "id": "netatmo_main",
+                "priority": 40,
+                "enabled": true,
+                "kind": "netatmo",
+                "config": {
+                    "client_id": "63abc_public_client_id",
+                    "client_secret": "very_secret_client_secret_value",
+                    "refresh_token": "rt_super_secret_refresh_token",
+                    "device_id": "70:ee:50:00:11:22"
+                }
+            }, {
+                "id": "ambient_main",
+                "priority": 50,
+                "enabled": true,
+                "kind": "ambient_weather",
+                "config": {
+                    "app_key": "ambient_secret_app_key_zzz",
+                    "api_key": "ambient_secret_api_key_yyy",
+                    "mac_address": "AA:BB:CC:DD:EE:FF"
+                }
+            }]
+        });
+
+        // GET path: redaction hides every new secret but leaves client_id +
+        // non-secret fields visible.
+        let mut redacted = original.clone();
+        redact_secrets(&mut redacted);
+        let s = serde_json::to_string(&redacted).unwrap();
+        assert!(
+            !s.contains("very_secret_client_secret_value"),
+            "client_secret leaked"
+        );
+        assert!(
+            !s.contains("rt_super_secret_refresh_token"),
+            "refresh_token leaked"
+        );
+        assert!(!s.contains("ambient_secret_app_key_zzz"), "app_key leaked");
+        assert!(!s.contains("ambient_secret_api_key_yyy"), "api_key leaked");
+        // client_id is public: it must survive verbatim.
+        assert!(
+            s.contains("63abc_public_client_id"),
+            "client_id must NOT be redacted (public identifier)"
+        );
+        assert!(
+            s.contains("70:ee:50:00:11:22"),
+            "device_id unexpectedly redacted"
+        );
+
+        // PUT path: client sends the redacted JSON unchanged; unredact restores
+        // every stored secret by sentinel match, leaving no sentinel behind.
+        let mut candidate = redacted.clone();
+        unredact_secrets(&mut candidate, &original);
+        assert_eq!(
+            candidate, original,
+            "sentinel round-trip failed to restore new source secrets"
+        );
         let mut leftover = Vec::new();
         remaining_sentinels(&candidate, "$", &mut leftover);
         assert!(leftover.is_empty(), "leftover sentinels: {leftover:?}");

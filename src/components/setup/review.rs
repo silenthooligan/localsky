@@ -98,6 +98,24 @@ fn summary_rows(draft: &serde_json::Value) -> Vec<(&'static str, String, &'stati
         format!("{}: {}", zones.len(), names.join(", "))
     };
 
+    // Soil-probe bindings: how many zones carry a non-null soil_sensor_id.
+    let bound_count = zones
+        .values()
+        .filter(|z| {
+            z.get("soil_sensor_id")
+                .map(|v| v.is_string())
+                .unwrap_or(false)
+        })
+        .count();
+    let sensors_text = if bound_count == 0 {
+        "None bound (weather-model only; bind probes in Settings -> Sensors any time)".into()
+    } else {
+        format!(
+            "{bound_count} zone{} bound to a soil probe",
+            if bound_count == 1 { "" } else { "s" }
+        )
+    };
+
     let llm = cfg.get("llm").cloned().unwrap_or(serde_json::Value::Null);
     let llm_text = if llm.is_null() {
         "Disabled".into()
@@ -140,6 +158,7 @@ fn summary_rows(draft: &serde_json::Value) -> Vec<(&'static str, String, &'stati
         ("Weather sources", sources_text, "/setup/sources"),
         ("Controllers", controllers_text, "/setup/controllers"),
         ("Zones", zones_text, "/setup/zones"),
+        ("Soil probes", sensors_text, "/setup/sensors"),
         ("LLM advisor", llm_text, "/setup/llm"),
         ("Notifications", notif_text, "/setup/notifications"),
     ]

@@ -20,7 +20,7 @@ use serde::Deserialize;
 use crate::components::controllers_form::ControllerEditorPanel;
 use crate::components::settings_ui::{BadgeTone, SettingsBadge, SettingsCard};
 use crate::components::sources_form::SourceEditorPanel;
-use crate::components::ui::Panel;
+use crate::components::ui::{HelpHint, Panel};
 
 /// Frontend mirror of `crate::devices::Device`. `kind` and `origin` arrive as
 /// the snake_case strings the API serializes; `source_id` backlinks a native
@@ -391,9 +391,21 @@ pub fn SettingsDevices() -> impl IntoView {
         Sel::List => view! {
             <Panel>
                 <div class="settings-section-head">
-                    <h2 class="settings-section-head__title">"Devices"</h2>
+                    <h2 class="settings-section-head__title">"Devices"<HelpHint topic="devices"/></h2>
                     <p class="settings-section-head__sub">
                         "Every gateway, controller, sensor, and service LocalSky uses, from both its own sources and Home Assistant. Native devices are editable here; Home Assistant devices are managed in HA and mirror in automatically."
+                    </p>
+                    <p class="settings-section-head__sub">
+                        "Three tiers: "<strong>"controllers"</strong>" open valves, "
+                        <strong>"sources"</strong>" (a weather station, an Ecowitt gateway, a "
+                        "forecast, an MQTT broker, or Home Assistant) bring data in, and "
+                        <strong>"sensors"</strong>" are the probes and meters those carry. Add a "
+                        "source here and its sensors appear under Settings, Sensors. "
+                        <a href=crate::docs::doc_url("first-soil-sensor")
+                            target="_blank" rel="noopener noreferrer"
+                            style="color: var(--accent)">
+                            "Add your first soil sensor →"
+                        </a>
                     </p>
                 </div>
                 <div class="device-add-bar">

@@ -5,7 +5,7 @@ use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
 
 use crate::app::NerdMode;
-use crate::components::ui::{Panel, Toggle};
+use crate::components::ui::{HelpHint, Panel, Toggle};
 
 #[component]
 pub fn SettingsAdvanced() -> impl IntoView {
@@ -170,7 +170,7 @@ pub fn SettingsAdvanced() -> impl IntoView {
         <main id="main-content" class="settings-page">
             <header class="settings-page__header">
                 <a class="settings-page__back" href="/settings">"← Settings"</a>
-                <h1 class="settings-page__title">"Advanced"</h1>
+                <h1 class="settings-page__title">"Advanced"<HelpHint topic="advanced"/></h1>
                 <p class="settings-page__subtitle">
                     "Debug visibility and rollback. None of these change the "
                     "engine's behavior; they just expose what's already "

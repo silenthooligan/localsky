@@ -13,7 +13,7 @@ use leptos::tachys::view::any_view::IntoAny;
 use crate::components::settings_ui::{
     BadgeTone, SettingsBadge, SettingsCard, SettingsKv, SettingsLoadError, SettingsResult,
 };
-use crate::components::ui::{FormField, Panel, PhotoField, SegmentedControl};
+use crate::components::ui::{FormField, HelpHint, Panel, PhotoField, SegmentedControl};
 use crate::docs::doc_url;
 
 #[component]
@@ -300,7 +300,7 @@ pub fn SettingsZones() -> impl IntoView {
         <main id="main-content" class="settings-page">
             <header class="settings-page__header">
                 <a class="settings-page__back" href="/settings">"← Settings"</a>
-                <h1 class="settings-page__title">"Zones"</h1>
+                <h1 class="settings-page__title">"Zones"<HelpHint topic="zone-math"/></h1>
                 <p class="settings-page__subtitle">
                     "One zone = one chunk of yard tied to one valve. Pick grass species + soil texture + measured precip rate; the engine computes ETc, soil bucket, and runtime from there. "
                     "See "
@@ -801,7 +801,7 @@ fn ZoneForm(
 
             <FormField
                 label="Soil moisture sensor (optional)".to_string()
-                helptext="Assign a sensor to drive this zone's skip decision. Pick a discovered local channel, or type an HA entity (ha:sensor.x). Blank = modeled bucket only.".to_string()
+                helptext="Assign a sensor to drive this zone's skip decision. The dropdown lists every discovered soil channel, both Home Assistant entities and LocalSky native sources (incl. a zone-bound MQTT probe's channel). Or type an id below. Blank = modeled bucket only.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 <select
@@ -847,11 +847,16 @@ fn ZoneForm(
                         </div>
                     }.into_any()
                 }}
+                // One picker: the select above already lists BOTH Home
+                // Assistant soil entities (ha:*) and LocalSky native channels
+                // (source:*) from /sensors/soil, so there is no separate HA
+                // picker. This input is the escape hatch for an id not yet
+                // discovered (e.g. an HA entity HA hasn't reported on yet).
                 <input
                     type="text"
                     class="ui-input"
                     style="margin-top: 0.4rem"
-                    placeholder="or ha:sensor.back_yard_soil_moisture"
+                    placeholder="or type any id (e.g. ha:sensor.back_yard_soil_moisture)"
                     prop:value=move || new_soil_sensor.get()
                     on:input=move |ev| new_soil_sensor.set(event_target_value(&ev))
                 />

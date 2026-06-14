@@ -173,6 +173,35 @@ struct JcResponse {
     fpr1: Option<u64>,
 }
 
+/// Subset of the controller options endpoint (/jo). `sn1t` is the SENSOR TYPE
+/// for sensor input 1. The OS firmware API enumerates types as: 0 = none,
+/// 1 = rain, 2 = flow, 3 = soil, 240 = program switch. A value of 2 is the
+/// controller's own declaration that a FLOW sensor is wired and configured,
+/// i.e. the real "connected" signal (capability is type-level and hardcoded;
+/// this is per device). OS firmware only permits a flow sensor on input 1
+/// ("sensor2 cannot be flow sensor"), so input 2's type never indicates flow
+/// and is not parsed. Defaults to 0 (no sensor) when absent.
+#[derive(Debug, Deserialize)]
+struct JoResponse {
+    #[serde(default)]
+    sn1t: u32,
+}
+
+impl JoResponse {
+    /// Whether the controller's options report a flow sensor wired in. OS only
+    /// allows flow on sensor input 1, so this is sensor-1-only. `flcrt` is the
+    /// live click-rate from /jc, present only when the firmware is actually
+    /// surfacing flow telemetry; requiring it corroborates the option so a
+    /// stale/mis-saved sensor type alone doesn't fabricate a connected sensor.
+    fn flow_connected(&self, flcrt: Option<u64>) -> bool {
+        self.sn1t == OS_SENSOR_TYPE_FLOW && flcrt.is_some()
+    }
+}
+
+/// OS sensor-type code for a flow sensor (per the firmware API: 0=none,
+/// 1=rain, 2=flow, 3=soil, 240=program switch).
+const OS_SENSOR_TYPE_FLOW: u32 = 2;
+
 #[derive(Debug, Deserialize)]
 struct CmResponse {
     /// OS returns "result":1 on success.
@@ -296,6 +325,21 @@ impl IrrigationController for OpenSprinklerDirect {
             }
             _ => None,
         };
+        // Flow PRESENCE (connected) is a per-device fact, not a capability:
+        // read the controller's configured sensor types from /jo and treat a
+        // flow type (== 2) on sensor input 1 as "a flow sensor is wired in". OS
+        // firmware only permits flow on input 1 ("sensor2 cannot be flow
+        // sensor"), so input 2 is never a flow signal. Corroborate with a
+        // present click-rate (flcrt is Some only when the firmware is actually
+        // surfacing flow telemetry) so a stale or mis-saved option alone
+        // doesn't fabricate a sensor. The /jo read is best-effort: a failure
+        // here must not fail the whole status read, so a controller that won't
+        // answer /jo just reports flow_connected=false.
+        let flow_connected = self
+            .get_json::<JoResponse>("/jo", &[])
+            .await
+            .map(|jo| jo.flow_connected(r.flcrt))
+            .unwrap_or(false);
         Ok(ControllerStatus {
             reachable: true,
             master_enabled: Some(r.en == 1),
@@ -304,6 +348,7 @@ impl IrrigationController for OpenSprinklerDirect {
             current_program: None,
             zone_states,
             flow_gpm,
+            flow_connected,
             firmware: r.fwv.map(|v| v.to_string()),
         })
     }
@@ -453,6 +498,31 @@ mod tests {
                 }
                 other => panic!("expected Remote, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn flow_connected_requires_flow_on_sensor1_and_a_click_rate() {
+        // sensor input 1 set to flow (2) + a live click-rate -> connected.
+        let jo = JoResponse {
+            sn1t: OS_SENSOR_TYPE_FLOW,
+        };
+        assert!(jo.flow_connected(Some(0)), "flcrt present (even 0) -> on");
+        assert!(jo.flow_connected(Some(42)));
+        // Same flow config but no click-rate surfaced -> not connected.
+        assert!(
+            !jo.flow_connected(None),
+            "flcrt absent must not report connected"
+        );
+        // Non-flow sensor type on input 1 is never a flow sensor, even with a
+        // click-rate present.
+        for t in [0u32, 1, 3, 240] {
+            let jo = JoResponse { sn1t: t };
+            assert!(
+                !jo.flow_connected(Some(42)),
+                "sn1t={t} is not a flow sensor"
+            );
+            assert!(!jo.flow_connected(None));
         }
     }
 

@@ -406,6 +406,11 @@ pub fn App() -> impl IntoView {
                             <Title text="LocalSky · Devices"/>
                             <crate::components::settings::SettingsDevices/>
                         }/>
+                    <Route path=path!("/settings/sensors")
+                        view=|| view! {
+                            <Title text="LocalSky · Sensors"/>
+                            <crate::components::settings::SettingsSensors/>
+                        }/>
                     <Route path=path!("/settings/zones")
                         view=|| view! {
                             <Title text="LocalSky · Zones"/>

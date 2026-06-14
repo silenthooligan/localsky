@@ -301,26 +301,26 @@ mod tests {
     async fn user_lifecycle() {
         let s = store();
         assert_eq!(s.user_count().await.unwrap(), 0);
-        let uid = s.create_user("Erik", "hunter22valid").await.unwrap();
+        let uid = s.create_user("Owner", "hunter22valid").await.unwrap();
         assert_eq!(s.user_count().await.unwrap(), 1);
         // Username normalized to lowercase; duplicate rejected.
-        assert!(s.create_user("erik", "another-pass").await.is_err());
+        assert!(s.create_user("owner", "another-pass").await.is_err());
         // Login works case-insensitively on username, exact on password.
-        assert_eq!(s.verify_login("ERIK", "hunter22valid").await.unwrap(), uid);
-        assert!(s.verify_login("erik", "wrong").await.is_err());
+        assert_eq!(s.verify_login("OWNER", "hunter22valid").await.unwrap(), uid);
+        assert!(s.verify_login("owner", "wrong").await.is_err());
         assert!(s.verify_login("ghost", "hunter22valid").await.is_err());
     }
 
     #[tokio::test]
     async fn weak_password_rejected() {
         let s = store();
-        assert!(s.create_user("erik", "short").await.is_err());
+        assert!(s.create_user("owner", "short").await.is_err());
     }
 
     #[tokio::test]
     async fn session_lifecycle() {
         let s = store();
-        let uid = s.create_user("erik", "hunter22valid").await.unwrap();
+        let uid = s.create_user("owner", "hunter22valid").await.unwrap();
         let cookie = s.create_session(uid, 30, None).await.unwrap();
         assert!(cookie.starts_with("lss_"));
         assert_eq!(s.validate_session(&cookie, 30).await.unwrap(), Some(uid));
@@ -331,7 +331,7 @@ mod tests {
     #[tokio::test]
     async fn api_token_lifecycle() {
         let s = store();
-        let uid = s.create_user("erik", "hunter22valid").await.unwrap();
+        let uid = s.create_user("owner", "hunter22valid").await.unwrap();
         let tok = s.create_api_token(uid, "hacs").await.unwrap();
         assert!(tok.starts_with("lsk_"));
         assert_eq!(s.validate_api_token(&tok).await.unwrap(), Some(uid));

@@ -16,7 +16,7 @@ use leptos::tachys::view::any_view::IntoAny;
 use crate::components::settings_ui::{
     BadgeTone, SettingsBadge, SettingsCard, SettingsKv, SettingsResult,
 };
-use crate::components::ui::{FormField, Panel, SegmentedControl, Toggle};
+use crate::components::ui::{FormField, HelpHint, Panel, SegmentedControl, Toggle};
 
 /// Replace em-dashes, en-dashes, and the Latin-1-decoded UTF-8 mojibake
 /// of either with a plain hyphen so old toml entries written before the
@@ -168,7 +168,7 @@ pub fn SettingsSchedules() -> impl IntoView {
         <main id="main-content" class="settings-page">
             <header class="settings-page__header">
                 <a class="settings-page__back" href="/settings">"Back to Settings"</a>
-                <h1 class="settings-page__title">"Manual schedules"</h1>
+                <h1 class="settings-page__title">"Manual schedules"<HelpHint topic="schedules"/></h1>
                 <p class="settings-page__subtitle">
                     "Fire a zone at a fixed weekday + time, on top of (or instead of) "
                     "the smart-irrigation auto-mode. Watering restrictions apply to "

@@ -10,7 +10,7 @@
 use leptos::prelude::*;
 
 use crate::components::settings_ui::SettingsResult;
-use crate::components::ui::{Button, FormField, Icon, Panel, SkeletonRows};
+use crate::components::ui::{Button, FormField, Icon, Panel, SecretInput, SkeletonRows};
 
 #[cfg(feature = "hydrate")]
 async fn fetch_json(url: &str) -> Option<serde_json::Value> {
@@ -270,9 +270,10 @@ pub fn SettingsAccount() -> impl IntoView {
                                     helptext="8+ characters.".to_string()
                                     error=Signal::derive(|| None::<String>)
                                 >
-                                    <input type="password" class="ui-input" autocomplete="new-password"
-                                        prop:value=move || password.get()
-                                        on:input=move |ev| password.set(event_target_value(&ev))/>
+                                    <SecretInput
+                                        value=password
+                                        autocomplete="new-password"
+                                        on_input=Callback::new(move |v: String| password.set(v))/>
                                 </FormField>
                                 <div class="settings-form-actions" style="justify-content:flex-start">
                                     <Button

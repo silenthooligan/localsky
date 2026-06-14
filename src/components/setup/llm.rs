@@ -6,7 +6,7 @@
 use leptos::prelude::*;
 
 use crate::components::setup::shell::{next_step_href, prev_step_href, SetupFooter};
-use crate::components::ui::{FormField, Panel, SegmentedControl};
+use crate::components::ui::{FormField, HelpHint, Panel, SecretInput, SegmentedControl};
 
 #[cfg(feature = "hydrate")]
 async fn fetch_draft() -> Option<serde_json::Value> {
@@ -250,7 +250,7 @@ pub fn LlmStep() -> impl IntoView {
 
     view! {
         <div class="setup-step">
-            <h2 class="setup-step__title">"AI advisor "<span class="setup-step__optional">"optional"</span></h2>
+            <h2 class="setup-step__title">"AI advisor "<span class="setup-step__optional">"optional"</span><HelpHint topic="llm"/></h2>
             <p class="setup-step__body">
                 "LocalSky can call an LLM to explain today's verdict in plain "
                 "English and flag anomalies in the snapshot. The deterministic "
@@ -313,12 +313,10 @@ pub fn LlmStep() -> impl IntoView {
                     helptext="Required by OpenAI; leave blank for local Ollama / LM Studio.".to_string()
                     error=Signal::derive(|| None::<String>)
                 >
-                    <input
-                        type="password"
-                        class="ui-input"
-                        prop:value=move || api_key.get()
-                        on:input=move |ev| api_key.set(event_target_value(&ev))
-                        on:change=move |_| persist_now()
+                    <SecretInput
+                        value=api_key
+                        on_input=Callback::new(move |v: String| api_key.set(v))
+                        on_change=Callback::new(move |_: String| persist_now())
                     />
                 </FormField>
             </Show>

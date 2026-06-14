@@ -15,7 +15,7 @@ use crate::components::controllers_form::ControllerEditorPanel;
 use crate::components::settings_ui::{
     config_kvs, BadgeTone, SettingsBadge, SettingsCard, SettingsLoadError, SettingsResult,
 };
-use crate::components::ui::Panel;
+use crate::components::ui::{HelpHint, Panel};
 use crate::docs::doc_url;
 
 #[component]
@@ -172,7 +172,7 @@ pub fn SettingsControllers() -> impl IntoView {
         <main id="main-content" class="settings-page">
             <header class="settings-page__header">
                 <a class="settings-page__back" href="/settings">"← Settings"</a>
-                <h1 class="settings-page__title">"Irrigation controllers"</h1>
+                <h1 class="settings-page__title">"Irrigation controllers"<HelpHint topic="controllers"/></h1>
                 <p class="settings-page__subtitle">
                     "Which hardware fires your valves. Exactly one must be default; new zones inherit that. "
                     "See "

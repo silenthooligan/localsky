@@ -209,7 +209,12 @@ mod tests {
         assert_eq!(
             radar_catalog::providers_json(&effective),
             concat!(
-                "[{\"id\":\"rainviewer\",\"label\":\"RainViewer (global composite)\",",
+                "[{\"id\":\"librewxr\",\"label\":\"Radar + nowcast (LibreWXR)\",",
+                "\"kind\":\"rainviewer\",\"coverage\":\"librewxr\",",
+                "\"coverageLabel\":\"Radar + 60 min nowcast (US, Canada, Europe, Japan, Taiwan, SE Asia)\",",
+                "\"url\":\"https://api.librewxr.net/public/weather-maps.json\",",
+                "\"attribution\":\"LibreWXR\",\"crossfade\":false},",
+                "{\"id\":\"rainviewer\",\"label\":\"RainViewer (global composite)\",",
                 "\"kind\":\"rainviewer\",\"coverage\":\"global\",\"coverageLabel\":\"Global\",",
                 "\"url\":\"https://api.rainviewer.com/public/weather-maps.json\",",
                 "\"attribution\":\"RainViewer.com\",\"crossfade\":false},",
@@ -229,7 +234,7 @@ mod tests {
         );
         assert_eq!(
             default_layers_attr(&inputs.default_layers),
-            "rainviewer,nexrad_iem,lightning_tempest"
+            "librewxr,rainviewer,nexrad_iem,lightning_tempest"
         );
     }
 

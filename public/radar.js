@@ -9,7 +9,7 @@
 //                          drives the animated frame machinery; kind "wms"
 //                          becomes an L.tileLayer.wms overlay.
 //   data-radar-features  : feature descriptors. Known ids:
-//                          nowcast          RainViewer forecast frames
+//                          precip_forecast  Open-Meteo precip forecast
 //                          warnings_us      NWS active-alert polygons
 //                          hurricanes       tropical cyclones, all basins
 //                                           (id kept for pref persistence;
@@ -63,6 +63,7 @@
   var hurricanePollTimer = null;
   var windPollTimer = null;
   var windMoveTimer = null;
+  var precipMoveTimer = null;
   var animationTimer = null;
 
   // One console.warn per failed source per page lifetime (not per init):
@@ -82,6 +83,7 @@
     if (hurricanePollTimer) { clearInterval(hurricanePollTimer); hurricanePollTimer = null; }
     if (windPollTimer) { clearInterval(windPollTimer); windPollTimer = null; }
     if (windMoveTimer) { clearTimeout(windMoveTimer); windMoveTimer = null; }
+    if (precipMoveTimer) { clearTimeout(precipMoveTimer); precipMoveTimer = null; }
     if (currentMap) {
       try { currentMap.remove(); } catch (e) { /* swallow */ }
       currentMap = null;
@@ -177,7 +179,7 @@
     },
   ];
   var FALLBACK_FEATURES = [
-    { id: 'nowcast', label: 'Forecast frames (RainViewer nowcast)', endpoints: [], attribution: 'RainViewer.com' },
+    { id: 'precip_forecast', label: 'Precipitation forecast', endpoints: ['/api/v1/radar/precip'], attribution: 'Open-Meteo' },
     { id: 'warnings_us', label: 'NWS severe weather alerts (US)', endpoints: [], attribution: 'NOAA/NWS' },
     { id: 'hurricanes', label: 'Hurricanes (NOAA NHC)', endpoints: [], attribution: 'NOAA NHC/CPHC · JMA · BOM · JTWC' },
     { id: 'lightning_tempest', label: 'Lightning strikes', endpoints: [], attribution: 'Tempest (local station) · Blitzortung.org contributors (CC BY-SA 4.0)' },
@@ -205,7 +207,7 @@
     geomet_ca: 'Radar CA',
     dwd_de: 'Radar DE',
     fmi_fi: 'Radar FI',
-    nowcast: 'Forecast',
+    precip_forecast: 'Forecast',
     warnings_us: 'Alerts',
     // hurricanes is intentionally unlisted: the descriptor label is
     // basin-localized ("Hurricanes (NOAA NHC)", "Typhoons (JMA / RSMC
@@ -244,6 +246,7 @@
   // browser never talks to Open-Meteo directly. Fallback for descriptors
   // that arrive without endpoints, same pattern as the NWS constant.
   var WINDGRID_URL = '/api/v1/radar/windgrid';
+  var PRECIP_URL = '/api/v1/radar/precip';
 
   // NWS alert severity ramp. Fill + stroke share the color; opacity keeps
   // the radar readable underneath.
@@ -305,7 +308,7 @@
     // renders data-default-layers="" and means start with everything off.
     var defaultLayersAttr = el.dataset.defaultLayers;
     if (defaultLayersAttr == null) {
-      defaultLayersAttr = 'rainviewer,nexrad_iem,lightning_tempest';
+      defaultLayersAttr = 'librewxr,rainviewer,nexrad_iem,lightning_tempest';
     }
     var defaultLayerIds = defaultLayersAttr
       .split(',')
@@ -417,8 +420,8 @@
     //
     // Exactly one rainviewer-kind provider gets the frame machinery (the
     // catalog only defines one; extras would double-animate, so they are
-    // skipped). The nowcast FEATURE extends the frame array with the
-    // API's forecast frames when toggled on.
+    // skipped). The precip_forecast FEATURE appends Open-Meteo forecast
+    // overlays after the observed frames when toggled on.
 
     var rainviewerDesc = null;
     for (var pi = 0; pi < providers.length; pi++) {
@@ -431,6 +434,8 @@
     var radarPastCount = 0;
     var radarCurrent = 0;
     var radarPlaying = true;
+    var precipOverlays = []; // Open-Meteo forecast frames {time, lead_min, overlay}
+    var precipFetchSeq = 0; // drops out-of-order responses after a pan
     var lastRadarData = null;
     // Aliases the outer-scope animationTimer so teardownExisting()
     // can clear it on route swap. Same goes for the polling timers
@@ -506,33 +511,52 @@
       return host + frame.path + '/256/{z}/{x}/{y}/2/1_1.png';
     }
 
+    // The scrubber spans observed RainViewer frames (indices 0 ..
+    // radarFrames.length-1, the last being "now") and, when the forecast
+    // layer is on, the Open-Meteo precip overlays appended after them.
+    function clockLabel(epochS) {
+      return new Date(epochS * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+
     function showRadarFrame(idx) {
-      var visibleOp = rvOpacityForZoom(map.getZoom());
-      Object.keys(radarTiles).forEach(function (k) {
-        radarTiles[k].setOpacity(parseInt(k, 10) === idx ? visibleOp : 0);
-      });
-      var f = radarFrames[idx];
-      if (f) {
-        var d = new Date(f.time * 1000);
-        var label = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        // Frames past the observed set are RainViewer nowcast: tag them
-        // with lead time so forecast frames are never mistaken for
-        // observations.
-        var tag = '';
-        if (idx === radarPastCount - 1) {
-          tag = ' (now)';
-        } else if (idx >= radarPastCount) {
-          var mins = Math.max(1, Math.round((f.time - Date.now() / 1000) / 60));
-          tag = ' (+' + mins + 'm forecast)';
+      var nowN = radarPastCount; // observed count; nowN-1 is "now"
+      var tileN = radarFrames.length; // observed + any radar nowcast tiles
+      var timeEl = document.getElementById('radar-time');
+      if (idx < tileN) {
+        // A radar tile: observed (idx < nowN) or real nowcast (idx >= nowN).
+        var visibleOp = rvOpacityForZoom(map.getZoom());
+        Object.keys(radarTiles).forEach(function (k) {
+          radarTiles[k].setOpacity(parseInt(k, 10) === idx ? visibleOp : 0);
+        });
+        precipOverlays.forEach(function (p) { if (p.overlay) p.overlay.setOpacity(0); });
+        var f = radarFrames[idx];
+        if (f && timeEl) {
+          var tag = '';
+          if (idx === nowN - 1) tag = ' (now)';
+          else if (idx >= nowN) {
+            tag = ' (+' + Math.max(1, Math.round((f.time - Date.now() / 1000) / 60)) + 'm forecast)';
+          }
+          timeEl.textContent = clockLabel(f.time) + tag;
         }
-        var timeEl = document.getElementById('radar-time');
-        if (timeEl) timeEl.textContent = label + tag;
+      } else {
+        // Open-Meteo model overlay (where the provider has no radar
+        // nowcast); its color already carries per-pixel transparency.
+        var pidx = idx - tileN;
+        Object.keys(radarTiles).forEach(function (k) { radarTiles[k].setOpacity(0); });
+        precipOverlays.forEach(function (p, i) {
+          if (p.overlay) p.overlay.setOpacity(i === pidx ? 1 : 0);
+        });
+        var pf = precipOverlays[pidx];
+        if (pf && timeEl) {
+          timeEl.textContent = clockLabel(pf.time) + ' (+' + pf.lead_min + 'm forecast)';
+        }
       }
     }
 
     function radarTick() {
-      if (!radarPlaying || radarFrames.length === 0) return;
-      radarCurrent = (radarCurrent + 1) % radarFrames.length;
+      var total = totalFrames();
+      if (!radarPlaying || total === 0) return;
+      radarCurrent = (radarCurrent + 1) % total;
       showRadarFrame(radarCurrent);
       radarTimer = animationTimer = setTimeout(radarTick, 600);
     }
@@ -541,18 +565,22 @@
       return fetch(rainviewerDesc.url).then(function (r) { return r.json(); });
     }
 
-    // (Re)build the animated frame set from the cached weather-maps.json
-    // payload. The nowcast feature toggle decides whether forecast frames
-    // join the loop; recon note: nowcast arrays have been observed empty
-    // on the key-free tier, in which case the toggle is a benign no-op.
+    // (Re)build the observed RainViewer frame set (history through now)
+    // from the cached weather-maps.json payload. The Open-Meteo forecast
+    // frames are appended virtually at animation time (see precipOverlays
+    // + totalFrames), so they are not part of radarTiles.
     function rebuildRadarFrames(data) {
       lastRadarData = data;
       var host = data.host;
       var past = (data.radar && data.radar.past) || [];
       var nowcast = (data.radar && data.radar.nowcast) || [];
-      var includeNowcast = nowcastLayer != null && map.hasLayer(nowcastLayer);
       radarPastCount = past.length;
-      radarFrames = includeNowcast ? past.concat(nowcast) : past.slice();
+      // Real radar nowcast tiles (e.g. LibreWXR) extend the loop into the
+      // future when the forecast layer is on. A provider with an empty
+      // nowcast (RainViewer) falls back to the Open-Meteo model overlays
+      // built in refreshPrecip.
+      var forecastOn = !!(precipGroup && map.hasLayer(precipGroup));
+      radarFrames = forecastOn && nowcast.length ? past.concat(nowcast) : past.slice();
 
       Object.keys(radarTiles).forEach(function (k) {
         radarLayer.removeLayer(radarTiles[k]);
@@ -580,15 +608,148 @@
       if (radarPlaying) radarTimer = animationTimer = setTimeout(radarTick, 1500);
     }
 
-    // ---------- Feature: RainViewer nowcast (forecast frames) ----------
+    // ---------- Feature: Open-Meteo precipitation forecast ----------
     //
-    // A "virtual" layer: an empty group whose on-map presence flags
-    // whether forecast frames are spliced into the animation. Riding the
-    // normal overlay machinery keeps the toggle, chips, and persistence
-    // uniform with real layers.
+    // Replaces the old RainViewer nowcast (whose key-free array was always
+    // empty). A toggle group that, when enabled, fetches a short-range
+    // precip grid for the viewport and renders each 15-minute step as an
+    // interpolated heatmap image overlay. Those overlays extend the radar
+    // scrubber into the future: the loop runs observed RainViewer frames
+    // through "now", then the forecast frames tagged "(+Nm forecast)".
+    // Lazy (nothing fetched while off), with a debounced moveend refetch,
+    // same discipline as the wind layer.
 
-    var nowcastDesc = rainviewerDesc ? featureById('nowcast') : null;
-    var nowcastLayer = nowcastDesc ? L.layerGroup() : null;
+    var precipDesc = featureById('precip_forecast');
+    var precipGroup = precipDesc ? L.layerGroup() : null;
+
+    function precipActive() {
+      return !!(precipGroup && map.hasLayer(precipGroup) && precipOverlays.length > 0);
+    }
+    function totalFrames() {
+      return radarFrames.length + (precipActive() ? precipOverlays.length : 0);
+    }
+
+    // mm-per-15min to an absolute precip color (so intensity reads the
+    // same regardless of the day). Below trace returns fully transparent;
+    // alpha is baked in so the basemap shows through.
+    function precipColor(mm) {
+      if (!(mm > 0.1)) return [0, 0, 0, 0];
+      var stops = [
+        [0.1, 155, 227, 255],
+        [0.5, 74, 163, 255],
+        [1.0, 46, 224, 106],
+        [2.5, 232, 226, 58],
+        [5.0, 240, 146, 42],
+        [10.0, 232, 65, 58],
+        [20.0, 178, 30, 122],
+      ];
+      var a = 165;
+      if (mm <= stops[0][0]) return [stops[0][1], stops[0][2], stops[0][3], a];
+      for (var i = 1; i < stops.length; i++) {
+        if (mm <= stops[i][0]) {
+          var t = (mm - stops[i - 1][0]) / (stops[i][0] - stops[i - 1][0]);
+          return [
+            Math.round(stops[i - 1][1] + t * (stops[i][1] - stops[i - 1][1])),
+            Math.round(stops[i - 1][2] + t * (stops[i][2] - stops[i - 1][2])),
+            Math.round(stops[i - 1][3] + t * (stops[i][3] - stops[i - 1][3])),
+            a,
+          ];
+        }
+      }
+      var last = stops[stops.length - 1];
+      return [last[1], last[2], last[3], a];
+    }
+
+    // Bilinear sample of a row-major grid (cols x rows, row 0 = north).
+    function precipSample(values, cols, rows, gx, gy) {
+      var x0 = Math.floor(gx), y0 = Math.floor(gy);
+      var x1 = Math.min(cols - 1, x0 + 1), y1 = Math.min(rows - 1, y0 + 1);
+      var fx = gx - x0, fy = gy - y0;
+      var v00 = values[y0 * cols + x0] || 0, v10 = values[y0 * cols + x1] || 0;
+      var v01 = values[y1 * cols + x0] || 0, v11 = values[y1 * cols + x1] || 0;
+      return (v00 * (1 - fx) + v10 * fx) * (1 - fy) + (v01 * (1 - fx) + v11 * fx) * fy;
+    }
+
+    function renderPrecipCanvas(values, cols, rows) {
+      var W = 160, H = 160;
+      var canvas = document.createElement('canvas');
+      canvas.width = W;
+      canvas.height = H;
+      var ctx = canvas.getContext('2d');
+      var img = ctx.createImageData(W, H);
+      for (var y = 0; y < H; y++) {
+        var gy = (y / (H - 1)) * (rows - 1);
+        for (var x = 0; x < W; x++) {
+          var gx = (x / (W - 1)) * (cols - 1);
+          var c = precipColor(precipSample(values, cols, rows, gx, gy));
+          var o = (y * W + x) * 4;
+          img.data[o] = c[0];
+          img.data[o + 1] = c[1];
+          img.data[o + 2] = c[2];
+          img.data[o + 3] = c[3];
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+      return canvas;
+    }
+
+    function precipUrl() {
+      var b = map.getBounds();
+      var minLat = Math.max(-85, Math.min(85, b.getSouth()));
+      var maxLat = Math.max(-85, Math.min(85, b.getNorth()));
+      var minLon = Math.max(-180, Math.min(180, b.getWest()));
+      var maxLon = Math.max(-180, Math.min(180, b.getEast()));
+      if (!(maxLat > minLat && maxLon > minLon)) return null;
+      var base = (precipDesc.endpoints && precipDesc.endpoints[0]) || PRECIP_URL;
+      return base + '?bbox=' +
+        [minLon, minLat, maxLon, maxLat]
+          .map(function (v) { return v.toFixed(2); })
+          .join(',');
+    }
+
+    function refreshPrecip() {
+      if (!precipGroup || !map.hasLayer(precipGroup)) return;
+      // If the active radar provider already supplies real nowcast tiles
+      // (LibreWXR), those carry the forecast through the scrubber; skip
+      // the model overlay so the forecast is not rendered twice.
+      if (lastRadarData && lastRadarData.radar && (lastRadarData.radar.nowcast || []).length) {
+        precipGroup.clearLayers();
+        precipOverlays = [];
+        return;
+      }
+      var url = precipUrl();
+      if (!url) return;
+      var seq = ++precipFetchSeq;
+      fetch(url)
+        .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(function (data) {
+          if (seq !== precipFetchSeq || tearingDown) return;
+          precipGroup.clearLayers();
+          precipOverlays = [];
+          var frames = (data && data.frames) || [];
+          var cols = (data && data.cols) || 8;
+          var rows = (data && data.rows) || 8;
+          if (frames.length && data.bounds) {
+            var bnds = [
+              [data.bounds.south, data.bounds.west],
+              [data.bounds.north, data.bounds.east],
+            ];
+            frames.forEach(function (fr) {
+              var canvas = renderPrecipCanvas(fr.values || [], cols, rows);
+              var ov = L.imageOverlay(canvas.toDataURL(), bnds, {
+                opacity: 0,
+                interactive: false,
+                attribution: precipDesc.attribution || 'Open-Meteo',
+              });
+              precipGroup.addLayer(ov);
+              precipOverlays.push({ time: fr.time, lead_min: fr.lead_min, overlay: ov });
+            });
+          }
+          if (radarCurrent >= totalFrames()) radarCurrent = Math.max(0, radarPastCount - 1);
+          showRadarFrame(radarCurrent);
+        })
+        .catch(function (e) { warnOnce('precip', 'Precip forecast fetch failed', e); });
+    }
 
     // ---------- Feature: NWS active alerts ----------
     //
@@ -954,8 +1115,8 @@
     //
     // Animated particle wind via leaflet-velocity (vendored at
     // /vendor/leaflet-velocity.min.js, loaded after Leaflet in the SSR
-    // shell). The toggle handle is an empty group (the nowcast precedent)
-    // so the menu/chips/persistence machinery stays uniform; the real
+    // shell). The toggle handle is an empty group (same virtual-group
+    // pattern) so the menu/chips/persistence machinery stays uniform; the real
     // L.velocityLayer is built lazily inside it on the first enable, so
     // no windgrid request leaves the browser while the layer is off. The
     // grid tracks the viewport: debounced moveend refetch while visible,
@@ -1041,6 +1202,16 @@
       });
     }
 
+    if (precipGroup) {
+      // Forecast tracks the viewport too: debounced refetch so panning
+      // re-samples the grid for the new bounds.
+      map.on('moveend', function () {
+        if (!map.hasLayer(precipGroup)) return;
+        if (precipMoveTimer) clearTimeout(precipMoveTimer);
+        precipMoveTimer = setTimeout(refreshPrecip, 2000);
+      });
+    }
+
     // ---------- Layer toggles: the Layers drawer ----------
     //
     // The overlay list is generated from the descriptor arrays: providers
@@ -1056,8 +1227,8 @@
     wmsProviders.forEach(function (p) {
       overlayDefs.push({ id: p.desc.id, label: p.desc.label, layer: p.layer, desc: p.desc, group: 'imagery' });
     });
-    if (nowcastLayer) {
-      overlayDefs.push({ id: nowcastDesc.id, label: nowcastDesc.label, layer: nowcastLayer, desc: nowcastDesc, group: 'overlays' });
+    if (precipGroup) {
+      overlayDefs.push({ id: precipDesc.id, label: precipDesc.label, layer: precipGroup, desc: precipDesc, group: 'overlays' });
     }
     if (warningsGroup) {
       overlayDefs.push({ id: warningsDesc.id, label: warningsDesc.label, layer: warningsGroup, desc: warningsDesc, group: 'overlays' });
@@ -1151,15 +1322,15 @@
     // Swatch colors are inline so new catalog entries need no CSS edits.
     var LEGEND_SWATCH = {
       rainviewer: '#58a6ff',
-      nowcast: '#58e0ff',
+      precip_forecast: '#4aa3ff',
       warnings_us: '#ff9f1c',
       hurricanes: '#ff4757',
       lightning_tempest: '#ffe066',
       wind: '#9d8cff',
     };
     function legendText(d) {
-      if (d.id === 'nowcast') {
-        return 'Extends the precipitation animation with RainViewer forecast frames, tagged "+Nm forecast" in the time readout.';
+      if (d.id === 'precip_forecast') {
+        return 'Extends the radar animation into the future. Where the radar source provides it (LibreWXR), real radar nowcast out to about an hour; otherwise an Open-Meteo model forecast for the next 2 hours, sampled over the map. Frames are tagged "+Nm forecast".';
       }
       if (d.id === 'warnings_us') {
         return 'NWS active alert polygons. Fill color is severity: red extreme, orange severe. Tap a polygon for the headline. Refreshes every 2 min.';
@@ -1551,10 +1722,17 @@
     map.on('unload', function () { tearingDown = true; });
     map.on('layeradd layerremove', function (e) {
       if (tearingDown || !isOverlayLayer(e.layer)) return;
-      // Nowcast toggled: splice the forecast frames in or out of the
-      // cached payload; the next animation tick picks up the new set.
-      if (nowcastLayer && e.layer === nowcastLayer && lastRadarData) {
-        rebuildRadarFrames(lastRadarData);
+      // Forecast toggled: enabling fetches + builds the future overlays;
+      // disabling drops them so the scrubber collapses back to observed.
+      if (precipGroup && e.layer === precipGroup) {
+        if (!map.hasLayer(precipGroup)) {
+          precipGroup.clearLayers();
+          precipOverlays = [];
+        }
+        // Rebuild to splice the provider's radar nowcast tiles in (enable)
+        // or out (disable); then fill the model-overlay fallback if on.
+        if (lastRadarData) rebuildRadarFrames(lastRadarData);
+        if (map.hasLayer(precipGroup)) refreshPrecip();
       }
       // Data features fetch lazily: nothing is requested while the layer
       // is hidden, so kick a refresh when one comes back on.
@@ -1602,6 +1780,7 @@
     // before the toggle handler exists, so the lazy build has to be
     // kicked here. No-op when the layer starts hidden (the default).
     refreshWind();
+    refreshPrecip();
     if (rainviewerDesc) {
       radarPollTimer = setInterval(refreshRainViewer, 5 * 60 * 1000);
     }

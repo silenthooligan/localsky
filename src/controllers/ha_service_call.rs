@@ -165,6 +165,7 @@ impl IrrigationController for HaServiceCall {
             current_program: None,
             zone_states: Vec::new(),
             flow_gpm: None,
+            flow_connected: false,
             firmware: None,
         })
     }

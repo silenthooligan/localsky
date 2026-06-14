@@ -22,7 +22,7 @@ use leptos::tachys::view::any_view::IntoAny;
 use crate::components::settings_ui::{
     BadgeTone, SettingsBadge, SettingsCard, SettingsKv, SettingsResult,
 };
-use crate::components::ui::{FormField, Panel, SegmentedControl, Toggle};
+use crate::components::ui::{FormField, HelpHint, Panel, SegmentedControl, Toggle};
 
 /// Replace em-dashes, en-dashes, and the Latin-1-decoded UTF-8 mojibake
 /// of either with a plain hyphen so old toml entries written before the
@@ -284,7 +284,7 @@ pub fn SettingsRestrictions() -> impl IntoView {
         <main id="main-content" class="settings-page">
             <header class="settings-page__header">
                 <a class="settings-page__back" href="/settings">"Back to Settings"</a>
-                <h1 class="settings-page__title">"Watering restrictions"</h1>
+                <h1 class="settings-page__title">"Watering restrictions"<HelpHint topic="restrictions"/></h1>
                 <p class="settings-page__subtitle">
                     "Honor watering rules from your local water authority, council, water management district, or HOA. "
                     "Restrictions can gate the live verdict (skip when not allowed), "
@@ -354,7 +354,7 @@ pub fn SettingsRestrictions() -> impl IntoView {
                 </div>
             </Panel>
 
-            <Panel title="Configured restrictions".to_string()>
+            <Panel title="Configured restrictions".to_string() help_topic="restrictions">
                 <ul class="settings-card-list">{restrictions_view}</ul>
                 <button
                     type="button"

@@ -1,6 +1,6 @@
 // Cross-source device reconciliation (Phase F3). The same physical gateway
 // can appear twice: once native (LocalSky reads it directly) and once via
-// the HA import. They often share NO stable identity (Erik's Ecowitt is
+// the HA import. They often share NO stable identity (a user's Ecowitt is
 // keyed by MAC natively but by the vendor passkey in HA, and MD5(MAC) is not
 // the passkey), so a strict id match can't collapse them. This does a
 // conservative reconcile: an HA device is folded into a native device when

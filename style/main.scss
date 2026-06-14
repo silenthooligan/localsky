@@ -4488,18 +4488,26 @@ html { scroll-behavior: smooth; }
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
   color: var(--text);
   font-family: var(--font-sans);
-  // Closed: parked off the right edge (plus its 10px inset), unfocusable
-  // and click-proof. The visibility flip is delayed so the slide-out
-  // stays visible on the way off.
-  transform: translateX(calc(100% + 10px));
+  // Closed: faded out and lifted slightly toward the chip, unfocusable
+  // and click-proof. We fade and drop rather than slide the full panel
+  // width: animating a long translate on a backdrop-filtered element
+  // over the live map forces a per-frame blur re-raster across the swept
+  // area, which reads as a glitchy stutter. Opacity plus a 6px nudge
+  // composite cleanly and leave the blur region effectively in place.
+  opacity: 0;
+  transform: translateY(-6px);
+  transform-origin: top right;
   visibility: hidden;
+  will-change: opacity, transform;
   transition:
-    transform 0.2s cubic-bezier(0.2, 0.7, 0.3, 1),
-    visibility 0s linear 0.2s;
+    opacity 0.15s ease,
+    transform 0.15s ease,
+    visibility 0s linear 0.15s;
 }
 
 .radar-drawer.is-open {
-  transform: translateX(0);
+  opacity: 1;
+  transform: translateY(0);
   visibility: visible;
   transition-delay: 0s;
 }
@@ -5991,6 +5999,16 @@ html:not([data-nerd="true"]) .skip-breakdown:not(:has(.sk-row-tripped)) {
 .running-banner-meta {
   font-size: 0.78rem;
   color: var(--text-dim);
+  margin-top: 0.1rem;
+}
+
+// Live measured flow from the controller's flow meter, shown only while a
+// zone runs and the controller reports flow. Slightly brighter than meta
+// so the live reading reads as the active number.
+.running-banner-flow {
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent, var(--text-bright));
   margin-top: 0.1rem;
 }
 
@@ -8053,6 +8071,32 @@ html:not([data-nerd="true"]) .skip-breakdown:not(:has(.sk-row-tripped)) {
   min-height: 40px;
 }
 .ui-input:focus { outline: var(--focus-ring); outline-offset: var(--focus-ring-offset); }
+
+// SecretInput: masked field + inline show/hide reveal toggle. The field
+// reserves right padding so its value never slides under the eye button.
+// Reduced-motion is handled globally (prefers-reduced-motion guard).
+.ui-secret-input { position: relative; display: block; }
+.ui-secret-input__field { padding-right: 2.6rem; }
+.ui-secret-input__toggle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  height: 100%;
+  width: 2.4rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-radius: 8px;
+  transition: color var(--motion-fast) ease;
+}
+.ui-secret-input__toggle:hover { color: var(--text); }
+.ui-secret-input__toggle:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
+.ui-secret-input__toggle[disabled] { color: var(--text-faint); cursor: not-allowed; }
 
 // review step
 // One-time post-wizard welcome card on the Weather home.

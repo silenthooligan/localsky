@@ -319,6 +319,25 @@ fn tropical_feature(lat: f64, lon: f64) -> RadarFeature {
 pub fn providers() -> &'static [RadarProvider] {
     &[
         RadarProvider {
+            // RainViewer-v2 compatible (same weather-maps.json shape:
+            // radar.past, radar.nowcast, host; byte-identical tile URL
+            // template), but unlike RainViewer's free tier it returns
+            // REAL radar nowcast frames. Placed FIRST so it is the
+            // regional default radar wherever it has coverage (the
+            // frontend animates the first rainviewer-kind provider in
+            // recommended(), which preserves catalog order); the global
+            // RainViewer entry below stays the fallback everywhere else.
+            id: "librewxr",
+            label: "Radar + nowcast (LibreWXR)",
+            kind: ProviderKind::Rainviewer,
+            coverage: "librewxr",
+            coverage_label: "Radar + 60 min nowcast (US, Canada, Europe, Japan, Taiwan, SE Asia)",
+            url: "https://api.librewxr.net/public/weather-maps.json",
+            wms_layer: None,
+            attribution: "LibreWXR",
+            crossfade: false,
+        },
+        RadarProvider {
             // Tile path template: {host}{path}/256/{z}/{x}/{y}/{color}/
             // {smooth}_{snow}.png from weather-maps.json radar.past
             // (13 frames, 10-min cadence). Only past frames are served
@@ -412,15 +431,15 @@ pub fn features(lat: f64, lon: f64) -> Vec<RadarFeature> {
         RadarFeature {
             // Extends the RainViewer timeline into future frames, which
             // the time scrubber/label must clearly mark as forecast.
-            // No endpoint of its own: frames come from the radar.nowcast
-            // array of the weather-maps.json the rainviewer provider
-            // already fetches. CAVEAT (verified 2026-06-12): that array
-            // was empty on every key-free fetch, so the layer has to
-            // degrade gracefully to "no forecast frames".
-            id: "nowcast",
-            label: "Forecast frames (RainViewer nowcast)".to_string(),
-            endpoints: Vec::new(),
-            attribution: "RainViewer.com".to_string(),
+            // Short-range precipitation forecast sampled from Open-Meteo
+            // over the map's bbox (server endpoint below), rendered as an
+            // animated heatmap that extends the radar timeline into the
+            // future. Replaces the old RainViewer nowcast, whose key-free
+            // nowcast array was empty on every fetch (verified 2026-06-12).
+            id: "precip_forecast",
+            label: "Precipitation forecast".to_string(),
+            endpoints: vec!["/api/v1/radar/precip".to_string()],
+            attribution: "Open-Meteo".to_string(),
         },
         RadarFeature {
             // Severity-colored NWS alert polygons, refreshed every
@@ -481,7 +500,7 @@ pub fn features(lat: f64, lon: f64) -> Vec<RadarFeature> {
 /// prefs resolve without needing a lat/lon.
 pub fn feature_ids() -> &'static [&'static str] {
     &[
-        "nowcast",
+        "precip_forecast",
         "warnings_us",
         "hurricanes",
         "lightning_tempest",
@@ -526,6 +545,31 @@ pub fn covers(coverage: &str, lat: f64, lon: f64) -> bool {
         // paint useful returns (mirror of the CONUS box including
         // southern Canada).
         "canada" => in_box(lat, lon, 41.0, 84.0, -142.0, -52.0),
+        // LibreWXR's real-radar regions, the union that makes it the
+        // regional default. US + Canada reuse the EXACT boxes the
+        // "us_all" and "canada" arms use (kept identical so US/Canada
+        // coverage never drifts between the two providers).
+        "librewxr" => {
+            // US: CONUS, mainland Alaska, Hawaii, PR/USVI, Guam/Marianas
+            // (same boxes as the "us_all" arm).
+            in_box(lat, lon, 21.0, 50.0, -127.0, -65.0)
+                || in_box(lat, lon, 50.0, 72.0, -180.0, -129.0)
+                || in_box(lat, lon, 17.0, 24.0, -161.0, -153.0)
+                || in_box(lat, lon, 16.0, 20.0, -68.5, -64.0)
+                || in_box(lat, lon, 12.0, 21.0, 143.0, 147.0)
+                // Canada (same box as the "canada" arm).
+                || in_box(lat, lon, 41.0, 84.0, -142.0, -52.0)
+                // El Salvador + Central American neighbors.
+                || in_box(lat, lon, 8.0, 18.0, -92.0, -82.0)
+                // Europe (EUMETNET OPERA, incl. Italy).
+                || in_box(lat, lon, 35.0, 72.0, -12.0, 45.0)
+                // Taiwan.
+                || in_box(lat, lon, 21.0, 26.0, 119.0, 122.5)
+                // Japan.
+                || in_box(lat, lon, 24.0, 46.0, 122.0, 146.0)
+                // SE Asia (Malaysia/Borneo/Brunei/Singapore/N. Sumatra).
+                || in_box(lat, lon, -6.0, 8.0, 95.0, 120.0)
+        }
         // Roughly the RADOLAN 900 km composite grid footprint: Germany
         // plus the border fringe (Benelux, Alps, western Poland) where
         // the composite still paints edge returns.
@@ -596,7 +640,7 @@ pub fn canonical_layer_id(id: &str) -> Option<&'static str> {
 /// panel's non-ssr fallback uses it directly, so the two can never
 /// drift apart.
 pub fn default_layer_ids() -> &'static [&'static str] {
-    &["rainviewer", "nexrad_iem", "lightning_tempest"]
+    &["librewxr", "rainviewer", "nexrad_iem", "lightning_tempest"]
 }
 
 /// Serialize a provider set for the `data-radar-providers` attribute.
@@ -665,15 +709,28 @@ mod tests {
 
     #[test]
     fn orlando_recommends_global_plus_both_us_sources() {
+        // LibreWXR leads (regional default) ahead of the global
+        // RainViewer fallback and the two US WMS sources.
         assert_eq!(
             ids(&recommended(28.5, -81.4)),
-            ["rainviewer", "nexrad_iem", "nowcoast"]
+            ["librewxr", "rainviewer", "nexrad_iem", "nowcoast"]
         );
     }
 
     #[test]
-    fn lisbon_recommends_global_only() {
-        assert_eq!(ids(&recommended(38.7, -9.1)), ["rainviewer"]);
+    fn lisbon_recommends_librewxr_then_global() {
+        // Inside LibreWXR's Europe box: LibreWXR is the default radar,
+        // RainViewer stays as the global fallback.
+        assert_eq!(ids(&recommended(38.7, -9.1)), ["librewxr", "rainviewer"]);
+    }
+
+    #[test]
+    fn sydney_outside_librewxr_leads_with_rainviewer() {
+        // No LibreWXR region covers Australia, so the global RainViewer
+        // is the default radar there (region-aware fallback).
+        let got = ids(&recommended(-33.9, 151.2));
+        assert!(!got.contains(&"librewxr"), "librewxr should be absent");
+        assert_eq!(got.first(), Some(&"rainviewer"));
     }
 
     #[test]
@@ -686,12 +743,18 @@ mod tests {
 
     #[test]
     fn berlin_recommends_global_plus_dwd() {
-        assert_eq!(ids(&recommended(52.5, 13.4)), ["rainviewer", "dwd_de"]);
+        assert_eq!(
+            ids(&recommended(52.5, 13.4)),
+            ["librewxr", "rainviewer", "dwd_de"]
+        );
     }
 
     #[test]
     fn helsinki_recommends_global_plus_fmi() {
-        assert_eq!(ids(&recommended(60.2, 24.9)), ["rainviewer", "fmi_fi"]);
+        assert_eq!(
+            ids(&recommended(60.2, 24.9)),
+            ["librewxr", "rainviewer", "fmi_fi"]
+        );
     }
 
     #[test]
@@ -773,7 +836,10 @@ mod tests {
         // the NHC one. The serialization contract radar.js parses from
         // data-radar-features is camelCase keys in declaration order.
         let json = features_json(28.5, -81.4);
-        assert!(json.starts_with("[{\"id\":\"nowcast\","));
+        assert!(json.starts_with(concat!(
+            "[{\"id\":\"precip_forecast\",\"label\":\"Precipitation forecast\",",
+            "\"endpoints\":[\"/api/v1/radar/precip\"],\"attribution\":\"Open-Meteo\"}"
+        )));
         assert!(json.contains(concat!(
             "{\"id\":\"warnings_us\",\"label\":\"NWS severe weather alerts (US)\",",
             "\"endpoints\":[\"https://api.weather.gov/alerts/active",

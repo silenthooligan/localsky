@@ -430,6 +430,21 @@ pub struct IrrigationSnapshot {
     /// the SI baseline).
     pub water_level_pct: f64,
 
+    /// True when the active controller reports a flow meter capability
+    /// (`ControllerCaps.flow_meter`). Lets the UI / HA decide whether to
+    /// surface any flow readout at all; false on controllers with no flow
+    /// hardware. Additive; absent = false (no meter).
+    #[serde(default)]
+    pub flow_meter: bool,
+    /// Live measured flow from the controller's own flow sensor, in
+    /// gallons-per-minute. `None` when the controller has no flow meter
+    /// (so non-flow setups render nothing); `Some(0.0)` is a real
+    /// "meter present, zero flow" reading. Populated from
+    /// `ControllerStatus.flow_gpm` each refresh on native deploys.
+    /// Additive; absent = null.
+    #[serde(default)]
+    pub flow_gpm: Option<f64>,
+
     pub zones: Vec<ZoneState>,
     pub skip_check: SkipCheck,
     pub forecast: Forecast,
