@@ -22,6 +22,8 @@ This release builds out the irrigation and sensor side and makes the whole produ
 
 ### Bug fixes
 
+- Setup wizard now completes on a fresh install: license acceptance is saved with the draft, so the toggle keeps its state across steps and the final step no longer rejects an accepted license.
+- Setup wizard notification choices (Web Push, MQTT, ntfy, Slack) are carried into the saved configuration instead of being dropped before the final step.
 - Flow is no longer reported as present when no meter is connected; the reading now reflects the real device signal.
 - OpenWeather sources save correctly (they previously failed to persist).
 - The radar Layers panel sizes to its content so settings stay visible, and opens and closes more smoothly.

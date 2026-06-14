@@ -7,9 +7,83 @@ use leptos::prelude::*;
 use crate::components::setup::shell::{next_step_href, SetupFooter};
 use crate::components::ui::{Icon, Toggle};
 
+#[cfg(feature = "hydrate")]
+async fn fetch_draft() -> Option<serde_json::Value> {
+    let resp = gloo_net::http::Request::get("/api/wizard/draft")
+        .send()
+        .await
+        .ok()?;
+    resp.json::<serde_json::Value>().await.ok()
+}
+
+#[cfg(feature = "hydrate")]
+async fn save_draft(draft: serde_json::Value) -> Result<(), String> {
+    let resp = gloo_net::http::Request::put("/api/wizard/draft")
+        .json(&draft)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    Ok(())
+}
+
 #[component]
 pub fn WelcomeStep() -> impl IntoView {
+    // License acceptance is persisted into the wizard draft (load on mount,
+    // save on change). It must round-trip through the draft so it survives
+    // step navigation AND so the server-side apply, which rejects an
+    // unaccepted license, actually sees it. A bare local signal here silently
+    // reset on remount and never reached apply, blocking wizard completion.
     let license_accepted = RwSignal::new(false);
+    let draft = RwSignal::new(serde_json::Value::Null);
+    let loaded = RwSignal::new(false);
+
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        leptos::task::spawn_local(async move {
+            if let Some(d) = fetch_draft().await {
+                license_accepted.set(
+                    d.get("license_accepted")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                );
+                draft.set(d);
+                loaded.set(true);
+            }
+        });
+    });
+
+    // Persist acceptance into the draft whenever it changes after load. The
+    // changed-guard makes the post-hydration re-run a no-op (the draft
+    // already holds the loaded value), so only a real user toggle saves.
+    Effect::new(move |_| {
+        let val = license_accepted.get();
+        if !loaded.get_untracked() {
+            return;
+        }
+        let mut changed = false;
+        draft.update(|d| {
+            if let Some(obj) = d.as_object_mut() {
+                if obj.get("license_accepted").and_then(|v| v.as_bool()) != Some(val) {
+                    obj.insert("license_accepted".into(), val.into());
+                    changed = true;
+                }
+            }
+        });
+        if !changed {
+            return;
+        }
+        let candidate = draft.get_untracked();
+        #[cfg(feature = "hydrate")]
+        leptos::task::spawn_local(async move {
+            let _ = save_draft(candidate).await;
+        });
+        #[cfg(not(feature = "hydrate"))]
+        let _ = candidate;
+    });
 
     let can_advance = move || license_accepted.get();
     let next_href = move || {

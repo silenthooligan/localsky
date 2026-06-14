@@ -316,6 +316,65 @@ mod tests {
     }
 
     #[test]
+    fn notifications_channels_survive_draft_roundtrip() {
+        // The Notifications wizard step writes each enabled channel as a
+        // fully-formed object under config.notifications.*. The draft PUT
+        // deserializes into a typed WizardDraft, so a partial object would
+        // 422 and silently drop every notification field (the bug this
+        // guards). Build the exact shapes the step emits, then prove they
+        // deserialize and round-trip back as present (non-null) channels,
+        // which is what the Review step checks.
+        let mut draft = WizardDraft::default();
+        draft.license_accepted = true;
+        let mut v = serde_json::to_value(&draft).unwrap();
+        v["config"]["notifications"] = serde_json::json!({
+            "web_push": {
+                "vapid_public": "",
+                "vapid_private_path": "",
+                "vapid_subject": "",
+            },
+            "mqtt": {
+                "host": "10.0.0.5",
+                "port": 1883,
+                "username": serde_json::Value::Null,
+                "password": serde_json::Value::Null,
+                "discovery_prefix": "homeassistant",
+                "publish_enabled": true,
+                "subscribe_enabled": false,
+            },
+            "ntfy": {
+                "base_url": "https://ntfy.sh",
+                "topic": "my-private-topic",
+                "auth_token": serde_json::Value::Null,
+            },
+            "slack": { "webhook_url": "https://hooks.slack.com/services/T/B/X" },
+        });
+
+        // This is the deserialize the PUT handler performs.
+        let parsed: WizardDraft =
+            serde_json::from_value(v).expect("notification draft must deserialize, not 422");
+        let n = &parsed.config.notifications;
+        assert!(n.web_push.is_some(), "web_push present");
+        assert_eq!(n.mqtt.as_ref().unwrap().host, "10.0.0.5");
+        let ntfy = n.ntfy.as_ref().unwrap();
+        assert_eq!(ntfy.base_url, "https://ntfy.sh");
+        assert_eq!(ntfy.topic, "my-private-topic");
+        assert_eq!(
+            n.slack.as_ref().unwrap().webhook_url,
+            "https://hooks.slack.com/services/T/B/X"
+        );
+
+        // And the Review step's "is this channel enabled?" check sees them.
+        let back = serde_json::to_value(&parsed.config.notifications).unwrap();
+        for key in ["web_push", "mqtt", "ntfy", "slack"] {
+            assert!(
+                back.get(key).map(|x| !x.is_null()).unwrap_or(false),
+                "Review sees {key} as enabled"
+            );
+        }
+    }
+
+    #[test]
     fn validate_for_apply_rejects_unaccepted_license() {
         let draft = WizardDraft::default();
         let store = WizardStore::new("/tmp/nope");
