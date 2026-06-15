@@ -11,7 +11,10 @@
 //   - /api/v1/info + /api/info: public. The HACS probe + pairing
 //     precheck; carries auth_required so clients know to ask for a token.
 //   - /api/*/auth/status|login|setup: public (setup only honored while
-//     zero users exist; enforced in the handler).
+//     zero users exist; enforced in the handler). NOTE the token-admin
+//     routes (POST /auth/tokens, DELETE /auth/tokens/{id}) are the
+//     opposite: ALWAYS authenticated-owner-only, even in Disabled mode
+//     and never via a trusted-network match (LS-API-06).
 //   - /login page: public (it hosts the form).
 //   - /ingest/*: public. Ecowitt consoles + webhook hardware cannot
 //     authenticate; per-source path secrets remain the mitigation.
@@ -116,14 +119,41 @@ impl AuthRuntime {
         }
     }
 
+    /// Decide the next AuthPolicy from a config load result (ACCT-02).
+    /// `Some(p)` means store `p`; `None` means keep the current policy.
+    ///   - Ok(cfg)        -> policy from cfg.auth
+    ///   - Err(NotFound)  -> disabled (explicit revert: no on-disk config
+    ///                       can back a required policy, so an in-memory
+    ///                       required must not persist past the file's
+    ///                       disappearance)
+    ///   - Err(other)     -> None (transient Io/parse: keep last good so a
+    ///                       flaky read never silently drops auth)
+    pub fn policy_for_load_result(
+        load: Result<crate::config::schema::Config, crate::ports::config_store::ConfigStoreError>,
+    ) -> Option<AuthPolicy> {
+        use crate::ports::config_store::ConfigStoreError;
+        match load {
+            Ok(cfg) => Some(Self::policy_from_cfg(&cfg.auth)),
+            Err(ConfigStoreError::NotFound) => Some(Self::policy_from_cfg(
+                &crate::config::schema::AuthConfig::default(),
+            )),
+            Err(_) => None,
+        }
+    }
+
     /// Spawn the policy refresher: re-reads the config + user count on a
     /// 10s cadence. Cheap (one small TOML parse + one COUNT(*)).
     pub fn spawn_refresh(self: &Arc<Self>, cfg_store: Arc<FileConfigStore>) {
         let rt = self.clone();
         tokio::spawn(async move {
             loop {
-                if let Ok(cfg) = cfg_store.load().await {
-                    rt.policy.store(Arc::new(Self::policy_from_cfg(&cfg.auth)));
+                // ACCT-02: map the load result to the next policy. A
+                // present config rebuilds policy from it; a NotFound config
+                // EXPLICITLY reverts to disabled (nothing on disk can back
+                // required mode); a transient read error keeps the last
+                // good policy so a flaky read never silently drops auth.
+                if let Some(policy) = Self::policy_for_load_result(cfg_store.load().await) {
+                    rt.policy.store(Arc::new(policy));
                 }
                 if let Ok(n) = rt.store.user_count().await {
                     rt.setup_complete
@@ -219,6 +249,174 @@ fn is_wizard_surface(path: &str) -> bool {
         || path.starts_with("/api/v1/wizard")
 }
 
+/// True for a private-range or loopback client address: the LAN LocalSky
+/// already trusts in its default (proxy/isolated-LAN) posture. Covers IPv4
+/// loopback + RFC1918 (10/8, 172.16/12, 192.168/16) and IPv6 loopback +
+/// unique-local (fc00::/7). Used ONLY by the disabled-mode privileged gate
+/// to admit the reverse proxy / LAN browser while still refusing a public
+/// internet caller. NOT a substitute for trusted_networks in Required mode.
+pub(crate) fn is_private_or_loopback(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
+        // map ::ffff:a.b.c.d to its v4 view first.
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return v4.is_loopback() || v4.is_private();
+            }
+            // fc00::/7 unique-local.
+            v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00
+        }
+    }
+}
+
+/// Privileged config/backup surface that must ALWAYS require an
+/// authenticated identity OR a trusted-network / loopback caller, even when
+/// global AuthMode is Disabled (security wave 3). On the shipped default
+/// (Disabled) the rest of the API is intentionally LAN-friendly and
+/// anonymous, but these specific routes either WRITE config or expose the
+/// full config surface (including the raw TOML + downloadable backup), so
+/// an unauthenticated, untrusted caller must be refused here regardless of
+/// mode. The ordinary redacted GET /api/config and the normal read /
+/// snapshot / stream surface are deliberately NOT included so the default
+/// posture stays frictionless for non-sensitive reads.
+///
+/// The set, normalized across the /api and /api/v1 prefixes:
+///   - any state-changing method on /api*/config* (PUT/POST/DELETE):
+///     config writes, preview, rollback, raw PUT
+///   - GET /api*/config/raw: the verbatim/redacted TOML editor read
+///   - ALL methods on /api*/backup*: the bundle download stages secrets +
+///     a DB copy off the box; restore writes config + stages a DB swap
+/// (The rollback + snapshot WRITE routes live under /config, so they are
+/// covered by the state-changing /config rule.)
+///   - the wizard's ALTERNATE config-write paths (LS-API-12). The wizard
+///     persists the SAME localsky.toml as /api/config, just by another
+///     route, so it has to clear the identical bar:
+///       - POST   /api*/wizard/apply        : writes the whole config
+///       - PUT    /api*/wizard/draft        : stages the full config
+///       - DELETE /api*/wizard/draft        : clears the staged config
+///       - POST   /api*/wizard/seed_current : mirrors the live config into
+///                                            a draft
+///     Only these four are swept in. The wizard's outbound probe/test/scan/
+///     discover endpoints are deliberately NOT here: they keep ProbeGuard,
+///     which admits a private/LAN client so a fresh self-hoster can drive
+///     onboarding from their own LAN. Adding them to the privileged gate
+///     would be redundant with ProbeGuard and identical in outcome, so the
+///     split is by responsibility (config-write gate vs SSRF/probe guard).
+/// Normalize the /api/v1/... prefix to /api/... so one rule set covers
+/// both the canonical and legacy API mounts.
+fn normalize_api_prefix(path: &str) -> std::borrow::Cow<'_, str> {
+    match path.strip_prefix("/api/v1/") {
+        Some(rest) => std::borrow::Cow::Owned(format!("/api/{rest}")),
+        None => std::borrow::Cow::Borrowed(path),
+    }
+}
+
+/// API-token administration surface that must ALWAYS require a real
+/// authenticated owner identity (LS-API-06), regardless of global
+/// AuthMode and regardless of where the caller sits on the network. This
+/// is a STRICTER bar than [`is_privileged_path`]: minting or revoking a
+/// long-lived API token is the keys-to-the-kingdom operation, so a
+/// trusted-network / loopback / private-LAN match is NOT sufficient here
+/// (unlike the config/backup privileged gate). Only a valid session or
+/// API token attributed to an owner account passes.
+///
+/// The set, normalized across the /api and /api/v1 prefixes:
+///   - POST   /api*/auth/tokens        : mint a new token
+///   - DELETE /api*/auth/tokens/{id}   : revoke a token
+/// (GET /api*/auth/tokens lists token metadata only, no secret; it stays
+/// on the ordinary auth path. The mutating mint/revoke routes are the
+/// ones that must never be reachable unauthenticated, even in Disabled
+/// mode where the rest of the API is intentionally LAN-anonymous.)
+fn is_token_admin_path(method: &Method, path: &str) -> bool {
+    let path = normalize_api_prefix(path);
+    let tokens_root = path == "/api/auth/tokens";
+    let tokens_child = path.starts_with("/api/auth/tokens/");
+    match *method {
+        // Mint a token: POST to the collection root.
+        Method::POST => tokens_root,
+        // Revoke a token: DELETE /tokens/{id}.
+        Method::DELETE => tokens_child,
+        _ => false,
+    }
+}
+
+/// The wizard's ALTERNATE config-write surface (LS-API-12). These routes
+/// persist or stage the SAME localsky.toml that /api/config writes, just
+/// via the setup/edit flow, so they must clear the identical privileged
+/// bar. Exactly four routes, normalized across /api and /api/v1:
+///   - POST   /api*/wizard/apply        : write the whole config
+///   - PUT    /api*/wizard/draft        : stage the full config
+///   - DELETE /api*/wizard/draft        : clear the staged config
+///   - POST   /api*/wizard/seed_current : mirror the live config to a draft
+/// The probe/test/scan/discover endpoints are intentionally EXCLUDED here
+/// (they keep ProbeGuard for LAN onboarding); only these config-write paths
+/// are gated. Path is already prefix-normalized by the caller.
+fn is_wizard_config_write(method: &Method, normalized_path: &str) -> bool {
+    match *method {
+        Method::POST => {
+            normalized_path == "/api/wizard/apply" || normalized_path == "/api/wizard/seed_current"
+        }
+        Method::PUT | Method::DELETE => normalized_path == "/api/wizard/draft",
+        _ => false,
+    }
+}
+
+/// Whether a credential-less caller is vouched for on the privileged
+/// config/backup/wizard-config-write gate, by network position alone. This
+/// is the exact admission rule the gate applies before falling back to a
+/// real credential, extracted as a pure function so the fresh-install LAN
+/// path can be unit-tested without standing up a router + DB.
+///
+///   - loopback or a configured trusted_networks CIDR: always vouched (in
+///     BOTH modes), the same-box owner / explicit-trust case.
+///   - in the DISABLED default posture ONLY, any private/LAN address
+///     (RFC1918 / ULA / loopback) is vouched: this is the product's
+///     "behind a reverse proxy / on an isolated trusted LAN" model and is
+///     exactly what a fresh-install LAN owner sends (private client IP,
+///     auth Disabled, no trusted_networks) when driving the wizard. We
+///     refuse only the INTERNET-anonymous caller here.
+///   - when the operator opts into Required mode the bar rises: only an
+///     explicit trusted_networks / loopback match passes without a
+///     credential; a bare private IP no longer suffices.
+pub(crate) fn privileged_caller_vouched(ip: &IpAddr, policy: &AuthPolicy) -> bool {
+    ip.is_loopback()
+        || policy.trusted.iter().any(|net| net.contains(ip))
+        || (!policy.required && is_private_or_loopback(ip))
+}
+
+fn is_privileged_path(method: &Method, path: &str) -> bool {
+    // Normalize /api/v1/... -> /api/... so one rule set covers both.
+    let path = normalize_api_prefix(path);
+    let path = path.as_ref();
+
+    // All backup routes are privileged in every method (download + restore
+    // + snapshot listing): the download alone exfiltrates config + DB.
+    if path == "/api/backup" || path.starts_with("/api/backup/") {
+        return true;
+    }
+
+    // The wizard's alternate config-write paths (apply / draft PUT+DELETE /
+    // seed_current) persist or stage the same localsky.toml as /api/config,
+    // so they clear the same bar. Probe/test/scan/discover are NOT here.
+    if is_wizard_config_write(method, path) {
+        return true;
+    }
+
+    let is_config = path == "/api/config" || path.starts_with("/api/config/");
+    if !is_config {
+        return false;
+    }
+    // Raw TOML read is privileged even as a GET (it is the editor's
+    // full-surface read; redaction protects the body, gating protects the
+    // route from an anonymous internet caller in disabled mode).
+    if *method == Method::GET {
+        return path == "/api/config/raw";
+    }
+    // Every state-changing method under /config: PUT /, POST /preview,
+    // POST /rollback, PUT /raw, and any future mutating route.
+    !matches!(*method, Method::HEAD | Method::OPTIONS)
+}
+
 fn wants_html(req: &Request<Body>) -> bool {
     req.method() == Method::GET
         && req
@@ -262,18 +460,25 @@ fn query_token(req: &Request<Body>) -> Option<String> {
 /// were appended by our own proxy chain, while anything left of the
 /// first untrusted hop is client-supplied and trivially spoofable.
 pub fn client_ip(req: &Request<Body>, trusted_proxies: &[ipnet::IpNet]) -> Option<IpAddr> {
-    let peer = req
-        .extensions()
+    client_ip_parts(req.extensions(), req.headers(), trusted_proxies)
+}
+
+/// Same client-IP derivation as [`client_ip`], but reading from request
+/// `Parts` (extensions + headers) so `FromRequestParts` extractors (e.g.
+/// the wizard probe guard) can make the identical trusted-proxy/XFF
+/// decision without owning a full `Request<Body>`.
+pub fn client_ip_parts(
+    extensions: &axum::http::Extensions,
+    headers: &header::HeaderMap,
+    trusted_proxies: &[ipnet::IpNet],
+) -> Option<IpAddr> {
+    let peer = extensions
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|ci| ci.0.ip())?;
     if !trusted_proxies.iter().any(|net| net.contains(&peer)) {
         return Some(peer);
     }
-    let Some(xff) = req
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-    else {
+    let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) else {
         return Some(peer);
     };
     for hop in xff.split(',').rev() {
@@ -368,6 +573,97 @@ pub async fn enforce(
         }
     }
 
+    // Token-admin gate (LS-API-06). Minting (POST /auth/tokens) or
+    // revoking (DELETE /auth/tokens/{id}) an API token must ALWAYS require
+    // a real authenticated owner identity, in BOTH auth modes and from any
+    // network position. This is deliberately STRICTER than the
+    // config/backup privileged gate below: a trusted-network / loopback /
+    // private-LAN match is NOT sufficient to mint or revoke a long-lived
+    // API token, because that token is itself a credential that would then
+    // work from anywhere. So even in the shipped default (AuthMode::
+    // Disabled), where the rest of the API is intentionally LAN-anonymous,
+    // these two routes require a valid session or API token attributed to
+    // an owner account. The demo already 403s them via demo_guard, so skip
+    // there (demo has no real owner to authenticate as).
+    if is_token_admin_path(req.method(), &path) && !super::demo_guard::is_demo() {
+        let user = if let Some(tok) = bearer_token(&req).or_else(|| query_token(&req)) {
+            rt.store.validate_api_token(&tok).await.ok().flatten()
+        } else if let Some(cookie) = cookie_token(&req) {
+            rt.store
+                .validate_session(&cookie, policy.session_ttl_days)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        match user {
+            Some(id) => {
+                req.extensions_mut().insert(RequestIdentity::User(id));
+                return next.run(req).await;
+            }
+            // No real credential: refuse, regardless of mode or network.
+            // Token admin is never reachable by a trusted-network caller.
+            None => {
+                if wants_html(&req) {
+                    let login = format!("{}/login", crate::base::from_headers(req.headers()));
+                    return Redirect::temporary(&login).into_response();
+                }
+                return unauthorized_api();
+            }
+        }
+    }
+
+    // Privileged config/backup gate (security wave 3). Runs in BOTH auth
+    // modes, BEFORE the disabled-mode short-circuit below, so config writes
+    // + the raw-config read + the whole backup surface always require an
+    // authenticated identity OR a trusted-network / loopback caller, even
+    // on the shipped default (AuthMode::Disabled). This protects a
+    // self-hoster in the default posture without forcing full auth, and
+    // does not touch the LAN-friendly default for ordinary reads.
+    // The public read-only demo is intentionally anonymous-readable and is
+    // already write-locked at the outermost layer by auth::demo_guard
+    // (every config/backup MUTATION returns 403 there). Its config GETs are
+    // redacted demo data, so the privileged READ gate would only break the
+    // demo's "kick the tires" browsing without adding protection. Skip the
+    // gate in demo mode; demo_guard remains the demo's mutation boundary.
+    if is_privileged_path(req.method(), &path) && !super::demo_guard::is_demo() {
+        // Loopback (same-box owner via same-host proxy, CLI, healthcheck)
+        // and a configured trusted_networks client are vouched for without
+        // credentials, mirroring the wizard ProbeGuard's allowance.
+        let client = client_ip(&req, &policy.trusted_proxies);
+        let trusted_ip = client.map(|ip| privileged_caller_vouched(&ip, &policy));
+        if trusted_ip == Some(true) {
+            req.extensions_mut().insert(RequestIdentity::TrustedNetwork);
+            return next.run(req).await;
+        }
+        // Otherwise require a valid credential (Bearer / cookie / stream
+        // token), regardless of global mode.
+        let user = if let Some(tok) = bearer_token(&req).or_else(|| query_token(&req)) {
+            rt.store.validate_api_token(&tok).await.ok().flatten()
+        } else if let Some(cookie) = cookie_token(&req) {
+            rt.store
+                .validate_session(&cookie, policy.session_ttl_days)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        if let Some(id) = user {
+            req.extensions_mut().insert(RequestIdentity::User(id));
+            return next.run(req).await;
+        }
+        // Unauthenticated, untrusted caller on a privileged route: refuse.
+        // HTML GET (the raw-config editor opened directly) gets a login
+        // redirect; everything else (API/JSON, writes) gets 401.
+        if wants_html(&req) {
+            let login = format!("{}/login", crate::base::from_headers(req.headers()));
+            return Redirect::temporary(&login).into_response();
+        }
+        return unauthorized_api();
+    }
+
     if !policy.required {
         req.extensions_mut().insert(RequestIdentity::Anonymous);
         return next.run(req).await;
@@ -457,6 +753,233 @@ mod tests {
     }
 
     #[test]
+    fn privileged_path_classification() {
+        // Config writes are privileged on every state-changing method, both
+        // prefixes.
+        assert!(is_privileged_path(&Method::PUT, "/api/config"));
+        assert!(is_privileged_path(&Method::PUT, "/api/v1/config"));
+        assert!(is_privileged_path(&Method::PUT, "/api/config/raw"));
+        assert!(is_privileged_path(&Method::POST, "/api/config/rollback"));
+        assert!(is_privileged_path(&Method::POST, "/api/v1/config/preview"));
+        // GET /config/raw is privileged (full-surface editor read).
+        assert!(is_privileged_path(&Method::GET, "/api/config/raw"));
+        assert!(is_privileged_path(&Method::GET, "/api/v1/config/raw"));
+        // ALL backup methods are privileged: the download exfiltrates
+        // config + DB, restore writes.
+        assert!(is_privileged_path(&Method::GET, "/api/v1/backup"));
+        assert!(is_privileged_path(&Method::POST, "/api/v1/backup/restore"));
+        assert!(is_privileged_path(&Method::GET, "/api/v1/backup/snapshots"));
+        assert!(is_privileged_path(&Method::GET, "/api/backup"));
+
+        // NOT privileged: the redacted ordinary config GET + the normal
+        // read/snapshot surface stay LAN-friendly.
+        assert!(!is_privileged_path(&Method::GET, "/api/config"));
+        assert!(!is_privileged_path(&Method::GET, "/api/v1/config"));
+        assert!(!is_privileged_path(&Method::GET, "/api/config/schema"));
+        assert!(!is_privileged_path(&Method::GET, "/api/config/snapshots"));
+        assert!(!is_privileged_path(&Method::GET, "/api/config/validate"));
+        assert!(!is_privileged_path(&Method::GET, "/api/v1/snapshot"));
+        assert!(!is_privileged_path(
+            &Method::GET,
+            "/api/v1/irrigation/stream"
+        ));
+        assert!(!is_privileged_path(&Method::GET, "/zones"));
+        // HEAD/OPTIONS on config are not state-changing.
+        assert!(!is_privileged_path(&Method::OPTIONS, "/api/config"));
+        assert!(!is_privileged_path(&Method::HEAD, "/api/config"));
+        // A lookalike path is not the backup surface.
+        assert!(!is_privileged_path(&Method::GET, "/api/backupsomething"));
+    }
+
+    #[test]
+    fn wizard_config_write_paths_are_privileged() {
+        // The wizard's three config-write surfaces persist/stage the same
+        // localsky.toml as /api/config, so they clear the same bar. Both
+        // /api and /api/v1 prefixes.
+        // apply: POST writes the whole config.
+        assert!(is_privileged_path(&Method::POST, "/api/wizard/apply"));
+        assert!(is_privileged_path(&Method::POST, "/api/v1/wizard/apply"));
+        // draft: PUT stages, DELETE clears.
+        assert!(is_privileged_path(&Method::PUT, "/api/wizard/draft"));
+        assert!(is_privileged_path(&Method::PUT, "/api/v1/wizard/draft"));
+        assert!(is_privileged_path(&Method::DELETE, "/api/wizard/draft"));
+        assert!(is_privileged_path(&Method::DELETE, "/api/v1/wizard/draft"));
+        // seed_current: POST mirrors live config into a draft.
+        assert!(is_privileged_path(
+            &Method::POST,
+            "/api/wizard/seed_current"
+        ));
+        assert!(is_privileged_path(
+            &Method::POST,
+            "/api/v1/wizard/seed_current"
+        ));
+
+        // NOT privileged: GET draft + GET state are ordinary reads (the
+        // wizard UI loads them); they stay LAN-friendly.
+        assert!(!is_privileged_path(&Method::GET, "/api/wizard/draft"));
+        assert!(!is_privileged_path(&Method::GET, "/api/v1/wizard/draft"));
+        assert!(!is_privileged_path(&Method::GET, "/api/wizard/state"));
+
+        // NOT privileged here: the probe/test/scan/discover endpoints keep
+        // ProbeGuard for LAN onboarding, so the privileged gate must NOT
+        // sweep them in (that would be redundant and could double-gate).
+        assert!(!is_privileged_path(
+            &Method::POST,
+            "/api/wizard/test_source"
+        ));
+        assert!(!is_privileged_path(
+            &Method::POST,
+            "/api/wizard/test_controller"
+        ));
+        assert!(!is_privileged_path(&Method::POST, "/api/wizard/test_llm"));
+        assert!(!is_privileged_path(&Method::POST, "/api/wizard/scan_zones"));
+        assert!(!is_privileged_path(&Method::POST, "/api/wizard/probe_soil"));
+        assert!(!is_privileged_path(&Method::GET, "/api/wizard/discover"));
+        assert!(!is_privileged_path(&Method::GET, "/api/wizard/geocode"));
+
+        // Wrong method on a config-write path is not privileged: POST /draft
+        // is not a draft route (the draft router has no POST), and PUT
+        // /apply / PUT /seed_current are not real routes either.
+        assert!(!is_privileged_path(&Method::POST, "/api/wizard/draft"));
+        assert!(!is_privileged_path(&Method::PUT, "/api/wizard/apply"));
+        assert!(!is_privileged_path(&Method::HEAD, "/api/wizard/draft"));
+        // A lookalike path is not the wizard config-write surface.
+        assert!(!is_privileged_path(&Method::POST, "/api/wizard/applyx"));
+        assert!(!is_privileged_path(&Method::POST, "/api/wizardly/apply"));
+    }
+
+    #[test]
+    fn fresh_install_lan_wizard_admitted_public_refused() {
+        // Models the shipped fresh-install default: AuthMode Disabled, no
+        // trusted_networks configured. The gate that runs on the wizard's
+        // config-write routes is: is_privileged_path() && (vouched-by-IP ||
+        // valid credential). Here we assert the IP branch directly, since
+        // that is what a credential-less fresh-install owner relies on.
+        let fresh = AuthPolicy {
+            required: false,
+            session_ttl_days: 30,
+            trusted: vec![],
+            trusted_proxies: vec![],
+            trusted_origins: vec![],
+        };
+
+        // The wizard config-write routes a fresh-install owner drives.
+        let write_routes = [
+            (Method::POST, "/api/wizard/apply"),
+            (Method::PUT, "/api/wizard/draft"),
+            (Method::DELETE, "/api/wizard/draft"),
+            (Method::POST, "/api/wizard/seed_current"),
+            (Method::POST, "/api/v1/wizard/apply"),
+            (Method::PUT, "/api/v1/wizard/draft"),
+        ];
+
+        let lan_owner: IpAddr = "10.0.0.50".parse().unwrap();
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        let public: IpAddr = "203.0.113.5".parse().unwrap();
+
+        for (method, path) in &write_routes {
+            // The route is privileged (so the gate engages)...
+            assert!(
+                is_privileged_path(method, path),
+                "{method} {path} must be privileged"
+            );
+            // ...and a private-LAN owner IP is vouched without a credential,
+            // so the fresh-install LAN wizard still works.
+            assert!(
+                privileged_caller_vouched(&lan_owner, &fresh),
+                "fresh-install LAN owner must drive {method} {path}"
+            );
+            // Loopback (same-box proxy / CLI) is vouched too.
+            assert!(privileged_caller_vouched(&loopback, &fresh));
+            // A public anonymous caller is REFUSED by IP: it then falls
+            // through to the credential check (which it has none for).
+            assert!(
+                !privileged_caller_vouched(&public, &fresh),
+                "public anonymous caller must be refused on {method} {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn required_mode_raises_bar_on_wizard_writes() {
+        // Once the operator opts into Required mode, a bare private-LAN IP no
+        // longer suffices on the wizard config-write gate: only an explicit
+        // trusted_networks / loopback match passes without a credential
+        // (mirroring /api/config). A real credential is still accepted by the
+        // gate's fallback (not modeled here; this asserts the IP branch).
+        let required_no_trust = AuthPolicy {
+            required: true,
+            session_ttl_days: 30,
+            trusted: vec![],
+            trusted_proxies: vec![],
+            trusted_origins: vec![],
+        };
+        let lan: IpAddr = "10.0.0.50".parse().unwrap();
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        // Bare LAN IP is NOT vouched in Required mode without trusted_networks.
+        assert!(!privileged_caller_vouched(&lan, &required_no_trust));
+        // Loopback still passes (same-box owner).
+        assert!(privileged_caller_vouched(&loopback, &required_no_trust));
+
+        // With the LAN explicitly trusted, it is vouched again even in
+        // Required mode.
+        let required_trusted = AuthPolicy {
+            required: true,
+            session_ttl_days: 30,
+            trusted: vec!["10.0.0.0/24".parse().unwrap()],
+            trusted_proxies: vec![],
+            trusted_origins: vec![],
+        };
+        assert!(privileged_caller_vouched(&lan, &required_trusted));
+    }
+
+    #[test]
+    fn token_admin_path_classification() {
+        // Mint: POST to the collection root, both prefixes.
+        assert!(is_token_admin_path(&Method::POST, "/api/auth/tokens"));
+        assert!(is_token_admin_path(&Method::POST, "/api/v1/auth/tokens"));
+        // Revoke: DELETE /tokens/{id}, both prefixes.
+        assert!(is_token_admin_path(&Method::DELETE, "/api/auth/tokens/7"));
+        assert!(is_token_admin_path(
+            &Method::DELETE,
+            "/api/v1/auth/tokens/7"
+        ));
+        // GET (list metadata) is NOT token-admin: it stays on the ordinary
+        // auth path. Only mint/revoke are the keys-to-the-kingdom routes.
+        assert!(!is_token_admin_path(&Method::GET, "/api/auth/tokens"));
+        assert!(!is_token_admin_path(&Method::GET, "/api/v1/auth/tokens"));
+        // DELETE on the bare collection (no id) is not a revoke route.
+        assert!(!is_token_admin_path(&Method::DELETE, "/api/auth/tokens"));
+        // POST to a child path is not the mint route.
+        assert!(!is_token_admin_path(&Method::POST, "/api/auth/tokens/7"));
+        // Other auth endpoints are untouched by this gate.
+        assert!(!is_token_admin_path(&Method::POST, "/api/auth/login"));
+        assert!(!is_token_admin_path(&Method::POST, "/api/auth/setup"));
+        // A lookalike path is not the token surface.
+        assert!(!is_token_admin_path(
+            &Method::POST,
+            "/api/auth/tokensomething"
+        ));
+    }
+
+    #[test]
+    fn private_or_loopback_recognition() {
+        // Loopback + RFC1918 are "the LAN we trust in disabled mode".
+        assert!(is_private_or_loopback(&"127.0.0.1".parse().unwrap()));
+        assert!(is_private_or_loopback(&"172.16.5.20".parse().unwrap()));
+        assert!(is_private_or_loopback(&"172.16.5.9".parse().unwrap()));
+        assert!(is_private_or_loopback(&"10.0.0.20".parse().unwrap())); // a private reverse-proxy hop
+        assert!(is_private_or_loopback(&"::1".parse().unwrap()));
+        assert!(is_private_or_loopback(&"fc00::1234".parse().unwrap()));
+        assert!(is_private_or_loopback(&"::ffff:10.0.0.50".parse().unwrap()));
+        // Public internet addresses are NOT trusted: the gate refuses them.
+        assert!(!is_private_or_loopback(&"203.0.113.5".parse().unwrap()));
+        assert!(!is_private_or_loopback(&"8.8.8.8".parse().unwrap()));
+        assert!(!is_private_or_loopback(&"172.32.0.1".parse().unwrap())); // just outside 172.16/12
+        assert!(!is_private_or_loopback(&"2606:4700::1".parse().unwrap()));
+    }
+
+    #[test]
     fn endpoint_classification() {
         assert!(is_auth_endpoint("/api/v1/auth/login"));
         assert!(is_auth_endpoint("/login"));
@@ -472,6 +995,38 @@ mod tests {
         assert!(is_docs("/docs/css/general.css"));
         assert!(!is_docs("/docsomething"));
         assert!(!is_docs("/api/docs"));
+    }
+
+    #[test]
+    fn refresher_reverts_to_disabled_on_notfound() {
+        use crate::config::schema::{AuthConfig, AuthMode, Config};
+        use crate::ports::config_store::ConfigStoreError;
+
+        // Present config with required mode -> policy required.
+        let mut cfg = Config::default();
+        cfg.auth.mode = AuthMode::Required;
+        let p =
+            AuthRuntime::policy_for_load_result(Ok(cfg)).expect("present config rebuilds policy");
+        assert!(p.required);
+
+        // NotFound -> explicit revert to disabled (the ACCT-02 invariant):
+        // an in-memory required must not survive the config disappearing.
+        let p = AuthRuntime::policy_for_load_result(Err(ConfigStoreError::NotFound))
+            .expect("NotFound yields a (disabled) policy, not a keep");
+        assert!(!p.required, "NotFound must revert to disabled");
+
+        // Transient error -> keep last good (None), never silently drop auth.
+        assert!(
+            AuthRuntime::policy_for_load_result(Err(ConfigStoreError::Io("flaky".into())))
+                .is_none(),
+            "transient read error must keep the last good policy"
+        );
+
+        // Sanity: a disabled config maps to disabled.
+        let mut disabled = Config::default();
+        disabled.auth = AuthConfig::default();
+        let p = AuthRuntime::policy_for_load_result(Ok(disabled)).unwrap();
+        assert!(!p.required);
     }
 
     #[test]

@@ -14,11 +14,21 @@
 // The bundle deliberately EXCLUDES /data/keys (VAPID private key) and
 // instance-id: restoring a config onto new hardware should mint a new
 // identity, and a push key inside a casually shared backup is a leak.
+//
+// SECURITY: the bundled localsky.toml is FULL FIDELITY (real secrets, not
+// redacted) because a backup must restore a working config onto a fresh
+// instance, which has nothing to un-redact against. The route is guarded:
+// auth::middleware treats every /api/backup* method as PRIVILEGED, so even
+// in the default AuthMode::Disabled posture only an authenticated/trusted
+// caller can download it, and the public demo 403s the whole surface. The
+// bundle therefore contains real credentials + the history DB and must be
+// stored securely. (The config/raw + wizard/draft reads remain redacted:
+// they are VIEWS, not backups.)
 
 use std::sync::Arc;
 
 use axum::{
-    extract::{Multipart, State},
+    extract::{DefaultBodyLimit, Multipart, State},
     http::{header, StatusCode},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
@@ -26,6 +36,7 @@ use axum::{
 };
 use rusqlite::Connection;
 use tokio::sync::Mutex;
+use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::config::FileConfigStore;
 use crate::persistence::ConfigSnapshotStore;
@@ -69,12 +80,29 @@ pub struct BackupApiState {
     pub snapshots: Option<ConfigSnapshotStore>,
 }
 
+/// Upper bound on a restore upload (LS-API-09). Generous because a real
+/// backup bundle is config + a VACUUM'd SQLite copy of the run history,
+/// which grows with retention, but bounded so an anonymous/over-large body
+/// cannot exhaust memory (post_restore + the Multipart extractor buffer
+/// each field). 200 MiB comfortably fits a multi-year history DB; the
+/// privileged gate already restricts this route to an authenticated/
+/// trusted caller, so this cap is defense-in-depth, not the access gate.
+const RESTORE_BODY_LIMIT: usize = 200 * 1024 * 1024;
+
 pub fn router(state: BackupApiState) -> Router {
     Router::new()
         .route("/", get(get_backup))
         .route("/restore", post(post_restore))
         .route("/snapshots", get(get_snapshots))
         .with_state(state)
+        // Bound the restore upload. RequestBodyLimitLayer caps the body
+        // regardless of how it is consumed (Multipart streams it), short-
+        // circuiting on Content-Length and on the wrapped body stream.
+        // DefaultBodyLimit::disable() lifts axum's stock 2 MiB extractor
+        // cap (which Multipart honors) so the explicit 200 MiB layer below
+        // is the single effective limit for a legitimate large backup.
+        .layer(RequestBodyLimitLayer::new(RESTORE_BODY_LIMIT))
+        .layer(DefaultBodyLimit::disable())
 }
 
 fn err(status: StatusCode, msg: impl Into<String>) -> Response {
@@ -107,7 +135,30 @@ async fn get_backup(State(s): State<BackupApiState>) -> Response {
         None
     };
 
-    let config_toml = tokio::fs::read(s.cfg_store.path()).await.ok();
+    // FULL-FIDELITY CONFIG (security wave 3, corrected): the bundle tars the
+    // REAL localsky.toml, secrets and all. A backup is a disaster-recovery
+    // artifact: restoring it onto a FRESH instance must reproduce a working
+    // config, and a fresh target has nothing to un-redact against, so a
+    // redacted bundle would write the "***redacted***" sentinel as each
+    // secret and silently break the restored instance. The config-leak
+    // finding (LS-API-03) is closed not by redacting the bundle but by the
+    // PRIVILEGED GATE in auth::middleware: GET /api/backup requires an
+    // authenticated/trusted caller even in the default AuthMode::Disabled
+    // posture, and the public demo 403s the whole backup surface. The
+    // config/raw + wizard/draft READ paths stay redacted (they are VIEWS,
+    // not backups); only the backup ships real secrets, and only to a
+    // caller already proven authorized to take it.
+    //
+    // SECURITY: the resulting bundle contains real secrets (HA token, MQTT /
+    // SMTP passwords, OpenSprinkler hash, LLM key, webhook URLs) and the
+    // history DB. Store it somewhere secure and treat it like a credential.
+    //
+    // If the file can't be read we withhold the config from the bundle
+    // (None); the DB + manifest still go out and `includes_config` is false.
+    let config_toml: Option<Vec<u8>> = match tokio::fs::read_to_string(s.cfg_store.path()).await {
+        Ok(raw) => Some(raw.into_bytes()),
+        Err(_) => None,
+    };
 
     let manifest = serde_json::json!({
         "service": "localsky",
@@ -115,6 +166,10 @@ async fn get_backup(State(s): State<BackupApiState>) -> Response {
         "created_at_epoch": chrono::Utc::now().timestamp(),
         "includes_db": db_copy.is_some(),
         "includes_config": config_toml.is_some(),
+        // The bundled config is FULL FIDELITY: real secrets, not redacted.
+        // It restores cleanly onto a fresh box. Flag stays for restore UIs
+        // so they can warn the operator to store the bundle securely.
+        "config_secrets_redacted": false,
     });
 
     let tarball = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
@@ -349,5 +404,151 @@ mod tests {
         let aside = apply_staged_restore(&db).unwrap().expect("swap happened");
         assert_eq!(std::fs::read(&db).unwrap(), b"NEW-DB");
         assert!(!std::path::Path::new(&aside).exists(), "no old db to keep");
+    }
+
+    /// Disaster-recovery contract: a backup taken from a configured
+    /// instance, restored onto a FRESH instance, must reproduce the SAME
+    /// config WITH REAL SECRETS. This proves the bundle is full fidelity
+    /// (not redacted) and that the restore parse/save path lands the real
+    /// secret bytes on disk. If the bundle were redacted, a fresh restore
+    /// would write the "***redacted***" sentinel (nothing to un-redact
+    /// against on a clean target) and the restored instance would be broken.
+    #[tokio::test]
+    async fn backup_restore_roundtrip_preserves_real_secrets_on_fresh_instance() {
+        use crate::config::schema::*;
+        use std::io::Read;
+
+        let dir = std::env::temp_dir().join(format!(
+            "localsky-backup-test-{}-roundtrip",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // ----- The SOURCE (configured) instance -----
+        let src_cfg_path = dir.join("source/localsky.toml");
+        std::fs::create_dir_all(src_cfg_path.parent().unwrap()).unwrap();
+
+        let mut cfg = Config::default();
+        cfg.deployment.location = Location {
+            lat: 28.5,
+            lon: -81.4,
+            elevation_m: None,
+        };
+        cfg.controllers.push(ControllerEntry {
+            id: "os_main".into(),
+            default: true,
+            enabled: true,
+            controller: ControllerKind::OpensprinklerDirect(OpenSprinklerDirectConfig {
+                host: "10.0.0.10".into(),
+                port: 80,
+                password_md5: "abc123md5hash".into(),
+                poll_interval_s: 10,
+            }),
+        });
+        cfg.notifications.email = Some(EmailConfig {
+            smtp_host: "smtp.example.com".into(),
+            smtp_port: 587,
+            username: "smtp_user_secret".into(),
+            password: "smtp_pass_secret".into(),
+            from_address: "a@example.com".into(),
+            to_address: "b@example.com".into(),
+            starttls: true,
+        });
+        std::fs::write(&src_cfg_path, toml::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        let src_state = BackupApiState {
+            cfg_store: Arc::new(FileConfigStore::new(&src_cfg_path)),
+            db: None,
+            db_path: dir
+                .join("source/irrigation.db")
+                .to_string_lossy()
+                .to_string(),
+            snapshots: None,
+        };
+
+        // ----- Take the backup -----
+        let resp = get_backup(State(src_state)).await;
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+
+        // Unpack the tar.gz and pull localsky.toml back out (this is exactly
+        // what post_restore's bundle branch does).
+        let gz = flate2::read::GzDecoder::new(bytes.as_ref());
+        let mut archive = tar::Archive::new(gz);
+        let mut bundled_config: Option<String> = None;
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let path = entry.path().unwrap().to_string_lossy().to_string();
+            if path == "localsky.toml" {
+                let mut s = String::new();
+                entry.read_to_string(&mut s).unwrap();
+                bundled_config = Some(s);
+            }
+        }
+        let bundled = bundled_config.expect("bundle contains localsky.toml");
+
+        // The bundle is FULL FIDELITY: real secrets are present, no sentinel.
+        assert!(
+            bundled.contains("abc123md5hash"),
+            "backup must contain the real OpenSprinkler password_md5"
+        );
+        assert!(
+            bundled.contains("smtp_pass_secret"),
+            "backup must contain the real SMTP password"
+        );
+        assert!(
+            bundled.contains("smtp_user_secret"),
+            "backup must contain the real SMTP username"
+        );
+        assert!(
+            !bundled.contains(crate::api::config::SECRET_REDACTED_SENTINEL),
+            "a backup must NOT carry the redaction sentinel"
+        );
+
+        // ----- Restore onto a FRESH instance -----
+        // Mirror post_restore's config branch: parse -> validate -> save to a
+        // clean store. The fresh target has NO prior config to un-redact
+        // against, so this is the exact disaster-recovery scenario.
+        let fresh_cfg_path = dir.join("fresh/localsky.toml");
+        std::fs::create_dir_all(fresh_cfg_path.parent().unwrap()).unwrap();
+        let fresh_store = FileConfigStore::new(&fresh_cfg_path);
+        assert!(
+            !fresh_store.is_initialized(),
+            "fresh instance starts with no config"
+        );
+
+        let restored: Config = toml::from_str(&bundled).expect("bundled TOML re-parses");
+        let report = crate::config::validate::validate(&restored);
+        assert!(report.ok(), "restored config must validate: {report:?}");
+        fresh_store.save(&restored).await.expect("restore save");
+
+        // ----- Verify the restored instance has the REAL secrets -----
+        let loaded = fresh_store.load().await.expect("fresh load after restore");
+        let ControllerKind::OpensprinklerDirect(os) = &loaded.controllers[0].controller else {
+            panic!("expected opensprinkler_direct controller");
+        };
+        assert_eq!(
+            os.password_md5, "abc123md5hash",
+            "restored OpenSprinkler secret must be the REAL value, not a sentinel"
+        );
+        let email = loaded.notifications.email.as_ref().expect("email config");
+        assert_eq!(
+            email.password, "smtp_pass_secret",
+            "restored SMTP password must be the REAL value"
+        );
+        assert_eq!(
+            email.username, "smtp_user_secret",
+            "restored SMTP username must be the REAL value"
+        );
+        // And nothing on the restored instance is a redaction sentinel.
+        let on_disk = std::fs::read_to_string(&fresh_cfg_path).unwrap();
+        assert!(
+            !on_disk.contains(crate::api::config::SECRET_REDACTED_SENTINEL),
+            "restored config on disk must contain no sentinel"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

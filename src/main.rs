@@ -28,7 +28,7 @@
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     use anyhow::Context;
-    use axum::http::{header, HeaderValue};
+    use axum::http::{header, HeaderName, HeaderValue};
     use axum::routing::get;
     use axum::Router;
     use leptos::prelude::*;
@@ -826,6 +826,40 @@ async fn main() -> anyhow::Result<()> {
         .layer(SetResponseHeaderLayer::overriding(
             header::CACHE_CONTROL,
             HeaderValue::from_static("no-cache"),
+        ))
+        // App-baseline security headers (WH-01 / LS-REC-02). Conservative,
+        // app-wide, and deliberately limited to headers that cannot break
+        // the deploy:
+        //   - X-Content-Type-Options: nosniff -> stop MIME sniffing.
+        //   - Referrer-Policy: strict-origin-when-cross-origin -> don't
+        //     leak full URLs (which can carry ?access_token on /stream)
+        //     to third-party origins.
+        //   - Permissions-Policy: deny geolocation/camera/microphone; the
+        //     app uses none of them, so an injected/embedded context can't
+        //     either.
+        // if_not_present so an upstream proxy that already sets a stricter
+        // value wins (the operator's edge stays authoritative).
+        //
+        // DELIBERATELY NOT SET in-app (see report):
+        //   - HSTS: would break LAN-HTTP self-hosters; belongs at the TLS
+        //     edge, not here.
+        //   - X-Frame-Options / CSP frame-ancestors: a blanket DENY /
+        //     'none' would break the HAOS ingress iframe (Home Assistant
+        //     embeds the addon cross-origin). Framing is left to the
+        //     edge/operator. See the WH-02 note.
+        //   - script/style CSP: risks breaking Leptos hydration and the
+        //     /pkg crossorigin-nonce behavior; intentionally omitted.
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("strict-origin-when-cross-origin"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("permissions-policy"),
+            HeaderValue::from_static("geolocation=(), camera=(), microphone=()"),
         ));
 
     // Mount the auth API + layer the enforcement middleware over the
@@ -841,6 +875,22 @@ async fn main() -> anyhow::Result<()> {
             ))
     } else {
         tracing::warn!("no history DB; built-in auth unavailable (mode stays disabled)");
+        app
+    };
+
+    // Public-demo read-only gate. Outermost layer so it short-circuits
+    // state-changing + outbound-probe requests before auth or any handler
+    // runs. No-op when LOCALSKY_DEMO != 1, so prod / the owner's live
+    // instance / self-hosters are untouched; only demo.localsky.io is
+    // locked to read browsing.
+    let app = if demo_mode {
+        tracing::info!(
+            "LOCALSKY_DEMO=1: demo read-only gate active (mutations + probes return 403)"
+        );
+        app.layer(axum::middleware::from_fn(
+            localsky::auth::demo_guard::block_when_demo,
+        ))
+    } else {
         app
     };
 

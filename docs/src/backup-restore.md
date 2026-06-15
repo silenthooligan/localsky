@@ -37,6 +37,8 @@ curl -fL -OJ -H "Authorization: Bearer lsk_yourtoken" \
 
 That curl line drops straight into cron for nightly backups. Keep a few generations and store them off the machine that runs LocalSky.
 
+> **The bundle contains real secrets.** So that it restores onto a fresh machine without you re-typing everything, `localsky.toml` is included **full fidelity**: your Home Assistant token, MQTT and SMTP passwords, OpenSprinkler password hash, LLM API key, and any webhook URLs are all in the file. The download endpoint is privileged (only an authenticated session, an API token, or a trusted-network/loopback caller can fetch it, even when auth is set to disabled), but the resulting `.tar.gz` is a credential once it leaves the box. Store it somewhere secure and encrypted, and treat it like a password. (The on-screen config views, by contrast, redact secrets.)
+
 Deliberately **not** in the bundle:
 
 - The web push VAPID private key (wherever `VAPID_PRIVATE_KEY_PATH` points). A casually shared backup should not leak a signing key; copy it separately if you use web push.

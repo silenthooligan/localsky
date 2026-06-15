@@ -151,7 +151,7 @@ If you only want the weather dashboard, leave the controllers list empty in the 
 
 LocalSky stays the brain; Home Assistant gets the entities. Install the companion integration and a running LocalSky is discovered automatically, with sub-second push updates, a full weather entity, zone valves, and irrigation services:
 
-[![Open your Home Assistant instance and add the LocalSky integration repository to HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=silenthooligan&repository=localsky-hacs&category=integration)
+[![Open your Home Assistant instance and add the LocalSky integration repository to HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=silenthooligan&repository=localsky-ha&category=integration)
 
 On Home Assistant OS or Supervised, the LocalSky server itself can also run as a one-click app instead of a separate Docker host:
 

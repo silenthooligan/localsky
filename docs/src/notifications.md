@@ -57,11 +57,11 @@ volumes:
   - ./localsky-keys:/keys:ro
 ```
 
-The LocalSky image runs as uid 10001, so make sure that user can read the PEM:
+The app runs as uid 10001. Unlike the writable `/data` volume (whose ownership the container fixes automatically), the keys directory is mounted read-only, so the container cannot adjust it for you. Make sure uid 10001 can read the PEM on the host:
 
 ```bash
 chown 10001:10001 ./localsky-keys/vapid-private.pem
-chmod 400 ./localsky-keys/vapid-private.pem
+chmod 440 ./localsky-keys/vapid-private.pem
 ```
 
 Restart the container after setting the variables; the keypair is read once at startup.

@@ -1,6 +1,6 @@
 [package]
 name = "localsky"
-version = "0.4.0-beta.2"
+version = "0.4.0-beta.3"
 edition = "2021"
 license = "Apache-2.0"
 description = "Local-first weather and irrigation control with native FAO-56 ET, multi-source weather merge, multi-controller HAL, optional Home Assistant, and optional local LLM advisor."
@@ -23,7 +23,7 @@ leptos_axum = { version = "0.8", optional = true }
 # SSR side
 axum = { version = "0.8", features = ["macros", "multipart"], optional = true }
 tower = { version = "0.5", optional = true }
-tower-http = { version = "0.6", features = ["fs", "compression-gzip", "set-header"], optional = true }
+tower-http = { version = "0.6", features = ["fs", "compression-gzip", "set-header", "limit"], optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
 tokio-stream = { version = "0.1", features = ["sync"], optional = true }
 

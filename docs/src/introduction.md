@@ -48,6 +48,6 @@ Everything runs on your own hardware. The only outbound calls are the ones you o
 ## Project links
 
 - Source: [github.com/silenthooligan/localsky](https://github.com/silenthooligan/localsky)
-- HACS integration: [github.com/silenthooligan/localsky-hacs](https://github.com/silenthooligan/localsky-hacs)
+- HACS integration: [github.com/silenthooligan/localsky-ha](https://github.com/silenthooligan/localsky-ha)
 - Issues + discussions: same repos
 - License: [Apache-2.0](https://github.com/silenthooligan/localsky/blob/main/LICENSE)

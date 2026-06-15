@@ -14,7 +14,6 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use reqwest::Client;
 use serde_json::{json, Value};
 
 use crate::config::schema::HaServiceCallConfig;
@@ -23,10 +22,13 @@ use crate::ports::irrigation_controller::{
     RunHandle, RunRecord,
 };
 
+/// Per-request budget for HA REST calls. Matches the previous persistent
+/// client's timeout; each call now builds an SSRF-hardened client.
+const HA_TIMEOUT: Duration = Duration::from_secs(15);
+
 pub struct HaServiceCall {
     id: String,
     config: HaServiceCallConfig,
-    client: Client,
 }
 
 impl HaServiceCall {
@@ -34,14 +36,9 @@ impl HaServiceCall {
         id: impl Into<String>,
         config: HaServiceCallConfig,
     ) -> Result<Self, ControllerError> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .map_err(|e| ControllerError::Init(format!("reqwest client: {e}")))?;
         Ok(Self {
             id: id.into(),
             config,
-            client,
         })
     }
 
@@ -65,21 +62,32 @@ impl HaServiceCall {
             domain,
             service
         );
-        let resp = self
-            .client
-            .post(&url)
+        // SSRF-hardened client built per call. base_url is config-supplied and
+        // these calls fire from the always-on scheduler/engine, so route
+        // outbound through net::safe_fetch: forbidden-target filter, resolved-IP
+        // pin (anti DNS-rebinding), no redirects. RFC1918/ULA stays allowed (HA
+        // lives on the LAN). A blocked target never made the call -> Init-class.
+        let (client, safe_url) = crate::net::safe_fetch::build_safe_client(&url, HA_TIMEOUT)
+            .await
+            .map_err(|e| ControllerError::Init(e.to_string()))?;
+        let resp = client
+            .post(safe_url)
             .bearer_auth(&self.config.bearer_token)
             .json(&data)
             .send()
             .await
-            .map_err(|e| ControllerError::Transport(e.to_string()))?;
+            .map_err(|e| {
+                ControllerError::Transport(crate::net::reqwest_error_category(&e).to_string())
+            })?;
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
             return Err(ControllerError::AuthFailed);
         }
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ControllerError::Remote(format!("HTTP {status}: {body}")));
+            // Status only: do NOT reflect the upstream body. The base_url is
+            // operator-supplied, so echoing the target's response would leak it
+            // (SSRF exfil channel), matching the other adapters' body-trim.
+            return Err(ControllerError::Remote(format!("HTTP {status}")));
         }
         Ok(())
     }
@@ -149,14 +157,19 @@ impl IrrigationController for HaServiceCall {
         // We can't enumerate zone state through service calls alone.
         // The reachable flag flips by hitting /api/ with a HEAD request.
         let url = format!("{}/api/", self.config.base_url.trim_end_matches('/'));
-        let reachable = self
-            .client
-            .get(&url)
-            .bearer_auth(&self.config.bearer_token)
-            .send()
-            .await
-            .map(|r| r.status().is_success())
-            .unwrap_or(false);
+        // SSRF-hardened client (same rationale as call_service). A blocked or
+        // unbuildable target simply reports unreachable rather than erroring the
+        // status read.
+        let reachable = match crate::net::safe_fetch::build_safe_client(&url, HA_TIMEOUT).await {
+            Ok((client, safe_url)) => client
+                .get(safe_url)
+                .bearer_auth(&self.config.bearer_token)
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false),
+            Err(_) => false,
+        };
         Ok(ControllerStatus {
             reachable,
             master_enabled: None,

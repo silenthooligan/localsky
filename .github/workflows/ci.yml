@@ -18,11 +18,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch (action ships no semver tags)
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
       - name: cargo fmt
         run: cargo fmt --all -- --check
       - name: cargo clippy
@@ -36,9 +36,9 @@ jobs:
       matrix:
         os: [ubuntu-22.04, ubuntu-24.04-arm, macos-14]
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch (action ships no semver tags)
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
       - name: cargo test
         run: cargo test --no-default-features --features ssr --lib
 
@@ -46,11 +46,11 @@ jobs:
     name: cargo leptos build smoke
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch (action ships no semver tags)
         with:
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
       - name: install cargo-leptos
         run: cargo install --locked cargo-leptos
       - name: build
@@ -60,10 +60,32 @@ jobs:
     name: markdownlint (no em dashes)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
       - name: detect em dashes in user-facing prose
         run: |
           if grep -nP '[\x{2014}\x{2013}]' README.md CONTRIBUTING.md SECURITY.md CHANGELOG.md CODE_OF_CONDUCT.md 2>/dev/null; then
             echo "Em or en dash detected; replace with commas, periods, or parens."
             exit 1
           fi
+
+  # SC-06: scan the locked dependency tree against the RustSec advisory DB
+  # and fail on any advisory. cargo-audit is installed as a prebuilt binary
+  # via cargo-binstall (no compile, ~seconds) so this stays fast and never
+  # gates on the rest of the matrix. It reads Cargo.lock directly, so no
+  # project build is needed.
+  cargo-audit:
+    name: cargo-audit (RustSec)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch (action ships no semver tags)
+      - name: install cargo-audit (prebuilt)
+        uses: cargo-bins/cargo-binstall@30b5ca8b54e1dcffd9548bc87ede1531310fdc67 # v1.20.0
+      - run: cargo binstall --no-confirm cargo-audit
+      - name: cargo audit
+        # Fails on any vulnerability or unmaintained-crate advisory. To
+        # accept a documented, unfixable advisory, append it here, e.g.
+        # `--ignore RUSTSEC-0000-0000`, with a comment justifying it. Keep
+        # this list empty unless an advisory has no upgrade path.
+        run: cargo audit --deny warnings

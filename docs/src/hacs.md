@@ -1,6 +1,6 @@
 # Home Assistant integration
 
-LocalSky ships a native Home Assistant integration, distributed through HACS from [github.com/silenthooligan/localsky-hacs](https://github.com/silenthooligan/localsky-hacs). It turns a running LocalSky instance into a first-class HA device: every weather reading, zone valve, soil probe, verdict, and threshold slider becomes an HA entity, and run/stop/pause become HA services you can call from automations.
+LocalSky ships a native Home Assistant integration, distributed through HACS from [github.com/silenthooligan/localsky-ha](https://github.com/silenthooligan/localsky-ha). It turns a running LocalSky instance into a first-class HA device: every weather reading, zone valve, soil probe, verdict, and threshold slider becomes an HA entity, and run/stop/pause become HA services you can call from automations.
 
 LocalSky stays the brain. The integration is a thin client over LocalSky's REST and SSE API; if HA goes down, watering continues unaffected.
 
@@ -26,13 +26,13 @@ One HA device per LocalSky instance, populated from LocalSky's live entity manif
 
 The integration is not yet in the HACS default catalog, so this step is required first. The button does it in one click:
 
-[![Open your Home Assistant instance and add this repository to HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=silenthooligan&repository=localsky-hacs&category=integration)
+[![Open your Home Assistant instance and add this repository to HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=silenthooligan&repository=localsky-ha&category=integration)
 
 Or manually:
 
 1. In Home Assistant, open **HACS**.
 2. Open the three-dot menu (top right) and choose **Custom repositories**.
-3. Add `https://github.com/silenthooligan/localsky-hacs` with category **Integration**.
+3. Add `https://github.com/silenthooligan/localsky-ha` with category **Integration**.
 4. Search for **LocalSky** in HACS and install it.
 5. Restart Home Assistant.
 

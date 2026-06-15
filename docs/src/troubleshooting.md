@@ -74,13 +74,12 @@ This bites most often with `network_mode: host`, where the container shares the 
 
 ### Wizard cannot save, or history is missing, with permission errors in the logs
 
-The image runs as uid 10001 by default. If your `/data` bind mount is owned by root on the host, LocalSky starts fine but cannot write to it: the setup wizard fails to save `localsky.toml`, and run history is disabled (the server logs the SQLite open failure and keeps running without it). Fix the ownership:
+The app runs as the non-root user uid 10001, and the container fixes the ownership of `/data` to that user on every startup, so a normal bind mount or named volume needs no manual `chown`. If you still see permission errors (the wizard cannot save `localsky.toml`, or history is disabled with a logged SQLite open failure), the cause is almost always one of:
 
-```bash
-sudo chown -R 10001:10001 /opt/localsky/data
-```
+- **`/data` is mounted read-only.** The container cannot fix ownership of, or write to, a read-only mount. Mount `/data` read-write.
+- **You overrode the entrypoint** (for example `user: "0:0"` plus a separate non-root step, or a custom `entrypoint:`). Remove the override and let the image manage the privilege drop.
 
-Or run the container as root with `user: "0:0"` in compose (works, but the chown is the cleaner fix).
+As a last resort you can pre-own the host directory yourself: `sudo chown -R 10001:10001 /opt/localsky/data`.
 
 ### Low-power hardware
 

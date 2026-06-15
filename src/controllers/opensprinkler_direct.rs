@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use reqwest::Client;
 use serde::Deserialize;
 
 use crate::config::schema::OpenSprinklerDirectConfig;
@@ -30,11 +29,15 @@ use crate::ports::irrigation_controller::{
 pub struct OpenSprinklerDirect {
     id: String,
     config: OpenSprinklerDirectConfig,
-    client: Client,
     /// Map of zone_slug -> station number (1-based). Populated from
     /// config.zones[*].controller_station before adapter construction.
     zone_to_station: Arc<std::collections::HashMap<String, u32>>,
 }
+
+/// Per-request HTTP timeout for OS calls. Matches the old persistent
+/// client's budget; each request now builds an SSRF-hardened client (host
+/// resolved + IP-pinned, no redirects) via net::safe_fetch.
+const OS_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl OpenSprinklerDirect {
     pub fn new(
@@ -42,14 +45,9 @@ impl OpenSprinklerDirect {
         config: OpenSprinklerDirectConfig,
         zone_to_station: std::collections::HashMap<String, u32>,
     ) -> Result<Self, ControllerError> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|e| ControllerError::Init(format!("reqwest client: {e}")))?;
         Ok(Self {
             id: id.into(),
             config,
-            client,
             zone_to_station: Arc::new(zone_to_station),
         })
     }
@@ -84,22 +82,28 @@ impl OpenSprinklerDirect {
             url.push('=');
             url.push_str(v);
         }
-        let resp = self
-            .client
-            .get(&url)
-            .send()
+        // SSRF-hardened, IP-pinned client built per request. Allows
+        // private LAN (the controller lives there) but rejects
+        // loopback/metadata/link-local/multicast, and follows no
+        // redirects. A bad/blocked target is an Init-class failure (we
+        // never made the call) rather than a Transport one.
+        let (client, safe_url) = crate::net::safe_fetch::build_safe_client(&url, OS_TIMEOUT)
             .await
-            .map_err(|e| ControllerError::Transport(e.to_string()))?;
+            .map_err(|e| ControllerError::Init(e.to_string()))?;
+        let resp = client.get(safe_url).send().await.map_err(|e| {
+            ControllerError::Transport(crate::net::reqwest_error_category(&e).to_string())
+        })?;
         let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| ControllerError::Transport(e.to_string()))?;
+        let body = resp.text().await.map_err(|e| {
+            ControllerError::Transport(crate::net::reqwest_error_category(&e).to_string())
+        })?;
         if !status.is_success() {
-            return Err(ControllerError::Remote(format!("HTTP {status}: {body}")));
+            // Do NOT reflect the raw upstream body: against a forced SSRF
+            // target it would leak that target's response. Status only.
+            return Err(ControllerError::Remote(format!("HTTP {status}")));
         }
         let value: serde_json::Value = serde_json::from_str(&body)
-            .map_err(|e| ControllerError::Remote(format!("json parse: {e}; body={body}")))?;
+            .map_err(|_| ControllerError::Remote("response was not valid JSON".into()))?;
         // OS replies HTTP 200 even on errors and signals them via a
         // {"result":N} envelope (firmware always uses 200 + result
         // codes). Without this check a wrong password "passes" the /jc
@@ -107,8 +111,10 @@ impl OpenSprinklerDirect {
         // deserializes into an all-default struct, and stop commands
         // are never actually verified.
         check_result_envelope(&value)?;
+        // Typed-shape mismatch: report the kind of failure, not the raw
+        // body (would leak a forced-SSRF target's response).
         serde_json::from_value(value)
-            .map_err(|e| ControllerError::Remote(format!("json parse: {e}; body={body}")))
+            .map_err(|_| ControllerError::Remote("unexpected response shape".into()))
     }
 }
 

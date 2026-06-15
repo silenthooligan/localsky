@@ -13,12 +13,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::ports::llm_provider::{ChatOpts, HealthReport, LlmError, LlmProvider};
 
+/// Default per-request budget. Matches the old persistent client; chat()
+/// can still raise it per call via ChatOpts.timeout_s.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub struct OpenaiCompatProvider {
     id: String,
     base_url: String,
     model: String,
     api_key: Option<String>,
-    client: Client,
 }
 
 impl OpenaiCompatProvider {
@@ -28,21 +31,27 @@ impl OpenaiCompatProvider {
         model: impl Into<String>,
         api_key: Option<String>,
     ) -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .expect("reqwest client construction");
         Self {
             id: id.into(),
             base_url: base_url.into(),
             model: model.into(),
             api_key,
-            client,
         }
     }
 
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url.trim_end_matches('/'), path)
+    }
+
+    /// SSRF-hardened, IP-pinned client for a given endpoint URL. The LLM
+    /// base_url is operator-supplied (and can be a private vLLM/Ollama on
+    /// the LAN, which stays allowed); loopback/metadata/link-local/
+    /// multicast are rejected, the resolved IP is pinned (anti DNS-
+    /// rebinding) and redirects are disabled.
+    async fn safe_client(&self, url: &str) -> Result<(Client, reqwest::Url), LlmError> {
+        crate::net::safe_fetch::build_safe_client(url, DEFAULT_TIMEOUT)
+            .await
+            .map_err(|e| LlmError::Transport(e.to_string()))
     }
 }
 
@@ -116,10 +125,9 @@ impl LlmProvider for OpenaiCompatProvider {
             stream: false,
         };
 
-        let mut req = self
-            .client
-            .post(self.url("/v1/chat/completions"))
-            .json(&body);
+        let endpoint = self.url("/v1/chat/completions");
+        let (client, safe_url) = self.safe_client(&endpoint).await?;
+        let mut req = client.post(safe_url).json(&body);
         if let Some(key) = &self.api_key {
             req = req.bearer_auth(key);
         }
@@ -129,7 +137,7 @@ impl LlmProvider for OpenaiCompatProvider {
         let resp = req
             .send()
             .await
-            .map_err(|e| LlmError::Transport(e.to_string()))?;
+            .map_err(|e| LlmError::Transport(crate::net::reqwest_error_category(&e).to_string()))?;
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
             return Err(LlmError::AuthFailed);
@@ -138,13 +146,14 @@ impl LlmProvider for OpenaiCompatProvider {
             return Err(LlmError::RateLimited);
         }
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(LlmError::Remote(format!("HTTP {status}: {body}")));
+            // Status only: don't reflect the upstream body (SSRF exfil
+            // channel when the URL was steered to an unintended target).
+            return Err(LlmError::Remote(format!("HTTP {status}")));
         }
         let parsed: ChatResponse = resp
             .json()
             .await
-            .map_err(|e| LlmError::Parse(e.to_string()))?;
+            .map_err(|e| LlmError::Parse(crate::net::reqwest_error_category(&e).to_string()))?;
         parsed
             .choices
             .into_iter()
@@ -155,14 +164,16 @@ impl LlmProvider for OpenaiCompatProvider {
 
     async fn health(&self) -> Result<HealthReport, LlmError> {
         // /v1/models for OpenAI; many compatible servers also expose it.
-        let mut req = self.client.get(self.url("/v1/models"));
+        let endpoint = self.url("/v1/models");
+        let (client, safe_url) = self.safe_client(&endpoint).await?;
+        let mut req = client.get(safe_url);
         if let Some(key) = &self.api_key {
             req = req.bearer_auth(key);
         }
         let resp = req
             .send()
             .await
-            .map_err(|e| LlmError::Transport(e.to_string()))?;
+            .map_err(|e| LlmError::Transport(crate::net::reqwest_error_category(&e).to_string()))?;
         let reachable = resp.status().is_success();
         Ok(HealthReport {
             reachable,

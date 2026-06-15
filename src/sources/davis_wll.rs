@@ -35,7 +35,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashSet;
 use tokio::time::{interval, MissedTickBehavior};
@@ -47,11 +46,13 @@ use crate::ports::weather_source::{
 };
 
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
+/// Per-request budget for the WLL LAN poll. Matches the previous persistent
+/// client's timeout; each fetch now builds an SSRF-hardened client.
+const WLL_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub struct DavisWll {
     id: String,
     config: DavisWllConfig,
-    client: Client,
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,20 +99,23 @@ struct Condition {
 
 impl DavisWll {
     pub fn new(id: impl Into<String>, config: DavisWllConfig) -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(8))
-            .build()
-            .expect("reqwest client construction");
         Self {
             id: id.into(),
             config,
-            client,
         }
     }
 
     async fn fetch(&self) -> anyhow::Result<CurrentConditionsResponse> {
         let url = format!("http://{}/v1/current_conditions", self.config.host);
-        let resp = self.client.get(&url).send().await?.error_for_status()?;
+        // SSRF-hardened client built per poll. The WLL host is config-supplied
+        // and this poller is always-on, so route outbound through
+        // net::safe_fetch (defense in depth): forbidden-target filter,
+        // resolved-IP pin (anti DNS-rebinding), no redirects. RFC1918/ULA stays
+        // allowed (the WLL lives on the LAN), so legitimate polling is
+        // unaffected.
+        let (client, safe_url) =
+            crate::net::safe_fetch::build_safe_client(&url, WLL_TIMEOUT).await?;
+        let resp = client.get(safe_url).send().await?.error_for_status()?;
         Ok(resp.json().await?)
     }
 }

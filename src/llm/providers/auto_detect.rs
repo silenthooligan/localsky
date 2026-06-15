@@ -15,7 +15,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use reqwest::Client;
 use tracing::{debug, info, warn};
 
 use crate::llm::providers::{ollama::OllamaProvider, openai_compat::OpenaiCompatProvider};
@@ -55,10 +54,6 @@ pub fn default_probe_targets() -> Vec<ProbeTarget> {
 /// detected provider gets `id = "auto:<kind>:<base_url>"` so logs are
 /// traceable to the actual endpoint.
 pub async fn detect(targets: Vec<ProbeTarget>, model: String) -> Option<Arc<dyn LlmProvider>> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(3))
-        .build()
-        .expect("reqwest client construction");
     for target in targets {
         let probe_path = match target.kind {
             ProbeKind::Ollama => "/api/tags",
@@ -66,7 +61,23 @@ pub async fn detect(targets: Vec<ProbeTarget>, model: String) -> Option<Arc<dyn 
         };
         let url = format!("{}{}", target.base_url.trim_end_matches('/'), probe_path);
         debug!("auto-detect probing {url}");
-        match client.get(&url).send().await {
+        // SSRF-hardened, IP-pinned probe: the probe_order is operator-
+        // supplied and reachable from the wizard's test_llm endpoint, so
+        // each candidate goes through the same forbidden-target +
+        // anti-rebinding + no-redirect client the real providers use. The
+        // built-in localhost defaults are loopback and so are rejected here
+        // (consistent with the OpenAI-compat provider's loopback policy); in
+        // a containerized deployment localhost is the container itself, not a
+        // real LLM host, so the operator points probe_order at the LAN/host.
+        let (client, safe_url) =
+            match crate::net::safe_fetch::build_safe_client(&url, Duration::from_secs(3)).await {
+                Ok(pair) => pair,
+                Err(e) => {
+                    debug!("auto-detect: {url} not a permitted target: {e}");
+                    continue;
+                }
+            };
+        match client.get(safe_url).send().await {
             Ok(r) if r.status().is_success() => {
                 info!("auto-detect: {url} responded; using {:?}", target.kind);
                 let provider: Arc<dyn LlmProvider> = match target.kind {

@@ -40,10 +40,17 @@ use crate::ports::irrigation_controller::{
     RunHandle, RunRecord, ZoneRuntimeStatus,
 };
 
+/// Per-request HTTP budget for Rain Bird cloud calls. Each request now
+/// builds an SSRF-hardened, IP-pinned client (no redirects) via
+/// net::safe_fetch because `base_url` is operator-configurable (the schema
+/// exposes it so the operator can follow Rain Bird's host rotations), which
+/// makes the target host user-controlled and reachable from the wizard's
+/// test_controller / scan_zones probe.
+const RB_TIMEOUT: Duration = Duration::from_secs(15);
+
 pub struct Rainbird {
     id: String,
     config: RainbirdConfig,
-    client: Client,
     access_token: Arc<Mutex<Option<String>>>,
     station_to_slug: BTreeMap<u32, String>,
     last_status: Arc<Mutex<Option<ControllerStatus>>>,
@@ -56,10 +63,6 @@ struct LoginResponse {
 
 impl Rainbird {
     pub fn new(id: impl Into<String>, config: RainbirdConfig) -> Result<Self, ControllerError> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .map_err(|e| ControllerError::Init(format!("reqwest client: {e}")))?;
         let station_to_slug = config
             .zone_station_map
             .iter()
@@ -68,11 +71,21 @@ impl Rainbird {
         Ok(Self {
             id: id.into(),
             config,
-            client,
             access_token: Arc::new(Mutex::new(None)),
             station_to_slug,
             last_status: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// SSRF-hardened, IP-pinned client for one Rain Bird URL. `base_url` is
+    /// operator-configurable, so loopback/metadata/link-local/multicast are
+    /// rejected, the resolved IP is pinned (anti DNS-rebinding) and
+    /// redirects are disabled. A blocked/unresolvable target is an
+    /// Init-class failure (the call was never made).
+    async fn safe_client(&self, url: &str) -> Result<(Client, reqwest::Url), ControllerError> {
+        crate::net::safe_fetch::build_safe_client(url, RB_TIMEOUT)
+            .await
+            .map_err(|e| ControllerError::Init(e.to_string()))
     }
 
     fn station_for(&self, slug: &str) -> Result<u32, ControllerError> {
@@ -88,16 +101,21 @@ impl Rainbird {
             "{}/v1/userLogin",
             self.config.base_url.trim_end_matches('/')
         );
-        let resp = self
-            .client
-            .post(&url)
+        let (client, safe_url) = self.safe_client(&url).await?;
+        let resp = client
+            .post(safe_url)
             .json(&json!({
                 "email": &self.config.email,
                 "password": &self.config.password,
             }))
             .send()
             .await
-            .map_err(|e| ControllerError::Transport(format!("rainbird login: {e}")))?;
+            .map_err(|e| {
+                ControllerError::Transport(format!(
+                    "rainbird login: {}",
+                    crate::net::reqwest_error_category(&e)
+                ))
+            })?;
         let status = resp.status();
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             return Err(ControllerError::AuthFailed);
@@ -105,10 +123,12 @@ impl Rainbird {
         if !status.is_success() {
             return Err(ControllerError::Remote(format!("rainbird login {status}")));
         }
-        let lr: LoginResponse = resp
-            .json()
-            .await
-            .map_err(|e| ControllerError::Transport(format!("rainbird login decode: {e}")))?;
+        let lr: LoginResponse = resp.json().await.map_err(|e| {
+            ControllerError::Transport(format!(
+                "rainbird login decode: {}",
+                crate::net::reqwest_error_category(&e)
+            ))
+        })?;
         *self.access_token.lock().await = Some(lr.access_token.clone());
         Ok(lr.access_token)
     }
@@ -128,17 +148,20 @@ impl Rainbird {
     ) -> Result<Value, ControllerError> {
         let mut token = self.current_token().await?;
         for attempt in 0..2 {
-            let mut req = self
-                .client
-                .request(method.clone(), &url)
-                .bearer_auth(&token);
+            // Per-attempt safe client: host resolved + IP-pinned, redirects
+            // off, forbidden targets rejected. Rebuilt each attempt so a
+            // re-login (after a 401) re-vets the target the same way.
+            let (client, safe_url) = self.safe_client(&url).await?;
+            let mut req = client.request(method.clone(), safe_url).bearer_auth(&token);
             if let Some(b) = &body {
                 req = req.json(b);
             }
-            let resp = req
-                .send()
-                .await
-                .map_err(|e| ControllerError::Transport(format!("rainbird {method} {url}: {e}")))?;
+            let resp = req.send().await.map_err(|e| {
+                ControllerError::Transport(format!(
+                    "rainbird {method}: {}",
+                    crate::net::reqwest_error_category(&e)
+                ))
+            })?;
             let status = resp.status();
             if status == StatusCode::UNAUTHORIZED && attempt == 0 {
                 *self.access_token.lock().await = None;
@@ -154,10 +177,12 @@ impl Rainbird {
             if !status.is_success() {
                 return Err(ControllerError::Remote(format!("rainbird {status}")));
             }
-            return resp
-                .json()
-                .await
-                .map_err(|e| ControllerError::Transport(format!("rainbird decode: {e}")));
+            return resp.json().await.map_err(|e| {
+                ControllerError::Transport(format!(
+                    "rainbird decode: {}",
+                    crate::net::reqwest_error_category(&e)
+                ))
+            });
         }
         Err(ControllerError::Remote("rainbird retry exhausted".into()))
     }

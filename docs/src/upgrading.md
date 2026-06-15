@@ -55,6 +55,8 @@ Auto-updaters (Watchtower, Diun notifications, Renovate on a pinned compose file
 
 No manual migration steps. If a migration fails, the error appears in `docker logs localsky` with the migration version that failed.
 
+**Ownership is handled for you.** LocalSky runs as the non-root user uid 10001, and the container fixes the ownership of `/data` to that user at startup. Upgrading from an older version that ran as root (and left root-owned files in the volume) needs no manual `chown`; the only requirement is that `/data` stays writable (not mounted read-only). If you front LocalSky with a reverse proxy, set `trusted_proxies` so it sees the real client IP (see [Authentication](authentication.md)).
+
 ## Downgrading and rollback
 
 Rolling back the image is the same recreate dance with an older tag:

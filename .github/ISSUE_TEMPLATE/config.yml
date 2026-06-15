@@ -7,5 +7,5 @@ contact_links:
     url: https://github.com/silenthooligan/localsky/security/advisories/new
     about: Use the private security advisory flow for anything sensitive. Don't file a public issue.
   - name: HACS integration issues
-    url: https://github.com/silenthooligan/localsky-hacs/issues
+    url: https://github.com/silenthooligan/localsky-ha/issues
     about: Bugs in the Home Assistant integration (entities, services, config flow) belong in the HACS repo.

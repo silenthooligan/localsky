@@ -26,12 +26,21 @@ use axum::{
 };
 use schemars::schema_for;
 use serde::{Deserialize, Serialize};
+use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::config::schema::Config;
 use crate::config::FileConfigStore;
 use crate::ports::config_store::{ConfigStore, ConfigStoreError};
 
 pub type ConfigApiState = Arc<FileConfigStore>;
+
+/// Upper bound on a config write (LS-API-09). A full localsky.toml with
+/// many zones/sources/rules is a few tens of KiB at most; 2 MiB is a
+/// comfortable ceiling that still refuses an over-large body before it is
+/// buffered. Applies to PUT / (JSON), PUT /raw (TOML text), POST /preview
+/// and POST /rollback. The route is privileged-gated already; this cap is
+/// defense-in-depth.
+const CONFIG_BODY_LIMIT: usize = 2 * 1024 * 1024;
 
 pub fn router(state: ConfigApiState) -> Router {
     Router::new()
@@ -43,24 +52,79 @@ pub fn router(state: ConfigApiState) -> Router {
         .route("/rollback", post(post_rollback))
         .route("/raw", get(get_raw_toml).put(put_raw_toml))
         .with_state(state)
+        .layer(RequestBodyLimitLayer::new(CONFIG_BODY_LIMIT))
 }
 
-/// Return the raw TOML bytes of /data/localsky.toml as text/plain so the
-/// Advanced settings page can render a textarea editor. Secrets are NOT
-/// redacted here (unlike GET /); this endpoint is operator-only and
-/// gated behind the existing app auth surface. Empty 200 when the file
-/// hasn't been written yet so the wizard can pre-populate via PUT.
-async fn get_raw_toml(State(store): State<ConfigApiState>) -> impl IntoResponse {
+#[derive(Debug, Deserialize, Default)]
+struct RawQuery {
+    /// Opt in to full-fidelity (unredacted) TOML. Honored only for an
+    /// authenticated owner identity; ignored otherwise.
+    #[serde(default)]
+    reveal: Option<bool>,
+}
+
+/// Return the TOML of /data/localsky.toml as text/plain so the Advanced
+/// settings page can render a textarea editor.
+///
+/// REDACTION + GATING (security wave 3): secrets are redacted to the
+/// sentinel by default, matching GET / and the backup/draft read paths, so
+/// this endpoint never leaks a cleartext token even in the shipped default
+/// posture (AuthMode::Disabled). The route itself is additionally treated
+/// as PRIVILEGED in `auth::middleware`: an unauthenticated, non-trusted
+/// caller is refused BEFORE reaching this handler, even with auth disabled.
+///
+/// Full fidelity (real secrets) is opt-in via `?reveal=1` AND only for a
+/// caller the privileged gate already vouched for: an authenticated owner
+/// (session/API-token User) OR a trusted-network caller. The latter is a
+/// LAN owner the operator trusts (loopback / RFC1918 / ULA / an explicit
+/// trusted_networks match in the disabled-default posture); honoring reveal
+/// for them lets a LAN owner in Disabled mode (who has no session) read
+/// their own raw config in the Advanced editor. A bare public/anonymous
+/// caller never reaches this handler (the gate refuses it). Redaction is
+/// still the DEFAULT; reveal must be explicitly requested. The editor PUT
+/// also round-trips the sentinel via `unredact_secrets`, so saving a
+/// redacted edit preserves untouched secrets.
+///
+/// Empty 200 when the file hasn't been written yet so the wizard can
+/// pre-populate via PUT.
+async fn get_raw_toml(
+    State(store): State<ConfigApiState>,
+    Query(q): Query<RawQuery>,
+    req: axum::extract::Request,
+) -> impl IntoResponse {
+    // Full fidelity is granted on an explicit opt-in to a caller the
+    // privileged gate already vouched for: an authenticated owner (User) OR
+    // a trusted-network caller. The privileged gate in auth::middleware
+    // refuses a bare public/anonymous caller before reaching this handler in
+    // BOTH auth modes, so a TrustedNetwork here is a LAN owner the operator
+    // trusts (loopback / RFC1918 / ULA / trusted_networks in the disabled
+    // default). Honoring ?reveal=1 for them lets a LAN owner in Disabled
+    // mode (who has no session) read their own raw config in the Advanced
+    // editor. Redacted stays the default; reveal is strictly opt-in.
+    let is_owner = matches!(
+        req.extensions().get::<crate::auth::RequestIdentity>(),
+        Some(crate::auth::RequestIdentity::User(_) | crate::auth::RequestIdentity::TrustedNetwork)
+    );
+    let reveal = q.reveal.unwrap_or(false) && is_owner;
     match tokio::fs::read_to_string(store.path()).await {
-        Ok(s) => (
-            StatusCode::OK,
-            [(
-                axum::http::header::CONTENT_TYPE,
-                "text/plain; charset=utf-8",
-            )],
-            s,
-        )
-            .into_response(),
+        Ok(s) => {
+            let body = if reveal {
+                s
+            } else {
+                // Withhold (empty) rather than ship raw bytes if the file
+                // somehow fails to parse for redaction: never leak.
+                redact_toml_str(&s).unwrap_or_default()
+            };
+            (
+                StatusCode::OK,
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "text/plain; charset=utf-8",
+                )],
+                body,
+            )
+                .into_response()
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
             StatusCode::OK,
             [(
@@ -81,10 +145,19 @@ async fn get_raw_toml(State(store): State<ConfigApiState>) -> impl IntoResponse 
     }
 }
 
-/// Replace /data/localsky.toml with the supplied TOML body verbatim,
-/// after a round-trip validation that the text parses to a Config
-/// matching the schema invariants. On success the FileConfigStore's
-/// in-memory cache is invalidated by the next load() call.
+/// Replace /data/localsky.toml with the supplied TOML body, after parsing
+/// + validating it against the schema invariants.
+///
+/// REDACTION ROUND-TRIP (security wave 3): GET /config/raw now returns
+/// REDACTED TOML by default (the Advanced editor textarea shows the
+/// sentinel for each secret, exactly like the form-based settings UI). So
+/// the body that comes back here may contain the sentinel for any secret
+/// the operator did not retype. We restore those from the stored config
+/// (same unredact_secrets pass as PUT /api/config) before saving, and
+/// reject any sentinel that has no stored counterpart so the literal
+/// "***redacted***" is never persisted as a secret. An operator who opened
+/// the editor with ?reveal=1 and typed real secrets simply has no sentinels
+/// to restore, so this is a no-op for them.
 async fn put_raw_toml(State(store): State<ConfigApiState>, body: String) -> impl IntoResponse {
     // Validate by parsing through the same path as the loader. Reuses
     // the Validate step in src/config/loader.rs::validate.
@@ -101,6 +174,53 @@ async fn put_raw_toml(State(store): State<ConfigApiState>, body: String) -> impl
                 .into_response();
         }
     };
+
+    // Restore redacted secrets from the stored config, then reject any
+    // unmatched sentinel (a new secret left as the placeholder).
+    let mut candidate_json = match serde_json::to_value(&parsed) {
+        Ok(v) => v,
+        Err(e) => {
+            return store_err(ConfigStoreError::Io(format!("serialize candidate: {e}")))
+                .into_response();
+        }
+    };
+    let original = match store.load().await {
+        Ok(cfg) => serde_json::to_value(&cfg).ok(),
+        Err(ConfigStoreError::NotFound) => None,
+        Err(e) => return store_err(e).into_response(),
+    };
+    if let Some(orig) = original.as_ref() {
+        unredact_secrets(&mut candidate_json, orig);
+    }
+    let mut leftover = Vec::new();
+    remaining_sentinels(&candidate_json, "$", &mut leftover);
+    if !leftover.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "unmatched_redacted_secret".into(),
+                detail: Some(format!(
+                    "redacted placeholder(s) with no stored value at: {}; supply the real secret",
+                    leftover.join(", ")
+                )),
+            }),
+        )
+            .into_response();
+    }
+    let parsed: Config = match serde_json::from_value(candidate_json) {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ApiError {
+                    error: "config_decode_error".into(),
+                    detail: Some(e.to_string()),
+                }),
+            )
+                .into_response();
+        }
+    };
+
     if let Err(e) = crate::config::loader::validate(&parsed) {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -124,19 +244,14 @@ async fn put_raw_toml(State(store): State<ConfigApiState>, body: String) -> impl
         )
             .into_response();
     }
-    // Store-managed write: snapshots the previous file + fsyncs.
-    if let Err(e) = store.save_raw_toml(body.clone()).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError {
-                error: "raw_write_failed".into(),
-                detail: Some(e.to_string()),
-            }),
-        )
-            .into_response();
+    // Store-managed typed write: snapshots the previous file + fsyncs. We
+    // save the unredacted Config (not the raw text) so restored secrets land
+    // on disk; the store serializes via to_string_pretty exactly like the
+    // form-based PUT, so the on-disk shape is identical either way.
+    match store.save(&parsed).await {
+        Ok(_) => Json(serde_json::json!({ "ok": true, "validation": report })).into_response(),
+        Err(e) => store_err(e).into_response(),
     }
-    Json(serde_json::json!({ "ok": true, "bytes": body.len(), "validation": report }))
-        .into_response()
 }
 
 #[derive(Debug, Serialize)]
@@ -189,7 +304,7 @@ async fn get_config(State(store): State<ConfigApiState>) -> impl IntoResponse {
 /// and preserves the existing stored value.
 pub const SECRET_REDACTED_SENTINEL: &str = "***redacted***";
 
-fn redact_secrets(v: &mut serde_json::Value) {
+pub(crate) fn redact_secrets(v: &mut serde_json::Value) {
     use serde_json::Value;
     match v {
         Value::Object(map) => {
@@ -209,16 +324,44 @@ fn redact_secrets(v: &mut serde_json::Value) {
                     || lk == "access_token"
                     || lk == "app_key"
                     || lk == "client_secret"
-                    || lk == "refresh_token";
+                    || lk == "refresh_token"
+                    // SMTP credential (EmailConfig.username); the MQTT
+                    // source/command/notification username fields are the
+                    // other half of a broker credential pair, so redacting
+                    // every `username` is both correct and conservative.
+                    || lk == "username"
+                    // Cloud-controller / cloud-source ACCOUNT EMAIL: the
+                    // username half of a credential pair whose password half
+                    // is already redacted above. B-hyve (BhyveConfig.email),
+                    // Rain Bird (RainbirdConfig.email) and LaCrosse
+                    // (LacrosseConfig.email) all authenticate with
+                    // account-email + password; leaving the email in the
+                    // clear half-leaked the credential. The notification
+                    // EmailConfig uses `from_address`/`to_address` (not
+                    // `email`) and `vapid_subject` is a mailto: contact, so
+                    // those legitimate addresses are untouched. The `email`
+                    // KEY on the notifications struct points at an OBJECT
+                    // (EmailConfig), not a string. We only redact a secret-named
+                    // key when its value is a STRING leaf (the cloud-controller
+                    // account emails are strings); when it is an object/array we
+                    // must still RECURSE into it, or marking `email` secret would
+                    // skip the whole notifications.email subtree and leak its
+                    // smtp username/password. See the string-vs-recurse handling
+                    // below.
+                    || lk == "email";
+                // Redact only when the secret-named key holds a STRING value;
+                // otherwise (object/array under a secret-named key, e.g. the
+                // notifications `email` EmailConfig object) fall through to
+                // recursion so nested secrets are still redacted.
                 if is_secret {
                     if let Value::String(s) = val {
                         if !s.is_empty() {
                             *s = SECRET_REDACTED_SENTINEL.to_string();
                         }
+                        continue;
                     }
-                } else {
-                    redact_secrets(val);
                 }
+                redact_secrets(val);
             }
         }
         Value::Array(arr) => {
@@ -230,6 +373,28 @@ fn redact_secrets(v: &mut serde_json::Value) {
     }
 }
 
+/// Redact secrets in a localsky.toml TEXT blob, returning sanitized TOML.
+///
+/// Used by the sibling read paths (GET /backup, GET /config/raw) that ship
+/// the on-disk config instead of the JSON-serialized one. The file is
+/// always store-written via `toml::to_string_pretty(&Config)`, so parsing
+/// it back into `Config`, running the SAME `redact_secrets()` pass over its
+/// JSON form, and re-serializing to TOML preserves every field the loader
+/// and restore path read while replacing each secret with the sentinel.
+/// The wizard/config PUT side already round-trips the sentinel back to the
+/// stored value via `unredact_secrets`, so a redacted backup re-imports
+/// without losing secrets when restored onto the SAME instance.
+///
+/// Parse/serialize failures return `None`; the caller decides whether to
+/// withhold the field rather than risk shipping raw bytes.
+pub(crate) fn redact_toml_str(raw: &str) -> Option<String> {
+    let cfg: Config = toml::from_str(raw).ok()?;
+    let mut v = serde_json::to_value(&cfg).ok()?;
+    redact_secrets(&mut v);
+    let redacted: Config = serde_json::from_value(v).ok()?;
+    toml::to_string_pretty(&redacted).ok()
+}
+
 /// Inverse of redact_secrets: walks the candidate config alongside the
 /// stored config, and any place the candidate contains the sentinel,
 /// substitutes the original value back in. Lets clients PUT a redacted
@@ -239,7 +404,7 @@ fn redact_secrets(v: &mut serde_json::Value) {
 /// matched BY ID, not by index: a reorder or delete in the candidate
 /// must not attach one entry's stored secret to a different entry.
 /// Id-less arrays still match positionally.
-fn unredact_secrets(candidate: &mut serde_json::Value, original: &serde_json::Value) {
+pub(crate) fn unredact_secrets(candidate: &mut serde_json::Value, original: &serde_json::Value) {
     use serde_json::Value;
     match (candidate, original) {
         (Value::Object(c), Value::Object(o)) => {
@@ -291,7 +456,7 @@ fn unredact_secrets(candidate: &mut serde_json::Value, original: &serde_json::Va
 /// result after unredact_secrets means a redacted placeholder had no
 /// stored counterpart (new/renamed entry); saving it would persist the
 /// literal sentinel as the secret, so the PUT handler rejects instead.
-fn remaining_sentinels(v: &serde_json::Value, path: &str, out: &mut Vec<String>) {
+pub(crate) fn remaining_sentinels(v: &serde_json::Value, path: &str, out: &mut Vec<String>) {
     use serde_json::Value;
     match v {
         Value::String(s) if s == SECRET_REDACTED_SENTINEL => out.push(path.to_string()),
@@ -607,6 +772,201 @@ mod tests {
         );
         assert!(s.contains("os_main"), "controller id unexpectedly redacted");
         assert!(s.contains("28.5"), "lat unexpectedly redacted");
+    }
+
+    #[test]
+    fn redact_covers_smtp_username_and_password() {
+        // EmailConfig.username is an SMTP credential; it must be redacted
+        // alongside the password. (The MQTT username fields ride the same
+        // `username` rule for free, which is correct: it's half of a
+        // broker credential pair.)
+        let mut v = serde_json::json!({
+            "notifications": {
+                "email": {
+                    "smtp_host": "smtp.example.com",
+                    "smtp_port": 587,
+                    "username": "smtp_user_secret",
+                    "password": "smtp_pass_secret",
+                    "from_address": "alerts@example.com",
+                    "to_address": "me@example.com",
+                    "starttls": true
+                }
+            }
+        });
+        redact_secrets(&mut v);
+        let s = serde_json::to_string(&v).unwrap();
+        assert!(!s.contains("smtp_user_secret"), "SMTP username leaked");
+        assert!(!s.contains("smtp_pass_secret"), "SMTP password leaked");
+        // Non-secret SMTP fields stay visible so the form still renders.
+        assert!(
+            s.contains("smtp.example.com"),
+            "smtp_host unexpectedly redacted"
+        );
+        assert!(s.contains("alerts@example.com"), "from_address redacted");
+    }
+
+    #[test]
+    fn redact_toml_str_sanitizes_a_real_config_file() {
+        // The backup + raw read paths re-serialize the on-disk TOML through
+        // this helper. Build a full Config, write it the same way the store
+        // does, then prove the redacted TOML still parses AND carries no
+        // cleartext secret.
+        use crate::config::schema::*;
+        let mut cfg = Config::default();
+        cfg.deployment.location = Location {
+            lat: 28.5,
+            lon: -81.4,
+            elevation_m: None,
+        };
+        cfg.sources.push(SourceEntry {
+            id: "ha_pass".into(),
+            priority: 30,
+            enabled: true,
+            max_age_s: None,
+            source: SourceKind::HaPassthrough(HaPassthroughConfig {
+                base_url: "http://ha.local:8123".into(),
+                bearer_token: "supersecret_ha_token_xyz".into(),
+                field_map: Default::default(),
+            }),
+        });
+        cfg.controllers.push(ControllerEntry {
+            id: "os_main".into(),
+            default: true,
+            enabled: true,
+            controller: ControllerKind::OpensprinklerDirect(OpenSprinklerDirectConfig {
+                host: "10.0.0.10".into(),
+                port: 80,
+                password_md5: "abc123md5hash".into(),
+                poll_interval_s: 10,
+            }),
+        });
+        cfg.notifications.email = Some(EmailConfig {
+            smtp_host: "smtp.example.com".into(),
+            smtp_port: 587,
+            username: "smtp_user_secret".into(),
+            password: "smtp_pass_secret".into(),
+            from_address: "a@example.com".into(),
+            to_address: "b@example.com".into(),
+            starttls: true,
+        });
+
+        // Store-style serialization (matches FileConfigStore::save).
+        let raw = toml::to_string_pretty(&cfg).unwrap();
+        // Sanity: the RAW file does contain the secrets (this is the leak
+        // the backup/raw paths used to ship).
+        assert!(raw.contains("supersecret_ha_token_xyz"));
+
+        let redacted = redact_toml_str(&raw).expect("redaction parses + re-serializes");
+        // No cleartext secret survives.
+        assert!(
+            !redacted.contains("supersecret_ha_token_xyz"),
+            "HA token leaked in backup TOML"
+        );
+        assert!(
+            !redacted.contains("abc123md5hash"),
+            "OS password_md5 leaked in backup TOML"
+        );
+        assert!(
+            !redacted.contains("smtp_user_secret"),
+            "SMTP username leaked in backup TOML"
+        );
+        assert!(
+            !redacted.contains("smtp_pass_secret"),
+            "SMTP password leaked in backup TOML"
+        );
+        assert!(
+            redacted.contains(SECRET_REDACTED_SENTINEL),
+            "sentinel present"
+        );
+        // The redacted output is still valid, restorable TOML.
+        let reparsed: Config =
+            toml::from_str(&redacted).expect("redacted TOML re-parses to Config");
+        assert_eq!(reparsed.controllers[0].id, "os_main");
+    }
+
+    #[test]
+    fn redact_covers_cloud_controller_account_email() {
+        // The cloud controllers (B-hyve, Rain Bird) and the LaCrosse cloud
+        // source authenticate with account-email + password. The password half
+        // was already redacted; this proves the email (the username half) is
+        // too, while a legitimate notification address (from_address /
+        // to_address / vapid_subject mailto:) is NOT redacted.
+        let mut v = serde_json::json!({
+            "controllers": [{
+                "id": "bhyve_main",
+                "kind": "bhyve",
+                "config": {
+                    "email": "owner.account@example.com",
+                    "password": "bhyve_pw_secret",
+                    "device_id": "dev-123"
+                }
+            }, {
+                "id": "rainbird_main",
+                "kind": "rainbird",
+                "config": {
+                    "email": "rainbird.account@example.com",
+                    "password": "rb_pw_secret",
+                    "controller_id": "ctl-9"
+                }
+            }],
+            "sources": [{
+                "id": "lacrosse_main",
+                "kind": "lacrosse",
+                "config": {
+                    "email": "lacrosse.account@example.com",
+                    "password": "lc_pw_secret",
+                    "device_id": "LTV-WSDTH04"
+                }
+            }],
+            "notifications": {
+                "email": {
+                    "smtp_host": "smtp.example.com",
+                    "from_address": "alerts@example.com",
+                    "to_address": "me@example.com",
+                    "username": "smtp_user",
+                    "password": "smtp_pw"
+                },
+                "web_push": {
+                    "vapid_subject": "mailto:ops@example.com"
+                }
+            }
+        });
+        redact_secrets(&mut v);
+        let s = serde_json::to_string(&v).unwrap();
+        // Account emails (the credential username half) must NOT survive.
+        assert!(
+            !s.contains("owner.account@example.com"),
+            "B-hyve account email leaked"
+        );
+        assert!(
+            !s.contains("rainbird.account@example.com"),
+            "Rain Bird account email leaked"
+        );
+        assert!(
+            !s.contains("lacrosse.account@example.com"),
+            "LaCrosse account email leaked"
+        );
+        // The password halves stay redacted as before.
+        assert!(!s.contains("bhyve_pw_secret"), "B-hyve password leaked");
+        assert!(!s.contains("rb_pw_secret"), "Rain Bird password leaked");
+        assert!(!s.contains("lc_pw_secret"), "LaCrosse password leaked");
+        // Legitimate NOTIFICATION addresses are untouched: from/to_address are
+        // not credentials, and vapid_subject is a contact mailto:.
+        assert!(
+            s.contains("alerts@example.com"),
+            "from_address must NOT be redacted"
+        );
+        assert!(
+            s.contains("me@example.com"),
+            "to_address must NOT be redacted"
+        );
+        assert!(
+            s.contains("mailto:ops@example.com"),
+            "vapid_subject must NOT be redacted"
+        );
+        // Non-secret device identifiers stay visible so the forms render.
+        assert!(s.contains("dev-123"), "device_id unexpectedly redacted");
+        assert!(s.contains("LTV-WSDTH04"), "device_id unexpectedly redacted");
     }
 
     #[test]

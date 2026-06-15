@@ -4,6 +4,18 @@ All notable changes to LocalSky are documented here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.4.0-beta.3] - 2026-06-14
+
+A security fixes and hardening release. Upgrading is recommended, especially for instances reachable beyond a trusted LAN.
+
+### Changed
+
+- Home Assistant integration links updated for the renamed `localsky-ha` repository.
+
+### Upgrade notes
+
+- Behind a reverse proxy, set `trusted_proxies` so LocalSky sees the real client IP.
+
 ## [0.4.0-beta.2] - 2026-06-14
 
 This release builds out the irrigation and sensor side and makes the whole product easy to set up and learn: flow metering, a first-class sensors experience, point-and-click setup for every data source, documentation built into the app, and contextual help on every screen.

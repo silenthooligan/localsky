@@ -37,7 +37,7 @@ Nothing breaks in this phase; you're adding, not replacing.
    [sensors.md](sensors.md) for a worked example.
 4. Install the **LocalSky integration** in HA, following
    [hacs.md](hacs.md). Two gotchas: it is not in the HACS default
-   catalog yet, so add `https://github.com/silenthooligan/localsky-hacs`
+   catalog yet, so add `https://github.com/silenthooligan/localsky-ha`
    as a HACS custom repository first; and if your LocalSky has an owner
    account, create an API token in LocalSky (Settings > Account)
    *before* adding the integration, because the config flow asks for it.

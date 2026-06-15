@@ -60,6 +60,8 @@ pub mod instance;
 #[cfg(feature = "ssr")]
 pub mod llm;
 #[cfg(feature = "ssr")]
+pub mod net;
+#[cfg(feature = "ssr")]
 pub mod network;
 #[cfg(feature = "ssr")]
 pub mod notifications;

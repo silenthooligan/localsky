@@ -56,25 +56,48 @@ impl EcowittLocal {
         &self.config.path
     }
 
+    /// Whether the configured shared secret matches this form (SC-08). True
+    /// when no secret is configured (open-by-default), or when the configured
+    /// secret matches the `PASSKEY`/`passkey`/`key` field via a constant-time
+    /// compare. The /ingest handler also calls this directly so the parallel
+    /// sensor_history write path is gated on the IDENTICAL check `handle_post`
+    /// uses, instead of writing regardless of the secret (which would bypass
+    /// SC-08 through a second door).
+    pub fn secret_matches(&self, form: &HashMap<String, String>) -> bool {
+        let Some(expected) = &self.config.shared_secret else {
+            // Open by default: no secret configured means accept.
+            return true;
+        };
+        let got = form
+            .get("PASSKEY")
+            .or_else(|| form.get("passkey"))
+            .or_else(|| form.get("key"));
+        // SC-08: constant-time compare. The passkey is a low-entropy
+        // operator-chosen secret an attacker can POST against repeatedly, so a
+        // `==` here would leak the matching prefix length via response timing.
+        got.map(|v| crate::net::constant_time_eq(v.as_bytes(), expected.as_bytes()))
+            .unwrap_or(false)
+    }
+
     /// Process one Ecowitt POST body. The body is application/x-www-form-urlencoded
     /// per the gateway's spec; LocalSky receives it as a parsed
     /// HashMap from the Axum form extractor.
-    pub fn handle_post(&self, form: &HashMap<String, String>) {
+    ///
+    /// Returns true if the payload was ACCEPTED: the shared secret matched (or
+    /// none is configured) AND at least one field parsed and an observation was
+    /// emitted. Returns false when the secret mismatched or the payload carried
+    /// no usable fields. The /ingest handler uses this to gate its sensor_history
+    /// write so a secret-rejected POST never reaches the history store.
+    pub fn handle_post(&self, form: &HashMap<String, String>) -> bool {
         // Optional shared-secret check. If the operator configured a
         // secret, require it to match either the `key` field (in the
         // path query) or the PASSKEY field (in the body).
-        if let Some(expected) = &self.config.shared_secret {
-            let got = form
-                .get("PASSKEY")
-                .or_else(|| form.get("passkey"))
-                .or_else(|| form.get("key"));
-            if got.map(|v| v.as_str()) != Some(expected.as_str()) {
-                debug!(
-                    source = self.id,
-                    "ecowitt post rejected: shared secret mismatch"
-                );
-                return;
-            }
+        if !self.secret_matches(form) {
+            debug!(
+                source = self.id,
+                "ecowitt post rejected: shared secret mismatch"
+            );
+            return false;
         }
 
         let mut fields: Vec<(WeatherField, f64)> = Vec::new();
@@ -127,7 +150,7 @@ impl EcowittLocal {
 
         if fields.is_empty() {
             debug!(source = self.id, "ecowitt post produced zero parsed fields");
-            return;
+            return false;
         }
 
         let _ = self.bus.send(SourceEvent::Observation {
@@ -135,6 +158,7 @@ impl EcowittLocal {
             fields,
             at_epoch: now_epoch(),
         });
+        true
     }
 }
 
@@ -292,11 +316,52 @@ mod tests {
         let mut form = HashMap::new();
         form.insert("tempf".into(), "72.5".into());
         form.insert("PASSKEY".into(), "wrongkey".into());
-        s.handle_post(&form);
+        // The accept signal the /ingest handler reads to gate sensor_history
+        // is false on mismatch, so the parallel write path is skipped too.
+        assert!(!s.handle_post(&form), "mismatch must report not-accepted");
 
         assert!(
             rx.try_recv().is_err(),
             "should not have emitted any observation"
+        );
+    }
+
+    #[test]
+    fn secret_matches_gates_the_parallel_history_write() {
+        // SC-08 regression: secret_matches is the exact check the /ingest
+        // ecowitt handler uses to decide whether to write sensor_history, so a
+        // secret-rejected POST never lands in history through that second door.
+        let s = build(Some("hunter2"));
+
+        // No secret presented -> rejected.
+        let mut no_key = HashMap::new();
+        no_key.insert("tempf".to_string(), "70.0".to_string());
+        assert!(
+            !s.secret_matches(&no_key),
+            "missing passkey must not match a configured secret"
+        );
+
+        // Wrong secret -> rejected.
+        let mut wrong = HashMap::new();
+        wrong.insert("PASSKEY".to_string(), "nope".to_string());
+        assert!(!s.secret_matches(&wrong), "wrong passkey must not match");
+
+        // Correct secret in any of the accepted fields -> accepted.
+        for field in ["PASSKEY", "passkey", "key"] {
+            let mut ok = HashMap::new();
+            ok.insert(field.to_string(), "hunter2".to_string());
+            assert!(
+                s.secret_matches(&ok),
+                "correct secret in `{field}` must match"
+            );
+        }
+
+        // Open-by-default: no configured secret accepts everything (preserves
+        // legitimate Ecowitt ingest on an unsecured LAN install).
+        let open = build(None);
+        assert!(
+            open.secret_matches(&HashMap::new()),
+            "no configured secret must accept (open by default)"
         );
     }
 

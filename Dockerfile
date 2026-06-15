@@ -2,7 +2,7 @@
 # Stage 1 compiles the SSR binary + WASM client via cargo-leptos.
 # Stage 2 ships only the binary, the static `site/` bundle, and CA roots.
 
-FROM rust:slim-trixie@sha256:082a5849a6870672b5f7a5bf4eddc71723fce38756fd834a0d734a5306a310ab AS builder
+FROM rust:slim-trixie@sha256:3b05f7c617a200c41c3506097f0d15fc193a1c93bfd8f141007b47cac8f95d3c AS builder
 
 RUN apt-get update && apt-get install -y \
         pkg-config libssl-dev curl wget build-essential \
@@ -11,13 +11,24 @@ RUN apt-get update && apt-get install -y \
 # cargo-binstall for fast cargo-leptos install (avoids OOM on source build).
 # Arch-aware: the build runs natively on both amd64 and arm64 runners, so
 # the bootstrap binary must match the build machine.
+#
+# Supply-chain pin: fetch a SPECIFIC release, never /latest/download. An
+# unpinned /latest meant the bootstrap binary could change under us between
+# builds (a silent supply-chain surface on a tool we run with full build-time
+# privileges). Bump CARGO_BINSTALL_VERSION deliberately when updating.
+ARG CARGO_BINSTALL_VERSION=v1.20.0
 RUN arch="$(uname -m)" \
-    && wget -q "https://github.com/cargo-bins/cargo-binstall/releases/latest/download/cargo-binstall-${arch}-unknown-linux-musl.tgz" \
+    && wget -q "https://github.com/cargo-bins/cargo-binstall/releases/download/${CARGO_BINSTALL_VERSION}/cargo-binstall-${arch}-unknown-linux-musl.tgz" \
     && tar -xf "cargo-binstall-${arch}-unknown-linux-musl.tgz" \
     && cp cargo-binstall /usr/local/cargo/bin \
     && rm "cargo-binstall-${arch}-unknown-linux-musl.tgz" cargo-binstall
 
-RUN cargo binstall cargo-leptos -y
+# Pin cargo-leptos to the line that targets leptos 0.8 (this repo's version),
+# instead of letting binstall pull whatever is newest. A future cargo-leptos
+# major could change the build contract or default versions under us; the ^0.3
+# constraint keeps builds reproducible while still taking patch fixes. Bump
+# deliberately alongside a leptos major.
+RUN cargo binstall cargo-leptos --version "^0.3" -y
 # mdbook builds the bundled documentation (docs/ -> docs/book) that the
 # server serves same-origin at /docs. Pinned to a version compatible with
 # docs/book.toml (mdbook >= 0.5; the book uses [output.html] search/fold/
@@ -66,7 +77,7 @@ RUN mdbook build docs
 FROM debian:trixie-slim@sha256:4e401d95de7083948053197a9c3913343cd06b706bf15eb6a0c3ccd26f436a0e
 
 RUN apt-get update && apt-get install -y \
-        ca-certificates libssl3 curl \
+        ca-certificates libssl3 curl gosu \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 10001 localsky \
     && useradd --system --uid 10001 --gid 10001 --home-dir /app --shell /usr/sbin/nologin localsky
@@ -79,15 +90,22 @@ COPY --from=builder --chown=10001:10001 /build/target/site /app/site
 # Placed after the site COPY so it lands inside the served static root.
 COPY --from=builder --chown=10001:10001 /build/docs/book /app/site/docs
 
-# /data and /keys are volume mounts; document the uid the container expects.
-# Bind-mount hosts should chown 10001:10001 or pass --user 0:0 to override.
+# /data and /keys are volume mounts. The entrypoint chowns them to the app uid
+# at startup and drops to the non-root user, so any volume shape (fresh bind
+# mount, named volume, or an upgrade from a root-owned volume) just works with
+# no operator action.
 RUN mkdir -p /data /keys && chown -R 10001:10001 /data /keys
 
 ENV LEPTOS_SITE_ADDR="0.0.0.0:8090"
 ENV LEPTOS_SITE_ROOT="site"
 ENV RUST_LOG="info"
 
-USER 10001:10001
+# Fix-perms-then-drop: the container starts as root, the entrypoint chowns the
+# writable mounts, then gosu-drops to uid 10001 to run the app unprivileged.
+# No USER directive here on purpose; the entrypoint owns the privilege drop.
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 EXPOSE 8090
 EXPOSE 50222/udp
 

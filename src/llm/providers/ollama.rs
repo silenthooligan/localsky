@@ -12,11 +12,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::ports::llm_provider::{ChatOpts, HealthReport, LlmError, LlmProvider};
 
+/// Default per-request budget. Matches the old persistent client; chat()
+/// can still raise it per call via ChatOpts.timeout_s.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+
 pub struct OllamaProvider {
     id: String,
     base_url: String,
     model: String,
-    client: Client,
 }
 
 impl OllamaProvider {
@@ -25,20 +28,28 @@ impl OllamaProvider {
         base_url: impl Into<String>,
         model: impl Into<String>,
     ) -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(60))
-            .build()
-            .expect("reqwest client construction");
         Self {
             id: id.into(),
             base_url: base_url.into(),
             model: model.into(),
-            client,
         }
     }
 
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url.trim_end_matches('/'), path)
+    }
+
+    /// SSRF-hardened, IP-pinned client for a given endpoint URL. The Ollama
+    /// base_url is operator-supplied and reachable from the wizard's
+    /// test_llm probe (build_llm_from), so it must carry the same
+    /// forbidden-target + IP-pin + no-redirect protections as the
+    /// OpenAI-compat provider: a private vLLM/Ollama on the LAN stays
+    /// allowed, while loopback/metadata/link-local/multicast are rejected,
+    /// the resolved IP is pinned (anti DNS-rebinding) and redirects are off.
+    async fn safe_client(&self, url: &str) -> Result<(Client, reqwest::Url), LlmError> {
+        crate::net::safe_fetch::build_safe_client(url, DEFAULT_TIMEOUT)
+            .await
+            .map_err(|e| LlmError::Transport(e.to_string()))
     }
 }
 
@@ -117,23 +128,26 @@ impl LlmProvider for OllamaProvider {
             },
         };
 
-        let mut req = self.client.post(self.url("/api/chat")).json(&body);
+        let endpoint = self.url("/api/chat");
+        let (client, safe_url) = self.safe_client(&endpoint).await?;
+        let mut req = client.post(safe_url).json(&body);
         if let Some(t) = opts.timeout_s {
             req = req.timeout(Duration::from_secs(t as u64));
         }
         let resp = req
             .send()
             .await
-            .map_err(|e| LlmError::Transport(e.to_string()))?;
+            .map_err(|e| LlmError::Transport(crate::net::reqwest_error_category(&e).to_string()))?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(LlmError::Remote(format!("HTTP {status}: {body}")));
+            // Status only: don't reflect the upstream body (SSRF exfil
+            // channel when the URL was steered to an unintended target).
+            return Err(LlmError::Remote(format!("HTTP {status}")));
         }
         let parsed: ChatResponse = resp
             .json()
             .await
-            .map_err(|e| LlmError::Parse(e.to_string()))?;
+            .map_err(|e| LlmError::Parse(crate::net::reqwest_error_category(&e).to_string()))?;
         parsed
             .message
             .and_then(|m| m.content)
@@ -141,12 +155,12 @@ impl LlmProvider for OllamaProvider {
     }
 
     async fn health(&self) -> Result<HealthReport, LlmError> {
-        let resp = self
-            .client
-            .get(self.url("/api/tags"))
-            .send()
-            .await
-            .map_err(|e| LlmError::Transport(e.to_string()))?;
+        let endpoint = self.url("/api/tags");
+        let (client, safe_url) = self.safe_client(&endpoint).await?;
+        let resp =
+            client.get(safe_url).send().await.map_err(|e| {
+                LlmError::Transport(crate::net::reqwest_error_category(&e).to_string())
+            })?;
         if !resp.status().is_success() {
             return Ok(HealthReport {
                 reachable: false,
@@ -158,7 +172,7 @@ impl LlmProvider for OllamaProvider {
         let tags: TagsResponse = resp
             .json()
             .await
-            .map_err(|e| LlmError::Parse(e.to_string()))?;
+            .map_err(|e| LlmError::Parse(crate::net::reqwest_error_category(&e).to_string()))?;
         let loaded = tags
             .models
             .iter()

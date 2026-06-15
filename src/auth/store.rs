@@ -235,6 +235,11 @@ impl AuthStore {
         .await
     }
 
+    // NOT USER-SCOPED: lists ALL non-revoked tokens regardless of owner. Safe
+    // under the single-owner model (one account => "all" == "the owner's").
+    // TODO(multi-user): add a `WHERE user_id = ?` filter and a `user_id` param
+    // before any multi-user / role work, so one owner cannot see another's
+    // tokens. Pair with the same scoping on `revoke_api_token`.
     pub async fn list_api_tokens(&self) -> Result<Vec<ApiTokenRow>, String> {
         self.with_conn(|c| {
             let mut stmt = c.prepare(
@@ -256,6 +261,10 @@ impl AuthStore {
         .await
     }
 
+    // NOT USER-SCOPED: revokes by token id alone, with no owner check. Safe
+    // under the single-owner model. TODO(multi-user): add `AND user_id = ?` and
+    // a `user_id` param (or an admin-role check at the caller) before any
+    // multi-user / role work, so one owner cannot revoke another's tokens by id.
     pub async fn revoke_api_token(&self, id: i64) -> Result<(), String> {
         self.with_conn(move |c| {
             c.execute(

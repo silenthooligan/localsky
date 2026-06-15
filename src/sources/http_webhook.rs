@@ -53,7 +53,13 @@ impl HttpWebhook {
     /// Returns true if any observation was emitted.
     pub fn handle_post(&self, payload: &[u8], provided_token: Option<&str>) -> bool {
         if let Some(expected) = &self.config.token {
-            if provided_token != Some(expected.as_str()) {
+            // SC-08: constant-time compare so a probing client cannot
+            // recover the token a byte at a time from response timing. A
+            // missing token always fails (never matches the expected).
+            let ok = provided_token
+                .map(|t| crate::net::constant_time_eq(t.as_bytes(), expected.as_bytes()))
+                .unwrap_or(false);
+            if !ok {
                 debug!(source = self.id, "webhook post rejected: token mismatch");
                 return false;
             }

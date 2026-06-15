@@ -29,7 +29,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
@@ -42,11 +41,13 @@ use crate::ports::weather_source::{
 };
 
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
+/// Per-request budget for the HA REST poll. Matches the previous persistent
+/// client's timeout; each fetch now builds an SSRF-hardened client.
+const HA_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub struct HaPassthrough {
     id: String,
     config: HaPassthroughConfig,
-    client: Client,
     /// Pre-parsed field_map: WeatherField -> entity_id. Unknown keys
     /// are dropped at construction with a warn.
     mapping: Vec<(WeatherField, String)>,
@@ -62,24 +63,24 @@ impl HaPassthrough {
     pub fn new(id: impl Into<String>, config: HaPassthroughConfig) -> Self {
         let id = id.into();
         let mapping = build_mapping(&id, &config.field_map);
-        let client = Client::builder()
-            .timeout(Duration::from_secs(8))
-            .user_agent("localsky/ha-passthrough")
-            .build()
-            .expect("reqwest client construction");
         Self {
             id,
             config,
-            client,
             mapping,
         }
     }
 
     async fn fetch_states(&self) -> anyhow::Result<Vec<StateEntry>> {
         let url = format!("{}/api/states", self.config.base_url.trim_end_matches('/'));
-        let resp = self
-            .client
-            .get(&url)
+        // SSRF-hardened client built per poll. The HA base_url is
+        // config-supplied and this poller is always-on, so route outbound
+        // through net::safe_fetch (defense in depth): forbidden-target filter,
+        // resolved-IP pin (anti DNS-rebinding), no redirects. RFC1918/ULA stays
+        // allowed (HA lives on the LAN), so legitimate polling is unaffected.
+        let (client, safe_url) =
+            crate::net::safe_fetch::build_safe_client(&url, HA_TIMEOUT).await?;
+        let resp = client
+            .get(safe_url)
             .bearer_auth(&self.config.bearer_token)
             .send()
             .await?

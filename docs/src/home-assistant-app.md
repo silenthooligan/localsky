@@ -64,7 +64,7 @@ multi-arch image, so there is no local build step.
    for weather, soil, and irrigation entities in Home Assistant. One click
    adds it to HACS, and it discovers the running app on its own:
 
-   [![Open your Home Assistant instance and add this repository to HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=silenthooligan&repository=localsky-hacs&category=integration)
+   [![Open your Home Assistant instance and add this repository to HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=silenthooligan&repository=localsky-ha&category=integration)
 
 ## How the Home Assistant connection works
 

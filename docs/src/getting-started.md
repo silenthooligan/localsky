@@ -69,7 +69,7 @@ docker run -d \
 
 `localsky-data` is a named Docker volume that holds the config file (`/data/localsky.toml`) and the SQLite database. Docker creates it on first run and it survives container upgrades.
 
-> **Prefer a bind mount?** The container runs as uid 10001, not root. If you mount a host directory instead (`-v /opt/localsky/data:/data`), first run `sudo chown -R 10001:10001 /opt/localsky/data`, or start the container with `--user 0:0`.
+> **Prefer a bind mount?** The container runs as the non-root user uid 10001 and fixes ownership of the mounted `/data` itself on startup, so a host directory (`-v /opt/localsky/data:/data`) works with no manual `chown`. The only requirement is that `/data` is writable, so do not mount it read-only.
 
 > **Networking for LAN weather stations.** On Linux, `--network host` is recommended: WeatherFlow Tempest hubs broadcast on UDP port 50222, and the wizard's network discovery (Tempest and Ecowitt broadcasts, OpenSprinkler subnet sweep) needs to see your LAN. With host networking, drop the `-p` flags; LocalSky listens on port 8090 directly. The bridged alternative shown above (`-p 8090:8090 -p 50222:50222/udp`) works too, but LAN broadcasts may not cross the bridge, so discovery can miss devices.
 

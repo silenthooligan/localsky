@@ -16,6 +16,7 @@
 //   API token       lsk_<43 chars base64url>
 // Both are stored as sha256 hex; plaintext is shown exactly once.
 
+pub mod demo_guard;
 pub mod hash;
 pub mod middleware;
 pub mod store;

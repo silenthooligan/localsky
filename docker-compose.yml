@@ -9,11 +9,21 @@ services:
     container_name: localsky
     restart: unless-stopped
     network_mode: host
-    # Temporary: image defaults to uid 10001 since the 2026-05-21 hardening pass,
-    # but the data + keys mounts may still be root-owned on the host.
-    # To drop this override, chown the data dir to 10001:10001 on the host
-    # and make sure 10001 can read the mounted vapid-private.pem.
-    user: "0:0"
+    # The image entrypoint starts as root, chowns /data (+ best-effort /keys) to
+    # uid 10001, then gosu-drops, so the app runs non-root with no host chown
+    # needed. Caps below are what the brief root entrypoint needs to chown + drop;
+    # after the drop the app process holds none. (If a VAPID key is added to the
+    # read-only keys mount, make it 10001-readable since /keys is :ro.)
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
     environment:
       - TZ=${TZ}
       - RUST_LOG=info
@@ -73,8 +83,18 @@ services:
     restart: unless-stopped
     ports:
       - "8091:8091"
-    # See note above; same transition condition.
-    user: "0:0"
+    # Entrypoint chowns /data then gosu-drops to uid 10001 (see the prod
+    # service note). These caps are for the brief root entrypoint only.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
     environment:
       - TZ=${TZ}
       # Verbose logging for the v2 test bed. The library namespaces

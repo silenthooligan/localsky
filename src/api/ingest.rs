@@ -19,6 +19,7 @@ use axum::{
 };
 use serde::Deserialize;
 use std::collections::HashMap;
+use tower_http::limit::RequestBodyLimitLayer;
 use tracing::warn;
 
 use crate::sources::{EcowittLocal, HttpWebhook};
@@ -33,11 +34,20 @@ pub struct IngestState {
     pub sensor_history: Option<crate::persistence::SensorHistoryStore>,
 }
 
+/// Upper bound on an ingest POST (LS-API-09). /ingest/* is the only
+/// always-public write surface (weather hardware + webhooks cannot
+/// authenticate; per-source secrets are the gate), so an anonymous caller
+/// can reach it. An Ecowitt form or a webhook JSON reading set is a few
+/// KiB; 256 KiB is a generous ceiling that still refuses a memory-
+/// exhaustion body from an unauthenticated client.
+const INGEST_BODY_LIMIT: usize = 256 * 1024;
+
 pub fn router(state: IngestState) -> Router {
     Router::new()
         .route("/ecowitt", post(ecowitt_handler))
         .route("/webhook/{id}", post(webhook_handler))
         .with_state(state)
+        .layer(RequestBodyLimitLayer::new(INGEST_BODY_LIMIT))
 }
 
 /// Ecowitt POST handler. The gateway sends form-encoded data; Axum's
@@ -64,7 +74,26 @@ async fn ecowitt_handler(
     // keyed by its Ecowitt name, so the Sensors page can show this source as
     // live + display the actual values the gateway is posting. Fire-and-
     // forget so the gateway always gets its prompt 200.
-    if let (Some(store), Some(src)) = (state.sensor_history.as_ref(), state.ecowitt.first()) {
+    //
+    // SC-08: gate this parallel write on the SAME shared-secret check the
+    // adapter's handle_post applies. The history attribution uses the first
+    // adapter's id, so verify the first adapter's secret here; if it does not
+    // match (and a secret is configured) we skip the insert entirely, instead
+    // of recording readings the adapter itself rejected. With no secret
+    // configured `secret_matches` returns true, preserving open-by-default
+    // ingest. Without this gate an attacker who knows only the source id could
+    // POST forged readings that bypassed the secret on the event bus but still
+    // landed in sensor_history through this second door.
+    let first_accepted = state
+        .ecowitt
+        .first()
+        .map(|src| src.secret_matches(&form))
+        .unwrap_or(false);
+    if let (Some(store), Some(src), true) = (
+        state.sensor_history.as_ref(),
+        state.ecowitt.first(),
+        first_accepted,
+    ) {
         let source_id = src.id().to_string();
         let epoch = chrono::Utc::now().timestamp();
         let readings: Vec<_> = form

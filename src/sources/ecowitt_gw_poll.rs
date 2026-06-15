@@ -24,7 +24,6 @@
 
 use std::time::Duration;
 
-use reqwest::Client;
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
@@ -259,10 +258,6 @@ pub fn spawn(id: String, config: EcowittGwPollConfig, history: Option<SensorHist
         warn!(source_id = %id, "ecowitt_gw_poll: no sensor_history store; poller disabled");
         return;
     };
-    let client = Client::builder()
-        .timeout(Duration::from_secs(8))
-        .build()
-        .expect("reqwest client construction");
     let url = format!("http://{}/get_livedata_info", config.host);
     let soilad_url = format!("http://{}/get_cli_soilad", config.host);
     let interval = Duration::from_secs(config.poll_interval_s.max(5) as u64);
@@ -275,7 +270,7 @@ pub fn spawn(id: String, config: EcowittGwPollConfig, history: Option<SensorHist
         let mut last_ok: Option<bool> = None;
         loop {
             tick.tick().await;
-            match fetch(&client, &url).await {
+            match fetch(&url).await {
                 Ok(body) => {
                     if last_ok != Some(true) {
                         info!(source_id = %id, "ecowitt_gw_poll reachable");
@@ -288,7 +283,7 @@ pub fn spawn(id: String, config: EcowittGwPollConfig, history: Option<SensorHist
                     // matches a calibrated source-of-truth, replacing the
                     // gateway's own % from livedata.
                     if !config.soil_calibration.is_empty() {
-                        if let Ok(soilad) = fetch(&client, &soilad_url).await {
+                        if let Ok(soilad) = fetch(&soilad_url).await {
                             let cal = parse_soilad(&soilad, &id, epoch, &config.soil_calibration);
                             if !cal.is_empty() {
                                 readings.retain(|r| !r.key.starts_with("soilmoisture"));
@@ -318,8 +313,19 @@ pub fn spawn(id: String, config: EcowittGwPollConfig, history: Option<SensorHist
     });
 }
 
-async fn fetch(client: &Client, url: &str) -> anyhow::Result<Value> {
-    let resp = client.get(url).send().await?.error_for_status()?;
+/// Fetch the gateway's local-API JSON through an SSRF-hardened client.
+///
+/// The gateway host comes from config (`config.host`) and this poller runs
+/// always-on in the background, so it routes outbound through net::safe_fetch
+/// (defense in depth): the forbidden-target filter rejects
+/// loopback/metadata/link-local/multicast, the resolved IP is pinned (anti
+/// DNS-rebinding) and redirects are disabled. RFC1918/ULA stay allowed because
+/// the GW1100/GW2000 lives on the LAN, so legitimate Ecowitt polling is
+/// unaffected. The 8s budget matches the previous persistent client.
+async fn fetch(url: &str) -> anyhow::Result<Value> {
+    let (client, safe_url) =
+        crate::net::safe_fetch::build_safe_client(url, Duration::from_secs(8)).await?;
+    let resp = client.get(safe_url).send().await?.error_for_status()?;
     Ok(resp.json::<Value>().await?)
 }
 
