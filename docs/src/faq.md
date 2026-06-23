@@ -2,11 +2,11 @@
 
 ### Does my data leave my network?
 
-Only when you ask it to. LocalSky makes no calls home and runs no analytics. The outbound traffic that can exist:
+Only when you ask it to. By default LocalSky makes no calls home, and the app itself runs no analytics. The outbound traffic that can exist:
 
 - Forecast sources you configure (Open-Meteo, NWS, OpenWeather, Pirate Weather, MET Norway): polled requests carrying your coordinates and any API key you supplied.
 - Cloud-bridged hardware you add (Tempest WebSocket, Netatmo, Ambient Weather, Tuya, YoLink sources; Rachio, Hydrawise, B-hyve controllers): those vendors' clouds, with the credentials you entered.
-- The optional update check: a plain daily GET to the GitHub releases API, off by default, opt-in via `[updates].check_enabled`. Nothing rides along with it.
+- The optional update check: a plain daily GET to the project's version manifest at `localsky.io/latest.json`, off by default, opt-in via `[updates].check_enabled`. The request carries the running version in its User-Agent (so the maintainer can see which versions are in use); no per-install identifier or config data rides along.
 - Web Push notifications, if you enable them: encrypted payloads to your browser's push service.
 
 Pure-LAN setups (local station, OpenSprinkler, no forecast sources) generate zero outbound traffic.
@@ -49,7 +49,7 @@ Not for the core loop. A LAN weather station plus a LAN controller (Tempest or E
 
 ### Is there telemetry?
 
-No. There is no usage reporting, no crash reporting, no analytics of any kind in the codebase. The only optional phone-anywhere behavior is the update check described above, and it defaults to off.
+No tracking lives in the app: no usage reporting, no crash reporting, no analytics SDK, no per-install identifier sent anywhere. The only optional phone-home is the update check above, off by default. When you enable it, the daily request to `localsky.io` carries the running version in its User-Agent, and (as with any web request) the server can see your IP; the maintainer reads those access logs only as aggregate version counts. Nothing else is collected, and nothing is stored in the app.
 
 ## Glossary
 

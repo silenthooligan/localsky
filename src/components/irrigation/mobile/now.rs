@@ -4,7 +4,7 @@
 // running banner is at the top of IrrigationPage, so when something is
 // actively watering the user sees it before any of this.
 
-use crate::components::irrigation::controls::StopAllPanel;
+use crate::components::irrigation::controls::{OverrideControl, StopAllPanel};
 use crate::components::irrigation::forecast::ForecastPanel;
 use crate::components::irrigation::hero::NextRunHero;
 use crate::ha::snapshot::IrrigationSnapshot;
@@ -16,6 +16,9 @@ pub fn MobileNow(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     view! {
         <div class="mobile-stack">
             {view! { <NextRunHero snap/> }.into_any()}
+            {view! {
+                <OverrideControl current=Signal::derive(move || snap.get().global_override.clone())/>
+            }.into_any()}
             {view! { <ForecastPanel snap/> }.into_any()}
             {view! { <StopAllPanel snap/> }.into_any()}
         </div>

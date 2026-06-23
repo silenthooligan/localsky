@@ -343,6 +343,7 @@ fn controller_kind_tag(kind: &crate::config::schema::ControllerKind) -> &'static
         Bhyve(_) => "bhyve",
         Rainbird(_) => "rainbird",
         MqttCommand(_) => "mqtt_command",
+        HttpGeneric(_) => "http_generic",
         DryRun(_) => "dry_run",
     }
 }

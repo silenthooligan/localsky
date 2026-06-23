@@ -140,6 +140,7 @@ fn classify_controller(kind: &ControllerKind, id: &str) -> (Option<String>, Stri
         K::Bhyve(_) => "B-hyve",
         K::Rainbird(_) => "Rain Bird",
         K::MqttCommand(_) => "MQTT",
+        K::HttpGeneric(_) => "DIY (HTTP)",
         K::DryRun(_) => "Dry run",
     };
     let name = if id.is_empty() {

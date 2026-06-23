@@ -80,6 +80,14 @@ pub struct Inputs {
     pub now_epoch: i64,
     pub override_tomorrow: String,
     pub is_tomorrow: bool,
+    /// Sticky global override: "auto" | "skip" | "run". Beats the engine
+    /// verdict (a per-zone override in turn beats this). "run" forces watering
+    /// past the skip conditions. "" / "auto" = follow the engine.
+    pub global_override: String,
+    /// Sticky per-zone overrides: zone slug -> "skip" | "run". Absent = auto.
+    /// Applied in `decide_per_zone`, beating both the global override and the
+    /// engine's per-zone verdict.
+    pub zone_overrides: std::collections::HashMap<String, String>,
 
     // ── Jurisdictional watering restrictions (Phase C) ──
     /// Operator-configured restrictions from `cfg.engine.watering_restrictions`.
@@ -314,6 +322,44 @@ pub fn decide_per_zone(
     i.soil_zones
         .iter()
         .map(|z| {
+            // Sticky override beats the engine entirely for this zone. A
+            // zone-specific override wins over the global one; "run" forces
+            // the zone past every skip gate (incl. its own soil saturation),
+            // "skip" force-skips it. (The global override also already shaped
+            // gverdict via pre_soil; this per-zone pass is what lets a single
+            // zone diverge from the global decision + override soil.)
+            let (eff, scope) = match i.zone_overrides.get(&z.slug).map(String::as_str) {
+                Some("skip") => ("skip", "this zone"),
+                Some("run") => ("run", "this zone"),
+                _ => match i.global_override.as_str() {
+                    "skip" => ("skip", "global"),
+                    "run" => ("run", "global"),
+                    _ => ("auto", ""),
+                },
+            };
+            match eff {
+                "skip" => {
+                    return ZoneVerdict {
+                        zone_slug: z.slug.clone(),
+                        zone_name: z.name.clone(),
+                        verdict: "skip".into(),
+                        reason: format!("Override: skip ({scope})"),
+                        source: "override".into(),
+                        multiplier: 1.0,
+                    }
+                }
+                "run" => {
+                    return ZoneVerdict {
+                        zone_slug: z.slug.clone(),
+                        zone_name: z.name.clone(),
+                        verdict: "run".into(),
+                        reason: format!("Override: force run ({scope})"),
+                        source: "override".into(),
+                        multiplier: 1.0,
+                    }
+                }
+                _ => {}
+            }
             // Global safety/weather gate binds every zone.
             if gverdict == "skip" {
                 return ZoneVerdict {
@@ -385,6 +431,14 @@ fn pre_soil(
     p: &SkipRuleParams,
     disabled: &HashSet<&str>,
 ) -> Option<(&'static str, String)> {
+    // Sticky global override (highest precedence — beats the one-day override,
+    // pause, restrictions, and every weather/soil gate). "run" force-runs past
+    // all skip conditions; "skip" force-skips. "auto"/"" falls through.
+    match i.global_override.as_str() {
+        "skip" => return Some(("skip", "Manual override: skip".to_string())),
+        "run" => return Some(("run", "Manual override: force run".to_string())),
+        _ => {}
+    }
     if i.is_tomorrow {
         match i.override_tomorrow.as_str() {
             "skip" => return Some(("skip", "Manual override (skip tomorrow)".to_string())),
@@ -747,6 +801,8 @@ pub fn inputs_from_skipcheck(s: &SkipCheck) -> Inputs {
         now_epoch: 0,
         override_tomorrow: String::new(),
         is_tomorrow: false,
+        global_override: "auto".to_string(),
+        zone_overrides: std::collections::HashMap::new(),
         watering_restrictions: Vec::new(),
         address_parity: AddressParity::NotApplicable,
     }
@@ -1281,6 +1337,8 @@ mod tests {
             now_epoch: 1_700_000_000,
             override_tomorrow: String::new(),
             is_tomorrow: false,
+            global_override: "auto".to_string(),
+            zone_overrides: std::collections::HashMap::new(),
             watering_restrictions: Vec::new(),
             address_parity: AddressParity::NotApplicable,
         }
@@ -2084,6 +2142,97 @@ mod tests {
         // Every protected id is a real catalog entry (no orphans).
         for id in PROTECTED_RULES {
             assert!(cat_ids.contains(id), "protected id {id} not in catalog");
+        }
+    }
+
+    // ── Sticky override (global + per-zone) ──────────────────────────────
+
+    #[test]
+    fn global_override_skip_forces_skip() {
+        let mut i = base();
+        i.global_override = "skip".into();
+        assert_eq!(decide(&i, &SkipRuleParams::default()).0, "skip");
+    }
+
+    #[test]
+    fn global_override_run_forces_run_past_rain() {
+        let mut i = base();
+        // Heavy rain now normally skips (matches the rain-now parity scenario).
+        i.rain_intensity_now_in_hr = 0.05;
+        assert_eq!(
+            decide(&i, &SkipRuleParams::default()).0,
+            "skip",
+            "sanity: rain-now skips"
+        );
+        i.global_override = "run".into();
+        assert_eq!(
+            decide(&i, &SkipRuleParams::default()).0,
+            "run",
+            "force run overrides the rain-now skip"
+        );
+    }
+
+    #[test]
+    fn zone_override_run_beats_global_skip() {
+        let mut i = base();
+        i.soil_zones = soil4(Some(40.0), Some(40.0), Some(40.0), Some(40.0));
+        i.global_override = "skip".into();
+        i.zone_overrides.insert("front_yard".into(), "run".into());
+        let zv = decide_per_zone(&i, &SkipRuleParams::default(), &[]);
+        let front = zv.iter().find(|z| z.zone_slug == "front_yard").unwrap();
+        let back = zv.iter().find(|z| z.zone_slug == "back_yard").unwrap();
+        assert_eq!(front.verdict, "run", "zone override run beats global skip");
+        assert_eq!(back.verdict, "skip", "other zones follow the global skip");
+    }
+
+    #[test]
+    fn zone_override_skip_beats_global_run() {
+        let mut i = base();
+        i.soil_zones = soil4(Some(40.0), Some(40.0), Some(40.0), Some(40.0));
+        i.global_override = "run".into();
+        i.zone_overrides.insert("side_yard".into(), "skip".into());
+        let zv = decide_per_zone(&i, &SkipRuleParams::default(), &[]);
+        let side = zv.iter().find(|z| z.zone_slug == "side_yard").unwrap();
+        let back = zv.iter().find(|z| z.zone_slug == "back_yard").unwrap();
+        assert_eq!(side.verdict, "skip", "zone override skip beats global run");
+        assert_eq!(back.verdict, "run", "other zones follow the global run");
+    }
+
+    #[test]
+    fn force_run_overrides_soil_saturation_per_zone() {
+        let mut i = base();
+        // back_yard saturated (90% >= 70 threshold) normally skips that zone.
+        i.soil_zones = soil4(Some(90.0), Some(40.0), Some(40.0), Some(40.0));
+        let zv0 = decide_per_zone(&i, &SkipRuleParams::default(), &[]);
+        assert_eq!(
+            zv0.iter()
+                .find(|z| z.zone_slug == "back_yard")
+                .unwrap()
+                .verdict,
+            "skip",
+            "sanity: saturated zone skips"
+        );
+        i.zone_overrides.insert("back_yard".into(), "run".into());
+        let zv = decide_per_zone(&i, &SkipRuleParams::default(), &[]);
+        assert_eq!(
+            zv.iter()
+                .find(|z| z.zone_slug == "back_yard")
+                .unwrap()
+                .verdict,
+            "run",
+            "force run overrides per-zone soil saturation"
+        );
+    }
+
+    #[test]
+    fn auto_override_is_noop() {
+        let mut i = base();
+        i.soil_zones = soil4(Some(40.0), Some(40.0), Some(40.0), Some(40.0));
+        let baseline = decide_per_zone(&i, &SkipRuleParams::default(), &[]);
+        i.global_override = "auto".into();
+        let with_auto = decide_per_zone(&i, &SkipRuleParams::default(), &[]);
+        for (a, b) in baseline.iter().zip(with_auto.iter()) {
+            assert_eq!(a.verdict, b.verdict, "auto override must change nothing");
         }
     }
 }

@@ -20,6 +20,7 @@
 pub mod bhyve;
 pub mod dry_run;
 pub mod ha_service_call;
+pub mod http_generic;
 pub mod hydrawise;
 pub mod mqtt_command;
 pub mod opensprinkler_direct;
@@ -30,6 +31,7 @@ pub mod registry;
 pub use bhyve::Bhyve;
 pub use dry_run::DryRunController;
 pub use ha_service_call::HaServiceCall;
+pub use http_generic::HttpGeneric;
 pub use hydrawise::Hydrawise;
 pub use mqtt_command::MqttCommand;
 pub use opensprinkler_direct::OpenSprinklerDirect;

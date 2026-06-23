@@ -164,7 +164,7 @@ fn render_payload(ev: &PushEvent) -> PushPayload {
             title: format!("{name} started"),
             body: "Watering in progress.".to_string(),
             tag: format!("zone-{slug}"),
-            url: format!("/irrigation/zone/{slug}"),
+            url: format!("/zones/{slug}"),
         },
         PushEvent::ZoneStopped {
             name,
@@ -174,7 +174,7 @@ fn render_payload(ev: &PushEvent) -> PushPayload {
             title: format!("{name} done"),
             body: format!("Ran for {duration_min} min."),
             tag: format!("zone-{slug}"),
-            url: format!("/irrigation/zone/{slug}"),
+            url: format!("/zones/{slug}"),
         },
         PushEvent::DailyVerdict { verdict, reason } => {
             let title = match verdict.as_str() {

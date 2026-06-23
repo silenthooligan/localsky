@@ -123,7 +123,9 @@ pub fn SettingsAccount() -> impl IntoView {
                 .send()
                 .await;
             if let Some(win) = web_sys::window() {
-                let _ = win.location().set_href(&crate::base::url("/login"));
+                // Replace, not assign: after logout a back gesture must not
+                // return into the now-deauthed app shell.
+                let _ = win.location().replace(&crate::base::url("/login"));
             }
         });
     };

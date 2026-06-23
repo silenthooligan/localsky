@@ -7,7 +7,7 @@
 //   POST   /api/wizard/apply           -> validate + write /data/localsky.toml
 //   POST   /api/wizard/test_source     -> dispatch through source adapter (Phase 6)
 //   POST   /api/wizard/test_controller -> dispatch through controller adapter (Phase 5)
-//   POST   /api/wizard/scan_zones      -> mDNS + controller probe (Phase 5)
+//   POST   /api/wizard/scan_zones      -> controller zone probe (Phase 5)
 //   POST   /api/wizard/test_llm        -> probe an LLM endpoint
 //   POST   /api/wizard/probe_soil      -> live Ecowitt soil enumeration
 //   GET    /api/wizard/discover        -> LAN device sweep

@@ -16,6 +16,12 @@ pub struct ZoneState {
     /// Slug used in OpenSprinkler entity IDs:
     /// `back_yard`, `front_yard`, `back_yard_shrubs`, `side_yard`.
     pub slug: String,
+    /// Sticky per-zone override: "auto" | "skip" | "run". "auto" follows the
+    /// global override / engine; "skip"/"run" force this one zone (beating the
+    /// global). Persisted in LocalSky sqlite (zone_overrides table). The zone
+    /// card renders its Auto/Skip/Force control from this.
+    #[serde(default = "default_auto_override")]
+    pub override_mode: String,
     /// Last six hex chars of the OpenSprinkler MAC. Stations don't have
     /// their own MACs; this is the controller's MAC, identical across
     /// all four zones. Kept on the zone for symmetry with the binary
@@ -247,6 +253,10 @@ pub struct Forecast {
     pub temp_max_today_f: f64,
     pub temp_min_today_f: f64,
     pub wind_max_today_mph: f64,
+    /// Today's forecast peak wind GUST, mph (Open-Meteo). Published as
+    /// sensor.localsky_wind_gust_forecast; the high-wind push keys on this
+    /// because the Tempest is wind-shadowed and under-reads real gusts.
+    pub wind_gust_today_mph: f64,
     pub humidity_mean_today_pct: f64,
 
     // ── Forecast intelligence (Phase A) ──
@@ -489,6 +499,13 @@ pub struct IrrigationSnapshot {
     /// instead of failing silently when the user taps them.
     #[serde(default)]
     pub override_helpers_present: bool,
+    /// Sticky global override: "auto" | "skip" | "run". Persisted in
+    /// LocalSky's own sqlite (native) so it survives redeploys and applies
+    /// regardless of HA mode. Unlike `override_tomorrow` it does NOT reset
+    /// nightly. The irrigation page renders the Auto/Skip/Force control from
+    /// this; a per-zone override (ZoneState.override_mode) beats it.
+    #[serde(default = "default_auto_override")]
+    pub global_override: String,
 
     /// Structured provenance for today's morning skip decision: every rule
     /// the ladder walked, what it saw, and which one fired. Computed
@@ -553,6 +570,10 @@ fn one_f64() -> f64 {
 
 fn default_true_running_known() -> bool {
     true
+}
+
+fn default_auto_override() -> String {
+    "auto".to_string()
 }
 
 fn default_true() -> bool {

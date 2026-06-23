@@ -356,6 +356,21 @@ fn push_irrigation_meta(out: &mut Vec<EntityDescriptor>) {
         icon: Some("mdi:water-percent"),
         zone_slug: None,
     });
+    // Sticky global override (auto/skip/run), read-only in HA. Set it from the
+    // LocalSky UI; exposed here so HA automations can react ("notify when
+    // irrigation is force-skipped"). Per-zone overrides stay UI-only.
+    out.push(EntityDescriptor {
+        platform: "sensor",
+        id: "global_override".into(),
+        name: "Override".into(),
+        snapshot: "irrigation",
+        path: vec!["global_override".into()],
+        unit: None,
+        device_class: None,
+        state_class: None,
+        icon: Some("mdi:tune"),
+        zone_slug: None,
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -439,6 +454,21 @@ fn push_forecast(out: &mut Vec<EntityDescriptor>) {
         device_class: None,
         state_class: Some("measurement"),
         icon: Some("mdi:weather-rainy"),
+        zone_slug: None,
+    });
+    // Forecast peak wind gust today (Open-Meteo). The Tempest is wind-shadowed
+    // and under-reads gusts, so the high-wind alert keys on this instead.
+    // Consumed by HA's high_wind_alert (fires >35 mph, 5-min debounce).
+    out.push(EntityDescriptor {
+        platform: "sensor",
+        id: "wind_gust_forecast".into(),
+        name: "Wind gust forecast".into(),
+        snapshot: "irrigation",
+        path: vec!["forecast".into(), "wind_gust_today_mph".into()],
+        unit: Some("mph"),
+        device_class: Some("wind_speed"),
+        state_class: Some("measurement"),
+        icon: Some("mdi:weather-windy"),
         zone_slug: None,
     });
 }

@@ -130,6 +130,11 @@ pub fn compute(fc: &ForecastSnapshot, today: &Inputs, params: &SkipRuleParams) -
             now_epoch: d.time_epoch,
             override_tomorrow: today.override_tomorrow.clone(),
             is_tomorrow: day_idx == 1,
+            // Sticky overrides are persistent, so every forward day inherits
+            // them (the strip models weather-only, but the global override
+            // still binds each cell's verdict via pre_soil).
+            global_override: today.global_override.clone(),
+            zone_overrides: today.zone_overrides.clone(),
 
             // Phase C: forward-project the restriction set; address parity
             // is a deployment property that doesn't change day-to-day.

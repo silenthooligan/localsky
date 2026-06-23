@@ -194,7 +194,7 @@ fn forecast_url(lat: f64, lon: f64, model: &str) -> String {
     let mut url = format!(
         "https://api.open-meteo.com/v1/forecast?\
          latitude={lat}&longitude={lon}&\
-         daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,wind_speed_10m_max,uv_index_max,sunrise,sunset&\
+         daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max,uv_index_max,sunrise,sunset&\
          hourly=weather_code,temperature_2m,apparent_temperature,precipitation,precipitation_probability,wind_speed_10m,wind_direction_10m,relative_humidity_2m,cloud_cover&\
          temperature_unit=fahrenheit&\
          wind_speed_unit=mph&\
@@ -249,6 +249,9 @@ struct RawDaily {
     precipitation_sum: Vec<f64>,
     precipitation_probability_max: Vec<Option<u32>>,
     wind_speed_10m_max: Vec<f64>,
+    /// Daily peak gust (mph); runs well above sustained wind_speed_10m_max and
+    /// is the signal the high-wind alert uses (the Tempest under-reads gusts).
+    wind_gusts_10m_max: Vec<f64>,
     uv_index_max: Vec<Option<f64>>,
     sunrise: Vec<String>,
     sunset: Vec<String>,
@@ -285,6 +288,7 @@ impl Raw {
                 precip_probability_max: pick(&self.daily.precipitation_probability_max, i)
                     .unwrap_or(0),
                 wind_max_mph: pick(&self.daily.wind_speed_10m_max, i),
+                wind_gust_max_mph: pick(&self.daily.wind_gusts_10m_max, i),
                 uv_index_max: pick(&self.daily.uv_index_max, i).unwrap_or(0.0),
                 sunrise_epoch: parse_om_local(&self.daily.sunrise[i]),
                 sunset_epoch: parse_om_local(&self.daily.sunset[i]),
@@ -396,7 +400,7 @@ mod tests {
         let expected = concat!(
             "https://api.open-meteo.com/v1/forecast?latitude=28.5&longitude=-81.4",
             "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,",
-            "precipitation_probability_max,wind_speed_10m_max,uv_index_max,sunrise,sunset",
+            "precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max,uv_index_max,sunrise,sunset",
             "&hourly=weather_code,temperature_2m,apparent_temperature,precipitation,",
             "precipitation_probability,wind_speed_10m,wind_direction_10m,",
             "relative_humidity_2m,cloud_cover",

@@ -20,6 +20,7 @@
 - [Weather and soil sensors](sensors.md)
 - [Soil probes and zones](soil-sensors.md)
 - [Irrigation controllers](controllers.md)
+- [DIY & ESP32 controllers](diy-controllers.md)
 - [Forecast sources and merge](forecast.md)
 - [Live radar](radar.md)
 

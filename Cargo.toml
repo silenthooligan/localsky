@@ -1,6 +1,6 @@
 [package]
 name = "localsky"
-version = "0.4.0-beta.3"
+version = "0.5.0-beta.1"
 edition = "2021"
 license = "Apache-2.0"
 description = "Local-first weather and irrigation control with native FAO-56 ET, multi-source weather merge, multi-controller HAL, optional Home Assistant, and optional local LLM advisor."
@@ -23,7 +23,7 @@ leptos_axum = { version = "0.8", optional = true }
 # SSR side
 axum = { version = "0.8", features = ["macros", "multipart"], optional = true }
 tower = { version = "0.5", optional = true }
-tower-http = { version = "0.6", features = ["fs", "compression-gzip", "set-header", "limit"], optional = true }
+tower-http = { version = "0.7", features = ["fs", "compression-gzip", "set-header", "limit"], optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
 tokio-stream = { version = "0.1", features = ["sync"], optional = true }
 
@@ -236,6 +236,13 @@ ssr = [
 output-name = "localsky"
 site-root = "target/site"
 site-pkg-dir = "pkg"
+# Content-hash the /pkg JS/WASM/CSS filenames so each build emits new URLs that
+# bust the browser cache automatically (no service-worker cache juggling, no
+# stale WASM on deploy). Requires BOTH: LEPTOS_HASH_FILES=true at runtime AND
+# hash.txt copied next to the binary (leptos reads it from
+# current_exe().parent()/hash.txt) — without both, names silently go hashless
+# while the files on disk are hashed, 404-ing the WASM. See Dockerfile.
+hash-files = true
 style-file = "style/main.scss"
 assets-dir = "public"
 site-addr = "0.0.0.0:8090"

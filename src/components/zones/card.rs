@@ -6,7 +6,7 @@
 use leptos::prelude::*;
 use serde_json::json;
 
-use crate::components::irrigation::controls::post_action_then;
+use crate::components::irrigation::controls::{post_action_then, OverrideControl};
 use crate::components::ui::{use_toast, Icon};
 use crate::ha::snapshot::ZoneState;
 
@@ -41,6 +41,10 @@ pub fn ZoneCard(
     let deficit = format!("{:.1}", zone.bucket_mm);
     let running = zone.running;
     let stop_slug = slug.clone();
+    // Sticky per-zone override (Auto/Skip/Force). Card is re-created per
+    // snapshot, so this value is current; the control POSTs set_zone_override.
+    let ov_mode = zone.override_mode.clone();
+    let ov_slug = slug.clone();
     // Disabled-after-click guard; the next streamed snapshot recreates the
     // card with the real state, so this only needs to cover the gap.
     let stopping = RwSignal::new(false);
@@ -144,6 +148,15 @@ pub fn ZoneCard(
                             <span class="zone-card__v">{format!("{pct:.0}")}<small>"%"</small></span>
                         </div>
                     })}
+                </div>
+                // Per-zone override. stop_propagation so tapping a segment sets
+                // the override instead of selecting/opening the zone.
+                <div
+                    class="zone-card__override"
+                    on:click=move |ev: leptos::ev::MouseEvent| ev.stop_propagation()
+                >
+                    <span class="zone-card__override-label">"Override"</span>
+                    <OverrideControl current=Signal::derive(move || ov_mode.clone()) zone=ov_slug/>
                 </div>
                 {running.then(|| view! {
                     <div class="zone-card__foot">

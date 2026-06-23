@@ -67,6 +67,18 @@ ENV GIT_SHA=${GIT_SHA}
 
 RUN cargo leptos build --release
 
+# hash-files emits content-hashed /pkg names + a hash.txt manifest. leptos reads
+# that manifest at runtime from current_exe().parent()/hash.txt (next to the
+# binary), NOT the site root, so stage it at a known path. Fail loudly if it's
+# missing: shipping hashed files without the manifest makes the HTML emit
+# hashless URLs that 404 the WASM.
+RUN HASHTXT="$(find /build/target -name hash.txt -print -quit)" \
+    && { [ -n "$HASHTXT" ] || HASHTXT="$(find /build -name hash.txt -print -quit)"; } \
+    && test -n "$HASHTXT" \
+    && echo "hash.txt found at: $HASHTXT" \
+    && cp "$HASHTXT" /build/hash.txt \
+    && echo "=== hash.txt contents ===" && cat /build/hash.txt
+
 # Render the bundled docs AFTER the app build so a docs change alone does
 # not invalidate the (slow) cargo build cache layer above. Output lands
 # in /build/docs/book and is copied into the site root in the runtime
@@ -85,6 +97,9 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 COPY --from=builder --chown=10001:10001 /build/target/release/localsky /app/localsky
 COPY --from=builder --chown=10001:10001 /build/target/site /app/site
+# hash.txt MUST sit next to the binary; leptos reads it from
+# current_exe().parent()/hash.txt to map /pkg names to their hashed forms.
+COPY --from=builder --chown=10001:10001 /build/hash.txt /app/hash.txt
 # Bundled documentation, served same-origin at /docs (LEPTOS_SITE_ROOT=
 # "site" -> /app/site, the docs ServeDir roots at <site_root>/docs).
 # Placed after the site COPY so it lands inside the served static root.
@@ -99,6 +114,10 @@ RUN mkdir -p /data /keys && chown -R 10001:10001 /data /keys
 ENV LEPTOS_SITE_ADDR="0.0.0.0:8090"
 ENV LEPTOS_SITE_ROOT="site"
 ENV RUST_LOG="info"
+# Emit content-hashed /pkg URLs (reads /app/hash.txt). No compile-time fallback
+# in leptos_config; must be set here or names go hashless and 404 the hashed
+# files on disk.
+ENV LEPTOS_HASH_FILES="true"
 
 # Fix-perms-then-drop: the container starts as root, the entrypoint chowns the
 # writable mounts, then gosu-drops to uid 10001 to run the app unprivileged.

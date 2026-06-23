@@ -108,7 +108,7 @@ poll_interval_s = 10
 
 Exactly one controller should have `default = true`. The validator rejects PUTs that leave the system with zero defaults when any controller exists.
 
-Supported `kind` values: `opensprinkler_direct`, `ha_service_call`, `esphome_native`, `rachio`, `hydrawise`, `bhyve`, `rainbird`, `mqtt_command`, `dry_run`.
+Supported `kind` values: `opensprinkler_direct`, `http_generic`, `mqtt_command`, `ha_service_call`, `rachio`, `hydrawise`, `bhyve`, `rainbird`, `dry_run`. (`esphome_native` is scaffolded but not yet built, so it is not offered in the UI; use `mqtt_command` or `http_generic` for ESPHome hardware.)
 
 ## `[zones.<slug>]`
 
@@ -310,7 +310,7 @@ Announces `_localsky._tcp` via mDNS so the Home Assistant integration and LAN cl
 check_enabled = false   # default: false
 ```
 
-Off by default; nothing phones home. When enabled (restart required), LocalSky polls the GitHub releases API about once a day and serves the comparison at `GET /api/v1/updates`. Nothing self-updates; `docker pull` stays the upgrade mechanism. See [Upgrading LocalSky](upgrading.md#update-notifications).
+Off by default; nothing phones home. When enabled (restart required), LocalSky polls the project version manifest at `localsky.io/latest.json` about once a day (the running version travels in the User-Agent, nothing per-install) and serves the comparison at `GET /api/v1/updates`. Nothing self-updates; `docker pull` stays the upgrade mechanism. See [Upgrading LocalSky](upgrading.md#update-notifications).
 
 ## Env var interpolation
 

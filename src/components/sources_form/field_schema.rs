@@ -80,7 +80,7 @@ pub struct FieldSpec {
 }
 
 impl FieldSpec {
-    const fn text(
+    pub(crate) const fn text(
         key: &'static str,
         label: &'static str,
         helptext: &'static str,
@@ -99,7 +99,7 @@ impl FieldSpec {
         }
     }
 
-    const fn secret(
+    pub(crate) const fn secret(
         key: &'static str,
         label: &'static str,
         helptext: &'static str,
@@ -118,7 +118,7 @@ impl FieldSpec {
         }
     }
 
-    const fn int(
+    pub(crate) const fn int(
         key: &'static str,
         label: &'static str,
         helptext: &'static str,
@@ -141,7 +141,7 @@ impl FieldSpec {
     /// 0; an empty value surfaces the inline "<label> is required" error and is
     /// OMITTED from the config (never written as 0) so a half-filled add can't
     /// silently persist a broken source.
-    const fn int_required(
+    pub(crate) const fn int_required(
         key: &'static str,
         label: &'static str,
         helptext: &'static str,
@@ -159,7 +159,7 @@ impl FieldSpec {
         }
     }
 
-    const fn float(
+    pub(crate) const fn float(
         key: &'static str,
         label: &'static str,
         helptext: &'static str,
@@ -180,7 +180,7 @@ impl FieldSpec {
     /// A REQUIRED float. Mirror of `int_required` for non-integer numbers: no
     /// sentinel default, inline required error when empty, key omitted on empty.
     #[allow(dead_code)]
-    const fn float_required(
+    pub(crate) const fn float_required(
         key: &'static str,
         label: &'static str,
         helptext: &'static str,
@@ -198,7 +198,7 @@ impl FieldSpec {
         }
     }
 
-    const fn boolean(
+    pub(crate) const fn boolean(
         key: &'static str,
         label: &'static str,
         helptext: &'static str,
@@ -216,7 +216,7 @@ impl FieldSpec {
         }
     }
 
-    const fn text_default(
+    pub(crate) const fn text_default(
         key: &'static str,
         label: &'static str,
         helptext: &'static str,
@@ -235,7 +235,7 @@ impl FieldSpec {
         }
     }
 
-    const fn select(
+    pub(crate) const fn select(
         key: &'static str,
         label: &'static str,
         helptext: &'static str,
@@ -927,7 +927,7 @@ pub fn SourceConfigForm(
 /// Render one FieldSpec as a labeled, two-way-bound input. A free function (not
 /// inline view! nesting) so each row monomorphizes in its own boundary, keeping
 /// the recursion depth flat per the no-deep-nesting guidance.
-fn field_row(
+pub(crate) fn field_row(
     spec: &FieldSpec,
     cfg: RwSignal<serde_json::Value>,
     // Send + Sync so the Password arm can wrap `flush` in a leptos Callback for

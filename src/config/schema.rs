@@ -176,9 +176,10 @@ pub fn default_retention_days() -> u32 {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct UpdatesConfig {
-    /// When true, poll the GitHub releases API daily and surface
-    /// "update available" in the UI. Plain GET, no telemetry attached;
-    /// off by default so fresh installs phone nowhere.
+    /// When true, poll https://localsky.io/latest.json daily and surface
+    /// "update available" in the UI. Plain GET (version in the User-Agent,
+    /// nothing per-install attached); off by default so fresh installs
+    /// phone nowhere.
     #[serde(default)]
     pub check_enabled: bool,
 }
@@ -1053,6 +1054,7 @@ pub enum ControllerKind {
     Bhyve(BhyveConfig),
     Rainbird(RainbirdConfig),
     MqttCommand(MqttCommandConfig),
+    HttpGeneric(HttpGenericConfig),
     DryRun(DryRunConfig),
 }
 
@@ -1185,12 +1187,17 @@ fn default_rainbird_base_url() -> String {
     "https://rdz-rest.rainbird.com".to_string()
 }
 
-/// Generic MQTT command-sink controller. Publishes start/stop messages
-/// to per-zone topics. Compatible with ESPHome `mqtt:` switches, Tasmota
+/// Generic MQTT controller. Publishes start/stop messages to per-zone
+/// topics, and OPTIONALLY subscribes to state/availability/flow topics to
+/// read zone status back. Compatible with ESPHome `mqtt:` switches, Tasmota
 /// relays, Sonoff/Shelly devices in MQTT mode, OpenSprinkler MQTT plug-in,
-/// and any DIY relay board that subscribes to MQTT. No state subscription;
-/// commands are fire-and-forget. Use ESPHome native or HaServiceCall when
-/// you need confirmed state.
+/// and any DIY relay board that subscribes to MQTT.
+///
+/// Command-only (no `state_topic`) is fire-and-forget: LocalSky owns the
+/// shutoff timer and reports running state from its own run log. Add a
+/// `state_topic` per zone (and optionally an `availability_topic` /
+/// `flow_topic`) and the board's reported state flows back into status() and
+/// the snapshot, the HA-native MQTT convention most ESP32 firmware speaks.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct MqttCommandConfig {
     pub broker_host: String,
@@ -1201,6 +1208,24 @@ pub struct MqttCommandConfig {
     /// MQTT client id. Defaults to "localsky-controller-<id>".
     #[serde(default)]
     pub client_id: Option<String>,
+    /// Optional controller-level availability (LWT) topic. When the board
+    /// publishes `payload_available` here, status().reachable is true; the
+    /// not-available payload (or a broker disconnect) marks it offline.
+    #[serde(default)]
+    pub availability_topic: Option<String>,
+    /// Payload that means "online" on `availability_topic`. Defaults to
+    /// "online" (the ESPHome/Tasmota convention).
+    #[serde(default = "default_mqtt_payload_available")]
+    pub payload_available: String,
+    /// Payload that means "offline" on `availability_topic`. Defaults to
+    /// "offline". Any payload that is neither this nor `payload_available` is
+    /// treated as indeterminate and leaves the last known state unchanged.
+    #[serde(default = "default_mqtt_payload_not_available")]
+    pub payload_not_available: String,
+    /// Optional topic carrying a numeric flow rate (gallons/min) for the
+    /// whole controller. The payload is parsed as a float into status().flow_gpm.
+    #[serde(default)]
+    pub flow_topic: Option<String>,
     /// Map LocalSky zone slug -> command spec. Each entry specifies the
     /// command topic and the on/off payloads to publish.
     #[serde(default)]
@@ -1220,6 +1245,16 @@ pub struct MqttZoneCommand {
     /// Optional retain flag on published messages.
     #[serde(default)]
     pub retain: bool,
+    /// Optional topic the board reports this zone's running state on. When
+    /// set, LocalSky subscribes and the reported value drives status().
+    /// A retained state topic means LocalSky learns the current state the
+    /// instant it (re)connects.
+    #[serde(default)]
+    pub state_topic: Option<String>,
+    /// Payload on `state_topic` that means "running". Defaults to this zone's
+    /// `on_payload`. Matching is exact and case-insensitive (trimmed).
+    #[serde(default)]
+    pub state_on_payload: Option<String>,
 }
 
 fn default_mqtt_on_payload() -> String {
@@ -1227,6 +1262,38 @@ fn default_mqtt_on_payload() -> String {
 }
 fn default_mqtt_off_payload() -> String {
     "OFF".to_string()
+}
+fn default_mqtt_payload_available() -> String {
+    "online".to_string()
+}
+fn default_mqtt_payload_not_available() -> String {
+    "offline".to_string()
+}
+
+/// Generic HTTP/REST controller for DIY / ESP32 boards. LocalSky drives the
+/// board over a tiny, documented REST contract (see the DIY controllers doc):
+///
+///   GET  {base}/status         -> {firmware?, zones:[{id,running,remaining_s?}], flow_gpm?, rain?}
+///   GET  {base}/zones          -> {zones:[{id,name}]}            (wizard "scan zones")
+///   POST {base}/zone/{id}/run    body {"seconds": N}
+///   POST {base}/zone/{id}/stop
+///   POST {base}/stop_all
+///
+/// Unlike `mqtt_command`, this is pollable: full status readback, zone
+/// discovery, and the wizard "test connection" all work. The board's station
+/// id comes from `zones[*].controller_station` (any string the board uses,
+/// e.g. "1" or "back_yard"). An optional bearer token is sent on every request.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct HttpGenericConfig {
+    /// Base URL of the board, e.g. `http://192.0.2.50` or `http://board.local:8080`.
+    pub base_url: String,
+    /// Optional `Authorization: Bearer <token>` sent on every request. Leave
+    /// unset for an open board on a trusted LAN.
+    #[serde(default)]
+    pub bearer_token: Option<String>,
+    /// Status poll interval (seconds).
+    #[serde(default = "default_controller_poll")]
+    pub poll_interval_s: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]

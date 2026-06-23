@@ -616,12 +616,44 @@ html, body {
   font-family: var(--font-sans);
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;
+  // App-shell, not a webpage: kill the browser pull-to-refresh and the
+  // vertical rubber-band scroll-chaining. A downward swipe at the top of a
+  // screen no longer reloads (the SSE streams keep data live, so a reload is
+  // pure redundancy that would only bounce the user back through the auth
+  // gate). Only the Y axis: the horizontal swipe-back gesture stays live so
+  // back navigation between app screens still works (the login/wizard pages
+  // are dropped from history via location.replace, so back never reaches
+  // them).
+  overscroll-behavior-y: none;
 }
 
 body {
   background-attachment: fixed;
   position: relative;
   overflow-x: hidden;
+  // Native-app touch feel: no grey tap-flash on press, no long-press
+  // callout menu, and the app chrome is not text-selectable (a drag
+  // shouldn't start a selection on a button or label). Real inputs and
+  // anything tagged .is-selectable opt back in just below.
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+// Text entry and explicitly-flagged content stay selectable / long-press
+// capable; everything else (the chrome) keeps the app feel above.
+input, textarea, select, [contenteditable="true"], .is-selectable {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+
+// Snappy taps on controls: drop the legacy 300ms delay and double-tap-zoom
+// without touching pan/scroll gestures elsewhere (charts and the radar map
+// declare their own touch-action).
+button, a, label, summary, [role="button"], .btn, .btn-clay {
+  touch-action: manipulation;
 }
 
 // Mode banners. app.rs sets data-dry-run / data-demo on <html> after
@@ -5494,6 +5526,126 @@ html:not([data-nerd="true"]) .skip-breakdown:not(:has(.sk-row-tripped)) {
 }
 
 // ------------------------------------------------------------------
+// Irrigation override — sticky Auto / Skip / Force. A titled panel on
+// the irrigation page drives the global override; a compact segmented
+// control in each zone card drives that zone. Auto = follow engine
+// (accent blue), Skip = amber, Force = teal. A zone override beats the
+// global one; both persist until changed.
+// ------------------------------------------------------------------
+.override-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  background: var(--elev-1);
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
+  transition: border-color var(--motion-base) ease, background var(--motion-base) ease;
+}
+.override-panel--active {
+  background: color-mix(in oklab, var(--accent) 8%, var(--elev-1));
+  border-color: color-mix(in oklab, var(--accent) 40%, transparent);
+}
+.override-panel__head { display: flex; align-items: center; gap: var(--space-3); }
+.override-panel__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  flex: none;
+  border-radius: 50%;
+  color: var(--text-faint);
+  background: var(--elev-2);
+  border: 1px solid var(--elev-border);
+}
+.override-panel--active .override-panel__icon {
+  color: #ffffff;
+  background: var(--accent);
+  border-color: color-mix(in oklab, var(--accent) 70%, #000);
+}
+.override-panel__text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.override-panel__title {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  font-weight: 700;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.override-panel--active .override-panel__title { color: var(--accent); }
+.override-panel__help {
+  margin: 0;
+  font-size: var(--text-body-sm);
+  color: var(--text-dim);
+  line-height: var(--leading-snug);
+}
+
+// Segmented Auto | Skip | Force control. Shared by the panel + zone cards.
+.override-seg {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: var(--elev-2);
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius);
+}
+.override-seg__btn {
+  flex: 1 1 0;
+  padding: 0.5rem 0.4rem;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: var(--text-body-sm);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background var(--motion-base) ease, color var(--motion-base) ease,
+    box-shadow var(--motion-base) ease;
+}
+.override-seg__btn:hover {
+  color: var(--accent-cool);
+  background: color-mix(in oklab, var(--accent) 12%, transparent);
+}
+.override-seg__btn.is-active {
+  color: #ffffff;
+  background: var(--accent);
+  box-shadow: var(--shadow-1);
+}
+.override-seg__btn--skip.is-active { background: var(--accent-warn); }
+.override-seg__btn--run.is-active { background: var(--accent-good); }
+
+// Compact variant inside a zone card / zone-detail.
+.override-ctl--compact .override-seg { padding: 3px; gap: 3px; }
+.override-ctl--compact .override-seg__btn {
+  padding: 0.4rem 0.3rem;
+  font-size: var(--text-micro);
+}
+
+// Per-zone override label rows (desktop card + mobile detail).
+.zone-card-override,
+.mobile-zone-override {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-top: 0.5rem;
+}
+.zone-card-override__label,
+.mobile-zone-override__label {
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  font-weight: 700;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+// ------------------------------------------------------------------
 // Stop All panel (bento cell). Hot-pink/red claymorphic surface so
 // it's visually unmistakable. Disabled (faded) when no zones run.
 // ------------------------------------------------------------------
@@ -8827,6 +8979,21 @@ button.mobile-tab {
 .zone-card__k { font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); }
 .zone-card__v { font-family: var(--font-mono); font-weight: 700; color: var(--text-bright); }
 .zone-card__v small { font-weight: 500; color: var(--text-faint); }
+// Per-zone override row on the master-detail card. Label + compact segmented
+// Auto/Skip/Force; sits above the hit overlay (the .zone-card > * z-index rule)
+// so it stays tappable without selecting the card.
+.zone-card__override { display: flex; align-items: center; gap: var(--space-3); }
+.zone-card__override-label {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  font-weight: 700;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.zone-card__override .override-ctl--compact { flex: 1; }
+
 .zone-card__foot { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-3); margin-top: auto; }
 .zone-card__stop {
   display: inline-flex; align-items: center; gap: 4px; margin-right: auto;

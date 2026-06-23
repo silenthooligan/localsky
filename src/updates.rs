@@ -1,15 +1,19 @@
 // Opt-in update check. When [updates].check_enabled is true, a
-// background task polls the GitHub releases API daily (with jitter) and
-// caches the newest version; GET /api/v1/updates serves the comparison.
-// No telemetry rides along (a plain GET with a UA string), nothing
-// self-updates: docker pull stays the upgrade mechanism.
+// background task polls the project's version manifest at
+// https://localsky.io/latest.json daily (with jitter) and caches the
+// newest version; GET /api/v1/updates serves the comparison. The request
+// is a plain GET whose only identifier is the User-Agent (localsky/<ver>),
+// so the manifest host sees aggregate version counts but nothing
+// per-install rides along. Nothing self-updates: docker pull stays the
+// upgrade mechanism. The manifest mirrors the GitHub release shape
+// (tag_name + html_url) so the comparison logic is source-agnostic.
 
 use std::sync::OnceLock;
 
 use serde::Serialize;
 use tokio::sync::RwLock;
 
-const RELEASES_URL: &str = "https://api.github.com/repos/silenthooligan/localsky/releases/latest";
+const RELEASES_URL: &str = "https://localsky.io/latest.json";
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct UpdateStatus {
@@ -46,8 +50,11 @@ fn newer(latest: &str, current: &str) -> bool {
 async fn check_once(client: &reqwest::Client) {
     let resp = client
         .get(RELEASES_URL)
-        .header("User-Agent", "localsky-update-check")
-        .header("Accept", "application/vnd.github+json")
+        .header(
+            "User-Agent",
+            concat!("localsky/", env!("CARGO_PKG_VERSION")),
+        )
+        .header("Accept", "application/json")
         .send()
         .await;
     let Ok(resp) = resp else { return };

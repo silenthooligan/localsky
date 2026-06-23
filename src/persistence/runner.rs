@@ -69,6 +69,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "push_subscriptions",
         sql: include_str!("migrations/M0010_push_subscriptions.sql"),
     },
+    Migration {
+        version: "M0011",
+        name: "overrides",
+        sql: include_str!("migrations/M0011_overrides.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]
@@ -230,6 +235,7 @@ mod tests {
                 "M0008".to_string(),
                 "M0009".to_string(),
                 "M0010".to_string(),
+                "M0011".to_string(),
             ]
         );
     }

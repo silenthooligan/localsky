@@ -67,6 +67,7 @@ expression: "IrrigationSnapshot::default()"
     "temp_max_today_f": 0.0,
     "temp_min_today_f": 0.0,
     "wind_max_today_mph": 0.0,
+    "wind_gust_today_mph": 0.0,
     "humidity_mean_today_pct": 0.0,
     "rain_3day_weighted_in": 0.0,
     "rain_7day_weighted_in": 0.0,
@@ -86,6 +87,7 @@ expression: "IrrigationSnapshot::default()"
   "pause_until_epoch": 0,
   "override_tomorrow": "",
   "override_helpers_present": false,
+  "global_override": "",
   "decision_trace": null,
   "zone_verdicts": [],
   "soil_probe_faults": []

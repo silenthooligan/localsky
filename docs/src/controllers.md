@@ -8,14 +8,17 @@ LocalSky's `IrrigationController` port abstracts the act of firing valves. The s
 |---|---|---|---|---|
 | **OpenSprinkler** (boxed) | Direct HTTP on LAN | No | 130-180 | Tested |
 | **OpenSprinkler Pi** | Direct HTTP on LAN | No | ~80 (Pi) + relay board | Tested |
+| **[DIY / ESP32](diy-controllers.md)** (HTTP) | Direct HTTP on LAN | No | 5-40 ESP32 + valves | Tested |
+| **[DIY / ESP32](diy-controllers.md)** (MQTT) | MQTT (ESPHome, Tasmota, Z2M) | No | 5-40 ESP32 + valves | Tested |
 | **Home Assistant service call** | HA REST | No (HA local) | Whatever HA drives | Tested |
-| **ESPHome sprinkler** | ESPHome native API | No | 5-40 ESP32 + valves | Community / planned |
 | **Rachio** Gen 2/3 | Rachio cloud API | Yes | 130-250 | Planned |
 | **Hunter Hydrawise** | Cloud API | Yes | 130-300 | Community / planned |
 | **B-hyve** | Cloud API | Yes | 80-150 | Community / planned |
 | **DryRun** | No-op | No | None | Tested |
 
-Prices are US retail; availability and cost vary by region. Rachio, B-hyve, and Hydrawise are sold mostly through North American retail; OpenSprinkler and ESPHome hardware ship worldwide, which makes them the natural picks outside North America too.
+Prices are US retail; availability and cost vary by region. Rachio, B-hyve, and Hydrawise are sold mostly through North American retail; OpenSprinkler and ESP32 hardware ship worldwide, which makes them the natural picks outside North America too.
+
+> Rolling your own with an ESP32 or another relay board? See [DIY & ESP32 controllers](diy-controllers.md) for the two supported paths (a small HTTP contract, or MQTT) with copy-and-flash reference firmware, beginner to advanced.
 
 ## OpenSprinkler (the ideal)
 
@@ -96,25 +99,14 @@ Use cases:
 - Using a controller LocalSky doesn't have a native adapter for (Hunter, B-hyve via HA), but the HA integration does
 - Wanting irrigation runs to flow through HA's automation engine for additional logic
 
-## ESPHome sprinkler (community / planned)
+## ESP32 / DIY (ESPHome, Tasmota, custom)
 
-ESPHome's `sprinkler` component turns an ESP32 with a relay board into a smart irrigation controller for ~$15-40 total parts cost. The native API (protobuf over TCP) is documented.
+An ESP32 with a relay board is a smart irrigation controller for ~$15-40 in parts. LocalSky drives it two ways, both first-class and both covered in detail on the [DIY & ESP32 controllers](diy-controllers.md) page:
 
-```toml
-[[controllers]]
-id = "esp_irrigation"
-default = true
-kind = "esphome_native"
-[controllers.config]
-host = "192.0.2.20"
-port = 6053
-password = "${ESP_API_PASSWORD}"
-[controllers.config.zone_entity_map]
-back_yard = "switch.back_yard_valve"
-front_yard = "switch.front_yard_valve"
-```
+- **MQTT** (`mqtt_command`): for boards that already speak MQTT (ESPHome, Tasmota, Zigbee2MQTT, a bare relay). Optional state/availability/flow readback. The bundled ESPHome reference firmware uses this path.
+- **HTTP** (`http_generic`): for a self-contained board with no broker. LocalSky polls a small REST contract, so Test connection + Scan zones work in the wizard. A copy-and-flash ESP32 Arduino sketch ships in `examples/http/`.
 
-Status: trait scaffolded, native adapter implementation deferred. Until then, run the ESPHome device under HA and use the `ha_service_call` controller. Track progress at the relevant GitHub issue.
+> A native ESPHome protobuf adapter (`esphome_native`) is scaffolded but not yet built, so it is not offered in the controller picker. Use MQTT or HTTP above for ESPHome hardware today.
 
 ## Rachio Gen 2/3 (planned)
 

@@ -1,0 +1,108 @@
+# LocalSky DIY irrigation controller, reference ESPHome firmware.
+#
+# A copy-paste starting point for an ESP32 relay board that LocalSky drives as
+# a first-class controller via the `mqtt_command` backend with state readback.
+# Each zone is an MQTT switch (LocalSky publishes ON/OFF, the board reports its
+# real state back), plus an optional flow sensor and LWT availability so the
+# dashboard shows the controller online/offline and live gallons/min.
+#
+# This is the path that "just works" with ESPHome, ESPHome speaks MQTT
+# natively. If you'd rather implement LocalSky's HTTP/REST contract on bare
+# Arduino/ESP-IDF, see docs: Connecting Hardware > DIY & ESP32 controllers.
+#
+# HOW TO USE
+#   1. Edit the substitutions (board name, relay GPIOs, flow pin/K-factor).
+#   2. Put wifi + MQTT creds in a secrets.yaml next to this file.
+#   3. `esphome run localsky-irrigation.yaml`
+#   4. Add the matching controller block to LocalSky (see the README in this
+#      folder for the exact toml; topics are derived from `name` below).
+#
+# Topic shape (with topic_prefix "localsky-irrig" and a switch named "Zone 1"):
+#   command:      localsky-irrig/switch/zone_1/command   (LocalSky -> board)
+#   state:        localsky-irrig/switch/zone_1/state     (board -> LocalSky)
+#   availability: localsky-irrig/status                  (online / offline LWT)
+#   flow:         localsky-irrig/sensor/flow_gpm/state   (gallons per minute)
+
+substitutions:
+  name: localsky-irrig
+  friendly_name: "LocalSky Irrigation"
+  # Active-HIGH relay board GPIOs (one per zone). Adjust to your wiring.
+  zone1_pin: GPIO16
+  zone2_pin: GPIO17
+  zone3_pin: GPIO18
+  zone4_pin: GPIO19
+  # Flow sensor: pulse input + pulses-per-gallon (K-factor) for your meter.
+  flow_pin: GPIO23
+  pulses_per_gallon: "450"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+logger:
+api:                       # keep the native API for ESPHome OTA/logs
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:                      # fallback hotspot for first provisioning
+    ssid: "${friendly_name} Setup"
+
+# MQTT is what LocalSky talks to. The birth/will messages give LocalSky the
+# availability signal (set `availability_topic = "${name}/status"`).
+mqtt:
+  broker: !secret mqtt_broker
+  username: !secret mqtt_username
+  password: !secret mqtt_password
+  topic_prefix: ${name}
+  birth_message:
+    topic: ${name}/status
+    payload: online
+  will_message:
+    topic: ${name}/status
+    payload: offline
+
+# One switch per zone. LocalSky publishes ON/OFF to each command topic, and
+# ESPHome reports the real relay state back on the state topic (a GPIO switch
+# always publishes its actual state, so the dashboard reflects the relay).
+# LocalSky owns the run duration + shutoff; an on-board safety auto-off is still
+# good practice (add an `on_turn_on` + `delay` automation if you want one).
+switch:
+  - platform: gpio
+    name: "Zone 1"
+    pin: ${zone1_pin}
+    id: zone_1
+  - platform: gpio
+    name: "Zone 2"
+    pin: ${zone2_pin}
+    id: zone_2
+  - platform: gpio
+    name: "Zone 3"
+    pin: ${zone3_pin}
+    id: zone_3
+  - platform: gpio
+    name: "Zone 4"
+    pin: ${zone4_pin}
+    id: zone_4
+
+# Optional flow meter. Converts pulse rate to gallons/min and publishes to
+# ${name}/sensor/flow_gpm/state. Point LocalSky's `flow_topic` there. Delete
+# this block if your board has no flow sensor.
+sensor:
+  - platform: pulse_counter
+    pin: ${flow_pin}
+    name: "Flow GPM"
+    id: flow_gpm
+    unit_of_measurement: "gal/min"
+    accuracy_decimals: 2
+    update_interval: 5s
+    filters:
+      # pulse_counter reports pulses/min; divide by pulses-per-gallon -> GPM.
+      - lambda: return x / ${pulses_per_gallon};

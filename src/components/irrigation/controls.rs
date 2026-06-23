@@ -75,6 +75,128 @@ pub fn StopAllPanel(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     }
 }
 
+/// Build the /action body for an override choice. `zone = None` drives the
+/// sticky global override; `Some(slug)` drives that one zone's override.
+fn override_action(zone: &Option<String>, mode: &str) -> serde_json::Value {
+    match zone {
+        Some(slug) => json!({ "kind": "set_zone_override", "zone": slug, "mode": mode }),
+        None => json!({ "kind": "set_global_override", "mode": mode }),
+    }
+}
+
+/// Sticky override segmented control: Auto / Skip / Force. Drives the global
+/// override (`zone = None`, rendered as a titled panel on the irrigation page)
+/// or a single zone's override (`zone = Some(slug)`, rendered compact inside a
+/// zone card). Sticky: the choice persists until changed. "Force" overrides
+/// every skip condition for the next scheduled run; the schedule still decides
+/// WHEN. A zone override beats the global one.
+#[component]
+pub fn OverrideControl(
+    /// Current mode from the snapshot ("auto" | "skip" | "run"); the control
+    /// follows it until the user first interacts (same pattern as the toggles).
+    current: Signal<String>,
+    /// None = global override; Some(slug) = a single zone's override.
+    #[prop(optional, into)]
+    zone: Option<String>,
+) -> impl IntoView {
+    // Normalize the empty default-snapshot value (pre-SSE hydrate frame) to
+    // "auto" so a segment is always highlighted, never a blank control.
+    let norm = |s: String| if s.is_empty() { "auto".to_string() } else { s };
+    let (mode, set_mode) = signal(norm(current.get_untracked()));
+    let user_touched = RwSignal::new(false);
+    let compact = zone.is_some();
+
+    // Follow the server value until first interaction, then stop fighting.
+    Effect::new(move |_| {
+        let server = current.get();
+        if !user_touched.get_untracked() {
+            set_mode.set(norm(server));
+        }
+    });
+
+    let toast = crate::components::ui::use_toast();
+    let save_done = Callback::new(move |result: Result<(), String>| {
+        if let Err(e) = result {
+            // Optimistic choice didn't stick: roll back + re-arm the follow.
+            user_touched.set(false);
+            set_mode.set(current.get_untracked());
+            toast.error(format!("Couldn't set override: {e}"));
+        }
+    });
+
+    let z_skip = zone.clone();
+    let z_run = zone.clone();
+    let z_auto = zone.clone();
+    let choose_auto = move |_| {
+        user_touched.set(true);
+        set_mode.set("auto".to_string());
+        post_action_then(override_action(&z_auto, "auto"), save_done);
+    };
+    let choose_skip = move |_| {
+        user_touched.set(true);
+        set_mode.set("skip".to_string());
+        post_action_then(override_action(&z_skip, "skip"), save_done);
+    };
+    let choose_run = move |_| {
+        user_touched.set(true);
+        set_mode.set("run".to_string());
+        post_action_then(override_action(&z_run, "run"), save_done);
+    };
+
+    let is = move |m: &'static str| mode.get() == m;
+    let seg = view! {
+        <div class="override-seg" role="group" aria-label="Irrigation override">
+            <button
+                type="button"
+                class="override-seg__btn"
+                class:is-active=move || is("auto")
+                on:click=choose_auto
+            >"Auto"</button>
+            <button
+                type="button"
+                class="override-seg__btn override-seg__btn--skip"
+                class:is-active=move || is("skip")
+                on:click=choose_skip
+            >"Skip"</button>
+            <button
+                type="button"
+                class="override-seg__btn override-seg__btn--run"
+                class:is-active=move || is("run")
+                on:click=choose_run
+            >"Force"</button>
+        </div>
+    };
+
+    if compact {
+        // Zone card: just the segmented buttons (the card already names the zone).
+        view! { <div class="override-ctl override-ctl--compact">{seg}</div> }.into_any()
+    } else {
+        // Irrigation page: a titled panel with a live explainer so the
+        // override is unmistakable when active.
+        let status = move || match mode.get().as_str() {
+            "skip" => "Skipping every zone until you switch back to Auto.".to_string(),
+            "run" => "Forcing the next run past all skip conditions. Zones can still override."
+                .to_string(),
+            _ => "Following the engine. Set Skip or Force to take manual control.".to_string(),
+        };
+        view! {
+            <section class="override-panel" class:override-panel--active=move || !is("auto")>
+                <div class="override-panel__head">
+                    <span class="override-panel__icon" aria-hidden="true">
+                        <crate::components::ui::Icon name="settings" size=18 stroke=2.0/>
+                    </span>
+                    <div class="override-panel__text">
+                        <h3 class="override-panel__title">"Override"</h3>
+                        <p class="override-panel__help">{status}</p>
+                    </div>
+                </div>
+                {seg}
+            </section>
+        }
+        .into_any()
+    }
+}
+
 /// Skip-threshold tuners + vacation/dry-run toggles. Each control
 /// follows the server-side value (via snap) until the user first
 /// interacts with it; from that point on, local is authoritative.

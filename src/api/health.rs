@@ -425,6 +425,7 @@ fn controller_kind_label(kind: &crate::config::schema::ControllerKind) -> &'stat
         Bhyve(_) => "bhyve",
         Rainbird(_) => "rainbird",
         MqttCommand(_) => "mqtt_command",
+        HttpGeneric(_) => "http_generic",
         DryRun(_) => "dry_run",
     }
 }

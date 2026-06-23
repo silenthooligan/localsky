@@ -89,7 +89,7 @@ LocalSky never updates itself and phones nowhere by default. Two opt-in ways to 
 check_enabled = true   # default: false
 ```
 
-When enabled, LocalSky polls the GitHub releases API about once a day (a plain GET, no telemetry attached) and serves the result at:
+When enabled, LocalSky polls the project version manifest at `localsky.io/latest.json` about once a day (a plain GET; the running version travels in the User-Agent, nothing per-install) and serves the result at:
 
 ```bash
 curl http://localhost:8090/api/v1/updates
@@ -108,7 +108,7 @@ curl http://localhost:8090/api/v1/updates
 
 The first check happens about a minute after boot; until then `latest` is null. Wire `update_available` into whatever notifies you (Home Assistant REST sensor, Uptime Kuma keyword, a cron + curl).
 
-**Per-device check.** Settings -> Advanced -> "Check GitHub for new LocalSky releases" makes your browser (not the server) fetch the latest release tag, at most once per 24 hours, and shows the result inline. It is stored per device and discloses that device's IP to GitHub, which the toggle's help text says outright.
+**Per-device check.** Settings -> Advanced -> "Check for new LocalSky releases" makes your browser (not the server) fetch `localsky.io/latest.json`, at most once per 24 hours, and shows the result inline. It is stored per device and discloses that device's IP to the `localsky.io` server, which the toggle's help text says outright.
 
 ## Upgrading from v0.1
 

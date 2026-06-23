@@ -71,7 +71,7 @@ const GROUPS: &[SectionGroup] = &[
             SectionLink {
                 key: "controllers",
                 label: "Controllers",
-                helptext: "OpenSprinkler, Rachio, Hydrawise, B-hyve, ESPHome, MQTT",
+                helptext: "OpenSprinkler, DIY/ESP32 (HTTP or MQTT), Rachio, Hydrawise, B-hyve, Home Assistant",
                 icon: "controllers",
             },
             SectionLink {

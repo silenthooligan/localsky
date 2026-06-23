@@ -179,9 +179,9 @@ You have several direct paths:
 
 Direct HTTP API on the LAN. See [docs/controllers.md](controllers.md#opensprinkler-the-ideal). US$130-180 hardware; the engine talks to it without anything else in the middle.
 
-### ESPHome sprinkler (DIY)
+### ESP32 / DIY (open hardware)
 
-For people who want full open hardware: an ESP32 + relay board + ESPHome's `sprinkler` component. ~US$15-40 in parts. LocalSky's `esphome_native` controller (planned) will speak the protobuf protocol directly. Until that adapter lands, enable MQTT on the ESPHome device and drive it with LocalSky's `mqtt_command` controller; no HA needed.
+For full open hardware: an ESP32 + relay board, ~US$15-40 in parts. LocalSky drives it two ways, no HA needed: the `http_generic` controller (LocalSky polls a small REST contract; a copy-and-flash Arduino sketch ships in `examples/http/`), or the `mqtt_command` controller for boards that speak MQTT (ESPHome/Tasmota; reference ESPHome firmware in `examples/esphome/`). See [DIY & ESP32 controllers](diy-controllers.md). A native ESPHome protobuf adapter is scaffolded but not yet built.
 
 ### Rachio, Hydrawise, B-hyve, Rain Bird
 

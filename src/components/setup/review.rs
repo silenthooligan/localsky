@@ -199,7 +199,10 @@ pub fn ReviewStep() -> impl IntoView {
                             if let Ok(Some(storage)) = win.local_storage() {
                                 let _ = storage.set_item("first_run_done", "0");
                             }
-                            let _ = win.location().set_href(&crate::base::url("/"));
+                            // Replace, not assign: a back gesture after setup
+                            // must land on the dashboard, never re-enter the
+                            // completed wizard.
+                            let _ = win.location().replace(&crate::base::url("/"));
                         }
                     }
                     Err(e) => {

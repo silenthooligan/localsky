@@ -46,11 +46,15 @@ before chasing a verdict you do not understand.
 ## Update check
 
 An opt-in check for new LocalSky releases. Off by default. When you turn
-it on, this device asks GitHub for the latest release tag at most once
-per day and shows it below the toggle, flagging when a newer version is
-available with a link to the release notes. The page is explicit about
-the trade: that request reveals this device's IP address to GitHub, which
-is why it is opt-in. Per-device and persisted.
+it on, this device asks the project's version manifest at
+`localsky.io/latest.json` for the newest release at most once per day and
+shows it below the toggle, flagging when a newer version is available with
+a link to the release notes. The page is explicit about the trade: that
+request reveals this device's IP address to the `localsky.io` server, and
+the running version travels in the request's User-Agent so the maintainer
+can see aggregate version adoption. No per-install identifier or config
+data is sent. That outbound contact is why it is opt-in. Per-device and
+persisted.
 
 ## Demo mode
 

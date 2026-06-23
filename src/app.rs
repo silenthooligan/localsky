@@ -10,10 +10,7 @@ use crate::components::{
     forecast::{DailyForecast, HourlyForecast},
     hero::Hero,
     install_prompt::InstallPrompt,
-    irrigation::{
-        mobile::MobileZoneDetail, IrrigationBudgetPage, IrrigationHistoryPage, IrrigationPage,
-        IrrigationZonesPage,
-    },
+    irrigation::IrrigationPage,
     lightning::LightningPanel,
     mobile_nav::MobileNav,
     page_header::PageHeader,
@@ -265,7 +262,9 @@ pub fn App() -> impl IntoView {
     };
 
     view! {
-        <Stylesheet id="leptos" href=crate::base::url("/pkg/localsky.css")/>
+        // The leptos CSS link now lives in the shell <head> as a
+        // <HashedStylesheet> (hash-files); a hardcoded /pkg/localsky.css here
+        // would 404 against the content-hashed filename on disk.
         <Title text="LocalSky"/>
 
         <Router base=router_base>
@@ -291,26 +290,6 @@ pub fn App() -> impl IntoView {
                         view=move || view! {
                             <Title text="LocalSky · Irrigation · Today"/>
                             <IrrigationPage snap=irrigation/>
-                        }/>
-                    <Route path=path!("/irrigation/zones")
-                        view=move || view! {
-                            <Title text="LocalSky · Irrigation · Zones"/>
-                            <IrrigationZonesPage snap=irrigation/>
-                        }/>
-                    <Route path=path!("/irrigation/budget")
-                        view=move || view! {
-                            <Title text="LocalSky · Irrigation · Water budget"/>
-                            <IrrigationBudgetPage snap=irrigation/>
-                        }/>
-                    <Route path=path!("/irrigation/history")
-                        view=move || view! {
-                            <Title text="LocalSky · Irrigation · History"/>
-                            <IrrigationHistoryPage snap=irrigation/>
-                        }/>
-                    <Route path=path!("/irrigation/zone/:slug")
-                        view=move || view! {
-                            <Title text="LocalSky · Zone"/>
-                            <MobileZoneDetail snap=irrigation/>
                         }/>
                     // ── v2 top-level destinations ──────────────────────
                     // Zones canvas + the Analyze triad (Simulator / Rule
@@ -642,7 +621,12 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <meta name="localsky-base" content=base.clone()/>
                 <script>{shim}</script>
                 <AutoReload options=options.clone() />
-                <HydrationScripts options root=base.clone()/>
+                <HydrationScripts options=options.clone() root=base.clone()/>
+                // Content-hashed leptos CSS link (hash-files). Emits
+                // /pkg/localsky.<hash>.css carrying the ingress prefix (root),
+                // so a new build busts the CSS cache too. Replaces the old
+                // hardcoded /pkg/localsky.css <Stylesheet> in the App component.
+                <HashedStylesheet options=options.clone() id="leptos" root=base.clone()/>
                 <MetaTags/>
                 <link rel="icon" type="image/svg+xml" href=crate::base::url("/favicon.svg")/>
                 <link rel="apple-touch-icon" href=crate::base::url("/icons/apple-touch-180.png")/>

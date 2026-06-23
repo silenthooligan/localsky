@@ -639,6 +639,9 @@ async fn build_from_map(
             snap.override_helpers_present = true;
             snap.pause_until_epoch = c.pause_until_epoch;
             snap.override_tomorrow = c.override_tomorrow.clone();
+            // Sticky global override is always LocalSky-native (its own sqlite),
+            // so it rides the native control surface even in HA mode.
+            snap.global_override = c.global_override.clone();
         }
         // HA path: read both from the entity map exactly as before.
         None => {
@@ -655,6 +658,7 @@ async fn build_from_map(
                 .and_then(Value::as_str)
                 .unwrap_or("none")
                 .to_string();
+            snap.global_override = "auto".to_string();
         }
     }
 
@@ -749,6 +753,12 @@ async fn build_from_map(
             ZoneState {
                 name: zone.display_name.clone(),
                 slug: zone.slug.clone(),
+                // Sticky per-zone override from the native control surface;
+                // "auto" when unset or in HA mode (control = None).
+                override_mode: control
+                    .and_then(|c| c.zone_overrides.get(&zone.slug))
+                    .cloned()
+                    .unwrap_or_else(|| "auto".to_string()),
                 hex: String::new(), // Populated in Phase 3 from device_registry if needed.
                 running: state_eq(&map, &running_id, "on"),
                 // HA path reads running from a binary_sensor, always a
@@ -871,6 +881,7 @@ async fn build_from_map(
     let temp_min_24h: Option<f64> = fc.min_temp_next_24h_f();
     let temp_max_3day = fc.max_temp_next_3d_f().unwrap_or(0.0);
     let wind_max_today = fc.wind_max_today_mph().unwrap_or(0.0);
+    let wind_gust_today = fc.wind_gust_max_today_mph().unwrap_or(0.0);
     // Days since significant rain: take the MIN of the regional model's
     // counter and the station-gauge counter from forecast_observations.
     // The gauge's memory beats the regional model for hyperlocal
@@ -920,6 +931,7 @@ async fn build_from_map(
         temp_max_today_f: state_f64(&map, "sensor.open_meteo_temp_max_today").unwrap_or(0.0),
         temp_min_today_f: state_f64(&map, "sensor.open_meteo_temp_min_today").unwrap_or(0.0),
         wind_max_today_mph: wind_max_today,
+        wind_gust_today_mph: wind_gust_today,
         humidity_mean_today_pct: state_f64(&map, "sensor.open_meteo_humidity_mean_today")
             .unwrap_or(0.0),
 
@@ -1022,6 +1034,15 @@ async fn build_from_map(
         now_epoch,
         override_tomorrow: snap.override_tomorrow.clone(),
         is_tomorrow: false,
+        // Sticky overrides (native sqlite; set on snap above). The global rides
+        // pre_soil; the per-zone map (auto entries dropped) rides decide_per_zone.
+        global_override: snap.global_override.clone(),
+        zone_overrides: snap
+            .zones
+            .iter()
+            .filter(|z| z.override_mode != "auto")
+            .map(|z| (z.slug.clone(), z.override_mode.clone()))
+            .collect(),
 
         // Watering restrictions resolved at boot from localsky.toml and
         // plumbed through spawn_refresher. The skip-rule ladder uses

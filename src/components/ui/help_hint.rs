@@ -82,7 +82,7 @@ pub fn help_topic(topic: &str) -> &'static str {
         "advanced" =>
             "Debug and recovery: Nerd mode shows the raw engine math, Kiosk mode hides controls on shared screens, plus config-rollback snapshots and full backup/restore.",
         "controllers" =>
-            "The hardware that fires your valves. OpenSprinkler talks direct on the LAN; Rachio, Hydrawise, B-hyve and Rain Bird use cloud APIs; MQTT and HA cover the rest.",
+            "The hardware that fires your valves. OpenSprinkler talks direct on the LAN; a DIY ESP32 board works over a simple HTTP contract or MQTT; Rachio, Hydrawise, B-hyve and Rain Bird use cloud APIs; HA covers the rest.",
         "devices" =>
             "Every controller, source, and sensor LocalSky uses, native or mirrored from Home Assistant. Add a source or controller here, or scan the LAN to adopt a gateway.",
         "schedules" =>

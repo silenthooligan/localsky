@@ -1,6 +1,8 @@
 // /login. Centered sign-in card. The auth middleware 302s
-// unauthenticated HTML requests here; on success we hard-navigate to /
-// so every stream and fetch restarts with the session cookie attached.
+// unauthenticated HTML requests here; on success we replace-navigate to /
+// (location.replace, not assign) so every stream and fetch restarts with
+// the session cookie attached AND the login card is dropped from the
+// history stack, so a back gesture can never return to it.
 // When no account exists yet (auth enabled by hand, or DB wiped), the
 // card flips to first-account creation against /api/auth/setup.
 
@@ -83,7 +85,7 @@ pub fn LoginPage() -> impl IntoView {
             match result {
                 Ok(()) => {
                     if let Some(win) = web_sys::window() {
-                        let _ = win.location().set_href(&crate::base::url("/"));
+                        let _ = win.location().replace(&crate::base::url("/"));
                     }
                 }
                 Err(e) => {

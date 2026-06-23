@@ -4,6 +4,25 @@ All notable changes to LocalSky are documented here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.5.0-beta.1] - 2026-06-22
+
+### Added
+
+- First-class DIY / ESP32 irrigation controller support, no boxed controller required:
+  - New "DIY (HTTP)" controller: drive any board over a small documented HTTP/REST contract (`GET /status`, `GET /zones`, `POST /zone/{id}/run|stop`, `POST /stop_all`, optional bearer token). Fully pollable, so status readback, zone discovery, and the setup wizard's "Test connection" / "Scan zones" all work. Selectable in the setup wizard and Settings > Controllers.
+  - The MQTT controller now supports optional state readback: per-zone `state_topic` (with `state_on_payload`), plus a controller-level `availability_topic` and `flow_topic`. With these set, the board's real running state, online/offline status, and live flow feed the dashboard. Command-only (fire-and-forget) behavior is unchanged when they're omitted.
+  - Reference firmware in `examples/`: an ESPHome config for the MQTT path and an ESP32 Arduino sketch for the HTTP path, plus a "DIY & ESP32 controllers" documentation page spanning beginner (copy-and-flash) to advanced (raw contract).
+- Sticky irrigation overrides: set a global, or per-zone, Auto / Skip / Force decision that persists until you clear it (instead of a one-shot skip). Surfaced on the zones cards and the controls panel.
+- New `sensor.localsky_wind_gust_forecast` exposing the day's forecast peak wind gust (Open-Meteo). A wind-shadowed station under-reports gusts, so the forecast feeds the high-wind irrigation skip and is available for Home Assistant automations.
+
+### Fixed
+
+- PWA reliability: `/pkg` WASM and JS assets are now content-hashed and the service worker is push-only, self-cleaning stale caches. This fixes the class of bug where a phone could load a stale asset pair and render the desktop layout or fail to hydrate after an upgrade.
+
+### Changed
+
+- DIY ESP32 boards via ESPHome / Tasmota now go through the MQTT or DIY (HTTP) controller. The non-functional `esphome_native` option (its backend is not yet built) is no longer offered in the controller picker, so a saved controller can no longer silently fail to water.
+
 ## [0.4.0-beta.3] - 2026-06-14
 
 A security fixes and hardening release. Upgrading is recommended, especially for instances reachable beyond a trusted LAN.
@@ -173,7 +192,7 @@ The v2 burndown. Lays a ports-and-adapters foundation underneath the existing v0
 - `IrrigationController` port with three adapters at launch: DryRun (demo + tests), OpenSprinklerDirect (HTTP API, MD5 auth), HaServiceCall (legacy continuity)
 - Arc-swap controller registry; hot-reload swaps the default mid-session without interrupting in-flight runs
 - `ControllerCaps` declared per adapter (flow_meter, rain_sensor, master_valve, multi_zone_parallel, history_query, remote_program_upload)
-- mDNS discovery hook in wizard for `_opensprinkler._tcp` and `_esphomelib._tcp`
+- LAN discovery in the wizard: an HTTP /24 sweep finds OpenSprinkler controllers. (LocalSky advertises itself over mDNS for clients to find; it does not browse mDNS for controllers.)
 
 #### Sources + standalone sensors
 

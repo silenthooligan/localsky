@@ -422,6 +422,14 @@ pub enum Action {
     /// reset this to "none" each day.
     /// Requires HA helper: input_select.irrigation_override_tomorrow.
     SetOverrideTomorrow { mode: String },
+    /// Sticky global override (LocalSky-native; persists until changed, no
+    /// nightly reset). mode = "auto" | "skip" | "run". "run" forces watering
+    /// past the skip conditions; "skip" force-skips; "auto" follows the engine.
+    SetGlobalOverride { mode: String },
+    /// Sticky per-zone override. zone = slug, mode = "auto" | "skip" | "run".
+    /// A zone override beats the global one; "auto" clears it so the zone
+    /// falls back to the global override / engine verdict.
+    SetZoneOverride { zone: String, mode: String },
     /// Tombstone: previously triggered Irrigation Unlimited's full
     /// sequence via irrigation_unlimited.run_now. IU support has been
     /// removed; the variant stays deserializable so stale clients get a
@@ -535,8 +543,47 @@ async fn native_control_action(
                 );
             }
         },
-        // native_control_action is only called for the three control
-        // variants; any other variant is a programming error.
+        Action::SetGlobalOverride { mode } => match mode.as_str() {
+            "auto" | "skip" | "run" => cs
+                .set_global_override(mode.clone())
+                .await
+                .map(|_| json!({ "ok": true, "source": "native", "mode": mode }))
+                .map_err(|e| e.to_string()),
+            _ => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": format!("invalid override mode: {mode}") })),
+                );
+            }
+        },
+        Action::SetZoneOverride { zone, mode } => {
+            // Same slug allow-list as running_sensor: reject entity-id injection.
+            let safe = !zone.is_empty()
+                && zone
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+            if !safe {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": format!("invalid zone slug: {zone}") })),
+                );
+            }
+            match mode.as_str() {
+                "auto" | "skip" | "run" => cs
+                    .set_zone_override(zone.clone(), mode.clone())
+                    .await
+                    .map(|_| json!({ "ok": true, "source": "native", "zone": zone, "mode": mode }))
+                    .map_err(|e| e.to_string()),
+                _ => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({ "error": format!("invalid override mode: {mode}") })),
+                    );
+                }
+            }
+        }
+        // native_control_action is only called for the control variants; any
+        // other variant is a programming error.
         _ => unreachable!("native_control_action called with non-control action"),
     };
     match result {
@@ -698,6 +745,19 @@ async fn action(State(st): State<ActionState>, Json(body): Json<Action>) -> impl
         if route_via_registry(st.source, has_default) {
             return registry_zone_action(body).await;
         }
+    }
+
+    // Sticky global/zone overrides are always LocalSky-native (their own
+    // sqlite), independent of source — route them to local state whenever a
+    // store is mounted (standalone, or HA mode with a persistence DB). This
+    // is what makes the new override surface work even on an HA-source deploy.
+    if st.control.is_some()
+        && matches!(
+            body,
+            Action::SetGlobalOverride { .. } | Action::SetZoneOverride { .. }
+        )
+    {
+        return native_control_action(&st.control, body).await;
     }
 
     // Native deploys have no HA helpers; the vacation pause + one-day
@@ -874,6 +934,17 @@ async fn action(State(st): State<ActionState>, Json(body): Json<Action>) -> impl
                 .await
                 .map(|_| json!({ "ok": true, "fired": "input_select.select_option", "mode": mode }))
                 .map_err(|e| e.to_string())
+        }
+        // Sticky overrides are native-only; they route to native_control_action
+        // above whenever a store is mounted. Reaching the HA path means there's
+        // no persistence DB to hold them.
+        Action::SetGlobalOverride { .. } | Action::SetZoneOverride { .. } => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "sticky override requires a persistence DB (none mounted)"
+                })),
+            );
         }
         // Handled by the 410 early-return above; IU is gone.
         Action::RunSequenceNow => unreachable!("run_sequence_now answered before the HA path"),

@@ -457,7 +457,7 @@ When `config_present` is false the server is in wizard mode; the dashboard redir
 
 ### `GET /api/v1/updates`
 
-Release check status: `{ current, latest, update_available, release_url, checked_at_epoch, check_enabled }`. The background check only runs when `[updates] check_enabled` is set; otherwise `latest` stays null.
+Release check status: `{ current, latest, update_available, release_url, checked_at_epoch, check_enabled }`. The background check only runs when `[updates] check_enabled` is set; otherwise `latest` stays null. When enabled it fetches the project version manifest at `localsky.io/latest.json` daily; the running version travels in the request User-Agent, nothing per-install.
 
 ### `GET /api/v1/location`
 

@@ -41,7 +41,10 @@ use serde::{Deserialize, Serialize};
 /// 1.11.0 (additive): GET /sensors/inventory (gateways, soil probes,
 /// and flow status: capable vs connected vs live GPM) backing the
 /// Sensors view and the wizard sensor step.
-pub const API_VERSION: &str = "1.11.0";
+/// 1.12.0 (additive): IrrigationSnapshot.global_override (sticky
+/// global Auto/Skip/Force override) + forecast.wind_gust_today_mph
+/// and the wind_gust_forecast sensor manifest descriptor.
+pub const API_VERSION: &str = "1.12.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {

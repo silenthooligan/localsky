@@ -201,8 +201,8 @@ pub fn SettingsAdvanced() -> impl IntoView {
             <Panel title="Update check".to_string()>
                 <Toggle
                     checked=update_check
-                    label="Check GitHub for new LocalSky releases".to_string()
-                    helptext="Off by default. When on, this device fetches https://api.github.com/repos/silenthooligan/localsky/releases/latest at most once per 24 hours and shows the latest tag below. Disclosure: that request reveals this device's IP to GitHub. Per-device, persisted to localStorage.".to_string()
+                    label="Check for new LocalSky releases".to_string()
+                    helptext="Off by default. When on, this device checks https://localsky.io/latest.json at most once per 24 hours and shows the latest version below. Disclosure: that request reveals this device's IP to the localsky.io server; no other data is sent. Per-device, persisted to localStorage.".to_string()
                 />
                 <UpdateStatusLine status=update_status/>
             </Panel>
@@ -492,14 +492,13 @@ async fn fetch_update_status() -> Result<UpdateStatus, String> {
         .unwrap_or("unknown")
         .to_string();
 
-    // Fetch latest GitHub release.
-    let latest =
-        Request::get("https://api.github.com/repos/silenthooligan/localsky/releases/latest")
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
+    // Fetch the latest published version from the project manifest.
+    let latest = Request::get("https://localsky.io/latest.json")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     if !latest.ok() {
-        return Err(format!("github returned HTTP {}", latest.status()));
+        return Err(format!("update server returned HTTP {}", latest.status()));
     }
     let latest_json: Value = latest.json().await.map_err(|e| e.to_string())?;
     let latest_tag = latest_json
@@ -515,7 +514,7 @@ async fn fetch_update_status() -> Result<UpdateStatus, String> {
         .to_string();
 
     let status = if latest_tag.is_empty() {
-        UpdateStatus::Error("github returned no tag_name".to_string())
+        UpdateStatus::Error("update server returned no version".to_string())
     } else if version_newer(&latest_tag, &current_version) {
         UpdateStatus::Available {
             current: current_version,

@@ -185,8 +185,9 @@ pub fn ControllersStep() -> impl IntoView {
             <h2 class="setup-step__title">"What runs your sprinklers?"<HelpHint topic="controllers"/></h2>
             <p class="setup-step__body">
                 "Which hardware fires your valves? OpenSprinkler talks directly on the LAN; "
+                "a DIY ESP32 board works over a simple HTTP contract or MQTT; "
                 "Rachio, Hydrawise, B-hyve and Rain Bird connect through their cloud APIs; "
-                "MQTT and Home Assistant cover everything else. Add one, test the connection, "
+                "Home Assistant covers everything else. Add one, test the connection, "
                 "then scan it to pull in your zones automatically."
             </p>
 

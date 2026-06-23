@@ -779,7 +779,7 @@ fn ZoneForm(
 
             <FormField
                 label="Controller station".to_string()
-                helptext="Station identifier on the chosen controller. For OpenSprinkler: 1-based number (e.g. 1, 2, 3). For HA service call: entity_id (e.g. switch.back_yard_zone). For ESPHome: switch entity_id.".to_string()
+                helptext="Station identifier on the chosen controller. For OpenSprinkler: 1-based number (e.g. 1, 2, 3). For DIY (HTTP): the board's zone id (e.g. 1 or back_yard). For HA service call: entity_id (e.g. switch.back_yard_zone).".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 <input

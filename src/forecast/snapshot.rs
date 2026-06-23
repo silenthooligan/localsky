@@ -19,6 +19,10 @@ pub struct DailyEntry {
     pub precip_sum_in: f64,
     pub precip_probability_max: u32,
     pub wind_max_mph: f64,
+    /// Daily peak wind GUST, mph (Open-Meteo wind_gusts_10m_max). Higher than
+    /// wind_max_mph (sustained); this is what a high-wind alert keys on. This
+    /// is the modeled/forecast gust, not the station's (wind-shadowed) reading.
+    pub wind_gust_max_mph: f64,
     pub uv_index_max: f64,
     pub sunrise_epoch: i64,
     pub sunset_epoch: i64,
@@ -109,6 +113,13 @@ impl ForecastSnapshot {
     /// Today's forecast peak wind, mph. None on empty daily.
     pub fn wind_max_today_mph(&self) -> Option<f64> {
         self.daily.first().map(|d| d.wind_max_mph)
+    }
+
+    /// Today's forecast peak wind GUST, mph. None on empty daily. Drives the
+    /// high-wind push (the Tempest is wind-shadowed, so gusts come from the
+    /// Open-Meteo forecast instead of the station's measured value).
+    pub fn wind_gust_max_today_mph(&self) -> Option<f64> {
+        self.daily.first().map(|d| d.wind_gust_max_mph)
     }
 
     /// Tomorrow's forecast precipitation total + probability max.

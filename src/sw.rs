@@ -1,15 +1,14 @@
 // Service worker route handler. Serves /sw.js with the SW_VERSION constant
-// interpolated at request time so every deploy invalidates the SW (and
-// therefore every namespaced cache) on next page load.
+// interpolated at request time so every deploy ships a byte-different /sw.js,
+// which triggers the browser's install -> activate lifecycle and picks up
+// updated push logic immediately.
 //
-// Why interpolate at request time rather than at build time:
-// - cargo-leptos doesn't fingerprint /pkg/* filenames in this project, so we
-//   can't rely on a hashed URL change to bust the SW.
-// - Embedding the version as a constant in JS gives `caches.delete()` on
-//   activate something concrete to compare against.
-// - Putting the version into the served JS rather than into a query string
-//   means browsers see a *byte-different* sw.js on each deploy, which is what
-//   triggers the install -> waiting -> activate lifecycle.
+// NOTE: the SW is now push-only (see public/sw.template.js). Asset cache-
+// busting is handled by content-hashed /pkg filenames (hash-files in Cargo.toml
+// + LEPTOS_HASH_FILES), NOT by the SW, so the version no longer namespaces any
+// cache. It still matters: a byte-different script is what makes the browser
+// install the new push/click handlers and run the one-time old-cache cleanup in
+// the activate handler.
 
 use axum::{
     http::header::{self, HeaderMap, HeaderValue},

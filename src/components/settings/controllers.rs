@@ -271,6 +271,7 @@ fn kind_icon(kind: &str) -> &'static str {
         "bhyve" => "refresh",
         "rainbird" => "cloud-drizzle",
         "mqtt_command" => "download",
+        "http_generic" => "activity",
         "dry_run" => "play",
         _ => "droplet",
     }
@@ -286,6 +287,7 @@ fn kind_pretty(kind: &str) -> &'static str {
         "bhyve" => "Orbit B-hyve cloud",
         "rainbird" => "Rain Bird cloud",
         "mqtt_command" => "MQTT command publish",
+        "http_generic" => "DIY HTTP / REST board",
         "dry_run" => "Dry-run (logs, no dispatch)",
         _ => "Unknown",
     }

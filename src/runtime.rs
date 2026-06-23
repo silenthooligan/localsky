@@ -35,8 +35,8 @@ use crate::config::env_compat;
 use crate::config::schema::{Config, ControllerKind, LlmProviderKind, SourceKind};
 use crate::config::FileConfigStore;
 use crate::controllers::{
-    Bhyve, ControllerRegistry, DryRunController, HaServiceCall, Hydrawise, MqttCommand,
-    OpenSprinklerDirect, Rachio, Rainbird,
+    Bhyve, ControllerRegistry, DryRunController, HaServiceCall, HttpGeneric, Hydrawise,
+    MqttCommand, OpenSprinklerDirect, Rachio, Rainbird,
 };
 use crate::llm::providers::{
     auto_detect::{default_probe_targets, detect, ProbeKind, ProbeTarget},
@@ -385,6 +385,27 @@ pub fn build_controllers(
             ControllerKind::MqttCommand(c) => {
                 Some(Arc::new(MqttCommand::new(entry.id.clone(), c.clone())))
             }
+            ControllerKind::HttpGeneric(c) => {
+                // Build zone -> board-station map from cfg.zones for this
+                // controller. Station ids are opaque strings the board uses.
+                let mut zone_to_station = std::collections::HashMap::new();
+                for (slug, zone) in &cfg.zones {
+                    if zone.controller_id != entry.id {
+                        continue;
+                    }
+                    let station = zone.controller_station.trim();
+                    if !station.is_empty() {
+                        // Normalize to underscore slugs so the map matches
+                        // zones::configured() + the snapshot + the schedulers,
+                        // mirroring the OpenSprinkler path.
+                        zone_to_station.insert(slug.replace('-', "_"), station.to_string());
+                    }
+                }
+                match HttpGeneric::new(entry.id.clone(), c.clone(), zone_to_station) {
+                    Ok(ctl) => Some(Arc::new(ctl)),
+                    Err(e) => skip(&entry.id, "http_generic", e),
+                }
+            }
             ControllerKind::EsphomeNative(_) => {
                 // Deferred: ESPHome native API uses a custom binary
                 // protocol; needs a dedicated crate or hand-rolled
@@ -431,6 +452,12 @@ pub fn build_test_controller(
         ControllerKind::Rainbird(c) => {
             Arc::new(Rainbird::new(entry.id.clone(), c.clone()).map_err(|e| e.to_string())?)
         }
+        // DIY HTTP boards are pollable: GET /status proves reachability and
+        // GET /zones backs the wizard's "scan zones" import.
+        ControllerKind::HttpGeneric(c) => Arc::new(
+            HttpGeneric::new(entry.id.clone(), c.clone(), Default::default())
+                .map_err(|e| e.to_string())?,
+        ),
         _ => {
             return Err(
                 "this controller kind can't be probed (fire-and-forget or HA-mediated)".into(),
@@ -555,5 +582,63 @@ mod tests {
             "env_compat should synthesize tempest_lan in config"
         );
         rt.signal_shutdown();
+    }
+
+    #[test]
+    fn build_test_controller_dispatches_probeable_vs_unsupported() {
+        use crate::config::schema::{
+            ControllerEntry, ControllerKind, HaServiceCallConfig, HttpGenericConfig,
+            MqttCommandConfig,
+        };
+        let entry = |id: &str, k: ControllerKind| ControllerEntry {
+            id: id.into(),
+            default: false,
+            enabled: true,
+            controller: k,
+        };
+
+        // Pollable kinds build a probe controller (status()/discover_zones()).
+        let http = entry(
+            "diy",
+            ControllerKind::HttpGeneric(HttpGenericConfig {
+                base_url: "http://192.0.2.50".into(),
+                bearer_token: None,
+                poll_interval_s: 10,
+            }),
+        );
+        assert!(build_test_controller(&http).is_ok(), "http_generic is probeable");
+
+        let dry = entry("dry", ControllerKind::DryRun(DryRunConfig::default()));
+        assert!(build_test_controller(&dry).is_ok(), "dry_run is probeable");
+
+        // Fire-and-forget / HA-mediated kinds can't be probed without side effects.
+        let mqtt = entry(
+            "mq",
+            ControllerKind::MqttCommand(MqttCommandConfig {
+                broker_host: "broker.local".into(),
+                broker_port: 1883,
+                username: None,
+                password: None,
+                client_id: None,
+                availability_topic: None,
+                payload_available: "online".into(),
+                payload_not_available: "offline".into(),
+                flow_topic: None,
+                zone_command_map: Default::default(),
+            }),
+        );
+        assert!(build_test_controller(&mqtt).is_err(), "mqtt_command is not probeable");
+
+        let ha = entry(
+            "ha",
+            ControllerKind::HaServiceCall(HaServiceCallConfig {
+                base_url: "http://ha.local:8123".into(),
+                bearer_token: "t".into(),
+                start_service: "script.os_zone_toggle".into(),
+                stop_service: "opensprinkler.stop".into(),
+                zone_entity_map: Default::default(),
+            }),
+        );
+        assert!(build_test_controller(&ha).is_err(), "ha_service_call is not probeable");
     }
 }
