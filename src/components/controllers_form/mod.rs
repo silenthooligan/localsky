@@ -79,7 +79,10 @@ pub fn ControllerEditorPanel(
     // esphome_native) can't show a valid selection in the picker and a blind
     // Save would re-commit a non-functional kind that waters nothing. Coerce to
     // a working default so editing forces a conscious re-selection.
-    let seed_kind = if controller_kind_options().iter().any(|(v, _)| v == &seed_kind) {
+    let seed_kind = if controller_kind_options()
+        .iter()
+        .any(|(v, _)| v == &seed_kind)
+    {
         seed_kind
     } else {
         "mqtt_command".to_string()
@@ -360,8 +363,10 @@ mod tests {
         // compile-time "every variant is consciously handled" guard.
         let _ = classify;
 
-        let picker: std::collections::BTreeSet<String> =
-            controller_kind_options().into_iter().map(|(v, _)| v).collect();
+        let picker: std::collections::BTreeSet<String> = controller_kind_options()
+            .into_iter()
+            .map(|(v, _)| v)
+            .collect();
 
         // Every picker entry must have a real (non-empty) starter template.
         // This is the exact invariant http_generic violated: an entry with no

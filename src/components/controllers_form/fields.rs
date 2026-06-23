@@ -15,7 +15,13 @@ use crate::components::sources_form::field_schema::{field_row, FieldSpec};
 pub fn controller_fields(kind: &str) -> Vec<FieldSpec> {
     match kind {
         "opensprinkler_direct" => vec![
-            FieldSpec::text("host", "Host / IP", "The controller's LAN address.", true, "192.0.2.50"),
+            FieldSpec::text(
+                "host",
+                "Host / IP",
+                "The controller's LAN address.",
+                true,
+                "192.0.2.50",
+            ),
             FieldSpec::int("port", "Port", "HTTP port (default 80).", 80.0),
             FieldSpec::secret(
                 "password_md5",
@@ -24,7 +30,12 @@ pub fn controller_fields(kind: &str) -> Vec<FieldSpec> {
                 true,
                 "",
             ),
-            FieldSpec::int("poll_interval_s", "Poll interval (s)", "How often to read controller status.", 10.0),
+            FieldSpec::int(
+                "poll_interval_s",
+                "Poll interval (s)",
+                "How often to read controller status.",
+                10.0,
+            ),
         ],
         "http_generic" => vec![
             FieldSpec::text(
@@ -41,13 +52,36 @@ pub fn controller_fields(kind: &str) -> Vec<FieldSpec> {
                 false,
                 "",
             ),
-            FieldSpec::int("poll_interval_s", "Poll interval (s)", "How often to read board status.", 10.0),
+            FieldSpec::int(
+                "poll_interval_s",
+                "Poll interval (s)",
+                "How often to read board status.",
+                10.0,
+            ),
         ],
         "mqtt_command" => vec![
-            FieldSpec::text("broker_host", "Broker host", "MQTT broker LAN address.", true, "192.0.2.10"),
+            FieldSpec::text(
+                "broker_host",
+                "Broker host",
+                "MQTT broker LAN address.",
+                true,
+                "192.0.2.10",
+            ),
             FieldSpec::int("broker_port", "Broker port", "Default 1883.", 1883.0),
-            FieldSpec::text("username", "Username", "Optional broker username.", false, ""),
-            FieldSpec::secret("password", "Password", "Optional broker password.", false, ""),
+            FieldSpec::text(
+                "username",
+                "Username",
+                "Optional broker username.",
+                false,
+                "",
+            ),
+            FieldSpec::secret(
+                "password",
+                "Password",
+                "Optional broker password.",
+                false,
+                "",
+            ),
             FieldSpec::text(
                 "availability_topic",
                 "Availability topic",
@@ -71,7 +105,13 @@ pub fn controller_fields(kind: &str) -> Vec<FieldSpec> {
                 true,
                 "http://homeassistant.local:8123",
             ),
-            FieldSpec::secret("bearer_token", "Long-lived token", "A Home Assistant long-lived access token.", true, ""),
+            FieldSpec::secret(
+                "bearer_token",
+                "Long-lived token",
+                "A Home Assistant long-lived access token.",
+                true,
+                "",
+            ),
             FieldSpec::text_default(
                 "start_service",
                 "Start service",
@@ -93,7 +133,12 @@ pub fn controller_fields(kind: &str) -> Vec<FieldSpec> {
         ],
         "hydrawise" => vec![
             FieldSpec::secret("api_key", "API key", "Hydrawise account API key.", true, ""),
-            FieldSpec::int_required("controller_id", "Controller ID", "Hydrawise controller id.", ""),
+            FieldSpec::int_required(
+                "controller_id",
+                "Controller ID",
+                "Hydrawise controller id.",
+                "",
+            ),
         ],
         "bhyve" => vec![
             FieldSpec::text("email", "Email", "Orbit B-hyve account email.", true, ""),
@@ -102,8 +147,20 @@ pub fn controller_fields(kind: &str) -> Vec<FieldSpec> {
         ],
         "rainbird" => vec![
             FieldSpec::text("email", "Email", "Rain Bird account email.", true, ""),
-            FieldSpec::secret("password", "Password", "Rain Bird account password.", true, ""),
-            FieldSpec::text("controller_id", "Controller ID", "Rain Bird controller serial / id.", true, ""),
+            FieldSpec::secret(
+                "password",
+                "Password",
+                "Rain Bird account password.",
+                true,
+                "",
+            ),
+            FieldSpec::text(
+                "controller_id",
+                "Controller ID",
+                "Rain Bird controller serial / id.",
+                true,
+                "",
+            ),
             FieldSpec::text_default(
                 "base_url",
                 "API base URL",

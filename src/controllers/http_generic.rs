@@ -248,8 +248,11 @@ impl IrrigationController for HttpGeneric {
 
     async fn stop_zone(&self, slug: &str) -> ControllerResult<()> {
         let station = self.station_for(slug)?;
-        self.post(&format!("/zone/{}/stop", encode_segment(&station)), json!({}))
-            .await
+        self.post(
+            &format!("/zone/{}/stop", encode_segment(&station)),
+            json!({}),
+        )
+        .await
     }
 
     async fn stop_all(&self) -> ControllerResult<()> {
@@ -268,7 +271,10 @@ impl IrrigationController for HttpGeneric {
         let mut last_err: Option<ControllerError> = None;
         for station in self.zone_to_station.values() {
             if let Err(e) = self
-                .post(&format!("/zone/{}/stop", encode_segment(station)), json!({}))
+                .post(
+                    &format!("/zone/{}/stop", encode_segment(station)),
+                    json!({}),
+                )
                 .await
             {
                 warn!(

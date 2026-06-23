@@ -606,7 +606,10 @@ mod tests {
                 poll_interval_s: 10,
             }),
         );
-        assert!(build_test_controller(&http).is_ok(), "http_generic is probeable");
+        assert!(
+            build_test_controller(&http).is_ok(),
+            "http_generic is probeable"
+        );
 
         let dry = entry("dry", ControllerKind::DryRun(DryRunConfig::default()));
         assert!(build_test_controller(&dry).is_ok(), "dry_run is probeable");
@@ -627,7 +630,10 @@ mod tests {
                 zone_command_map: Default::default(),
             }),
         );
-        assert!(build_test_controller(&mqtt).is_err(), "mqtt_command is not probeable");
+        assert!(
+            build_test_controller(&mqtt).is_err(),
+            "mqtt_command is not probeable"
+        );
 
         let ha = entry(
             "ha",
@@ -639,6 +645,9 @@ mod tests {
                 zone_entity_map: Default::default(),
             }),
         );
-        assert!(build_test_controller(&ha).is_err(), "ha_service_call is not probeable");
+        assert!(
+            build_test_controller(&ha).is_err(),
+            "ha_service_call is not probeable"
+        );
     }
 }

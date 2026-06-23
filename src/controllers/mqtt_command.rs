@@ -611,7 +611,7 @@ mod tests {
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].0, "back_yard");
         assert_eq!(subs[0].1, "ON"); // stored verbatim; match is case-insensitive
-        // topics() includes state + availability + flow.
+                                     // topics() includes state + availability + flow.
         let topics = meta.topics();
         assert!(topics.contains(&"homeassistant/switch/back_yard/state".to_string()));
         assert!(topics.contains(&"diy-irrig/status".to_string()));
@@ -631,8 +631,7 @@ mod tests {
         let meta = build_sub_meta(&cfg);
         let subs = meta.state.get(shared_topic).unwrap();
         assert_eq!(subs.len(), 2, "both zones map to the shared state topic");
-        let slugs: std::collections::BTreeSet<_> =
-            subs.iter().map(|(s, _)| s.as_str()).collect();
+        let slugs: std::collections::BTreeSet<_> = subs.iter().map(|(s, _)| s.as_str()).collect();
         assert!(slugs.contains("back_yard") && slugs.contains("front_lawn"));
     }
 
@@ -656,8 +655,14 @@ mod tests {
 
     #[test]
     fn classify_availability_online_offline_indeterminate() {
-        assert_eq!(classify_availability("online", "online", "offline"), Some(true));
-        assert_eq!(classify_availability(" OFFLINE ", "online", "offline"), Some(false));
+        assert_eq!(
+            classify_availability("online", "online", "offline"),
+            Some(true)
+        );
+        assert_eq!(
+            classify_availability(" OFFLINE ", "online", "offline"),
+            Some(false)
+        );
         // Anything else is indeterminate -> caller leaves last value alone.
         assert_eq!(classify_availability("weird", "online", "offline"), None);
     }
