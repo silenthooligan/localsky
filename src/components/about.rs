@@ -42,15 +42,15 @@ pub fn AboutPage() -> impl IntoView {
     let _ = (health, updates);
 
     view! {
-        <main id="main-content" class="about-page">
+        <div class="about-page">
             <div class="about-hero">
                 <span class="about-hero__mark">
                     <img src="/brand-mark.svg" alt="" width="56" height="56"/>
                 </span>
                 <h1 class="about-hero__name">"LOCAL"<span class="about-hero__accent">"SKY"</span></h1>
                 <p class="about-hero__tag">
-                    "Hyperlocal weather and irrigation intelligence that lives on "
-                    "your hardware and answers to no cloud."
+                    "Hyperlocal weather and irrigation intelligence that runs on "
+                    "your hardware. Self-hosted, no account, no tracking."
                 </p>
                 <div class="about-hero__badges">
                     <span class="ha-chip ha-chip--on">
@@ -179,6 +179,6 @@ pub fn AboutPage() -> impl IntoView {
             <p class="about-footer">
                 {format!("LOCALSKY v{version} · Apache-2.0 · made for yards everywhere")}
             </p>
-        </main>
+        </div>
     }
 }

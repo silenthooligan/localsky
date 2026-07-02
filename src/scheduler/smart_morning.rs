@@ -57,7 +57,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{Local, NaiveDate, TimeZone, Utc};
+use chrono::{NaiveDate, Utc};
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
@@ -69,9 +69,15 @@ use crate::engine::sunrise::sunrise_utc;
 use crate::ha::IrrigationStore;
 use crate::ha::WateringPolicy;
 use crate::persistence::runs::{NewRun, RunsStore};
+use crate::persistence::ActiveRunsStore;
 use crate::ports::irrigation_controller::IrrigationController;
 use crate::push::dispatcher::{PushDispatcher, PushEvent};
 use crate::scheduler::dispatch_gate;
+
+/// Grace added to a zone's whole-cycle deadline before the reaper enforces a
+/// shutoff. Covers controller-clock skew + the reaper's own poll granularity, so
+/// a valve closing right on time is never falsely "enforced".
+const ACTIVE_RUN_GRACE_S: i64 = 30;
 
 /// Width of the "we are at target_start" window, in seconds. The tick
 /// interval is 60s so a 90s tolerance guarantees exactly one match per
@@ -118,6 +124,7 @@ pub fn spawn(
     _watering_policy: WateringPolicy,
     controllers: ControllerRegistry,
     runs: Option<RunsStore>,
+    active_runs: Option<ActiveRunsStore>,
     location: (f64, f64),
     cfg: Option<Arc<Config>>,
     push: Option<PushDispatcher>,
@@ -140,7 +147,11 @@ pub fn spawn(
         let mut stale_row_date: Option<NaiveDate> = None;
         loop {
             tick.tick().await;
-            let now_local = Local::now();
+            // P1-8c: the calendar "today" for sunrise + the day-dedup keys off the
+            // CONFIGURED timezone, not the container TZ. The dispatch window itself
+            // is computed in UTC below (now_utc vs the sunrise-derived target), so
+            // it stays DST-correct independently.
+            let now_local = crate::timeutil::now_local();
             let today: NaiveDate = now_local.date_naive();
 
             // Bounded dedupe map: drop entries older than a week.
@@ -301,6 +312,7 @@ pub fn spawn(
                 &snap,
                 &controllers,
                 runs.as_ref(),
+                active_runs.as_ref(),
                 push.as_ref(),
                 cfg.as_ref(),
                 today,
@@ -321,6 +333,7 @@ async fn dispatch_today(
     snap: &crate::ha::snapshot::IrrigationSnapshot,
     controllers: &ControllerRegistry,
     runs: Option<&RunsStore>,
+    active_runs: Option<&ActiveRunsStore>,
     push: Option<&PushDispatcher>,
     cfg: Option<&Arc<Config>>,
     today: NaiveDate,
@@ -495,6 +508,33 @@ async fn dispatch_today(
         // otherwise dispatch the zone in one shot.
         let segments = build_cycle_plan(cfg, &zone.slug, duration_s, soak_minutes);
 
+        // P0-1b: arm the persisted shutoff deadline for the WHOLE zone cycle
+        // (all run + soak segments), not per segment: the valve legitimately
+        // cycles on and off within the cycle, so a per-segment deadline would make
+        // the reaper fire during every soak. Deadline = cycle end + grace; the
+        // reaper enforces a stop only if the valve is still commanded on past the
+        // entire cycle (i.e. a controller self-shutoff genuinely failed).
+        if !dry_run {
+            if let Some(ar) = active_runs {
+                let now = Utc::now().timestamp();
+                let cycle_s: i64 = segments
+                    .iter()
+                    .map(|s| (s.run_seconds + s.soak_seconds) as i64)
+                    .sum();
+                if let Err(e) = ar
+                    .arm(
+                        zone.slug.clone(),
+                        controller.id().to_string(),
+                        now,
+                        now + cycle_s + ACTIVE_RUN_GRACE_S,
+                    )
+                    .await
+                {
+                    warn!(zone = %zone.slug, error = %e, "active-run arm failed");
+                }
+            }
+        }
+
         for (idx, seg) in segments.iter().enumerate() {
             if dry_run {
                 info!(
@@ -508,10 +548,27 @@ async fn dispatch_today(
                 continue;
             }
             if dispatch_gate::stop_requested_since(cycle_start_epoch) {
-                abandon_cycle(controller.as_ref(), runs, &zone.slug, duration_s).await;
+                abandon_cycle(
+                    controller.as_ref(),
+                    runs,
+                    active_runs,
+                    &zone.slug,
+                    duration_s,
+                )
+                .await;
                 return;
             }
-            match controller.run_zone(&zone.slug, seg.run_seconds).await {
+            // P0-8: serialize this run_zone dispatch on the zone against the
+            // manual API path + manual scheduler, sharing one lock registry.
+            // Held only across the dispatch (per segment, not the whole cycle),
+            // so a concurrent manual run on this zone is never blocked for the
+            // length of the cycle and a Stop is never blocked at all.
+            let run_result = {
+                let lock = crate::controllers::zone_run_lock(&zone.slug);
+                let _run_serialize = lock.lock().await;
+                controller.run_zone(&zone.slug, seg.run_seconds).await
+            };
+            match run_result {
                 Ok(handle) => {
                     info!(
                         zone = %zone.slug,
@@ -560,12 +617,30 @@ async fn dispatch_today(
                         }
                         failure_notified = true;
                     }
+                    // P0-1b: the whole-cycle shutoff deadline was armed for this
+                    // zone before the segment loop, but this segment's dispatch
+                    // failed so no valve was commanded on. Disarm it before we
+                    // break, otherwise the reaper later wakes on a deadline for a
+                    // run that never started and logs a misleading "enforcing
+                    // shutoff" line (it self-heals, but the log is wrong).
+                    if let Some(ar) = active_runs {
+                        if let Err(e) = ar.disarm(&zone.slug).await {
+                            warn!(zone = %zone.slug, error = %e, "active-run disarm after dispatch failure failed");
+                        }
+                    }
                     break;
                 }
             }
             let wait = seg.run_seconds as u64 + seg.soak_seconds as u64;
             if wait_unless_stopped(wait, cycle_start_epoch).await {
-                abandon_cycle(controller.as_ref(), runs, &zone.slug, duration_s).await;
+                abandon_cycle(
+                    controller.as_ref(),
+                    runs,
+                    active_runs,
+                    &zone.slug,
+                    duration_s,
+                )
+                .await;
                 return;
             }
         }
@@ -574,7 +649,14 @@ async fn dispatch_today(
             // zone N+1's first segment. The last segment's soak is 0
             // so this is the only spacing here.
             if wait_unless_stopped(INTER_ZONE_PREAMBLE_S, cycle_start_epoch).await {
-                abandon_cycle(controller.as_ref(), runs, &zone.slug, duration_s).await;
+                abandon_cycle(
+                    controller.as_ref(),
+                    runs,
+                    active_runs,
+                    &zone.slug,
+                    duration_s,
+                )
+                .await;
                 return;
             }
         }
@@ -594,7 +676,12 @@ fn zone_skip_verdict<'a>(
     zone.verdict
         .as_ref()
         .or_else(|| snap.zone_verdicts.iter().find(|v| v.zone_slug == zone.slug))
-        .filter(|v| v.verdict == "skip" && v.source != "global")
+        // A per-zone skip is honored when it is NOT inherited from a blanket
+        // aggregate skip (which the will_skip early-return already handled), OR
+        // when the aggregate did NOT blanket-skip. The latter is the soil-floor
+        // demotion morning (P1-2): will_skip is false because a dry zone runs, so
+        // a wet sibling's source:"global" skip must still be honored here.
+        .filter(|v| v.verdict == "skip" && (v.source != "global" || !snap.skip_check.will_skip))
 }
 
 /// Sleep `secs`, polling the dispatch gate every couple of seconds.
@@ -620,6 +707,7 @@ async fn wait_unless_stopped(secs: u64, cycle_start_epoch: i64) -> bool {
 async fn abandon_cycle(
     controller: &dyn IrrigationController,
     runs: Option<&RunsStore>,
+    active_runs: Option<&ActiveRunsStore>,
     current_zone: &str,
     planned_duration_s: u32,
 ) {
@@ -629,6 +717,11 @@ async fn abandon_cycle(
     );
     if let Err(e) = controller.stop_all().await {
         warn!(error = %e, "smart morning: stop_all after manual stop failed");
+    }
+    // P0-1b: stop_all physically closed every valve, so clear the deadline ledger
+    // (no reaper backstop is needed for valves now known off).
+    if let Some(ar) = active_runs {
+        let _ = ar.clear_all().await;
     }
     if let Some(rs) = runs {
         let row = NewRun {
@@ -699,23 +792,14 @@ fn build_cycle_plan(
 /// boot reconciliation pass so a restart inside the same morning never
 /// fires the dispatch twice.
 async fn handled_smart_morning_today(runs: &RunsStore, today: NaiveDate) -> bool {
-    let start_local = match today
-        .and_hms_opt(0, 0, 0)
-        .and_then(|d| Local.from_local_datetime(&d).single())
-    {
-        Some(d) => d.with_timezone(&Utc),
-        None => return false,
-    };
-    let end_local = match today
-        .succ_opt()
-        .and_then(|d| d.and_hms_opt(0, 0, 0))
-        .and_then(|d| Local.from_local_datetime(&d).single())
-    {
-        Some(d) => d.with_timezone(&Utc),
+    // P1-8c: the local day's UTC bounds key off the CONFIGURED timezone, so the
+    // boot dedupe window matches the same "today" the dispatch loop uses.
+    let (start_utc, end_utc) = match crate::timeutil::local_day_bounds_utc(today) {
+        Some(b) => b,
         None => return false,
     };
     let rows = match runs
-        .window(start_local.timestamp(), end_local.timestamp())
+        .window(start_utc.timestamp(), end_utc.timestamp())
         .await
     {
         Ok(rs) => rs,
@@ -743,6 +827,7 @@ async fn handled_smart_morning_today(runs: &RunsStore, today: NaiveDate) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Local, TimeZone};
 
     #[test]
     fn build_cycle_plan_fallback_when_cfg_missing() {
@@ -760,6 +845,9 @@ mod tests {
             reason: "Soil saturated (76% at or above the 65% threshold)".into(),
             source: source.into(),
             multiplier: 1.0,
+            // P1 additive fields default (reason_code "", operands None) for this
+            // scheduler test fixture.
+            ..Default::default()
         }
     }
 
@@ -774,6 +862,368 @@ mod tests {
             verdict: v,
             ..Default::default()
         }
+    }
+
+    // ── P1-4: dispatch_today actuation + fail-safe integration tests ─────────
+    use crate::persistence::run_migrations;
+    use crate::ports::irrigation_controller::{
+        ControllerCaps, ControllerResult, ControllerStatus, RunHandle, RunRecord,
+    };
+    use std::sync::atomic::Ordering;
+
+    // dispatch_gate's LAST_STOP_EPOCH is process-global + monotonic, and the lib
+    // test binary runs these concurrently, so the epochs are ordered so no test's
+    // stamp poisons another's gate check:
+    //   STOP_EPOCH (low)  -- stamped by the before-cycle abandon test.
+    //   MID_CYCLE_EPOCH   -- the mid-sequence test's cycle start; it stamps THIS
+    //                        value AFTER zone k dispatches, so the gate is below it
+    //                        at loop start (zone k runs) and at-or-above it for the
+    //                        wait after zone k (the remainder is abandoned).
+    //   NO_STOP_EPOCH (highest) -- the no-stop tests' cycle start. It sits above
+    //                        every stamp any sibling test makes, so
+    //                        stop_requested_since(NO_STOP_EPOCH) stays false for
+    //                        them regardless of interleaving.
+    // Each test gets its own in-memory DB, so row assertions use a wide window
+    // (abandon_cycle stamps real Utc::now()).
+    const STOP_EPOCH: i64 = 1_000_000_000; // ~year 2001
+    const MID_CYCLE_EPOCH: i64 = 15_000_000_000; // ~year 2445
+    const NO_STOP_EPOCH: i64 = 100_000_000_000; // ~year 5138 (above every stamp)
+    const WIDE: (i64, i64) = (0, 999_999_999_999);
+
+    /// Records run_zone (slug, duration_s) in dispatch order and counts stop_all
+    /// (the abandon path). Never sleeps, never fails. The default controller for
+    /// the P1-4 tests.
+    struct DispatchRecorder {
+        id: String,
+        runs: std::sync::Mutex<Vec<(String, u32)>>,
+        stop_all_calls: std::sync::atomic::AtomicUsize,
+    }
+    impl DispatchRecorder {
+        fn new(id: &str) -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                id: id.into(),
+                runs: std::sync::Mutex::new(Vec::new()),
+                stop_all_calls: std::sync::atomic::AtomicUsize::new(0),
+            })
+        }
+        fn log(&self) -> Vec<(String, u32)> {
+            self.runs.lock().unwrap().clone()
+        }
+        fn stops(&self) -> usize {
+            self.stop_all_calls.load(Ordering::SeqCst)
+        }
+    }
+    #[async_trait::async_trait]
+    impl IrrigationController for DispatchRecorder {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn supports(&self) -> ControllerCaps {
+            ControllerCaps {
+                flow_meter: false,
+                rain_sensor: false,
+                master_valve: false,
+                multi_zone_parallel: false,
+                history_query: false,
+                remote_program_upload: false,
+            }
+        }
+        async fn run_zone(&self, slug: &str, duration_s: u32) -> ControllerResult<RunHandle> {
+            self.runs
+                .lock()
+                .unwrap()
+                .push((slug.to_string(), duration_s));
+            Ok(RunHandle {
+                controller_id: self.id.clone(),
+                zone_slug: slug.to_string(),
+                started_epoch: Utc::now().timestamp(),
+                planned_duration_s: duration_s,
+                provider_ref: None,
+            })
+        }
+        async fn stop_zone(&self, _slug: &str) -> ControllerResult<()> {
+            Ok(())
+        }
+        async fn stop_all(&self) -> ControllerResult<()> {
+            self.stop_all_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn status(&self) -> ControllerResult<ControllerStatus> {
+            Ok(ControllerStatus {
+                reachable: true,
+                master_enabled: None,
+                water_level_pct: None,
+                rain_sensor_tripped: None,
+                current_program: None,
+                zone_states: vec![],
+                flow_gpm: None,
+                flow_connected: false,
+                firmware: None,
+            })
+        }
+        async fn run_history(&self, _since_epoch: i64) -> ControllerResult<Vec<RunRecord>> {
+            Ok(vec![])
+        }
+    }
+
+    fn registry_with(rec: &std::sync::Arc<DispatchRecorder>) -> ControllerRegistry {
+        let ctrl: std::sync::Arc<dyn IrrigationController> = rec.clone();
+        let registry = ControllerRegistry::new();
+        registry.set(vec![(ctrl, true)]);
+        registry
+    }
+
+    /// One migrated in-memory DB shared by both stores (test-isolated).
+    fn stores() -> (RunsStore, ActiveRunsStore) {
+        let mut c = rusqlite::Connection::open_in_memory().unwrap();
+        run_migrations(&mut c).unwrap();
+        let conn = std::sync::Arc::new(tokio::sync::Mutex::new(c));
+        (RunsStore::new(conn.clone()), ActiveRunsStore::new(conn))
+    }
+
+    fn zone_secs(
+        slug: &str,
+        secs: u32,
+        v: Option<crate::ha::snapshot::ZoneVerdict>,
+    ) -> crate::ha::snapshot::ZoneState {
+        crate::ha::snapshot::ZoneState {
+            slug: slug.into(),
+            name: slug.into(),
+            planned_run_seconds: secs,
+            verdict: v,
+            ..Default::default()
+        }
+    }
+
+    fn at(epoch: i64) -> chrono::DateTime<Utc> {
+        chrono::DateTime::from_timestamp(epoch, 0).unwrap()
+    }
+
+    fn snap_with(
+        zones: Vec<crate::ha::snapshot::ZoneState>,
+    ) -> crate::ha::snapshot::IrrigationSnapshot {
+        let mut s = crate::ha::snapshot::IrrigationSnapshot::default();
+        s.zones = zones;
+        s
+    }
+
+    async fn run_dispatch(
+        snap: &crate::ha::snapshot::IrrigationSnapshot,
+        registry: &ControllerRegistry,
+        runs: &RunsStore,
+        active_runs: &ActiveRunsStore,
+        now_utc: chrono::DateTime<Utc>,
+    ) {
+        let n = snap.zones.len();
+        let total: u64 = snap
+            .zones
+            .iter()
+            .map(|z| z.planned_run_seconds as u64)
+            .sum();
+        dispatch_today(
+            snap,
+            registry,
+            Some(runs),
+            Some(active_runs),
+            None, // push
+            None, // cfg -> single segment, no soak
+            chrono::NaiveDate::from_ymd_opt(2026, 6, 25).unwrap(),
+            now_utc,
+            n,
+            total,
+            false, // dry_run
+            false, // is_catch_up
+        )
+        .await;
+    }
+
+    // (a) every due zone dispatches, in order, with its planned duration.
+    #[tokio::test(start_paused = true)]
+    async fn dispatch_runs_all_zones_in_order() {
+        let rec = DispatchRecorder::new("os_main");
+        let registry = registry_with(&rec);
+        let (runs, active_runs) = stores();
+        let snap = snap_with(vec![
+            zone_secs("front", 1, None),
+            zone_secs("side", 1, None),
+            zone_secs("back", 1, None),
+        ]);
+        run_dispatch(&snap, &registry, &runs, &active_runs, at(NO_STOP_EPOCH)).await;
+        assert_eq!(
+            rec.log(),
+            vec![
+                ("front".to_string(), 1u32),
+                ("side".into(), 1),
+                ("back".into(), 1)
+            ]
+        );
+        assert_eq!(rec.stops(), 0);
+        assert!(runs.window(WIDE.0, WIDE.1).await.unwrap().is_empty());
+    }
+
+    // (b) a Stop requested at/ before the cycle abandons the sequence: stop_all
+    // is called once, no zone is dispatched, and the abandon row is written.
+    #[tokio::test]
+    async fn dispatch_stop_abandons_sequence() {
+        let rec = DispatchRecorder::new("os_main");
+        let registry = registry_with(&rec);
+        let (runs, active_runs) = stores();
+        let snap = snap_with(vec![
+            zone_secs("front", 1, None),
+            zone_secs("side", 1, None),
+        ]);
+        dispatch_gate::note_stop_at(STOP_EPOCH);
+        run_dispatch(&snap, &registry, &runs, &active_runs, at(STOP_EPOCH)).await;
+        assert!(rec.log().is_empty(), "no zone may dispatch after a stop");
+        assert_eq!(rec.stops(), 1, "abandon_cycle must stop_all once");
+        let rows = runs.window(WIDE.0, WIDE.1).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].zone_slug, "front");
+        assert_eq!(rows[0].status, "skipped");
+        assert_eq!(
+            rows[0].skip_reason.as_deref(),
+            Some("Stopped manually; remaining sequence abandoned")
+        );
+    }
+
+    // (b2) THE FAIL-SAFE: a stop fired WHILE zone k of N is running abandons
+    // zones k+1..N (they never dispatch a start) and closes the open valve via
+    // stop_all. This is the real mid-sequence case the run-history row
+    // "Stopped manually; remaining sequence abandoned" attests to, distinct from
+    // (b) where the stop precedes the very first zone.
+    //
+    // Mechanism: dispatch and a stopper run concurrently on a start_paused
+    // runtime. The stopper busy-yields (never parks on a timer) until zone 1 is
+    // recorded, then stamps the gate at MID_CYCLE_EPOCH. Because the stopper is
+    // runnable, the runtime cannot auto-advance the dispatch's post-zone-1 sleep
+    // until the stamp is in place; when the sleep then resolves, wait_unless_stopped
+    // observes the stop and abandon_cycle fires. k=1 of N=3 here: zones 2 and 3
+    // must never dispatch.
+    #[tokio::test(start_paused = true)]
+    async fn dispatch_stop_mid_sequence_abandons_remainder_and_closes_valve() {
+        let rec = DispatchRecorder::new("os_main");
+        let registry = registry_with(&rec);
+        let (runs, active_runs) = stores();
+        // Each zone's planned seconds drive the post-zone wait (run+soak). Non-zero
+        // so wait_unless_stopped actually sleeps after zone 1, giving the gate a
+        // wait to interrupt rather than racing the inter-zone preamble.
+        let snap = snap_with(vec![
+            zone_secs("front", 30, None),
+            zone_secs("side", 30, None),
+            zone_secs("back", 30, None),
+        ]);
+
+        let rec_for_stop = rec.clone();
+        let stopper = async move {
+            // Wait (busy, no timer) until zone k=1 ("front") has dispatched its
+            // start, then trip the gate at the cycle's own start epoch.
+            loop {
+                if !rec_for_stop.log().is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                rec_for_stop.log(),
+                vec![("front".to_string(), 30u32)],
+                "stop must land while exactly zone 1 is running"
+            );
+            dispatch_gate::note_stop_at(MID_CYCLE_EPOCH);
+        };
+
+        let dispatch = run_dispatch(&snap, &registry, &runs, &active_runs, at(MID_CYCLE_EPOCH));
+        tokio::join!(dispatch, stopper);
+
+        // Only zone 1 ever dispatched a start; zones 2 (side) and 3 (back) were
+        // abandoned and never run_zone'd.
+        assert_eq!(
+            rec.log(),
+            vec![("front".to_string(), 30u32)],
+            "zones after the stop must never dispatch a start"
+        );
+        // The open valve was closed: abandon_cycle calls stop_all exactly once.
+        assert_eq!(
+            rec.stops(),
+            1,
+            "mid-sequence stop must close the valve via stop_all"
+        );
+        // The active-run deadline ledger was cleared (valves known off).
+        assert!(
+            active_runs.due(i64::MAX / 2).await.unwrap().is_empty(),
+            "abandon clears the deadline ledger after stop_all"
+        );
+        // History records the abandonment against the zone that was running.
+        let rows = runs.window(WIDE.0, WIDE.1).await.unwrap();
+        assert_eq!(rows.len(), 1, "exactly one abandon row");
+        assert_eq!(rows[0].zone_slug, "front");
+        assert_eq!(rows[0].status, "skipped");
+        assert_eq!(
+            rows[0].skip_reason.as_deref(),
+            Some("Stopped manually; remaining sequence abandoned")
+        );
+    }
+
+    // (c) P1-2 demotion morning: will_skip=false, a dry zone (run/soil_floor)
+    // dispatches while a wet sibling (skip/global) is skipped via the widened
+    // zone_skip_verdict. The marquee dispatch proof for the moat.
+    #[tokio::test(start_paused = true)]
+    async fn dispatch_soil_floor_runs_dry_skips_wet() {
+        let rec = DispatchRecorder::new("os_main");
+        let registry = registry_with(&rec);
+        let (runs, active_runs) = stores();
+        let snap = snap_with(vec![
+            zone_secs("dry_bed", 1, Some(verdict("dry_bed", "run", "soil_floor"))),
+            zone_secs("wet_bed", 1, Some(verdict("wet_bed", "skip", "global"))),
+        ]);
+        run_dispatch(&snap, &registry, &runs, &active_runs, at(NO_STOP_EPOCH)).await;
+        assert_eq!(
+            rec.log(),
+            vec![("dry_bed".to_string(), 1u32)],
+            "only the dry zone runs"
+        );
+        assert_eq!(rec.stops(), 0);
+        let rows = runs.window(WIDE.0, WIDE.1).await.unwrap();
+        assert_eq!(rows.len(), 1, "only the wet zone gets a skip row");
+        assert_eq!(rows[0].zone_slug, "wet_bed");
+        assert_eq!(rows[0].status, "skipped");
+    }
+
+    // (d) a zero-budget zone is never dispatched (the planned_run_seconds guard).
+    #[tokio::test]
+    async fn dispatch_zero_budget_zone_noop() {
+        let rec = DispatchRecorder::new("os_main");
+        let registry = registry_with(&rec);
+        let (runs, active_runs) = stores();
+        let snap = snap_with(vec![zone_secs("off_zone", 0, None)]);
+        run_dispatch(&snap, &registry, &runs, &active_runs, at(NO_STOP_EPOCH)).await;
+        assert!(rec.log().is_empty());
+        assert_eq!(rec.stops(), 0);
+        assert!(runs.window(WIDE.0, WIDE.1).await.unwrap().is_empty());
+    }
+
+    // (e) a blanket will_skip=true returns before the loop: no dispatch, a skip
+    // row per due zone (zero-budget zones excluded).
+    #[tokio::test]
+    async fn dispatch_blanket_skip_early_returns() {
+        let rec = DispatchRecorder::new("os_main");
+        let registry = registry_with(&rec);
+        let (runs, active_runs) = stores();
+        let mut snap = snap_with(vec![
+            zone_secs("front", 600, None),
+            zone_secs("off_zone", 0, None),
+        ]);
+        snap.skip_check.will_skip = true;
+        snap.skip_check.reason = "Rain expected within 4h".into();
+        run_dispatch(&snap, &registry, &runs, &active_runs, at(NO_STOP_EPOCH)).await;
+        assert!(rec.log().is_empty());
+        assert_eq!(rec.stops(), 0);
+        let rows = runs.window(WIDE.0, WIDE.1).await.unwrap();
+        assert_eq!(rows.len(), 1, "one skip row for the due zone only");
+        assert_eq!(rows[0].zone_slug, "front");
+        assert_eq!(
+            rows[0].skip_reason.as_deref(),
+            Some("Rain expected within 4h")
+        );
     }
 
     #[test]
@@ -791,10 +1241,18 @@ mod tests {
             Some(verdict("front_yard", "skip", "condition")),
         );
         assert!(zone_skip_verdict(&snap, &z).is_some());
-        // Global-source skip is the aggregate ladder's job, not the
-        // per-zone loop's (skip_check.will_skip already returned).
+        // Global-source skip on a BLANKET-skip morning (will_skip=true) is the
+        // aggregate early-return's job, not the per-zone loop's.
+        let mut blanket = crate::ha::snapshot::IrrigationSnapshot::default();
+        blanket.skip_check.will_skip = true;
         let z = zone_with("back_yard", Some(verdict("back_yard", "skip", "global")));
-        assert!(zone_skip_verdict(&snap, &z).is_none());
+        assert!(zone_skip_verdict(&blanket, &z).is_none());
+        // But on a soil-floor demotion morning (will_skip=false), a wet sibling's
+        // global-source skip MUST be honored here (P1-2): the aggregate did not
+        // blanket-skip, so the early-return never fired and this is where the wet
+        // zone gets skipped while the dry zone runs.
+        let z = zone_with("back_yard", Some(verdict("back_yard", "skip", "global")));
+        assert!(zone_skip_verdict(&snap, &z).is_some());
         // Run / run_extended verdicts never block.
         let z = zone_with("side_yard", Some(verdict("side_yard", "run", "global")));
         assert!(zone_skip_verdict(&snap, &z).is_none());

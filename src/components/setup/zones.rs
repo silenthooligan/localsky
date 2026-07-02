@@ -6,11 +6,149 @@
 
 use leptos::prelude::*;
 
+use crate::components::settings::zones::ZoneForm;
 use crate::components::setup::shell::{next_step_href, prev_step_href, SetupFooter};
-use crate::components::ui::Panel;
+use crate::components::ui::{Button, Panel};
+
+#[cfg(feature = "hydrate")]
+async fn fetch_draft() -> Option<serde_json::Value> {
+    let resp = gloo_net::http::Request::get("/api/wizard/draft")
+        .send()
+        .await
+        .ok()?;
+    resp.json::<serde_json::Value>().await.ok()
+}
+
+#[cfg(feature = "hydrate")]
+async fn save_draft(draft: serde_json::Value) -> Result<(), String> {
+    let resp = gloo_net::http::Request::put("/api/wizard/draft")
+        .json(&draft)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    Ok(())
+}
 
 #[component]
 pub fn ZonesStep() -> impl IntoView {
+    // P2-1: create real zones in the wizard by reusing the settings ZoneForm,
+    // wired to the wizard draft instead of the live config. `config_json` is the
+    // draft's `config` object (the form mutates config["zones"] and reads
+    // config["controllers"] for its picker); `persist` folds it back into the
+    // full draft and PUTs it.
+    let draft = RwSignal::new(serde_json::Value::Null);
+    let config_json = RwSignal::new(serde_json::Value::Null);
+    let loaded = RwSignal::new(false);
+
+    let add_open = RwSignal::new(false);
+    let editing_slug: RwSignal<Option<String>> = RwSignal::new(None);
+    let new_slug = RwSignal::new(String::new());
+    let new_display_name = RwSignal::new(String::new());
+    // Preset-seeded with sensible warm-season defaults; re-seeded cool-season
+    // from the configured latitude on load (matches the settings form).
+    let new_species = RwSignal::new("st_augustine".to_string());
+    let new_soil = RwSignal::new("sandy_loam".to_string());
+    let new_area = RwSignal::new(1000.0f64);
+    let new_sprinkler = RwSignal::new("rotor".to_string());
+    let new_precip = RwSignal::new(String::new());
+    let new_controller = RwSignal::new(String::new());
+    let new_station = RwSignal::new(String::new());
+    let new_photo_url = RwSignal::new(String::new());
+    let new_soil_sensor = RwSignal::new(String::new());
+    let new_soil_min = RwSignal::new(30.0f64);
+    let new_soil_sat = RwSignal::new(70.0f64);
+    // Sensors are configured AFTER zones in the wizard, so the soil-sensor
+    // picker is empty here (modeled bucket); the user assigns probes later.
+    let soil_sensor_opts = RwSignal::new(Vec::<(String, String, Option<f64>, String)>::new());
+    let result_msg = RwSignal::new(String::new());
+    let result_ok = RwSignal::new(false);
+
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        leptos::task::spawn_local(async move {
+            if let Some(d) = fetch_draft().await {
+                let cfg = d
+                    .get("config")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                // Cool-season default outside |lat| < 35, so a northern user does
+                // not open the form to a Florida lawn.
+                let lat = cfg
+                    .get("deployment")
+                    .and_then(|dep| dep.get("location"))
+                    .and_then(|l| l.get("lat"))
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                if lat.abs() >= 35.0 && new_species.get_untracked() == "st_augustine" {
+                    new_species.set("tall_fescue".to_string());
+                }
+                // Default the (required) controller to the first one configured in
+                // the prior step, so a beginner never faces an empty required field.
+                if let Some(first) = cfg
+                    .get("controllers")
+                    .and_then(|c| c.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|c| c.get("id"))
+                    .and_then(|v| v.as_str())
+                {
+                    new_controller.set(first.to_string());
+                }
+                config_json.set(cfg);
+                draft.set(d);
+                loaded.set(true);
+            }
+        });
+    });
+
+    // Commit-immediately: fold the edited config back into the draft and save.
+    let persist = Callback::new(move |()| {
+        if !loaded.get_untracked() {
+            return;
+        }
+        draft.update(|d| {
+            if let Some(obj) = d.as_object_mut() {
+                obj.insert("config".into(), config_json.get_untracked());
+            }
+        });
+        let candidate = draft.get_untracked();
+        #[cfg(feature = "hydrate")]
+        leptos::task::spawn_local(async move {
+            let _ = save_draft(candidate).await;
+        });
+        #[cfg(not(feature = "hydrate"))]
+        let _ = candidate;
+    });
+
+    // (slug, display name, species) for the added-zones list.
+    let zone_list = move || {
+        config_json
+            .get()
+            .get("zones")
+            .and_then(|z| z.as_object())
+            .map(|m| {
+                m.iter()
+                    .map(|(slug, z)| {
+                        let name = z
+                            .get("display_name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(slug)
+                            .to_string();
+                        let species = z
+                            .get("species")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .replace('_', " ");
+                        (slug.clone(), name, species)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+
     view! {
         <div class="setup-step">
             <h2 class="setup-step__title">"Tell us about your yard"</h2>
@@ -22,6 +160,100 @@ pub fn ZonesStep() -> impl IntoView {
                 "with the FAO-56 single-bucket model, and only fires when "
                 "depletion crosses the species-specific MAD threshold."
             </p>
+
+            // P2-1: the actual zone-creation surface (reuses the settings form).
+            <Panel title="Your zones".to_string()>
+                {move || {
+                    let zones = zone_list();
+                    if zones.is_empty() {
+                        view! {
+                            <p class="setup-step__body">
+                                "No zones yet. Add your first watering zone to get a real "
+                                "schedule; you can add more or edit them anytime under "
+                                "/settings/zones."
+                            </p>
+                        }
+                        .into_any()
+                    } else {
+                        view! {
+                            <ul class="setup-zone-list">
+                                {zones
+                                    .into_iter()
+                                    .map(|(slug, name, species)| {
+                                        view! {
+                                            <li>
+                                                <strong>{name}</strong>
+                                                " - "
+                                                {species}
+                                                " ("<code>{slug}</code>")"
+                                            </li>
+                                        }
+                                            .into_any()
+                                    })
+                                    .collect::<Vec<_>>()}
+                            </ul>
+                        }
+                        .into_any()
+                    }
+                }}
+                <Show when=move || !add_open.get()>
+                    <Button
+                        variant="primary"
+                        on_click=Callback::new(move |_| add_open.set(true))
+                    >
+                        {move || {
+                            if zone_list().is_empty() {
+                                "+ Add your first zone"
+                            } else {
+                                "+ Add another zone"
+                            }
+                        }}
+                    </Button>
+                </Show>
+                {move || {
+                    let msg = result_msg.get();
+                    if msg.is_empty() {
+                        ().into_any()
+                    } else {
+                        let color = if result_ok.get() {
+                            "var(--verdict-run)"
+                        } else {
+                            "var(--accent-warm)"
+                        };
+                        view! {
+                            <p class="setup-step__body" style=format!("color: {color}")>
+                                {msg}
+                            </p>
+                        }
+                        .into_any()
+                    }
+                }}
+            </Panel>
+
+            <Show when=move || add_open.get()>
+                <ZoneForm
+                    config_json=config_json
+                    new_slug=new_slug
+                    new_display_name=new_display_name
+                    new_species=new_species
+                    new_soil=new_soil
+                    new_area=new_area
+                    new_sprinkler=new_sprinkler
+                    new_precip=new_precip
+                    new_controller=new_controller
+                    new_station=new_station
+                    new_photo_url=new_photo_url
+                    new_soil_sensor=new_soil_sensor
+                    new_soil_min=new_soil_min
+                    new_soil_sat=new_soil_sat
+                    soil_sensor_opts=soil_sensor_opts
+                    editing_slug=editing_slug
+                    add_open=add_open
+                    result_msg=result_msg
+                    result_ok=result_ok
+                    persist=persist
+                />
+            </Show>
 
             <Panel title="Grass species catalog".to_string()>
                 <p class="setup-step__body" style="margin-bottom: 0.85rem">

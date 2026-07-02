@@ -5,14 +5,16 @@
 // be imported as zone stubs so the Zones step opens pre-populated.
 //
 // Controllers are written into the wizard draft, not the live config.
-// Skipping is fine: DryRun lets you explore scheduling without hardware,
-// and controllers can be added under /settings/controllers any time.
+// Skipping is fine: the "No hardware (simulate)" controller lets you explore
+// scheduling without hardware, and controllers can be added under
+// /settings/controllers any time. The empty state surfaces that simulate path
+// as a one-click primary action ("I have no irrigation hardware").
 
 use leptos::prelude::*;
 
 use crate::components::controllers_form::{controller_kind_options, ControllerEditorPanel};
 use crate::components::setup::shell::{next_step_href, prev_step_href, SetupFooter};
-use crate::components::ui::HelpHint;
+use crate::components::ui::{Button, HelpHint};
 
 #[cfg(feature = "hydrate")]
 async fn fetch_draft() -> Option<serde_json::Value> {
@@ -108,6 +110,21 @@ pub fn ControllersStep() -> impl IntoView {
     #[cfg(not(feature = "hydrate"))]
     let _ = draft;
 
+    // Whether a DryRun (simulate) controller is already in the draft, so the
+    // empty-state "no hardware" shortcut only offers itself once.
+    let has_dry_run = move || {
+        draft
+            .get()
+            .get("config")
+            .and_then(|c| c.get("controllers"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .any(|c| c.get("kind").and_then(|k| k.as_str()) == Some("dry_run"))
+            })
+            .unwrap_or(false)
+    };
+
     // Merge a controller entry from the shared editor into the draft,
     // enforcing default-flag exclusivity across draft controllers.
     let persist = Callback::new(move |entry: serde_json::Value| {
@@ -156,6 +173,23 @@ pub fn ControllersStep() -> impl IntoView {
         adding.set(false);
     });
 
+    // One-click "I have no irrigation hardware (simulate)" shortcut for the
+    // empty state. Adds a ready-to-go DryRun controller (made default so zones
+    // dispatch to it) through the same persist path the editor uses, so the
+    // user can explore scheduling without touching the kind picker or JSON.
+    let add_dry_run = move |_| {
+        if has_dry_run() {
+            return;
+        }
+        persist.run(serde_json::json!({
+            "id": "simulated",
+            "default": true,
+            "enabled": true,
+            "kind": "dry_run",
+            "config": { "simulate_runs": false },
+        }));
+    };
+
     let added_view = move || {
         let controllers = draft
             .get()
@@ -166,10 +200,18 @@ pub fn ControllersStep() -> impl IntoView {
             .unwrap_or_default();
         if controllers.is_empty() {
             return view! {
-                <p class="setup-step__body" style="margin:0">
-                    "No controllers added yet. Add your hardware below, or add a DryRun "
-                    "controller to explore scheduling without firing a single valve."
-                </p>
+                <div class="setup-empty">
+                    <p class="setup-step__body" style="margin:0 0 var(--space-3)">
+                        "No controllers added yet. Add your hardware below, or, if you don't have "
+                        "irrigation hardware yet, simulate runs to explore scheduling first."
+                    </p>
+                    <Button
+                        variant="primary"
+                        on_click=Callback::new(add_dry_run)
+                    >
+                        "I have no irrigation hardware (simulate)"
+                    </Button>
+                </div>
             }
             .into_any();
         }
@@ -184,11 +226,12 @@ pub fn ControllersStep() -> impl IntoView {
         <div class="setup-step">
             <h2 class="setup-step__title">"What runs your sprinklers?"<HelpHint topic="controllers"/></h2>
             <p class="setup-step__body">
-                "Which hardware fires your valves? OpenSprinkler talks directly on the LAN; "
-                "a DIY ESP32 board works over a simple HTTP contract or MQTT; "
-                "Rachio, Hydrawise, B-hyve and Rain Bird connect through their cloud APIs; "
-                "Home Assistant covers everything else. Add one, test the connection, "
-                "then scan it to pull in your zones automatically."
+                "Which hardware fires your valves? OpenSprinkler and DIY boards (HTTP or MQTT) "
+                "talk directly on your network; Rachio, Hydrawise, B-hyve and Rain Bird connect "
+                "through their cloud APIs; Home Assistant fires the valves for everything else. "
+                "Add one, test the connection, then scan it to pull in your zones automatically. "
+                "No irrigation hardware? You can simulate runs to explore scheduling first, and "
+                "add real hardware any time."
             </p>
 
             <crate::components::setup::discover::NetworkScan mode="controllers" draft=draft/>
@@ -204,8 +247,7 @@ pub fn ControllersStep() -> impl IntoView {
                 }.into_any()
             } else {
                 view! {
-                    <button type="button" class="setup-footer__btn setup-footer__btn--primary"
-                        on:click=move |_| adding.set(true)>"+ Add a controller"</button>
+                    <Button variant="primary" on_click=Callback::new(move |_| adding.set(true))>"+ Add a controller"</Button>
                 }.into_any()
             }}
 
@@ -470,13 +512,9 @@ fn WizardControllerRow(
             <div class="setup-scan">
                 <p class="setup-scan__title">"Zones found on this controller"</p>
                 {rows}
-                <button
-                    type="button"
-                    class="setup-footer__btn setup-footer__btn--primary"
-                    on:click=on_import.clone()
-                >
+                <Button variant="primary" on_click=Callback::new(on_import.clone())>
                     {move || format!("Import {} zone{}", n_selected(), if n_selected() == 1 { "" } else { "s" })}
-                </button>
+                </Button>
             </div>
         }
         .into_any()
@@ -494,22 +532,20 @@ fn WizardControllerRow(
                     </span>
                 </div>
                 <div class="cond-row__actions">
-                    <button
-                        type="button"
-                        class="setup-footer__btn setup-footer__btn--ghost"
-                        prop:disabled=move || testing.get()
-                        on:click=on_test
+                    <Button
+                        variant="ghost"
+                        disabled=Signal::derive(move || testing.get())
+                        on_click=Callback::new(on_test)
                     >
                         {move || if testing.get() { "Testing…" } else { "Test" }}
-                    </button>
-                    <button
-                        type="button"
-                        class="setup-footer__btn setup-footer__btn--ghost"
-                        prop:disabled=move || scanning.get()
-                        on:click=on_scan
+                    </Button>
+                    <Button
+                        variant="ghost"
+                        disabled=Signal::derive(move || scanning.get())
+                        on_click=Callback::new(on_scan)
                     >
                         {move || if scanning.get() { "Scanning…" } else { "Scan zones" }}
-                    </button>
+                    </Button>
                 </div>
             </div>
             {move || {

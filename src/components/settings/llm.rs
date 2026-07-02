@@ -2,8 +2,8 @@
 
 use leptos::prelude::*;
 
-use crate::components::settings_ui::SettingsResult;
-use crate::components::ui::{FormField, Panel, SecretInput, SegmentedControl};
+use crate::components::settings_ui::{SettingsResult, StatusHero};
+use crate::components::ui::{Button, FormField, Panel, SecretInput, SegmentedControl};
 
 #[component]
 pub fn SettingsLlm() -> impl IntoView {
@@ -46,6 +46,25 @@ pub fn SettingsLlm() -> impl IntoView {
     };
     let show_key = move || provider.get() == "openai_compat";
 
+    // Status hero state, derived from the configured provider. Reuses the Home
+    // Assistant page's hero pattern so the integration pages share one look.
+    let advisor_off = move || provider.get() == "none";
+    let hero_chip = move || match provider.get().as_str() {
+        "none" => "Off".to_string(),
+        "auto" => "Auto".to_string(),
+        _ => "Active".to_string(),
+    };
+    let hero_meaning = move || {
+        match provider.get().as_str() {
+        "none" => "The advisor is off. Verdicts still show, just without the plain-English explanation.".to_string(),
+        "auto" => "Auto-detects a local LLM (Ollama or llama.cpp) on this machine. No setup needed; leave it here if you run one.".to_string(),
+        "ollama" => "Explaining verdicts through your Ollama server.".to_string(),
+        "llamacpp" => "Explaining verdicts through your llama.cpp server.".to_string(),
+        "openai_compat" => "Explaining verdicts through an OpenAI-compatible endpoint.".to_string(),
+        _ => "Configured.".to_string(),
+    }
+    };
+
     let on_save = move |_| {
         if saving.get() {
             return;
@@ -86,7 +105,7 @@ pub fn SettingsLlm() -> impl IntoView {
     };
 
     view! {
-        <main id="main-content" class="settings-page">
+        <div class="settings-page">
             <header class="settings-page__header">
                 <a class="settings-page__back" href="/settings">"← Settings"</a>
                 <h1 class="settings-page__title">"LLM advisor"</h1>
@@ -97,6 +116,14 @@ pub fn SettingsLlm() -> impl IntoView {
                     "content only and never gates safety."
                 </p>
             </header>
+
+            <StatusHero
+                icon="llm"
+                title="AI advisor"
+                ok=Signal::derive(move || !advisor_off())
+                chip=Signal::derive(hero_chip)
+                meaning=Signal::derive(hero_meaning)
+            />
 
             <Panel title="Provider".to_string() help_topic="llm">
                 <SegmentedControl
@@ -160,18 +187,17 @@ pub fn SettingsLlm() -> impl IntoView {
             </Show>
 
             <div class="settings-actions">
-                <button
-                    type="button"
-                    class="setup-footer__btn setup-footer__btn--primary"
-                    disabled=move || saving.get()
-                    on:click=on_save
+                <Button
+                    variant="primary"
+                    on_click=Callback::new(on_save)
+                    disabled=Signal::derive(move || saving.get())
                 >
                     {move || if saving.get() { "Saving…" } else { "Save changes" }}
-                </button>
+                </Button>
             </div>
 
             <SettingsResult result_msg=result_msg result_ok=result_ok/>
-        </main>
+        </div>
     }
 }
 

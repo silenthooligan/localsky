@@ -28,8 +28,11 @@
 // LocalSky tick doesn't crowd out wakeups from other adapters.
 //
 // data_structure_type values: 1 = ISS, 2 = leaf/soil sensors, 3 =
-// barometer, 4 = indoor temp/hum. We read 1 + 3 + 4 (skip 2 until
-// LocalSky supports soil/leaf wetness via WLL).
+// barometer, 4 = indoor temp/hum. We read 1 (ISS, txid-filtered), 2
+// (soil moisture -> per-zone KeyedReading via soil_zone_map; leaf wetness
+// -> global LeafWetness), and 3 (barometer). Type 4 (indoor) is ignored.
+// Davis soil is centibars of tension and leaf wetness is a 0-15 index, so
+// both are converted to a monotonic percent on the way out (see `extract`).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -94,7 +97,49 @@ struct Condition {
     // Barometer (type 3) fields
     #[serde(default)]
     bar_sea_level: Option<f64>, // inHg already
-                                // Indoor (type 4), currently unused, kept for documentation.
+    // Soil/leaf (type 2) fields. Field names match the WeatherLink Live local
+    // API (weatherlink.github.io/weatherlink-live-local-api, data_structure_type
+    // 2). Davis reports soil moisture in CENTIBARS of tension (low = wet) and
+    // leaf wetness on a 0-15 index (davisinstruments 6420), so both are
+    // converted on the way out (see `extract`). Soil/leaf stations have their
+    // OWN txid (separate from the ISS), so type-2 records are NOT filtered by
+    // the configured ISS txid.
+    #[serde(default)]
+    moist_soil_1: Option<f64>,
+    #[serde(default)]
+    moist_soil_2: Option<f64>,
+    #[serde(default)]
+    moist_soil_3: Option<f64>,
+    #[serde(default)]
+    moist_soil_4: Option<f64>,
+    #[serde(default)]
+    wet_leaf_1: Option<f64>,
+    #[serde(default)]
+    wet_leaf_2: Option<f64>,
+    // Indoor (type 4), currently unused, kept for documentation.
+}
+
+/// Davis soil moisture is reported in centibars of tension (0 = saturated,
+/// rising as the soil dries). Convert to a monotonic "percent available" so it
+/// reads like every other soil source (wet = high) for the zone soil gate. This
+/// is a coarse linear map over the 0-200 cb working range, NOT a soil-texture
+/// calibration; the operator sets their zone threshold against it.
+fn soil_cb_to_pct(cb: f64) -> f64 {
+    (100.0 * (1.0 - cb / 200.0)).clamp(0.0, 100.0)
+}
+
+/// Davis leaf wetness is a 0-15 index; scale to 0-100%.
+fn leaf_index_to_pct(idx: f64) -> f64 {
+    (idx * 100.0 / 15.0).clamp(0.0, 100.0)
+}
+
+/// What one poll yields: global weather fields (Observation) plus per-zone soil
+/// channels (KeyedReading). Kept separate because soil is zone-qualified and
+/// rides the bus as a KeyedReading, not a global WeatherField.
+#[derive(Debug, Default, PartialEq)]
+struct Extracted {
+    fields: Vec<(WeatherField, f64)>,
+    soil: Vec<(String, f64)>,
 }
 
 impl DavisWll {
@@ -120,8 +165,12 @@ impl DavisWll {
     }
 }
 
-fn extract_fields(resp: &CurrentConditionsResponse, txid: u32) -> Vec<(WeatherField, f64)> {
-    let mut out = Vec::new();
+fn extract(
+    resp: &CurrentConditionsResponse,
+    txid: u32,
+    soil_zone_map: &std::collections::BTreeMap<u32, String>,
+) -> Extracted {
+    let mut out = Extracted::default();
     for c in &resp.data.conditions {
         match c.data_structure_type {
             1 => {
@@ -130,40 +179,70 @@ fn extract_fields(resp: &CurrentConditionsResponse, txid: u32) -> Vec<(WeatherFi
                     continue;
                 }
                 if let Some(v) = c.temp {
-                    out.push((WeatherField::AirTempF, v));
+                    out.fields.push((WeatherField::AirTempF, v));
                 }
                 if let Some(v) = c.dew_point {
-                    out.push((WeatherField::DewPointF, v));
+                    out.fields.push((WeatherField::DewPointF, v));
                 }
                 if let Some(v) = c.hum {
-                    out.push((WeatherField::RhPct, v));
+                    out.fields.push((WeatherField::RhPct, v));
                 }
                 if let Some(v) = c.wind_speed_last {
-                    out.push((WeatherField::WindMph, v));
+                    out.fields.push((WeatherField::WindMph, v));
                 }
                 if let Some(v) = c.wind_speed_hi_last_10_min {
-                    out.push((WeatherField::WindGustMph, v));
+                    out.fields.push((WeatherField::WindGustMph, v));
                 }
                 if let Some(v) = c.wind_dir_last {
-                    out.push((WeatherField::WindBearingDeg, v));
+                    out.fields.push((WeatherField::WindBearingDeg, v));
                 }
                 if let Some(v) = c.rain_rate_last_in {
-                    out.push((WeatherField::RainIntensityInHr, v));
+                    out.fields.push((WeatherField::RainIntensityInHr, v));
                 }
                 if let Some(v) = c.rainfall_daily_in {
-                    out.push((WeatherField::RainTodayIn, v));
+                    out.fields.push((WeatherField::RainTodayIn, v));
                 }
                 if let Some(v) = c.uv_index {
-                    out.push((WeatherField::UvIndex, v));
+                    out.fields.push((WeatherField::UvIndex, v));
                 }
                 if let Some(v) = c.solar_rad {
-                    out.push((WeatherField::SolarWm2, v));
+                    out.fields.push((WeatherField::SolarWm2, v));
+                }
+            }
+            2 => {
+                // Soil/leaf station. NOT filtered by the ISS txid: the soil/leaf
+                // station is a separate transmitter. Soil moisture maps per
+                // channel to a zone (centibars -> %); leaf wetness is global
+                // (0-15 index -> %). Unmapped soil channels are dropped (zone
+                // binding is required for soil).
+                for (ch, cb) in [
+                    (1u32, c.moist_soil_1),
+                    (2, c.moist_soil_2),
+                    (3, c.moist_soil_3),
+                    (4, c.moist_soil_4),
+                ] {
+                    if let (Some(cb), Some(zone)) = (cb, soil_zone_map.get(&ch)) {
+                        out.soil.push((
+                            crate::sources::bus_recorder::zone_soil_key(zone),
+                            soil_cb_to_pct(cb),
+                        ));
+                    }
+                }
+                // Up to two leaf sensors; take the WETTER of the two present
+                // (the conservative reading for disease-pressure monitoring).
+                let leaf = match (c.wet_leaf_1, c.wet_leaf_2) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (a, b) => a.or(b),
+                };
+                if let Some(idx) = leaf {
+                    out.fields
+                        .push((WeatherField::LeafWetness, leaf_index_to_pct(idx)));
                 }
             }
             3 => {
                 // Barometer (one per WLL; not per-txid).
                 if let Some(v) = c.bar_sea_level {
-                    out.push((WeatherField::PressureInHg, v));
+                    out.fields.push((WeatherField::PressureInHg, v));
                 }
             }
             _ => {}
@@ -191,6 +270,9 @@ impl WeatherSource for DavisWll {
         fields.insert(WeatherField::PressureInHg);
         fields.insert(WeatherField::RainTodayIn);
         fields.insert(WeatherField::RainIntensityInHr);
+        // A WLL may carry a soil/leaf station; advertise leaf wetness (soil is a
+        // per-zone KeyedReading, not a global field, so it isn't listed here).
+        fields.insert(WeatherField::LeafWetness);
         SourceCaps {
             live_current: true,
             hourly_forecast_hours: 0,
@@ -202,11 +284,11 @@ impl WeatherSource for DavisWll {
     }
 
     fn priority(&self, field: WeatherField) -> i32 {
-        // Direct LAN station, no cloud round-trip. Priority 80
-        // equal to Tempest UDP / Ecowitt LAN. Beats every cloud
-        // source (forecast or cloud-routed station) but ties with
-        // other direct-LAN stations; the merge engine breaks ties
-        // by source order.
+        // Adapter-level priority for the legacy merge layer only; the LIVE
+        // current-conditions arbitration uses the config SourceEntry.priority
+        // (default_priority_for_kind: a direct LAN station defaults to 100). This
+        // 80 just ranks Davis as a direct-LAN station above any cloud source in
+        // that dead layer; field-tie order there is by source order.
         match field {
             WeatherField::AirTempF
             | WeatherField::DewPointF
@@ -218,7 +300,8 @@ impl WeatherSource for DavisWll {
             | WeatherField::SolarWm2
             | WeatherField::PressureInHg
             | WeatherField::RainTodayIn
-            | WeatherField::RainIntensityInHr => 80,
+            | WeatherField::RainIntensityInHr
+            | WeatherField::LeafWetness => 80,
             _ => i32::MIN,
         }
     }
@@ -244,13 +327,22 @@ impl WeatherSource for DavisWll {
                                 });
                                 last_reachable = Some(true);
                             }
-                            let fields = extract_fields(&resp, self.config.txid);
-                            if !fields.is_empty() {
-                                debug!(source_id = %self.id, fields_n = fields.len(), "DavisWll updated");
+                            let ex = extract(&resp, self.config.txid, &self.config.soil_zone_map);
+                            let at_epoch = chrono::Utc::now().timestamp();
+                            if !ex.fields.is_empty() {
+                                debug!(source_id = %self.id, fields_n = ex.fields.len(), soil_n = ex.soil.len(), "DavisWll updated");
                                 let _ = bus.send(SourceEvent::Observation {
                                     source_id: self.id.clone(),
-                                    fields,
-                                    at_epoch: chrono::Utc::now().timestamp(),
+                                    fields: ex.fields,
+                                    at_epoch,
+                                });
+                            }
+                            for (key, value) in ex.soil {
+                                let _ = bus.send(SourceEvent::KeyedReading {
+                                    source_id: self.id.clone(),
+                                    key,
+                                    value,
+                                    at_epoch,
                                 });
                             }
                         }
@@ -288,8 +380,13 @@ mod tests {
             DavisWllConfig {
                 host: "192.0.2.10".into(),
                 txid: 1,
+                soil_zone_map: Default::default(),
             },
         )
+    }
+
+    fn no_soil() -> std::collections::BTreeMap<u32, String> {
+        Default::default()
     }
 
     #[test]
@@ -340,7 +437,7 @@ mod tests {
             }
         }))
         .unwrap();
-        let f = extract_fields(&body, 1);
+        let f = extract(&body, 1, &no_soil()).fields;
         let temp = f
             .iter()
             .find(|(k, _)| *k == WeatherField::AirTempF)
@@ -359,10 +456,6 @@ mod tests {
         assert_eq!(temp, 75.0);
         assert!((press - 30.05).abs() < 0.001);
         assert_eq!(solar, 800.0);
-        // Confirm the indoor block (type 4) didn't contribute.
-        assert!(f
-            .iter()
-            .all(|(k, _)| *k != WeatherField::AirTempF || *k == WeatherField::AirTempF));
         // Confirm only one AirTempF (from ISS, not type 4).
         let temp_count = f
             .iter()
@@ -385,10 +478,86 @@ mod tests {
             }
         }))
         .unwrap();
-        let f = extract_fields(&body, 1);
+        let f = extract(&body, 1, &no_soil()).fields;
         assert!(
             f.is_empty(),
             "ISS with txid 2 must be skipped when configured for txid 1"
+        );
+    }
+
+    #[test]
+    fn type2_soil_maps_to_zone_channels_and_converts_centibars() {
+        // Soil/leaf station on its OWN txid (3), so it must NOT be filtered by
+        // the configured ISS txid (1). Channels 1+2 are mapped to zones; 3 is
+        // not, so it must be dropped.
+        let body: CurrentConditionsResponse = serde_json::from_value(json!({
+            "data": { "conditions": [ {
+                "data_structure_type": 2, "txid": 3,
+                "moist_soil_1": 0.0,    // saturated -> 100%
+                "moist_soil_2": 100.0,  // 100 cb -> 50%
+                "moist_soil_3": 20.0,   // unmapped channel -> dropped
+                "wet_leaf_1": 15.0      // full index -> 100%
+            } ] }
+        }))
+        .unwrap();
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(1u32, "back_yard".to_string());
+        map.insert(2u32, "front_yard".to_string());
+        let ex = extract(&body, 1, &map);
+        // Two soil channels (1, 2); channel 3 dropped (unmapped).
+        assert_eq!(ex.soil.len(), 2);
+        let back = ex
+            .soil
+            .iter()
+            .find(|(k, _)| k.ends_with("back_yard"))
+            .unwrap();
+        let front = ex
+            .soil
+            .iter()
+            .find(|(k, _)| k.ends_with("front_yard"))
+            .unwrap();
+        assert!((back.1 - 100.0).abs() < 0.001, "0 cb -> 100% (saturated)");
+        assert!((front.1 - 50.0).abs() < 0.001, "100 cb -> 50%");
+        // Leaf wetness 15/15 -> 100%, a global LeafWetness field.
+        let leaf = ex
+            .fields
+            .iter()
+            .find(|(k, _)| *k == WeatherField::LeafWetness)
+            .unwrap();
+        assert!((leaf.1 - 100.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn type2_dual_leaf_takes_the_wetter() {
+        // Both leaf sensors present -> the wetter (max) index wins.
+        let body: CurrentConditionsResponse = serde_json::from_value(json!({
+            "data": { "conditions": [ {
+                "data_structure_type": 2, "wet_leaf_1": 3.0, "wet_leaf_2": 12.0
+            } ] }
+        }))
+        .unwrap();
+        let leaf = extract(&body, 1, &no_soil())
+            .fields
+            .into_iter()
+            .find(|(k, _)| *k == WeatherField::LeafWetness)
+            .unwrap()
+            .1;
+        // max(3, 12) = 12 -> 12/15 * 100 = 80%.
+        assert!((leaf - 80.0).abs() < 0.001, "wetter sensor wins: {leaf}");
+    }
+
+    #[test]
+    fn type2_with_no_zone_map_emits_no_soil() {
+        let body: CurrentConditionsResponse = serde_json::from_value(json!({
+            "data": { "conditions": [ {
+                "data_structure_type": 2, "moist_soil_1": 50.0
+            } ] }
+        }))
+        .unwrap();
+        let ex = extract(&body, 1, &no_soil());
+        assert!(
+            ex.soil.is_empty(),
+            "soil needs a zone binding to be emitted"
         );
     }
 }

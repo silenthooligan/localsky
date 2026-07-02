@@ -1,6 +1,6 @@
 [package]
 name = "localsky"
-version = "0.5.0-beta.1"
+version = "0.7.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "Local-first weather and irrigation control with native FAO-56 ET, multi-source weather merge, multi-controller HAL, optional Home Assistant, and optional local LLM advisor."
@@ -23,7 +23,7 @@ leptos_axum = { version = "0.8", optional = true }
 # SSR side
 axum = { version = "0.8", features = ["macros", "multipart"], optional = true }
 tower = { version = "0.5", optional = true }
-tower-http = { version = "0.7", features = ["fs", "compression-gzip", "set-header", "limit"], optional = true }
+tower-http = { version = "0.7", features = ["fs", "compression-gzip", "compression-br", "set-header", "limit"], optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
 tokio-stream = { version = "0.1", features = ["sync"], optional = true }
 
@@ -39,7 +39,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = tr
 # (without it, chrono panics on the browser side).
 chrono = { version = "0.4", features = ["serde", "wasmbind"] }
 
-# Concurrent state — small, lock-free for read-heavy snapshot
+# Concurrent state: small, lock-free for read-heavy snapshot
 arc-swap = { version = "1", optional = true }
 
 # LAN device discovery (Phase E2): enumerate local interfaces so the
@@ -111,14 +111,33 @@ base64 = "0.22"
 # HMAC-SHA256 signing for the Tuya cloud adapter (openapi.tuyaXX.com
 # requires per-request HMAC signatures). Pure Rust, all transitively
 # present already via web-push; making them direct deps so the Tuya
-# source can use them. ssr-only — Tuya signing never runs in the WASM
+# source can use them. ssr-only: Tuya signing never runs in the WASM
 # bundle.
 sha2 = { version = "0.11", optional = true }
 hmac = { version = "0.13", optional = true }
 hex = { version = "0.4", optional = true }
 
+# ES256 (P-256 ECDSA) JWT signing for the Apple WeatherKit source. Pure Rust
+# (RustCrypto), so it won't pull a second C crypto backend alongside rustls.
+# ssr-only: WeatherKit signing never runs in the WASM bundle.
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"], optional = true }
+
+# Pure-Rust GRIB2 decoder for the NOAA MRMS radar-QPE source. MRMS publishes its
+# 1 km national QPE grids as GRIB2; the adapter decodes the cell over the
+# deployment lat/lon into a current rain reading. gribberish stays pure Rust with
+# no C deps. We enable ONLY the `png` feature: MRMS 2D products are packed with
+# data-representation template 5.41 (PNG-packed), so without `png` every message
+# fails to decode (data() returns Err and the source silently emits nothing). The
+# `png` feature is the pure-Rust `png` crate (no native lib), NOT the `jpeg`
+# feature, which pulls openjpeg-sys (a C lib that also collides with
+# libsqlite3-sys); we leave `jpeg` OFF for that reason. default-features=false
+# keeps everything else off, so the runtime image stays slim. ssr-only: GRIB
+# decoding never runs in the WASM bundle (the hydrate build sees the NoaaMrms
+# SourceKind variant in the shared schema but never the adapter or this dep).
+gribberish = { version = "1", default-features = false, features = ["png"], optional = true }
+
 # WASM
-wasm-bindgen = { version = "=0.2.125", optional = true }
+wasm-bindgen = { version = "=0.2.126", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
 gloo-net = { version = "0.7", features = ["http", "eventsource"], optional = true }
@@ -181,8 +200,19 @@ semver = { version = "1", optional = true }
 
 [dev-dependencies]
 insta = { version = "1", features = ["json"] }
+# test-util enables #[tokio::test(start_paused = true)] so the dispatch
+# integration tests virtualize cycle-soak sleeps (instant + deterministic).
+# Test-only; merges with the ssr build's optional tokio (features unify).
+tokio = { version = "1", features = ["full", "test-util"] }
 
 [features]
+# Dev-ergonomics default so a bare `cargo clippy` / `cargo check` / rust-analyzer
+# resolves: the code is ssr-or-hydrate gated, so with NO feature crate::engine
+# (and friends) are absent and clippy fails to compile. SAFE: cargo-leptos sets
+# both bin-default-features=false and lib-default-features=false below, and CI
+# passes --no-default-features explicitly, so the real ssr (bin) and wasm
+# (lib/hydrate) builds never inherit this and can never end up ssr+hydrate at once.
+default = ["ssr"]
 hydrate = [
     "leptos/hydrate",
     "dep:console_error_panic_hook",
@@ -218,6 +248,8 @@ ssr = [
     "dep:sha2",
     "dep:hmac",
     "dep:hex",
+    "dep:p256",
+    "dep:gribberish",
     "dep:argon2",
     "dep:rand",
     "dep:ipnet",
@@ -240,7 +272,7 @@ site-pkg-dir = "pkg"
 # bust the browser cache automatically (no service-worker cache juggling, no
 # stale WASM on deploy). Requires BOTH: LEPTOS_HASH_FILES=true at runtime AND
 # hash.txt copied next to the binary (leptos reads it from
-# current_exe().parent()/hash.txt) — without both, names silently go hashless
+# current_exe().parent()/hash.txt): without both, names silently go hashless
 # while the files on disk are hashed, 404-ing the WASM. See Dockerfile.
 hash-files = true
 style-file = "style/main.scss"
@@ -261,6 +293,13 @@ lib-profile-release = "wasm-release"
 [profile.wasm-release]
 inherits = "release"
 opt-level = 'z'
-lto = true
-codegen-units = 1
+# Thin LTO + multiple codegen units instead of fat LTO + a single unit: the
+# crate grew large enough that `lto = true` + `codegen-units = 1` (one giant
+# LLVM module in one rustc process) peaked past the CI runner's RAM and got
+# SIGKILL'd ("cannot allocate memory"). Thin LTO keeps nearly all of the
+# size win at a fraction of the peak memory, and splitting into 16 units lets
+# rustc bound per-unit memory. opt-level='z' still does the per-function size
+# work, so the bundle stays small.
+lto = "thin"
+codegen-units = 16
 panic = "abort"

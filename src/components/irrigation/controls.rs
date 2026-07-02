@@ -12,9 +12,66 @@
 // (same value). External-to-the-dashboard HA changes won't reflect
 // until page refresh, acceptable for thresholds set once a season.
 
+use crate::components::units_fmt::{
+    depth_unit, f_to_c, in_to_mm, mph_to_kph, temp_unit, use_unit_prefs, wind_unit, UnitPrefs,
+};
 use crate::ha::snapshot::IrrigationSnapshot;
 use leptos::prelude::*;
 use serde_json::json;
+
+/// Which physical quantity a threshold row measures, so the editable
+/// control can convert its value + bounds to the user's display unit
+/// while still committing the engine's internal (imperial) value.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ThresholdKind {
+    /// Internal unit mph (`max_wind_mph`).
+    Wind,
+    /// Internal unit °F (`min_temp_f`).
+    Temp,
+    /// Internal unit inches (`rain_skip_in`).
+    Depth,
+}
+
+impl ThresholdKind {
+    /// Stored (internal) value -> display value for the current prefs.
+    fn to_display(self, stored: f64, p: UnitPrefs) -> f64 {
+        match self {
+            ThresholdKind::Wind if p.wind_metric => mph_to_kph(stored),
+            ThresholdKind::Temp if p.temp_c => f_to_c(stored),
+            ThresholdKind::Depth if p.rain_mm => in_to_mm(stored),
+            _ => stored,
+        }
+    }
+
+    /// Display (edited) value -> stored (internal) value for the current prefs.
+    fn to_stored(self, display: f64, p: UnitPrefs) -> f64 {
+        match self {
+            ThresholdKind::Wind if p.wind_metric => display / 1.609_344,
+            ThresholdKind::Temp if p.temp_c => display * 9.0 / 5.0 + 32.0,
+            ThresholdKind::Depth if p.rain_mm => display / 25.4,
+            _ => display,
+        }
+    }
+
+    /// Display-unit label for the current prefs.
+    fn unit_label(self, p: UnitPrefs) -> &'static str {
+        match self {
+            ThresholdKind::Wind => wind_unit(p),
+            ThresholdKind::Temp => temp_unit(p),
+            ThresholdKind::Depth => depth_unit(p),
+        }
+    }
+
+    /// Whether the display unit is the metric one (used to widen the
+    /// edit decimals so a converted depth like 1.27mm isn't truncated).
+    fn is_metric(self, p: UnitPrefs) -> bool {
+        match self {
+            ThresholdKind::Wind => p.wind_metric,
+            ThresholdKind::Temp => p.temp_c,
+            ThresholdKind::Depth => p.rain_mm,
+        }
+    }
+}
 
 /// Big "Stop All Zones" panel. Hot-red claymorphic surface so it's
 /// unmistakable. Desktop: single-tap. Mobile (is_mobile context = true):
@@ -71,6 +128,107 @@ pub fn StopAllPanel(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 "STOP ALL ZONES"
             </button>
             <StopAllConfirm visible=confirm_open running_count/>
+        </section>
+    }
+}
+
+/// P2-7: Rain Delay one-tap. The category's most-used control: pause ALL
+/// watering for a preset (or custom) number of hours, then resume automatically.
+/// Wraps the existing timed vacation pause (`set_pause_until` / `clear_pause_until`),
+/// and when a delay is active shows a live countdown chip + Cancel instead of the
+/// preset buttons.
+#[component]
+pub fn RainDelayPanel(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
+    let until = move || snap.get().pause_until_epoch;
+    let active = move || {
+        let u = until();
+        u > 0 && u > chrono::Utc::now().timestamp()
+    };
+    // Re-renders on each snapshot (every ~10s via SSE), so the countdown stays
+    // current without a dedicated ticker.
+    let time_left = move || {
+        let secs = (until() - chrono::Utc::now().timestamp()).max(0);
+        let days = secs / 86_400;
+        let hours = (secs % 86_400) / 3_600;
+        let mins = (secs % 3_600) / 60;
+        if days > 0 {
+            format!("{days}d {hours}h left")
+        } else if hours > 0 {
+            format!("{hours}h {mins}m left")
+        } else {
+            format!("{mins}m left")
+        }
+    };
+
+    let done = toast_on_err("Rain delay failed");
+    let set_hours = move |hours: i64| {
+        let epoch = chrono::Utc::now().timestamp() + hours * 3_600;
+        post_action_then(json!({ "kind": "set_pause_until", "epoch": epoch }), done);
+    };
+    let cancel = move |_| {
+        post_action_then(json!({ "kind": "clear_pause_until" }), done);
+    };
+
+    let custom = RwSignal::new(String::new());
+    let apply_custom = move |_| {
+        if let Ok(h) = custom.get_untracked().trim().parse::<i64>() {
+            if (1..=720).contains(&h) {
+                set_hours(h);
+                custom.set(String::new());
+            }
+        }
+    };
+
+    view! {
+        <section class="rain-delay" class:rain-delay--active=active>
+            <div class="rain-delay__head">
+                <span class="rain-delay__icon" aria-hidden="true">
+                    <crate::components::ui::Icon name="droplet" size=18 stroke=2.0/>
+                </span>
+                <div class="rain-delay__text">
+                    <h3 class="rain-delay__title">"Rain delay"</h3>
+                    <p class="rain-delay__help">
+                        "Pause every zone for a set time, then resume automatically."
+                    </p>
+                </div>
+            </div>
+            {move || {
+                if active() {
+                    view! {
+                        <div class="rain-delay__row">
+                            <span class="rain-delay__chip">{time_left}</span>
+                            <button
+                                type="button"
+                                class="rain-delay__cancel"
+                                on:click=cancel
+                            >
+                                "Cancel"
+                            </button>
+                        </div>
+                    }
+                    .into_any()
+                } else {
+                    view! {
+                        <div class="rain-delay__row">
+                            <button type="button" class="rain-delay__btn" on:click=move |_| set_hours(24)>"24h"</button>
+                            <button type="button" class="rain-delay__btn" on:click=move |_| set_hours(48)>"48h"</button>
+                            <button type="button" class="rain-delay__btn" on:click=move |_| set_hours(72)>"72h"</button>
+                            <input
+                                type="number"
+                                class="rain-delay__custom"
+                                min="1"
+                                max="720"
+                                placeholder="hrs"
+                                aria-label="Custom rain-delay hours"
+                                prop:value=move || custom.get()
+                                on:input=move |ev| custom.set(event_target_value(&ev))
+                            />
+                            <button type="button" class="rain-delay__btn" on:click=apply_custom>"Set"</button>
+                        </div>
+                    }
+                    .into_any()
+                }
+            }}
         </section>
     }
 }
@@ -203,6 +361,10 @@ pub fn OverrideControl(
 /// Page refresh re-arms the follow.
 #[component]
 pub fn ThresholdsPanel(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
+    // Per-device display-unit preference. Read inside the rows so the
+    // threshold value, bounds, and unit label all re-render when the
+    // pref changes (or when localStorage loads post-hydration).
+    let prefs = use_unit_prefs();
     view! {
         <section class="thresholds">
             <h3 class="thresholds-title">"Skip thresholds"</h3>
@@ -211,11 +373,12 @@ pub fn ThresholdsPanel(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 <ThresholdControl
                     label="Max wind"
                     key="max_wind_mph"
-                    unit="mph"
+                    kind=ThresholdKind::Wind
                     min=0.0
                     max=30.0
                     step=1.0
                     decimals=0
+                    prefs
                     current=Signal::derive(move || snap.get().skip_check.max_wind_mph)
                 />
             }}
@@ -223,11 +386,12 @@ pub fn ThresholdsPanel(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 <ThresholdControl
                     label="Min temp"
                     key="min_temp_f"
-                    unit="°F"
+                    kind=ThresholdKind::Temp
                     min=20.0
                     max=60.0
                     step=1.0
                     decimals=0
+                    prefs
                     current=Signal::derive(move || snap.get().skip_check.min_temp_f)
                 />
             }}
@@ -235,11 +399,12 @@ pub fn ThresholdsPanel(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 <ThresholdControl
                     label="Rain skip"
                     key="rain_skip_in"
-                    unit="in"
+                    kind=ThresholdKind::Depth
                     min=0.0
                     max=1.0
                     step=0.05
                     decimals=2
+                    prefs
                     current=Signal::derive(move || snap.get().skip_check.rain_skip_in)
                 />
             }}
@@ -270,13 +435,21 @@ pub fn ThresholdsPanel(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
 fn ThresholdControl(
     label: &'static str,
     key: &'static str,
-    unit: &'static str,
+    /// Physical quantity this row measures; drives display-unit
+    /// conversion of the value, bounds, and unit label.
+    kind: ThresholdKind,
     min: f64,
     max: f64,
     step: f64,
     decimals: usize,
+    /// Per-device display-unit preference (read from component scope).
+    prefs: Signal<UnitPrefs>,
     current: Signal<f64>,
 ) -> impl IntoView {
+    // `val` is always the engine's INTERNAL (imperial) value: the
+    // snapshot feeds it, the clamp uses the imperial min/max, and the
+    // set_threshold POST sends it as-stored. Conversion happens only at
+    // the input/slider display boundary below.
     let (val, set_val) = signal(current.get_untracked());
     let user_touched = RwSignal::new(false);
 
@@ -288,10 +461,17 @@ fn ThresholdControl(
         }
     });
 
-    let fmt_value = move |v: f64| match decimals {
-        0 => format!("{:.0}", v),
-        2 => format!("{:.2}", v),
-        _ => format!("{}", v),
+    // Format a DISPLAY-unit value for the number field. Metric units get
+    // an extra decimal so a converted bound (e.g. 0.05in -> 1.27mm) isn't
+    // rounded to nothing; imperial keeps the caller's decimals.
+    let fmt_value = move |v: f64, metric: bool| {
+        let d = if metric { decimals.max(1) } else { decimals };
+        match d {
+            0 => format!("{v:.0}"),
+            1 => format!("{v:.1}"),
+            2 => format!("{v:.2}"),
+            _ => format!("{v}"),
+        }
     };
 
     let toast = crate::components::ui::use_toast();
@@ -303,18 +483,50 @@ fn ThresholdControl(
             toast.error(format!("Couldn't save {label}: {e}"));
         }
     });
+    // `v` arrives in DISPLAY units from the input/slider; convert back to
+    // the internal unit, clamp against the internal bounds, then POST.
     let commit = move |v: f64| {
-        let clamped = v.clamp(min, max);
+        let p = prefs.get_untracked();
+        let stored = kind.to_stored(v, p).clamp(min, max);
         user_touched.set(true);
-        set_val.set(clamped);
+        set_val.set(stored);
         post_action_then(
             json!({
                 "kind": "set_threshold",
                 "key": key,
-                "value": clamped,
+                "value": stored,
             }),
             save_done,
         );
+    };
+    // Drag-in-progress (slider on:input): keep the local value live in
+    // the internal unit so the bound display tracks the thumb.
+    let drag = move |v: f64| {
+        let p = prefs.get_untracked();
+        user_touched.set(true);
+        set_val.set(kind.to_stored(v, p));
+    };
+
+    // Display-unit bounds + step, reactive to the unit preference.
+    let disp_min = move || kind.to_display(min, prefs.get());
+    let disp_max = move || kind.to_display(max, prefs.get());
+    // Convert the imperial step to the display unit so the slider keeps a
+    // proportional granularity; floor a metric depth step (e.g. ~1.27mm)
+    // to a clean 0.1 so the number spinner is usable.
+    let disp_step = move || {
+        let p = prefs.get();
+        if kind.is_metric(p) {
+            match kind {
+                ThresholdKind::Depth => 0.1,
+                _ => 1.0,
+            }
+        } else {
+            step
+        }
+    };
+    let disp_val = move || {
+        let p = prefs.get();
+        kind.to_display(val.get(), p)
     };
 
     view! {
@@ -324,30 +536,30 @@ fn ThresholdControl(
                 <input
                     type="number"
                     class="num-clay"
-                    min=min
-                    max=max
-                    step=step
+                    min=disp_min
+                    max=disp_max
+                    step=disp_step
                     inputmode="decimal"
-                    prop:value=move || fmt_value(val.get())
+                    prop:value=move || fmt_value(disp_val(), kind.is_metric(prefs.get()))
                     on:change=move |ev| {
                         if let Ok(v) = event_target_value(&ev).parse::<f64>() {
                             commit(v);
                         }
                     }
                 />
-                <span class="threshold-unit">{unit}</span>
+                <span class="threshold-unit">{move || kind.unit_label(prefs.get())}</span>
             </div>
             <input
                 type="range"
                 class="slider-clay"
-                min=min
-                max=max
-                step=step
-                prop:value=move || val.get().to_string()
+                min=disp_min
+                max=disp_max
+                step=disp_step
+                aria-label=move || format!("{label} ({})", kind.unit_label(prefs.get()))
+                prop:value=move || disp_val().to_string()
                 on:input=move |ev| {
                     if let Ok(v) = event_target_value(&ev).parse::<f64>() {
-                        user_touched.set(true);
-                        set_val.set(v);
+                        drag(v);
                     }
                 }
                 on:change=move |ev| {

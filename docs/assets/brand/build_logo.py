@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LocalSky logomark / icon pipeline (v3 — real vector trace).
+"""LocalSky logomark / icon pipeline (v3, real vector trace).
 
 Pipeline:
 1. logomark-master.png  =  reference artwork cropped from the brand
@@ -18,7 +18,7 @@ Pipeline:
 5. Rasterize PNGs at the PWA-required sizes via Inkscape.
 
 The v2 attempt embedded the master PNG as a base64 data URI inside the
-SVG — that wasn't an honest mirror. v3 is real vector geometry.
+SVG, which wasn't an honest mirror. v3 is real vector geometry.
 
 Requires:
   pip install --user --break-system-packages potrace numpy pillow
@@ -109,7 +109,7 @@ def _trace_bitmap_to_svg_d(bmp: np.ndarray, W: int, H: int) -> str:
 def _svg_art(W: int, H: int, ink_d: str, blue_d: str, *, ink_fill: str) -> str:
     """Transparent-background SVG with the two-layer logomark.
     `ink_fill` swaps between INK (#2a3139, light variant) and TEAL
-    (#149c92, dark variant) — the blue layer stays blue either way."""
+    (#149c92, dark variant); the blue layer stays blue either way."""
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" '
         f'role="img" aria-label="LocalSky">'
@@ -128,7 +128,7 @@ def _svg_with_bg(W: int, H: int, ink_d: str, blue_d: str, *,
     maskable variant can leave the platform a margin to crop."""
     art_size = W * (1 - 2 * safe_margin)
     art_offset = W * safe_margin
-    # We re-use the trace coordinates directly — scaling happens via
+    # We re-use the trace coordinates directly; scaling happens via
     # an outer <g transform>.
     scale = art_size / W
     return (

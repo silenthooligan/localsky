@@ -81,6 +81,12 @@ pub struct WizardApiState {
     /// Live Tempest store: passive discovery (a broadcasting hub shows
     /// up here without any probe).
     pub tempest_store: Option<Arc<crate::tempest::state::TempestStore>>,
+    /// Live runtime handles for config hot-reload. Present when a live engine
+    /// is wired (main.rs boot); `None` in unit tests with no running engine. On
+    /// apply, the engine-tunable subset of the new config is re-applied here so
+    /// re-entering the wizard as an editor takes effect without a restart, the
+    /// same as PUT /api/config.
+    pub runtime: Option<crate::runtime::RuntimeHandles>,
 }
 
 /// Upper bound on a wizard body (LS-API-09). The largest is the draft
@@ -269,12 +275,44 @@ async fn put_draft(
     let store = s.draft_store.clone();
     let load_store = store.clone();
     let original_draft = tokio::task::spawn_blocking(move || load_store.load()).await;
-    let original_cfg = match original_draft {
-        Ok(Ok(d)) => serde_json::to_value(&d.config).ok(),
-        // No stored draft yet (or a transient load issue): nothing to
-        // restore from. A sentinel that survives is then caught below.
-        _ => None,
-    };
+    // Capture both the original config (for unredaction) and the stored
+    // draft's last_updated_epoch (for optimistic concurrency below).
+    let (original_cfg, stored_epoch): (Option<serde_json::Value>, Option<i64>) =
+        match &original_draft {
+            Ok(Ok(d)) => (
+                serde_json::to_value(&d.config).ok(),
+                Some(d.last_updated_epoch),
+            ),
+            // No stored draft yet (or a transient load issue): nothing to
+            // restore from and no version to conflict with. A sentinel that
+            // survives is then caught below.
+            _ => (None, None),
+        };
+    // Optimistic concurrency (LS-API): the client echoes back the
+    // last_updated_epoch it fetched on GET. If a draft is already stored and
+    // its epoch differs, another writer saved in between, so refuse with 409
+    // rather than silently clobbering their save (last-write-wins). A first
+    // PUT against no stored draft (stored_epoch == None) always proceeds.
+    if let Some(stored) = stored_epoch {
+        let client_epoch = candidate.get("last_updated_epoch").and_then(|v| v.as_i64());
+        // A client that omits the token entirely (older UI) is treated as
+        // "unconditional" and allowed through, preserving backward compat;
+        // a client that DOES send a token must match the stored version.
+        if let Some(client) = client_epoch {
+            if client != stored {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(ApiError {
+                        error: "draft_conflict".into(),
+                        detail: Some(format!(
+                            "the setup draft changed since you loaded it (you have {client}, current is {stored}); reload the wizard and re-apply your edits"
+                        )),
+                    }),
+                )
+                    .into_response();
+            }
+        }
+    }
     if let (Some(cfg), Some(orig)) = (candidate.get_mut("config"), original_cfg.as_ref()) {
         crate::api::config::unredact_secrets(cfg, orig);
     }
@@ -337,12 +375,16 @@ async fn post_apply(State(s): State<WizardApiState>) -> impl IntoResponse {
         Ok(Err(e)) => return wizard_err(e).into_response(),
         Err(e) => return wizard_err(WizardError::Io(format!("join: {e}"))).into_response(),
     };
-    // Pre-apply checks, then fill the defaults the wizard promises for
-    // skipped steps (sources) before writing.
+    // Fill the defaults the wizard promises for skipped steps (sources,
+    // timezone, units), auto-mark the sole controller default, and provision
+    // a VAPID keypair if Web Push was enabled with no keys. This runs BEFORE
+    // validation so the validator sees the finalized config (e.g. the
+    // now-marked default controller), matching what gets written to disk.
+    WizardStore::finalize_for_apply(&mut draft);
+    // Pre-apply checks against the finalized draft.
     if let Err(e) = s.draft_store.validate_for_apply(&draft) {
         return wizard_err(e).into_response();
     }
-    WizardStore::finalize_for_apply(&mut draft);
     // The Account step creates the owner directly in SQLite; reflect it
     // in the written policy so login is required from first boot.
     if let Some(rt) = &s.auth_rt {
@@ -350,9 +392,24 @@ async fn post_apply(State(s): State<WizardApiState>) -> impl IntoResponse {
             draft.config.auth.mode = crate::config::schema::AuthMode::Required;
         }
     }
+    // The previous on-disk config, for the hot-reload restart-required diff
+    // (re-entering the wizard as an editor over a configured instance). `None`
+    // on a true fresh install (no prior config), where only the live re-apply
+    // of the tunables runs.
+    let prev_cfg = s.config_store.load().await.ok();
     // Write the config atomically.
     match s.config_store.save(&draft.config).await {
         Ok(v) => {
+            // Genuine hot-reload: re-apply the engine-tunable subset of the new
+            // config (source priorities, per-field overrides, forecast provider,
+            // watering policy) to the LIVE running system so a wizard edit takes
+            // effect now, not at the next restart. Mirrors PUT /api/config.
+            let apply_outcome = match &s.runtime {
+                Some(h) => {
+                    crate::runtime::apply_runtime_config(h, prev_cfg.as_ref(), &draft.config)
+                }
+                None => crate::runtime::ConfigApplyOutcome::default(),
+            };
             // Now that auth.mode=required is PERSISTED (ACCT-02), flip the
             // live policy to match so required enforcement starts at once
             // instead of waiting for the next refresher tick. This is the
@@ -370,7 +427,12 @@ async fn post_apply(State(s): State<WizardApiState>) -> impl IntoResponse {
             // can still resume from the draft, which is harmless.
             let ds = s.draft_store.clone();
             let _ = tokio::task::spawn_blocking(move || ds.clear()).await;
-            Json(v).into_response()
+            Json(serde_json::json!({
+                "saved": v,
+                "restart_required": apply_outcome.restart_required,
+                "restart_reasons": apply_outcome.restart_reasons,
+            }))
+            .into_response()
         }
         Err(e) => (
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -750,6 +812,44 @@ fn soil_channels_from_livedata(body: &serde_json::Value, source_id: &str) -> Vec
         .collect()
 }
 
+/// Count the live soil-moisture channels a discovered Ecowitt gateway is
+/// carrying, by fetching its `/get_livedata_info` through the SAME
+/// SSRF-hardened `build_safe_client` that `post_probe_soil` uses and running
+/// `soil_channels_from_livedata`. Best-effort enrichment for discovery: any
+/// failure (blocked target, unreachable, non-JSON body, no soil) yields 0 and
+/// NEVER errors the scan. The per-gateway fetch is capped well under the
+/// discover handler's ~8s budget so a slow or absent gateway shortens the
+/// sweep rather than hanging it; the source_id passed to the parser is
+/// irrelevant to the count (channels are keyed off the livedata keys), so a
+/// stable placeholder is used.
+async fn ecowitt_soil_channels(ip: &str) -> u32 {
+    // Tight per-gateway cap: a real gateway answers in well under this on a
+    // LAN, so the timeout only shortens dead/slow probes and keeps the whole
+    // enrichment under the discover handler's budget.
+    const ECOWITT_LIVEDATA_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+    let url = format!("http://{ip}/get_livedata_info");
+    let (client, safe_url) =
+        match crate::net::safe_fetch::build_safe_client(&url, ECOWITT_LIVEDATA_BUDGET).await {
+            Ok(pair) => pair,
+            // Blocked/unsupported/unreachable target: not a soil gateway as far
+            // as discovery is concerned. Leave the count at 0, do not error.
+            Err(_) => return 0,
+        };
+    let body_json = match client
+        .get(safe_url)
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+    {
+        Ok(r) => match r.json::<serde_json::Value>().await {
+            Ok(v) => v,
+            Err(_) => return 0,
+        },
+        Err(_) => return 0,
+    };
+    soil_channels_from_livedata(&body_json, "ecowitt_gw").len() as u32
+}
+
 // ---- Re-entry support: state probe + seed-from-current. ----
 
 /// GET /api/wizard/state -> { config_present, draft_present }. The setup
@@ -814,11 +914,44 @@ async fn get_discover(_guard: ProbeGuard, State(s): State<WizardApiState>) -> im
         })
     });
 
+    // The OpenSprinkler sweep probes every host of every local /24. On a
+    // host-network container that means every network interface + docker bridge the host
+    // sees, and the per-host timeout is NOT a total bound -- so without an
+    // overall deadline the request can run for minutes and the wizard spinner
+    // hangs with no error (the reported bug). Hard-cap the sweep so it always
+    // returns within a few seconds; ecowitt keeps its own 3s UDP window, so
+    // wrapping only the opensprinkler future preserves ecowitt's result even if
+    // the subnet sweep is the slow one.
+    // 8s overall cap with a short 400ms per-host connect: a real controller
+    // answers in well under that, so the timeout only shortens dead-IP probes
+    // and the whole sweep finishes in a few seconds on a typical multi-subnet
+    // host -- fast enough to actually find the controller before the cap, not
+    // just fast enough to stop hanging.
+    const DISCOVER_OPENSPRINKLER_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
     let (ecowitt, opensprinkler) = tokio::join!(
-        crate::discovery::ecowitt::discover_ecowitt(std::time::Duration::from_secs(3)),
-        crate::discovery::opensprinkler::discover_opensprinkler(std::time::Duration::from_millis(
-            1500
-        )),
+        async {
+            // The UDP sweep returns identity only; it cannot tell a soil-
+            // bearing gateway from a weather-only one. Enrich each gateway
+            // with a live soil-channel count so the wizard recognizes it as a
+            // soil gateway at scan time (not only later in the Sensors step).
+            let mut gateways =
+                crate::discovery::ecowitt::discover_ecowitt(std::time::Duration::from_secs(3))
+                    .await;
+            for gw in &mut gateways {
+                gw.soil_channels = ecowitt_soil_channels(&gw.ip).await;
+            }
+            gateways
+        },
+        async {
+            tokio::time::timeout(
+                DISCOVER_OPENSPRINKLER_BUDGET,
+                crate::discovery::opensprinkler::discover_opensprinkler(
+                    std::time::Duration::from_millis(400),
+                ),
+            )
+            .await
+            .unwrap_or_default()
+        },
     );
 
     Json(serde_json::json!({
@@ -909,6 +1042,7 @@ mod draft_redaction_tests {
             config_store: Arc::new(FileConfigStore::new(dir.join("localsky.toml"))),
             auth_rt: None,
             tempest_store: None,
+            runtime: None,
         }
     }
 
@@ -923,6 +1057,7 @@ mod draft_redaction_tests {
                 base_url: "http://ha.local:8123".into(),
                 bearer_token: "supersecret_ha_token_xyz".into(),
                 field_map: Default::default(),
+                soil_zone_map: Default::default(),
             }),
         });
         WizardDraft {
@@ -1023,6 +1158,59 @@ mod draft_redaction_tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[tokio::test]
+    async fn put_draft_optimistic_concurrency() {
+        let dir = std::env::temp_dir().join(format!(
+            "localsky-wizard-test-{}-concurrency",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = state_in(&dir);
+
+        // First PUT against no stored draft always succeeds (no version to
+        // conflict with).
+        let mut draft = WizardDraft::default();
+        draft.license_accepted = true;
+        let v0 = serde_json::to_value(&draft).unwrap();
+        let r0 = put_draft(State(s.clone()), Json(v0)).await.into_response();
+        assert_eq!(
+            r0.status(),
+            StatusCode::NO_CONTENT,
+            "first PUT must succeed"
+        );
+
+        // The save bumped last_updated_epoch; capture the stored token a GET
+        // would return.
+        let stored_epoch = s.draft_store.load().unwrap().last_updated_epoch;
+
+        // A PUT echoing a STALE token (someone else saved in between) is a 409.
+        let mut stale = serde_json::to_value(&draft).unwrap();
+        stale["last_updated_epoch"] = serde_json::json!(stored_epoch - 1);
+        let r_conflict = put_draft(State(s.clone()), Json(stale))
+            .await
+            .into_response();
+        assert_eq!(
+            r_conflict.status(),
+            StatusCode::CONFLICT,
+            "a stale last_updated_epoch must 409, not silently last-write-win"
+        );
+
+        // A PUT echoing the CURRENT token proceeds.
+        let mut fresh = serde_json::to_value(&draft).unwrap();
+        fresh["last_updated_epoch"] = serde_json::json!(stored_epoch);
+        let r_ok = put_draft(State(s.clone()), Json(fresh))
+            .await
+            .into_response();
+        assert_eq!(
+            r_ok.status(),
+            StatusCode::NO_CONTENT,
+            "a matching token must save"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]
@@ -1059,6 +1247,7 @@ mod probe_guard_tests {
             config_store: Arc::new(FileConfigStore::new(dir.join("localsky.toml"))),
             auth_rt: Some(Arc::new(rt)),
             tempest_store: None,
+            runtime: None,
         }
     }
 
@@ -1247,5 +1436,35 @@ mod probe_soil_tests {
     #[test]
     fn empty_body_has_no_channels() {
         assert!(soil_channels_from_livedata(&json!({}), "gw").is_empty());
+    }
+
+    #[test]
+    fn livedata_count_drives_discovered_gateway_soil_channels() {
+        // The enrichment in get_discover sets DiscoveredGateway.soil_channels
+        // to the channel count this reduction yields, and the wizard UI reads
+        // that field off the JSON. Assert N soil channels -> soil_channels=N
+        // and that the field serializes under that exact name.
+        let body = json!({
+            "ch_soil": [
+                {"channel": "1", "name": "Back Yard", "battery": "5", "humidity": "32%"},
+                {"channel": "2", "name": "Side Yard", "battery": "4", "humidity": "65%"},
+                {"channel": "4", "name": "Front Yard", "battery": "3", "humidity": "21%"}
+            ]
+        });
+        // Mirror ecowitt_soil_channels: the count is the bindable-channel total.
+        let n = soil_channels_from_livedata(&body, "ecowitt_gw").len() as u32;
+        assert_eq!(n, 3);
+
+        let gw = crate::discovery::ecowitt::DiscoveredGateway {
+            vendor: "ecowitt".to_string(),
+            mac: "00:11:22:33:44:55".to_string(),
+            ip: "192.0.2.61".to_string(),
+            port: 45000,
+            model: "GW2000A".to_string(),
+            suggested_host: "192.0.2.61".to_string(),
+            soil_channels: n,
+        };
+        let v = serde_json::to_value(&gw).expect("serializes");
+        assert_eq!(v["soil_channels"], json!(3));
     }
 }

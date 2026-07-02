@@ -9,12 +9,27 @@
 // labels, needle, and hub all read from CSS custom properties so the
 // face inverts cleanly in light mode without losing depth.
 
+use crate::components::units_fmt::{fmt_wind, use_unit_prefs, UnitPrefs};
 use crate::tempest::state::Snapshot;
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
 
+/// True for a cloud-only (Open-Meteo) deployment. Keys on the canonical
+/// `has_live_station` signal (true for any live station: Tempest / Ecowitt /
+/// Davis / MQTT / ...), NOT the old Tempest-only serial + battery heuristic that
+/// misread a live non-Tempest station as cloud-only. Open-Meteo populates
+/// sustained wind speed / direction / gust, so the compass and the lull / avg /
+/// gust bars stay live; only the Tempest-exclusive 3-second "now" rapid-wind
+/// sample has no source, so it is hidden for cloud-only rather than shown as a
+/// permanent 0.
+fn is_cloud_only(s: &Snapshot) -> bool {
+    !s.has_live_station
+}
+
 #[component]
 pub fn WindPanel(snap: ReadSignal<Snapshot>) -> impl IntoView {
+    let prefs = use_unit_prefs();
+    let cloud_only = move || is_cloud_only(&snap.get());
     let dir = move || {
         let s = snap.get();
         // Prefer rapid_wind direction; fall back to obs_st avg when no rapid yet.
@@ -133,10 +148,15 @@ pub fn WindPanel(snap: ReadSignal<Snapshot>) -> impl IntoView {
                     </div>
                 </div>
                 <div class="wind-bars">
-                    <WindBar label="lull" mph=move || snap.get().wind_lull_mph scale=scale color="cool"/>
-                    <WindBar label="avg"  mph=move || snap.get().wind_avg_mph  scale=scale color="mid"/>
-                    <WindBar label="gust" mph=move || snap.get().wind_gust_mph scale=scale color="hot"/>
-                    <WindBar label="now"  mph=move || snap.get().rapid_wind_mph scale=scale color="live"/>
+                    <WindBar label="lull" mph=move || snap.get().wind_lull_mph scale=scale color="cool" prefs=prefs/>
+                    <WindBar label="avg"  mph=move || snap.get().wind_avg_mph  scale=scale color="mid" prefs=prefs/>
+                    <WindBar label="gust" mph=move || snap.get().wind_gust_mph scale=scale color="hot" prefs=prefs/>
+                    // The "now" bar is the Tempest 3-second rapid-wind sample; a
+                    // cloud-only deployment has no such reading (Open-Meteo is an
+                    // hourly model), so hide it rather than pin a live-green 0.
+                    <Show when=move || !cloud_only()>
+                        <WindBar label="now"  mph=move || snap.get().rapid_wind_mph scale=scale color="live" prefs=prefs/>
+                    </Show>
                 </div>
             </div>
         </section>
@@ -144,11 +164,19 @@ pub fn WindPanel(snap: ReadSignal<Snapshot>) -> impl IntoView {
 }
 
 #[component]
-fn WindBar<F, S>(label: &'static str, mph: F, scale: S, color: &'static str) -> impl IntoView
+fn WindBar<F, S>(
+    label: &'static str,
+    mph: F,
+    scale: S,
+    color: &'static str,
+    prefs: Signal<UnitPrefs>,
+) -> impl IntoView
 where
     F: Fn() -> f64 + Copy + Send + Sync + 'static,
     S: Fn() -> f64 + Copy + Send + Sync + 'static,
 {
+    // Proportion math stays in mph (the stored/internal unit); only the
+    // readout value+unit converts at the display boundary.
     let pct = move || (mph() / scale().max(0.1)) * 100.0;
     view! {
         <div class={format!("wind-bar wind-bar-{}", color)}>
@@ -156,7 +184,7 @@ where
             <div class="wind-bar-track">
                 <div class="wind-bar-fill" style=move || format!("width: {:.1}%;", pct())></div>
             </div>
-            <span class="wind-bar-value">{move || format!("{:.1} mph", mph())}</span>
+            <span class="wind-bar-value">{move || fmt_wind(mph(), prefs.get())}</span>
         </div>
     }
 }

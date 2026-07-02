@@ -5,8 +5,8 @@
 
 use leptos::prelude::*;
 
-use crate::components::settings_ui::SettingsResult;
-use crate::components::ui::{FormField, Panel, SecretInput, Toggle};
+use crate::components::settings_ui::{SettingsResult, StatusHero};
+use crate::components::ui::{Button, FormField, Panel, SecretInput, Toggle};
 
 #[component]
 pub fn SettingsNotifications() -> impl IntoView {
@@ -92,8 +92,47 @@ pub fn SettingsNotifications() -> impl IntoView {
         }
     };
 
+    // Status hero: how many channels are actually wired up. Shares the HA page's
+    // hero look so the integration pages read as one family.
+    let active_count = move || {
+        let mut n = 0;
+        if !mqtt_host.get().trim().is_empty() && mqtt_publish_enabled.get() {
+            n += 1;
+        }
+        if !ntfy_base_url.get().trim().is_empty() && !ntfy_topic.get().trim().is_empty() {
+            n += 1;
+        }
+        if !slack_webhook.get().trim().is_empty() {
+            n += 1;
+        }
+        if web_push_enabled.get() {
+            n += 1;
+        }
+        n
+    };
+    let hero_chip = move || {
+        let n = active_count();
+        if n == 0 {
+            "Off".to_string()
+        } else {
+            format!("{n} active")
+        }
+    };
+    let hero_meaning = move || {
+        let n = active_count();
+        if n == 0 {
+            "No channels set up yet, so run/skip alerts go nowhere. Turn on a channel below."
+                .to_string()
+        } else {
+            format!(
+                "{n} channel{} will receive run/skip + verdict alerts. Each is independent.",
+                if n == 1 { "" } else { "s" }
+            )
+        }
+    };
+
     view! {
-        <main id="main-content" class="settings-page">
+        <div class="settings-page">
             <header class="settings-page__header">
                 <a class="settings-page__back" href="/settings">"← Settings"</a>
                 <h1 class="settings-page__title">"Notifications"</h1>
@@ -103,6 +142,14 @@ pub fn SettingsNotifications() -> impl IntoView {
                     "subscription is per-device and handled from the dashboard."
                 </p>
             </header>
+
+            <StatusHero
+                icon="bell"
+                title="Notifications"
+                ok=Signal::derive(move || active_count() > 0)
+                chip=Signal::derive(hero_chip)
+                meaning=Signal::derive(hero_meaning)
+            />
 
             <Panel title="Web Push (per device)".to_string() help_topic="notifications">
                 <Toggle
@@ -241,18 +288,17 @@ pub fn SettingsNotifications() -> impl IntoView {
             </Panel>
 
             <div class="settings-actions">
-                <button
-                    type="button"
-                    class="setup-footer__btn setup-footer__btn--primary"
-                    disabled=move || saving.get()
-                    on:click=on_save
+                <Button
+                    variant="primary"
+                    disabled=Signal::derive(move || saving.get())
+                    on_click=Callback::new(on_save)
                 >
                     {move || if saving.get() { "Saving…" } else { "Save changes" }}
-                </button>
+                </Button>
             </div>
 
             <SettingsResult result_msg=result_msg result_ok=result_ok/>
-        </main>
+        </div>
     }
 }
 

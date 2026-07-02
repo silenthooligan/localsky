@@ -1,11 +1,14 @@
 ---
 source: src/api/snapshot_tests.rs
+assertion_line: 63
 expression: "IrrigationSnapshot::default()"
 ---
 {
   "last_refresh_epoch": 0,
   "ha_reachable": false,
+  "timezone": "",
   "tempest_last_seen_epoch": 0,
+  "station_serial": "",
   "forecast_last_seen_epoch": 0,
   "next_run_epoch": 0,
   "next_run_total_minutes": 0.0,
@@ -27,6 +30,7 @@ expression: "IrrigationSnapshot::default()"
     "rain_3day_weighted_in": 0.0,
     "rain_7day_weighted_in": 0.0,
     "rain_next_4h_in": 0.0,
+    "rain_observed_recent_in": 0.0,
     "wind_max_today_mph": 0.0,
     "temp_min_24h_f": 0.0,
     "temp_min_24h_valid": false,
@@ -37,28 +41,25 @@ expression: "IrrigationSnapshot::default()"
     "max_wind_mph": 0.0,
     "min_temp_f": 0.0,
     "rain_skip_in": 0.0,
-    "soil_back_yard_pct": null,
-    "soil_front_yard_pct": null,
-    "soil_side_yard_pct": null,
-    "soil_back_yard_shrubs_pct": null,
     "soil_temp_yard_min_f": null,
     "soil_temp_yard_max_f": null,
     "frost_skip_soil_f": 0.0,
-    "saturation_back_yard_pct": 0.0,
-    "saturation_front_yard_pct": 0.0,
-    "saturation_side_yard_pct": 0.0,
-    "saturation_back_yard_shrubs_pct": 0.0,
     "is_paused": false,
     "is_dry_run": false,
     "will_skip": false,
     "verdict": "",
-    "reason": ""
+    "reason": "",
+    "reason_code": ""
   },
   "forecast": {
     "rain_today_tempest_in": 0.0,
     "rain_today_om_in": 0.0,
+    "station_source_label": "",
+    "forecast_source_label": "",
     "rain_intensity_in_hr": 0.0,
     "rain_type": "",
+    "rain_is_live": false,
+    "rain_nature": "model",
     "rain_tomorrow_in": 0.0,
     "rain_3day_in": 0.0,
     "eto_today_mm": 0.0,
@@ -90,5 +91,8 @@ expression: "IrrigationSnapshot::default()"
   "global_override": "",
   "decision_trace": null,
   "zone_verdicts": [],
-  "soil_probe_faults": []
+  "soil_probe_faults": [],
+  "units": "imperial",
+  "field_sources": {},
+  "force_overrode_guard": null
 }

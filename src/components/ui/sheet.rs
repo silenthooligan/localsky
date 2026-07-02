@@ -24,6 +24,10 @@ pub fn Sheet(
     /// Optional aria-label for the modal region. Defaults to title.
     #[prop(into, optional)]
     aria_label: String,
+    /// Optional DOM id for the panel, so an external toggle can point
+    /// `aria-controls` at it. Omitted attribute when empty.
+    #[prop(into, optional)]
+    id: String,
     /// Click-outside-to-dismiss. Defaults true.
     #[prop(default = true)]
     dismiss_on_backdrop: bool,
@@ -34,6 +38,7 @@ pub fn Sheet(
     } else {
         aria_label
     };
+    let panel_id = (!id.is_empty()).then_some(id);
     let close = move |_| open.set(false);
     let title_owned = title.clone();
     let panel: NodeRef<leptos::html::Div> = NodeRef::new();
@@ -134,6 +139,7 @@ pub fn Sheet(
             />
             <div
                 class="sheet__panel"
+                id=panel_id
                 role="dialog"
                 aria-modal="true"
                 aria-label=aria.clone()

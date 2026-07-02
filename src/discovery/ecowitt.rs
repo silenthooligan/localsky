@@ -30,6 +30,12 @@ pub struct DiscoveredGateway {
     pub model: String,
     /// Pre-built `ecowitt_gw_poll` source config the "Add" button can use.
     pub suggested_host: String,
+    /// Live soil-probe channel count detected via get_livedata_info at scan
+    /// time, 0 when none. Populated by get_discover, not by the UDP identity
+    /// sweep (which carries no sensor inventory), so a default of 0 stands in
+    /// until the per-gateway livedata fetch fills it.
+    #[serde(default)]
+    pub soil_channels: u32,
 }
 
 const ECOWITT_PORT: u16 = 46000;
@@ -66,6 +72,9 @@ pub fn parse_reply(buf: &[u8]) -> Option<DiscoveredGateway> {
         port,
         model,
         suggested_host: ip,
+        // The UDP identity sweep has no sensor inventory; get_discover fills
+        // this in with a live get_livedata_info fetch per gateway.
+        soil_channels: 0,
     })
 }
 
@@ -200,6 +209,20 @@ mod tests {
         assert_eq!(gw.model, "GW1100B-WIFI4455 V2.4.5");
         assert_eq!(gw.suggested_host, "192.0.2.61");
         assert_eq!(gw.vendor, "ecowitt");
+        // The UDP identity frame carries no sensor inventory, so the count
+        // defaults to 0 here; get_discover fills it from a live livedata fetch.
+        assert_eq!(gw.soil_channels, 0);
+    }
+
+    #[test]
+    fn soil_channels_serializes() {
+        // The wizard UI reads `soil_channels` off the discovered-gateway JSON
+        // to render the Ecowitt row as a soil gateway, so the field must
+        // serialize under that exact name and carry the live count.
+        let mut gw = parse_reply(&synth_reply()).expect("parses");
+        gw.soil_channels = 3;
+        let v = serde_json::to_value(&gw).expect("serializes");
+        assert_eq!(v["soil_channels"], serde_json::json!(3));
     }
 
     #[test]

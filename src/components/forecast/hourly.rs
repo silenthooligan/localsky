@@ -6,7 +6,7 @@
 use crate::components::forecast::glyph::weather_code_glyph;
 use crate::components::units_fmt::{fmt_temp_short, use_unit_prefs, UnitPrefs};
 use crate::forecast::snapshot::{ForecastSnapshot, HourlyEntry};
-use chrono::{DateTime, Local, TimeZone, Timelike};
+use crate::timefmt::{format_hm, format_wday_short};
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
 
@@ -23,10 +23,13 @@ pub fn HourlyForecast(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
                         if s.hourly.is_empty() { "Loading…".to_string() }
                         else {
                             let last_idx = (s.hourly.len() - 1).min(47);
-                            let end = Local.timestamp_opt(s.hourly[last_idx].time_epoch, 0)
-                                .single()
-                                .map(|d: DateTime<Local>| d.format("%a %-I%p").to_string())
-                                .unwrap_or_default();
+                            let epoch = s.hourly[last_idx].time_epoch;
+                            // 24-hour, deployment-local (e.g. "Sun 14:00"), not browser-TZ.
+                            let end = format!(
+                                "{} {}",
+                                format_wday_short(epoch, &s.timezone),
+                                format_hm(epoch, &s.timezone),
+                            );
                             format!("through {end}")
                         }
                     }}
@@ -34,12 +37,14 @@ pub fn HourlyForecast(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
             </header>
             <div class="hourly-scroll">
                 {move || {
-                    let entries: Vec<HourlyEntry> = snap.get().hourly.into_iter().take(48).collect();
+                    let s = snap.get();
+                    let tz = s.timezone.clone();
+                    let entries: Vec<HourlyEntry> = s.hourly.into_iter().take(48).collect();
                     let prefs = unit_prefs.get();
                     if entries.is_empty() {
                         view! { <crate::components::ui::Skeleton variant="chart"/> }.into_any()
                     } else {
-                        view! { <HourlyChart entries prefs/> }.into_any()
+                        view! { <HourlyChart entries prefs tz/> }.into_any()
                     }
                 }}
             </div>
@@ -48,7 +53,7 @@ pub fn HourlyForecast(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
 }
 
 #[component]
-fn HourlyChart(entries: Vec<HourlyEntry>, prefs: UnitPrefs) -> impl IntoView {
+fn HourlyChart(entries: Vec<HourlyEntry>, prefs: UnitPrefs, tz: String) -> impl IntoView {
     let n = entries.len().max(1);
     let col_w: f64 = 56.0;
     let total_w = col_w * n as f64;
@@ -68,14 +73,15 @@ fn HourlyChart(entries: Vec<HourlyEntry>, prefs: UnitPrefs) -> impl IntoView {
         header_h + pad + usable * (1.0 - (t - temp_min) / temp_span)
     };
 
-    // Header glyphs + temps per hour.
+    // Header glyphs + temps per hour. 24-hour, deployment-local (e.g. "14:00").
     let header_cells: Vec<_> = entries.iter().enumerate().map(|(i, e)| {
         let x = col_w * (i as f64) + col_w / 2.0;
-        let label = Local.timestamp_opt(e.time_epoch, 0).single()
-            .map(|d: DateTime<Local>| d.format("%-I%p").to_string())
-            .unwrap_or_default();
-        let local_hour = Local.timestamp_opt(e.time_epoch, 0).single()
-            .map(|d: DateTime<Local>| d.hour())
+        let label = format_hm(e.time_epoch, &tz);
+        // Day/night for the glyph: the deployment-local hour, read off the
+        // 24-hour "HH:MM" string (always 2-digit hour); fall back to noon.
+        let local_hour = label
+            .get(0..2)
+            .and_then(|h| h.parse::<u32>().ok())
             .unwrap_or(12);
         let is_day = (6..20).contains(&local_hour);
         let (g, _) = weather_code_glyph(e.weather_code, is_day);
@@ -118,6 +124,18 @@ fn HourlyChart(entries: Vec<HourlyEntry>, prefs: UnitPrefs) -> impl IntoView {
         d
     };
 
+    // #3: filled area under the temperature line so the curve reads as a shape,
+    // not a thin wire. Reuse the line path, then close it down to the temp-band
+    // baseline and back, filled with a top-down warm gradient.
+    let temp_area = if entries.is_empty() {
+        String::new()
+    } else {
+        let baseline = header_h + temp_h;
+        let first_x = col_w / 2.0;
+        let last_x = col_w * ((entries.len() - 1) as f64) + col_w / 2.0;
+        format!("{temp_path} L {last_x:.2} {baseline:.2} L {first_x:.2} {baseline:.2} Z")
+    };
+
     // Rain probability bars.
     let rain_baseline = header_h + temp_h;
     let rain_bars: Vec<_> = entries.iter().enumerate().map(|(i, e)| {
@@ -136,7 +154,7 @@ fn HourlyChart(entries: Vec<HourlyEntry>, prefs: UnitPrefs) -> impl IntoView {
                 class="hourly-rain-bar"
                 opacity={opacity.to_string()}
             >
-                <title>{format!("{}% rain at {}", e.precip_probability, format_local_hour(e.time_epoch))}</title>
+                <title>{format!("{}% rain at {}", e.precip_probability, format_local_hour(e.time_epoch, &tz))}</title>
             </rect>
         }.into_any()
     }).collect();
@@ -163,8 +181,15 @@ fn HourlyChart(entries: Vec<HourlyEntry>, prefs: UnitPrefs) -> impl IntoView {
             <rect x="0" y={header_h.to_string()} width={total_w.to_string()} height={temp_h.to_string()} class="hourly-band-temp"/>
             <rect x="0" y={(header_h + temp_h).to_string()} width={total_w.to_string()} height={rain_h.to_string()} class="hourly-band-rain"/>
 
+            <defs>
+                <linearGradient id="hourly-temp-grad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stop-color="var(--accent-warm)" stop-opacity="0.20"/>
+                    <stop offset="100%" stop-color="var(--accent-warm)" stop-opacity="0"/>
+                </linearGradient>
+            </defs>
             {now_line}
             {header_cells}
+            <path d={temp_area} fill="url(#hourly-temp-grad)" class="hourly-temp-area"/>
             <path d={temp_path} class="hourly-temp-line"/>
             {rain_bars}
 
@@ -174,10 +199,8 @@ fn HourlyChart(entries: Vec<HourlyEntry>, prefs: UnitPrefs) -> impl IntoView {
     }
 }
 
-fn format_local_hour(epoch: i64) -> String {
-    Local
-        .timestamp_opt(epoch, 0)
-        .single()
-        .map(|d: DateTime<Local>| d.format("%a %-I%p").to_string())
-        .unwrap_or_default()
+/// Weekday + 24-hour clock in the deployment timezone (e.g. "Sun 14:00"),
+/// for the rain-bar tooltip. Empty / invalid tz -> browser-local (hydrate).
+fn format_local_hour(epoch: i64, tz: &str) -> String {
+    format!("{} {}", format_wday_short(epoch, tz), format_hm(epoch, tz))
 }

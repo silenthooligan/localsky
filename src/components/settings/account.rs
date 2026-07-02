@@ -236,10 +236,11 @@ pub fn SettingsAccount() -> impl IntoView {
     };
 
     view! {
-        <div class="settings-section">
-            <header class="settings-section__head">
-                <h2 class="settings-section__title">"Account and API tokens"</h2>
-                <p class="settings-section__sub">
+        <div class="settings-page">
+            <header class="settings-page__header">
+                <a class="settings-page__back" href="/settings">"← Settings"</a>
+                <h1 class="settings-page__title">"Account & API tokens"</h1>
+                <p class="settings-page__subtitle">
                     "The owner account protects the UI and API. Integrations (the Home "
                     "Assistant add-on, scripts) authenticate with API tokens sent as "
                     <code>"Authorization: Bearer"</code>"."

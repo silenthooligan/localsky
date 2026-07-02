@@ -22,17 +22,21 @@
 #![allow(clippy::unit_arg)]
 #![allow(clippy::manual_clamp)]
 
+pub mod agronomy;
 pub mod app;
 pub mod base;
 pub mod components;
 pub mod docs;
+pub mod explain;
 pub mod forecast;
 pub mod gates_catalog;
 pub mod ha;
 pub mod history;
 pub mod nav_log;
 pub mod radar_catalog;
+pub mod reason_render;
 pub mod tempest;
+pub mod timefmt;
 
 #[cfg(feature = "hydrate")]
 pub mod push_client;
@@ -60,6 +64,8 @@ pub mod instance;
 #[cfg(feature = "ssr")]
 pub mod llm;
 #[cfg(feature = "ssr")]
+pub mod metrics;
+#[cfg(feature = "ssr")]
 pub mod net;
 #[cfg(feature = "ssr")]
 pub mod network;
@@ -71,6 +77,11 @@ pub mod persistence;
 pub mod ports;
 #[cfg(feature = "ssr")]
 pub mod push;
+// THE irrigation snapshot refresher. Native (supports HA OR native sources),
+// so it lives at the crate root rather than under `ha::` (which named it
+// misleadingly). Distinct from `forecast::refresher`, the forecast poller.
+#[cfg(feature = "ssr")]
+pub mod refresher;
 #[cfg(feature = "ssr")]
 pub mod runtime;
 #[cfg(feature = "ssr")]

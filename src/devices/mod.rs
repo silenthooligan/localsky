@@ -137,6 +137,16 @@ pub struct Device {
     /// (this native one) badged "+ HA". The HA duplicate is dropped.
     #[serde(default)]
     pub also_in_ha: bool,
+    /// The config entry's enabled flag. Some for native source/controller
+    /// devices (the frontend renders an on/off toggle from it); None for
+    /// HA-imported devices, which carry no LocalSky config entry.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// The `SourceKind` serde tag slug ("open_meteo", "tempest_ws",
+    /// "ecowitt_gw_poll", "nws", "noaa_mrms", ...) for weather-source devices.
+    /// None for controllers and HA devices.
+    #[serde(default)]
+    pub source_kind: Option<String>,
     /// Sensors or zones this device provides.
     pub children: Vec<DeviceChild>,
 }
@@ -157,6 +167,7 @@ pub fn field_role(field: &crate::ports::weather_source::WeatherField) -> &'stati
         F::LightningCount | F::LightningDistanceMi => "lightning",
         F::Et0Today => "et",
         F::FlowGpm | F::FlowTotalGalToday => "flow",
+        F::LeafWetness => "moisture",
         F::ForecastDaily | F::ForecastHourly | F::Pop => "forecast",
     }
 }
@@ -184,6 +195,7 @@ pub fn field_label(field: &crate::ports::weather_source::WeatherField) -> &'stat
         F::Et0Today => "Reference ET0",
         F::FlowGpm => "Flow rate",
         F::FlowTotalGalToday => "Flow total today",
+        F::LeafWetness => "Leaf wetness",
         F::ForecastDaily => "Daily forecast",
         F::ForecastHourly => "Hourly forecast",
         F::Pop => "Precip probability",
@@ -214,6 +226,7 @@ pub fn field_key(field: &crate::ports::weather_source::WeatherField) -> &'static
         F::Et0Today => "et0_today",
         F::FlowGpm => "flow_gpm",
         F::FlowTotalGalToday => "flow_total_gal_today",
+        F::LeafWetness => "leaf_wetness_pct",
         F::ForecastDaily => "forecast_daily",
         F::ForecastHourly => "forecast_hourly",
         F::Pop => "pop",

@@ -87,6 +87,16 @@ pub fn help_topic(topic: &str) -> &'static str {
             "Every controller, source, and sensor LocalSky uses, native or mirrored from Home Assistant. Add a source or controller here, or scan the LAN to adopt a gateway.",
         "schedules" =>
             "Fire a zone at a fixed weekday and time. Override replaces the smart engine for that zone; Floor fires alongside it. Restrictions still gate and cap each run.",
+        "skip-rules" =>
+            "The checks the engine runs every morning before watering: rain already fallen + forecast, freeze, wind, and heat-stress. Cross any threshold and tonight's run is skipped. The defaults suit most lawns; tune only if your climate needs it.",
+        "sources" =>
+            "Where weather data comes in: a local station (Tempest, Ecowitt), a cloud service (Open-Meteo, WeatherKit, NWS), MQTT, or Home Assistant. When several report the same reading, the higher-priority source wins. Add and edit these in Devices.",
+        "zones" =>
+            "A zone is one chunk of yard on one valve. Its grass species, soil texture, and area drive how much water the engine schedules; everything else has a sensible default under Advanced.",
+        "theme" =>
+            "How LocalSky looks on this device: Dark, Light, Auto (follow your system), or High-contrast. Per-browser and applied instantly.",
+        "units" =>
+            "Imperial or Metric for what you see (temperature, rain, wind, area). The engine works in metric internally, so switching mostly changes what you read. Zone area is the exception: you enter it, so its unit feeds the water math.",
         _ => "(no help topic configured)",
     }
 }

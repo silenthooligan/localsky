@@ -1,9 +1,11 @@
 // SettingsSchedules. Operator surface for `Config.manual_schedules`.
 //
 // The scheduler tick lives in src/scheduler/manual.rs; this page just
-// builds the list. Save round-trips through GET/PUT /api/config and the
-// dispatcher picks up new schedules at boot (a future iteration can
-// hot-reload mid-run via a watch channel).
+// builds the list. Save round-trips through GET/PUT /api/config, which swaps
+// the schedule set into the dispatcher's live handle (W1.5 ArcSwap); the
+// dispatcher loads that handle at the top of every tick and is spawned
+// unconditionally at boot, so an added (including the FIRST) or edited
+// schedule takes effect on the next tick without a container restart.
 //
 // Mirrors the editing-state pattern from settings/zones.rs +
 // settings/restrictions.rs: `editing_id: Option<String>` switches the
@@ -16,7 +18,7 @@ use leptos::tachys::view::any_view::IntoAny;
 use crate::components::settings_ui::{
     BadgeTone, SettingsBadge, SettingsCard, SettingsKv, SettingsResult,
 };
-use crate::components::ui::{FormField, HelpHint, Panel, SegmentedControl, Toggle};
+use crate::components::ui::{Button, FormField, HelpHint, Panel, SegmentedControl, Toggle};
 
 /// Replace em-dashes, en-dashes, and the Latin-1-decoded UTF-8 mojibake
 /// of either with a plain hyphen so old toml entries written before the
@@ -46,6 +48,41 @@ pub fn SettingsSchedules() -> impl IntoView {
     let saving = RwSignal::new(false);
     let result_msg = RwSignal::new(String::new());
     let result_ok = RwSignal::new(false);
+
+    // Commit-immediately: every add / edit / delete persists on its own (no more
+    // "Add to list -> Save all changes" two-step that lost work on navigation).
+    let persist = Callback::new(move |()| {
+        if saving.get() {
+            return;
+        }
+        saving.set(true);
+        result_msg.set(String::new());
+        let cfg = config_json.get();
+        #[cfg(feature = "hydrate")]
+        {
+            wasm_bindgen_futures::spawn_local(async move {
+                match save_config(cfg).await {
+                    Ok(()) => {
+                        crate::components::settings_ui::toast_saved(
+                            result_msg,
+                            result_ok,
+                            "Saved. The scheduler picks up changes on the next tick.",
+                        );
+                    }
+                    Err(e) => {
+                        result_ok.set(false);
+                        result_msg.set(e);
+                    }
+                }
+                saving.set(false);
+            });
+        }
+        #[cfg(not(feature = "hydrate"))]
+        {
+            saving.set(false);
+            let _ = cfg;
+        }
+    });
 
     #[cfg(feature = "hydrate")]
     {
@@ -124,6 +161,7 @@ pub fn SettingsSchedules() -> impl IntoView {
                         new_mode=new_mode
                         editing_id=editing_id
                         add_open=add_open
+                        persist=persist
                     />
                 })
             })
@@ -131,43 +169,10 @@ pub fn SettingsSchedules() -> impl IntoView {
         view! { <>{items}</> }.into_any()
     };
 
-    let on_save = move |_| {
-        if saving.get() {
-            return;
-        }
-        saving.set(true);
-        result_msg.set(String::new());
-        let cfg = config_json.get();
-        #[cfg(feature = "hydrate")]
-        {
-            wasm_bindgen_futures::spawn_local(async move {
-                match save_config(cfg).await {
-                    Ok(()) => {
-                        crate::components::settings_ui::toast_saved(
-                            result_msg,
-                            result_ok,
-                            "Saved. Scheduler picks up new schedules on next container restart.",
-                        );
-                    }
-                    Err(e) => {
-                        result_ok.set(false);
-                        result_msg.set(e);
-                    }
-                }
-                saving.set(false);
-            });
-        }
-        #[cfg(not(feature = "hydrate"))]
-        {
-            saving.set(false);
-            let _ = cfg;
-        }
-    };
-
     view! {
-        <main id="main-content" class="settings-page">
+        <div class="settings-page">
             <header class="settings-page__header">
-                <a class="settings-page__back" href="/settings">"Back to Settings"</a>
+                <a class="settings-page__back" href="/settings">"← Settings"</a>
                 <h1 class="settings-page__title">"Manual schedules"<HelpHint topic="schedules"/></h1>
                 <p class="settings-page__subtitle">
                     "Fire a zone at a fixed weekday + time, on top of (or instead of) "
@@ -238,21 +243,12 @@ pub fn SettingsSchedules() -> impl IntoView {
                     add_open=add_open
                     result_msg=result_msg
                     result_ok=result_ok
+                    persist=persist
                 />
             </Show>
 
-            <button
-                type="button"
-                class="setup-apply-btn"
-                style="margin-top: 1.5rem"
-                disabled=move || saving.get()
-                on:click=on_save
-            >
-                {move || if saving.get() { "Saving…" } else { "Save all changes" }}
-            </button>
-
             <SettingsResult result_msg=result_msg result_ok=result_ok/>
-        </main>
+        </div>
     }
 }
 
@@ -279,6 +275,7 @@ fn ScheduleForm(
     add_open: RwSignal<bool>,
     result_msg: RwSignal<String>,
     result_ok: RwSignal<bool>,
+    persist: Callback<()>,
 ) -> impl IntoView {
     let zone_options = move || {
         let cfg = config_json.get();
@@ -367,12 +364,8 @@ fn ScheduleForm(
             new_mode,
         );
         add_open.set(false);
-        result_ok.set(true);
-        result_msg.set(if was_edit {
-            "Updated schedule. Click Save below to persist.".to_string()
-        } else {
-            "Added schedule. Click Save below to persist.".to_string()
-        });
+        // Commit immediately instead of staging for a separate "Save".
+        persist.run(());
     };
 
     let on_cancel = move |_| {
@@ -538,24 +531,22 @@ fn ScheduleForm(
             </FormField>
 
             <div class="settings-form-actions">
-                <button
-                    type="button"
-                    class="setup-footer__btn setup-footer__btn--ghost"
-                    on:click=on_cancel
+                <Button
+                    variant="ghost"
+                    on_click=Callback::new(on_cancel)
                 >
                     "Cancel"
-                </button>
-                <button
-                    type="button"
-                    class="setup-footer__btn setup-footer__btn--primary"
-                    on:click=on_add
+                </Button>
+                <Button
+                    variant="primary"
+                    on_click=Callback::new(on_add)
                 >
                     {move || if editing_id.get().is_some() {
                         "Save schedule changes"
                     } else {
-                        "Add to list"
+                        "Add schedule"
                     }}
-                </button>
+                </Button>
             </div>
         </Panel></div>
     }
@@ -697,6 +688,7 @@ fn ScheduleCard(
     new_mode: RwSignal<String>,
     editing_id: RwSignal<Option<String>>,
     add_open: RwSignal<bool>,
+    persist: Callback<()>,
 ) -> impl IntoView {
     let raw_name = schedule
         .get("name")
@@ -813,12 +805,13 @@ fn ScheduleCard(
                 arr.retain(|s| s.get("id").and_then(|v| v.as_str()) != Some(&target));
             }
         });
+        persist.run(());
     };
 
     view! {
         <li class="settings-card-list__item">
             <SettingsCard
-                icon="\u{23f0}".into()
+                icon="calendar".into()
                 title=name
                 subtitle=subtitle
                 badges=Box::new(move || view! {
@@ -837,22 +830,20 @@ fn ScheduleCard(
                     <SettingsKv label="Mode" value=mode_kv/>
                 }.into_any())
                 actions=Box::new(move || view! {
-                    <button
-                        class="setup-footer__btn setup-footer__btn--ghost"
-                        type="button"
-                        aria-label=format!("Edit schedule {id_for_edit_label}")
-                        on:click=on_edit
+                    <Button
+                        variant="ghost"
+                        aria_label=format!("Edit schedule {id_for_edit_label}")
+                        on_click=Callback::new(on_edit)
                     >
                         "Edit"
-                    </button>
-                    <button
-                        class="setup-footer__btn setup-footer__btn--danger"
-                        type="button"
-                        aria-label=format!("Delete schedule {id_for_delete_label}")
-                        on:click=on_delete
+                    </Button>
+                    <Button
+                        variant="danger"
+                        aria_label=format!("Delete schedule {id_for_delete_label}")
+                        on_click=Callback::new(on_delete)
                     >
                         "Delete"
-                    </button>
+                    </Button>
                 }.into_any())
             />
         </li>

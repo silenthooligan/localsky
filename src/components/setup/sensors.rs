@@ -20,7 +20,8 @@
 use leptos::prelude::*;
 
 use crate::components::setup::shell::{next_step_href, prev_step_href, SetupFooter};
-use crate::components::ui::{HelpHint, Icon, Panel};
+use crate::components::ui::{Button, HelpHint, Icon, Panel};
+use crate::components::units_fmt::{temp_unit, temp_value, use_unit_prefs, UnitPrefs};
 use crate::docs::doc_url;
 
 // ---------------------------------------------------------------------------
@@ -200,6 +201,9 @@ pub fn SensorsStep() -> impl IntoView {
     // Same toast hub the Settings Sensors bind path uses, so a confirmed save
     // (or a failure) gives the same lightweight feedback here.
     let toast = crate::components::ui::use_toast();
+    // Per-device display-unit prefs; read in the body closure and threaded into
+    // the (non-reactive) probe rows so soil-probe temps honor °C/°F.
+    let prefs = use_unit_prefs();
 
     #[cfg(feature = "hydrate")]
     Effect::new(move |_| {
@@ -290,6 +294,7 @@ pub fn SensorsStep() -> impl IntoView {
         let gws = draft_gateways(&d);
         let opts = draft_zone_opts(&d);
         let probed = probes.get();
+        let p = prefs.get();
 
         if gws.is_empty() {
             return no_gateway_state().into_any();
@@ -308,7 +313,7 @@ pub fn SensorsStep() -> impl IntoView {
                     .find(|(sid, _)| sid == &gw.source_id)
                     .map(|(_, ch)| ch.clone())
                     .unwrap_or_default();
-                gateway_card(&d, gw, channels, opts.clone(), bind, is_probing)
+                gateway_card(&d, gw, channels, opts.clone(), bind, is_probing, p)
             })
             .collect();
 
@@ -321,6 +326,10 @@ pub fn SensorsStep() -> impl IntoView {
                 <p class="sensors-section__hint" style="margin-bottom: var(--space-4)">
                     "Read live off each gateway you added in the Weather step. Bind a probe "
                     "to a zone to let it drive that zone's skip decision once setup is applied."
+                </p>
+                <p class="sensors-section__hint" style="margin-bottom: var(--space-4)">
+                    "With fewer than 3 reporting probes, LocalSky cannot cross-check one probe "
+                    "against its siblings, so a single odd-but-nonzero reading is trusted as-is."
                 </p>
                 {cards}
                 {show_no_probes_hint.then(no_probes_hint)}
@@ -340,15 +349,15 @@ pub fn SensorsStep() -> impl IntoView {
             </p>
 
             <div class="scan-panel">
-                <button
-                    type="button"
-                    class="setup-footer__btn setup-footer__btn--ghost scan-panel__btn"
-                    prop:disabled=move || probing.get()
-                    on:click=on_reprobe
+                <Button
+                    variant="secondary"
+                    class="scan-panel__btn"
+                    icon="refresh"
+                    disabled=Signal::derive(move || probing.get())
+                    on_click=Callback::new(on_reprobe)
                 >
-                    <Icon name="refresh" size=15/>
-                    {move || if probing.get() { " Reading gateways…" } else { " Re-read probes" }}
-                </button>
+                    {move || if probing.get() { "Reading gateways…" } else { "Re-read probes" }}
+                </Button>
                 {move || {
                     let e = probe_err.get();
                     (!e.is_empty()).then(|| view! {
@@ -458,6 +467,7 @@ fn gateway_card(
     zone_opts: Vec<ZoneOpt>,
     bind: Callback<(String, String)>,
     probing: bool,
+    prefs: UnitPrefs,
 ) -> impl IntoView {
     let count = channels.len();
     let count_label = format!("{count} probe{}", if count == 1 { "" } else { "s" });
@@ -501,7 +511,7 @@ fn gateway_card(
         .into_iter()
         .map(|c| {
             let bound = bound_zone_for(draft, &c.id);
-            soil_probe_row(c, bound, zone_opts.clone(), bind)
+            soil_probe_row(c, bound, zone_opts.clone(), bind, prefs)
         })
         .collect();
 
@@ -531,13 +541,14 @@ fn soil_probe_row(
     bound_slug: Option<String>,
     zone_opts: Vec<ZoneOpt>,
     bind: Callback<(String, String)>,
+    prefs: UnitPrefs,
 ) -> impl IntoView {
     let probe_id = c.id.clone();
     let label = format!("Channel {}", c.channel);
     let reading = c
         .moisture_pct
         .map(|m| format!("{m:.1}%"))
-        .unwrap_or_else(|| "—".to_string());
+        .unwrap_or_else(|| "-".to_string());
     let selected_slug = bound_slug.clone().unwrap_or_default();
 
     // Chips: battery, temp, EC, shown only when present (Icon, no emoji).
@@ -565,7 +576,7 @@ fn soil_probe_row(
         chips.push(view! {
             <span class="soil-card__pill" style="--sc: var(--accent); display:inline-flex; align-items:center; gap:0.25rem">
                 <Icon name="thermometer" size=12/>
-                {format!("{t:.0}°F")}
+                {format!("{}{}", temp_value(t, prefs), temp_unit(prefs))}
             </span>
         });
     }

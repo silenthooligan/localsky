@@ -4,32 +4,24 @@
 
 use crate::config::schema::SprinklerType;
 
-/// Resolve the precipitation rate (mm/hr) for a sprinkler type when the
-/// operator has not measured it. Numbers are middle-of-band typical
-/// values for residential heads; the engine will use these to size run
-/// durations until the catch-cup measurement is supplied.
+/// Resolve the precipitation rate (mm/hr) for a sprinkler type when the operator
+/// has not measured it. The DATA lives in the shared, slug-keyed `crate::agronomy`
+/// catalog (read by the wasm UI too); this delegates via the enum's serde slug,
+/// pinned by `sprinkler_slug_matches_serde`.
 pub fn catalog_precip_rate_mm_hr(t: SprinklerType) -> f64 {
+    crate::agronomy::sprinkler_precip_mm_hr(sprinkler_slug(t))
+}
+
+/// Enum -> snake_case slug used by the agronomy catalog + the config wire format.
+fn sprinkler_slug(t: SprinklerType) -> &'static str {
     use SprinklerType::*;
     match t {
-        // Gear-driven and impact rotors: slower coverage, distributed
-        // throw. ~10 mm/hr is a sane Hunter/Rain Bird mid-range.
-        Rotor => 10.0,
-        // Fixed-head spray nozzles: tight throw, fast precipitation.
-        // 38 mm/hr is the Hunter Pro-Adjustable / MP-1500 typical.
-        Spray => 38.0,
-        // Matched-precipitation rotators: designed to match spray
-        // throughput at slower coverage; ~14 mm/hr typical.
-        MpRotator => 14.0,
-        // Residential drip / dripline: gallons per hour translates to a
-        // very low equivalent precipitation rate. 6 mm/hr is the
-        // catalog default for 1 gph emitters at 12" spacing.
-        Drip => 6.0,
-        // Bubblers throw a lot of water in a small area; treat as a
-        // high effective precipitation rate.
-        Bubbler => 50.0,
-        // Unknown / mixed setups: pick a generic middle value so the
-        // engine still produces a reasonable schedule.
-        Other => 25.0,
+        Rotor => "rotor",
+        Spray => "spray",
+        MpRotator => "mp_rotator",
+        Drip => "drip",
+        Bubbler => "bubbler",
+        Other => "other",
     }
 }
 
@@ -43,4 +35,48 @@ pub fn effective_precip_rate_mm_hr(
     override_value
         .filter(|v| *v > 0.0)
         .unwrap_or_else(|| catalog_precip_rate_mm_hr(sprinkler_type))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `sprinkler_slug` must equal each variant's serde wire name (the agronomy
+    /// catalog + config file key off it). A drift would silently return the
+    /// generic "other" rate.
+    #[test]
+    fn sprinkler_slug_matches_serde() {
+        let variants = [
+            SprinklerType::Rotor,
+            SprinklerType::Spray,
+            SprinklerType::MpRotator,
+            SprinklerType::Drip,
+            SprinklerType::Bubbler,
+            SprinklerType::Other,
+        ];
+        for v in variants {
+            assert_eq!(
+                serde_json::Value::String(sprinkler_slug(v).to_string()),
+                serde_json::to_value(v).unwrap(),
+                "sprinkler_slug drifted from serde for {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn effective_prefers_positive_override() {
+        assert_eq!(
+            effective_precip_rate_mm_hr(SprinklerType::Rotor, Some(20.0)),
+            20.0
+        );
+        assert_eq!(
+            effective_precip_rate_mm_hr(SprinklerType::Rotor, None),
+            10.0
+        );
+        // A non-positive override falls back to the catalog default.
+        assert_eq!(
+            effective_precip_rate_mm_hr(SprinklerType::Spray, Some(0.0)),
+            38.0
+        );
+    }
 }

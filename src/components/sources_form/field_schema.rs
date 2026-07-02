@@ -10,7 +10,7 @@
 //   * `FieldSpec` describes ONE scalar config key: its JSON key (byte-identical
 //     to what the engine's serde struct deserializes), label, widget type,
 //     helptext, required flag, default, placeholder, and a secret flag (render
-//     as a masked password input, but persist plainly — config is tracked).
+//     as a masked password input, but persist plainly: config is tracked).
 //   * `source_fields(kind)` returns the &[FieldSpec] for a kind's BASE scalars.
 //     Complex nested keys (MQTT `subscriptions`, Ecowitt `soil_calibration`,
 //     HA `field_map`, the per-device maps on YoLink/Tuya) are intentionally
@@ -30,6 +30,53 @@
 use leptos::prelude::*;
 
 use crate::components::ui::{FormField, SecretInput};
+use crate::components::units_fmt::{
+    distance_unit, distance_value_mi, mi_to_km, use_unit_prefs, UnitPrefs,
+};
+
+/// A convertible physical-unit dimension a numeric field is expressed in. The
+/// VALUE persisted to JSON always stays in the engine's imperial-as-stored unit
+/// (the serde field name encodes it, e.g. `radius_mi`); this marker only drives
+/// the DISPLAY boundary -- the label's unit suffix and the value shown/typed in
+/// the input -- through the shared units_fmt helpers, so a metric preference
+/// shows km without ever changing the stored miles. Extend as more physical
+/// numeric config fields appear (rain depth, temperature, etc.).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisplayUnit {
+    /// Source value is MILES; display via distance_value_mi / distance_unit.
+    DistanceMi,
+}
+
+impl DisplayUnit {
+    /// The display-unit suffix (e.g. "mi" or "km") for the active prefs.
+    fn unit_label(self, p: UnitPrefs) -> &'static str {
+        match self {
+            DisplayUnit::DistanceMi => distance_unit(p),
+        }
+    }
+
+    /// Convert a stored (imperial) source value into the displayed value string.
+    fn value_to_display(self, source: f64, p: UnitPrefs) -> String {
+        match self {
+            DisplayUnit::DistanceMi => distance_value_mi(source, p),
+        }
+    }
+
+    /// Convert a displayed value (in the active unit) back to the stored
+    /// imperial source value, so the wire format stays imperial-as-stored.
+    fn display_to_source(self, displayed: f64, p: UnitPrefs) -> f64 {
+        match self {
+            // Inverse of mi_to_km when metric; identity when imperial.
+            DisplayUnit::DistanceMi => {
+                if p.distance_metric {
+                    displayed / (mi_to_km(1.0))
+                } else {
+                    displayed
+                }
+            }
+        }
+    }
+}
 
 /// Widget kind for one config field.
 #[derive(Clone, Debug, PartialEq)]
@@ -77,6 +124,17 @@ pub struct FieldSpec {
     pub placeholder: &'static str,
     /// Render as a masked password input (still persisted plainly).
     pub secret: bool,
+    /// When Some, this numeric field carries a convertible physical unit. The
+    /// VALUE on the wire stays imperial-as-stored; the renderer converts the
+    /// displayed/typed value and the label's unit suffix through units_fmt at
+    /// the display boundary only. None for non-physical numbers (counts, ports,
+    /// seconds, ids) and all non-numeric fields.
+    pub display_unit: Option<DisplayUnit>,
+    /// When Some, an absolute "Where to get this ->" link rendered under the
+    /// field, pointing the user at the provider page where they create/find the
+    /// credential (e.g. openweathermap.org/api). Only set on the secret/account
+    /// fields that strand a newcomer otherwise; None for self-explanatory fields.
+    pub doc_url: Option<&'static str>,
 }
 
 impl FieldSpec {
@@ -96,6 +154,8 @@ impl FieldSpec {
             default: FieldDefault::None,
             placeholder,
             secret: false,
+            display_unit: None,
+            doc_url: None,
         }
     }
 
@@ -115,6 +175,60 @@ impl FieldSpec {
             default: FieldDefault::None,
             placeholder,
             secret: true,
+            display_unit: None,
+            doc_url: None,
+        }
+    }
+
+    /// A masked secret field that ALSO carries a "Where to get this ->" link to
+    /// the provider's credential page. Same persistence as `secret`; the only
+    /// addition is `doc_url`, rendered under the field so a newcomer is never
+    /// stranded wondering where the key comes from.
+    pub(crate) const fn secret_doc(
+        key: &'static str,
+        label: &'static str,
+        helptext: &'static str,
+        required: bool,
+        placeholder: &'static str,
+        doc_url: &'static str,
+    ) -> Self {
+        Self {
+            key,
+            label,
+            field_type: FieldType::Password,
+            helptext,
+            required,
+            default: FieldDefault::None,
+            placeholder,
+            secret: true,
+            display_unit: None,
+            doc_url: Some(doc_url),
+        }
+    }
+
+    /// A free-text field that carries a "Where to get this ->" link. For the
+    /// public-identifier credentials (OAuth client id, account email) that pair
+    /// with a secret but aren't themselves masked, yet still send the user to a
+    /// provider page to obtain them.
+    pub(crate) const fn text_doc(
+        key: &'static str,
+        label: &'static str,
+        helptext: &'static str,
+        required: bool,
+        placeholder: &'static str,
+        doc_url: &'static str,
+    ) -> Self {
+        Self {
+            key,
+            label,
+            field_type: FieldType::Text,
+            helptext,
+            required,
+            default: FieldDefault::None,
+            placeholder,
+            secret: false,
+            display_unit: None,
+            doc_url: Some(doc_url),
         }
     }
 
@@ -133,6 +247,8 @@ impl FieldSpec {
             default: FieldDefault::Num(default),
             placeholder: "",
             secret: false,
+            display_unit: None,
+            doc_url: None,
         }
     }
 
@@ -156,6 +272,8 @@ impl FieldSpec {
             default: FieldDefault::None,
             placeholder,
             secret: false,
+            display_unit: None,
+            doc_url: None,
         }
     }
 
@@ -174,6 +292,33 @@ impl FieldSpec {
             default: FieldDefault::Num(default),
             placeholder: "",
             secret: false,
+            display_unit: None,
+            doc_url: None,
+        }
+    }
+
+    /// An optional float carrying a convertible physical unit. The `default` and
+    /// the stored value stay in the source (imperial) unit; the renderer shows /
+    /// accepts the active display unit and adjusts the label suffix via
+    /// units_fmt. Use for physical numeric config (e.g. Blitzortung radius_mi).
+    pub(crate) const fn float_unit(
+        key: &'static str,
+        label: &'static str,
+        helptext: &'static str,
+        default: f64,
+        display_unit: DisplayUnit,
+    ) -> Self {
+        Self {
+            key,
+            label,
+            field_type: FieldType::Number { integer: false },
+            helptext,
+            required: false,
+            default: FieldDefault::Num(default),
+            placeholder: "",
+            secret: false,
+            display_unit: Some(display_unit),
+            doc_url: None,
         }
     }
 
@@ -195,6 +340,8 @@ impl FieldSpec {
             default: FieldDefault::None,
             placeholder,
             secret: false,
+            display_unit: None,
+            doc_url: None,
         }
     }
 
@@ -213,6 +360,8 @@ impl FieldSpec {
             default: FieldDefault::Bool(default),
             placeholder: "",
             secret: false,
+            display_unit: None,
+            doc_url: None,
         }
     }
 
@@ -232,6 +381,8 @@ impl FieldSpec {
             default: FieldDefault::Str(default),
             placeholder,
             secret: false,
+            display_unit: None,
+            doc_url: None,
         }
     }
 
@@ -251,6 +402,8 @@ impl FieldSpec {
             default: FieldDefault::Str(default),
             placeholder: "",
             secret: false,
+            display_unit: None,
+            doc_url: None,
         }
     }
 }
@@ -281,8 +434,10 @@ const TUYA_REGIONS: &[(&str, &str)] = &[
 static F_TEMPEST_UDP: &[FieldSpec] = &[
     FieldSpec::text_default(
         "bind_addr",
-        "Bind address",
-        "UDP listen address for Tempest hub broadcasts. The default catches every hub on the LAN.",
+        "Listen address",
+        "Where LocalSky LISTENS for the Tempest -- not the device's IP. The hub \
+         broadcasts its readings over your LAN on its own; you don't enter an IP. \
+         Leave the default (all interfaces, the Tempest port 50222).",
         "0.0.0.0:50222",
         "0.0.0.0:50222",
     ),
@@ -296,12 +451,13 @@ static F_TEMPEST_UDP: &[FieldSpec] = &[
 ];
 
 static F_TEMPEST_WS: &[FieldSpec] = &[
-    FieldSpec::secret(
+    FieldSpec::secret_doc(
         "access_token",
         "Access token",
         "Tempest personal-use access token from tempestwx.com (Settings, Data Authorizations).",
         true,
         "your Tempest token",
+        "https://tempestwx.com/settings/tokens",
     ),
     FieldSpec::int_required(
         "station_id",
@@ -314,8 +470,8 @@ static F_TEMPEST_WS: &[FieldSpec] = &[
 static F_DAVIS_WLL: &[FieldSpec] = &[
     FieldSpec::text(
         "host",
-        "WLL host",
-        "IP or hostname of the WeatherLink Live device on the LAN.",
+        "Device IP / host",
+        "The WeatherLink Live device's own IP (or hostname) on your LAN -- find it in your router or the WeatherLink app.",
         true,
         "weatherlinklive.local",
     ),
@@ -347,8 +503,8 @@ static F_ECOWITT_LOCAL: &[FieldSpec] = &[
 static F_ECOWITT_GW_POLL: &[FieldSpec] = &[
     FieldSpec::text(
         "host",
-        "Gateway host",
-        "IP or hostname of the Ecowitt gateway on the LAN. LocalSky polls its local API (no cloud).",
+        "Gateway IP / host",
+        "The Ecowitt gateway's own IP (or hostname) on your LAN -- find it in the WS View app or your router. LocalSky polls its local API (no cloud).",
         true,
         "192.0.2.50",
     ),
@@ -361,12 +517,13 @@ static F_ECOWITT_GW_POLL: &[FieldSpec] = &[
 ];
 
 static F_AMBIENT_WEATHER: &[FieldSpec] = &[
-    FieldSpec::secret(
+    FieldSpec::secret_doc(
         "app_key",
         "Application key",
         "Ambient Weather application key (ambientweather.net, Account, API Keys).",
         true,
         "your application key",
+        "https://ambientweather.net/account",
     ),
     FieldSpec::secret(
         "api_key",
@@ -386,12 +543,13 @@ static F_AMBIENT_WEATHER: &[FieldSpec] = &[
 
 static F_NETATMO: &[FieldSpec] = &[
     // OAuth client id is a public identifier, not a secret: visible + not redacted.
-    FieldSpec::text(
+    FieldSpec::text_doc(
         "client_id",
         "Client ID",
         "Netatmo app client id from dev.netatmo.com.",
         true,
         "your client id",
+        "https://dev.netatmo.com/apps",
     ),
     FieldSpec::secret(
         "client_secret",
@@ -418,12 +576,14 @@ static F_NETATMO: &[FieldSpec] = &[
 
 static F_YOLINK: &[FieldSpec] = &[
     // UAID (the YoLink client id) is a public identifier, not a secret.
-    FieldSpec::text(
+    FieldSpec::text_doc(
         "client_id",
         "UAID",
-        "YoLink UAID from the app's developer settings.",
+        "YoLink UAID + Secret Key come from the YoLink phone app: Account, Advanced \
+         Settings, User Access Credentials, then create a pair.",
         true,
         "your UAID",
+        "https://www.yosmart.com",
     ),
     FieldSpec::secret(
         "client_secret",
@@ -467,12 +627,13 @@ static F_LACROSSE: &[FieldSpec] = &[
 
 static F_TUYA_CLOUD: &[FieldSpec] = &[
     // Tuya Access ID (the client_id) is a public identifier, not a secret.
-    FieldSpec::text(
+    FieldSpec::text_doc(
         "client_id",
         "Access ID",
-        "Tuya IoT Platform access_id (client_id) from your Cloud project.",
+        "Tuya IoT Platform access_id (client_id) from your Cloud project (iot.tuya.com).",
         true,
         "your access id",
+        "https://iot.tuya.com",
     ),
     FieldSpec::secret(
         "client_secret",
@@ -511,9 +672,9 @@ static F_OPEN_METEO: &[FieldSpec] = &[
     ),
     FieldSpec::boolean(
         "include_radar",
-        "Include radar",
-        "Fetch Open-Meteo precipitation tiles for the radar layer.",
-        false,
+        "Provide radar",
+        "On by default. Lets this Open-Meteo source power the Live Radar map's precipitation overlay. Turn off only if you do not want a radar map from Open-Meteo.",
+        true,
     ),
     FieldSpec::select(
         "model",
@@ -540,21 +701,47 @@ static F_MET_NORWAY: &[FieldSpec] = &[FieldSpec::text(
     "LocalSky (you@example.com)",
 )];
 
-static F_OPENWEATHER: &[FieldSpec] = &[FieldSpec::secret(
+static F_OPENWEATHER: &[FieldSpec] = &[FieldSpec::secret_doc(
     "api_key",
     "API key",
-    "OpenWeather API key from openweathermap.org (API keys tab).",
+    "OpenWeather API key from openweathermap.org (free tier; API keys tab after sign-up).",
     true,
     "your OpenWeather key",
+    "https://openweathermap.org/api",
 )];
 
-static F_PIRATE_WEATHER: &[FieldSpec] = &[FieldSpec::secret(
+static F_PIRATE_WEATHER: &[FieldSpec] = &[FieldSpec::secret_doc(
     "api_key",
     "API key",
-    "Pirate Weather API key from pirateweather.net.",
+    "Pirate Weather API key from pirateweather.net (free tier; register for a key).",
     true,
     "your Pirate Weather key",
+    "https://pirateweather.net",
 )];
+
+static F_SYNOPTIC: &[FieldSpec] = &[
+    FieldSpec::secret_doc(
+        "token",
+        "API token",
+        "Synoptic public API token from synopticdata.com (free tier; create a token in your account).",
+        true,
+        "your Synoptic token",
+        "https://synopticdata.com/",
+    ),
+    FieldSpec::text(
+        "station_id",
+        "Station ID (optional)",
+        "Pin a specific station by its STID (e.g. KSLC). Leave blank to use the nearest reporting station to your location.",
+        false,
+        "e.g. KSLC",
+    ),
+    FieldSpec::float(
+        "radius_mi",
+        "Search radius (miles)",
+        "How far to search for the nearest station when no station id is pinned. 25 miles is a good default.",
+        25.0,
+    ),
+];
 
 static F_MQTT: &[FieldSpec] = &[
     FieldSpec::text(
@@ -610,6 +797,123 @@ static F_HTTP_WEBHOOK: &[FieldSpec] = &[
     ),
 ];
 
+static F_REST_METHODS: &[(&str, &str)] = &[("GET", "GET"), ("POST", "POST")];
+
+static F_REST_POLL: &[FieldSpec] = &[
+    FieldSpec::text(
+        "url",
+        "API URL",
+        "Full URL to poll (HTTPS recommended). Put query-param API keys here. The field mappings (JSON paths) are edited in Advanced.",
+        true,
+        "https://api.example.com/current?apiKey=...",
+    ),
+    FieldSpec::select(
+        "method",
+        "HTTP method",
+        "GET for most weather APIs; POST when the API needs a request body.",
+        F_REST_METHODS,
+        "GET",
+    ),
+    FieldSpec::int(
+        "poll_interval_s",
+        "Poll interval (seconds)",
+        "How often to poll. 300s (5 min) is friendly to rate-limited APIs.",
+        300.0,
+    ),
+];
+
+static F_PROMETHEUS: &[FieldSpec] = &[
+    FieldSpec::text(
+        "url",
+        "Prometheus URL",
+        "Base URL of your Prometheus server. The PromQL queries (one per reading) are edited in Advanced.",
+        true,
+        "http://prometheus.local:9090",
+    ),
+    FieldSpec::int(
+        "poll_interval_s",
+        "Poll interval (seconds)",
+        "How often to evaluate the queries. 60s is typical.",
+        60.0,
+    ),
+    FieldSpec::text(
+        "username",
+        "Basic-auth user (optional)",
+        "Only if your Prometheus is behind HTTP basic-auth (e.g. a reverse proxy). Leave blank otherwise.",
+        false,
+        "",
+    ),
+    FieldSpec::secret(
+        "password",
+        "Basic-auth password (optional)",
+        "Paired with the basic-auth user. Leave blank if Prometheus is unauthenticated.",
+        false,
+        "",
+    ),
+];
+
+static F_WEATHERKIT: &[FieldSpec] = &[
+    FieldSpec::text(
+        "key_id",
+        "Key ID",
+        "The WeatherKit key's Key ID from the Apple Developer portal.",
+        true,
+        "ABC123KEYID",
+    ),
+    FieldSpec::text(
+        "team_id",
+        "Team ID",
+        "Your Apple Developer Team ID.",
+        true,
+        "DEF456TEAM",
+    ),
+    FieldSpec::text(
+        "service_id",
+        "Service ID",
+        "The WeatherKit service identifier you registered (e.g. com.example.localsky).",
+        true,
+        "com.example.localsky",
+    ),
+    FieldSpec::secret_doc(
+        "private_key_pem",
+        "Private key (.p8)",
+        "Contents of the downloaded .p8 key (PKCS#8 PEM). Treat like a password; LocalSky signs JWTs with it locally. Needs a paid Apple Developer account; expect ~5-10 min to register a WeatherKit key + Service ID.",
+        true,
+        "-----BEGIN PRIVATE KEY-----",
+        "https://developer.apple.com/weatherkit/",
+    ),
+];
+
+static F_INFLUXDB: &[FieldSpec] = &[
+    FieldSpec::text(
+        "url",
+        "InfluxDB URL",
+        "Base URL of your InfluxDB server. The InfluxQL queries (one per reading) are edited in Advanced.",
+        true,
+        "http://influxdb.local:8086",
+    ),
+    FieldSpec::text(
+        "database",
+        "Database / bucket",
+        "v1 database name, or the v1-compat bucket mapping for v2 (the `db` query param).",
+        true,
+        "weather",
+    ),
+    FieldSpec::secret(
+        "token",
+        "API token (v2, optional)",
+        "InfluxDB 2.x API token (sent as Authorization: Token). Leave blank for v1 with basic-auth or an open instance.",
+        false,
+        "",
+    ),
+    FieldSpec::int(
+        "poll_interval_s",
+        "Poll interval (seconds)",
+        "How often to run the queries. 60s is typical.",
+        60.0,
+    ),
+];
+
 static F_HA_PASSTHROUGH: &[FieldSpec] = &[
     FieldSpec::text(
         "base_url",
@@ -634,11 +938,15 @@ static F_BLITZORTUNG: &[FieldSpec] = &[
         "Explicit opt-in (default off). Community CC BY-SA data, display-only; never a safety feature.",
         false,
     ),
-    FieldSpec::float(
+    FieldSpec::float_unit(
+        // Stored key + value stay miles (radius_mi); the label suffix and the
+        // shown/typed value convert at the display boundary via units_fmt, so a
+        // km preference shows km without changing the wire format.
         "radius_mi",
-        "Radius (miles)",
+        "Radius",
         "Keep only strikes within this distance of the station; the global firehose is filtered locally.",
         100.0,
+        DisplayUnit::DistanceMi,
     ),
 ];
 
@@ -682,12 +990,22 @@ pub fn source_fields(kind: &str) -> &'static [FieldSpec] {
         // ---- Forecast models ----
         "open_meteo" => F_OPEN_METEO,
         "nws" => F_NWS,
+        // NOAA MRMS is a fully keyless region-auto-seeded source (US-only radar
+        // QPE, no account, no scalar config), seeded like NWS rather than added
+        // by hand, so it is NOT in kind_options() and carries no base-config
+        // fields. The JSON-advanced editor covers the lone optional product knob.
+        "noaa_mrms" => &[],
         "met_norway" => F_MET_NORWAY,
+        "synoptic" => F_SYNOPTIC,
         "openweather" => F_OPENWEATHER,
         "pirate_weather" => F_PIRATE_WEATHER,
         // ---- Generic ingest ----
         "mqtt" => F_MQTT,
         "http_webhook" => F_HTTP_WEBHOOK,
+        "rest_poll" => F_REST_POLL,
+        "prometheus" => F_PROMETHEUS,
+        "influxdb" => F_INFLUXDB,
+        "weatherkit" => F_WEATHERKIT,
         "ha_passthrough" => F_HA_PASSTHROUGH,
         // ---- Display-only / demo ----
         "blitzortung" => F_BLITZORTUNG,
@@ -944,6 +1262,26 @@ pub(crate) fn field_row(
     let placeholder = spec.placeholder;
     let required = spec.required;
     let field_type = spec.field_type.clone();
+    let display_unit = spec.display_unit;
+
+    // Per-device unit prefs (reactive; updates after the post-hydration
+    // localStorage read). Created ONLY for display_unit fields so plain fields
+    // (the vast majority) don't each spin up a redundant hydrate effect; the
+    // default imperial prefs are used as a static stand-in otherwise so the
+    // label/seed closures stay uniform.
+    let prefs: Signal<UnitPrefs> = if display_unit.is_some() {
+        use_unit_prefs()
+    } else {
+        Signal::derive(UnitPrefs::default)
+    };
+
+    // Reactive label. Plain fields show the static label; a display_unit field
+    // appends the ACTIVE unit suffix ("Radius (mi)" / "Radius (km)") so the
+    // label tracks the preference while the stored value stays imperial.
+    let label_text = Signal::derive(move || match display_unit {
+        Some(du) => format!("{label} ({})", du.unit_label(prefs.get())),
+        None => label.to_string(),
+    });
 
     // Inline required-validation: empty value on a required field shows an error.
     let spec_for_err = spec.clone();
@@ -952,7 +1290,9 @@ pub(crate) fn field_row(
             return None;
         }
         let v = field_string_value(&cfg.get(), &spec_for_err);
-        v.trim().is_empty().then(|| format!("{label} is required"))
+        v.trim()
+            .is_empty()
+            .then(|| format!("{} is required", label_text.get()))
     });
 
     let input: AnyView = match field_type {
@@ -1033,16 +1373,49 @@ pub(crate) fn field_row(
         FieldType::Number { .. } => {
             let spec_for_seed = spec.clone();
             let spec_for_set = spec.clone();
+            // Seed: read the stored (imperial) source value, then for a
+            // display_unit field show it in the active unit; plain numbers seed
+            // the raw stored string unchanged.
+            let seed = move || {
+                let raw = field_string_value(&cfg.get(), &spec_for_seed);
+                match display_unit {
+                    Some(du) => match raw.trim().parse::<f64>() {
+                        Ok(src) => du.value_to_display(src, prefs.get()),
+                        // Empty / unparsable (e.g. mid-typing in JSON-advanced):
+                        // pass through so the input isn't blanked.
+                        Err(_) => raw,
+                    },
+                    None => raw,
+                }
+            };
             view! {
                 <input
                     type="number"
                     class="ui-input"
                     step="any"
                     placeholder=placeholder
-                    prop:value=move || field_string_value(&cfg.get(), &spec_for_seed)
+                    prop:value=seed
                     on:input=move |ev| {
                         let v = event_target_value(&ev);
-                        cfg.update(|c| apply_string_value(c, &spec_for_set, &v));
+                        // For a display_unit field the user types the DISPLAY
+                        // unit; convert back to the stored imperial source value
+                        // before persisting so the wire format stays imperial.
+                        // Empty/unparsable strings pass through to apply_string_value
+                        // unchanged (it handles empty -> default/remove).
+                        match display_unit {
+                            Some(du) => match v.trim().parse::<f64>() {
+                                Ok(disp) => {
+                                    let src = du.display_to_source(disp, prefs.get());
+                                    cfg.update(|c| apply_string_value(c, &spec_for_set, &src.to_string()));
+                                }
+                                Err(_) => {
+                                    cfg.update(|c| apply_string_value(c, &spec_for_set, &v));
+                                }
+                            },
+                            None => {
+                                cfg.update(|c| apply_string_value(c, &spec_for_set, &v));
+                            }
+                        }
                         flush();
                     }
                 />
@@ -1069,18 +1442,51 @@ pub(crate) fn field_row(
         }
     };
 
-    // Bool renders its own inline label inside the checkbox <label>, so the
-    // FormField label would duplicate it; pass an empty label there.
-    let ff_label = if matches!(spec.field_type, FieldType::Bool) {
+    // Bool renders its own inline label inside the checkbox <label>; a
+    // display_unit field needs a REACTIVE label (the unit suffix tracks the
+    // pref signal) which FormField's plain-String label can't do. Both pass an
+    // empty FormField label and render their own; everything else uses the
+    // static label.
+    let renders_own_label = matches!(spec.field_type, FieldType::Bool) || display_unit.is_some();
+    let ff_label = if renders_own_label {
         String::new()
     } else {
         label.to_string()
     };
     let _ = key;
 
+    // Reactive label rendered inside the slot ONLY for display_unit fields (Bool
+    // already has its inline label in the checkbox). Mirrors the
+    // ui-form-field__label class so it matches the static-label fields visually.
+    let own_label = (display_unit.is_some()).then(move || {
+        view! {
+            <label class="ui-form-field__label">{move || label_text.get()}</label>
+        }
+    });
+
+    // "Where to get this ->" link for credential/account fields, rendered under
+    // the input so a newcomer is never stranded wondering where the key/token
+    // comes from. The href is an external provider URL (full https), so it opens
+    // in a new tab with the usual noopener hardening. Absent for self-explanatory
+    // fields (host/port/path/...).
+    let doc_link = spec.doc_url.map(|href| {
+        view! {
+            <a
+                class="source-field-doc"
+                href=href
+                target="_blank"
+                rel="noopener noreferrer"
+            >
+                "Where to get this \u{2192}"
+            </a>
+        }
+    });
+
     view! {
         <FormField label=ff_label helptext=helptext.to_string() error=error>
+            {own_label}
             {input}
+            {doc_link}
         </FormField>
     }
 }
@@ -1089,6 +1495,69 @@ pub(crate) fn field_row(
 mod tests {
     use super::*;
     use crate::components::sources_form::kind_options;
+
+    const IMPERIAL: UnitPrefs = UnitPrefs {
+        temp_c: false,
+        rain_mm: false,
+        wind_metric: false,
+        pressure_metric: false,
+        distance_metric: false,
+        area_metric: false,
+    };
+    const METRIC: UnitPrefs = UnitPrefs {
+        distance_metric: true,
+        ..IMPERIAL
+    };
+
+    #[test]
+    fn blitzortung_radius_carries_a_distance_display_unit() {
+        // The radius field's stored key/value stay imperial (radius_mi); only
+        // the DISPLAY is unit-aware. The marker is what drives that.
+        let spec = source_fields("blitzortung")
+            .iter()
+            .find(|s| s.key == "radius_mi")
+            .unwrap();
+        assert_eq!(spec.display_unit, Some(DisplayUnit::DistanceMi));
+        // Default stays in the stored (miles) unit, untouched by display.
+        assert_eq!(spec.default, FieldDefault::Num(100.0));
+    }
+
+    #[test]
+    fn display_unit_label_and_value_track_prefs() {
+        let du = DisplayUnit::DistanceMi;
+        // Label suffix flips with the pref.
+        assert_eq!(du.unit_label(IMPERIAL), "mi");
+        assert_eq!(du.unit_label(METRIC), "km");
+        // Stored miles render in the active display unit.
+        assert_eq!(du.value_to_display(100.0, IMPERIAL), "100.0");
+        assert_eq!(du.value_to_display(100.0, METRIC), "160.9");
+    }
+
+    #[test]
+    fn display_to_source_keeps_the_wire_imperial() {
+        let du = DisplayUnit::DistanceMi;
+        // Imperial: identity (typed miles persist as miles).
+        assert!((du.display_to_source(100.0, IMPERIAL) - 100.0).abs() < 1e-9);
+        // Metric: typed km convert back to the stored miles wire value.
+        assert!((du.display_to_source(160.9344, METRIC) - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn no_field_marks_a_non_numeric_kind_with_a_display_unit() {
+        // A display_unit only makes sense on a numeric field; assert the marker
+        // never lands on a text/select/bool/password spec.
+        for (kind, _label) in kind_options() {
+            for spec in source_fields(&kind) {
+                if spec.display_unit.is_some() {
+                    assert!(
+                        matches!(spec.field_type, FieldType::Number { .. }),
+                        "kind `{kind}` field `{}` has a display_unit but is not numeric",
+                        spec.key
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn every_source_kind_has_a_field_schema_entry() {
@@ -1156,6 +1625,47 @@ mod tests {
                 "UI kind string `{kind}` ({label}) does not deserialize into SourceKind: {:?}",
                 parsed.err()
             );
+        }
+    }
+
+    #[test]
+    fn keyed_sources_carry_a_setup_doc_link() {
+        // The credential/account sources that strand a newcomer must each expose
+        // a "Where to get this ->" link on one of their fields, pointing at the
+        // provider page. Guards against a future field rename dropping the link.
+        let want_doc = [
+            "openweather",
+            "pirate_weather",
+            "weatherkit",
+            "tempest_ws",
+            "netatmo",
+            "ambient_weather",
+            "tuya_cloud",
+            "yolink",
+        ];
+        for kind in want_doc {
+            let has_link = source_fields(kind).iter().any(|s| s.doc_url.is_some());
+            assert!(
+                has_link,
+                "kind `{kind}` should carry a setup doc link on a credential field"
+            );
+        }
+    }
+
+    #[test]
+    fn doc_links_are_absolute_provider_urls() {
+        // doc_url is an EXTERNAL provider page (full https), unlike the in-app
+        // doc_url() slug links: it must be absolute so target=_blank resolves.
+        for (kind, _label) in kind_options() {
+            for spec in source_fields(&kind) {
+                if let Some(href) = spec.doc_url {
+                    assert!(
+                        href.starts_with("https://"),
+                        "kind `{kind}` field `{}` doc_url `{href}` must be an absolute https URL",
+                        spec.key
+                    );
+                }
+            }
         }
     }
 

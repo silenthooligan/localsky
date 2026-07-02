@@ -2,7 +2,7 @@
 // across N sessions, rain-aware, with minimum-interval pacing so each
 // session is a real soak rather than daily light sprinkles.
 //
-// Phase 3E extraction from src/ha/refresher.rs::compute_water_budgets.
+// Phase 3E extraction from src/refresher.rs::compute_water_budgets.
 // Pure function: takes typed per-zone inputs and the merged forecast,
 // returns a WaterBudget record per zone. HA-entity reading + zone
 // enumeration stay in refresher.rs as the v0.1 glue path; the v2

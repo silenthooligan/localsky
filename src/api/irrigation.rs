@@ -23,7 +23,7 @@ use crate::ports::irrigation_controller::ControllerError;
 use crate::scheduler::dispatch_gate;
 use axum::{
     extract::{Query, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Json,
@@ -58,14 +58,25 @@ pub fn set_shadow_store(s: Arc<IrrigationStore>) {
 struct DispatchHandles {
     registry: ControllerRegistry,
     runs: Option<RunsStore>,
+    /// Deadline ledger (P0-1b): a manual Run arms a persisted shutoff deadline so
+    /// the reaper closes the valve even if this process dies before its timer.
+    active_runs: Option<crate::persistence::ActiveRunsStore>,
 }
 
 static DISPATCH: std::sync::OnceLock<DispatchHandles> = std::sync::OnceLock::new();
 
-/// Register the controller registry + runs store for manual zone
-/// dispatch (called from main at boot).
-pub fn set_dispatch_handles(registry: ControllerRegistry, runs: Option<RunsStore>) {
-    let _ = DISPATCH.set(DispatchHandles { registry, runs });
+/// Register the controller registry + runs store + active-run ledger for manual
+/// zone dispatch (called from main at boot).
+pub fn set_dispatch_handles(
+    registry: ControllerRegistry,
+    runs: Option<RunsStore>,
+    active_runs: Option<crate::persistence::ActiveRunsStore>,
+) {
+    let _ = DISPATCH.set(DispatchHandles {
+        registry,
+        runs,
+        active_runs,
+    });
 }
 
 /// Configured engine skip-rule thresholds for the What-If simulator,
@@ -120,6 +131,8 @@ pub fn router(
             Router::new()
                 .route("/history", get(history_window))
                 .route("/decisions", get(decisions_window))
+                .route("/export", get(export))
+                .route("/accuracy", get(accuracy))
                 .with_state(h),
         )
     } else {
@@ -326,6 +339,10 @@ async fn simulate(
             if let Some(us) = scripts.apply_user_skip(&hypo) {
                 hypothetical.verdict = "skip".into();
                 hypothetical.reason = us.reason.clone();
+                // P1: this custom test rule decided the hypothetical; mirror its id
+                // into the trace's reason_code. The metric is user-defined, so no
+                // canonical engine operands (value/threshold/unit_kind stay None).
+                hypothetical.reason_code = us.id.clone();
                 hypothetical.rules.push(crate::ha::snapshot::RuleEval {
                     id: us.id,
                     label: us.name,
@@ -333,6 +350,10 @@ async fn simulate(
                     detail: "your test rule".into(),
                     outcome: "fired".into(),
                     verdict: Some("skip".into()),
+                    margin_label: None,
+                    value: None,
+                    threshold: None,
+                    unit_kind: None,
                 });
             }
         }
@@ -483,7 +504,7 @@ fn toggle_entity(key: &str) -> Option<String> {
 const RUN_SECONDS_MAX: u32 = 7200;
 
 /// HA entity for the vacation-pause expiry helper. Created manually in
-/// HA's helpers UI; documented in .agent/agent.md.
+/// HA's helpers UI (an input_datetime named irrigation_pause_until).
 const PAUSE_UNTIL_ENTITY: &str = "input_datetime.irrigation_pause_until";
 
 /// HA entity for the one-day override (none/skip/run).
@@ -638,6 +659,14 @@ async fn registry_zone_action(body: Action) -> (StatusCode, Json<Value>) {
     };
     match body {
         Action::Run { zone, seconds } => {
+            // Serialize concurrent Run actions on the SAME zone: two near-
+            // simultaneous POSTs would otherwise both resolve the controller and
+            // call run_zone, racing the hardware timer (last-writer-wins on OS/
+            // HTTP, two shutoff timers on MQTT closing at the shorter duration) and
+            // double-writing the manual run row. Held only for Run, and keyed by
+            // zone, so a Stop / StopAll is never blocked behind a running zone.
+            let run_lock = crate::controllers::zone_run_lock(&zone);
+            let _run_serialize = run_lock.lock().await;
             let clamped = seconds.min(RUN_SECONDS_MAX).max(1);
             if clamped != seconds {
                 tracing::warn!(
@@ -676,6 +705,22 @@ async fn registry_zone_action(body: Action) -> (StatusCode, Json<Value>) {
                             tracing::warn!(zone = %zone, error = %e, "manual run row insert failed");
                         }
                     }
+                    // P0-1b: arm the persisted shutoff deadline so the reaper
+                    // closes this valve even if the process dies before the
+                    // controller's own timer fires.
+                    if let Some(ar) = d.active_runs.as_ref() {
+                        if let Err(e) = ar
+                            .arm(
+                                zone.clone(),
+                                handle.controller_id.clone(),
+                                handle.started_epoch,
+                                handle.started_epoch + clamped as i64,
+                            )
+                            .await
+                        {
+                            tracing::warn!(zone = %zone, error = %e, "active-run arm failed");
+                        }
+                    }
                     (
                         StatusCode::OK,
                         Json(json!({
@@ -690,25 +735,37 @@ async fn registry_zone_action(body: Action) -> (StatusCode, Json<Value>) {
             }
         }
         Action::Stop { zone } => match controller.stop_zone(&zone).await {
-            Ok(()) => (
-                StatusCode::OK,
-                Json(json!({
-                    "ok": true,
-                    "dispatched": format!("controller:{}", controller.id()),
-                    "stopped": zone,
-                })),
-            ),
+            Ok(()) => {
+                // P0-1b: an explicit stop disarms the deadline so the reaper does
+                // not later re-stop an already-closed valve.
+                if let Some(ar) = d.active_runs.as_ref() {
+                    let _ = ar.disarm(&zone).await;
+                }
+                (
+                    StatusCode::OK,
+                    Json(json!({
+                        "ok": true,
+                        "dispatched": format!("controller:{}", controller.id()),
+                        "stopped": zone,
+                    })),
+                )
+            }
             Err(e) => controller_error_response(e),
         },
         Action::StopAll => match controller.stop_all().await {
-            Ok(()) => (
-                StatusCode::OK,
-                Json(json!({
-                    "ok": true,
-                    "dispatched": format!("controller:{}", controller.id()),
-                    "stopped": "all",
-                })),
-            ),
+            Ok(()) => {
+                if let Some(ar) = d.active_runs.as_ref() {
+                    let _ = ar.clear_all().await;
+                }
+                (
+                    StatusCode::OK,
+                    Json(json!({
+                        "ok": true,
+                        "dispatched": format!("controller:{}", controller.id()),
+                        "stopped": "all",
+                    })),
+                )
+            }
             Err(e) => controller_error_response(e),
         },
         // Only the three zone-action variants reach this fn.
@@ -748,7 +805,7 @@ async fn action(State(st): State<ActionState>, Json(body): Json<Action>) -> impl
     }
 
     // Sticky global/zone overrides are always LocalSky-native (their own
-    // sqlite), independent of source — route them to local state whenever a
+    // sqlite), independent of source: route them to local state whenever a
     // store is mounted (standalone, or HA mode with a persistence DB). This
     // is what makes the new override surface work even on an HA-source deploy.
     if st.control.is_some()
@@ -1006,9 +1063,140 @@ async fn decisions_window(
     }
 }
 
+/// P3-4: the forecast-accuracy scoreboard for the last `?days=N` (default 30,
+/// cap 365). One row per local day pairing the morning verdict with the rain
+/// that actually fell, plus the honest matched/scored tally.
+async fn accuracy(
+    State(conn): State<Arc<Mutex<Connection>>>,
+    Query(q): Query<HistoryQuery>,
+) -> impl IntoResponse {
+    let days = q.days.clamp(1, 365);
+    let from = chrono::Utc::now().timestamp() - (days as i64) * 86400;
+    let store = crate::persistence::verdict_history::VerdictHistoryStore::new(conn);
+    match store.accuracy_window(from).await {
+        Ok(res) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(res).unwrap_or_default()),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+/// P2-11: portable history export over the existing windowed readers.
+/// `?format=csv` (default) streams the run/skip events as CSV; `?format=json`
+/// returns the full `{runs, decisions}` structured export. `?days=N` bounds the
+/// window (default 365, max 3650). Served under the same gated history routes.
+#[derive(Debug, serde::Deserialize)]
+struct ExportQuery {
+    #[serde(default = "default_export_days")]
+    days: u32,
+    #[serde(default = "default_export_format")]
+    format: String,
+}
+fn default_export_days() -> u32 {
+    365
+}
+fn default_export_format() -> String {
+    "csv".to_string()
+}
+
+/// Minimal RFC 4180 CSV field escaping: quote when the value contains a comma,
+/// quote, or newline, doubling embedded quotes.
+fn csv_field(s: &str) -> String {
+    if s.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+async fn export(
+    State(conn): State<Arc<Mutex<Connection>>>,
+    Query(q): Query<ExportQuery>,
+) -> impl IntoResponse {
+    let days = q.days.clamp(1, 3650);
+    let now = chrono::Utc::now().timestamp();
+    let from = now - (days as i64) * 86400;
+    let runs = match db::window(conn.clone(), from, now).await {
+        Ok(w) => w.runs,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+    };
+    let decisions = match db::decisions_window(conn, from, now).await {
+        Ok(w) => w.decisions,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+    };
+
+    if q.format.eq_ignore_ascii_case("json") {
+        return (
+            StatusCode::OK,
+            [(
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"localsky-history.json\"",
+            )],
+            Json(json!({
+                "from_epoch": from,
+                "to_epoch": now,
+                "runs": runs,
+                "decisions": decisions,
+            })),
+        )
+            .into_response();
+    }
+
+    // CSV of run/skip events: the portable "what watered when, and what got
+    // skipped and why" log.
+    let mut out = String::from("timestamp_utc,zone,event,duration_s,reason\n");
+    for r in &runs {
+        let ts = chrono::DateTime::from_timestamp(r.start_epoch, 0)
+            .map(|d| d.to_rfc3339())
+            .unwrap_or_default();
+        let (event, reason) = match &r.skip_reason {
+            Some(reason) => ("skip", reason.as_str()),
+            None => ("run", ""),
+        };
+        out.push_str(&format!(
+            "{ts},{},{event},{},{}\n",
+            csv_field(&r.zone),
+            r.duration_s,
+            csv_field(reason),
+        ));
+    }
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/csv; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"localsky-history.csv\"",
+            ),
+        ],
+        out,
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn csv_field_escapes_per_rfc4180() {
+        assert_eq!(csv_field("back_yard"), "back_yard");
+        // Comma -> quoted.
+        assert_eq!(csv_field("Rain, then freeze"), "\"Rain, then freeze\"");
+        // Embedded quote -> doubled + quoted.
+        assert_eq!(csv_field("said \"skip\""), "\"said \"\"skip\"\"\"");
+        // Newline -> quoted.
+        assert_eq!(csv_field("a\nb"), "\"a\nb\"");
+        assert_eq!(csv_field(""), "");
+    }
 
     #[test]
     fn native_deploy_always_routes_registry() {

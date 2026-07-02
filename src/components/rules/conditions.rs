@@ -11,6 +11,7 @@
 
 use leptos::prelude::*;
 
+use crate::components::ui::Button;
 use crate::ha::snapshot::{IrrigationSnapshot, SkipCheck};
 
 /// (value, label, unit) for every metric a comparison can read. `value`
@@ -263,8 +264,8 @@ pub fn ConditionsSection(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView 
                             <span class="toggle-pill__opt toggle-pill__opt--on" class:is-active=enabled>"On"</span>
                             <span class="toggle-pill__opt toggle-pill__opt--off" class:is-active=!enabled>"Off"</span>
                         </button>
-                        <button type="button" class="setup-footer__btn setup-footer__btn--ghost" on:click=move |_| editing.set(Some(idx))>"Edit"</button>
-                        <button type="button" class="setup-footer__btn setup-footer__btn--danger" on:click=del>"Delete"</button>
+                        <Button variant="ghost" on_click=Callback::new(move |_| editing.set(Some(idx)))>"Edit"</Button>
+                        <Button variant="danger" on_click=Callback::new(del)>"Delete"</Button>
                     </li>
                 }
             })
@@ -276,8 +277,8 @@ pub fn ConditionsSection(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView 
         <section class="rulelab-conditions">
             <div class="rulelab-conditions__head">
                 <h2 class="rulelab__section-title">"Your watering rules"</h2>
-                <button type="button" class="setup-footer__btn setup-footer__btn--primary"
-                    on:click=move |_| editing.set(Some(usize::MAX))>"+ New rule"</button>
+                <Button variant="primary"
+                    on_click=Callback::new(move |_| editing.set(Some(usize::MAX)))>"+ New rule"</Button>
             </div>
             <p class="sensors-section__hint">
                 "Structured triggers, augment-only: a rule can add a skip, extend, or scale a zone's run; it can never override a safety gate (freeze, wind, restriction, rain). Rules run top to bottom and the first skip wins, so order them by priority with the arrows."
@@ -326,7 +327,7 @@ pub fn ConditionsSection(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView 
                                     <span class="rule-template__name">{t.name}</span>
                                     <span class="rule-template__desc">{t.desc}</span>
                                 </div>
-                                <button type="button" class="setup-footer__btn setup-footer__btn--primary" on:click=add>"Add"</button>
+                                <Button variant="primary" on_click=Callback::new(add)>"Add"</Button>
                             </div>
                         }
                     }).collect_view()}
@@ -678,8 +679,8 @@ fn ConditionRuleEditor(
             {move || { let e = error.get(); (!e.is_empty()).then(|| view! { <p class="source-editor__error">{e}</p> }) }}
 
             <div class="settings-form-actions">
-                <button type="button" class="setup-footer__btn setup-footer__btn--ghost" on:click=move |_| on_done.run(())>"Cancel"</button>
-                <button type="button" class="setup-footer__btn setup-footer__btn--primary" on:click=on_save>"Save rule"</button>
+                <Button variant="ghost" on_click=Callback::new(move |_| on_done.run(()))>"Cancel"</Button>
+                <Button variant="primary" on_click=Callback::new(on_save)>"Save rule"</Button>
             </div>
         </div>
     }

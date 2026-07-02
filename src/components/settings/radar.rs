@@ -20,8 +20,8 @@
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
 
-use crate::components::settings_ui::{BadgeTone, SettingsBadge, SettingsResult};
-use crate::components::ui::{HelpHint, Panel};
+use crate::components::settings_ui::{BadgeTone, SettingsBadge, SettingsResult, StatusHero};
+use crate::components::ui::{Button, HelpHint, Panel};
 
 #[component]
 pub fn SettingsRadar() -> impl IntoView {
@@ -37,6 +37,10 @@ pub fn SettingsRadar() -> impl IntoView {
     // fallbacks match the radar map's no-config coordinates.
     let lat = RwSignal::new(40.0f64);
     let lon = RwSignal::new(-75.0f64);
+    // Whether an enabled source supplies radar map tiles (Open-Meteo with
+    // include_radar). Drives the "no radar source" banner. Defaults true so the
+    // banner never flashes before the config loads.
+    let has_radar_source = RwSignal::new(true);
 
     let loaded = RwSignal::new(false);
     let saving = RwSignal::new(false);
@@ -50,6 +54,7 @@ pub fn SettingsRadar() -> impl IntoView {
                 if let Ok(d) = fetch_radar_ui().await {
                     lat.set(d.lat);
                     lon.set(d.lon);
+                    has_radar_source.set(d.has_radar_source);
                     custom.set(!d.providers.is_empty());
                     enabled.set(if d.providers.is_empty() {
                         recommended_ids(d.lat, d.lon)
@@ -145,7 +150,9 @@ pub fn SettingsRadar() -> impl IntoView {
                             <span class="radar-settings__row-label">{label}</span>
                             <span class="radar-settings__row-meta">{attribution}</span>
                         </div>
-                        <SettingsBadge label=coverage tone=BadgeTone::Accent/>
+                        <div class="radar-settings__row-aside">
+                            <SettingsBadge label=coverage tone=BadgeTone::Accent/>
+                        </div>
                     </li>
                 }
             })
@@ -178,28 +185,50 @@ pub fn SettingsRadar() -> impl IntoView {
                             <span class="radar-settings__row-label">{label}</span>
                             <span class="radar-settings__row-meta">{attribution}</span>
                         </div>
-                        {recommended.then(|| view! {
-                            <SettingsBadge label="Recommended".to_string() tone=BadgeTone::Good/>
-                        })}
-                        <SettingsBadge label=coverage tone=BadgeTone::Muted/>
-                        <button
-                            type="button"
-                            class="toggle-pill"
-                            role="switch"
-                            aria-checked=move || if is_on.get() { "true" } else { "false" }
-                            on:click=toggle
-                        >
-                            <span class="toggle-pill__opt toggle-pill__opt--on" class:is-active=move || is_on.get()>"On"</span>
-                            <span class="toggle-pill__opt toggle-pill__opt--off" class:is-active=move || !is_on.get()>"Off"</span>
-                        </button>
+                        <div class="radar-settings__row-aside">
+                            {recommended.then(|| view! {
+                                <SettingsBadge label="Recommended".to_string() tone=BadgeTone::Good/>
+                            })}
+                            <SettingsBadge label=coverage tone=BadgeTone::Muted/>
+                            <button
+                                type="button"
+                                class="toggle-pill"
+                                role="switch"
+                                aria-checked=move || if is_on.get() { "true" } else { "false" }
+                                on:click=toggle
+                            >
+                                <span class="toggle-pill__opt toggle-pill__opt--on" class:is-active=move || is_on.get()>"On"</span>
+                                <span class="toggle-pill__opt toggle-pill__opt--off" class:is-active=move || !is_on.get()>"Off"</span>
+                            </button>
+                        </div>
                     </li>
                 }
             })
             .collect_view()
     };
 
+    // Status hero (Auto vs Custom), matching the other integration pages.
+    let hero_chip = move || {
+        if custom.get() {
+            "Custom".to_string()
+        } else {
+            "Auto".to_string()
+        }
+    };
+    let hero_meaning = move || {
+        if custom.get() {
+            let n = enabled.get().len();
+            format!(
+                "Custom menu: {n} provider{} you picked.",
+                if n == 1 { "" } else { "s" }
+            )
+        } else {
+            "Auto: imagery providers are chosen for your region. Switch to Custom below to pick your own.".to_string()
+        }
+    };
+
     view! {
-        <main id="main-content" class="settings-page">
+        <div class="settings-page">
             <header class="settings-page__header">
                 <a class="settings-page__back" href="/settings">"← Settings"</a>
                 <h1 class="settings-page__title">"Radar"<HelpHint topic="radar"/></h1>
@@ -210,6 +239,40 @@ pub fn SettingsRadar() -> impl IntoView {
                     "itself still win over the defaults set here."
                 </p>
             </header>
+
+            <StatusHero
+                icon="sources"
+                title="Radar"
+                ok=Signal::derive(|| true)
+                chip=Signal::derive(hero_chip)
+                meaning=Signal::derive(hero_meaning)
+            />
+
+            // Radar imagery comes from a radar-capable weather source: an
+            // enabled Open-Meteo source with "Provide radar" on, which is the
+            // default for a fresh install. This banner shows ONLY when that is
+            // missing (the user turned radar off on their Open-Meteo source, or
+            // has no Open-Meteo source at all), because then the precipitation
+            // overlay has nothing to fetch. The radar-tile layers below
+            // (RainViewer, NEXRAD, and the rest) are public services that still
+            // render, so the map is not blank, only its precipitation overlay.
+            <Show when=move || !has_radar_source.get()>
+                <p class="setup-result setup-result--err" role="alert" style="margin-bottom: 1rem">
+                    "The radar precipitation overlay needs an Open-Meteo source "
+                    "with radar turned on. Open Settings -> Devices, add or edit your "
+                    "Open-Meteo source, and switch \"Provide radar\" on. It is on by "
+                    "default for new installs, so you only land here if it was turned "
+                    "off. The other radar layers below still work without it."
+                </p>
+            </Show>
+
+            <p class="settings-page__subtitle">
+                "The radar imagery comes from a radar-capable weather source: "
+                "Open-Meteo with radar turned on, which is the default. The "
+                "imagery providers menu below picks which radar overlay layers "
+                "the map offers (such as RainViewer and regional reflectivity); "
+                "the default layers picker chooses which start visible."
+            </p>
 
             <Panel title="Imagery providers".to_string() help_topic="radar">
                 <div class="radar-settings__mode">
@@ -291,14 +354,13 @@ pub fn SettingsRadar() -> impl IntoView {
             </Panel>
 
             <div class="settings-actions">
-                <button
-                    type="button"
-                    class="setup-footer__btn setup-footer__btn--primary"
-                    disabled=move || saving.get() || !loaded.get() || !can_save()
-                    on:click=on_save
+                <Button
+                    variant="primary"
+                    on_click=Callback::new(on_save)
+                    disabled=Signal::derive(move || saving.get() || !loaded.get() || !can_save())
                 >
                     {move || if saving.get() { "Saving…" } else { "Save changes" }}
-                </button>
+                </Button>
             </div>
 
             <SettingsResult result_msg=result_msg result_ok=result_ok/>
@@ -308,7 +370,7 @@ pub fn SettingsRadar() -> impl IntoView {
                     "Loading current values from /api/config..."
                 </p>
             </Show>
-        </main>
+        </div>
     }
 }
 
@@ -387,6 +449,9 @@ struct RadarUiDraft {
     lon: f64,
     providers: Vec<String>,
     default_layers: Vec<String>,
+    /// True when an enabled source supplies radar map tiles (an Open-Meteo
+    /// source with include_radar). False -> the "no radar source" banner shows.
+    has_radar_source: bool,
 }
 
 #[cfg(feature = "hydrate")]
@@ -426,6 +491,23 @@ async fn fetch_radar_ui() -> Result<RadarUiDraft, String> {
         }
     }
     let loc = val.get("deployment").and_then(|d| d.get("location"));
+    // A radar-capable source = an enabled Open-Meteo source with
+    // include_radar=true (it powers the precipitation nowcast tiles). Detected
+    // straight off the config JSON so this page needs no extra round-trip.
+    let has_radar_source = val
+        .get("sources")
+        .and_then(|s| s.as_array())
+        .map(|arr| {
+            arr.iter().any(|s| {
+                s.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false)
+                    && s.get("kind").and_then(|v| v.as_str()) == Some("open_meteo")
+                    && s.get("config")
+                        .and_then(|c| c.get("include_radar"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
     Ok(RadarUiDraft {
         lat: loc
             .and_then(|l| l.get("lat"))
@@ -437,6 +519,7 @@ async fn fetch_radar_ui() -> Result<RadarUiDraft, String> {
             .unwrap_or(-75.0),
         providers: str_list("providers"),
         default_layers,
+        has_radar_source,
     })
 }
 

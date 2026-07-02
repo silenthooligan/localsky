@@ -16,40 +16,12 @@ use leptos_router::NavigateOptions;
 
 #[component]
 pub fn Sidebar() -> impl IntoView {
-    // Drawer-open state for mobile. Desktop ignores it (sidebar is
-    // always visible above 760px via SCSS).
-    let drawer_open = RwSignal::new(false);
-
-    let toggle_drawer = move |_| {
-        drawer_open.set(!drawer_open.get_untracked());
-    };
-
-    let backdrop_class = move || {
-        if drawer_open.get() {
-            "sidebar-backdrop is-visible"
-        } else {
-            "sidebar-backdrop"
-        }
-    };
-    let sidebar_class = move || {
-        if drawer_open.get() {
-            "sidebar is-open"
-        } else {
-            "sidebar"
-        }
-    };
-
     view! {
+        // Mobile top bar: brand only. Mobile navigation lives in the bottom
+        // tab-bar (MobileNav) + its accessible "More" sheet. The old hamburger
+        // drawer was a redundant, a11y-broken second nav and was removed (P3-5);
+        // the sidebar below is desktop-only (hidden under 760px via SCSS).
         <div class="mobile-app-bar">
-            <button
-                class="sidebar-hamburger"
-                aria-label="Open navigation"
-                on:click=toggle_drawer
-            >
-                <span class="hamburger-bar"></span>
-                <span class="hamburger-bar"></span>
-                <span class="hamburger-bar"></span>
-            </button>
             <a href="/" class="header-brand" aria-label="LocalSky home">
                 <span class="header-brand__mark" aria-hidden="true">
                     <img src="/brand-mark.svg" alt="" width="20" height="20"/>
@@ -60,9 +32,7 @@ pub fn Sidebar() -> impl IntoView {
             </a>
         </div>
 
-        <div class=backdrop_class on:click=toggle_drawer></div>
-
-        <aside class=sidebar_class aria-label="Primary navigation">
+        <aside class="sidebar" aria-label="Primary navigation">
             <a href="/" class="sidebar-brand" aria-label="LocalSky home">
                 <span class="sidebar-brand-mark" aria-hidden="true">
                     // The brand mark lives in public/brand-mark.svg
@@ -92,23 +62,24 @@ pub fn Sidebar() -> impl IntoView {
 
             // PRIMARY, the live products + the garden map.
             <NavSection title="">
-                <NavLink href="/" icon="weather" label="Weather" drawer=drawer_open/>
-                <NavLink href="/irrigation" icon="droplet" label="Irrigation" drawer=drawer_open/>
-                <NavLink href="/zones" icon="zones" label="Zones" drawer=drawer_open/>
-                <NavLink href="/sensors" icon="activity" label="Sensors" drawer=drawer_open/>
+                <NavLink href="/" icon="weather" label="Weather"/>
+                <NavLink href="/irrigation" icon="droplet" label="Irrigation"/>
+                <NavLink href="/week" icon="calendar" label="Week"/>
+                <NavLink href="/zones" icon="zones" label="Zones"/>
+                <NavLink href="/sensors" icon="activity" label="Sensors"/>
             </NavSection>
 
             // ANALYZE, the marquee reasoning tools.
             <NavSection title="Analyze">
-                <NavLink href="/simulator" icon="simulator" label="Simulator" drawer=drawer_open/>
-                <NavLink href="/rules" icon="rule-lab" label="Rule Lab" drawer=drawer_open/>
-                <NavLink href="/history" icon="history" label="History" drawer=drawer_open/>
+                <NavLink href="/simulator" icon="simulator" label="Simulator"/>
+                <NavLink href="/rules" icon="rule-lab" label="Rule Lab"/>
+                <NavLink href="/history" icon="history" label="History"/>
             </NavSection>
 
             // SETTINGS, set-once configuration, demoted to one entry.
             // The 12 sections live as tabs inside the settings page.
             <NavSection title="" compact=true>
-                <NavLink href="/settings" icon="settings" label="Settings" drawer=drawer_open/>
+                <NavLink href="/settings" icon="settings" label="Settings"/>
             </NavSection>
 
             // ───────────────────────────────────────────────────────
@@ -165,7 +136,6 @@ fn NavLink(
     href: &'static str,
     icon: &'static str,
     label: &'static str,
-    drawer: RwSignal<bool>,
     #[prop(optional)] sub: bool,
 ) -> impl IntoView {
     let loc = use_location();
@@ -199,7 +169,6 @@ fn NavLink(
             return;
         }
         ev.prevent_default();
-        drawer.set(false);
         navigate(&crate::base::url(href), NavigateOptions::default());
     };
 
@@ -207,7 +176,9 @@ fn NavLink(
         <li>
             // title carries the label for the tablet icon-rail, where the
             // text label is hidden and hover/long-press needs a tooltip.
-            <a class=active_class href=href on:click=on_click title=label>
+            // aria-label guarantees SR announcement when the visible label
+            // is collapsed away in the icon rail (title is not reliably read).
+            <a class=active_class href=href on:click=on_click title=label aria-label=label>
                 <span class="sidebar-link-icon"><Icon name=icon/></span>
                 <span class="sidebar-link-label">{label}</span>
             </a>

@@ -2,11 +2,13 @@
 // rolling buffer the listener maintains. Up arrow / flat / down arrow
 // derived from the slope across the last hour.
 
+use crate::components::units_fmt::{pressure_unit, pressure_value, use_unit_prefs, UnitPrefs};
 use crate::tempest::state::Snapshot;
 use leptos::prelude::*;
 
 #[component]
 pub fn PressurePanel(snap: ReadSignal<Snapshot>) -> impl IntoView {
+    let prefs = use_unit_prefs();
     let trend_arrow = move || {
         let s = snap.get();
         let pts = &s.pressure_trend_inhg;
@@ -37,21 +39,21 @@ pub fn PressurePanel(snap: ReadSignal<Snapshot>) -> impl IntoView {
             <h2 class="panel-title">"Pressure"</h2>
             <div class="pressure-row">
                 <div class="big-number">
-                    {move || format!("{:.2}", snap.get().pressure_inhg)}
-                    <span class="big-unit">" inHg"</span>
+                    {move || pressure_value(snap.get().pressure_inhg, prefs.get())}
+                    <span class="big-unit">{move || format!(" {}", pressure_unit(prefs.get()))}</span>
                 </div>
                 <div class={move || format!("trend trend-{}", trend_arrow().1)}>
                     <span class="trend-arrow">{move || trend_arrow().0}</span>
                     <span class="trend-label">{move || trend_arrow().1}</span>
                 </div>
             </div>
-            <Sparkline snap/>
+            {move || view! { <Sparkline snap prefs=prefs.get()/> }}
         </section>
     }
 }
 
 #[component]
-fn Sparkline(snap: ReadSignal<Snapshot>) -> impl IntoView {
+fn Sparkline(snap: ReadSignal<Snapshot>, prefs: UnitPrefs) -> impl IntoView {
     let path = Memo::new(move |_| {
         let s = snap.get();
         let pts = &s.pressure_trend_inhg;
@@ -90,8 +92,8 @@ fn Sparkline(snap: ReadSignal<Snapshot>) -> impl IntoView {
             <path d=move || path.get().0 class="sparkline-path"/>
         </svg>
         <div class="sparkline-axis">
-            <span>{move || format!("{:.2}", path.get().1)}</span>
-            <span>{move || format!("{:.2}", path.get().2)}</span>
+            <span>{move || pressure_value(path.get().1, prefs)}</span>
+            <span>{move || pressure_value(path.get().2, prefs)}</span>
         </div>
     }
 }

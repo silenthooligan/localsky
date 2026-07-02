@@ -5,7 +5,7 @@
 
 <p align="center">
   <strong>Hyperlocal weather on your hardware. Smart irrigation when you want it.</strong><br>
-  Self-hosted, open source, no cloud, no subscription, no account.
+  Self-hosted, open source, no account, no tracking, no subscription.
 </p>
 
 <p align="center">
@@ -201,7 +201,6 @@ Full docs live in [`docs/`](docs/) and are built into an mdBook for online viewi
 - [Grass species](https://localsky.io/docs/grass-species) and [soil textures](https://localsky.io/docs/soil-textures)
 - [Skip rules](https://localsky.io/docs/skip-rules), every rule in the ladder, explained
 - [HACS integration](https://localsky.io/docs/hacs), pairing Home Assistant with a running LocalSky
-- [UX journey](https://localsky.io/docs/ux-journey), first-run, upgrades, hardware changes, config changes
 
 ## Architecture at a glance
 

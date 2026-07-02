@@ -108,6 +108,31 @@ mod tests {
         assert_eq!(snap.flow_gpm, None);
     }
 
+    /// Household units carry on the snapshot (display-plumbing). The default
+    /// serializes as "imperial"; a metric deployment serializes as "metric";
+    /// and a snapshot from an older producer (no `units` key) deserializes to
+    /// Imperial via `#[serde(default)]`, so the additive field never breaks the
+    /// SSE/HACS contract.
+    #[test]
+    fn snapshot_units_serializes_and_defaults() {
+        use crate::config::schema::Units;
+
+        let default = IrrigationSnapshot::default();
+        let v = serde_json::to_value(&default).unwrap();
+        assert_eq!(v["units"], serde_json::json!("imperial"));
+
+        let mut metric = IrrigationSnapshot::default();
+        metric.units = Units::Metric;
+        let v = serde_json::to_value(&metric).unwrap();
+        assert_eq!(v["units"], serde_json::json!("metric"));
+
+        // Older producer (no units key) -> Imperial via serde default.
+        let mut v = serde_json::to_value(IrrigationSnapshot::default()).unwrap();
+        v.as_object_mut().unwrap().remove("units");
+        let snap: IrrigationSnapshot = serde_json::from_value(v).unwrap();
+        assert_eq!(snap.units, Units::Imperial);
+    }
+
     /// `/api/v1/forecast/snapshot`.
     #[test]
     fn forecast_v1_shape() {

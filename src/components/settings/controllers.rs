@@ -10,12 +10,15 @@
 
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
+use leptos_router::hooks::{use_location, use_navigate};
 
 use crate::components::controllers_form::ControllerEditorPanel;
+use crate::components::settings::{form_state_url, parse_form_state, FormState};
 use crate::components::settings_ui::{
-    config_kvs, BadgeTone, SettingsBadge, SettingsCard, SettingsLoadError, SettingsResult,
+    config_kvs, BadgeTone, EntityKind, SettingsBadge, SettingsCard, SettingsLoadError,
+    SettingsResult,
 };
-use crate::components::ui::{HelpHint, Panel};
+use crate::components::ui::{Button, HelpHint, Panel};
 use crate::docs::doc_url;
 
 #[component]
@@ -24,8 +27,32 @@ pub fn SettingsControllers() -> impl IntoView {
     let saving = RwSignal::new(false);
     let result_msg = RwSignal::new(String::new());
     let result_ok = RwSignal::new(false);
-    let add_open = RwSignal::new(false);
-    let editing_id: RwSignal<Option<String>> = RwSignal::new(None);
+    // Persistent, dismissible restart-required banner. Populated only when a
+    // save returns restart_required=true (a newly added controller that needs a
+    // boot-wired connection); routine edits hot-reload and leave it empty.
+    let restart_reasons: RwSignal<Vec<String>> = RwSignal::new(Vec::new());
+    let restart_dismissed = RwSignal::new(false);
+    // The add/edit form's open-state is URL state (?add=1 / ?edit=<id>), not a
+    // bare signal: opening pushes a history entry, so the phone back gesture
+    // closes the form instead of leaving settings. SSR + hydrate both derive it
+    // from the same URL. `add_open` / `editing_id` are kept as derived views of
+    // that state so the rest of the page is unchanged.
+    let loc = use_location();
+    let form_state = Signal::derive(move || parse_form_state(&loc.search.get()));
+    let add_open = Signal::derive(move || form_state.get() != FormState::Closed);
+    let editing_id = Signal::derive(move || match form_state.get() {
+        FormState::Edit(id) => Some(id),
+        _ => None,
+    });
+    let navigate = use_navigate();
+    let nav_form: Callback<FormState> = Callback::new(move |next: FormState| {
+        let url = form_state_url(
+            &loc.pathname.get_untracked(),
+            &loc.search.get_untracked(),
+            &next,
+        );
+        navigate(&url, Default::default());
+    });
     // Initial-load state: Some(err) when the config GET failed. The
     // editor body is replaced by a Retry banner in that case.
     let load_error: RwSignal<Option<String>> = RwSignal::new(None);
@@ -99,8 +126,7 @@ pub fn SettingsControllers() -> impl IntoView {
                 }
             }
         });
-        editing_id.set(None);
-        add_open.set(false);
+        nav_form.run(FormState::Closed);
         result_ok.set(true);
         result_msg.set(if was_editing {
             "Updated. Click Save to apply.".into()
@@ -109,10 +135,7 @@ pub fn SettingsControllers() -> impl IntoView {
         });
     });
 
-    let on_cancel_form = Callback::new(move |()| {
-        editing_id.set(None);
-        add_open.set(false);
-    });
+    let on_cancel_form = Callback::new(move |()| nav_form.run(FormState::Closed));
 
     let controllers_view = move || {
         let cfg = config_json.get();
@@ -127,8 +150,7 @@ pub fn SettingsControllers() -> impl IntoView {
                     <ControllerCard
                         controller=c
                         config_json=config_json
-                        editing_id=editing_id
-                        add_open=add_open
+                        nav_form=nav_form
                     />
                 }
             })
@@ -146,12 +168,17 @@ pub fn SettingsControllers() -> impl IntoView {
         {
             wasm_bindgen_futures::spawn_local(async move {
                 match save_config(candidate).await {
-                    Ok(()) => {
+                    Ok(reasons) => {
                         crate::components::settings_ui::toast_saved(
                             result_msg,
                             result_ok,
                             "Saved. Controller registry hot-reloads on next dispatch.",
                         );
+                        // A newly added controller that needs a boot-wired
+                        // connection raises the dismissible banner with the
+                        // server's reasons; an empty list (hot-reload) clears it.
+                        restart_dismissed.set(false);
+                        restart_reasons.set(reasons);
                     }
                     Err(e) => {
                         result_ok.set(false);
@@ -169,7 +196,7 @@ pub fn SettingsControllers() -> impl IntoView {
     };
 
     view! {
-        <main id="main-content" class="settings-page">
+        <div class="settings-page">
             <header class="settings-page__header">
                 <a class="settings-page__back" href="/settings">"← Settings"</a>
                 <h1 class="settings-page__title">"Irrigation controllers"<HelpHint topic="controllers"/></h1>
@@ -183,6 +210,8 @@ pub fn SettingsControllers() -> impl IntoView {
                 </p>
             </header>
 
+            <crate::components::settings::RestartBanner reasons=restart_reasons dismissed=restart_dismissed/>
+
             <Show
                 when=move || load_error.get().is_none()
                 fallback=move || view! { <SettingsLoadError error=load_error retry=load_retry/> }
@@ -192,28 +221,30 @@ pub fn SettingsControllers() -> impl IntoView {
                     {controllers_view}
                 </ul>
 
-                <button
-                    type="button"
-                    class="setup-footer__btn setup-footer__btn--primary"
-                    style="margin-top: 1rem"
-                    on:click=move |_| {
-                        let now_open = !add_open.get();
-                        add_open.set(now_open);
-                        if !now_open {
-                            editing_id.set(None);
-                        }
-                    }
-                >
-                    {move || {
-                        if !add_open.get() {
-                            "+ Add controller"
-                        } else if editing_id.get().is_some() {
-                            "× Cancel edit"
-                        } else {
-                            "× Cancel add"
-                        }
-                    }}
-                </button>
+                <div class="settings-add-btn">
+                    <Button
+                        variant="primary"
+                        on_click=Callback::new(move |_| {
+                            // Toggle: open the add form, or close whatever's open.
+                            let next = if add_open.get() {
+                                FormState::Closed
+                            } else {
+                                FormState::Add
+                            };
+                            nav_form.run(next);
+                        })
+                    >
+                        {move || {
+                            if !add_open.get() {
+                                "+ Add controller"
+                            } else if editing_id.get().is_some() {
+                                "× Cancel edit"
+                            } else {
+                                "× Cancel add"
+                            }
+                        }}
+                    </Button>
+                </div>
             </Panel>
 
             <Show when=move || add_open.get()>
@@ -256,7 +287,7 @@ pub fn SettingsControllers() -> impl IntoView {
             </Show>
 
             <SettingsResult result_msg=result_msg result_ok=result_ok/>
-        </main>
+        </div>
     }
 }
 
@@ -309,8 +340,13 @@ async fn fetch_config() -> Result<serde_json::Value, String> {
         .map_err(|e| e.to_string())
 }
 
+/// PUT the candidate config. Returns the restart_reasons the PUT response
+/// carried (empty when the change hot-reloaded). A newly added controller that
+/// needs a boot-wired connection (e.g. an OpenSprinkler poll loop) flags
+/// restart_required=true with the reasons; the caller raises the shared
+/// RestartBanner. A missing/old field reads as "no restart", the safe default.
 #[cfg(feature = "hydrate")]
-async fn save_config(cfg: serde_json::Value) -> Result<(), String> {
+async fn save_config(cfg: serde_json::Value) -> Result<Vec<String>, String> {
     use gloo_net::http::Request;
     let resp = Request::put("/api/config")
         .json(&cfg)
@@ -322,7 +358,26 @@ async fn save_config(cfg: serde_json::Value) -> Result<(), String> {
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("HTTP {}: {body}", resp.status()));
     }
-    Ok(())
+    let reasons = resp
+        .json::<serde_json::Value>()
+        .await
+        .ok()
+        .filter(|v| {
+            v.get("restart_required")
+                .and_then(|r| r.as_bool())
+                .unwrap_or(false)
+        })
+        .and_then(|v| {
+            v.get("restart_reasons")
+                .and_then(|r| r.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
+        })
+        .unwrap_or_default();
+    Ok(reasons)
 }
 
 /// Single controller row, extracted into its own component so its
@@ -335,8 +390,7 @@ async fn save_config(cfg: serde_json::Value) -> Result<(), String> {
 fn ControllerCard(
     controller: serde_json::Value,
     config_json: RwSignal<serde_json::Value>,
-    editing_id: RwSignal<Option<String>>,
-    add_open: RwSignal<bool>,
+    nav_form: Callback<FormState>,
 ) -> impl IntoView {
     let id = controller
         .get("id")
@@ -384,10 +438,9 @@ fn ControllerCard(
         });
     };
     // Open the shared editor on this controller; it seeds itself from config
-    // by id (the page's <Show> looks the entry up), so we only flip state.
+    // by id (the page's <Show> looks the entry up), so we only set URL state.
     let on_edit = move |_| {
-        editing_id.set(Some(id_for_edit.clone()));
-        add_open.set(true);
+        nav_form.run(FormState::Edit(id_for_edit.clone()));
     };
     let on_delete = move |_| {
         let target = id_for_delete.clone();
@@ -404,6 +457,7 @@ fn ControllerCard(
                 icon=icon
                 title=title
                 subtitle=subtitle
+                entity=Some(EntityKind::Controller)
                 badges=Box::new(move || view! {
                     {default.then(|| view! {
                         <SettingsBadge label="Default".into() tone=BadgeTone::Accent/>
@@ -417,30 +471,27 @@ fn ControllerCard(
                 details=Box::new(move || view! { {kv_rows} }.into_any())
                 actions=Box::new(move || view! {
                     {(!default).then(|| view! {
-                        <button
-                            class="setup-footer__btn setup-footer__btn--ghost"
-                            type="button"
-                            on:click=make_default
+                        <Button
+                            variant="ghost"
+                            on_click=Callback::new(make_default)
                         >
                             "Make default"
-                        </button>
+                        </Button>
                     })}
-                    <button
-                        class="setup-footer__btn setup-footer__btn--ghost"
-                        type="button"
-                        aria-label=format!("Edit controller {id_for_edit_label}")
-                        on:click=on_edit
+                    <Button
+                        variant="ghost"
+                        aria_label=format!("Edit controller {id_for_edit_label}")
+                        on_click=Callback::new(on_edit)
                     >
                         "Edit"
-                    </button>
-                    <button
-                        class="setup-footer__btn setup-footer__btn--danger"
-                        type="button"
-                        aria-label=format!("Delete controller {id_for_delete_label}")
-                        on:click=on_delete
+                    </Button>
+                    <Button
+                        variant="danger"
+                        aria_label=format!("Delete controller {id_for_delete_label}")
+                        on_click=Callback::new(on_delete)
                     >
                         "Delete"
-                    </button>
+                    </Button>
                 }.into_any())
             />
         </li>

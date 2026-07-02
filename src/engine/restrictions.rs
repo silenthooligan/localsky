@@ -8,7 +8,7 @@
 // a `RestrictionVerdict` with the first matching skip reason plus the
 // min-of-active per-zone duration cap.
 
-use chrono::{DateTime, Datelike, Local, NaiveDate, Timelike, Weekday};
+use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Timelike, Weekday};
 
 use crate::config::schema::{AddressParity, EffectiveWindow, WateringRestriction};
 
@@ -27,7 +27,7 @@ pub struct RestrictionVerdict {
 /// True when `now`'s date falls inside `w`'s effective window. DST
 /// rules follow US convention: 2nd Sunday of March → 1st Sunday of
 /// November.
-pub fn is_in_effective_window(now: DateTime<Local>, w: &EffectiveWindow) -> bool {
+pub fn is_in_effective_window<Tz: TimeZone>(now: DateTime<Tz>, w: &EffectiveWindow) -> bool {
     let date = now.date_naive();
     match w {
         EffectiveWindow::AllYear => true,
@@ -69,7 +69,11 @@ pub fn is_in_effective_window(now: DateTime<Local>, w: &EffectiveWindow) -> bool
 /// their address parity. Empty allowed list = no restriction. When the
 /// operator's parity is `NotApplicable`, weekday gates are no-ops (the
 /// restriction can't decide either way).
-pub fn allowed_today(now: DateTime<Local>, r: &WateringRestriction, parity: AddressParity) -> bool {
+pub fn allowed_today<Tz: TimeZone>(
+    now: DateTime<Tz>,
+    r: &WateringRestriction,
+    parity: AddressParity,
+) -> bool {
     let today_dow = now.weekday().num_days_from_sunday() as u8;
     let allowed = match parity {
         AddressParity::Odd => &r.allowed_weekdays_odd,
@@ -85,7 +89,7 @@ pub fn allowed_today(now: DateTime<Local>, r: &WateringRestriction, parity: Addr
 /// True when `now`'s hour falls in `[forbidden_hour_start, forbidden_hour_end)`.
 /// Supports wrap-around (e.g. start=22, end=6). When either bound is
 /// `None`, this gate is inactive.
-pub fn in_forbidden_hours(now: DateTime<Local>, r: &WateringRestriction) -> bool {
+pub fn in_forbidden_hours<Tz: TimeZone>(now: DateTime<Tz>, r: &WateringRestriction) -> bool {
     let (start, end) = match (r.forbidden_hour_start, r.forbidden_hour_end) {
         (Some(s), Some(e)) => (s, e),
         _ => return false,
@@ -102,11 +106,14 @@ pub fn in_forbidden_hours(now: DateTime<Local>, r: &WateringRestriction) -> bool
 /// Aggregate over every restriction in `restrictions`. First triggering
 /// restriction supplies the skip reason; caps accumulate as the min
 /// across every active restriction's `max_minutes_per_zone`.
-pub fn evaluate(
-    now: DateTime<Local>,
+pub fn evaluate<Tz: TimeZone>(
+    now: DateTime<Tz>,
     restrictions: &[WateringRestriction],
     parity: AddressParity,
-) -> RestrictionVerdict {
+) -> RestrictionVerdict
+where
+    Tz::Offset: Copy,
+{
     let mut verdict = RestrictionVerdict::default();
 
     for r in restrictions {
@@ -151,7 +158,7 @@ fn format_reason(r: &WateringRestriction, bad_day: bool, bad_hour: bool) -> Stri
         let s = r.forbidden_hour_start.unwrap_or(0);
         let e = r.forbidden_hour_end.unwrap_or(0);
         format!(
-            "Watering restriction ({}): currently inside the forbidden window ({s:02}:00 – {e:02}:00)",
+            "Watering restriction ({}): currently inside the forbidden window ({s:02}:00 to {e:02}:00)",
             r.name
         )
     }
@@ -200,7 +207,7 @@ fn nth_weekday_of_month(year: i32, month: u32, weekday: Weekday, n: u32) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use chrono::Local;
 
     fn make(yyyy: i32, mm: u32, dd: u32, h: u32, mn: u32) -> DateTime<Local> {
         Local

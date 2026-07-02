@@ -35,34 +35,75 @@ pub fn synthesize() -> Config {
         log_lines.push(format!("timezone from TZ env ({tz})"));
     }
 
-    // ----- Always-on local source: Tempest UDP -----
-    cfg.sources.push(SourceEntry {
-        id: "tempest_lan".into(),
-        priority: 100,
-        max_age_s: None,
-        enabled: true,
-        source: SourceKind::TempestUdp(TempestUdpConfig {
-            bind_addr: env::var("TEMPEST_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:50222".into()),
-            hub_serial: env::var("TEMPEST_HUB_SERIAL").ok(),
-        }),
-    });
-    log_lines.push("synthesized tempest_lan source (UDP 50222)".into());
+    // ----- Local source: Tempest UDP (only when the operator signaled one) -----
+    // The legacy v0.1 image always opened a Tempest UDP listener. That is wrong
+    // for a no-hardware install: a passive socket nothing transmits on drives a
+    // global "tempest_lan offline / degraded" health banner ~60s after boot. So
+    // we synthesize the listener ONLY when the operator explicitly opted into a
+    // Tempest (a TEMPEST_BIND_ADDR or TEMPEST_HUB_SERIAL env). A v0.1 deployment
+    // that actually had a Tempest set one of these (or accepts adding it from
+    // the Sources UI); without either, the install is cloud-only (Open-Meteo).
+    let tempest_bind = env::var("TEMPEST_BIND_ADDR").ok();
+    let tempest_hub = env::var("TEMPEST_HUB_SERIAL").ok();
+    if let Some(entry) = tempest_lan_entry(tempest_bind, tempest_hub) {
+        cfg.sources.push(entry);
+        log_lines.push("synthesized tempest_lan source from TEMPEST_* env (UDP 50222)".into());
+    }
 
     // ----- Always-on forecast source: Open-Meteo -----
+    // The keyless cloud backstop and last link in the cloud-only fallback
+    // chain. Its merge priority + freshness window come from the region helper
+    // (Open-Meteo always ranks 50; its ~1800s refresh cadence widens max_age to
+    // ~2100 so a per-field pin survives a full refresh cycle, closing the
+    // wind-pin freshness-cadence mismatch). location.lat/lon were set above from
+    // WEATHER_APP_LAT/LON (or the Config::default 0,0 when absent, which resolves
+    // to the Global ranking) so the priority is correct for whatever cloud a
+    // user later adds.
+    let om_kind = SourceKind::OpenMeteo(OpenMeteoConfig {
+        forecast_days: 7,
+        forecast_hours: 48,
+        past_days: 1,
+        // Radar on by default: the synthesized Open-Meteo source powers
+        // the Live Radar precipitation overlay out of the box, matching
+        // the serde default in schema::default_open_meteo_include_radar.
+        include_radar: true,
+        model: crate::forecast::model_catalog::DEFAULT_MODEL.to_string(),
+    });
+    let (om_lat, om_lon) = (cfg.deployment.location.lat, cfg.deployment.location.lon);
+    // Snapshot BEFORE the Open-Meteo push: a genuinely no-hardware install has no
+    // sources yet here (a TEMPEST_* opt-in already pushed a tempest_lan above, so
+    // it is not empty). This gates the region keyless authority below so a
+    // hardware/HA deployment is never given an unsolicited extra cloud.
+    let no_local_sources = cfg.sources.is_empty();
     cfg.sources.push(SourceEntry {
         id: "open_meteo".into(),
-        priority: 50,
-        max_age_s: None,
-        enabled: true,
-        source: SourceKind::OpenMeteo(OpenMeteoConfig {
-            forecast_days: 7,
-            forecast_hours: 48,
-            past_days: 1,
-            include_radar: false,
-            model: crate::forecast::model_catalog::DEFAULT_MODEL.to_string(),
-        }),
+        priority: crate::config::region::default_priority_for(&om_kind, om_lat, om_lon),
+        max_age_s: crate::config::region::default_max_age_for(&om_kind),
+        enabled: crate::config::region::default_enabled_for(&om_kind, om_lat, om_lon),
+        source: om_kind,
     });
-    log_lines.push("synthesized open_meteo source (7-day forecast)".into());
+    log_lines.push("synthesized open_meteo source (7-day forecast, radar on)".into());
+
+    // ----- Default-on regional keyless authority -----
+    // A no-hardware user should boot with the region's KEYLESS authority live,
+    // zero clicks: NWS in the US, Met.no in Europe/the Nordics (nothing extra
+    // elsewhere, where Open-Meteo is the sole keyless cloud). Both are keyless
+    // (the helper auto-fills the required user_agent) and land at their region
+    // rank (70, above the Open-Meteo backstop at 50) with the slow-cadence
+    // freshness window, via the same region helpers Open-Meteo used above. We
+    // gate strictly on the pre-Open-Meteo emptiness so a hardware/HA install is
+    // never handed an unsolicited cloud; a real live LAN station still outranks
+    // these (priority 100, live_current=true vs these false). NEVER a keyed
+    // source (Pirate/OpenWeather/WeatherKit): those stay operator opt-in.
+    if no_local_sources {
+        for entry in crate::config::region::region_keyless_authority_entries(om_lat, om_lon) {
+            log_lines.push(format!(
+                "synthesized region keyless authority source '{}' (priority {}, enabled {})",
+                entry.id, entry.priority, entry.enabled
+            ));
+            cfg.sources.push(entry);
+        }
+    }
 
     // ----- Optional HA passthrough source + service-call controller -----
     let ha_url = env::var("HA_URL").ok();
@@ -82,6 +123,7 @@ pub fn synthesize() -> Config {
                 base_url: url.clone(),
                 bearer_token: token.clone(),
                 field_map: Default::default(),
+                soil_zone_map: Default::default(),
             }),
         });
         // Default controller routes to HA service calls (matches v0.1).
@@ -201,6 +243,34 @@ pub fn synthesize() -> Config {
     cfg
 }
 
+/// Decide whether to synthesize the passive Tempest UDP listener from the
+/// TEMPEST_* env signals, pure (no env reads) so it is testable in isolation.
+///
+/// The legacy v0.1 image always opened a Tempest listener, which is wrong for a
+/// no-hardware install: a passive socket nothing transmits on drives a global
+/// "tempest_lan offline" health banner ~60s after boot. So the listener is
+/// synthesized ONLY when the operator explicitly opted into a Tempest (either a
+/// bind address or a hub serial). `None` => cloud-only (Open-Meteo) install with
+/// no phantom tempest_lan.
+fn tempest_lan_entry(
+    tempest_bind: Option<String>,
+    tempest_hub: Option<String>,
+) -> Option<SourceEntry> {
+    if tempest_bind.is_none() && tempest_hub.is_none() {
+        return None;
+    }
+    Some(SourceEntry {
+        id: "tempest_lan".into(),
+        priority: 100,
+        max_age_s: None,
+        enabled: true,
+        source: SourceKind::TempestUdp(TempestUdpConfig {
+            bind_addr: tempest_bind.unwrap_or_else(|| "0.0.0.0:50222".into()),
+            hub_serial: tempest_hub,
+        }),
+    })
+}
+
 fn build_llm_config() -> LlmConfig {
     let provider = env::var("LLM_PROVIDER").unwrap_or_else(|_| "auto".into());
     let timeout_s = env::var("LLM_TIMEOUT_S")
@@ -288,4 +358,122 @@ fn seed_legacy_zones(cfg: &mut Config) {
             ..turf("Back Yard Shrubs", 4)
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Protects the phantom-Tempest fix: a no-hardware (no TEMPEST_*) install must
+    // be cloud-only (Open-Meteo) with NO passive tempest_lan listener (which would
+    // otherwise drive a false "offline" health banner), and a TEMPEST_* signal must
+    // still synthesize a Tempest source. The decision is tested through the pure
+    // `tempest_lan_entry` helper so it never mutates the shared process env (which
+    // would race other tests reading TEMPEST_* / the synthesize fallback).
+
+    #[test]
+    fn no_tempest_env_synthesizes_no_tempest_lan() {
+        // No bind addr, no hub serial => no Tempest source (cloud-only install).
+        assert!(
+            tempest_lan_entry(None, None).is_none(),
+            "a no-hardware install must NOT synthesize a phantom tempest_lan"
+        );
+    }
+
+    #[test]
+    fn tempest_bind_addr_synthesizes_a_tempest_source() {
+        // TEMPEST_BIND_ADDR set => a tempest_lan UDP source IS synthesized.
+        let entry =
+            tempest_lan_entry(Some("0.0.0.0:50222".into()), None).expect("bind addr -> tempest");
+        assert_eq!(entry.id, "tempest_lan");
+        match entry.source {
+            SourceKind::TempestUdp(c) => {
+                assert_eq!(c.bind_addr, "0.0.0.0:50222");
+                assert!(c.hub_serial.is_none());
+            }
+            other => panic!("expected a TempestUdp source, got {other:?}"),
+        }
+        // A hub serial alone (no bind) also opts in, defaulting the bind addr.
+        let by_hub =
+            tempest_lan_entry(None, Some("HB-00012345".into())).expect("hub serial -> tempest");
+        match by_hub.source {
+            SourceKind::TempestUdp(c) => {
+                assert_eq!(c.bind_addr, "0.0.0.0:50222");
+                assert_eq!(c.hub_serial.as_deref(), Some("HB-00012345"));
+            }
+            other => panic!("expected a TempestUdp source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn synthesized_open_meteo_carries_region_aware_priority_and_widened_max_age() {
+        // The synthesized Open-Meteo backstop must seed its merge priority +
+        // freshness window from the region helper: Open-Meteo always ranks 50,
+        // and its ~1800s refresh cadence widens max_age to ~2100 so a per-field
+        // pin survives a full refresh cycle (the wind-pin freshness mismatch).
+        let cfg = synthesize();
+        let om = cfg
+            .sources
+            .iter()
+            .find(|s| s.id == "open_meteo")
+            .expect("synthesize must include open_meteo");
+        assert_eq!(
+            om.priority, 50,
+            "Open-Meteo must seed the 50-priority keyless backstop rank"
+        );
+        assert_eq!(
+            om.max_age_s,
+            Some(crate::config::region::MAX_AGE_SLOW_CADENCE_S),
+            "the 1800s-cadence Open-Meteo source must widen max_age (~2100) so a pin outlives the refresh"
+        );
+        assert!(om.enabled, "the synthesized Open-Meteo backstop is enabled");
+    }
+
+    #[test]
+    fn synthesize_always_includes_open_meteo_and_no_unsignaled_tempest() {
+        // The Open-Meteo forecast source is pushed unconditionally, so any
+        // synthesized config (regardless of ambient env) carries it. And because
+        // this process sets no TEMPEST_* in the test env, synthesize() must not
+        // produce a tempest_lan here either.
+        let cfg = synthesize();
+        assert!(
+            cfg.sources.iter().any(|s| s.id == "open_meteo"),
+            "env_compat must always synthesize a cloud-first open_meteo source"
+        );
+        assert!(
+            !cfg.sources.iter().any(|s| s.id == "tempest_lan"),
+            "with no TEMPEST_* env, synthesize must not produce a phantom tempest_lan"
+        );
+    }
+
+    #[test]
+    fn synthesize_at_default_location_adds_no_regional_authority() {
+        // With no WEATHER_APP_LAT/LON in the test env the location stays the
+        // Config::default 0,0, which resolves to the Global region: no keyless
+        // regional authority covers it, so synthesize() must add Open-Meteo only
+        // and NEVER a keyed source. The US/Nordic synthesis branches are covered
+        // race-free by region::region_keyless_authority_entries unit tests (this
+        // test must not mutate the shared process env to set a location). NWS /
+        // Met.no must not appear at 0,0.
+        let cfg = synthesize();
+        assert!(
+            cfg.sources.iter().any(|s| s.id == "open_meteo"),
+            "the always-on Open-Meteo backstop is present"
+        );
+        assert!(
+            !cfg.sources.iter().any(|s| s.id == "nws"),
+            "0,0 is Global: no NWS authority is synthesized"
+        );
+        assert!(
+            !cfg.sources.iter().any(|s| s.id == "met_norway"),
+            "0,0 is Global: no Met.no authority is synthesized"
+        );
+        // And never a keyed provider regardless of region.
+        assert!(
+            !cfg.sources
+                .iter()
+                .any(|s| s.id == "pirate_weather" || s.id == "openweather"),
+            "no keyed source is ever auto-enabled"
+        );
+    }
 }

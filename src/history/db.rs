@@ -28,6 +28,10 @@ impl HistoryDb {
             Connection::open(&path).with_context(|| format!("open sqlite at {path:?}"))?;
         conn.pragma_update(None, "journal_mode", "WAL").ok();
         conn.pragma_update(None, "synchronous", "NORMAL").ok();
+        // Wait out a concurrent writer instead of failing the statement. The
+        // refresher + the chatty Ecowitt/webhook ingest contend on this file;
+        // without a busy timeout a SQLITE_BUSY drops a reading or a decision row.
+        conn.busy_timeout(std::time::Duration::from_secs(5)).ok();
         // Apply v2 migrations. This evolves a legacy v0.1 database to
         // the v2 schema in-place (runs gets zone_slug etc; decisions
         // gets renamed to verdict_history) and creates fresh tables on
@@ -189,9 +193,18 @@ pub async fn window(
 /// the default keeps everything forever (long-trend friendly).
 pub async fn prune_older_than(conn: Arc<Mutex<Connection>>, cutoff_epoch: i64) -> Result<usize> {
     tokio::task::spawn_blocking(move || -> Result<usize> {
-        let conn = conn.blocking_lock();
-        let a = conn.execute("DELETE FROM runs WHERE start_epoch < ?1", [cutoff_epoch])?;
-        let b = conn.execute("DELETE FROM decisions WHERE epoch < ?1", [cutoff_epoch])?;
+        let mut conn = conn.blocking_lock();
+        // One transaction so a partial prune can't leave runs and decisions out
+        // of step. The decisions table was renamed to verdict_history in the v2
+        // migration; pruning the old name silently errored and let the decision
+        // history grow unbounded.
+        let tx = conn.transaction()?;
+        let a = tx.execute("DELETE FROM runs WHERE start_epoch < ?1", [cutoff_epoch])?;
+        let b = tx.execute(
+            "DELETE FROM verdict_history WHERE epoch < ?1",
+            [cutoff_epoch],
+        )?;
+        tx.commit()?;
         Ok(a + b)
     })
     .await
@@ -216,6 +229,7 @@ mod tests {
             verdict: "skip".into(),
             reason: "Already wet (0.10\" today)".into(),
             degraded: false,
+            reason_code: "already_wet".into(),
             rules: vec![RuleEval {
                 id: "already_wet".into(),
                 label: "Already wet today".into(),
@@ -223,6 +237,9 @@ mod tests {
                 detail: "0.10\" today vs 0.05\" floor".into(),
                 outcome: "fired".into(),
                 verdict: Some("skip".into()),
+                margin_label: None,
+                // P1 additive operands; not exercised by this roundtrip fixture.
+                ..Default::default()
             }],
         };
         let rec = DecisionRecord {
@@ -259,5 +276,43 @@ mod tests {
             .await
             .unwrap();
         assert!(w.decisions[0].trace.is_none());
+    }
+
+    // Regression: prune must target verdict_history (renamed from decisions in
+    // the v2 migration). The pre-fix code did DELETE FROM decisions, which errors
+    // on a migrated DB and let history grow forever. This test fails on that code.
+    #[tokio::test]
+    async fn prune_trims_verdict_history_after_migration() {
+        let db = mem();
+        let old = DecisionRecord {
+            epoch: 1_000_000_000,
+            verdict: "skip".into(),
+            reason: "old".into(),
+            trace: None,
+        };
+        let recent = DecisionRecord {
+            epoch: 1_900_000_000,
+            verdict: "run".into(),
+            reason: "recent".into(),
+            trace: None,
+        };
+        record_decision(db.clone(), old, String::new())
+            .await
+            .unwrap();
+        record_decision(db.clone(), recent, String::new())
+            .await
+            .unwrap();
+
+        let removed = prune_older_than(db.clone(), 1_500_000_000).await.unwrap();
+        assert_eq!(
+            removed, 1,
+            "exactly the one stale verdict_history row pruned"
+        );
+
+        let w = decisions_window(db.clone(), 0, 2_000_000_000)
+            .await
+            .unwrap();
+        assert_eq!(w.decisions.len(), 1);
+        assert_eq!(w.decisions[0].verdict, "run");
     }
 }

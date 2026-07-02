@@ -16,7 +16,7 @@ use crate::ha::IrrigationStore;
 
 /// Manifest schema version. SemVer-style. Bumped on shape-breaking
 /// changes only; additive fields use the same major.
-pub const MANIFEST_SCHEMA_VERSION: &str = "1.1";
+pub const MANIFEST_SCHEMA_VERSION: &str = "1.2";
 
 /// One HA entity descriptor. HACS reads `platform` + `id` + `name` +
 /// `snapshot`/`path` to know where to fetch state from the coordinator,
@@ -89,12 +89,23 @@ async fn manifest(State(store): State<Arc<IrrigationStore>>) -> Json<Manifest> {
     let snap = store.snapshot();
     let mut entities = Vec::new();
 
-    push_tempest_weather(&mut entities);
-    push_irrigation_meta(&mut entities);
-    push_thresholds(&mut entities);
+    // A live local station (Tempest serial present) gates the station-only
+    // scalars (battery) so a cloud-only / Ecowitt install does not publish a
+    // phantom 0% device_class=battery sensor. Configured irrigation gates the
+    // irrigation entities so a weather-only install does not get phantom
+    // verdict/override/threshold sliders that error on write. The irrigation
+    // snapshot carries only zones (no controller list); a configured controller
+    // always yields at least one zone, so non-empty zones is the presence test.
+    let has_station = !snap.station_serial.is_empty();
+    let has_irrigation = !snap.zones.is_empty();
+
+    push_tempest_weather(&mut entities, has_station);
+    push_irrigation_meta(&mut entities, has_irrigation);
+    push_thresholds(&mut entities, has_irrigation);
     push_forecast(&mut entities);
+    push_provenance_and_flow(&mut entities);
     push_zone_entities(&mut entities, &snap.zones);
-    push_diagnostics(&mut entities);
+    push_diagnostics(&mut entities, has_irrigation);
 
     Json(Manifest {
         schema_version: MANIFEST_SCHEMA_VERSION,
@@ -105,7 +116,7 @@ async fn manifest(State(store): State<Arc<IrrigationStore>>) -> Json<Manifest> {
 // ─────────────────────────────────────────────────────────────────────
 // Tempest weather scalars (snapshot=tempest)
 // ─────────────────────────────────────────────────────────────────────
-fn push_tempest_weather(out: &mut Vec<EntityDescriptor>) {
+fn push_tempest_weather(out: &mut Vec<EntityDescriptor>, has_station: bool) {
     let defs: &[(
         &str,
         &str,
@@ -278,15 +289,6 @@ fn push_tempest_weather(out: &mut Vec<EntityDescriptor>) {
             Some("measurement"),
             Some("mdi:flash"),
         ),
-        (
-            "battery_pct",
-            "Tempest battery",
-            "battery_pct",
-            Some("%"),
-            Some("battery"),
-            Some("measurement"),
-            None,
-        ),
     ];
     for (id, name, field, unit, device_class, state_class, icon) in defs {
         out.push(EntityDescriptor {
@@ -302,12 +304,39 @@ fn push_tempest_weather(out: &mut Vec<EntityDescriptor>) {
             zone_slug: None,
         });
     }
+    // Battery is a Tempest-specific live-station scalar. On a cloud-only or
+    // Ecowitt/Davis/MQTT install there is no Tempest battery: publishing it
+    // surfaced a phantom device_class=battery sensor reading 0% in HA (a fake
+    // "dead battery"). Gate it on a live local station actually being present
+    // (non-empty Tempest serial). When present, label it source-neutrally as
+    // "Station battery" rather than hardcoding "Tempest".
+    if has_station {
+        out.push(EntityDescriptor {
+            platform: "sensor",
+            id: "battery_pct".to_string(),
+            name: "Station battery".to_string(),
+            snapshot: "tempest",
+            path: vec!["battery_pct".to_string()],
+            unit: Some("%"),
+            device_class: Some("battery"),
+            state_class: Some("measurement"),
+            icon: None,
+            zone_slug: None,
+        });
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
 // Irrigation top-level (snapshot=irrigation)
 // ─────────────────────────────────────────────────────────────────────
-fn push_irrigation_meta(out: &mut Vec<EntityDescriptor>) {
+fn push_irrigation_meta(out: &mut Vec<EntityDescriptor>, has_irrigation: bool) {
+    // A weather-only install (no controllers, no zones) has no irrigation to
+    // verdict, override, or threshold. Publishing these surfaced phantom
+    // verdict/override sensors and number sliders in HA that error on write
+    // (nothing to actuate). Gate them on irrigation actually being configured.
+    if !has_irrigation {
+        return;
+    }
     out.push(EntityDescriptor {
         platform: "sensor",
         id: "irrigation_verdict".into(),
@@ -376,7 +405,13 @@ fn push_irrigation_meta(out: &mut Vec<EntityDescriptor>) {
 // ─────────────────────────────────────────────────────────────────────
 // User-tunable thresholds (number entities, action: set_threshold)
 // ─────────────────────────────────────────────────────────────────────
-fn push_thresholds(out: &mut Vec<EntityDescriptor>) {
+fn push_thresholds(out: &mut Vec<EntityDescriptor>, has_irrigation: bool) {
+    // Threshold number entities (max wind / min temp / rain skip) only mean
+    // something when there is irrigation to skip. A weather-only install gets
+    // none, so HA does not render sliders that write to a no-op skip-check.
+    if !has_irrigation {
+        return;
+    }
     let defs: &[(&str, &str, &str, Option<&'static str>, Option<&'static str>)] = &[
         (
             "max_wind_mph",
@@ -469,6 +504,81 @@ fn push_forecast(out: &mut Vec<EntityDescriptor>) {
         device_class: Some("wind_speed"),
         state_class: Some("measurement"),
         icon: Some("mdi:weather-windy"),
+        zone_slug: None,
+    });
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Source provenance + generalized flow/leaf readings (Phase D alignment).
+// These ride the existing snapshots, so the manifest-driven HACS integration
+// surfaces them with no Python change. Provenance answers "which source drives
+// my conditions/forecast"; flow + leaf-wetness expose the generalized readings
+// that any source can now provide.
+// ─────────────────────────────────────────────────────────────────────
+fn push_provenance_and_flow(out: &mut Vec<EntityDescriptor>) {
+    // Which source currently drives current conditions (a string sensor).
+    out.push(EntityDescriptor {
+        platform: "sensor",
+        id: "conditions_source".into(),
+        name: "Conditions source".into(),
+        snapshot: "tempest",
+        path: vec!["source_label".into()],
+        unit: None,
+        device_class: None,
+        state_class: None,
+        icon: Some("mdi:transit-connection-variant"),
+        zone_slug: None,
+    });
+    // Which source currently drives the forecast.
+    out.push(EntityDescriptor {
+        platform: "sensor",
+        id: "forecast_source".into(),
+        name: "Forecast source".into(),
+        snapshot: "irrigation",
+        path: vec!["forecast".into(), "forecast_source_label".into()],
+        unit: None,
+        device_class: None,
+        state_class: None,
+        icon: Some("mdi:weather-partly-cloudy"),
+        zone_slug: None,
+    });
+    // Flow rate + cumulative flow today (a flow meter on a controller or a
+    // standalone pulse meter). 0 when no flow source is configured.
+    out.push(EntityDescriptor {
+        platform: "sensor",
+        id: "flow_gpm".into(),
+        name: "Flow rate".into(),
+        snapshot: "tempest",
+        path: vec!["flow_gpm".into()],
+        unit: Some("gal/min"),
+        device_class: Some("volume_flow_rate"),
+        state_class: Some("measurement"),
+        icon: Some("mdi:water-pump"),
+        zone_slug: None,
+    });
+    out.push(EntityDescriptor {
+        platform: "sensor",
+        id: "flow_total_gal_today".into(),
+        name: "Flow total today".into(),
+        snapshot: "tempest",
+        path: vec!["flow_total_gal_today".into()],
+        unit: Some("gal"),
+        device_class: Some("water"),
+        state_class: Some("total_increasing"),
+        icon: Some("mdi:water"),
+        zone_slug: None,
+    });
+    // Leaf wetness (Davis WLL soil/leaf, Ecowitt WH35, agronomic probes).
+    out.push(EntityDescriptor {
+        platform: "sensor",
+        id: "leaf_wetness_pct".into(),
+        name: "Leaf wetness".into(),
+        snapshot: "tempest",
+        path: vec!["leaf_wetness_pct".into()],
+        unit: Some("%"),
+        device_class: None,
+        state_class: Some("measurement"),
+        icon: Some("mdi:leaf"),
         zone_slug: None,
     });
 }
@@ -623,7 +733,9 @@ fn push_zone_entities(out: &mut Vec<EntityDescriptor>, zones: &[crate::ha::snaps
 // ─────────────────────────────────────────────────────────────────────
 // Diagnostic / connectivity binary sensors
 // ─────────────────────────────────────────────────────────────────────
-fn push_diagnostics(out: &mut Vec<EntityDescriptor>) {
+fn push_diagnostics(out: &mut Vec<EntityDescriptor>, has_irrigation: bool) {
+    // HA connectivity is relevant to any HA-integrated install (weather-only
+    // included), so it is always published.
     out.push(EntityDescriptor {
         platform: "binary_sensor",
         id: "ha_reachable".into(),
@@ -636,18 +748,24 @@ fn push_diagnostics(out: &mut Vec<EntityDescriptor>) {
         icon: None,
         zone_slug: None,
     });
-    out.push(EntityDescriptor {
-        platform: "binary_sensor",
-        id: "iu_suspended".into(),
-        name: "Irrigation suspended".into(),
-        snapshot: "irrigation",
-        path: vec!["iu_suspended".into()],
-        unit: None,
-        device_class: Some("problem"),
-        state_class: None,
-        icon: None,
-        zone_slug: None,
-    });
+    // "Irrigation suspended" tracks the IU/skip-check suspension state, which
+    // only exists when irrigation is configured. On a weather-only install it
+    // was a permanently-OFF device_class=problem sensor (a phantom that can
+    // never trip). Gate it on irrigation actually being present.
+    if has_irrigation {
+        out.push(EntityDescriptor {
+            platform: "binary_sensor",
+            id: "iu_suspended".into(),
+            name: "Irrigation suspended".into(),
+            snapshot: "irrigation",
+            path: vec!["iu_suspended".into()],
+            unit: None,
+            device_class: Some("problem"),
+            state_class: None,
+            icon: None,
+            zone_slug: None,
+        });
+    }
 }
 
 #[cfg(test)]
@@ -663,7 +781,7 @@ mod tests {
     #[test]
     fn weather_entities_present() {
         let mut out = Vec::new();
-        push_tempest_weather(&mut out);
+        push_tempest_weather(&mut out, true);
         // Minimum set HACS needs to render a weather entity
         let ids: Vec<&str> = out.iter().map(|e| e.id.as_str()).collect();
         for required in ["air_temp_f", "rh_pct", "wind_avg_mph", "pressure_inhg"] {
@@ -672,9 +790,54 @@ mod tests {
     }
 
     #[test]
+    fn battery_gated_on_station_presence() {
+        // A live station present -> the (source-neutral) battery sensor is
+        // published; a cloud-only / Ecowitt install (no Tempest serial) omits
+        // it so HA never shows a phantom 0% battery.
+        let mut with_station = Vec::new();
+        push_tempest_weather(&mut with_station, true);
+        assert!(with_station.iter().any(|e| e.id == "battery_pct"));
+
+        let mut cloud_only = Vec::new();
+        push_tempest_weather(&mut cloud_only, false);
+        assert!(!cloud_only.iter().any(|e| e.id == "battery_pct"));
+    }
+
+    #[test]
+    fn irrigation_entities_gated_on_irrigation_present() {
+        // A weather-only install (no zones/controllers) must not publish the
+        // irrigation verdict/override sensors, threshold sliders, or the
+        // IU-suspended problem sensor.
+        let mut weather_only = Vec::new();
+        push_irrigation_meta(&mut weather_only, false);
+        push_thresholds(&mut weather_only, false);
+        push_diagnostics(&mut weather_only, false);
+        let ids: Vec<&str> = weather_only.iter().map(|e| e.id.as_str()).collect();
+        assert!(!ids.contains(&"irrigation_verdict"));
+        assert!(!ids.contains(&"global_override"));
+        assert!(!ids.contains(&"max_wind_mph"));
+        assert!(!ids.contains(&"iu_suspended"));
+        // HA connectivity is always published, irrigation or not.
+        assert!(ids.contains(&"ha_reachable"));
+
+        // With irrigation configured they all return.
+        let mut with_irrigation = Vec::new();
+        push_irrigation_meta(&mut with_irrigation, true);
+        push_thresholds(&mut with_irrigation, true);
+        push_diagnostics(&mut with_irrigation, true);
+        let ids: Vec<&str> = with_irrigation.iter().map(|e| e.id.as_str()).collect();
+        for required in ["irrigation_verdict", "max_wind_mph", "iu_suspended"] {
+            assert!(
+                ids.contains(&required),
+                "missing irrigation entity: {required}"
+            );
+        }
+    }
+
+    #[test]
     fn diagnostics_are_binary_sensors() {
         let mut out = Vec::new();
-        push_diagnostics(&mut out);
+        push_diagnostics(&mut out, true);
         for e in &out {
             assert_eq!(e.platform, "binary_sensor");
         }

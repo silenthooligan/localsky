@@ -21,7 +21,7 @@ pub mod hash;
 pub mod middleware;
 pub mod store;
 
-pub use middleware::{AuthRuntime, RequestIdentity};
+pub use middleware::{AuthRuntime, NoStoreGate, RequestIdentity};
 pub use store::AuthStore;
 
 /// Cookie name for browser sessions.

@@ -8,15 +8,25 @@
 use leptos::prelude::*;
 
 use crate::components::settings_ui::SettingsResult;
-use crate::components::ui::{FormField, HelpHint, Panel};
+use crate::components::ui::{Button, FormField, Panel};
 
 #[component]
 pub fn SettingsLocation() -> impl IntoView {
     let lat = RwSignal::new(0.0f64);
     let lon = RwSignal::new(0.0f64);
     let elevation = RwSignal::new(0.0f64);
+    // True once the user types in the elevation field, so the
+    // location-driven auto-fill stops clobbering their manual value.
+    let elevation_user_edited = RwSignal::new(false);
     let tz = RwSignal::new(String::new());
     let display_name = RwSignal::new(String::new());
+
+    // Address search (mirrors the setup wizard's LocationStep) so editing your
+    // location later is as easy as setting it the first time -- no decimal
+    // coordinates required.
+    let query = RwSignal::new(String::new());
+    let searching = RwSignal::new(false);
+    let results: RwSignal<Vec<(String, f64, f64)>> = RwSignal::new(Vec::new());
 
     let loaded = RwSignal::new(false);
     let saving = RwSignal::new(false);
@@ -32,6 +42,11 @@ pub fn SettingsLocation() -> impl IntoView {
                     lat.set(cfg.lat);
                     lon.set(cfg.lon);
                     elevation.set(cfg.elevation);
+                    // A persisted non-zero elevation is treated as a manual
+                    // value: don't auto-overwrite it on the next location set.
+                    if cfg.elevation != 0.0 {
+                        elevation_user_edited.set(true);
+                    }
                     tz.set(cfg.tz);
                     display_name.set(cfg.display_name);
                     loaded.set(true);
@@ -100,8 +115,129 @@ pub fn SettingsLocation() -> impl IntoView {
         }
     };
 
+    // Fill the timezone from the chosen lat/lon (offline tz lookup).
+    let suggest_tz = move || {
+        #[cfg(feature = "hydrate")]
+        {
+            let la = lat.get_untracked();
+            let lo = lon.get_untracked();
+            if la == 0.0 && lo == 0.0 {
+                return;
+            }
+            wasm_bindgen_futures::spawn_local(async move {
+                let url = format!("/api/v1/location/timezone?lat={la}&lon={lo}");
+                if let Ok(resp) = gloo_net::http::Request::get(&url).send().await {
+                    if let Ok(v) = resp.json::<serde_json::Value>().await {
+                        if let Some(name) = v.get("timezone").and_then(|t| t.as_str()) {
+                            tz.set(name.to_string());
+                        }
+                    }
+                }
+            });
+        }
+    };
+
+    // Prefill the elevation from the chosen lat/lon (Open-Meteo). Meters in ->
+    // meters stored (elevation_m is meters), so no unit conversion. Skips when
+    // the user has manually edited the field. Quiet failure: stays editable.
+    let suggest_elevation = move || {
+        #[cfg(feature = "hydrate")]
+        {
+            let la = lat.get_untracked();
+            let lo = lon.get_untracked();
+            if (la == 0.0 && lo == 0.0) || elevation_user_edited.get_untracked() {
+                return;
+            }
+            wasm_bindgen_futures::spawn_local(async move {
+                let url = format!("/api/v1/location/elevation?lat={la}&lon={lo}");
+                if let Ok(resp) = gloo_net::http::Request::get(&url).send().await {
+                    if resp.ok() {
+                        if let Ok(v) = resp.json::<serde_json::Value>().await {
+                            if let Some(m) = v.get("elevation_m").and_then(|e| e.as_f64()) {
+                                if !elevation_user_edited.get_untracked() {
+                                    elevation.set(m.round());
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    };
+
+    // Geocode the typed address via the Nominatim proxy.
+    let on_search = move |_: ()| {
+        let q = query.get_untracked().trim().to_string();
+        if q.is_empty() || searching.get_untracked() {
+            return;
+        }
+        searching.set(true);
+        results.set(Vec::new());
+        #[cfg(feature = "hydrate")]
+        wasm_bindgen_futures::spawn_local(async move {
+            let url = format!("/api/wizard/geocode?q={}", urlencoding_lite(&q));
+            if let Ok(resp) = gloo_net::http::Request::get(&url).send().await {
+                if let Ok(v) = resp.json::<serde_json::Value>().await {
+                    let list = v
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|r| {
+                                    Some((
+                                        r.get("display_name")?.as_str()?.to_string(),
+                                        r.get("lat")?.as_str()?.parse::<f64>().ok()?,
+                                        r.get("lon")?.as_str()?.parse::<f64>().ok()?,
+                                    ))
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    results.set(list);
+                }
+            }
+            searching.set(false);
+        });
+        #[cfg(not(feature = "hydrate"))]
+        {
+            let _ = q;
+            searching.set(false);
+        }
+    };
+
+    let results_view = move || {
+        let list = results.get();
+        if list.is_empty() {
+            return ().into_any();
+        }
+        list.into_iter()
+            .map(|(name, la, lo)| {
+                view! {
+                    <button
+                        type="button"
+                        class="geo-result"
+                        on:click=move |_| {
+                            lat.set(la);
+                            lon.set(lo);
+                            results.set(Vec::new());
+                            // A freshly chosen place is a new location:
+                            // re-derive its elevation, overriding any prior
+                            // auto-fill (the user can still edit after).
+                            elevation_user_edited.set(false);
+                            suggest_tz();
+                            suggest_elevation();
+                        }
+                    >
+                        <span class="geo-result__name">{name}</span>
+                        <span class="geo-result__coords">{format!("{la:.4}, {lo:.4}")}</span>
+                    </button>
+                }
+            })
+            .collect_view()
+            .into_any()
+    };
+
     view! {
-        <main id="main-content" class="settings-page">
+        <div class="settings-page">
             <header class="settings-page__header">
                 <a class="settings-page__back" href="/settings">"← Settings"</a>
                 <h1 class="settings-page__title">"Location"</h1>
@@ -113,8 +249,31 @@ pub fn SettingsLocation() -> impl IntoView {
                 </p>
             </header>
 
-            <Panel title="Coordinates".to_string()>
-                <HelpHint topic="location"/>
+            <Panel title="Coordinates".to_string() help_topic="location">
+                <FormField
+                    label="Find by address".to_string()
+                    helptext="City, street, or landmark (OpenStreetMap lookup). Picks the coordinates + timezone for you.".to_string()
+                    error=Signal::derive(|| None::<String>)
+                >
+                    <div class="geo-search">
+                        <input
+                            type="text"
+                            class="ui-input"
+                            placeholder="e.g. Springfield, Sydney, or 51.5, -0.1"
+                            prop:value=move || query.get()
+                            on:input=move |ev| query.set(event_target_value(&ev))
+                            on:keydown=move |ev| if ev.key() == "Enter" { on_search(()) }
+                        />
+                        <Button
+                            variant="ghost"
+                            disabled=Signal::derive(move || searching.get())
+                            on_click=Callback::new(move |_| on_search(()))
+                        >
+                            {move || if searching.get() { "Searching…" } else { "Search" }}
+                        </Button>
+                    </div>
+                </FormField>
+                <div class="geo-results">{results_view}</div>
                 <div class="grid settings-field-grid">
                 <FormField
                     label="Latitude".to_string()
@@ -154,7 +313,7 @@ pub fn SettingsLocation() -> impl IntoView {
 
                 <FormField
                     label="Elevation (m)".to_string()
-                    helptext="Optional. Used by the FAO-56 Penman-Monteith net-radiation term.".to_string()
+                    helptext="Auto-filled from your location; edit to override. Used by the FAO-56 Penman-Monteith net-radiation term.".to_string()
                     error=Signal::derive(|| None::<String>)
                 >
                     <input
@@ -165,6 +324,7 @@ pub fn SettingsLocation() -> impl IntoView {
                         on:input=move |ev| {
                             if let Ok(v) = event_target_value(&ev).parse::<f64>() {
                                 elevation.set(v);
+                                elevation_user_edited.set(true);
                             }
                         }
                     />
@@ -172,8 +332,7 @@ pub fn SettingsLocation() -> impl IntoView {
                 </div>
             </Panel>
 
-            <Panel title="Identity".to_string()>
-                <HelpHint topic="location"/>
+            <Panel title="Identity".to_string() help_topic="location">
                 <div class="grid settings-field-grid">
                 <FormField
                     label="Deployment name".to_string()
@@ -206,14 +365,13 @@ pub fn SettingsLocation() -> impl IntoView {
             </Panel>
 
             <div class="settings-actions">
-                <button
-                    type="button"
-                    class="setup-footer__btn setup-footer__btn--primary"
-                    disabled=move || !can_save() || saving.get()
-                    on:click=on_save
+                <Button
+                    variant="primary"
+                    disabled=Signal::derive(move || !can_save() || saving.get())
+                    on_click=Callback::new(on_save)
                 >
                     {move || if saving.get() { "Saving…" } else { "Save changes" }}
-                </button>
+                </Button>
             </div>
 
             <SettingsResult result_msg=result_msg result_ok=result_ok/>
@@ -223,7 +381,7 @@ pub fn SettingsLocation() -> impl IntoView {
                     "Loading current location from /api/config..."
                 </p>
             </Show>
-        </main>
+        </div>
     }
 }
 
@@ -318,4 +476,20 @@ async fn patch_location(d: LocationDraft) -> Result<(), String> {
         return Err(format!("HTTP {}: {body}", resp.status()));
     }
     Ok(())
+}
+
+/// Tiny query encoder for the geocode call (space + reserved chars).
+#[cfg(feature = "hydrate")]
+fn urlencoding_lite(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b' ' => out.push('+'),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b',' => {
+                out.push(b as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
 }

@@ -9,7 +9,13 @@
 use leptos::prelude::*;
 
 use crate::components::setup::shell::{next_step_href, prev_step_href, SetupFooter};
-use crate::components::ui::{FormField, HelpHint};
+use crate::components::ui::{Button, FormField, HelpHint};
+use crate::components::units_fmt::use_unit_prefs;
+
+/// Meters per foot. Elevation is stored in meters (Open-Meteo and the
+/// elevation_m config field are both meters) but shown/entered in the user's
+/// selected length unit, so imperial users never type or read a metric value.
+const M_PER_FT: f64 = 0.3048;
 
 #[cfg(feature = "hydrate")]
 async fn fetch_draft() -> Option<serde_json::Value> {
@@ -36,10 +42,27 @@ async fn save_draft(draft: serde_json::Value) -> Result<(), String> {
 
 #[component]
 pub fn LocationStep() -> impl IntoView {
-    let lat = RwSignal::new(0.0f64);
-    let lon = RwSignal::new(0.0f64);
-    let elevation = RwSignal::new(0.0f64);
+    // Option-backed so an unset field renders as an EMPTY placeholder, not a
+    // real-looking literal "0" (which read as a filled-in value for the single
+    // mandatory field). None => placeholder; Some(v) => the entered value.
+    let lat = RwSignal::new(Option::<f64>::None);
+    let lon = RwSignal::new(Option::<f64>::None);
+    // Elevation is stored in METERS (config + Open-Meteo are meters) but shown
+    // and entered in the user's selected length unit. None => empty placeholder.
+    let elevation_m = RwSignal::new(Option::<f64>::None);
+    // True once the user has typed in the elevation field, so the
+    // location-driven auto-fill stops clobbering their manual value.
+    let elevation_user_edited = RwSignal::new(false);
     let tz = RwSignal::new(String::new());
+
+    // Length-unit preference: imperial shows/accepts feet, metric meters. The
+    // elevation field always stores meters internally regardless.
+    let prefs = use_unit_prefs();
+    let elev_metric = move || prefs.get().distance_metric;
+    let elev_unit = move || if elev_metric() { "m" } else { "ft" };
+    // Meters (stored) -> the displayed unit, and back.
+    let m_to_display = move |m: f64| if elev_metric() { m } else { m / M_PER_FT };
+    let display_to_m = move |v: f64| if elev_metric() { v } else { v * M_PER_FT };
 
     let draft = RwSignal::new(serde_json::Value::Null);
     let loaded = RwSignal::new(false);
@@ -58,13 +81,22 @@ pub fn LocationStep() -> impl IntoView {
                     .and_then(|c| c.get("deployment"))
                     .and_then(|dep| dep.get("location"))
                 {
-                    lat.set(loc.get("lat").and_then(|v| v.as_f64()).unwrap_or(0.0));
-                    lon.set(loc.get("lon").and_then(|v| v.as_f64()).unwrap_or(0.0));
-                    elevation.set(
-                        loc.get("elevation_m")
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(0.0),
-                    );
+                    // Treat a persisted 0,0 (the null-island default a blank
+                    // draft carries) as "unset" so the field shows its empty
+                    // placeholder rather than a real-looking "0".
+                    let plat = loc.get("lat").and_then(|v| v.as_f64());
+                    let plon = loc.get("lon").and_then(|v| v.as_f64());
+                    if plat != Some(0.0) || plon != Some(0.0) {
+                        lat.set(plat);
+                        lon.set(plon);
+                    }
+                    let elev = loc.get("elevation_m").and_then(|v| v.as_f64());
+                    elevation_m.set(elev);
+                    // A persisted elevation is treated as a manual value: don't
+                    // auto-overwrite it on the next location set.
+                    if elev.is_some() {
+                        elevation_user_edited.set(true);
+                    }
                 }
                 if let Some(t) = d
                     .get("config")
@@ -94,13 +126,15 @@ pub fn LocationStep() -> impl IntoView {
             else {
                 return;
             };
+            // lat/lon persist as numbers (the config schema wants f64); an
+            // unset field writes 0.0 so the draft stays valid, and the Review
+            // step still flags 0,0 as "not set". elevation_m is meters or null.
             let next_loc = serde_json::json!({
-                "lat": lat.get_untracked(),
-                "lon": lon.get_untracked(),
-                "elevation_m": if elevation.get_untracked() == 0.0 {
-                    serde_json::Value::Null
-                } else {
-                    elevation.get_untracked().into()
+                "lat": lat.get_untracked().unwrap_or(0.0),
+                "lon": lon.get_untracked().unwrap_or(0.0),
+                "elevation_m": match elevation_m.get_untracked() {
+                    Some(m) => m.into(),
+                    None => serde_json::Value::Null,
                 },
             });
             let tz_v = tz.get_untracked();
@@ -132,9 +166,10 @@ pub fn LocationStep() -> impl IntoView {
     let suggest_tz = move || {
         #[cfg(feature = "hydrate")]
         {
-            let la = lat.get_untracked();
-            let lo = lon.get_untracked();
-            if (la == 0.0 && lo == 0.0) || !tz.get_untracked().trim().is_empty() {
+            let (Some(la), Some(lo)) = (lat.get_untracked(), lon.get_untracked()) else {
+                return;
+            };
+            if !tz.get_untracked().trim().is_empty() {
                 return;
             }
             leptos::task::spawn_local(async move {
@@ -153,8 +188,45 @@ pub fn LocationStep() -> impl IntoView {
         }
     };
 
+    // Prefill the elevation from lat/lon whenever they change, unless the
+    // user has manually edited the field. The API returns meters and we store
+    // meters (Open-Meteo and the elevation_m config field are both meters);
+    // the display layer converts to the user's unit for the input. Quiet
+    // failure: the field stays editable for manual entry. Mirrors suggest_tz's
+    // lifecycle (fires from commit()).
+    let suggest_elevation = move || {
+        #[cfg(feature = "hydrate")]
+        {
+            let (Some(la), Some(lo)) = (lat.get_untracked(), lon.get_untracked()) else {
+                return;
+            };
+            if elevation_user_edited.get_untracked() {
+                return;
+            }
+            leptos::task::spawn_local(async move {
+                let url = format!("/api/v1/location/elevation?lat={la}&lon={lo}");
+                if let Ok(resp) = gloo_net::http::Request::get(&url).send().await {
+                    if resp.ok() {
+                        if let Ok(v) = resp.json::<serde_json::Value>().await {
+                            if let Some(m) = v.get("elevation_m").and_then(|e| e.as_f64()) {
+                                // Re-check the guard: the user may have typed
+                                // while the request was in flight. The API
+                                // returns meters; store meters (rounded).
+                                if !elevation_user_edited.get_untracked() {
+                                    elevation_m.set(Some(m.round()));
+                                    persist_now();
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    };
+
     let commit = move || {
         suggest_tz();
+        suggest_elevation();
         persist_now();
     };
 
@@ -197,27 +269,34 @@ pub fn LocationStep() -> impl IntoView {
     };
 
     let lat_err: Signal<Option<String>> = Signal::derive(move || {
-        let v = lat.get();
-        if !(-90.0..=90.0).contains(&v) {
-            Some(format!("Latitude must be between -90 and 90 (got {v:.4})"))
-        } else if v == 0.0 && lon.get() == 0.0 {
-            Some("0,0 is the null island default; set your actual location".to_string())
-        } else {
-            None
+        // None (empty field) is not an error message on its own, but it does
+        // gate advancing (can_advance below requires a set value); only flag a
+        // typed value that's out of range, or the null-island 0,0 case.
+        match lat.get() {
+            Some(v) if !(-90.0..=90.0).contains(&v) => {
+                Some(format!("Latitude must be between -90 and 90 (got {v:.4})"))
+            }
+            Some(v) if v == 0.0 && lon.get() == Some(0.0) => {
+                Some("0,0 is the null island default; set your actual location".to_string())
+            }
+            _ => None,
         }
     });
-    let lon_err: Signal<Option<String>> = Signal::derive(move || {
-        let v = lon.get();
-        if !(-180.0..=180.0).contains(&v) {
-            Some(format!(
-                "Longitude must be between -180 and 180 (got {v:.4})"
-            ))
-        } else {
-            None
-        }
+    let lon_err: Signal<Option<String>> = Signal::derive(move || match lon.get() {
+        Some(v) if !(-180.0..=180.0).contains(&v) => Some(format!(
+            "Longitude must be between -180 and 180 (got {v:.4})"
+        )),
+        _ => None,
     });
 
-    let can_advance = move || lat_err.get().is_none() && lon_err.get().is_none();
+    // Location is the single mandatory step: both coordinates must be set (not
+    // the empty placeholder, not the null-island 0,0) and in range.
+    let can_advance = move || {
+        let (Some(la), Some(lo)) = (lat.get(), lon.get()) else {
+            return false;
+        };
+        !(la == 0.0 && lo == 0.0) && lat_err.get().is_none() && lon_err.get().is_none()
+    };
 
     let next_href = move || {
         if can_advance() {
@@ -240,9 +319,13 @@ pub fn LocationStep() -> impl IntoView {
                         type="button"
                         class="geo-result"
                         on:click=move |_| {
-                            lat.set(la);
-                            lon.set(lo);
+                            lat.set(Some(la));
+                            lon.set(Some(lo));
                             results.set(Vec::new());
+                            // A freshly chosen place is a new location:
+                            // re-derive its elevation, overriding any prior
+                            // auto-fill (but the user can still edit after).
+                            elevation_user_edited.set(false);
                             commit();
                         }
                     >
@@ -279,14 +362,13 @@ pub fn LocationStep() -> impl IntoView {
                         on:input=move |ev| query.set(event_target_value(&ev))
                         on:keydown=move |ev| if ev.key() == "Enter" { on_search(()) }
                     />
-                    <button
-                        type="button"
-                        class="setup-footer__btn setup-footer__btn--ghost"
-                        prop:disabled=move || searching.get()
-                        on:click=move |_| on_search(())
+                    <Button
+                        variant="ghost"
+                        disabled=Signal::derive(move || searching.get())
+                        on_click=Callback::new(move |_| on_search(()))
                     >
                         {move || if searching.get() { "Searching…" } else { "Search" }}
-                    </button>
+                    </Button>
                 </div>
             </FormField>
             <div class="geo-results">{results_view}</div>
@@ -300,10 +382,14 @@ pub fn LocationStep() -> impl IntoView {
                     type="number"
                     step="0.0001"
                     class="ui-input"
-                    prop:value=move || lat.get()
+                    placeholder="e.g. 40.7128"
+                    prop:value=move || lat.get().map(|v| v.to_string()).unwrap_or_default()
                     on:input=move |ev| {
-                        if let Ok(v) = event_target_value(&ev).parse::<f64>() {
-                            lat.set(v);
+                        let raw = event_target_value(&ev);
+                        if raw.trim().is_empty() {
+                            lat.set(None);
+                        } else if let Ok(v) = raw.parse::<f64>() {
+                            lat.set(Some(v));
                         }
                     }
                     on:change=move |_| commit()
@@ -319,10 +405,14 @@ pub fn LocationStep() -> impl IntoView {
                     type="number"
                     step="0.0001"
                     class="ui-input"
-                    prop:value=move || lon.get()
+                    placeholder="e.g. -74.0060"
+                    prop:value=move || lon.get().map(|v| v.to_string()).unwrap_or_default()
                     on:input=move |ev| {
-                        if let Ok(v) = event_target_value(&ev).parse::<f64>() {
-                            lon.set(v);
+                        let raw = event_target_value(&ev);
+                        if raw.trim().is_empty() {
+                            lon.set(None);
+                        } else if let Ok(v) = raw.parse::<f64>() {
+                            lon.set(Some(v));
                         }
                     }
                     on:change=move |_| commit()
@@ -330,22 +420,43 @@ pub fn LocationStep() -> impl IntoView {
             </FormField>
 
             <FormField
-                label="Elevation (m)".to_string()
-                helptext="Optional. Used by FAO-56 net-radiation. Leave at 0 for sea level.".to_string()
+                label="Elevation".to_string()
+                helptext="Auto-filled from your location; edit to override. Used by FAO-56 net-radiation.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
-                <input
-                    type="number"
-                    step="1"
-                    class="ui-input"
-                    prop:value=move || elevation.get()
-                    on:input=move |ev| {
-                        if let Ok(v) = event_target_value(&ev).parse::<f64>() {
-                            elevation.set(v);
+                // Unit-suffixed input: the value is shown and entered in your
+                // selected length unit (feet for imperial, meters for metric)
+                // but stored as meters internally. The suffix updates with the
+                // unit preference (it resolves client-side after hydration).
+                <div style="display:flex; align-items:center; gap: var(--space-2)">
+                    <input
+                        type="number"
+                        step="1"
+                        class="ui-input"
+                        style="flex:1"
+                        placeholder=move || if elev_metric() { "meters" } else { "feet" }
+                        prop:value=move || {
+                            // Stored meters -> the displayed unit, rounded for a
+                            // clean field; empty when unset.
+                            elevation_m
+                                .get()
+                                .map(|m| m_to_display(m).round().to_string())
+                                .unwrap_or_default()
                         }
-                    }
-                    on:change=move |_| persist_now()
-                />
+                        on:input=move |ev| {
+                            let raw = event_target_value(&ev);
+                            elevation_user_edited.set(true);
+                            if raw.trim().is_empty() {
+                                elevation_m.set(None);
+                            } else if let Ok(v) = raw.parse::<f64>() {
+                                // Entered in the displayed unit; convert to meters.
+                                elevation_m.set(Some(display_to_m(v)));
+                            }
+                        }
+                        on:change=move |_| persist_now()
+                    />
+                    <span style="color: var(--text-dim); min-width: 1.5rem">{move || elev_unit()}</span>
+                </div>
             </FormField>
 
             <FormField

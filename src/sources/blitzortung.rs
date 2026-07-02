@@ -40,11 +40,14 @@ use std::time::Duration;
 use anyhow::Context;
 use futures::{SinkExt, StreamExt};
 use rand::RngExt;
+use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
 use serde::Deserialize;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, info, warn};
 
-use crate::config::schema::{default_blitzortung_hosts, BlitzortungConfig};
+use crate::config::schema::{
+    default_blitzortung_hosts, BlitzortungConfig, BlitzortungMqtt, BlitzortungTransport,
+};
 use crate::sources::bus_recorder::SourceLastSeen;
 use crate::tempest::packets::{StrikeEvent, STRIKE_SOURCE_BLITZORTUNG};
 use crate::tempest::state::TempestStore;
@@ -130,6 +133,124 @@ pub struct RawStrike {
     pub lon: f64,
 }
 
+/// Parse the three fields LocalSky uses from one decoded strike record.
+///
+/// Fast path: strict serde, which is valid for the `complete` /
+/// `lzw_complete` topics and today's WebSocket frames. Fallback: a
+/// tolerant head extractor for the `core` / `lzw_core` topics, whose
+/// records are NOT valid JSON (`"mdecs":undefined` plus a `"region",N`
+/// comma-for-colon), so serde rejects them. The fallback reads only the
+/// record head, before any `sig[` station array, so a station's own
+/// lat/lon/time can never be captured by mistake, and it parses the raw
+/// `time` as an i64 to keep full nanosecond precision (an f64 would lose
+/// the low digits the dedup key depends on).
+pub fn parse_strike(s: &str) -> Option<RawStrike> {
+    if let Ok(raw) = serde_json::from_str::<RawStrike>(s) {
+        return Some(raw);
+    }
+    extract_raw_strike(s)
+}
+
+fn extract_raw_strike(s: &str) -> Option<RawStrike> {
+    // Truncate at the first '[' so the sig[] station array (each entry of
+    // which carries its own "lat"/"lon"/"time") is out of reach.
+    let head = match s.find('[') {
+        Some(i) => &s[..i],
+        None => s,
+    };
+    let lat = find_f64_field(head, "\"lat\":")?;
+    let lon = find_f64_field(head, "\"lon\":")?;
+    let time = find_i64_field(head, "\"time\":").unwrap_or(0);
+    Some(RawStrike { time, lat, lon })
+}
+
+/// Byte offset just past `key`'s colon, but only where `key` sits at the
+/// start of a top-level field (immediately after `{` or `,`). This skips
+/// look-alikes such as `"latc":`/`"blat":` and any occurrence of the key
+/// inside a string value.
+fn field_value_start(s: &str, key: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(rel) = s[from..].find(key) {
+        let at = from + rel;
+        match s[..at].chars().next_back() {
+            Some('{') | Some(',') => return Some(at + key.len()),
+            _ => from = at + key.len(),
+        }
+    }
+    None
+}
+
+fn find_f64_field(s: &str, key: &str) -> Option<f64> {
+    parse_leading_f64(&s[field_value_start(s, key)?..])
+}
+
+fn find_i64_field(s: &str, key: &str) -> Option<i64> {
+    parse_leading_i64(&s[field_value_start(s, key)?..])
+}
+
+/// Parse a leading JSON number (optional sign, fraction, exponent),
+/// consuming only the numeric prefix. Rejects trailing junk by
+/// construction and, unlike a `"lat":(-?\d+(?:\.\d+)?)` regex, does not
+/// silently drop an exponent (which would read `1.2e-3` as `1.2`).
+fn parse_leading_f64(s: &str) -> Option<f64> {
+    let t = s.trim_start();
+    let b = t.as_bytes();
+    let mut end = 0;
+    if matches!(b.first(), Some(b'-') | Some(b'+')) {
+        end += 1;
+    }
+    let mut saw_digit = false;
+    while end < b.len() && b[end].is_ascii_digit() {
+        end += 1;
+        saw_digit = true;
+    }
+    if end < b.len() && b[end] == b'.' {
+        end += 1;
+        while end < b.len() && b[end].is_ascii_digit() {
+            end += 1;
+            saw_digit = true;
+        }
+    }
+    if !saw_digit {
+        return None;
+    }
+    if end < b.len() && (b[end] == b'e' || b[end] == b'E') {
+        let mut e = end + 1;
+        if e < b.len() && matches!(b[e], b'-' | b'+') {
+            e += 1;
+        }
+        let mut exp_digit = false;
+        while e < b.len() && b[e].is_ascii_digit() {
+            e += 1;
+            exp_digit = true;
+        }
+        if exp_digit {
+            end = e;
+        }
+    }
+    t[..end].parse::<f64>().ok()
+}
+
+/// Parse a leading signed integer (the nanosecond `time`), consuming only
+/// the digit prefix. Kept separate from the float parser so the 19-digit
+/// nanosecond value round-trips exactly as an i64.
+fn parse_leading_i64(s: &str) -> Option<i64> {
+    let t = s.trim_start();
+    let b = t.as_bytes();
+    let mut end = 0;
+    if matches!(b.first(), Some(b'-') | Some(b'+')) {
+        end += 1;
+    }
+    let digits_start = end;
+    while end < b.len() && b[end].is_ascii_digit() {
+        end += 1;
+    }
+    if end == digits_start {
+        return None;
+    }
+    t[..end].parse::<i64>().ok()
+}
+
 /// Great-circle distance in km (haversine, R = 6371 km). Plenty
 /// accurate for a keep/drop radius check.
 pub fn haversine_km(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
@@ -151,6 +272,17 @@ pub fn to_strike_event(
     radius_km: f64,
     now_epoch: i64,
 ) -> Option<StrikeEvent> {
+    // Reject non-finite or out-of-range coordinates before they reach the
+    // map. The tolerant `core` parser and the unversioned feed can both
+    // yield a garbage coordinate; the radius check alone would still keep
+    // a wrong value that happens to land near the station.
+    if !raw.lat.is_finite()
+        || !raw.lon.is_finite()
+        || !(-90.0..=90.0).contains(&raw.lat)
+        || !(-180.0..=180.0).contains(&raw.lon)
+    {
+        return None;
+    }
     let distance_km = haversine_km(station_lat, station_lon, raw.lat, raw.lon);
     if distance_km > radius_km {
         return None;
@@ -167,6 +299,10 @@ pub fn to_strike_event(
         source: STRIKE_SOURCE_BLITZORTUNG.to_string(),
         lat: Some(raw.lat),
         lon: Some(raw.lon),
+        // Raw nanosecond time is the dedup key (see StrikeEvent::id). 0
+        // when the feed omitted it, which also disables dedup for that
+        // strike (it cannot be identified across refinements anyway).
+        id: raw.time.max(0),
     })
 }
 
@@ -208,8 +344,29 @@ async fn run(
     station: (f64, f64),
     last_seen: Option<SourceLastSeen>,
 ) {
-    let hosts = effective_hosts(&config.hosts);
+    // Miles -> km once; both transports share the local radius filter.
     let radius_km = config.radius_mi.max(0.0) * 1.609_344;
+    match config.transport {
+        BlitzortungTransport::WebSocket => {
+            run_websocket(id, &config, store, station, radius_km, last_seen).await
+        }
+        BlitzortungTransport::Mqtt => {
+            run_mqtt(id, &config, store, station, radius_km, last_seen).await
+        }
+    }
+}
+
+/// Legacy public web-map firehose: rotate ws1/ws2/ws7/ws8 on failure
+/// with jittered exponential backoff.
+async fn run_websocket(
+    id: String,
+    config: &BlitzortungConfig,
+    store: Arc<TempestStore>,
+    station: (f64, f64),
+    radius_km: f64,
+    last_seen: Option<SourceLastSeen>,
+) {
+    let hosts = effective_hosts(&config.hosts);
     // Shuffled start so a fleet of instances doesn't pile onto ws1.
     let mut host_idx = rand::rng().random_range(0..hosts.len());
     let mut backoff = BACKOFF_MIN;
@@ -218,7 +375,7 @@ async fn run(
         source_id = %id,
         hosts = hosts.len(),
         radius_mi = config.radius_mi,
-        "blitzortung community lightning feed enabled (display-only layer)"
+        "blitzortung community lightning feed enabled (WebSocket transport, display-only layer)"
     );
     loop {
         let url = &hosts[host_idx % hosts.len()];
@@ -250,6 +407,58 @@ async fn run(
         }
         was_streaming = false;
         host_idx = host_idx.wrapping_add(1);
+        let jitter_ms = rand::rng().random_range(0..=(backoff.as_millis() as u64 / 2).max(1));
+        tokio::time::sleep(backoff + Duration::from_millis(jitter_ms)).await;
+        backoff = (backoff * 2).min(BACKOFF_MAX);
+    }
+}
+
+/// Dedicated Blitzortung MQTT broker: a single durable subscription with
+/// the same jittered backoff discipline (no host rotation; one broker).
+async fn run_mqtt(
+    id: String,
+    config: &BlitzortungConfig,
+    store: Arc<TempestStore>,
+    station: (f64, f64),
+    radius_km: f64,
+    last_seen: Option<SourceLastSeen>,
+) {
+    let mqtt = &config.mqtt;
+    let mut backoff = BACKOFF_MIN;
+    let mut was_streaming = true;
+    info!(
+        source_id = %id,
+        host = %mqtt.host,
+        port = mqtt.port,
+        topic = %mqtt.topic,
+        radius_mi = config.radius_mi,
+        "blitzortung community lightning feed enabled (MQTT transport, display-only layer)"
+    );
+    loop {
+        let mut frames: u64 = 0;
+        let err = connect_and_stream_mqtt(
+            mqtt,
+            &id,
+            &store,
+            station,
+            radius_km,
+            last_seen.as_ref(),
+            &mut frames,
+        )
+        .await
+        .unwrap_err(); // the stream loop only returns by failing
+        if frames > 0 {
+            backoff = BACKOFF_MIN;
+            was_streaming = true;
+        }
+        if was_streaming {
+            warn!(source_id = %id, host = %mqtt.host, error = %format!("{err:#}"),
+                  "blitzortung mqtt connection lost; backing off");
+        } else {
+            debug!(source_id = %id, host = %mqtt.host, error = %format!("{err:#}"),
+                   "blitzortung mqtt still unreachable");
+        }
+        was_streaming = false;
         let jitter_ms = rand::rng().random_range(0..=(backoff.as_millis() as u64 / 2).max(1));
         tokio::time::sleep(backoff + Duration::from_millis(jitter_ms)).await;
         backoff = (backoff * 2).min(BACKOFF_MAX);
@@ -305,26 +514,119 @@ async fn connect_and_stream(
         if let Some(ls) = last_seen {
             ls.record(id, chrono::Utc::now().timestamp());
         }
-        match serde_json::from_str::<RawStrike>(&decode_frame(&txt)) {
-            Ok(raw) => {
-                if let Some(evt) = to_strike_event(
-                    &raw,
-                    station.0,
-                    station.1,
-                    radius_km,
-                    chrono::Utc::now().timestamp(),
-                ) {
-                    pending.push(evt);
-                }
-            }
-            // Unparseable frame = protocol drift (unversioned feed).
-            // Log quietly and keep reading; one bad frame is not a
-            // reason to drop a healthy connection.
-            Err(e) => debug!(source_id = %id, error = %e, "blitzortung frame did not parse"),
+        // Decode the LZW frame, then parse + radius-filter on the shared
+        // path (serde fast path, tolerant fallback). WebSocket frames are
+        // the `complete` shape so serde succeeds; the fallback only ever
+        // engages if the unversioned feed drifts to the `core` shape.
+        if !ingest_text(&decode_frame(&txt), station, radius_km, &mut pending) {
+            // Unparseable frame = protocol drift. Log quietly and keep
+            // reading; one bad frame is not a reason to drop a healthy
+            // connection.
+            debug!(source_id = %id, "blitzortung frame did not parse");
         }
         if !pending.is_empty() && last_flush.elapsed() >= FLUSH_INTERVAL {
             flush(store, &mut pending);
             last_flush = tokio::time::Instant::now();
+        }
+    }
+}
+
+/// Parse one decoded strike record and, when it falls inside the radius,
+/// queue it. Returns false only if the record did not parse at all, so
+/// the caller can log protocol drift. Shared by both transports.
+fn ingest_text(
+    text: &str,
+    station: (f64, f64),
+    radius_km: f64,
+    pending: &mut Vec<StrikeEvent>,
+) -> bool {
+    let Some(raw) = parse_strike(text) else {
+        return false;
+    };
+    if let Some(evt) = to_strike_event(
+        &raw,
+        station.0,
+        station.1,
+        radius_km,
+        chrono::Utc::now().timestamp(),
+    ) {
+        pending.push(evt);
+    }
+    true
+}
+
+/// One MQTT connection lifetime: connect, subscribe on ConnAck, then
+/// ingest published strikes until the event loop errors or goes silent.
+/// Always returns Err describing why it ended; unflushed strikes are
+/// applied first so none are lost across a reconnect.
+async fn connect_and_stream_mqtt(
+    cfg: &BlitzortungMqtt,
+    id: &str,
+    store: &Arc<TempestStore>,
+    station: (f64, f64),
+    radius_km: f64,
+    last_seen: Option<&SourceLastSeen>,
+    frames: &mut u64,
+) -> anyhow::Result<()> {
+    let mut opts = MqttOptions::new(format!("localsky-{id}"), &cfg.host, cfg.port);
+    opts.set_keep_alive(Duration::from_secs(30));
+    if !cfg.username.is_empty() {
+        opts.set_credentials(&cfg.username, &cfg.password);
+    }
+    // `complete` strikes reach a few KB; give the incoming buffer headroom
+    // above rumqttc's small default so a large payload is never truncated.
+    opts.set_max_packet_size(512 * 1024, 512 * 1024);
+    let (client, mut eventloop) = AsyncClient::new(opts, 64);
+    // Topics carrying "lzw" are LZW-compressed; the plain topics are not.
+    let is_lzw = cfg.topic.contains("lzw");
+    let mut pending: Vec<StrikeEvent> = Vec::new();
+    let mut last_flush = tokio::time::Instant::now();
+    loop {
+        let event = match tokio::time::timeout(FRAME_SILENCE, eventloop.poll()).await {
+            Err(_) => {
+                flush(store, &mut pending);
+                anyhow::bail!(
+                    "no frames for {}s (global feed never goes quiet; treating as dead)",
+                    FRAME_SILENCE.as_secs()
+                );
+            }
+            Ok(Err(e)) => {
+                flush(store, &mut pending);
+                return Err(anyhow::Error::from(e).context("mqtt eventloop"));
+            }
+            Ok(Ok(event)) => event,
+        };
+        match event {
+            // Subscribe on (re)connect so a reconnect re-subscribes.
+            Event::Incoming(Packet::ConnAck(_)) => {
+                client
+                    .subscribe(&cfg.topic, QoS::AtMostOnce)
+                    .await
+                    .context("mqtt subscribe")?;
+                debug!(source_id = %id, topic = %cfg.topic, "blitzortung mqtt connected + subscribing");
+            }
+            Event::Incoming(Packet::Publish(p)) => {
+                *frames += 1;
+                // Every message proves liveness for /api/health, even when
+                // no strike lands inside the radius for hours.
+                if let Some(ls) = last_seen {
+                    ls.record(id, chrono::Utc::now().timestamp());
+                }
+                let payload = String::from_utf8_lossy(&p.payload);
+                let text = if is_lzw {
+                    decode_frame(&payload)
+                } else {
+                    payload.into_owned()
+                };
+                if !ingest_text(&text, station, radius_km, &mut pending) {
+                    debug!(source_id = %id, "blitzortung mqtt message did not parse");
+                }
+                if !pending.is_empty() && last_flush.elapsed() >= FLUSH_INTERVAL {
+                    flush(store, &mut pending);
+                    last_flush = tokio::time::Instant::now();
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -411,6 +713,67 @@ mod tests {
         assert_eq!(raw.time, 1_781_278_922_596_972_800);
         assert!((raw.lat - 40.220814).abs() < 1e-9);
         assert!((raw.lon - 23.953156).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_strike_tolerates_core_invalid_json() {
+        // The `core` topic is NOT valid JSON: a bare `undefined` and a
+        // `"region",N` comma-for-colon. serde rejects it; the tolerant
+        // fallback must still recover time/lat/lon at full ns precision.
+        let core = r#"{"time":1782914975455557600,"lat":51.243883,"lon":12.150345,"alt":0,"pol":0,"mdecs":undefined,"mcg":171,"status":2,"region",9}"#;
+        assert!(serde_json::from_str::<RawStrike>(core).is_err());
+        let raw = parse_strike(core).expect("tolerant fallback parses core");
+        assert_eq!(raw.time, 1_782_914_975_455_557_600);
+        assert!((raw.lat - 51.243883).abs() < 1e-9);
+        assert!((raw.lon - 12.150345).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_strike_uses_serde_fast_path_for_complete() {
+        let complete = r#"{"time":7,"lat":51.24,"lon":12.15,"alt":0,"pol":0,"mds":9,"mcg":1,"status":2,"region":9,"sig":[{"sta":1,"time":2,"lat":50.9,"lon":11.0,"alt":2,"status":12}]}"#;
+        let raw = parse_strike(complete).unwrap();
+        assert_eq!(raw.time, 7);
+        assert!((raw.lat - 51.24).abs() < 1e-9);
+        assert!((raw.lon - 12.15).abs() < 1e-9);
+    }
+
+    #[test]
+    fn extractor_reads_head_never_nested_sig_station() {
+        // If the fallback ever runs on a complete-shaped record (serde
+        // rejected it), it must read the strike's own coords, never a
+        // sig[] station's (which follow the first '['). Station here is
+        // 50.94/11.09 with time 269883; the strike is 51.24/12.15.
+        let with_sig = r#"{"time":1782914975455557600,"lat":51.243883,"lon":12.150345,"alt":0,"mds":9,"status":2,"region":9,"sig":[{"sta":1,"time":269883,"lat":50.947643,"lon":11.092339,"alt":253,"status":12}]}"#;
+        let raw = extract_raw_strike(with_sig).unwrap();
+        assert!((raw.lat - 51.243883).abs() < 1e-9);
+        assert!((raw.lon - 12.150345).abs() < 1e-9);
+        assert_eq!(raw.time, 1_782_914_975_455_557_600);
+    }
+
+    #[test]
+    fn extractor_handles_scientific_notation_and_key_lookalikes() {
+        // Scientific notation must NOT truncate to 1.2 (a naive
+        // `\d+(\.\d+)?` regex would drop the exponent).
+        let sci = r#"{"time":5,"lat":1.2e-3,"lon":-0.0}"#;
+        let raw = extract_raw_strike(sci).unwrap();
+        assert!((raw.lat - 0.0012).abs() < 1e-12);
+        assert!(raw.lon.abs() < 1e-12);
+        // A look-alike key preceding the real one must not be captured.
+        let lookalike = r#"{"time":5,"latitude":9.9,"lat":51.2,"lon":12.1}"#;
+        let raw = extract_raw_strike(lookalike).unwrap();
+        assert!((raw.lat - 51.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn out_of_range_coordinates_are_dropped() {
+        // A garbage coordinate that still lands "near" the station must
+        // not survive: range check rejects it before the radius check.
+        let bad = RawStrike {
+            time: 1_781_278_922_596_972_800,
+            lat: 999.0,
+            lon: 12.0,
+        };
+        assert!(to_strike_event(&bad, 40.0, 23.0, 200.0, 1_781_278_900).is_none());
     }
 
     #[test]

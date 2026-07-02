@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use reqwest::{Client, StatusCode};
+use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -41,7 +41,6 @@ const POLL_INTERVAL: Duration = Duration::from_secs(60);
 pub struct Yolink {
     id: String,
     config: YolinkConfig,
-    client: Client,
     /// Pre-parsed mapping list. Entries with unparseable field strings
     /// are dropped at construction with a warn.
     mapping: Vec<ResolvedMapping>,
@@ -50,7 +49,10 @@ pub struct Yolink {
 
 #[derive(Debug, Clone)]
 struct ResolvedMapping {
-    field: WeatherField,
+    /// Global weather field (None when this is a per-zone soil channel).
+    field: Option<WeatherField>,
+    /// Per-zone soil channel slug (None for a normal weather mapping).
+    zone_slug: Option<String>,
     device_id: String,
     device_type: String,
     state_path: Vec<String>,
@@ -67,14 +69,13 @@ impl Yolink {
     pub fn new(id: impl Into<String>, config: YolinkConfig) -> Self {
         let id = id.into();
         let mapping = build_mapping(&id, &config.device_field_map);
-        let client = Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .expect("reqwest client construction");
+        // P4-7: no stored client. Each request builds an SSRF-hardened client
+        // pinned to the (operator-overridable) base_url's resolved host via
+        // safe_fetch, so a base_url pointed at a private/loopback address is
+        // refused instead of probed.
         Self {
             id,
             config,
-            client,
             mapping,
             access_token: Mutex::new(None),
         }
@@ -91,9 +92,10 @@ impl Yolink {
             cid = form_encode(&self.config.client_id),
             cs = form_encode(&self.config.client_secret),
         );
-        let resp: TokenResponse = self
-            .client
-            .post(&url)
+        let (client, safe_url) =
+            crate::net::safe_fetch::build_safe_client(&url, Duration::from_secs(15)).await?;
+        let resp: TokenResponse = client
+            .post(safe_url)
             .header(
                 reqwest::header::CONTENT_TYPE,
                 "application/x-www-form-urlencoded",
@@ -128,9 +130,10 @@ impl Yolink {
         });
         let mut token = self.current_token().await?;
         for attempt in 0..2 {
-            let resp = self
-                .client
-                .post(&url)
+            let (client, safe_url) =
+                crate::net::safe_fetch::build_safe_client(&url, Duration::from_secs(15)).await?;
+            let resp = client
+                .post(safe_url)
                 .bearer_auth(&token)
                 .json(&body)
                 .send()
@@ -153,19 +156,38 @@ impl Yolink {
 fn build_mapping(source_id: &str, field_map: &[YolinkFieldMap]) -> Vec<ResolvedMapping> {
     let mut out = Vec::new();
     for entry in field_map {
-        let Some(field) = parse_weather_field(&entry.field).or_else(|| parse_camel(&entry.field))
-        else {
-            warn!(source_id, field = %entry.field, "yolink field map: unknown WeatherField; ignoring");
-            continue;
-        };
         let state_path: Vec<String> = entry
             .state_path
             .split('.')
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
             .collect();
+        let zone = entry
+            .zone_slug
+            .as_deref()
+            .map(str::trim)
+            .filter(|z| !z.is_empty());
+        // Per-zone soil channel: emitted as a KeyedReading, no WeatherField.
+        if let Some(zone) = zone {
+            out.push(ResolvedMapping {
+                field: None,
+                zone_slug: Some(zone.to_string()),
+                device_id: entry.device_id.clone(),
+                device_type: entry.device_type.clone(),
+                state_path,
+                scale: entry.scale,
+                offset: entry.offset,
+            });
+            continue;
+        }
+        let Some(field) = parse_weather_field(&entry.field).or_else(|| parse_camel(&entry.field))
+        else {
+            warn!(source_id, field = %entry.field, "yolink field map: unknown WeatherField; ignoring");
+            continue;
+        };
         out.push(ResolvedMapping {
-            field,
+            field: Some(field),
+            zone_slug: None,
             device_id: entry.device_id.clone(),
             device_type: entry.device_type.clone(),
             state_path,
@@ -233,10 +255,12 @@ impl WeatherSource for Yolink {
     fn capabilities(&self) -> SourceCaps {
         let mut fields = HashSet::new();
         for m in &self.mapping {
-            fields.insert(m.field);
+            if let Some(f) = m.field {
+                fields.insert(f);
+            }
         }
         SourceCaps {
-            live_current: !self.mapping.is_empty(),
+            live_current: self.mapping.iter().any(|m| m.field.is_some()),
             hourly_forecast_hours: 0,
             daily_forecast_days: 0,
             radar_tiles: false,
@@ -247,7 +271,7 @@ impl WeatherSource for Yolink {
 
     fn priority(&self, field: WeatherField) -> i32 {
         // Cloud-routed LoRa sensor: same tier as AmbientWeather (70).
-        if self.mapping.iter().any(|m| m.field == field) {
+        if self.mapping.iter().any(|m| m.field == Some(field)) {
             70
         } else {
             i32::MIN
@@ -278,7 +302,17 @@ impl WeatherSource for Yolink {
                                 any_ok = true;
                                 if let Some(raw) = extract_state_number(&resp, &m.state_path) {
                                     let v = raw * m.scale + m.offset;
-                                    fields.push((m.field, v));
+                                    if let Some(zone) = &m.zone_slug {
+                                        // Per-zone soil channel -> KeyedReading.
+                                        let _ = bus.send(SourceEvent::KeyedReading {
+                                            source_id: self.id.clone(),
+                                            key: crate::sources::bus_recorder::zone_soil_key(zone),
+                                            value: v,
+                                            at_epoch: chrono::Utc::now().timestamp(),
+                                        });
+                                    } else if let Some(f) = m.field {
+                                        fields.push((f, v));
+                                    }
                                 } else {
                                     debug!(
                                         source_id = %self.id,
@@ -337,6 +371,7 @@ mod tests {
                     state_path: "temperature".into(),
                     scale: 1.0,
                     offset: 0.0,
+                    zone_slug: None,
                 },
                 YolinkFieldMap {
                     field: "FlowGpm".into(),
@@ -345,6 +380,7 @@ mod tests {
                     state_path: "waterFlow".into(),
                     scale: 1.0,
                     offset: 0.0,
+                    zone_slug: None,
                 },
             ],
             base_url: "https://api.yosmart.com".into(),
@@ -360,6 +396,7 @@ mod tests {
             state_path: "x".into(),
             scale: 1.0,
             offset: 0.0,
+            zone_slug: None,
         }];
         assert!(build_mapping("test", &bad).is_empty());
     }
@@ -374,6 +411,7 @@ mod tests {
                 state_path: "p".into(),
                 scale: 1.0,
                 offset: 0.0,
+                zone_slug: None,
             },
             YolinkFieldMap {
                 field: "rh_pct".into(),
@@ -382,12 +420,13 @@ mod tests {
                 state_path: "p".into(),
                 scale: 1.0,
                 offset: 0.0,
+                zone_slug: None,
             },
         ];
         let r = build_mapping("test", &m);
         assert_eq!(r.len(), 2);
-        assert_eq!(r[0].field, WeatherField::AirTempF);
-        assert_eq!(r[1].field, WeatherField::RhPct);
+        assert_eq!(r[0].field, Some(WeatherField::AirTempF));
+        assert_eq!(r[1].field, Some(WeatherField::RhPct));
     }
 
     #[test]

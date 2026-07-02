@@ -7,7 +7,7 @@
 
 use leptos::prelude::*;
 
-use crate::components::ui::Icon;
+use crate::components::ui::{Button, Icon};
 #[cfg(feature = "hydrate")]
 use crate::docs::REPO_URL;
 
@@ -145,10 +145,10 @@ pub fn BetaFeedback() -> impl IntoView {
                         prop:value=move || text.get()
                         on:input=move |ev| text.set(event_target_value(&ev))
                     ></textarea>
-                    <button type="button" class="beta-fb__send" on:click=submit>
+                    <Button variant="primary" class="beta-fb__send" on_click=Callback::new(submit)>
                         <Icon name="external" size=14/>
                         "Open on GitHub"
-                    </button>
+                    </Button>
                     <p class="beta-fb__privacy">
                         "Opens a prefilled GitHub issue with your version and page attached. "
                         "Nothing is sent until you submit it there."

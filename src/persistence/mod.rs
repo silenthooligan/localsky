@@ -14,6 +14,7 @@
 //   push_subscriptions.rs - moved from src/push/store.rs
 //   edge_detector.rs   - DB-backed zone-edge state (no in-memory loss on restart)
 
+pub mod active_runs;
 pub mod config_snapshots;
 pub mod forecast_observations;
 pub mod irrigation_control;
@@ -23,6 +24,7 @@ pub mod sensor_history;
 pub mod verdict_history;
 pub mod weather_sampler;
 
+pub use active_runs::{ActiveRun, ActiveRunsError, ActiveRunsStore};
 pub use config_snapshots::ConfigSnapshotStore;
 pub use forecast_observations::{ForecastObservationsError, ForecastObservationsStore};
 pub use irrigation_control::{IrrigationControlState, IrrigationControlStore};

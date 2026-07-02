@@ -233,6 +233,15 @@ fn is_info(path: &str) -> bool {
     path == "/api/info" || path == "/api/v1/info"
 }
 
+/// P4-1: the Prometheus exposition endpoint. Public like /api/health: it carries
+/// only aggregate operational counters (verdict mix, refresh/degraded counts,
+/// controller/cloud error counts, last-fetch latency) -- no secrets, config, or
+/// PII -- so a scraper (the monitoring host) reaches it without credentials. A deployment
+/// that wants it private firewalls /metrics at the proxy.
+fn is_metrics(path: &str) -> bool {
+    path == "/metrics"
+}
+
 /// Bundled documentation, served same-origin at /docs (see
 /// docs_serve.rs). Public so in-app help is reachable pre-login and on
 /// fresh installs (a locked-out operator still needs the setup guide).
@@ -395,11 +404,38 @@ fn is_privileged_path(method: &Method, path: &str) -> bool {
         return true;
     }
 
+    // Irrigation actuation: POST /api/irrigation/action runs / stops / pauses /
+    // skips physical valves. It clears the same anonymous-internet bar as a config
+    // write; an unauthenticated caller in disabled mode must never open a valve.
+    // /simulate is a read-only dry-run preview and intentionally stays open.
+    if path == "/api/irrigation/action"
+        && !matches!(*method, Method::HEAD | Method::OPTIONS | Method::GET)
+    {
+        return true;
+    }
+
     // The wizard's alternate config-write paths (apply / draft PUT+DELETE /
     // seed_current) persist or stage the same localsky.toml as /api/config,
     // so they clear the same bar. Probe/test/scan/discover are NOT here.
     if is_wizard_config_write(method, path) {
         return true;
+    }
+
+    // AuthMode-Disabled hardening (LS-REC-05): in the shipped default an
+    // anonymous internet caller could otherwise seed push subscriptions
+    // (POST /push/subscribe) or fill disk with photo uploads (POST
+    // /zones/photo). Neither is a benign read, so both clear the same
+    // anonymous-internet bar as a config write. A LAN/loopback/trusted
+    // caller is still vouched by IP (the gate's IP branch), so a normal
+    // self-hoster's own browser keeps working; only the public-anonymous
+    // caller is refused. State-changing methods only (a GET never reaches
+    // these handlers).
+    if !matches!(*method, Method::HEAD | Method::OPTIONS | Method::GET) {
+        let is_push_sub = path == "/api/push/subscribe" || path == "/api/push/unsubscribe";
+        let is_photo_upload = path == "/api/zones/photo";
+        if is_push_sub || is_photo_upload {
+            return true;
+        }
     }
 
     let is_config = path == "/api/config" || path.starts_with("/api/config/");
@@ -534,6 +570,143 @@ fn unauthorized_api() -> Response {
     resp
 }
 
+/// One-shot guard for the P4-6 exposure warning (see `enforce`): the
+/// "public IP while auth Disabled" warning fires at most once per process.
+static EXPOSED_WHILE_OPEN_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Store-independent gate for the no-history-DB boot (LS-REC-05 fail-closed).
+///
+/// When no history DB is mounted there is no [`AuthStore`], so the full
+/// [`enforce`] middleware (which needs the store to validate credentials) was
+/// previously NOT layered at all, and the Origin check + the privileged
+/// config/backup/push/photo/actuation gate silently disappeared: every
+/// state-changing route became reachable cross-origin and unauthenticated.
+/// This struct carries only the hot [`AuthPolicy`] (no store) so the
+/// structural protections still layer and FAIL CLOSED: with no store, a
+/// privileged route admits ONLY an IP-vouched caller (loopback / trusted_
+/// networks / private-LAN-in-disabled), and a credential can never be
+/// presented, so a public/anonymous caller is refused outright. Identity is
+/// always Anonymous here (there is no store to attribute a User to).
+pub struct NoStoreGate {
+    pub policy: arc_swap::ArcSwap<AuthPolicy>,
+}
+
+impl NoStoreGate {
+    pub fn new() -> Self {
+        Self {
+            policy: arc_swap::ArcSwap::from_pointee(AuthPolicy::default()),
+        }
+    }
+
+    /// Refresh the policy from the config file on the same 10s cadence as
+    /// [`AuthRuntime::spawn_refresh`]. No user-count poll (there is no store);
+    /// trusted_networks/proxies/origins still come from the config so a LAN
+    /// owner's Origin + trusted-IP rules apply even without persistence.
+    pub fn spawn_refresh(self: &Arc<Self>, cfg_store: Arc<FileConfigStore>) {
+        let gate = self.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Some(policy) = AuthRuntime::policy_for_load_result(cfg_store.load().await) {
+                    gate.policy.store(Arc::new(policy));
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+        });
+    }
+}
+
+impl Default for NoStoreGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The structural half of [`enforce`] for the no-store boot: Origin check on
+/// state-changing requests + the privileged / token-admin gate, with NO
+/// credential validation (there is no store). Fails closed:
+///   - Origin check: identical to `enforce` (cross-origin writes rejected in
+///     both modes).
+///   - token-admin (mint/revoke API token): always refused, no store to
+///     authenticate an owner.
+///   - privileged (config/backup/push/photo/actuation/wizard-config-write):
+///     an IP-vouched caller (loopback / trusted_networks / private-LAN in the
+///     disabled default) passes; everyone else is refused (no credential is
+///     possible without a store).
+/// Every other path is admitted Anonymous, matching the disabled-default
+/// posture for ordinary reads. Demo mode is handled by the outer demo_guard,
+/// so this gate does not special-case it.
+pub async fn enforce_no_store(
+    State(gate): State<Arc<NoStoreGate>>,
+    mut req: Request<Body>,
+    next: Next,
+) -> Response {
+    let policy = gate.policy.load_full();
+    let path = req.uri().path().to_string();
+    // No store -> auth can never be "required"; report Disabled so /info and
+    // the health trim behave as in the open posture.
+    req.extensions_mut().insert(AuthRequired(false));
+
+    // Origin check on state-changing requests (CSRF / DNS-rebinding), the
+    // ONLY thing stopping a hostile site from firing cross-origin writes at a
+    // LAN instance with auth disabled. Identical to `enforce`. /ingest is
+    // exempt (weather hardware POSTs; per-source secrets gate those).
+    if !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS)
+        && !path.starts_with("/ingest")
+        && !path.starts_with("/api/v1/ingest")
+    {
+        if let Some(origin) = req
+            .headers()
+            .get(header::ORIGIN)
+            .and_then(|v| v.to_str().ok())
+        {
+            let host = req
+                .headers()
+                .get(header::HOST)
+                .and_then(|v| v.to_str().ok());
+            let fwd_host = req
+                .headers()
+                .get("x-forwarded-host")
+                .and_then(|v| v.to_str().ok());
+            if !origin_allowed(origin, host, fwd_host, &policy.trusted_origins) {
+                return (StatusCode::FORBIDDEN, "cross-origin write rejected").into_response();
+            }
+        }
+    }
+
+    // Token admin (mint/revoke) requires a real owner identity, which needs a
+    // store we do not have: refuse unconditionally. (No tokens can exist
+    // without a store anyway.)
+    if is_token_admin_path(req.method(), &path) {
+        if wants_html(&req) {
+            let login = format!("{}/login", crate::base::from_headers(req.headers()));
+            return Redirect::temporary(&login).into_response();
+        }
+        return unauthorized_api();
+    }
+
+    // Privileged gate, IP-vouching only (no credential possible without a
+    // store). This is the fail-closed core: config/backup/push/photo/
+    // actuation/wizard-config-write are refused for a non-vouched caller.
+    if is_privileged_path(req.method(), &path) {
+        let client = client_ip(&req, &policy.trusted_proxies);
+        if client.map(|ip| privileged_caller_vouched(&ip, &policy)) == Some(true) {
+            req.extensions_mut().insert(RequestIdentity::TrustedNetwork);
+            return next.run(req).await;
+        }
+        if wants_html(&req) {
+            let login = format!("{}/login", crate::base::from_headers(req.headers()));
+            return Redirect::temporary(&login).into_response();
+        }
+        return unauthorized_api();
+    }
+
+    // Everything else is an ordinary anonymous request (the disabled-default
+    // posture for non-sensitive reads + the open app surface).
+    req.extensions_mut().insert(RequestIdentity::Anonymous);
+    next.run(req).await
+}
+
 pub async fn enforce(
     State(rt): State<Arc<AuthRuntime>>,
     mut req: Request<Body>,
@@ -542,6 +715,53 @@ pub async fn enforce(
     let policy = rt.policy.load_full();
     let path = req.uri().path().to_string();
     req.extensions_mut().insert(AuthRequired(policy.required));
+
+    // P4-6 posture nudge: on the shipped default (auth Disabled), a request that
+    // arrives from a PUBLIC source IP means this instance is very likely exposed
+    // to the internet with no login. Warn once per process so the operator sees
+    // it without spamming a line per request. After it fires, the steady-state
+    // cost is a single relaxed atomic load. Required mode is already protected,
+    // so it is exempt.
+    if !policy.required && !EXPOSED_WHILE_OPEN_WARNED.load(std::sync::atomic::Ordering::Relaxed) {
+        // client_ip resolves the real client only when the socket peer is a
+        // configured trusted_proxy; otherwise it returns the peer itself. Two
+        // exposure shapes to catch:
+        //   - direct: the peer is a PUBLIC IP (direct internet bind).
+        //   - proxied: the peer is private BUT a forwarding header is present and
+        //     NO trusted_proxies are configured -- i.e. an (unconfigured) reverse
+        //     proxy is in front, which may well be internet-facing. This is the
+        //     dominant deployment and the prior version missed it entirely
+        //     (peer = the proxy's own private IP, so the public test never fired).
+        let peer = client_ip(&req, &policy.trusted_proxies);
+        let direct_public = matches!(peer, Some(ip) if !is_private_or_loopback(&ip));
+        let has_fwd = req.headers().contains_key("x-forwarded-for")
+            || req.headers().contains_key("forwarded");
+        let proxied_unconfigured = policy.trusted_proxies.is_empty()
+            && has_fwd
+            && matches!(peer, Some(ip) if is_private_or_loopback(&ip));
+        if direct_public || proxied_unconfigured {
+            EXPOSED_WHILE_OPEN_WARNED.store(true, std::sync::atomic::Ordering::Relaxed);
+            if direct_public {
+                if let Some(ip) = peer {
+                    tracing::warn!(
+                        client_ip = %ip,
+                        "LocalSky served a request from a PUBLIC IP while authentication is \
+                         DISABLED. If this instance is reachable from the internet, enable a login \
+                         under Settings -> Account, or restrict access at your firewall / reverse \
+                         proxy. LAN-only use needs no login."
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    "LocalSky received a forwarded request (proxy header present) while \
+                     authentication is DISABLED and no trusted_proxies are configured. If the \
+                     reverse proxy in front is internet-facing without its own login, enable a \
+                     login under Settings -> Account, or set auth.trusted_proxies so real client \
+                     IPs (and this exposure check) work. LAN-only use needs no login."
+                );
+            }
+        }
+    }
 
     // Origin check on state-changing requests (CSRF + DNS-rebinding
     // hardening alongside SameSite=Lax). Enforced in BOTH auth modes:
@@ -675,6 +895,7 @@ pub async fn enforce(
     if is_public_asset(&path)
         || is_auth_endpoint(&path)
         || is_info(&path)
+        || is_metrics(&path)
         || path.starts_with("/ingest")
         || path.starts_with("/api/v1/ingest")
         || is_docs(&path)
@@ -771,10 +992,36 @@ mod tests {
         assert!(is_privileged_path(&Method::GET, "/api/v1/backup/snapshots"));
         assert!(is_privileged_path(&Method::GET, "/api/backup"));
 
+        // Irrigation actuation is privileged: POST /irrigation/action opens valves.
+        assert!(is_privileged_path(&Method::POST, "/api/irrigation/action"));
+        assert!(is_privileged_path(
+            &Method::POST,
+            "/api/v1/irrigation/action"
+        ));
+
+        // Push subscribe/unsubscribe + photo upload are privileged in the
+        // disabled default (anonymous internet must not seed subscriptions or
+        // fill disk). Both prefixes; POST only.
+        assert!(is_privileged_path(&Method::POST, "/api/push/subscribe"));
+        assert!(is_privileged_path(&Method::POST, "/api/v1/push/subscribe"));
+        assert!(is_privileged_path(&Method::POST, "/api/push/unsubscribe"));
+        assert!(is_privileged_path(&Method::POST, "/api/zones/photo"));
+        assert!(is_privileged_path(&Method::POST, "/api/v1/zones/photo"));
+        // The vapid-key READ stays public (the frontend needs it before any
+        // subscription exists).
+        assert!(!is_privileged_path(&Method::GET, "/api/push/vapid-key"));
+        assert!(!is_privileged_path(&Method::GET, "/api/push/subscribe"));
+
         // NOT privileged: the redacted ordinary config GET + the normal
         // read/snapshot surface stay LAN-friendly.
         assert!(!is_privileged_path(&Method::GET, "/api/config"));
         assert!(!is_privileged_path(&Method::GET, "/api/v1/config"));
+        // The dry-run preview does not actuate and stays open.
+        assert!(!is_privileged_path(
+            &Method::POST,
+            "/api/irrigation/simulate"
+        ));
+        assert!(!is_privileged_path(&Method::GET, "/api/irrigation/action"));
         assert!(!is_privileged_path(&Method::GET, "/api/config/schema"));
         assert!(!is_privileged_path(&Method::GET, "/api/config/snapshots"));
         assert!(!is_privileged_path(&Method::GET, "/api/config/validate"));
@@ -986,6 +1233,9 @@ mod tests {
         assert!(!is_auth_endpoint("/api/v1/auth/tokens"));
         assert!(is_info("/api/v1/info"));
         assert!(is_health("/api/v1/health"));
+        assert!(is_metrics("/metrics"));
+        assert!(!is_metrics("/metrics/x"));
+        assert!(!is_metrics("/api/metrics"));
         assert!(is_wizard_surface("/setup/controllers"));
         assert!(is_wizard_surface("/api/v1/wizard/draft"));
         // Bundled docs are public; the exemption is a precise prefix.

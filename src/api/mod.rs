@@ -120,7 +120,7 @@ pub fn router(
             "/forecast",
             forecast::router(forecast_store, history.clone()),
         )
-        .nest("/devices", devices::router(devices))
+        .nest("/devices", devices::router(devices, history.clone()))
         .merge(info::router())
         .merge(sources::router())
         .merge(manifest_router);

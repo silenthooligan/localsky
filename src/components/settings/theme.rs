@@ -8,6 +8,8 @@
 
 use leptos::prelude::*;
 
+use crate::components::ui::HelpHint;
+
 struct ThemePreset {
     id: &'static str,
     label: &'static str,
@@ -94,10 +96,10 @@ pub fn SettingsTheme() -> impl IntoView {
     };
 
     view! {
-        <main id="main-content" class="settings-page">
+        <div class="settings-page">
             <header class="settings-page__header">
                 <a class="settings-page__back" href="/settings">"← Settings"</a>
-                <h1 class="settings-page__title">"Theme"</h1>
+                <h1 class="settings-page__title">"Theme"<HelpHint topic="theme"/></h1>
                 <p class="settings-page__subtitle">
                     "Applies to this browser only. Your choice persists across "
                     "page reloads via localStorage."
@@ -135,6 +137,6 @@ pub fn SettingsTheme() -> impl IntoView {
                     }
                 }).collect_view()}
             </div>
-        </main>
+        </div>
     }
 }

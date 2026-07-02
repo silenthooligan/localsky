@@ -1,4 +1,4 @@
-# LocalSky — Leptos full-stack weather + irrigation app.
+# LocalSky: Leptos full-stack weather + irrigation app.
 # Tempest UDP (50222) + Ecowitt discovery use broadcast, so a multi-homed
 # host should run network_mode: host to share every interface (one NIC for
 # outbound APIs, another on the sensor subnet, for example).
@@ -26,33 +26,31 @@ services:
       - no-new-privileges:true
     environment:
       - TZ=${TZ}
+      # Runtime uid:gid the entrypoint runs the app as (chowns /data to it).
+      # Defaults to the image's 10001; override for a NAS/NFS volume owner.
+      - PUID=${PUID:-10001}
+      - PGID=${PGID:-10001}
       - RUST_LOG=info
       - LEPTOS_SITE_ADDR=0.0.0.0:${LOCALSKY_PORT_1_INT}
       - LEPTOS_SITE_ROOT=site
       - WEATHER_APP_LAT=${WEATHER_APP_LAT}
       - WEATHER_APP_LON=${WEATHER_APP_LON}
       - WEATHER_APP_ZOOM=${WEATHER_APP_ZOOM}
-      # HA REST poll for irrigation snapshot. Long-lived token shared with
-      # Alloy and the weather-app predecessor.
+      # HA REST poll for irrigation snapshot. Long-lived HA token.
       - HA_TOKEN=${HA_LONG_LIVED_TOKEN}
-      - HA_URL=http://${HA_URL:-http://homeassistant.local:8123}
-      # Shadow mode: build the native (no-HA) snapshot alongside the HA one
-      # each tick so it can be compared at /api/v1/irrigation/shadow/diff
-      # before native is ever trusted with a valve. Never drives dispatch.
-      # Remove once native is validated + made authoritative.
-      - LOCALSKY_SHADOW_NATIVE=1
+      - HA_URL=${HA_URL:-http://homeassistant.local:8123}
       # SQLite-backed irrigation history (365-day Gantt + utilization heatmap).
       - HISTORY_DB_PATH=/data/irrigation.db
-      # LLM advisor (Phase F). Talks to the configured OpenAI-compatible LLM endpoint over its
-      # OpenAI-compatible endpoint. Set LLM_ADVISOR_DISABLED=1 to kill
-      # advisor calls fleet-wide without redeploying.
+      # LLM advisor (Phase F). Talks to the configured OpenAI-compatible LLM
+      # endpoint. Set LLM_ADVISOR_DISABLED=1 to kill advisor calls without
+      # redeploying.
       - LLM_BASE_URL=${LLM_BASE_URL:-}
       - LLM_ADVISOR_MODEL=${LLM_ADVISOR_MODEL}
       - LLM_ADVISOR_DISABLED=${LLM_ADVISOR_DISABLED}
       # Web Push (Phase PWA-5). VAPID keypair for signing notifications.
       # If unset, the dispatcher logs once and silently drops every event;
       # the rest of the app keeps running. Generate keys with the
-      # web-push CLI or openssl, see .agent/agent.md for the recipe.
+      # web-push CLI or openssl, see docs/notifications.md for the recipe.
       - VAPID_PUBLIC_KEY=${VAPID_PUBLIC_KEY:-}
       - VAPID_PRIVATE_KEY_PATH=${VAPID_PRIVATE_KEY_PATH:-/keys/vapid-private.pem}
       # RFC 8292 subject: contact URL the push service may use. Override
@@ -70,54 +68,3 @@ services:
         max-size: "10m"
         max-file: "5"
         tag: "localsky"
-
-  # Demo sidecar (demo.localsky.io). Same image as prod (`:latest`); only the env vars differ
-  # (LOCALSKY_DEMO=1 + verbose RUST_LOG). Post-cutover there's no longer a
-  # separate v2 image to maintain, and the build workflow only refreshes
-  # `:latest` + `:${sha}` on push so pinning `:v2` here would freeze the
-  # demo at whatever was last tagged. Synthetic data, no HA, no LLM, no
-  # real hardware: used to capture screenshots + smoke-test changes.
-  localsky-demo:
-    image: ghcr.io/silenthooligan/localsky:latest
-    container_name: localsky-demo
-    restart: unless-stopped
-    ports:
-      - "8091:8091"
-    # Entrypoint chowns /data then gosu-drops to uid 10001 (see the prod
-    # service note). These caps are for the brief root entrypoint only.
-    cap_drop:
-      - ALL
-    cap_add:
-      - CHOWN
-      - DAC_OVERRIDE
-      - FOWNER
-      - SETUID
-      - SETGID
-    security_opt:
-      - no-new-privileges:true
-    environment:
-      - TZ=${TZ}
-      # Verbose logging for the v2 test bed. The library namespaces
-      # (`localsky=debug`) bubble up engine + source + controller chatter
-      # without flooding from tower/hyper transport layers.
-      - RUST_LOG=info,localsky=debug,tower_http=info,axum=info
-      - LEPTOS_SITE_ADDR=0.0.0.0:8091
-      - LEPTOS_SITE_ROOT=site
-      - LOCALSKY_DEMO=1
-      - HISTORY_DB_PATH=/data/irrigation.db
-    volumes:
-      - ./demo-data:/data
-    # The image HEALTHCHECK targets 8090 (the prod port). Override for the
-    # demo sidecar since it binds 8091.
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--max-time", "4", "http://127.0.0.1:8091/api/v1/info"]
-      interval: 30s
-      timeout: 5s
-      start_period: 30s
-      retries: 3
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "5"
-        tag: "localsky-demo"

@@ -94,6 +94,11 @@ fn synth_tempest(t_sim: f64) -> TempestSnapshot {
         rain_in_last_min: 0.0,
         rain_in_today: 0.0,
         rain_intensity_in_hr: 0.0,
+        et0_today: 3.5 + (day_phase * 0.5).sin() * 1.0,
+        flow_gpm: 0.0,
+        flow_total_gal_today: 0.0,
+        pop_pct: (20.0 + 30.0 * (day_phase * 0.7).sin()).clamp(0.0, 100.0),
+        leaf_wetness_pct: (35.0 + 35.0 * (day_phase * 0.6 + 1.0).sin()).clamp(0.0, 100.0),
         precip_type: 0,
         lightning_count_last_min: 0,
         lightning_strikes_last_hour: 0,
@@ -105,6 +110,16 @@ fn synth_tempest(t_sim: f64) -> TempestSnapshot {
         battery_pct: TempestSnapshot::battery_pct_from_v(2.68),
         station_serial: "ST-DEMO0001".into(),
         hub_serial: "HB-DEMO0001".into(),
+        source_label: "Demo".into(),
+        owner_priority: 50,
+        // Demo is a live station: all engine-critical fields are fresh.
+        air_temp_live_epoch: now,
+        wind_live_epoch: now,
+        rh_live_epoch: now,
+        rain_live_epoch: now,
+        // Demo presents as a real live local station (serial + battery), so the
+        // display reads it as a station, not cloud-only.
+        has_live_station: true,
     }
 }
 
@@ -183,6 +198,7 @@ fn synth_irrigation(t_sim: f64) -> IrrigationSnapshot {
         rain_3day_weighted_in: 0.42,
         rain_7day_weighted_in: 0.95,
         rain_next_4h_in: 0.18,
+        rain_observed_recent_in: 0.0,
         wind_max_today_mph: 8.0,
         temp_min_24h_f: 71.0,
         temp_min_24h_valid: true,
@@ -193,21 +209,27 @@ fn synth_irrigation(t_sim: f64) -> IrrigationSnapshot {
         max_wind_mph: 10.0,
         min_temp_f: 38.0,
         rain_skip_in: 0.25,
-        soil_back_yard_pct: Some(42.0),
-        soil_front_yard_pct: Some(48.0),
-        soil_side_yard_pct: Some(50.0),
-        soil_back_yard_shrubs_pct: Some(55.0),
+        soil_fields: std::collections::BTreeMap::from([
+            ("soil_back_yard_pct".to_string(), Some(42.0)),
+            ("soil_front_yard_pct".to_string(), Some(48.0)),
+            ("soil_side_yard_pct".to_string(), Some(50.0)),
+            ("soil_back_yard_shrubs_pct".to_string(), Some(55.0)),
+            ("saturation_back_yard_pct".to_string(), Some(70.0)),
+            ("saturation_front_yard_pct".to_string(), Some(70.0)),
+            ("saturation_side_yard_pct".to_string(), Some(70.0)),
+            ("saturation_back_yard_shrubs_pct".to_string(), Some(85.0)),
+        ]),
         soil_temp_yard_min_f: Some(74.0),
         soil_temp_yard_max_f: Some(82.0),
         frost_skip_soil_f: 35.0,
-        saturation_back_yard_pct: 70.0,
-        saturation_front_yard_pct: 70.0,
-        saturation_side_yard_pct: 70.0,
-        saturation_back_yard_shrubs_pct: 85.0,
         is_paused: false,
         is_dry_run: false,
         will_skip: verdict == "skip",
         verdict: verdict.to_string(),
+        // P1: derive the demo reason_code from the same classifier the scoreboard
+        // uses, so the synthetic SkipCheck carries a coherent code (rain_next_4h /
+        // heat_advisory / rain_now / tomorrow_rain / "run") without hand-listing.
+        reason_code: crate::persistence::verdict_history::classify_reason_code(verdict, &reason),
         reason,
     };
     snap.seven_day_verdicts = synth_seven_day_verdicts(now);
@@ -383,6 +405,7 @@ fn synth_forecast() -> ForecastSnapshot {
     let mut f = ForecastSnapshot::default();
     f.last_refresh_epoch = now;
     f.source_reachable = true;
+    f.source_label = "Demo".into();
     f.timezone = "America/New_York".into();
     f.daily = daily;
     f.hourly = hourly;

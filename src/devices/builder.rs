@@ -23,7 +23,10 @@ pub fn build_devices(config: &Config) -> Vec<Device> {
     let mut devices = Vec::new();
 
     // --- Weather / sensor sources ---
-    for entry in config.sources.iter().filter(|s| s.enabled) {
+    // Include DISABLED sources too: the device list is the single weather-source
+    // list and its on/off toggle is how the operator re-enables a source, so a
+    // disabled source must still appear (else toggling it off strands it).
+    for entry in config.sources.iter() {
         let (kind, model, name) = classify_source(&entry.source, &entry.id);
         let children: Vec<DeviceChild> = kind_fields(&entry.source)
             .iter()
@@ -35,6 +38,11 @@ pub fn build_devices(config: &Config) -> Vec<Device> {
                 )
             })
             .collect();
+        // SourceKind is #[serde(tag = "kind")], so its serialized "kind" field
+        // is the tag slug the frontend keys the discovery/enable UI on.
+        let source_kind = serde_json::to_value(&entry.source)
+            .ok()
+            .and_then(|v| v.get("kind").and_then(|k| k.as_str()).map(str::to_string));
         devices.push(Device {
             id: format!("source:{}", entry.id),
             kind,
@@ -46,6 +54,8 @@ pub fn build_devices(config: &Config) -> Vec<Device> {
             online: None,
             last_seen_epoch: None,
             also_in_ha: false,
+            enabled: Some(entry.enabled),
+            source_kind,
             children,
         });
     }
@@ -74,6 +84,8 @@ pub fn build_devices(config: &Config) -> Vec<Device> {
             online: None,
             last_seen_epoch: None,
             also_in_ha: false,
+            enabled: Some(entry.enabled),
+            source_kind: None,
             children,
         });
     }
@@ -86,9 +98,24 @@ pub fn build_devices(config: &Config) -> Vec<Device> {
 fn classify_source(kind: &SourceKind, id: &str) -> (DeviceKind, Option<String>, String) {
     use SourceKind as K;
     let (dk, model, name) = match kind {
+        // The Tempest is a weather STATION (wind/rain/solar/lightning), so its
+        // model reads as the station brand. The Ecowitt gateway is primarily a
+        // SOIL gateway in this fleet (it owns every soil probe), so its model
+        // spells "Ecowitt soil gateway" to give it a distinct sub-identity: with
+        // both present, the two Source cards no longer read as identical blue
+        // "Source" tiles (persona E). Both still classify to WeatherGateway (the
+        // local-hardware signal); only the human MODEL label distinguishes them.
         K::TempestUdp(_) | K::TempestWs(_) => (DeviceKind::WeatherGateway, "Tempest", "Tempest"),
-        K::EcowittLocal(_) => (DeviceKind::WeatherGateway, "Ecowitt", "Ecowitt gateway"),
-        K::EcowittGwPoll(_) => (DeviceKind::WeatherGateway, "Ecowitt", "Ecowitt gateway"),
+        K::EcowittLocal(_) => (
+            DeviceKind::WeatherGateway,
+            "Ecowitt soil gateway",
+            "Ecowitt gateway",
+        ),
+        K::EcowittGwPoll(_) => (
+            DeviceKind::WeatherGateway,
+            "Ecowitt soil gateway",
+            "Ecowitt gateway",
+        ),
         K::DavisWll(_) => (
             DeviceKind::WeatherGateway,
             "Davis WeatherLink Live",
@@ -101,6 +128,13 @@ fn classify_source(kind: &SourceKind, id: &str) -> (DeviceKind, Option<String>, 
         K::OpenWeather(_) => (DeviceKind::WeatherCloud, "OpenWeather", "OpenWeather"),
         K::PirateWeather(_) => (DeviceKind::WeatherCloud, "Pirate Weather", "Pirate Weather"),
         K::MetNorway(_) => (DeviceKind::WeatherCloud, "MET Norway", "MET Norway"),
+        K::Synoptic(_) => (
+            DeviceKind::WeatherCloud,
+            "Synoptic (MesoWest)",
+            "Synoptic Data",
+        ),
+        K::NoaaMrms(_) => (DeviceKind::WeatherCloud, "NOAA MRMS", "NOAA MRMS"),
+        K::WeatherKit(_) => (DeviceKind::WeatherCloud, "Apple WeatherKit", "WeatherKit"),
         K::AmbientWeather(_) => (
             DeviceKind::WeatherCloud,
             "Ambient Weather",
@@ -116,6 +150,9 @@ fn classify_source(kind: &SourceKind, id: &str) -> (DeviceKind, Option<String>, 
         ),
         K::Mqtt(_) => (DeviceKind::Virtual, "MQTT", "MQTT source"),
         K::HttpWebhook(_) => (DeviceKind::Virtual, "HTTP", "HTTP webhook"),
+        K::RestPoll(_) => (DeviceKind::WeatherCloud, "REST API", "REST API source"),
+        K::Prometheus(_) => (DeviceKind::Virtual, "Prometheus", "Prometheus source"),
+        K::InfluxDb(_) => (DeviceKind::Virtual, "InfluxDB", "InfluxDB source"),
         K::DemoReplay(_) => (DeviceKind::Virtual, "Demo", "Demo feed"),
     };
     // Use the operator's source id as the display name when it carries more
@@ -193,7 +230,10 @@ fn kind_fields(kind: &SourceKind) -> Vec<WeatherField> {
         K::Yolink(_) | K::Lacrosse(_) | K::TuyaCloud(_) => vec![F::AirTempF, F::RhPct],
         K::OpenMeteo(_) => vec![F::ForecastDaily, F::ForecastHourly, F::Pop, F::Et0Today],
         K::Nws(_) => vec![F::ForecastDaily, F::ForecastHourly, F::Pop],
-        K::OpenWeather(_) | K::PirateWeather(_) | K::MetNorway(_) => {
+        // MRMS is radar QPE only: it emits the current rain scalars, never a
+        // forecast snapshot, so its device children are just the two rain fields.
+        K::NoaaMrms(_) => vec![F::RainIntensityInHr, F::RainTodayIn],
+        K::OpenWeather(_) | K::PirateWeather(_) | K::MetNorway(_) | K::WeatherKit(_) => {
             vec![
                 F::ForecastDaily,
                 F::ForecastHourly,
@@ -201,10 +241,26 @@ fn kind_fields(kind: &SourceKind) -> Vec<WeatherField> {
                 F::RainIntensityInHr,
             ]
         }
+        // Synoptic is a nearest-station observation only: current wind /
+        // pressure / temp / humidity, no forecast and no rain gauge.
+        K::Synoptic(_) => vec![
+            F::AirTempF,
+            F::RhPct,
+            F::WindMph,
+            F::WindBearingDeg,
+            F::PressureInHg,
+        ],
         K::DemoReplay(_) => vec![F::AirTempF, F::RhPct, F::WindMph, F::RainTodayIn],
         // Bridge + generic ingest: children come from what's mapped (F) or
         // posted, not from the kind. Empty until those land.
-        K::HaPassthrough(_) | K::Mqtt(_) | K::HttpWebhook(_) => Vec::new(),
+        // RestPoll fields are config-driven (resolved at runtime from the
+        // mappings), not derivable from the kind alone -> empty here.
+        K::HaPassthrough(_)
+        | K::Mqtt(_)
+        | K::HttpWebhook(_)
+        | K::RestPoll(_)
+        | K::Prometheus(_)
+        | K::InfluxDb(_) => Vec::new(),
         // Display-only map/dashboard layer: strikes feed the snapshot's
         // lightning buffer, not sensor_history, so it has no per-field
         // sensor children to enumerate.
@@ -305,6 +361,72 @@ controller_station = "1"
             .children
             .iter()
             .any(|c| c.id == "source:open_meteo:et0_today"));
+    }
+
+    // A config whose only weather source is DISABLED, to prove disabled sources
+    // still build (so the device-list toggle can re-enable them) and carry both
+    // enabled=Some(false) and their SourceKind tag slug.
+    fn cfg_disabled_source() -> Config {
+        let toml = r#"
+schema_version = 1
+
+[deployment]
+mode = "standalone"
+
+[deployment.location]
+lat = 30.0
+lon = -81.0
+
+[[sources]]
+id = "ecowitt_soil"
+enabled = false
+kind = "ecowitt_gw_poll"
+[sources.config]
+host = "192.0.2.61"
+
+[[controllers]]
+id = "os1"
+default = true
+kind = "opensprinkler_direct"
+[controllers.config]
+host = "192.0.2.60"
+password_md5 = "a6d82bced638de3def1e9bbb4983225c"
+"#;
+        toml::from_str(toml).expect("test config parses")
+    }
+
+    #[test]
+    fn disabled_source_still_builds_with_enabled_flag_and_kind_slug() {
+        let devices = build_devices(&cfg_disabled_source());
+        let src = devices
+            .iter()
+            .find(|d| d.id == "source:ecowitt_soil")
+            .expect("disabled source still appears in the device list");
+        assert_eq!(
+            src.enabled,
+            Some(false),
+            "the config entry's enabled flag is surfaced verbatim"
+        );
+        assert_eq!(
+            src.source_kind.as_deref(),
+            Some("ecowitt_gw_poll"),
+            "source_kind carries the SourceKind serde tag slug"
+        );
+    }
+
+    #[test]
+    fn enabled_source_carries_kind_slug_and_flag() {
+        let devices = build_devices(&cfg());
+        let src = devices
+            .iter()
+            .find(|d| d.id == "source:open_meteo")
+            .unwrap();
+        assert_eq!(src.enabled, Some(true));
+        assert_eq!(src.source_kind.as_deref(), Some("open_meteo"));
+        // Controllers carry no source_kind.
+        let ctrl = devices.iter().find(|d| d.id == "controller:os1").unwrap();
+        assert_eq!(ctrl.source_kind, None);
+        assert_eq!(ctrl.enabled, Some(true));
     }
 
     #[test]

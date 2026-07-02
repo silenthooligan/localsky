@@ -66,6 +66,7 @@ impl HttpWebhook {
         }
 
         let mut fields: Vec<(WeatherField, f64)> = Vec::new();
+        let mut emitted_keyed = false;
         for mapping in &self.config.fields {
             let Some(raw) = extract_numeric(payload, mapping.json_path.as_deref()) else {
                 debug!(
@@ -75,6 +76,24 @@ impl HttpWebhook {
                 );
                 continue;
             };
+            let value = raw * mapping.scale + mapping.offset;
+            // Per-zone soil channel: emit a KeyedReading like the MQTT adapter so
+            // a DIY gateway can feed zone-bound soil (field is ignored).
+            if let Some(zone) = mapping
+                .zone_slug
+                .as_deref()
+                .map(str::trim)
+                .filter(|z| !z.is_empty())
+            {
+                let _ = self.bus.send(SourceEvent::KeyedReading {
+                    source_id: self.id.clone(),
+                    key: crate::sources::bus_recorder::zone_soil_key(zone),
+                    value,
+                    at_epoch: now_epoch(),
+                });
+                emitted_keyed = true;
+                continue;
+            }
             let Some(field) = parse_weather_field(&mapping.field) else {
                 debug!(
                     source = self.id,
@@ -83,20 +102,18 @@ impl HttpWebhook {
                 );
                 continue;
             };
-            let value = raw * mapping.scale + mapping.offset;
             fields.push((field, value));
         }
 
-        if fields.is_empty() {
-            return false;
+        let had_obs = !fields.is_empty();
+        if had_obs {
+            let _ = self.bus.send(SourceEvent::Observation {
+                source_id: self.id.clone(),
+                fields,
+                at_epoch: now_epoch(),
+            });
         }
-
-        let _ = self.bus.send(SourceEvent::Observation {
-            source_id: self.id.clone(),
-            fields,
-            at_epoch: now_epoch(),
-        });
-        true
+        had_obs || emitted_keyed
     }
 }
 
@@ -187,6 +204,7 @@ mod tests {
             json_path: json_path.map(|s| s.to_string()),
             scale,
             offset: 0.0,
+            zone_slug: None,
         }
     }
 
@@ -205,6 +223,28 @@ mod tests {
             panic!("expected observation");
         };
         assert_eq!(fields.len(), 2);
+    }
+
+    #[test]
+    fn zone_slug_field_emits_keyed_soil_reading() {
+        // A6/G4: a DIY gateway can feed per-zone soil via zone_slug, emitted as
+        // a KeyedReading (soilmoisture_<slug>) instead of a global WeatherField.
+        let (s, mut rx) = build(
+            None,
+            vec![HttpWebhookField {
+                field: String::new(),
+                json_path: Some("soil".into()),
+                scale: 1.0,
+                offset: 0.0,
+                zone_slug: Some("back_garden".into()),
+            }],
+        );
+        assert!(s.handle_post(br#"{"soil": 41.0}"#, None));
+        let SourceEvent::KeyedReading { key, value, .. } = rx.try_recv().unwrap() else {
+            panic!("expected keyed reading");
+        };
+        assert_eq!(key, "soilmoisture_back_garden");
+        assert_eq!(value, 41.0);
     }
 
     #[test]
@@ -233,6 +273,7 @@ mod tests {
                 json_path: None,
                 scale: 1.8,
                 offset: 32.0,
+                zone_slug: None,
             }],
         );
         let ok = s.handle_post(b"20.0", None);

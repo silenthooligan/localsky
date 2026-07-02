@@ -44,8 +44,9 @@ pub fn MobileNav() -> impl IntoView {
             <Tab tab="history" href="/history" icon="history" label="History"/>
             <MoreTab more_open=more_open/>
         </nav>
-        <Sheet open=more_open title="More".to_string() aria_label="More destinations".to_string()>
+        <Sheet open=more_open title="More".to_string() aria_label="More destinations".to_string() id="mobile-more-menu".to_string()>
             <div class="mobile-more">
+                <MoreLink href="/week" icon="calendar" label="Week" open=more_open/>
                 <MoreLink href="/sensors" icon="activity" label="Sensors" open=more_open/>
                 <MoreLink href="/simulator" icon="simulator" label="Simulator" open=more_open/>
                 <MoreLink href="/rules" icon="rule-lab" label="Rule Lab" open=more_open/>
@@ -103,6 +104,9 @@ fn MoreTab(more_open: RwSignal<bool>) -> impl IntoView {
             type="button"
             class=cls
             aria-label="More"
+            aria-haspopup="menu"
+            aria-controls="mobile-more-menu"
+            aria-expanded=move || more_open.get().to_string()
             on:click=move |_| more_open.set(true)
         >
             <span class="mobile-tab-glyph" aria-hidden="true"><Icon name="more" size=22/></span>

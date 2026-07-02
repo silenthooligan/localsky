@@ -7,13 +7,20 @@ use leptos::prelude::*;
 use serde_json::json;
 
 use crate::components::irrigation::controls::{post_action_then, OverrideControl};
-use crate::components::ui::{use_toast, Icon};
+use crate::components::ui::{use_toast, Button, Icon};
+use crate::components::units_fmt::{depth_unit, depth_value_mm, use_unit_prefs};
 use crate::ha::snapshot::ZoneState;
 
-/// (status key, label, color token) for a zone's live state.
+/// (status key, label, color token) for a zone's live state. A zone the engine
+/// will SKIP must never read "TONIGHT" even if it carries a leftover planned
+/// duration: the skip verdict is the truth, so it reads "SKIPPING" (blue) and
+/// the planned minutes below are suppressed. Running and idle are unaffected.
 pub fn zone_status(z: &ZoneState) -> (&'static str, &'static str, &'static str) {
+    let skipping = z.verdict.as_ref().is_some_and(|v| v.verdict == "skip");
     if z.running {
         ("running", "RUNNING", "var(--verdict-run)")
+    } else if skipping {
+        ("skipping", "SKIPPING", "var(--verdict-skip)")
     } else if z.planned_run_seconds > 0 {
         ("scheduled", "TONIGHT", "var(--accent)")
     } else {
@@ -31,14 +38,30 @@ pub fn ZoneCard(
     soil_pct: Option<f64>,
 ) -> impl IntoView {
     let (status, label, color) = zone_status(&zone);
+    // Per-device display-unit preference; read prefs.get() in render
+    // closures so a units change (or post-hydration localStorage load)
+    // re-renders the convertible values.
+    let prefs = use_unit_prefs();
     let name = zone.name.clone();
     let slug = zone.slug.clone();
     let slug_sel = slug.clone();
     let slug_active = slug.clone();
     let is_active = move || selected.get().as_deref() == Some(slug_active.as_str());
-    let planned = ((zone.planned_run_seconds + 30) / 60).to_string();
+    // A zone the engine will SKIP waters 0 minutes tonight, regardless of any
+    // leftover planned duration on the snapshot: show "0" so the "Tonight" stat
+    // matches the SKIPPING status and the zone's verdict (T4), never a planned
+    // figure the zone will not actually run.
+    let zone_skipping = zone.verdict.as_ref().is_some_and(|v| v.verdict == "skip");
+    let planned = if zone_skipping {
+        "0".to_string()
+    } else {
+        ((zone.planned_run_seconds + 30) / 60).to_string()
+    };
     let today = format!("{:.0}", zone.today_run_minutes);
-    let deficit = format!("{:.1}", zone.bucket_mm);
+    // Deficit is a soil-water DEPTH stored in millimeters; convert at the
+    // display boundary (helpers respect units_rain). Engine math + wire
+    // format stay mm.
+    let deficit_mm = zone.bucket_mm;
     let running = zone.running;
     let stop_slug = slug.clone();
     // Sticky per-zone override (Auto/Skip/Force). Card is re-created per
@@ -78,10 +101,20 @@ pub fn ZoneCard(
     });
     let verdict_reason = verdict
         .as_ref()
-        .filter(|v| v.verdict == "skip" && !v.reason.is_empty())
+        // Show the reason on skips and on a soil-floor run (P1-2), so the green
+        // WATER pill explains "soil below minimum; forecast-rain skip overridden".
+        .filter(|v| (v.verdict == "skip" || v.source == "soil_floor") && !v.reason.is_empty())
+        .cloned()
         .map(|v| {
-            let r = v.reason.clone();
-            view! { <div class="zone-card__reason">{r}</div> }
+            // P2 units architecture: render the reason unit-aware from the
+            // structured ZoneVerdict (soil reasons are percent / unit-invariant;
+            // global-bound reasons fall back to the baked string). Read prefs.get()
+            // inside the closure so a units toggle re-renders.
+            view! {
+                <div class="zone-card__reason">
+                    {move || crate::reason_render::render_zone_reason(&v, prefs.get())}
+                </div>
+            }
         });
 
     let select_label = format!("Open {} details", zone.name);
@@ -140,7 +173,10 @@ pub fn ZoneCard(
                     </div>
                     <div class="zone-card__stat">
                         <span class="zone-card__k">"Deficit"</span>
-                        <span class="zone-card__v">{deficit}<small>" mm"</small></span>
+                        <span class="zone-card__v">
+                            {move || depth_value_mm(deficit_mm, prefs.get())}
+                            <small>{move || format!(" {}", depth_unit(prefs.get()))}</small>
+                        </span>
                     </div>
                     {soil_pct.map(|pct| view! {
                         <div class="zone-card__stat zone-card__stat--soil">
@@ -160,15 +196,15 @@ pub fn ZoneCard(
                 </div>
                 {running.then(|| view! {
                     <div class="zone-card__foot">
-                        <button
-                            type="button"
+                        <Button
+                            variant="danger"
                             class="zone-card__stop"
-                            prop:disabled=move || stopping.get()
-                            on:click=on_stop
+                            disabled=Signal::derive(move || stopping.get())
+                            on_click=Callback::new(on_stop)
                         >
                             <Icon name="stop" size=14/>
                             {move || if stopping.get() { "Stopping…" } else { "Stop" }}
-                        </button>
+                        </Button>
                     </div>
                 })}
             </div>

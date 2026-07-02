@@ -1,6 +1,9 @@
 # LocalSky
 
-> These docs track LocalSky v0.2.0-beta.1.
+<!-- TODO: template this banner from Cargo.toml's version at mdbook build
+     (a preprocessor / build step) so it never drifts from the binary again.
+     Until then the literal below must be bumped by hand on every release. -->
+> These docs track LocalSky v0.7.0-beta.1.
 
 **Hyperlocal weather on your hardware. Smart irrigation when you want it.**
 

@@ -100,7 +100,10 @@ pub async fn discover_opensprinkler(per_host_timeout: Duration) -> Vec<Discovere
             let client = client.clone();
             async move { probe(client, ip, port).await }
         })
-        .buffer_unordered(64)
+        // High fan-out so a /24 (x2 ports) across several local subnets still
+        // finishes within the wizard's discovery budget; each probe is a short
+        // same-LAN connect, so this is bounded by sockets, not CPU.
+        .buffer_unordered(256)
         .filter_map(|r| async move { r })
         .collect()
         .await;

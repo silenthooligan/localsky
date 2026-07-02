@@ -41,6 +41,11 @@ pub enum WeatherField {
     ForecastDaily,
     ForecastHourly,
     Pop,
+    /// Leaf wetness as a percent (0-100). A surface-wetness reading from a
+    /// dedicated leaf-wetness sensor (Davis WLL soil/leaf station, Ecowitt
+    /// WH35, agricultural probes). Display + history only; the engine does not
+    /// gate irrigation on it, but it is a recognized agronomic reading.
+    LeafWetness,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -74,6 +79,17 @@ pub enum SourceEvent {
         source_id: String,
         key: String,
         value: f64,
+        at_epoch: i64,
+    },
+    /// A full forecast snapshot from a forecast-capable source (Open-Meteo,
+    /// NWS, OpenWeather, PirateWeather, Met.no). The `forecast_bridge` merges
+    /// these into the shared ForecastStore using per-source priority, so the
+    /// user's CHOSEN forecast source drives the forecast instead of a single
+    /// hardcoded provider. Carries the whole snapshot (daily + hourly +
+    /// past_daily + timezone) the source built from its own API response.
+    Forecast {
+        source_id: String,
+        snapshot: crate::forecast::snapshot::ForecastSnapshot,
         at_epoch: i64,
     },
     /// Reachability change. The engine surfaces this in per-source status badges.

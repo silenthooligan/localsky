@@ -87,6 +87,18 @@ pub struct ZoneState {
     /// Probe battery as a percentage (Ecowitt 0-5 level scaled ×20).
     #[serde(default)]
     pub soil_battery_pct: Option<f64>,
+
+    /// REPORTING-ONLY suspect-probe indicator. `Some(reason)` when the
+    /// soil-quarantine logic distrusted this zone's probe (offline, or a wild
+    /// outlier vs its trustworthy siblings) REGARDLESS of the final watering
+    /// verdict, so a genuinely bad probe is surfaced even when a global gate
+    /// (forecast rain, etc.) masked the per-zone `verdict.source` as "global".
+    /// The reason carries the engine's canonical "Soil probe suspect (28% vs
+    /// yard 73%)" shape so the AnomalyBanner renders the numbers. Set by
+    /// `apply_engine` from `engine::skip_rules::suspect_probes`, which is
+    /// computed from the raw readings, NOT the verdict. Changes no decision.
+    #[serde(default)]
+    pub soil_suspect: Option<String>,
 }
 
 /// Per-zone flex-math breakdown for the math-transparency tile. All
@@ -155,6 +167,14 @@ pub struct SkipCheck {
     pub rain_7day_weighted_in: f64,
     /// Σ hourly[0..4] precip, total expected rain in the next 4 hours.
     pub rain_next_4h_in: f64,
+    /// OBSERVED rain over the recent window: today's measured total plus the
+    /// last `rain_observed_window_days` of past observed daily rain. Sensor-
+    /// independent backstop that lets the engine skip the morning after heavy
+    /// rain even when a soil probe is bad/offline. Additive /api/v1 field;
+    /// defaults to 0.0 when absent so JSON from older producers deserializes
+    /// (an absent value just means the observed-rain gate sees no recent rain).
+    #[serde(default)]
+    pub rain_observed_recent_in: f64,
     /// Today's forecast peak wind (Open-Meteo daily[0]).
     pub wind_max_today_mph: f64,
     /// Min hourly forecast temperature for the next 24h (overnight low).
@@ -184,14 +204,16 @@ pub struct SkipCheck {
     pub min_temp_f: f64,
     pub rain_skip_in: f64,
 
-    // ── Soil sensor inputs (Phase E) ──
-    /// Per-zone calibrated soil moisture %, owned natively by LocalSky
-    /// (raw FDR AD polled from the gateway, calibrated per zone). `None`
-    /// when the probe is unavailable (radio dropout, gateway offline).
-    pub soil_back_yard_pct: Option<f64>,
-    pub soil_front_yard_pct: Option<f64>,
-    pub soil_side_yard_pct: Option<f64>,
-    pub soil_back_yard_shrubs_pct: Option<f64>,
+    // ── Soil sensor inputs (per-zone, generalized) ──
+    /// Per-zone calibrated soil moisture AND saturation threshold, for EVERY
+    /// configured soil zone (not a fixed set of yard slugs). Flattened so the
+    /// JSON exposes `skip_check.soil_<slug>_pct` (Option: `null` when the probe
+    /// is offline) and `skip_check.saturation_<slug>_pct` exactly as the
+    /// manifest's per-zone soil descriptor (push_zone_entities) expects, for
+    /// ANY zone slug. Replaces the old hardcoded back_yard/front_yard/
+    /// side_yard/back_yard_shrubs fields (same JSON keys for those slugs).
+    #[serde(flatten)]
+    pub soil_fields: std::collections::BTreeMap<String, Option<f64>>,
     /// Yard-wide soil temperature aggregates (min/max), computed natively
     /// from the per-zone soil temps in zones[]. Min drives the frost gate.
     pub soil_temp_yard_min_f: Option<f64>,
@@ -199,14 +221,6 @@ pub struct SkipCheck {
     /// Soil-frost skip threshold (°F). Below this, suspend the morning run.
     /// From the LocalSky skip-rules config (default 35.0).
     pub frost_skip_soil_f: f64,
-    /// Per-zone saturation thresholds (%). When ALL four zones are at or
-    /// above their threshold, the engine returns a yard-wide skip. Per-zone
-    /// gating (one wet zone, others dry) is surfaced via each zone's own
-    /// verdict in zones[].
-    pub saturation_back_yard_pct: f64,
-    pub saturation_front_yard_pct: f64,
-    pub saturation_side_yard_pct: f64,
-    pub saturation_back_yard_shrubs_pct: f64,
 
     // ── Toggles ──
     pub is_paused: bool,
@@ -220,6 +234,15 @@ pub struct SkipCheck {
     pub verdict: String,
     /// Human-readable reason. Empty when `verdict == "run"`.
     pub reason: String,
+    /// P1 (units architecture): stable id of the rule that DECIDED this verdict,
+    /// e.g. "wind_now", "rain_3day", "soil_saturation". Same id used in
+    /// `RuleEval.id` / the gates catalog. `"run"` when nothing fired (a clean
+    /// run). ADDITIVE + invisible: it mirrors the engine's existing baked
+    /// `reason`/`verdict` and changes no decision; a later client phase re-renders
+    /// the reason unit-aware from this code + the numeric operands. `#[serde(
+    /// default)]` so older JSON (no code) deserializes to "".
+    #[serde(default)]
+    pub reason_code: String,
 }
 
 /// Live + forecast weather context. The dashboard surfaces both
@@ -232,14 +255,49 @@ pub struct Forecast {
     /// Tempest's local rain gauge accumulated total since midnight, in
     /// inches. Tempest reports in inches when HA is in imperial mode.
     pub rain_today_tempest_in: f64,
-    /// Open-Meteo's regional model accumulated total today, in inches.
-    /// Falls back here when the Tempest gauge stays at 0 during a
-    /// real rain event (haptic-sensor misses can happen).
+    /// The forecast model's accumulated total today, in inches. Falls back
+    /// here when the local gauge stays at 0 during a real rain event
+    /// (haptic-sensor misses can happen). (Field name kept for API/HA
+    /// compatibility; the actual provider is `forecast_source_label`.)
     pub rain_today_om_in: f64,
+    /// Provenance: display name of the live station driving
+    /// `rain_today_tempest_in` (e.g. "Tempest", "Ecowitt") so the UI labels the
+    /// rain comparison with the REAL source instead of hardcoding "Tempest".
+    #[serde(default)]
+    pub station_source_label: String,
+    /// Provenance: display name of the forecast provider driving the model rain
+    /// fields (e.g. "Open-Meteo", "NWS"). Empty until set.
+    #[serde(default)]
+    pub forecast_source_label: String,
     /// Tempest live rain rate, in/hr. Drives the "RAINING NOW" badge.
     pub rain_intensity_in_hr: f64,
     /// Tempest precipitation type: "none" / "rain" / "hail".
     pub rain_type: String,
+    /// TRUE only when `rain_intensity_in_hr` / `rain_type` come from a LIVE source
+    /// that currently OWNS the rain reading (the refresher's `rain_live`: a
+    /// live_current writer stamped `rain_live_epoch` within the freshness window).
+    /// FALSE on cloud-only / station-stale, where those two fields are filled from
+    /// the Open-Meteo current-hour forecast precip (a model prediction, NOT an
+    /// observation). The "RAINING NOW" badge keys on this so it only shows the
+    /// live green OBSERVED state when a live source is actually measuring rain,
+    /// instead of presenting a forecast fill as an observation (T3). Additive
+    /// `#[serde(default)]` (absent -> false -> badge stays calm), so older
+    /// producers and the engine snapshot tests deserialize unchanged.
+    #[serde(default)]
+    pub rain_is_live: bool,
+    /// The HONEST nature of the live rain reading (`rain_intensity_in_hr` /
+    /// `rain_type`): Measured (a real gauge), RadarQpe (NOAA MRMS radar), or
+    /// Model (a forecast fill). The dashboard rain badge derives green
+    /// "measures rain" / "radar-measured rain" / amber "forecast only" from this
+    /// (NOT from `rain_is_live` alone), and NEVER says "live" on a Model nature.
+    /// Defaults to Model (the honest fallback when no live measured/radar source
+    /// owns the rain). Additive `#[serde(default)]` so older producers and the
+    /// snapshot tests deserialize unchanged. The producer (refresher) derives this
+    /// from the 3-tier rain gate's merge owner: Measured for a live LAN gauge or a
+    /// fresh NWS observation, RadarQpe for a fresh NOAA MRMS radar fill, else
+    /// Model.
+    #[serde(default)]
+    pub rain_nature: RainNature,
     /// Open-Meteo forecast for tomorrow, in inches.
     pub rain_tomorrow_in: f64,
     /// Open-Meteo 3-day rolling rain forecast (today + next 2), in.
@@ -310,6 +368,13 @@ pub struct DayVerdict {
     pub verdict: String,
     /// Human-readable reason; empty on plain "run".
     pub reason: String,
+    /// P1 (units architecture): stable id of the rule that decided this day's
+    /// cell, copied straight from the engine `SkipCheck.reason_code` the strip
+    /// runs per day. `"run"` when nothing fired. ADDITIVE + invisible; mirrors the
+    /// existing baked `verdict`/`reason`. `#[serde(default)]` so older JSON
+    /// deserializes to "".
+    #[serde(default)]
+    pub reason_code: String,
 }
 
 /// Per-zone 7-day soil-moisture projection (Phase E predictive). Built
@@ -416,11 +481,30 @@ pub struct IrrigationSnapshot {
     /// True when the most recent poll completed without error.
     pub ha_reachable: bool,
 
+    /// IANA timezone name for this deployment (e.g. "America/New_York"), mirroring
+    /// `ForecastSnapshot.timezone`. The client formats every epoch in the
+    /// irrigation UI against THIS zone (via `crate::timefmt`), not the viewer's
+    /// browser timezone, so a phone in another timezone still shows the
+    /// deployment's local 24h clock. Populated each refresh from the configured /
+    /// location-derived timezone. Additive `#[serde(default)]`: absent (older
+    /// producers) -> empty string, and the client falls back to browser-local.
+    #[serde(default)]
+    pub timezone: String,
+
     /// UTC epoch of the most recent Tempest UDP packet (or 0). The
     /// dashboard strip header surfaces this so a stalled local-radio
     /// path is visible without a separate /api/health round-trip.
     #[serde(default)]
     pub tempest_last_seen_epoch: i64,
+    /// Serial of the live local station (Tempest / Ecowitt / ...) currently
+    /// owning current-conditions, mirroring `WeatherSnapshot.station_serial`.
+    /// EMPTY means no physical/live station has reported, i.e. a cloud-only
+    /// install: the verdict-strip freshness pill keys on this to show
+    /// provenance instead of falsely flagging a non-existent station as
+    /// "stale". Populated each refresh from the live-station store. Additive
+    /// `#[serde(default)]`: absent (older producers) -> "" -> cloud-only path.
+    #[serde(default)]
+    pub station_serial: String,
     /// UTC epoch of the most recent Open-Meteo refresh (or 0). Same
     /// observability purpose as `tempest_last_seen_epoch`.
     #[serde(default)]
@@ -529,6 +613,90 @@ pub struct IrrigationSnapshot {
     /// known faults.
     #[serde(default)]
     pub soil_probe_faults: Vec<SoilProbeFault>,
+
+    /// Household display-unit default, copied verbatim from
+    /// `cfg.deployment.units` each refresh (mirror of the `photo_url` copy
+    /// pattern). The client uses this as the per-device baseline: when a
+    /// device has not opted into its own override, `use_unit_prefs` expands
+    /// this household value (Metric -> METRIC, Imperial -> IMPERIAL). The
+    /// engine never reads it; it is display-plumbing only. Additive;
+    /// absent = `Units::Imperial` (the serde + struct default), which keeps
+    /// the default deployment byte-identical to before this field existed.
+    #[serde(default)]
+    pub units: Units,
+
+    /// Per-field current-conditions provenance: WeatherField snake_case name
+    /// (see `config::field_overrides::field_name`, e.g. `wind_mph`,
+    /// `rain_today_in`) -> the display label of the source CURRENTLY driving
+    /// that reading ("Tempest", "Ecowitt", a cloud provider, ...). Populated
+    /// each refresh from the merge layer's live ownership, so the UI can label
+    /// each headline reading with where it actually comes from ("Wind: Tempest")
+    /// and a per-field source picker can show the live owner. Covers the small
+    /// user-facing set the override page exposes. Additive `#[serde(default)]`:
+    /// absent (older producers / no live source yet) deserializes to an empty
+    /// map and the UI falls back to the merged `source_label`.
+    #[serde(default)]
+    pub field_sources: std::collections::BTreeMap<String, String>,
+
+    /// Forced-run safety signal: when a sticky `global_override = "run"` is
+    /// watering THROUGH a hard guard (freeze, restriction, raining-now, dry-run,
+    /// ...), this carries that guard's reason string (e.g. "Freeze risk now
+    /// (28°F < 35°F)") so the irrigation hero can warn the operator they are
+    /// running past a real protection. `None` when there is no force-run, or when
+    /// the force-run is not overriding anything (the engine would have run
+    /// anyway). The override still wins, byte-for-byte; this only NAMES what it
+    /// is suppressing. Produced by `engine::force_overrode_guard`. Additive
+    /// `#[serde(default)]`: absent (older producers) -> `None`, no warning shown.
+    #[serde(default)]
+    pub force_overrode_guard: Option<String>,
+}
+
+/// Household display-unit system. Defined here in the both-features snapshot
+/// module (rather than in `config::schema`, which is `ssr`-only) so the hydrate
+/// client can deserialize it off the snapshot and resolve display units.
+/// `config::schema` re-exports this as `config::schema::Units`, so the config
+/// layer's `deployment.units` field and the wizard keep their existing path.
+/// `JsonSchema` is derived only under `ssr` (schemars is an ssr-only dep, and
+/// only the ssr-side `/api/config/schema` endpoint needs it).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "ssr", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum Units {
+    #[default]
+    Imperial,
+    Metric,
+}
+
+/// The HONEST nature of the LIVE current-rain reading driving the snapshot, the
+/// axis the dashboard rain badge keys on (distinct from `Forecast::rain_is_live`,
+/// which says only whether a live source currently owns the reading):
+///
+///   * `Measured`: a real instrument gauge reading (a LAN station, or an NWS
+///     station observation). Green "Measures rain".
+///   * `RadarQpe`: a gauge-corrected radar rain estimate (NOAA MRMS),
+///     observation-grade but a radar grid, not your own gauge. Green
+///     "Radar-measured rain".
+///   * `Model`: a model/forecast fill for the current interval (Open-Meteo,
+///     Pirate's rain, OpenWeather, WeatherKit, Met.no). Amber "Forecast only";
+///     the badge must NEVER say "live" on this.
+///
+/// Defaults to `Model` (the honest fallback when no live measured/radar source
+/// owns the rain). Lives in this both-features snapshot module (not ssr-only
+/// `config::schema`) so the hydrate client deserializes it off the snapshot.
+/// `JsonSchema` only under ssr (schemars is ssr-only). The producer derives this
+/// per refresh in the refresher's 3-tier rain gate: `Measured` when a live LAN
+/// gauge (or a fresh NWS observation) owns the current-rain field, `RadarQpe`
+/// when a fresh NOAA MRMS radar fill owns it, else `Model` (the forecast
+/// fallback). The same nature also drives the engine's observation-grade-only
+/// hard rain skip (a `Model` rain may only soft-skip).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "ssr", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum RainNature {
+    Measured,
+    RadarQpe,
+    #[default]
+    Model,
 }
 
 /// One rule's evaluation in a decision trace. Lives here (the shared
@@ -549,6 +717,28 @@ pub struct RuleEval {
     pub outcome: String,
     /// Verdict produced if this rule fired.
     pub verdict: Option<String>,
+    /// P3-9: plain-language "distance to flip" for the threshold gates, e.g.
+    /// "0.08\" of headroom before this skips" (passed) or "skipped, 0.05 in/hr
+    /// past the line" (fired). `None` for binary control/safety gates with no
+    /// numeric threshold, and for inapplicable / not-reached rows. Additive
+    /// serde field; absent = no margin shown.
+    #[serde(default)]
+    pub margin_label: Option<String>,
+    /// P1 (units architecture): the structured operands behind `margin_label`,
+    /// so a later client phase can re-render the margin unit-aware instead of
+    /// parsing the baked string. `value` is the driving input the gate saw,
+    /// `threshold` the line it compares against, both in IMPERIAL canonical units;
+    /// `unit_kind` names the dimension ("temp_f","wind_mph","rain_in",
+    /// "rain_rate_in_hr","pct","soil_temp_f","none"). All `None` for binary
+    /// control/safety gates (override, pause, restrictions, dry_run, live_data)
+    /// and for inapplicable / not-reached rows. ADDITIVE: mirrors `margin_label`'s
+    /// inputs, changes no decision. `#[serde(default)]` so older JSON deserializes.
+    #[serde(default)]
+    pub value: Option<f64>,
+    #[serde(default)]
+    pub threshold: Option<f64>,
+    #[serde(default)]
+    pub unit_kind: Option<String>,
 }
 
 /// Full structured trace of a morning skip decision.
@@ -561,7 +751,48 @@ pub struct DecisionTrace {
     /// data was available at all). Additive field; absent = false.
     #[serde(default)]
     pub degraded: bool,
+    /// P1 (units architecture): stable id of the rule that DECIDED this trace,
+    /// mirroring the deciding `RuleEval.id` (the one whose outcome is "fired").
+    /// `"run"` when nothing fired (a clean run). ADDITIVE + invisible; mirrors
+    /// the existing baked `verdict`/`reason`. `#[serde(default)]` so older JSON
+    /// deserializes to "".
+    #[serde(default)]
+    pub reason_code: String,
     pub rules: Vec<RuleEval>,
+}
+
+/// P3-4: one day on the forecast-accuracy scoreboard. The decision LocalSky made
+/// that day paired with what the sky actually did, so an operator can watch the
+/// rain calls pay off (or honestly miss). Shared serde type so the History UI
+/// renders it directly. `correct` is `Some` only on days where rain was actually
+/// a factor (forecast or observed); a dry default day or a non-rain skip
+/// (restriction/freeze) is shown for context but not scored.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScoreboardDay {
+    pub date: String,
+    pub verdict: String,
+    pub reason: String,
+    /// P1 (units architecture): stable id of the rule that decided this day,
+    /// classified from the persisted `reason` (the scoreboard reconstructs days
+    /// from `verdict_history` rows, which store only verdict + reason text, so the
+    /// code is derived not re-emitted; no history migration). `"run"` for a clean
+    /// run and `""` when the reason can't be classified. ADDITIVE + invisible;
+    /// `#[serde(default)]` so older JSON deserializes to "".
+    #[serde(default)]
+    pub reason_code: String,
+    pub predicted_in: Option<f64>,
+    pub observed_in: Option<f64>,
+    pub assessment: String,
+    pub correct: Option<bool>,
+}
+
+/// P3-4: the scoreboard window plus its honest tally. `scored` counts only the
+/// rain-relevant days; `matched` is how many of those went the right way.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AccuracyResult {
+    pub days: Vec<ScoreboardDay>,
+    pub scored: u32,
+    pub matched: u32,
 }
 
 fn one_f64() -> f64 {
@@ -592,12 +823,36 @@ pub struct ZoneVerdict {
     /// "skip" | "run" | "run_extended"
     pub verdict: String,
     pub reason: String,
-    /// Which layer decided: "global" | "soil_saturation" | "condition" | "default"
+    /// Which layer decided: "global" | "soil_saturation" | "soil_quarantine"
+    /// (an offline/outlier probe was distrusted and this zone's soil was
+    /// inferred from its trustworthy neighbors) | "condition" | "soil_floor"
+    /// (dry-soil veto ran the zone despite a forecast-rain skip) | "override" |
+    /// "default"
     pub source: String,
     /// Applied watering multiplier from custom AdjustMultiplier rules,
     /// clamped to [0.5, 1.5]. 1.0 = unchanged.
     #[serde(default = "one_f64")]
     pub multiplier: f64,
+    /// P1 (units architecture): stable id of the rule that decided this zone:
+    /// the per-zone rung's own id ("soil_saturation" / "soil_quarantine" /
+    /// "soil_floor" / "override") when it diverges, else the global firing rule
+    /// id carried in from the yard-wide decision ("rain_3day", "wind_now", ...),
+    /// or "condition" for a custom-rule skip, and "run" on a clean run. ADDITIVE
+    /// + invisible; mirrors the existing baked `verdict`/`reason`/`source`.
+    /// `#[serde(default)]` so older JSON deserializes to "".
+    #[serde(default)]
+    pub reason_code: String,
+    /// P1 (units architecture): the soil operands behind the per-zone soil
+    /// decision, in PERCENT (soil-moisture % vs the saturation/target % line), so
+    /// a later client phase can re-render the soil reason. `value` = the soil %
+    /// the verdict rode (raw or quarantine-inferred), `threshold` = the % line it
+    /// crossed (saturation_pct for a saturation skip, target_min_pct for a
+    /// soil_floor run). Both `None` for non-soil (global / override / condition)
+    /// decisions. ADDITIVE; changes no decision. `#[serde(default)]`.
+    #[serde(default)]
+    pub value: Option<f64>,
+    #[serde(default)]
+    pub threshold: Option<f64>,
 }
 
 impl Default for ZoneVerdict {
@@ -609,6 +864,9 @@ impl Default for ZoneVerdict {
             reason: String::new(),
             source: "default".into(),
             multiplier: 1.0,
+            reason_code: String::new(),
+            value: None,
+            threshold: None,
         }
     }
 }

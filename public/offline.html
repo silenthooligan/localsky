@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1220">
+  <title>Offline · LocalSky</title>
+  <style>
+    :root {
+      --bg: #0b1220;
+      --panel: #131c2e;
+      --border: #21304a;
+      --ink: #e7edf6;
+      --muted: #94a3b8;
+      --blue: #1490dc;
+      --teal: #149c92;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      background: radial-gradient(120% 120% at 50% 0%, #142036 0%, var(--bg) 60%);
+      color: var(--ink);
+      font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      -webkit-font-smoothing: antialiased;
+    }
+    .card {
+      width: 100%;
+      max-width: 440px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 36px 32px;
+      text-align: center;
+      box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+    }
+    .mark {
+      width: 84px;
+      height: 84px;
+      margin: 0 auto 20px;
+      display: block;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 1.4rem;
+      letter-spacing: -0.01em;
+    }
+    p {
+      margin: 0 0 22px;
+      color: var(--muted);
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      color: #fbcfcf;
+      background: rgba(220, 80, 80, 0.12);
+      border: 1px solid rgba(220, 80, 80, 0.35);
+      padding: 6px 12px;
+      border-radius: 999px;
+      margin-bottom: 18px;
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #e06464;
+    }
+    button {
+      appearance: none;
+      border: 0;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 600;
+      color: #fff;
+      background: linear-gradient(135deg, var(--blue), var(--teal));
+      padding: 12px 24px;
+      border-radius: 12px;
+      width: 100%;
+    }
+    button:hover { filter: brightness(1.06); }
+    button:active { transform: translateY(1px); }
+    button:focus-visible { outline: 3px solid rgba(20, 144, 220, 0.6); outline-offset: 2px; }
+    .hint {
+      margin: 16px 0 0;
+      font-size: 0.82rem;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <main class="card" role="main">
+    <svg class="mark" viewBox="0 0 534 534" role="img" aria-label="LocalSky" xmlns="http://www.w3.org/2000/svg">
+      <g transform="translate(32 32) scale(0.88)">
+        <path fill="#149c92" fill-rule="evenodd" d="M206.0,357.5C206.0,356.7 208.4,351.3 211.4,345.5L216.7,335.0L169.0,335.0C124.8,335.0 120.8,334.9 113.6,333.0C71.0,322.1 49.4,273.0 69.2,232.0C82.2,205.0 115.5,188.6 146.6,193.9C165.9,197.2 184.1,206.9 207.1,226.3L214.2,232.3L222.7,223.8L231.2,215.3L222.3,207.8C199.0,188.2 181.0,177.5 164.5,173.4C160.7,172.5 156.9,171.6 156.3,171.4C155.3,171.1 155.5,169.8 157.0,166.0C174.4,121.8 219.5,92.0 268.9,92.0C316.8,92.0 358.4,118.2 379.1,161.3C381.4,166.1 383.1,170.3 382.8,170.5C382.5,170.8 378.8,171.9 374.4,173.1C356.8,177.7 338.5,188.5 315.7,207.8L306.8,215.3L315.3,223.8L323.8,232.3L330.6,226.4C359.3,201.7 382.8,191.8 408.8,193.3C460.1,196.2 491.7,250.5 469.0,296.5C460.7,313.2 447.9,324.7 429.8,331.7L422.5,334.5L371.8,335.0L321.1,335.5L324.2,340.5C325.9,343.2 328.6,348.4 330.1,352.0L332.9,358.5L373.2,358.8C417.1,359.1 424.2,358.6 437.6,354.1C465.8,344.6 490.3,317.9 497.4,288.9C499.6,279.9 499.6,248.9 497.5,240.5C487.5,202.2 454.3,174.0 413.9,169.5L408.2,168.9L406.0,162.7C389.1,116.0 349.4,81.9 299.3,70.8C284.9,67.6 253.9,67.6 239.4,70.8C189.1,81.7 150.6,114.2 133.4,160.0L130.2,168.5L125.3,169.3C86.9,175.5 62.6,192.1 47.3,222.5C19.1,278.5 54.0,347.6 115.7,358.0C125.3,359.6 206.0,359.2 206.0,357.5Z"/>
+        <path fill="#1490dc" fill-rule="evenodd" d="M280.9,426.9C307.4,418.5 321.2,392.1 311.7,368.0C308.3,359.4 303.9,351.1 296.8,340.1C285.3,322.2 275.3,305.8 272.8,300.5C269.9,294.6 268.7,295.0 264.4,303.0C259.6,311.8 250.1,327.4 242.0,339.5C227.5,361.3 224.7,368.3 224.6,384.0C224.5,394.8 224.7,395.9 227.6,402.0C233.2,413.9 242.7,422.1 256.5,426.8C260.6,428.2 276.6,428.2 280.9,426.9Z"/>
+      </g>
+    </svg>
+    <span class="badge"><span class="dot"></span>Offline</span>
+    <h1>You are offline</h1>
+    <p>LocalSky cannot reach the server right now. Your weather and irrigation data will reappear as soon as the connection is back.</p>
+    <button type="button" onclick="location.reload()">Try again</button>
+    <p class="hint">This page is shown by LocalSky when the network is unavailable.</p>
+  </main>
+  <script>
+    // Auto-retry the moment connectivity returns.
+    window.addEventListener('online', function () { location.reload(); });
+  </script>
+</body>
+</html>

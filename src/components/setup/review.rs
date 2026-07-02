@@ -49,7 +49,11 @@ fn summary_rows(draft: &serde_json::Value) -> Vec<(&'static str, String, &'stati
         .cloned()
         .unwrap_or_default();
     let sources_text = if sources.is_empty() {
-        "None added (defaults synthesize Tempest UDP + Open-Meteo)".into()
+        "None added, and that's fine: LocalSky uses Open-Meteo (free, no key) \
+         for your forecast automatically, and listens for a Tempest on your \
+         network if you have one. You'll see weather right away; add hardware \
+         or other sources anytime in Settings."
+            .into()
     } else {
         let kinds: Vec<String> = sources
             .iter()
@@ -262,6 +266,30 @@ pub fn ReviewStep() -> impl IntoView {
                     "current setup or start fresh."
                 </p>
             </div>
+
+            {move || {
+                // P2-1: warn (not block) at apply when no zones are configured.
+                let d = draft.get();
+                let has_zones = d
+                    .get("config")
+                    .and_then(|c| c.get("zones"))
+                    .and_then(|z| z.as_object())
+                    .map(|m| !m.is_empty())
+                    .unwrap_or(false);
+                if d.is_null() || has_zones {
+                    ().into_any()
+                } else {
+                    view! {
+                        <p class="setup-zero-zone-warn">
+                            "Heads up: no zones are configured yet, so irrigation is idle "
+                            "and nothing will water. The weather home still works fully. "
+                            "You can apply now and add zones any time under Settings -> "
+                            "Zones, or go back to the Zones step to add your first one."
+                        </p>
+                    }
+                    .into_any()
+                }
+            }}
 
             <button
                 type="button"

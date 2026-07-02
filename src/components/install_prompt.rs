@@ -23,6 +23,7 @@
 // shape matches; the post-hydrate effect flips the signal once it's
 // determined what to show.
 
+use crate::components::ui::Button;
 use leptos::prelude::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -73,7 +74,7 @@ pub fn InstallPrompt() -> impl IntoView {
                     <div class="install-prompt-title">"Install LocalSky"</div>
                     <div class="install-prompt-body">"Add to your home screen for full-screen mode and push notifications."</div>
                 </div>
-                <button class="btn-clay btn-clay-good install-prompt-cta" on:click=on_install>"Install"</button>
+                <Button variant="success" class="install-prompt-cta" on_click=Callback::new(on_install)>"Install"</Button>
                 <button class="install-prompt-close" aria-label="Dismiss" on:click=on_dismiss>"\u{2715}"</button>
             </div>
         }.into_any(),

@@ -21,7 +21,7 @@ Weather: Tempest, Ecowitt gateways and soil probes, Davis WeatherLink Live, plus
 
 ### What does "beta" mean here?
 
-The current release is v0.2.0-beta.1. The engine math (FAO-56) is stable, but the API wire format is not semver-locked until 1.0, and features and config fields can still change between releases. Config files carry a `schema_version` and migrate forward automatically at boot, so upgrades are safe; still, keep backups, and rehearse new controller setups with the `dry_run` controller before letting the engine drive real valves.
+The current release is v0.7.0-beta.1. The engine math (FAO-56) is stable, but the API wire format is not semver-locked until 1.0, and features and config fields can still change between releases. Config files carry a `schema_version` and migrate forward automatically at boot, so upgrades are safe; still, keep backups, and rehearse new controller setups with the `dry_run` controller before letting the engine drive real valves.
 
 ### Where is my data?
 

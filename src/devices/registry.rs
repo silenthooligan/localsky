@@ -97,6 +97,8 @@ mod tests {
             online: None,
             last_seen_epoch: None,
             also_in_ha: false,
+            enabled: None,
+            source_kind: None,
             children: Vec::new(),
         }
     }

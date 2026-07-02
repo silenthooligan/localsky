@@ -11,14 +11,16 @@
 // We use the deployment display_name (slugified) as <node_id> so the
 // same broker can serve multiple LocalSky deployments without collision.
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use rumqttc::{AsyncClient, ClientError, MqttOptions, QoS};
+use rumqttc::{AsyncClient, ClientError, Event, MqttOptions, Packet, QoS};
 use serde::Serialize;
 use thiserror::Error;
 use tracing::{info, warn};
 
 use crate::config::schema::MqttConfig;
+use crate::ha::snapshot::IrrigationSnapshot;
 
 #[derive(Debug, Error)]
 pub enum MqttPublishError {
@@ -118,11 +120,25 @@ impl HaMqttPublisher {
         }
     }
 
-    /// Publish discovery for one zone. Issues four entities per zone:
-    /// bucket_mm, et_today_mm, planned_seconds, running.
-    pub async fn publish_zone_discovery(&self, zone_slug: &str) -> Result<(), MqttPublishError> {
+    /// Publish discovery for one zone. Issues the bucket_mm + planned_seconds
+    /// sensors always, and the `running` binary_sensor only when
+    /// `running_known` is true. (No per-zone ET sensor: ET0 is a single
+    /// yard-wide forecast value, not per-zone, so a per-zone et_today_mm would
+    /// publish the same number N times with no real per-zone producer.)
+    ///
+    /// `running_known=false` (fire-and-forget MQTT/DIY controllers) means we
+    /// never get a trustworthy readback, so `publish_zone_state` withholds the
+    /// running state forever. Publishing its discovery anyway would leave HA
+    /// with a `running` binary_sensor stuck "unknown" for the life of the
+    /// deployment, so we gate the discovery the same way `flow_meter` gates the
+    /// flow sensor: no producer, no entity.
+    pub async fn publish_zone_discovery(
+        &self,
+        zone_slug: &str,
+        running_known: bool,
+    ) -> Result<(), MqttPublishError> {
         let device = self.device();
-        let entities: Vec<(&str, String, DiscoveryEntity)> = vec![
+        let mut entities: Vec<(&str, String, DiscoveryEntity)> = vec![
             (
                 "sensor",
                 format!("zone_{zone_slug}_bucket_mm"),
@@ -134,22 +150,6 @@ impl HaMqttPublisher {
                     device_class: None,
                     state_class: Some("measurement".into()),
                     icon: Some("mdi:water".into()),
-                    device: device.clone(),
-                    attribution: "LocalSky".into(),
-                },
-            ),
-            (
-                "sensor",
-                format!("zone_{zone_slug}_et_today_mm"),
-                DiscoveryEntity {
-                    name: format!("{zone_slug} ET today"),
-                    unique_id: format!("{}_zone_{zone_slug}_et_today_mm", self.node_id),
-                    state_topic: self
-                        .state_topic("sensor", &format!("zone_{zone_slug}_et_today_mm")),
-                    unit_of_measurement: Some("mm".into()),
-                    device_class: None,
-                    state_class: Some("measurement".into()),
-                    icon: Some("mdi:weather-sunny".into()),
                     device: device.clone(),
                     attribution: "LocalSky".into(),
                 },
@@ -170,7 +170,9 @@ impl HaMqttPublisher {
                     attribution: "LocalSky".into(),
                 },
             ),
-            (
+        ];
+        if running_known {
+            entities.push((
                 "binary_sensor",
                 format!("zone_{zone_slug}_running"),
                 DiscoveryEntity {
@@ -185,8 +187,8 @@ impl HaMqttPublisher {
                     device: device.clone(),
                     attribution: "LocalSky".into(),
                 },
-            ),
-        ];
+            ));
+        }
         for (component, object_id, entity) in entities {
             let topic = self.config_topic(component, &object_id);
             let payload = serde_json::to_string(&entity)
@@ -263,18 +265,11 @@ impl HaMqttPublisher {
         &self,
         zone_slug: &str,
         bucket_mm: Option<f64>,
-        et_today_mm: Option<f64>,
         planned_seconds: Option<u32>,
         running: Option<bool>,
     ) -> Result<(), MqttPublishError> {
         if let Some(v) = bucket_mm {
             let topic = self.state_topic("sensor", &format!("zone_{zone_slug}_bucket_mm"));
-            self.client
-                .publish(topic, QoS::AtLeastOnce, true, format!("{v:.2}"))
-                .await?;
-        }
-        if let Some(v) = et_today_mm {
-            let topic = self.state_topic("sensor", &format!("zone_{zone_slug}_et_today_mm"));
             self.client
                 .publish(topic, QoS::AtLeastOnce, true, format!("{v:.2}"))
                 .await?;
@@ -306,11 +301,158 @@ impl HaMqttPublisher {
         Ok(())
     }
 
+    /// Publish discovery for every zone in the snapshot + the verdict + (when
+    /// the active controller has a flow meter) the flow sensor. Idempotent +
+    /// retained, so it is safe to re-issue on each broker (re)connect. HA picks
+    /// up the entities the moment it sees the retained config topics.
+    pub async fn publish_all_discovery(
+        &self,
+        snap: &IrrigationSnapshot,
+    ) -> Result<(), MqttPublishError> {
+        for z in &snap.zones {
+            self.publish_zone_discovery(&z.slug, z.running_known)
+                .await?;
+        }
+        self.publish_verdict_discovery().await?;
+        if snap.flow_meter {
+            self.publish_flow_discovery().await?;
+        }
+        Ok(())
+    }
+
+    /// Publish the current state for every zone + the verdict + flow. Mirrors
+    /// the discovery set so HA's auto-created entities carry live values.
+    pub async fn publish_all_state(
+        &self,
+        snap: &IrrigationSnapshot,
+    ) -> Result<(), MqttPublishError> {
+        for z in &snap.zones {
+            // `running_known=false` (fire-and-forget MQTT/DIY) means we cannot
+            // trust the readback, so withhold the running state (None) rather
+            // than asserting a possibly-wrong OFF; the bucket + planned values
+            // are still meaningful.
+            let running = if z.running_known {
+                Some(z.running)
+            } else {
+                None
+            };
+            self.publish_zone_state(
+                &z.slug,
+                Some(z.bucket_mm),
+                Some(z.planned_run_seconds),
+                running,
+            )
+            .await?;
+        }
+        self.publish_verdict_state(&snap.skip_check.verdict, &snap.skip_check.reason)
+            .await?;
+        self.publish_flow_state(snap.flow_gpm).await?;
+        Ok(())
+    }
+
     /// Graceful disconnect. The runtime calls this on shutdown.
     pub async fn close(self) -> Result<(), MqttPublishError> {
         self.client.disconnect().await?;
         Ok(())
     }
+}
+
+/// Spawn the outbound HA-discovery publisher (boot "step 6"). Drives one
+/// rumqttc connection: it publishes HA MQTT discovery configs once per
+/// (re)connect and republishes live state for every `sensor.localsky_*` /
+/// `binary_sensor.localsky_*` entity whenever the engine produces a new
+/// irrigation snapshot. Wholly optional: the caller only calls this when
+/// `cfg.notifications.mqtt` is set AND the publish toggles are on, so a
+/// no-MQTT deploy is unaffected.
+///
+/// Resilience contract (never panics boot):
+///   - construction + the whole loop run inside the spawned task, so a bad
+///     broker host can never fail `main`;
+///   - the eventloop is polled in the same `select!` as the snapshot watcher,
+///     so queued publishes are actually flushed to the wire;
+///   - on any eventloop error we log, back off, and reconnect (a fresh
+///     `connect`), republishing discovery + the latest state on the new
+///     ConnAck so HA recovers after a broker restart.
+pub fn spawn(
+    cfg: MqttConfig,
+    deployment_display_name: String,
+    mut snap_rx: tokio::sync::watch::Receiver<Arc<IrrigationSnapshot>>,
+) {
+    // Stable client id per deployment so a reconnect resumes the same MQTT
+    // session identity (and the broker's retained discovery survives).
+    let client_id = format!("localsky-pub-{}", slugify(&deployment_display_name));
+    info!(
+        broker = %cfg.host,
+        port = cfg.port,
+        discovery_prefix = %cfg.discovery_prefix,
+        "ha mqtt publisher: starting (boot step 6)"
+    );
+    tokio::spawn(async move {
+        // Outer loop: each pass owns one connection. On an eventloop error we
+        // drop the publisher + eventloop, back off, and reconnect.
+        loop {
+            let (publisher, mut eventloop) =
+                match HaMqttPublisher::connect(&cfg, &deployment_display_name, &client_id).await {
+                    Ok(pe) => pe,
+                    Err(e) => {
+                        warn!(error = %e, "ha mqtt publisher: connect failed; retrying in 10s");
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                        continue;
+                    }
+                };
+
+            // Track whether we have an active session: only publish state once
+            // the broker has ConnAck'd (a publish before connect just queues).
+            let mut connected = false;
+
+            // Inner loop: poll the eventloop (drives I/O + reconnect detection)
+            // and react to new snapshots. We `borrow()` the watch on every
+            // wake, so a snapshot that arrived before ConnAck is still picked
+            // up on the first post-connect publish.
+            loop {
+                tokio::select! {
+                    ev = eventloop.poll() => {
+                        match ev {
+                            Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                                connected = true;
+                                info!("ha mqtt publisher: connected; publishing discovery");
+                                let snap = snap_rx.borrow().clone();
+                                if let Err(e) = publisher.publish_all_discovery(&snap).await {
+                                    warn!(error = %e, "ha mqtt publisher: discovery publish failed");
+                                }
+                                // Seed live state immediately so HA's freshly
+                                // discovered entities are not "unknown".
+                                if let Err(e) = publisher.publish_all_state(&snap).await {
+                                    warn!(error = %e, "ha mqtt publisher: initial state publish failed");
+                                }
+                            }
+                            Ok(_) => {} // PingResp, PubAck, outgoing, etc.
+                            Err(e) => {
+                                warn!(error = %e, "ha mqtt publisher: eventloop error; reconnecting in 5s");
+                                tokio::time::sleep(Duration::from_secs(5)).await;
+                                break; // drop this connection; outer loop reconnects
+                            }
+                        }
+                    }
+                    changed = snap_rx.changed() => {
+                        if changed.is_err() {
+                            // The refresher dropped its sender (process is
+                            // tearing down): stop the publisher cleanly.
+                            info!("ha mqtt publisher: snapshot channel closed; stopping");
+                            let _ = publisher.close().await;
+                            return;
+                        }
+                        if connected {
+                            let snap = snap_rx.borrow().clone();
+                            if let Err(e) = publisher.publish_all_state(&snap).await {
+                                warn!(error = %e, "ha mqtt publisher: state publish failed");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// Slugify a free-text display name into a safe MQTT topic segment.
@@ -334,12 +476,6 @@ pub fn slugify(s: &str) -> String {
     } else {
         out
     }
-}
-
-#[allow(dead_code)]
-fn surface_warning() {
-    warn!("placeholder so tracing isn't optimized out in tests");
-    info!("...");
 }
 
 #[cfg(test)]
@@ -381,5 +517,56 @@ mod tests {
         };
         let json = serde_json::to_string(&e).unwrap();
         assert!(json.contains("\"attribution\":\"LocalSky\""));
+    }
+
+    #[test]
+    fn discovery_payload_carries_ha_required_keys() {
+        // HA MQTT discovery requires (at minimum) state_topic + unique_id +
+        // a device block on each entity config payload; the optional
+        // unit_of_measurement / device_class / state_class are skipped when
+        // None (so a string sensor like the verdict serializes cleanly).
+        let e = DiscoveryEntity {
+            name: "back_yard bucket".into(),
+            unique_id: "yard_zone_back_yard_bucket_mm".into(),
+            state_topic: "homeassistant/sensor/yard/zone_back_yard_bucket_mm/state".into(),
+            unit_of_measurement: Some("mm".into()),
+            device_class: None,
+            state_class: Some("measurement".into()),
+            icon: Some("mdi:water".into()),
+            device: DiscoveryDevice {
+                identifiers: vec!["yard".into()],
+                name: "Yard".into(),
+                manufacturer: "LocalSky".into(),
+                model: "LocalSky v2".into(),
+                sw_version: "0.7.0".into(),
+            },
+            attribution: "LocalSky".into(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&e).unwrap();
+        assert!(
+            v.get("state_topic").is_some(),
+            "discovery needs state_topic"
+        );
+        assert!(v.get("unique_id").is_some(), "discovery needs unique_id");
+        assert!(
+            v.get("device").and_then(|d| d.get("identifiers")).is_some(),
+            "discovery needs device.identifiers"
+        );
+        // None-valued optionals are omitted (HA tolerates absence).
+        assert!(
+            v.get("device_class").is_none(),
+            "None device_class must be skipped, not null"
+        );
+    }
+
+    #[test]
+    fn slugify_yields_a_safe_topic_node_id() {
+        // The node id keys the discovery topic
+        // (homeassistant/<component>/<node>/<object>/config), so it must be a
+        // safe single topic segment (no spaces, no '/').
+        let node = slugify("North Lawn / Strip");
+        assert!(!node.contains(' '));
+        assert!(!node.contains('/'));
+        assert_eq!(node, "north_lawn_strip");
     }
 }

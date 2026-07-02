@@ -5,7 +5,7 @@
 // not modeled -- the curve answers "if I did nothing all week, would
 // each zone stay in its healthy band?"
 //
-// Phase 3E extraction from src/ha/refresher.rs::compute_soil_forecasts.
+// Phase 3E extraction from src/refresher.rs::compute_soil_forecasts.
 // Pure function per zone; HA-entity reading + zone enumeration stay in
 // refresher.rs (v0.1) or move to a config-driven enumeration (v2+).
 
@@ -62,6 +62,20 @@ pub fn project_zone(
 
     // Day 0 = today (current reading); deltas start at day 1 using
     // daily[N]'s rain projection.
+    //
+    // KNOWN LIMITATION (#4b, display-only; do NOT "fix" the math here):
+    // `start_pct` is a probe reading on a RELATIVE scale (the sensor's own
+    // 0-100% calibration), but the daily deltas are derived from absolute mm of
+    // water (rain mm captured minus ET mm lost) converted to a percent of
+    // `soil_depth_mm` of VWC. Adding an absolute-VWC delta onto a relative-scale
+    // baseline is a unit mismatch: only correct if the probe's % happens to be
+    // true volumetric water content, which most consumer probes are not. The
+    // longer the horizon, the more the curve can drift from reality. This is
+    // acceptable because the projection is advisory ("if I did nothing all week")
+    // and never gates a real watering decision (the live skip ladder reads the
+    // probe directly). A future pass should anchor both to the same scale (e.g.
+    // derive deltas in the probe's relative units, or calibrate the probe to
+    // VWC); until then, treat the 7-day curve as a trend, not a measurement.
     for d in fc.daily.iter().take(n_days).skip(1) {
         let rain_effective_mm = d.precip_sum_in * 25.4 * (d.precip_probability_max as f64) / 100.0;
         let captured_mm = rain_effective_mm * capture_efficiency;

@@ -309,6 +309,7 @@ pub fn parse_weather_field(name: &str) -> Option<WeatherField> {
         "et0_today" => Et0Today,
         "flow_gpm" => FlowGpm,
         "flow_total_gal_today" => FlowTotalGalToday,
+        "leaf_wetness_pct" => LeafWetness,
         _ => return None,
     })
 }

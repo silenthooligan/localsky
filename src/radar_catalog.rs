@@ -331,7 +331,7 @@ pub fn providers() -> &'static [RadarProvider] {
             label: "Radar + nowcast (LibreWXR)",
             kind: ProviderKind::Rainviewer,
             coverage: "librewxr",
-            coverage_label: "Radar + 60 min nowcast (US, Canada, Europe, Japan, Taiwan, SE Asia)",
+            coverage_label: "US, Canada, Europe, Japan, Taiwan, SE Asia",
             url: "https://api.librewxr.net/public/weather-maps.json",
             wms_layer: None,
             attribution: "LibreWXR",

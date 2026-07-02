@@ -30,6 +30,15 @@ pub fn spawn_weather_sampler(conn: Arc<Mutex<Connection>>, tempest: Arc<TempestS
             if s.last_packet_epoch <= 0 || s.last_packet_epoch == last_epoch {
                 continue;
             }
+            // Only sample the off-bus paths that own the snapshot: the live
+            // Tempest UDP path, and the demo feeder ("Demo") so the demo
+            // dashboard keeps its telemetry sparklines. Bus sources
+            // (Ecowitt/Davis/...) are already persisted to sensor_history by the
+            // bus recorder under their own id; sampling them here would
+            // double-record and mis-attribute their data to "tempest".
+            if !matches!(s.source_label.as_str(), "Tempest" | "Demo") {
+                continue;
+            }
             last_epoch = s.last_packet_epoch;
             let e = s.last_packet_epoch;
             let mk = |key: &str, value: f64| Reading {

@@ -4,6 +4,39 @@ All notable changes to LocalSky are documented here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-01
+
+LocalSky's version jumps from 0.5 to 0.7 to bring the whole portfolio onto one shared version: the app, the Home Assistant integration (localsky-ha), and the Home Assistant add-on now all ship as 0.7.0 and move in lockstep from here. (0.6 was an internal-only iteration; the public app moves straight to 0.7.0.)
+
+A large release centered on full, understandable control over where every reading comes from: a drag-to-order backup chain per reading, one unified source list, display units everywhere, a cloud-first experience for users without hardware, smarter irrigation safety, and a broad visual and accessibility pass.
+
+### Added
+
+- Per-reading priority and backup chain (Settings > Devices): every headline reading (temperature, humidity, wind, rain, pressure, solar/UV) shows an ordered chain of every source that can provide it. The top source that is reporting wins, and if it goes quiet the next takes over, so a reading is never lost. "Automatic" shows the smart default order for your region; drag a row (or use the up/down arrows) to make it "Custom". The order you set is the priority the engine uses, per reading.
+- One unified weather-source list: local stations, cloud services, and every other source kind live in a single list where each source appears once, with its live status, an on/off toggle, its sensors, and edit/remove. Cloud services you have not turned on yet show separately as coverage you can add.
+- Display units: choose how temperature, rainfall, wind, pressure, distance, and zone area are shown (Settings > Units). A household default applies to the whole install, and any device can override it. Every reading and every plain-language decision reason renders in your chosen units.
+- Cloud weather is first-class: an install with no hardware uses Open-Meteo (free, no API key) automatically and sees weather right away, and a forecast-source selector chooses which provider drives your forecast.
+- Honest cloud rain: NOAA MRMS radar (a live radar rain rate plus a gauge-corrected hourly total) joins the catalog, and each source is labeled by how honest each reading is, per reading: measured, radar, real-time nowcast, or model forecast.
+- New source: Synoptic Data (the nearest real weather station's measured wind, pressure, temperature, and humidity; free token).
+- Elevation auto-fills from your location in setup (still editable).
+- Soil-probe anomaly surface: a probe that goes offline, or reads as a wild outlier versus its neighbours, is flagged on the irrigation and zones views.
+
+### Changed
+
+- Editable, migrated source and controller IDs: rename a source or controller and every reference to it moves too (its per-reading picks, forecast pin, zone soil binding, and zone-to-controller links), so a rename never leaves anything dangling.
+- Source settings, made approachable: a single device hub, plain-language descriptions with a "where to get this" link for keyed services, and an at-a-glance view of what each provider covers. Open-Meteo is the recommended zero-config pick.
+- The irrigation hero now explains the upcoming run, which zones will water and why, before it runs.
+- A unified colour language across the weather and irrigation views: blue for water and wet, amber for drying out, teal for satisfied, red for freeze, wind, and restrictions. The rain gauge fills blue up to the skip threshold, then teal once it is met.
+- A broad visual and accessibility pass: consistent depth and motion, clearer entity identity, improved keyboard and screen-reader focus, larger touch targets, and settings panels that widen to use a large screen.
+
+### Fixed
+
+- Irrigation safety: rain that actually fell today now skips the NEXT scheduled watering on its own, independent of any soil sensor. Previously the next day's decision looked only at the forecast, so a real afternoon rain could still let the next morning's run proceed.
+- A single bad soil probe (reading far drier than its neighbours) is distrusted and inferred from the rest of the yard, so it can no longer water a saturated zone.
+- Watering duration was inflated by a heat index that paired the forecast high with the current (often night-time) humidity; it now pairs each day's high with that day's own humidity.
+- Zones: clicking a zone card now reliably opens that zone on the first click.
+- Display consistency: every reading respects your unit preference (no more mixed millimetres and inches).
+
 ## [0.5.0-beta.1] - 2026-06-22
 
 ### Added
@@ -169,7 +202,7 @@ The v2 burndown. Lays a ports-and-adapters foundation underneath the existing v0
 - `${VAR}` env interpolation; `env_compat` layer synthesizes a v2 Config from legacy env vars so existing deployments boot unchanged
 - Versioned migrations between schema revisions
 - Atomic writes (tmp + fsync + rename) with snapshot-before-write into `config_snapshots` (20-version retention) and always-reachable `/api/config/rollback`
-- Recursive secret redaction with sentinel + unredact roundtrip on PUT so `/api/config` never leaks tokens (4 unit tests)
+- Recursive secret redaction with sentinel + unredact roundtrip on PUT so `/api/config` never leaks tokens
 - Validation: target_min < saturation, area > 0, precip in (0, 200], no whitespace in ids, lat/lon ranges; structured error responses
 
 #### First-run wizard + settings UI
@@ -181,7 +214,7 @@ The v2 burndown. Lays a ports-and-adapters foundation underneath the existing v0
 
 #### Persistence
 
-- Hand-rolled migration runner with versioned SQL files and `assert_monotonic()` per-PR unit test
+- Hand-rolled migration runner with versioned SQL files and monotonic-version enforcement
 - `runs` evolved to v2 (status, controller_id, source, et0_mm, etc) via table-rebuild migration; DB-backed in-flight run state (no in-memory loss across restarts)
 - `sensor_history` time-series store with `(epoch, source_id, key)` PK and per-source freshness query
 - `verdict_history` with `inputs_json` for engine replay against historical conditions
@@ -231,14 +264,8 @@ The v2 burndown. Lays a ports-and-adapters foundation underneath the existing v0
 
 - Apache-2.0 license, NOTICE with citations, `.env.example`, expanded `.gitignore`
 - Public README, CONTRIBUTING, SECURITY, CODE_OF_CONDUCT, this CHANGELOG
-- Docs site under `docs/` covering getting-started, standalone, controllers, sensors, irrigation-engine, grass-species, soil-textures, skip-rules, configuration, api, ux-journey, hacs
+- Docs site under `docs/` covering getting-started, standalone, controllers, sensors, irrigation-engine, grass-species, soil-textures, skip-rules, configuration, api, hacs
 
-### Internal
+## [0.1.0]
 
-- 157 unit tests covering engine math, persistence migrations, controllers, sources, LLM providers, config redaction, and engine inputs
-- `cargo check --features ssr`: zero warnings; `cargo check --features hydrate --target wasm32-unknown-unknown`: zero warnings
-- All v0.1 behavior paths still work; v2 modules are additive
-
-## [0.1.0] - Internal release
-
-Initial homelab deployment. Tempest UDP weather, Open-Meteo forecast, Home Assistant Smart Irrigation + Irrigation Unlimited integration, OpenAI-compatible LLM advisor, four hardcoded zones, glass-morphism PWA UI. Never publicly released.
+The first LocalSky build: Tempest UDP weather, Open-Meteo forecast, an OpenAI-compatible LLM advisor, and a glass-morphism PWA UI.

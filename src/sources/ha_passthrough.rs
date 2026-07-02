@@ -57,6 +57,10 @@ pub struct HaPassthrough {
 struct StateEntry {
     entity_id: String,
     state: String,
+    /// HA `attributes.unit_of_measurement` (e.g. "°C", "km/h", "hPa", "mm").
+    /// Used to normalize the reading to LocalSky's canonical imperial unit;
+    /// None means "no declared unit, assume already canonical".
+    unit: Option<String>,
 }
 
 impl HaPassthrough {
@@ -98,6 +102,11 @@ impl HaPassthrough {
                 out.push(StateEntry {
                     entity_id: entity_id.to_string(),
                     state: state.to_string(),
+                    unit: v
+                        .get("attributes")
+                        .and_then(|a| a.get("unit_of_measurement"))
+                        .and_then(|u| u.as_str())
+                        .map(|s| s.to_string()),
                 });
             }
         }
@@ -143,6 +152,7 @@ fn parse_weather_field(name: &str) -> Option<WeatherField> {
         "et0today" => WeatherField::Et0Today,
         "flowgpm" | "flowrate" | "flowratepm" => WeatherField::FlowGpm,
         "flowtotalgaltoday" | "flowtotalgallons" | "flowtoday" => WeatherField::FlowTotalGalToday,
+        "leafwetnesspct" | "leafwetness" | "wetness" => WeatherField::LeafWetness,
         _ => return None,
     })
 }
@@ -191,8 +201,8 @@ impl WeatherSource for HaPassthrough {
             mapping_n = self.mapping.len(),
             "HaPassthrough source started",
         );
-        if self.mapping.is_empty() {
-            warn!(source_id = %self.id, "HaPassthrough has empty field_map; idle");
+        if self.mapping.is_empty() && self.config.soil_zone_map.is_empty() {
+            warn!(source_id = %self.id, "HaPassthrough has empty field_map + soil_zone_map; idle");
         }
         let mut tick = interval(POLL_INTERVAL);
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -213,14 +223,17 @@ impl WeatherSource for HaPassthrough {
                             // are small (HA: a few hundred entities;
                             // mapping: handful of fields). Building a
                             // HashMap pays for itself once mapping > 1.
-                            let mut by_id: std::collections::HashMap<&str, &str> =
+                            let mut by_id: std::collections::HashMap<&str, (&str, Option<&str>)> =
                                 std::collections::HashMap::with_capacity(states.len());
                             for s in &states {
-                                by_id.insert(s.entity_id.as_str(), s.state.as_str());
+                                by_id.insert(
+                                    s.entity_id.as_str(),
+                                    (s.state.as_str(), s.unit.as_deref()),
+                                );
                             }
                             let mut fields = Vec::new();
                             for (field, entity_id) in &self.mapping {
-                                let Some(raw) = by_id.get(entity_id.as_str()) else {
+                                let Some((raw, unit)) = by_id.get(entity_id.as_str()).copied() else {
                                     debug!(source_id = %self.id, entity_id, "ha_passthrough entity not present in /api/states");
                                     continue;
                                 };
@@ -230,6 +243,9 @@ impl WeatherSource for HaPassthrough {
                                     debug!(source_id = %self.id, entity_id, value = %raw, "ha_passthrough entity state not numeric");
                                     continue;
                                 };
+                                // Normalize the HA sensor's unit (°C, km/h, hPa,
+                                // mm...) to LocalSky's canonical imperial unit.
+                                let v = crate::sources::units::to_canonical(*field, v, unit);
                                 fields.push((*field, v));
                             }
                             if !fields.is_empty() {
@@ -237,6 +253,28 @@ impl WeatherSource for HaPassthrough {
                                 let _ = bus.send(SourceEvent::Observation {
                                     source_id: self.id.clone(),
                                     fields,
+                                    at_epoch: chrono::Utc::now().timestamp(),
+                                });
+                            }
+                            // Per-zone soil probes: each mapped HA entity becomes
+                            // a KeyedReading under soilmoisture_<zone_slug> so a
+                            // zone binds it like a native soil channel.
+                            for (entity_id, zone) in &self.config.soil_zone_map {
+                                let zone = zone.trim();
+                                if zone.is_empty() {
+                                    continue;
+                                }
+                                let Some((raw, _unit)) = by_id.get(entity_id.as_str()).copied()
+                                else {
+                                    continue;
+                                };
+                                let Ok(v) = raw.parse::<f64>() else {
+                                    continue;
+                                };
+                                let _ = bus.send(SourceEvent::KeyedReading {
+                                    source_id: self.id.clone(),
+                                    key: crate::sources::bus_recorder::zone_soil_key(zone),
+                                    value: v,
                                     at_epoch: chrono::Utc::now().timestamp(),
                                 });
                             }
@@ -277,6 +315,7 @@ mod tests {
             base_url: "http://example.invalid".into(),
             bearer_token: "t".into(),
             field_map: fm,
+            soil_zone_map: Default::default(),
         }
     }
 

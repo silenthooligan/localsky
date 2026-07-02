@@ -16,7 +16,7 @@ If you enabled [authentication](authentication.md), add `-H "Authorization: Bear
 
 The image is published at `ghcr.io/silenthooligan/localsky`:
 
-- **Pinned version** (`ghcr.io/silenthooligan/localsky:v0.2.0-beta.1`): you decide exactly when to move and what release notes apply. Recommended while LocalSky is in beta.
+- **Pinned version** (`ghcr.io/silenthooligan/localsky:v0.7.0-beta.1`): you decide exactly when to move and what release notes apply. Recommended while LocalSky is in beta.
 - **`:latest`**: always points at the newest release. Convenient, but a routine `docker compose pull` can move you across versions without you reading the release notes first.
 
 Either way, read the release notes on GitHub before upgrading. Releases that change the database or config schema say so explicitly.
@@ -55,7 +55,14 @@ Auto-updaters (Watchtower, Diun notifications, Renovate on a pinned compose file
 
 No manual migration steps. If a migration fails, the error appears in `docker logs localsky` with the migration version that failed.
 
-**Ownership is handled for you.** LocalSky runs as the non-root user uid 10001, and the container fixes the ownership of `/data` to that user at startup. Upgrading from an older version that ran as root (and left root-owned files in the volume) needs no manual `chown`; the only requirement is that `/data` stays writable (not mounted read-only). If you front LocalSky with a reverse proxy, set `trusted_proxies` so it sees the real client IP (see [Authentication](authentication.md)).
+**Ownership is handled for you.** LocalSky runs as a non-root user (uid 10001 by default) and the container fixes the ownership of `/data` to that user at startup. Upgrading from an older version that ran as root (and left root-owned files in the volume) needs no manual `chown`; the only requirement is that `/data` stays writable (not mounted read-only). If you front LocalSky with a reverse proxy, set `trusted_proxies` so it sees the real client IP (see [Authentication](authentication.md)).
+
+**`PUID` / `PGID` are now honored** (they were previously ignored). The container drops to `PUID:PGID`, defaulting to `10001:10001`. Two things to know when upgrading:
+
+- If your volume is owned by 10001 (the default), leave `PUID`/`PGID` unset or set them to `10001` so nothing re-chowns.
+- If you carried a stale `PUID=1000` from an old `.env`, the container will now run as 1000 and re-chown `/data` to 1000 on first boot. That is harmless but one-time; set it to match your volume's owner if you want to avoid the re-chown.
+
+**NFS exports that refuse ownership changes** (Synology / QNAP with `root_squash` or "map all users") can't be chowned to an arbitrary uid. The container detects that `/data` still isn't writable as the target uid and falls back to running as the volume's *actual* owner so writes succeed, instead of erroring. It will **not** fall back to root: if the only writable owner is root, it logs an error and refuses, since running the app as root would defeat the non-root model. Pin a concrete uid:gid with `PUID`/`PGID` (matching what your NAS maps the share to) for full control. See [Troubleshooting -> Wizard cannot save](troubleshooting.md).
 
 ## Downgrading and rollback
 
@@ -68,7 +75,7 @@ docker run -d \
   --restart unless-stopped \
   -p 8090:8090 \
   -v /opt/localsky/data:/data \
-  ghcr.io/silenthooligan/localsky:v0.2.0-beta.1
+  ghcr.io/silenthooligan/localsky:v0.7.0-beta.1
 ```
 
 Two things to know:
@@ -97,10 +104,10 @@ curl http://localhost:8090/api/v1/updates
 
 ```json
 {
-  "current": "0.2.0-beta.1",
-  "latest": "v0.2.0",
+  "current": "0.7.0-beta.1",
+  "latest": "v0.7.0",
   "update_available": true,
-  "release_url": "https://github.com/silenthooligan/localsky/releases/tag/v0.2.0",
+  "release_url": "https://github.com/silenthooligan/localsky/releases/tag/v0.7.0",
   "checked_at_epoch": 1765432100,
   "check_enabled": true
 }

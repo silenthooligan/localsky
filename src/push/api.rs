@@ -7,6 +7,14 @@
 // Push subscriptions are stored alongside the irrigation history in the
 // same SQLite file. If the history db wasn't openable at startup, the
 // endpoints respond 503; the rest of the app stays up.
+//
+// GATING (LS-REC-05): the state-changing subscribe/unsubscribe POSTs are in
+// the PRIVILEGED set (auth::middleware::is_privileged_path), so in the
+// shipped Disabled default an anonymous internet caller cannot seed
+// subscriptions; an IP-vouched LAN/loopback caller (or an authenticated
+// owner) still reaches them. The vapid-key GET stays public (the frontend
+// needs it before any subscription exists). The gate runs in the middleware
+// layer, not here, mirroring how POST /irrigation/action is gated.
 
 use crate::push::dispatcher::vapid_public_key;
 use crate::push::store::{self, StoredSubscription};

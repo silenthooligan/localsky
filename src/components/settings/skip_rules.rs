@@ -10,7 +10,8 @@
 use leptos::prelude::*;
 
 use crate::components::settings_ui::SettingsResult;
-use crate::components::ui::{FormField, Panel, Slider};
+use crate::components::ui::{Button, FormField, HelpHint, Panel, Slider};
+use crate::components::units_fmt::{temp_unit, wind_unit, UnitPrefs};
 
 #[component]
 pub fn SettingsSkipRules() -> impl IntoView {
@@ -27,6 +28,8 @@ pub fn SettingsSkipRules() -> impl IntoView {
     let min_temp_f = RwSignal::new(40.0f64);
     let rain_skip_in = RwSignal::new(0.25f64);
     let frost_skip_soil_f = RwSignal::new(38.0f64);
+    // P2-6: seasonal water-budget dial (percent of computed run depth).
+    let seasonal_adjust_pct = RwSignal::new(100u32);
 
     let loaded = RwSignal::new(false);
     let saving = RwSignal::new(false);
@@ -50,6 +53,7 @@ pub fn SettingsSkipRules() -> impl IntoView {
                     min_temp_f.set(d.min_temp_f);
                     rain_skip_in.set(d.rain_skip_in);
                     frost_skip_soil_f.set(d.frost_skip_soil_f);
+                    seasonal_adjust_pct.set(d.seasonal_adjust_pct);
                     loaded.set(true);
                 }
             });
@@ -75,6 +79,7 @@ pub fn SettingsSkipRules() -> impl IntoView {
             min_temp_f: min_temp_f.get(),
             rain_skip_in: rain_skip_in.get(),
             frost_skip_soil_f: frost_skip_soil_f.get(),
+            seasonal_adjust_pct: seasonal_adjust_pct.get(),
         };
         #[cfg(feature = "hydrate")]
         {
@@ -118,10 +123,10 @@ pub fn SettingsSkipRules() -> impl IntoView {
     };
 
     view! {
-        <main id="main-content" class="settings-page">
+        <div class="settings-page">
             <header class="settings-page__header">
                 <a class="settings-page__back" href="/settings">"← Settings"</a>
-                <h1 class="settings-page__title">"Skip rules"</h1>
+                <h1 class="settings-page__title">"Skip rules"<HelpHint topic="skip-rules"/></h1>
                 <p class="settings-page__subtitle">
                     "Override the 17-rule skip ladder's thresholds. The engine "
                     "evaluates these every tick to decide run / skip / extended "
@@ -131,6 +136,53 @@ pub fn SettingsSkipRules() -> impl IntoView {
                     <a href="/rules" style="color: var(--accent)">"Rule Lab"</a>"."
                 </p>
             </header>
+
+            // P2-6: the seasonal trust dial, first because it's the control an
+            // operator reaches for most across the seasons.
+            <Panel title="Water budget".to_string()>
+                <p class="settings-page__subtitle" style="margin: 0 0 0.85rem">
+                    "The trust dial. Scales every zone's run depth up or down without "
+                    "touching the per-zone math, like the seasonal-adjust on a commercial "
+                    "controller. 100% is the engine's computed amount; dial down in a wet, "
+                    "cool stretch and up in a heat wave."
+                </p>
+                <FormField
+                    label="Seasonal adjustment".to_string()
+                    helptext="Percent of the engine-computed run depth, 50-150%. Applied before the per-zone safety cap, so tonight's planned minutes already reflect it.".to_string()
+                    error=Signal::derive(|| None::<String>)
+                >
+                    <div class="seasonal-dial">
+                        <input
+                            type="range"
+                            class="slider-clay"
+                            min="50"
+                            max="150"
+                            step="5"
+                            prop:value=move || seasonal_adjust_pct.get().to_string()
+                            on:input=move |ev| {
+                                if let Ok(v) = event_target_value(&ev).parse::<u32>() {
+                                    seasonal_adjust_pct.set(v);
+                                }
+                            }
+                        />
+                        <span class="seasonal-dial__value">
+                            {move || format!("{}%", seasonal_adjust_pct.get())}
+                        </span>
+                    </div>
+                    <p class="seasonal-dial__effect">
+                        {move || {
+                            let p = seasonal_adjust_pct.get();
+                            if p == 100 {
+                                "Every run waters the engine's computed depth.".to_string()
+                            } else if p < 100 {
+                                format!("Every run waters {p}% of the computed depth (drier).")
+                            } else {
+                                format!("Every run waters {p}% of the computed depth (wetter).")
+                            }
+                        }}
+                    </p>
+                </FormField>
+            </Panel>
 
             <Panel title="Rain skips".to_string() help_topic="skip-breakdown">
                 <div class="grid settings-field-grid">
@@ -175,32 +227,41 @@ pub fn SettingsSkipRules() -> impl IntoView {
             <Panel title="Wind + temperature".to_string() help_topic="skip-breakdown">
                 <div class="grid settings-field-grid">
                     <FormField
-                        label="Max wind (mph)".to_string()
+                        // Slider value round-trips into engine config as the
+                        // stored mph threshold, so it stays imperial; the unit
+                        // string is sourced from the helper at default prefs
+                        // (always "mph") rather than hardcoded, never display-
+                        // converted (that would desync from the stored value).
+                        label=format!("Max wind ({})", wind_unit(UnitPrefs::default()))
                         helptext="Skip when sustained wind is at or above this. Default: 15".to_string()
                         error=Signal::derive(|| None::<String>)
                     >
-                        <Slider value=max_wind_mph min=0.0 max=40.0 step=1.0 suffix=" mph".to_string()/>
+                        <Slider value=max_wind_mph min=0.0 max=40.0 step=1.0 suffix=format!(" {}", wind_unit(UnitPrefs::default()))/>
                     </FormField>
                     <FormField
-                        label="Wind forecast slack (mph)".to_string()
+                        label=format!("Wind forecast slack ({})", wind_unit(UnitPrefs::default()))
                         helptext="Added to max_wind_mph when evaluating forecast wind so a brief gust doesn't shut down the night. Default: 5".to_string()
                         error=Signal::derive(|| None::<String>)
                     >
-                        <Slider value=wind_forecast_slack_mph min=0.0 max=20.0 step=1.0 suffix=" mph".to_string()/>
+                        <Slider value=wind_forecast_slack_mph min=0.0 max=20.0 step=1.0 suffix=format!(" {}", wind_unit(UnitPrefs::default()))/>
                     </FormField>
                     <FormField
-                        label="Min temperature (\u{00b0}F)".to_string()
+                        // Slider value round-trips into engine config as the
+                        // stored °F threshold, so it stays imperial; unit string
+                        // sourced from the helper at default prefs (always "°F"),
+                        // not display-converted (would desync from stored value).
+                        label=format!("Min temperature ({})", temp_unit(UnitPrefs::default()))
                         helptext="Skip when air temp drops below this overnight. Default: 40".to_string()
                         error=Signal::derive(|| None::<String>)
                     >
-                        <Slider value=min_temp_f min=20.0 max=70.0 step=1.0 suffix=" \u{00b0}F".to_string()/>
+                        <Slider value=min_temp_f min=20.0 max=70.0 step=1.0 suffix=format!(" {}", temp_unit(UnitPrefs::default()))/>
                     </FormField>
                     <FormField
-                        label="Soil frost threshold (\u{00b0}F)".to_string()
+                        label=format!("Soil frost threshold ({})", temp_unit(UnitPrefs::default()))
                         helptext="Skip when yard-wide soil temp drops below this. Requires a soil sensor source. Default: 38".to_string()
                         error=Signal::derive(|| None::<String>)
                     >
-                        <Slider value=frost_skip_soil_f min=28.0 max=50.0 step=1.0 suffix=" \u{00b0}F".to_string()/>
+                        <Slider value=frost_skip_soil_f min=28.0 max=50.0 step=1.0 suffix=format!(" {}", temp_unit(UnitPrefs::default()))/>
                     </FormField>
                 </div>
             </Panel>
@@ -213,11 +274,11 @@ pub fn SettingsSkipRules() -> impl IntoView {
                 </p>
                 <div class="grid settings-field-grid">
                     <FormField
-                        label="Heat advisory temp (\u{00b0}F)".to_string()
+                        label=format!("Heat advisory temp ({})", temp_unit(UnitPrefs::default()))
                         helptext="Daily high at or above this. Default: 95".to_string()
                         error=Signal::derive(|| None::<String>)
                     >
-                        <Slider value=heat_advisory_temp_f min=85.0 max=120.0 step=1.0 suffix=" \u{00b0}F".to_string()/>
+                        <Slider value=heat_advisory_temp_f min=85.0 max=120.0 step=1.0 suffix=format!(" {}", temp_unit(UnitPrefs::default()))/>
                     </FormField>
                     <FormField
                         label="Heat advisory humidity (%)".to_string()
@@ -248,21 +309,16 @@ pub fn SettingsSkipRules() -> impl IntoView {
             </Panel>
 
             <div class="settings-actions">
-                <button
-                    type="button"
-                    class="setup-footer__btn setup-footer__btn--primary"
-                    disabled=move || saving.get()
-                    on:click=on_save
+                <Button
+                    variant="primary"
+                    disabled=Signal::derive(move || saving.get())
+                    on_click=Callback::new(on_save)
                 >
                     {move || if saving.get() { "Saving…" } else { "Save changes" }}
-                </button>
-                <button
-                    type="button"
-                    class="setup-footer__btn setup-footer__btn--ghost"
-                    on:click=on_reset
-                >
+                </Button>
+                <Button variant="ghost" on_click=Callback::new(on_reset)>
                     "Reset to defaults"
-                </button>
+                </Button>
             </div>
 
             <SettingsResult result_msg=result_msg result_ok=result_ok/>
@@ -272,7 +328,7 @@ pub fn SettingsSkipRules() -> impl IntoView {
                     "Loading current values from /api/config..."
                 </p>
             </Show>
-        </main>
+        </div>
     }
 }
 
@@ -307,6 +363,9 @@ struct SkipRulesDraft {
     min_temp_f: f64,
     rain_skip_in: f64,
     frost_skip_soil_f: f64,
+    /// P2-6 trust dial: lives on `engine` (not `engine.skip_rules`), but rides
+    /// this same draft since this is the engine-tuning page.
+    seasonal_adjust_pct: u32,
 }
 
 #[cfg(feature = "hydrate")]
@@ -345,6 +404,13 @@ async fn fetch_skip_rules() -> Result<SkipRulesDraft, String> {
         min_temp_f: f64_at("min_temp_f", 40.0),
         rain_skip_in: f64_at("rain_skip_in", 0.25),
         frost_skip_soil_f: f64_at("frost_skip_soil_f", 38.0),
+        // seasonal_adjust_pct lives one level up, on `engine`.
+        seasonal_adjust_pct: val
+            .get("engine")
+            .and_then(|e| e.get("seasonal_adjust_pct"))
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32)
+            .unwrap_or(100),
     })
 }
 
@@ -379,6 +445,11 @@ async fn patch_skip_rules(d: SkipRulesDraft) -> Result<(), String> {
             "rain_skip_in": d.rain_skip_in,
             "frost_skip_soil_f": d.frost_skip_soil_f,
         }),
+    );
+    // P2-6: the seasonal dial sits on `engine`, beside `skip_rules`.
+    engine_obj.insert(
+        "seasonal_adjust_pct".into(),
+        serde_json::json!(d.seasonal_adjust_pct),
     );
     let resp = Request::put("/api/config")
         .json(&cfg)

@@ -9,6 +9,7 @@ use crate::components::{
     footer::Footer,
     forecast::{DailyForecast, HourlyForecast},
     hero::Hero,
+    humidity::HumidityPanel,
     install_prompt::InstallPrompt,
     irrigation::IrrigationPage,
     lightning::LightningPanel,
@@ -68,6 +69,40 @@ fn initial_forecast_ssr() -> ForecastSnapshot {
 #[derive(Clone, Copy)]
 pub struct NerdMode(pub RwSignal<bool>);
 
+/// Household display-unit default, derived once at the app root from the
+/// irrigation snapshot's `units` field (which the refresher copies from
+/// `cfg.deployment.units`). Provided as context so `use_unit_prefs` can
+/// resolve a device's display units against the household baseline WITHOUT a
+/// per-component `/api/config` fetch. Newtype'd so the `use_context` lookup is
+/// unambiguous.
+///
+/// SSR-safety: the irrigation signal starts at `IrrigationSnapshot::default()`
+/// on both SSR and hydrate's first frame, whose `units` is `Units::Imperial`.
+/// So this signal reads Imperial on the SSR-matching first frame and only
+/// changes once the SSE pushes the real snapshot (client-side), which keeps the
+/// SSR/hydrate DOM trees identical. `use_unit_prefs` reads this only inside its
+/// hydrate Effect, never at SSR.
+#[derive(Clone, Copy)]
+pub struct HouseholdUnits(pub Signal<crate::ha::snapshot::Units>);
+
+/// Whether this deployment has any irrigation hardware configured (at least one
+/// controller OR zone), read once at app root from `GET /api/v1/info`'s
+/// `has_irrigation`. Provided as context so any component can branch the
+/// information architecture on it. The shell uses it to gate the irrigation
+/// routes and to set `data-no-irrigation` on `<html>` (the stylesheet hides the
+/// irrigation-only nav items from there, matching the `data-nerd`/`data-dry-run`
+/// mechanism). Newtype'd so the `use_context` lookup is unambiguous.
+///
+/// SSR-safety: starts at `true` on both SSR and hydrate's first frame, then the
+/// deferred `/api/v1/info` fetch flips it to the real value client-side. Routes
+/// and nav entries that depend on it therefore render identically on the
+/// SSR-matching first frame (everything present), and only the no-irrigation
+/// install collapses them after hydration. Starting at `true` (not `false`)
+/// keeps a full-irrigation install from flashing a stripped nav before the
+/// fetch resolves.
+#[derive(Clone, Copy)]
+pub struct HasIrrigation(pub RwSignal<bool>);
+
 #[component]
 pub fn App() -> impl IntoView {
     provide_meta_context();
@@ -89,6 +124,15 @@ pub fn App() -> impl IntoView {
     // in prod.
     let (nav_debug, _set_nav_debug) = signal::<Vec<String>>(Vec::new());
     provide_context(nav_debug);
+
+    // Household display-unit default, derived from the irrigation snapshot and
+    // shared via context so `use_unit_prefs` resolves household-vs-device units
+    // without its own fetch. Reads Imperial on SSR + hydrate's first frame
+    // (default snapshot), then tracks the SSE-pushed value client-side. See the
+    // `HouseholdUnits` doc comment for the SSR-match rationale.
+    provide_context(HouseholdUnits(Signal::derive(move || {
+        irrigation.get().units
+    })));
 
     // Viewport flag for layout decisions. SSR + hydrate's first frame both
     // see `false` (desktop), so the initial DOM tree matches and tachys
@@ -115,11 +159,19 @@ pub fn App() -> impl IntoView {
     // Gate persistence until the initial localStorage read has run. Without
     // this the persist Effect fires on mount (nerd_mode=false) and writes "0"
     // before the deferred read, so the read then sees "0" and the
-    // default-to-nerd never takes for new users. Only the hydrate-gated
+    // server-default seed never takes for new users. Only the hydrate-gated
     // block below touches it; SSR builds leave it unused.
     #[allow(unused_variables)]
     let nerd_loaded = RwSignal::new(false);
     provide_context(NerdMode(nerd_mode));
+
+    // Irrigation-presence flag. Starts `true` so a full install never flashes a
+    // stripped nav before /api/v1/info resolves; the deferred info fetch below
+    // flips it to the server's `has_irrigation`. SSR + hydrate's first frame both
+    // see `true`, so the route list and nav render identically until the
+    // client-only fetch lands. See `HasIrrigation` for the SSR-match rationale.
+    let has_irrigation: RwSignal<bool> = RwSignal::new(true);
+    provide_context(HasIrrigation(has_irrigation));
     #[cfg(feature = "hydrate")]
     {
         leptos::task::spawn_local(async move {
@@ -149,6 +201,13 @@ pub fn App() -> impl IntoView {
         });
     }
 
+    // Tracks whether the device has an EXPLICIT prior nerd-mode choice in
+    // localStorage. When false (a new device), the /api/v1/info fetch below seeds
+    // the signal from the server's `nerd_mode_default` instead of hard-coding the
+    // user into either mode. Only the hydrate-gated blocks touch it.
+    #[allow(unused_variables)]
+    let nerd_choice_explicit = RwSignal::new(false);
+
     // Nerd-mode hydration: same deferred-init pattern as is_mobile so
     // SSR + hydrate's first frame both see `false` and the DOM tree
     // matches. After the hydration walker finishes we read
@@ -162,11 +221,16 @@ pub fn App() -> impl IntoView {
             if let Some(win) = web_sys::window() {
                 if let Ok(Some(storage)) = win.local_storage() {
                     match storage.get_item("nerd_mode") {
-                        // Respect an explicit prior choice...
-                        Ok(Some(v)) => nerd_mode.set(v == "1" || v == "true"),
-                        // ...but default new users into nerd mode: the full
-                        // skip-check breakdown + projections are the point.
-                        _ => nerd_mode.set(true),
+                        // Respect an explicit prior choice. A new device with no
+                        // stored value is LEFT at Simple (false) here; the
+                        // /api/v1/info fetch below then seeds it from the server's
+                        // `nerd_mode_default` knob, so "show the math" is one tap
+                        // away but is no longer forced on by default (design #3).
+                        Ok(Some(v)) => {
+                            nerd_mode.set(v == "1" || v == "true");
+                            nerd_choice_explicit.set(true);
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -195,13 +259,16 @@ pub fn App() -> impl IntoView {
         });
     }
 
-    // Mode banner: one-shot fetch of /api/v1/info on hydrate. If the
-    // server reports LOCALSKY_SMART_DRY_RUN=1 we set data-dry-run on
-    // <html> so the stylesheet drops in a fixed warning bar, the
-    // morning scheduler logs dispatch but never waters, and without
-    // this banner "nothing happened at 6 AM" looks like a regression
-    // instead of an intentional override. Same treatment for the demo
-    // flag (synthetic weather, recording-only controllers).
+    // One-shot fetch of /api/v1/info on hydrate. Four things ride on it:
+    //   - dry_run / demo  -> data-dry-run / data-demo on <html> for the fixed
+    //     warning bars (without them "nothing happened at 6 AM" reads as a
+    //     regression instead of an intentional override / a demo instance).
+    //   - has_irrigation  -> the HasIrrigation signal (gates the irrigation
+    //     routes) + data-no-irrigation on <html> so the stylesheet hides the
+    //     irrigation-only nav items on a weather-only install (design #2).
+    //   - nerd_mode_default -> seeds Simple-vs-Nerd for a NEW device that has no
+    //     explicit prior choice, instead of hard-coding new users into Nerd mode
+    //     (design #3). An explicit localStorage choice always wins.
     #[cfg(feature = "hydrate")]
     {
         leptos::task::spawn_local(async move {
@@ -217,6 +284,27 @@ pub fn App() -> impl IntoView {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let demo = val.get("demo").and_then(|v| v.as_bool()).unwrap_or(false);
+            // Pre-1.13.0 servers omit these; absence is the safe default
+            // (weather-only nav stays as-is, Simple mode) so an older backend
+            // degrades gracefully rather than stripping the nav.
+            let irrigation = val
+                .get("has_irrigation")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let nerd_default = val
+                .get("nerd_mode_default")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            has_irrigation.set(irrigation);
+            // Seed nerd mode from the server default ONLY for a device with no
+            // explicit prior choice. The localStorage read above has already run
+            // (both are spawn_local'd after the same 0ms defer, and this one then
+            // awaits a network round-trip), so `nerd_choice_explicit` is settled.
+            if !nerd_choice_explicit.get_untracked() {
+                nerd_mode.set(nerd_default);
+            }
+
             if let Some(win) = web_sys::window() {
                 if let Some(doc) = win.document() {
                     if let Some(html) = doc.document_element() {
@@ -225,6 +313,14 @@ pub fn App() -> impl IntoView {
                         }
                         if demo {
                             let _ = html.set_attribute("data-demo", "true");
+                        }
+                        // Weather-only install: the stylesheet hides the
+                        // irrigation-only nav links from this attribute (same
+                        // mechanism as data-nerd / data-dry-run).
+                        if irrigation {
+                            let _ = html.remove_attribute("data-no-irrigation");
+                        } else {
+                            let _ = html.set_attribute("data-no-irrigation", "true");
                         }
                     }
                 }
@@ -284,12 +380,17 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/")
                         view=move || view! {
                             <Title text="LocalSky · Weather"/>
-                            <WeatherHome snap=tempest forecast=forecast/>
+                            <WeatherHome snap=tempest forecast=forecast irrigation=irrigation/>
                         }/>
                     <Route path=path!("/irrigation")
                         view=move || view! {
                             <Title text="LocalSky · Irrigation · Today"/>
                             <IrrigationPage snap=irrigation/>
+                        }/>
+                    <Route path=path!("/week")
+                        view=move || view! {
+                            <Title text="LocalSky · Watering Week"/>
+                            <crate::components::watering_week::WateringWeekPage snap=irrigation/>
                         }/>
                     // ── v2 top-level destinations ──────────────────────
                     // Zones canvas + the Analyze triad (Simulator / Rule
@@ -360,15 +461,35 @@ pub fn App() -> impl IntoView {
                             <Title text="LocalSky · Notifications"/>
                             <crate::components::settings::SettingsNotifications/>
                         }/>
+                    // Deprecated source/controller editors: the unified Devices
+                    // hub (/settings/devices) replaced both (design #4, redundant
+                    // surfaces). Keep the URLs alive but repoint them at the hub so
+                    // stale deep-links + the in-app links that still point here land
+                    // on the live editor instead of the orphaned raw-JSON pages.
+                    // <Redirect> issues a real server redirect under SSR and a
+                    // client navigate after hydration.
+                    // Legacy source/controller/data-source editors fold into the
+                    // unified Devices hub inside the settings SHELL (master-detail
+                    // with the left section rail), so deep links + stale in-app
+                    // links land on the live editor with the rail intact instead
+                    // of the bare /settings/devices route (which drops the rail)
+                    // or an orphaned raw-JSON page. Per-field source ownership +
+                    // priority now lives co-located in that hub (design #4), so
+                    // /settings/data-sources points there too.
                     <Route path=path!("/settings/sources")
                         view=|| view! {
-                            <Title text="LocalSky · Sources"/>
-                            <crate::components::settings::SettingsSources/>
+                            <leptos_router::components::Redirect
+                                path=crate::base::url("/settings?section=devices")/>
+                        }/>
+                    <Route path=path!("/settings/data-sources")
+                        view=|| view! {
+                            <leptos_router::components::Redirect
+                                path=crate::base::url("/settings?section=devices")/>
                         }/>
                     <Route path=path!("/settings/controllers")
                         view=|| view! {
-                            <Title text="LocalSky · Controllers"/>
-                            <crate::components::settings::SettingsControllers/>
+                            <leptos_router::components::Redirect
+                                path=crate::base::url("/settings?section=devices")/>
                         }/>
                     <Route path=path!("/settings/help")
                         view=move || view! {
@@ -461,48 +582,54 @@ pub fn App() -> impl IntoView {
 fn WeatherHome(
     snap: ReadSignal<Snapshot>,
     forecast: ReadSignal<ForecastSnapshot>,
+    irrigation: ReadSignal<IrrigationSnapshot>,
 ) -> impl IntoView {
     // Split into sibling helper fns and type-erase each via .into_any() so
     // the inner view trees don't propagate up into WeatherHome's
     // monomorphized type. Without the erasure, rustc walks every nested
-    // HtmlElement+ attrs tuple and overflows its query depth at the
-    // panel grid.
-    // Two-column wide-screen layout: everything weather-related stacks in the
-    // left column; the radar map fills the right column at full height. Below
-    // 1400px the wrappers are `display: contents` so the existing single-
-    // column flow is bit-for-bit identical to the old WeatherHome.
+    // HtmlElement+ attrs tuple and overflows its query depth at the grid.
+    //
+    // Layout (.weather-grid, see SCSS): on wide screens the hero + wind +
+    // lightning share the top row, the four compact metric cards (rain /
+    // humidity / pressure / sun) share the second row, and the radar spans the
+    // bottom. On a true ultrawide the grid locks to the viewport so the whole
+    // dashboard fits the viewport without scrolling. Each panel is placed by its
+    // own root class (.wind, .rain, ...) via grid-template-areas, so the order
+    // here is just DOM order: hero+wind+lightning, the four metric cards, the
+    // radar (which spans the full height on the right), then the forecast strips
+    // tucked under the metric cards.
     view! {
-        <div class="weather-layout">
-            <div class="weather-main">
-                {view! { <crate::components::welcome_card::WelcomeCard/> }.into_any()}
-                {render_hero(snap).into_any()}
-                {view! { <crate::components::weather_telemetry::WeatherTelemetry snap/> }.into_any()}
-                {render_panels(snap).into_any()}
+        {view! { <crate::components::welcome_card::WelcomeCard/> }.into_any()}
+        // Front-door watering verdict (design #4): a compact, persistent strip
+        // above the weather grid for irrigation deployments, so the product's
+        // "aha" (will it water tonight, and why) is visible on the Weather home
+        // and deep-links into /irrigation. Weather-only installs render nothing.
+        {view! { <HomeWateringVerdict snap=irrigation/> }.into_any()}
+        <div class="weather-grid">
+            {render_hero(snap, forecast).into_any()}
+            {view! { <WindPanel snap/> }.into_any()}
+            {view! { <LightningPanel snap/> }.into_any()}
+            {view! { <RainPanel snap/> }.into_any()}
+            {view! { <HumidityPanel snap/> }.into_any()}
+            {view! { <PressurePanel snap/> }.into_any()}
+            {view! { <SolarPanel snap/> }.into_any()}
+            {render_radar().into_any()}
+            <div class="weather-extra">
                 {view! { <HourlyForecast snap=forecast/> }.into_any()}
                 {view! { <DailyForecast snap=forecast/> }.into_any()}
-            </div>
-            <div class="weather-side">
-                {render_radar().into_any()}
             </div>
         </div>
         {render_footer(snap).into_any()}
     }
 }
 
-fn render_hero(snap: ReadSignal<Snapshot>) -> impl IntoView {
-    view! { <Hero snap/> }
-}
-
-fn render_panels(snap: ReadSignal<Snapshot>) -> impl IntoView {
-    view! {
-        <section class="grid">
-            {view! { <WindPanel snap/> }.into_any()}
-            {view! { <RainPanel snap/> }.into_any()}
-            {view! { <LightningPanel snap/> }.into_any()}
-            {view! { <PressurePanel snap/> }.into_any()}
-            {view! { <SolarPanel snap/> }.into_any()}
-        </section>
-    }
+fn render_hero(
+    snap: ReadSignal<Snapshot>,
+    forecast: ReadSignal<ForecastSnapshot>,
+) -> impl IntoView {
+    // Pass the forecast so the cloud-only condition glyph can key off the
+    // current weather_code (correct rain/snow/fog) rather than only solar.
+    view! { <Hero snap forecast=forecast/> }
 }
 
 fn render_radar() -> impl IntoView {
@@ -515,6 +642,196 @@ fn render_radar() -> impl IntoView {
 
 fn render_footer(snap: ReadSignal<Snapshot>) -> impl IntoView {
     view! { <Footer snap/> }
+}
+
+/// Compact, persistent watering-verdict strip for the Weather home (design #4).
+/// Built entirely from the irrigation snapshot the shell already holds: one
+/// short verdict word (WATER / SKIP / PAUSED / WATERING NOW / OFFLINE), one
+/// plain-language reason line, and a deep link into /irrigation for the full
+/// hero. Deliberately small: it surfaces the product's "aha" on the front door
+/// without duplicating the irrigation hero's stat grid.
+///
+/// Only renders on irrigation deployments. `HasIrrigation` starts `true` so the
+/// strip is present on SSR + hydrate's first frame (matching DOM), then the
+/// /api/v1/info fetch may collapse it to nothing on a weather-only install. The
+/// inner structure is fixed (no Vec-length-dependent children), so the snapshot
+/// SSE swap only changes text, never the child count, keeping hydration sound.
+#[component]
+fn HomeWateringVerdict(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
+    use crate::components::irrigation::hero::{resolve_next_run, skip_tag_string};
+    use crate::components::units_fmt::use_unit_prefs;
+    use crate::components::verdict::{verdict_label, verdict_token};
+    use crate::reason_render::render_skip_reason;
+
+    let has_irrigation = use_context::<HasIrrigation>().map(|h| h.0);
+    let prefs = use_unit_prefs();
+
+    // One coarse state, mirroring the irrigation hero's phase ladder so the two
+    // surfaces never disagree: offline / running / paused / skip / run. This
+    // strip is a thin PRESENTER over the hero's honest resolver, not a second
+    // decision: a scheduled slot the engine predicts will SKIP must theme blue
+    // (skip) and say so, NEVER a green "WATER / Next run HH:MM" (the W6
+    // regression: the old ladder returned "run" for any next_run_epoch > 0,
+    // even when resolve_next_run says the slot skips).
+    let state = move || {
+        let s = snap.get();
+        if !s.ha_reachable {
+            "off"
+        } else if s.zones.iter().any(|z| z.running) {
+            "run-now"
+        } else if s.skip_check.will_skip && s.skip_check.reason.starts_with("Paused") {
+            "paused"
+        } else if s.skip_check.will_skip && s.next_run_epoch <= 0 {
+            "skip"
+        } else if s.next_run_epoch > 0 {
+            // Theme by what the NEXT SLOT actually does (same call the hero
+            // makes): a slot predicted to water is a run, a slot predicted to
+            // skip is a skip, so the strip never claims water is coming for a
+            // slot the engine will skip.
+            if resolve_next_run(&s).slot_skips {
+                "skip"
+            } else {
+                "run"
+            }
+        } else {
+            "run"
+        }
+    };
+
+    // Short verdict word, colored by the shared verdict token.
+    let word = move || match state() {
+        "off" => "OFFLINE".to_string(),
+        "run-now" => "WATERING NOW".to_string(),
+        "paused" => "PAUSED".to_string(),
+        // A skip state reads SKIP regardless of the morning skip_check.verdict
+        // (which may say WATER for a slot that already ran this morning while
+        // the NEXT slot skips); the state() ladder already decided this is a
+        // skip, so word it as one. The run branch keeps the engine verdict so a
+        // run_extended slot can read "WATER +".
+        "skip" => verdict_label("skip").to_string(),
+        // verdict_label maps the engine verdict string to WATER / WATER + / SKIP.
+        _ => verdict_label(&snap.get().skip_check.verdict).to_string(),
+    };
+    let word_color = move || match state() {
+        "off" => "var(--text-faint)".to_string(),
+        "paused" => "var(--verdict-wind)".to_string(),
+        "run-now" | "run" => verdict_token("run").to_string(),
+        // Blue skip token, matching the honest skip word above and the hero's
+        // blue skip theming, instead of coloring off the morning verdict.
+        "skip" => verdict_token("skip").to_string(),
+        _ => verdict_token(&snap.get().skip_check.verdict).to_string(),
+    };
+
+    // One-line reason. For a scheduled run, lead with WHEN (24h, deployment-local
+    // via timefmt); for a skip/pause, the plain-English skip reason; offline says
+    // so. Never the full stat breakdown, that lives on /irrigation.
+    let reason = move || {
+        let s = snap.get();
+        match state() {
+            "off" => "Irrigation backend unreachable".to_string(),
+            "run-now" => {
+                if let Some(z) = s.zones.iter().find(|z| z.running) {
+                    format!("{} running now", z.name)
+                } else {
+                    "A zone is running now".to_string()
+                }
+            }
+            "paused" => render_skip_reason(&s.skip_check, prefs.get()),
+            "skip" => {
+                // A skipping state has two shapes that must read honestly:
+                //   - an OPEN-ENDED skip (no scheduled slot): the morning
+                //     skip_check is the live reason.
+                //   - a SCHEDULED slot the engine predicts will SKIP: the
+                //     morning skip_check describes a DIFFERENT (already-passed)
+                //     window, so use the hero's resolver to surface the slot's
+                //     own reason + an explicit "Re-checks HH:MM", never a green
+                //     "Next run". Reuses the hero's skip_tag_string so the strip
+                //     and the hero word the skip identically.
+                if s.next_run_epoch > 0 {
+                    skip_tag_string(&resolve_next_run(&s), &s.timezone)
+                } else {
+                    render_skip_reason(&s.skip_check, prefs.get())
+                }
+            }
+            _ => {
+                // Scheduled run. Lead with the next-run time in the deployment's
+                // 24h local clock (WAVE-1 timefmt, never the browser TZ).
+                if s.next_run_epoch > 0 {
+                    let tz = s.timezone.as_str();
+                    let day = crate::timefmt::format_wday_short(s.next_run_epoch, tz);
+                    let hm = crate::timefmt::format_hm(s.next_run_epoch, tz);
+                    if day.is_empty() {
+                        format!("Next run {hm}")
+                    } else {
+                        format!("Next run {day} {hm}")
+                    }
+                } else {
+                    "Watering scheduled".to_string()
+                }
+            }
+        }
+    };
+
+    // The whole strip is an anchor into /irrigation (the full hero). Plain <a> so
+    // default navigation works if the WASM intercept misses; the global click
+    // shim + leptos router handle the in-app transition. Inline-styled (this
+    // shell work is scoped to .rs) so it needs no new stylesheet rule: a quiet
+    // claymorphic surface with a left verdict stripe. Each `style` attribute is a
+    // dynamic closure so the verdict color tracks the SSE snapshot without a CSS
+    // custom-property dance (the color is interpolated straight into the string).
+    let wrap_style = move || {
+        format!(
+            "display:flex;align-items:center;gap:var(--space-3);\
+             padding:var(--space-3) var(--space-4);margin-bottom:var(--space-3);\
+             background:var(--elev-1);border:1px solid var(--elev-border-strong);\
+             border-left:3px solid {c};border-radius:var(--radius-lg);\
+             box-shadow:var(--shadow-1);text-decoration:none;color:inherit;",
+            c = word_color()
+        )
+    };
+    let glyph_style = move || format!("flex:none;display:flex;color:{c};", c = word_color());
+    let word_style = move || {
+        format!(
+            "flex:none;font-family:var(--font-mono);font-weight:700;\
+             letter-spacing:0.04em;font-size:var(--text-body-sm);color:{c};",
+            c = word_color()
+        )
+    };
+    // Gate on irrigation presence. `true` on SSR + hydrate's first frame keeps
+    // the DOM identical; a weather-only install collapses the strip after the
+    // info fetch resolves (client-only reactive update). When the context is
+    // somehow absent (it is always provided at app root), default to showing it.
+    // The strip is rebuilt inside this reactive closure each run; `word`,
+    // `reason`, and the style closures are all Copy (they capture only Copy
+    // signals), so they re-copy into the inner view on every re-render.
+    move || {
+        let show = has_irrigation.map(|h| h.get()).unwrap_or(true);
+        show.then(|| {
+            view! {
+                <a
+                    class="home-watering-verdict is-interactive"
+                    href=crate::base::url("/irrigation")
+                    aria-label="Open the irrigation dashboard"
+                    style=wrap_style
+                >
+                    <span aria-hidden="true" style=glyph_style>
+                        <crate::components::ui::Icon name="droplet" size=20u32/>
+                    </span>
+                    <span style=word_style>
+                        {word}
+                    </span>
+                    <span style="flex:1;min-width:0;color:var(--text-soft);\
+                                 font-size:var(--text-body-sm);overflow:hidden;\
+                                 text-overflow:ellipsis;white-space:nowrap;">
+                        {reason}
+                    </span>
+                    <span aria-hidden="true" style="flex:none;display:flex;color:var(--text-faint);">
+                        <crate::components::ui::Icon name="chevron-right" size=18u32/>
+                    </span>
+                </a>
+            }
+        })
+    }
 }
 
 #[component]

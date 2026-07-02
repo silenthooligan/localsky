@@ -1,5 +1,6 @@
 ---
 source: src/api/snapshot_tests.rs
+assertion_line: 57
 expression: "TempestSnapshot::default()"
 ---
 {
@@ -23,6 +24,11 @@ expression: "TempestSnapshot::default()"
   "rain_in_last_min": 0.0,
   "rain_in_today": 0.0,
   "rain_intensity_in_hr": 0.0,
+  "et0_today": 0.0,
+  "flow_gpm": 0.0,
+  "flow_total_gal_today": 0.0,
+  "pop_pct": 0.0,
+  "leaf_wetness_pct": 0.0,
   "precip_type": 0,
   "lightning_count_last_min": 0,
   "lightning_strikes_last_hour": 0,
@@ -33,5 +39,12 @@ expression: "TempestSnapshot::default()"
   "battery_v": 0.0,
   "battery_pct": 0.0,
   "station_serial": "",
-  "hub_serial": ""
+  "hub_serial": "",
+  "source_label": "",
+  "owner_priority": 0,
+  "air_temp_live_epoch": 0,
+  "wind_live_epoch": 0,
+  "rh_live_epoch": 0,
+  "rain_live_epoch": 0,
+  "has_live_station": false
 }

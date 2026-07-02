@@ -26,7 +26,12 @@ pub mod mqtt_command;
 pub mod opensprinkler_direct;
 pub mod rachio;
 pub mod rainbird;
+pub mod reaper;
 pub mod registry;
+
+// P1-3: trait-contract conformance harness (offline-testable adapters).
+#[cfg(test)]
+mod conformance;
 
 pub use bhyve::Bhyve;
 pub use dry_run::DryRunController;
@@ -38,3 +43,27 @@ pub use opensprinkler_direct::OpenSprinklerDirect;
 pub use rachio::Rachio;
 pub use rainbird::Rainbird;
 pub use registry::ControllerRegistry;
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// P0-8: per-zone async lock that serializes Run dispatch on the same zone
+/// across EVERY dispatch path (manual API, manual scheduler, smart-morning
+/// cycle). Two near-simultaneous `run_zone` calls on one zone otherwise race
+/// the hardware shutoff timer (last-writer-wins on HTTP, two timers closing at
+/// the shorter duration on MQTT) and double-write the run row. Lazily created
+/// per slug. ONLY Run takes it, so a Stop / StopAll is never blocked behind a
+/// running zone. Held only across the `run_zone` dispatch, never the run
+/// duration (the controller owns the shutoff), so it cannot block a later
+/// manual run for the length of a cycle. The std mutex guarding the map is
+/// dropped before the caller awaits the tokio mutex, so it is never held across
+/// an await.
+pub fn zone_run_lock(zone: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    let map = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().unwrap();
+    guard
+        .entry(zone.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}

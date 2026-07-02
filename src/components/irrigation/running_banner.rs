@@ -12,6 +12,7 @@
 // during manual overlap), shows the first running zone with a "+N more"
 // hint. The stop button always invokes stop_all in that case to be safe.
 
+use crate::components::ui::Button;
 use crate::ha::snapshot::IrrigationSnapshot;
 use leptos::prelude::*;
 use serde_json::json;
@@ -80,9 +81,9 @@ pub fn RunningBanner(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                         <div class="running-banner-flow">{l}</div>
                     })}
                 </div>
-                <button class="running-banner-stop btn-clay btn-clay-hot" on:click=on_stop>
+                <Button variant="danger" class="running-banner-stop" on_click=Callback::new(on_stop)>
                     {if count > 1 { "STOP ALL" } else { "STOP" }}
-                </button>
+                </Button>
             </div>
         }
         .into_any()

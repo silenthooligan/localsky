@@ -18,6 +18,7 @@ use leptos::tachys::view::any_view::IntoAny;
 
 use crate::components::settings_ui::{SettingsLoadError, SettingsResult};
 use crate::components::ui::{HelpHint, Icon, Panel};
+use crate::components::units_fmt::{temp_unit, temp_value, use_unit_prefs, UnitPrefs};
 use crate::docs::doc_url;
 
 use serde::Deserialize;
@@ -190,6 +191,11 @@ pub fn SettingsSensors() -> impl IntoView {
     let result_msg = RwSignal::new(String::new());
     let result_ok = RwSignal::new(false);
 
+    // Per-device display-unit prefs (temp scale for the soil-probe temp chip).
+    // Read inside the soil/orphan closures and threaded into the non-reactive
+    // card/row fns as a prop, the way VerdictCell takes prefs.
+    let prefs = use_unit_prefs();
+
     // Load on mount and on every Retry bump.
     #[cfg(feature = "hydrate")]
     {
@@ -314,6 +320,7 @@ pub fn SettingsSensors() -> impl IntoView {
     let soil_view = move || {
         let inv = inventory.get();
         let opts = zone_opts();
+        let p = prefs.get();
         let cards: Vec<_> = inv
             .gateways
             .iter()
@@ -324,7 +331,7 @@ pub fn SettingsSensors() -> impl IntoView {
                     .filter(|p| p.source_id == gw.source_id)
                     .cloned()
                     .collect();
-                gateway_card(gw.clone(), children, opts.clone(), bind)
+                gateway_card(gw.clone(), children, opts.clone(), bind, p)
             })
             .collect();
         view! { <div class="soil-grid soil-grid--gateways">{cards}</div> }.into_any()
@@ -346,6 +353,7 @@ pub fn SettingsSensors() -> impl IntoView {
             return ().into_any();
         }
         let opts = zone_opts();
+        let p = prefs.get();
         // Synthesize a gateway header from the first orphan's source meta.
         let first = &orphans[0];
         let synth = Gateway {
@@ -359,7 +367,7 @@ pub fn SettingsSensors() -> impl IntoView {
         };
         view! {
             <div class="soil-grid soil-grid--gateways">
-                {gateway_card(synth, orphans, opts, bind)}
+                {gateway_card(synth, orphans, opts, bind, p)}
             </div>
         }
         .into_any()
@@ -402,7 +410,7 @@ pub fn SettingsSensors() -> impl IntoView {
     };
 
     view! {
-        <main id="main-content" class="settings-page">
+        <div class="settings-page">
             <header class="settings-page__header">
                 <a class="settings-page__back" href="/settings">"← Settings"</a>
                 <h1 class="settings-page__title">"Sensors"<HelpHint topic="soil-sensors"/></h1>
@@ -447,7 +455,7 @@ pub fn SettingsSensors() -> impl IntoView {
                     <SettingsResult result_msg=result_msg result_ok=result_ok/>
                 </Show>
             </Show>
-        </main>
+        </div>
     }
 }
 
@@ -462,6 +470,7 @@ fn gateway_card(
     probes: Vec<SoilProbe>,
     zone_opts: Vec<ZoneOpt>,
     bind: Callback<(String, String)>,
+    prefs: UnitPrefs,
 ) -> impl IntoView {
     let count = probes.len();
     let count_label = format!("{count} channel{}", if count == 1 { "" } else { "s" });
@@ -485,7 +494,7 @@ fn gateway_card(
 
     let rows: Vec<_> = probes
         .into_iter()
-        .map(|p| soil_probe_row(p, zone_opts.clone(), bind))
+        .map(|p| soil_probe_row(p, zone_opts.clone(), bind, prefs))
         .collect();
 
     view! {
@@ -512,6 +521,7 @@ fn soil_probe_row(
     p: SoilProbe,
     zone_opts: Vec<ZoneOpt>,
     bind: Callback<(String, String)>,
+    prefs: UnitPrefs,
 ) -> impl IntoView {
     let probe_id = p.id.clone();
     let label = p
@@ -521,7 +531,7 @@ fn soil_probe_row(
     let reading = p
         .moisture_pct
         .map(|m| format!("{m:.1}%"))
-        .unwrap_or_else(|| "—".to_string());
+        .unwrap_or_else(|| "-".to_string());
     let age = fmt_age(p.age_s);
     let bound_slug = p.bound_zone_slug.clone().unwrap_or_default();
 
@@ -530,14 +540,17 @@ fn soil_probe_row(
     if let Some(b) = p.battery_pct {
         chips.push(view! {
             <span class="soil-card__pill" style="--sc: var(--verdict-run)">
-                {format!("🔋 {b:.0}%")}
+                {format!("Battery {b:.0}%")}
             </span>
         });
     }
     if let Some(t) = p.temp_f {
+        // Source value is Fahrenheit; route through the display-unit formatter
+        // so it honors the temp-scale pref (value + °F/°C unit split).
+        let temp_chip = format!("{}{}", temp_value(t, prefs), temp_unit(prefs));
         chips.push(view! {
             <span class="soil-card__pill" style="--sc: var(--accent)">
-                {format!("{t:.0}°F")}
+                {temp_chip}
             </span>
         });
     }
@@ -629,12 +642,12 @@ fn flow_card(f: FlowMeter) -> impl IntoView {
             ),
             None => (
                 "Flow meter supported. None connected.".to_string(),
-                "—".to_string(),
+                "-".to_string(),
                 false,
                 true,
             ),
         },
-        (false, _, _) => ("No flow input".to_string(), "—".to_string(), false, false),
+        (false, _, _) => ("No flow input".to_string(), "-".to_string(), false, false),
     };
 
     let age_pill = show_age.then(|| view! { <span class="soil-card__pill">{age}</span> });
@@ -731,7 +744,7 @@ fn empty_state() -> impl IntoView {
                     </li>
                 </ul>
                 <p style="margin: var(--space-3) 0 0">
-                    <a href="/settings/devices?discover=1" style="color: var(--accent)">
+                    <a href="/settings?section=devices&add=source" style="color: var(--accent)">
                         "Add a sensor in Devices →"
                     </a>
                     "  ·  "

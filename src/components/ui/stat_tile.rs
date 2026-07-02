@@ -58,7 +58,7 @@ pub fn StatTile(
     let has_unit = !unit.is_empty();
     let icon_accent = accent.clone();
     view! {
-        <div class="stat-tile">
+        <div class="stat-tile" style=format!("--tile-accent:{accent}")>
             <div class="stat-tile__head">
                 {icon.map(|n| view! {
                     <span class="stat-tile__icon" style=format!("color:{icon_accent}")>

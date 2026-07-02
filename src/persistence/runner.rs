@@ -74,6 +74,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "overrides",
         sql: include_str!("migrations/M0011_overrides.sql"),
     },
+    Migration {
+        version: "M0012",
+        name: "active_runs",
+        sql: include_str!("migrations/M0012_active_runs.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]
@@ -236,6 +241,7 @@ mod tests {
                 "M0009".to_string(),
                 "M0010".to_string(),
                 "M0011".to_string(),
+                "M0012".to_string(),
             ]
         );
     }

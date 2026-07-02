@@ -44,7 +44,11 @@ use serde::{Deserialize, Serialize};
 /// 1.12.0 (additive): IrrigationSnapshot.global_override (sticky
 /// global Auto/Skip/Force override) + forecast.wind_gust_today_mph
 /// and the wind_gust_forecast sensor manifest descriptor.
-pub const API_VERSION: &str = "1.12.0";
+/// 1.13.0 (additive): `has_irrigation` (any controller/zone configured)
+/// + `nerd_mode_default` here, so the client can hide irrigation nav on a
+/// weather-only install and seed Simple vs Nerd mode from server config
+/// instead of hard-coding new users into Nerd mode.
+pub const API_VERSION: &str = "1.13.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {
@@ -82,6 +86,20 @@ pub struct Info {
     /// Lets clients dedupe across IP/host changes. None before first
     /// boot completes init.
     pub uuid: Option<String>,
+    /// True when any irrigation hardware is configured (at least one
+    /// controller OR at least one zone in localsky.toml). The Wave-2 UI
+    /// reads this at app root to HIDE the irrigation nav items on a
+    /// weather-only install, so a no-hardware user is not staring at empty
+    /// Zones/Irrigation/History doors. False on a fresh/weather-only config.
+    /// `#[serde(default)]` so an older payload (pre-1.13.0) still decodes.
+    #[serde(default)]
+    pub has_irrigation: bool,
+    /// The configured `features.nerd_mode_default`. The Wave-2 UI seeds the
+    /// initial Simple vs Nerd presentation from this instead of hard-coding
+    /// every new user into Nerd mode. Defaults to false (Simple).
+    /// `#[serde(default)]` so an older payload (pre-1.13.0) still decodes.
+    #[serde(default)]
+    pub nerd_mode_default: bool,
 }
 
 pub fn router() -> Router {
@@ -92,12 +110,31 @@ fn env_flag(name: &str) -> bool {
     std::env::var(name).ok().as_deref() == Some("1")
 }
 
+/// Read `has_irrigation` + `nerd_mode_default` from the live config file.
+/// Self-contained (no router state) so the info router stays stateless and
+/// merge-mounted as-is: it loads localsky.toml from the same CONFIG_PATH the
+/// boot path uses. A missing/unparseable config (fresh install) yields the
+/// safe defaults (no irrigation, Simple mode), exactly what a weather-only or
+/// pre-wizard install should report.
+async fn config_signals() -> (bool, bool) {
+    use crate::ports::config_store::ConfigStore;
+    let path = std::env::var("CONFIG_PATH").unwrap_or_else(|_| "/data/localsky.toml".to_string());
+    match crate::config::FileConfigStore::new(&path).load().await {
+        Ok(cfg) => {
+            let has_irrigation = !cfg.controllers.is_empty() || !cfg.zones.is_empty();
+            (has_irrigation, cfg.features.nerd_mode_default)
+        }
+        Err(_) => (false, false),
+    }
+}
+
 async fn info(req: axum::http::Request<axum::body::Body>) -> Json<Info> {
     let auth_required = req
         .extensions()
         .get::<crate::auth::middleware::AuthRequired>()
         .map(|a| a.0)
         .unwrap_or(false);
+    let (has_irrigation, nerd_mode_default) = config_signals().await;
     Json(Info {
         service: "localsky",
         service_version: env!("CARGO_PKG_VERSION"),
@@ -109,6 +146,8 @@ async fn info(req: axum::http::Request<axum::body::Body>) -> Json<Info> {
         demo: env_flag("LOCALSKY_DEMO"),
         auth_required,
         uuid: crate::instance::get().map(str::to_string),
+        has_irrigation,
+        nerd_mode_default,
     })
 }
 
@@ -129,5 +168,15 @@ mod tests {
         for p in parts {
             p.parse::<u32>().expect("each component must parse as u32");
         }
+        // The Wave-2 signals are present. With no config file on disk in the
+        // test environment they fall back to the safe weather-only defaults.
+        assert!(
+            !body.has_irrigation,
+            "no config -> weather-only (has_irrigation=false)"
+        );
+        assert!(
+            !body.nerd_mode_default,
+            "no config -> Simple mode default (nerd_mode_default=false)"
+        );
     }
 }

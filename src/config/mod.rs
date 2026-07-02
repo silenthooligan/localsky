@@ -10,7 +10,10 @@
 //   env_compat.rs - synthesize Config from legacy v0.1 env vars
 
 pub mod env_compat;
+pub mod field_overrides;
+pub mod kind_labels;
 pub mod loader;
+pub mod region;
 pub mod schema;
 pub mod store;
 pub mod validate;

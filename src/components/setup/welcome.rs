@@ -127,7 +127,7 @@ pub fn WelcomeStep() -> impl IntoView {
                 <p class="setup-needs__title">"Setup takes about five minutes. Helpful to have:"</p>
                 <ul class="setup-needs__list">
                     <li>"Your address (or coordinates); weather and sun math start there"</li>
-                    <li>"Optional: a weather station on your network (Tempest, Ecowitt, Davis...)"</li>
+                    <li>"Optional: a weather or soil-sensor device on your network (Tempest, Ecowitt, Davis...). Some do both."</li>
                     <li>"Optional: your sprinkler controller (it can be found by a network scan)"</li>
                 </ul>
             </div>

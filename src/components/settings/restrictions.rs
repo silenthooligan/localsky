@@ -22,7 +22,7 @@ use leptos::tachys::view::any_view::IntoAny;
 use crate::components::settings_ui::{
     BadgeTone, SettingsBadge, SettingsCard, SettingsKv, SettingsResult,
 };
-use crate::components::ui::{FormField, HelpHint, Panel, SegmentedControl, Toggle};
+use crate::components::ui::{Button, FormField, HelpHint, Panel, SegmentedControl, Toggle};
 
 /// Replace em-dashes, en-dashes, and the Latin-1-decoded UTF-8 mojibake
 /// of either with a plain hyphen so old toml entries written before the
@@ -80,6 +80,63 @@ pub fn SettingsRestrictions() -> impl IntoView {
     let saving = RwSignal::new(false);
     let result_msg = RwSignal::new(String::new());
     let result_ok = RwSignal::new(false);
+
+    // Commit-immediately: every add / edit / delete persists on its own (no more
+    // "Add to list -> Save all changes" two-step). Also pushes the parity radio
+    // into deployment.address_parity and heals any em-dash mojibake on save.
+    let persist = Callback::new(move |()| {
+        if saving.get() {
+            return;
+        }
+        saving.set(true);
+        result_msg.set(String::new());
+        let mut cfg = config_json.get();
+        if let Some(dep) = cfg.get_mut("deployment").and_then(|d| d.as_object_mut()) {
+            dep.insert("address_parity".into(), serde_json::json!(parity.get()));
+        }
+        if let Some(arr) = cfg
+            .get_mut("engine")
+            .and_then(|e| e.get_mut("watering_restrictions"))
+            .and_then(|v| v.as_array_mut())
+        {
+            for r in arr.iter_mut() {
+                if let Some(name_val) = r.get("name").cloned() {
+                    if let Some(raw) = name_val.as_str() {
+                        let cleaned = sanitize_name(raw);
+                        if cleaned != raw {
+                            r.as_object_mut()
+                                .unwrap()
+                                .insert("name".into(), serde_json::json!(cleaned));
+                        }
+                    }
+                }
+            }
+        }
+        #[cfg(feature = "hydrate")]
+        {
+            wasm_bindgen_futures::spawn_local(async move {
+                match save_config(cfg).await {
+                    Ok(()) => {
+                        crate::components::settings_ui::toast_saved(
+                            result_msg,
+                            result_ok,
+                            "Saved. Engine picks up restrictions on next tick.",
+                        );
+                    }
+                    Err(e) => {
+                        result_ok.set(false);
+                        result_msg.set(e);
+                    }
+                }
+                saving.set(false);
+            });
+        }
+        #[cfg(not(feature = "hydrate"))]
+        {
+            saving.set(false);
+            let _ = cfg;
+        }
+    });
 
     #[cfg(feature = "hydrate")]
     {
@@ -161,6 +218,7 @@ pub fn SettingsRestrictions() -> impl IntoView {
                         new_max_minutes=new_max_minutes
                         editing_id=editing_id
                         add_open=add_open
+                        persist=persist
                     />
                 })
             })
@@ -192,68 +250,9 @@ pub fn SettingsRestrictions() -> impl IntoView {
                 arr.push(restriction);
             }
         });
-        result_ok.set(true);
-        result_msg
-            .set("Added a starter restriction. Edit it for your area, then Save below.".into());
+        // Commit the starter immediately; the user edits it in place from the list.
+        persist.run(());
     });
-
-    let on_save = move |_| {
-        if saving.get() {
-            return;
-        }
-        saving.set(true);
-        result_msg.set(String::new());
-        let mut cfg = config_json.get();
-        // Push the parity radio back into deployment.address_parity before
-        // we persist.
-        if let Some(dep) = cfg.get_mut("deployment").and_then(|d| d.as_object_mut()) {
-            dep.insert("address_parity".into(), serde_json::json!(parity.get()));
-        }
-        // Sanitize the `name` field on every restriction so a save heals
-        // any em-dash mojibake left over from pre-fix entries. Idempotent.
-        if let Some(arr) = cfg
-            .get_mut("engine")
-            .and_then(|e| e.get_mut("watering_restrictions"))
-            .and_then(|v| v.as_array_mut())
-        {
-            for r in arr.iter_mut() {
-                if let Some(name_val) = r.get("name").cloned() {
-                    if let Some(raw) = name_val.as_str() {
-                        let cleaned = sanitize_name(raw);
-                        if cleaned != raw {
-                            r.as_object_mut()
-                                .unwrap()
-                                .insert("name".into(), serde_json::json!(cleaned));
-                        }
-                    }
-                }
-            }
-        }
-        #[cfg(feature = "hydrate")]
-        {
-            wasm_bindgen_futures::spawn_local(async move {
-                match save_config(cfg).await {
-                    Ok(()) => {
-                        crate::components::settings_ui::toast_saved(
-                            result_msg,
-                            result_ok,
-                            "Saved. Engine picks up restrictions on next tick.",
-                        );
-                    }
-                    Err(e) => {
-                        result_ok.set(false);
-                        result_msg.set(e);
-                    }
-                }
-                saving.set(false);
-            });
-        }
-        #[cfg(not(feature = "hydrate"))]
-        {
-            saving.set(false);
-            let _ = cfg;
-        }
-    };
 
     // True when there's at least one enabled restriction with a non-empty
     // weekday list and the operator hasn't picked an address parity yet.
@@ -281,9 +280,9 @@ pub fn SettingsRestrictions() -> impl IntoView {
     };
 
     view! {
-        <main id="main-content" class="settings-page">
+        <div class="settings-page">
             <header class="settings-page__header">
-                <a class="settings-page__back" href="/settings">"Back to Settings"</a>
+                <a class="settings-page__back" href="/settings">"← Settings"</a>
                 <h1 class="settings-page__title">"Watering restrictions"<HelpHint topic="restrictions"/></h1>
                 <p class="settings-page__subtitle">
                     "Honor watering rules from your local water authority, council, water management district, or HOA. "
@@ -411,21 +410,12 @@ pub fn SettingsRestrictions() -> impl IntoView {
                     add_open=add_open
                     result_msg=result_msg
                     result_ok=result_ok
+                    persist=persist
                 />
             </Show>
 
-            <button
-                type="button"
-                class="setup-apply-btn"
-                style="margin-top: 1.5rem"
-                disabled=move || saving.get()
-                on:click=on_save
-            >
-                {move || if saving.get() { "Saving…" } else { "Save all changes" }}
-            </button>
-
             <SettingsResult result_msg=result_msg result_ok=result_ok/>
-        </main>
+        </div>
     }
 }
 
@@ -455,6 +445,7 @@ fn RestrictionForm(
     add_open: RwSignal<bool>,
     result_msg: RwSignal<String>,
     result_ok: RwSignal<bool>,
+    persist: Callback<()>,
 ) -> impl IntoView {
     let on_add = move |_| {
         let id = new_id.get().trim().to_lowercase().replace(' ', "_");
@@ -549,12 +540,8 @@ fn RestrictionForm(
         new_enabled.set(true);
         new_effective_kind.set("all_year".to_string());
         add_open.set(false);
-        result_ok.set(true);
-        result_msg.set(if was_edit {
-            "Updated restriction. Click Save below to persist.".to_string()
-        } else {
-            "Added restriction. Click Save below to persist.".to_string()
-        });
+        // Commit immediately instead of staging for a separate "Save".
+        persist.run(());
     };
 
     let on_cancel = move |_| {
@@ -738,24 +725,16 @@ fn RestrictionForm(
             </FormField>
 
             <div class="settings-form-actions">
-                <button
-                    type="button"
-                    class="setup-footer__btn setup-footer__btn--ghost"
-                    on:click=on_cancel
-                >
+                <Button variant="ghost" on_click=Callback::new(on_cancel)>
                     "Cancel"
-                </button>
-                <button
-                    type="button"
-                    class="setup-footer__btn setup-footer__btn--primary"
-                    on:click=on_add
-                >
+                </Button>
+                <Button variant="primary" on_click=Callback::new(on_add)>
                     {move || if editing_id.get().is_some() {
                         "Save restriction changes"
                     } else {
-                        "Add to list"
+                        "Add restriction"
                     }}
-                </button>
+                </Button>
             </div>
         </Panel></div>
     }
@@ -929,6 +908,7 @@ fn RestrictionCard(
     new_max_minutes: RwSignal<String>,
     editing_id: RwSignal<Option<String>>,
     add_open: RwSignal<bool>,
+    persist: Callback<()>,
 ) -> impl IntoView {
     let raw_name = restriction
         .get("name")
@@ -1076,12 +1056,13 @@ fn RestrictionCard(
                 arr.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(&target));
             }
         });
+        persist.run(());
     };
 
     view! {
         <li class="settings-card-list__item">
             <SettingsCard
-                icon="\u{1f6b1}".into()
+                icon="ban".into()
                 title=name
                 subtitle=subtitle
                 badges=Box::new(move || view! {
@@ -1100,22 +1081,20 @@ fn RestrictionCard(
                     <SettingsKv label="Max per zone" value=max_minutes_kv/>
                 }.into_any())
                 actions=Box::new(move || view! {
-                    <button
-                        class="setup-footer__btn setup-footer__btn--ghost"
-                        type="button"
-                        aria-label=format!("Edit restriction {id_for_edit_label}")
-                        on:click=on_edit
+                    <Button
+                        variant="ghost"
+                        aria_label=format!("Edit restriction {id_for_edit_label}")
+                        on_click=Callback::new(on_edit)
                     >
                         "Edit"
-                    </button>
-                    <button
-                        class="setup-footer__btn setup-footer__btn--danger"
-                        type="button"
-                        aria-label=format!("Delete restriction {id_for_delete_label}")
-                        on:click=on_delete
+                    </Button>
+                    <Button
+                        variant="danger"
+                        aria_label=format!("Delete restriction {id_for_delete_label}")
+                        on_click=Callback::new(on_delete)
                     >
                         "Delete"
-                    </button>
+                    </Button>
                 }.into_any())
             />
         </li>

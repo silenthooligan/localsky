@@ -211,7 +211,7 @@ mod tests {
             concat!(
                 "[{\"id\":\"librewxr\",\"label\":\"Radar + nowcast (LibreWXR)\",",
                 "\"kind\":\"rainviewer\",\"coverage\":\"librewxr\",",
-                "\"coverageLabel\":\"Radar + 60 min nowcast (US, Canada, Europe, Japan, Taiwan, SE Asia)\",",
+                "\"coverageLabel\":\"US, Canada, Europe, Japan, Taiwan, SE Asia\",",
                 "\"url\":\"https://api.librewxr.net/public/weather-maps.json\",",
                 "\"attribution\":\"LibreWXR\",\"crossfade\":false},",
                 "{\"id\":\"rainviewer\",\"label\":\"RainViewer (global composite)\",",

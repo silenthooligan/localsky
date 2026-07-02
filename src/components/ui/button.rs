@@ -38,12 +38,20 @@ pub fn Button(
     /// aria-label when the button has no readable text (icon-only).
     #[prop(into, optional)]
     aria_label: String,
+    /// Extra classes (layout / positioning) appended after the btn classes, so a
+    /// caller can keep a flex/grid placement class while adopting the primitive.
+    #[prop(into, optional)]
+    class: String,
     children: Children,
 ) -> impl IntoView {
     let class = move || {
         let mut c = format!("btn btn--{variant} btn--{size}");
         if block {
             c.push_str(" btn--block");
+        }
+        if !class.is_empty() {
+            c.push(' ');
+            c.push_str(&class);
         }
         c
     };

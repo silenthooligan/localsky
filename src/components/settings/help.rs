@@ -10,10 +10,11 @@ use crate::docs::{doc_url, ISSUES_URL, REPO_URL, SITE_BASE};
 #[component]
 pub fn SettingsHelp() -> impl IntoView {
     view! {
-        <div class="settings-section">
-            <header class="settings-section__head">
-                <h2 class="settings-section__title">"Help & documentation"</h2>
-                <p class="settings-section__sub">
+        <div class="settings-page">
+            <header class="settings-page__header">
+                <a class="settings-page__back" href="/settings">"← Settings"</a>
+                <h1 class="settings-page__title">"Help & documentation"</h1>
+                <p class="settings-page__subtitle">
                     "Guides for every stage, from first install to deep tuning."
                 </p>
             </header>

@@ -1,7 +1,7 @@
 {
   "name": "LocalSky",
   "short_name": "LocalSky",
-  "description": "Hyperlocal weather dashboard with optional smart irrigation. Local-first, no cloud.",
+  "description": "Hyperlocal weather dashboard with optional smart irrigation. Self-hosted, no account, no tracking.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

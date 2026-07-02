@@ -8,6 +8,7 @@
 // alongside the live values, matching SI's internal compute.
 
 use crate::components::ui::HelpHint;
+use crate::components::units_fmt::{depth_unit, depth_value_mm, fmt_rain_rate_mm, use_unit_prefs};
 use crate::ha::snapshot::{IrrigationSnapshot, ZoneState};
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
@@ -76,15 +77,20 @@ fn ZoneMathTile(zone: Signal<ZoneState>) -> impl IntoView {
 #[component]
 fn MathRows(zone: Signal<ZoneState>) -> impl IntoView {
     let m = Signal::derive(move || zone.get().math.unwrap_or_default());
+    let prefs = use_unit_prefs();
 
     let fmt_bucket = move || {
+        // bucket is MILLIMETERS; show the deficit/surplus in the display unit.
+        let p = prefs.get();
+        let u = depth_unit(p);
         let v = m.get().bucket_mm;
         if v < 0.0 {
-            format!("{:.2} mm (deficit, needs water)", v)
+            // depth_value_mm of the negative keeps the leading minus.
+            format!("{} {u} (deficit, needs water)", depth_value_mm(v, p))
         } else if v > 0.0 {
-            format!("+{:.2} mm (surplus)", v)
+            format!("+{} {u} (surplus)", depth_value_mm(v, p))
         } else {
-            "0.00 mm (at field capacity)".to_string()
+            format!("{} {u} (at field capacity)", depth_value_mm(0.0, p))
         }
     };
     let fmt_kc = move || {
@@ -104,6 +110,8 @@ fn MathRows(zone: Signal<ZoneState>) -> impl IntoView {
         format!("\u{00d7} {:.2} ({})", v, kind)
     };
     let fmt_thr = move || {
+        // throughput is MILLIMETERS/HOUR; classification stays on the raw mm/hr
+        // value, only the displayed rate respects the unit toggle.
         let v = m.get().throughput_mm_hr;
         let kind = if v <= 0.0 {
             "unset"
@@ -116,7 +124,7 @@ fn MathRows(zone: Signal<ZoneState>) -> impl IntoView {
         } else {
             "fixed spray"
         };
-        format!("\u{00f7} {:.2} mm/hr ({})", v, kind)
+        format!("\u{00f7} {} ({})", fmt_rain_rate_mm(v, prefs.get()), kind)
     };
     let fmt_capture = move || format!("\u{00f7} {:.2} (capture eff.)", m.get().capture_eff);
     let fmt_raw = move || format!("= {}", format_seconds_pretty(m.get().raw_seconds));

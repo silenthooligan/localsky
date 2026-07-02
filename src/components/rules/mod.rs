@@ -14,11 +14,15 @@ pub mod conditions;
 
 use chrono::{Local, TimeZone};
 use leptos::prelude::*;
+use leptos_router::hooks::{use_location, use_navigate};
 
 use crate::components::rules::conditions::ConditionsSection;
+use crate::components::ui::Button;
+use crate::components::units_fmt::{use_unit_prefs, UnitPrefs};
 use crate::components::verdict::{verdict_label, verdict_token};
 use crate::ha::snapshot::{DecisionTrace, IrrigationSnapshot, RuleEval};
 use crate::history::types::DecisionRecord;
+use crate::reason_render::{render_rule_detail, render_rule_margin, render_trace_reason};
 
 fn fmt_day(epoch: i64) -> String {
     Local
@@ -63,6 +67,9 @@ pub fn RuleLabPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     // Past decisions (newest first). None selected = show today's live trace.
     let decisions = RwSignal::new(Vec::<DecisionRecord>::new());
     let selected: RwSignal<Option<i64>> = RwSignal::new(None);
+    // Per-device unit preference; the ladder's per-rule detail + margin re-render
+    // unit-aware from the structured RuleEval (P2 units architecture).
+    let prefs = use_unit_prefs();
 
     #[cfg(feature = "hydrate")]
     {
@@ -83,8 +90,22 @@ pub fn RuleLabPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         });
     }
 
-    // Two tabs: Rules (configure, front and center) and Decisions (audit).
-    let tab = RwSignal::new("rules");
+    // Two tabs: Rules (configure, front and center) and Decisions (audit). The
+    // active tab is URL state (?tab=decisions) not a bare signal, so the phone
+    // back gesture switches tabs / leaves Rule Lab one step at a time instead of
+    // jumping straight out, and a tab deep-links.
+    let loc = use_location();
+    let tab = Signal::derive(move || {
+        if loc.search.get().contains("tab=decisions") {
+            "decisions"
+        } else {
+            "rules"
+        }
+    });
+    let nav_rules = use_navigate();
+    let go_rules = move |_| nav_rules("/rules", Default::default());
+    let nav_dec = use_navigate();
+    let go_dec = move |_| nav_dec("/rules?tab=decisions", Default::default());
 
     view! {
         <div class="rulelab-page">
@@ -98,9 +119,9 @@ pub fn RuleLabPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
 
             <div class="rulelab-tabs" role="tablist">
                 <button type="button" class="rulelab-tab" class:is-active=move || tab.get() == "rules"
-                    role="tab" on:click=move |_| tab.set("rules")>"Rules"</button>
+                    role="tab" on:click=go_rules>"Rules"</button>
                 <button type="button" class="rulelab-tab" class:is-active=move || tab.get() == "decisions"
-                    role="tab" on:click=move |_| tab.set("decisions")>"Decisions"</button>
+                    role="tab" on:click=go_dec>"Decisions"</button>
             </div>
 
             {move || if tab.get() == "decisions" {
@@ -148,13 +169,13 @@ pub fn RuleLabPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                             {move || {
                                 match selected.get() {
                                     None => match snap.get().decision_trace {
-                                        Some(trace) => view! { <TraceView trace/> }.into_any(),
+                                        Some(trace) => view! { <TraceView trace prefs/> }.into_any(),
                                         None => view! { <div class="rulelab-empty">"Waiting for the first decision of the day…"</div> }.into_any(),
                                     },
                                     Some(ep) => {
                                         let rec = decisions.get().into_iter().find(|d| d.epoch == ep);
                                         match rec.and_then(|d| d.trace) {
-                                            Some(trace) => view! { <TraceView trace/> }.into_any(),
+                                            Some(trace) => view! { <TraceView trace prefs/> }.into_any(),
                                             None => view! { <div class="rulelab-empty">"No stored trace for this decision (recorded before trace capture)."</div> }.into_any(),
                                         }
                                     }
@@ -185,9 +206,9 @@ fn SafetyGates() -> impl IntoView {
                 <p class="sensors-section__hint">
                     "These deterministic gates decide first, in this order. Each weather gate can be disabled if you know what you are doing; control and legal gates (override, pause, restrictions) are always on. Disabling is config, not code: a snapshot is kept and one click re-enables."
                 </p>
-                <a class="setup-footer__btn setup-footer__btn--primary rulelab-gates__cta" href="/settings/skip-rules">
+                <Button variant="primary" href="/settings/skip-rules" class="rulelab-gates__cta">
                     "Configure thresholds (rain inches, wind mph, freeze temperature)"
-                </a>
+                </Button>
                 <BuiltinGateManager/>
             </div>
         </details>
@@ -195,29 +216,41 @@ fn SafetyGates() -> impl IntoView {
 }
 
 #[component]
-fn TraceView(trace: DecisionTrace) -> impl IntoView {
+fn TraceView(trace: DecisionTrace, prefs: Signal<UnitPrefs>) -> impl IntoView {
     let vtoken = verdict_token(&trace.verdict);
     let vlabel = verdict_label(&trace.verdict);
+    // P2 units architecture: re-render the trace's top-level reason unit-aware
+    // from the deciding rule's structured operands; fall back to the baked reason
+    // for codes whose operands aren't carried (control gates, etc.).
     let reason = if trace.reason.is_empty() {
         "All clear, no skip rule fired.".to_string()
     } else {
-        trace.reason.clone()
+        render_trace_reason(&trace, prefs.get_untracked())
     };
     view! {
         <div class="rulelab">
             <div class="rulelab-verdict" style=format!("--v:{vtoken}")>
-                <span class="rulelab-verdict__pill">{vlabel}</span>
+                <span class="rulelab-verdict__eyebrow">"Today's decision"</span>
+                <div class="rulelab-verdict__row">
+                    <span class="rulelab-verdict__pill">{vlabel}</span>
+                    {trace.degraded.then(|| view! {
+                        <span class="ha-chip ha-chip--warn">
+                            <span class="ha-chip__dot" aria-hidden="true"></span>
+                            "ran on backup readings"
+                        </span>
+                    })}
+                </div>
                 <span class="rulelab-verdict__reason">{reason}</span>
             </div>
             <ol class="rulelab-ladder">
-                {trace.rules.into_iter().map(|r| view! { <RuleRow r/> }).collect_view()}
+                {trace.rules.into_iter().map(|r| view! { <RuleRow r prefs/> }).collect_view()}
             </ol>
         </div>
     }
 }
 
 #[component]
-fn RuleRow(r: RuleEval) -> impl IntoView {
+fn RuleRow(r: RuleEval, prefs: Signal<UnitPrefs>) -> impl IntoView {
     let (badge_label, badge_class, accent) = match r.outcome.as_str() {
         "fired" => {
             let v = r.verdict.clone().unwrap_or_default();
@@ -251,12 +284,26 @@ fn RuleRow(r: RuleEval) -> impl IntoView {
         "rule-row"
     };
     let cat_attr = r.category.clone();
+    // P2 units architecture: re-render the per-rule detail + margin unit-aware
+    // from the structured RuleEval operands. Both read prefs.get() inside the
+    // closures so a units toggle re-renders; threshold gates with no operands
+    // fall back to the baked detail / margin_label inside the renderer.
+    let has_margin = r.margin_label.is_some() || (r.value.is_some() && r.threshold.is_some());
+    let r_detail = r.clone();
+    let r_margin = r.clone();
     view! {
         <li class=row_class style=format!("--accent-row:{accent}")>
             <span class="rule-row__cat" data-cat=cat_attr>{r.category}</span>
             <div class="rule-row__body">
                 <span class="rule-row__label">{r.label}</span>
-                <span class="rule-row__detail">{r.detail}</span>
+                <span class="rule-row__detail">
+                    {move || render_rule_detail(&r_detail, prefs.get())}
+                </span>
+                {has_margin.then(|| view! {
+                    <span class="rule-row__margin" aria-label="margin" title="how close this gate was to flipping">
+                        {move || render_rule_margin(&r_margin, prefs.get()).unwrap_or_default()}
+                    </span>
+                })}
             </div>
             <span class=badge_class>{badge_label}</span>
         </li>
@@ -353,7 +400,11 @@ fn BuiltinGateManager() -> impl IntoView {
                 };
                 let id_chk = id_s.clone();
                 view! {
-                    <div class="gate-row" class:gate-row--off=move || disabled_now().contains(&id_chk)>
+                    <div
+                        class="gate-row"
+                        class:gate-row--protected=*protected
+                        class:gate-row--off=move || disabled_now().contains(&id_chk)
+                    >
                         <div class="gate-row__text">
                             <span class="gate-row__label">{label.to_string()}</span>
                             <span class="gate-row__meaning">{meaning.to_string()}</span>

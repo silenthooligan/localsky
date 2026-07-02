@@ -8,7 +8,7 @@
 
 use leptos::prelude::*;
 
-use crate::components::ui::{FormField, Icon, SecretInput};
+use crate::components::ui::{Button, FormField, Icon, SecretInput};
 
 #[component]
 pub fn LoginPage() -> impl IntoView {
@@ -147,14 +147,15 @@ pub fn LoginPage() -> impl IntoView {
                                 on_input=Callback::new(move |v: String| password.set(v))
                             />
                         </FormField>
-                        <button
-                            type="button"
+                        <Button
+                            variant="primary"
                             class="setup-apply-btn login-card__submit"
-                            prop:disabled=move || busy.get()
-                            on:click=move |_| submit(())
+                            disabled=Signal::derive(move || busy.get())
+                            loading=Signal::derive(move || busy.get())
+                            on_click=Callback::new(move |_| submit(()))
                         >
                             {move || if busy.get() { "Signing in…" } else if exists { "Sign in" } else { "Create and sign in" }}
-                        </button>
+                        </Button>
                     }.into_any(),
                 }}
                 {move || {

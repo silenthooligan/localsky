@@ -8,7 +8,7 @@
 use leptos::prelude::*;
 
 use crate::components::setup::shell::{next_step_href, prev_step_href, SetupFooter};
-use crate::components::ui::{FormField, Panel, SecretInput};
+use crate::components::ui::{Button, FormField, Panel, SecretInput};
 
 #[component]
 pub fn AccountStep() -> impl IntoView {
@@ -18,6 +18,13 @@ pub fn AccountStep() -> impl IntoView {
     let busy = RwSignal::new(false);
     let msg = RwSignal::new(String::new());
     let ok = RwSignal::new(false);
+    // The deciding access-context question. The step used to be skippable with
+    // no gate right after the user was told they may reach LocalSky off-LAN;
+    // answering this once makes the no-auth outcome a conscious choice instead
+    // of a silent default. "" = unanswered, "external" = reaches it off-LAN
+    // (recommend a login), "lan" = LAN-only behind their own router/proxy
+    // (no-auth confirmed). Local-only: it just steers the guidance below.
+    let access = RwSignal::new(String::new());
     // Whether an account already exists (created earlier this wizard run
     // or this is a re-run). Hydrate-only probe of /api/auth/status.
     let already = RwSignal::new(false);
@@ -113,9 +120,63 @@ pub fn AccountStep() -> impl IntoView {
             <p class="setup-step__body">
                 "Protect this LocalSky with a login. The account guards the UI and API; "
                 "integrations like Home Assistant authenticate with an API token you create "
-                "in Settings afterward. Skipping leaves the instance open, which is fine "
-                "behind your own reverse-proxy login or on a trusted, isolated network."
+                "in Settings afterward. Skipping is the right call for LAN-only use behind "
+                "your own router, or when a reverse proxy already handles the login."
             </p>
+            <p class="setup-step__body setup-step__nudge">
+                "Create the login if you will reach LocalSky from outside your home network, "
+                "for example a phone on cellular or a public URL. LocalSky logs a best-effort "
+                "warning when it spots a request that looks internet-facing while no login is set, "
+                "but your firewall or reverse proxy is the real boundary -- treat the login as the "
+                "lock, not the warning."
+            </p>
+
+            // Deciding question, asked once. Until it's answered the step gives
+            // no skippable "no login" outcome, so a user can't breeze past the
+            // access decision they were just told matters.
+            {move || (!already.get()).then(|| view! {
+                <Panel title="How will you reach LocalSky?".to_string()>
+                    <div class="setup-access-choice" role="radiogroup" aria-label="How will you reach LocalSky?">
+                        <label style="display:flex; gap:0.5rem; align-items:flex-start; min-height:44px">
+                            <input
+                                type="radio"
+                                name="access-context"
+                                prop:checked=move || access.get() == "external"
+                                on:input=move |_| access.set("external".into())
+                            />
+                            <span>
+                                <strong>"From outside my home network"</strong>
+                                <span class="setup-step__hint" style="display:block">
+                                    "A phone on cellular, a public URL, or through a tunnel. A login is strongly recommended."
+                                </span>
+                            </span>
+                        </label>
+                        <label style="display:flex; gap:0.5rem; align-items:flex-start; min-height:44px">
+                            <input
+                                type="radio"
+                                name="access-context"
+                                prop:checked=move || access.get() == "lan"
+                                on:input=move |_| access.set("lan".into())
+                            />
+                            <span>
+                                <strong>"Only on my home network"</strong>
+                                <span class="setup-step__hint" style="display:block">
+                                    "LAN only, behind your own router (or a reverse proxy that already handles login). No login needed here."
+                                </span>
+                            </span>
+                        </label>
+                    </div>
+                </Panel>
+            })}
+
+            // LAN-only answer: confirm the no-auth outcome explicitly, so
+            // skipping is a stated decision, not an unmarked default.
+            {move || (!already.get() && access.get() == "lan").then(|| view! {
+                <p class="setup-test-result is-ok" style="padding-left:0">
+                    "Got it: no login needed. Skip this step (use Next), or add one anyway below. "
+                    "You can always set a login later in Settings if that changes."
+                </p>
+            })}
 
             {move || if already.get() {
                 view! {
@@ -127,6 +188,10 @@ pub fn AccountStep() -> impl IntoView {
                         </p>
                     </Panel>
                 }.into_any()
+            } else if access.get().is_empty() {
+                // Wait for the access answer before offering the form, so the
+                // decision is made first (no unmarked skip).
+                ().into_any()
             } else {
                 view! {
                     <Panel title="Create the owner account".to_string()>
@@ -166,14 +231,13 @@ pub fn AccountStep() -> impl IntoView {
                             />
                         </FormField>
                         <div class="settings-form-actions" style="justify-content:flex-start">
-                            <button
-                                type="button"
-                                class="setup-footer__btn setup-footer__btn--primary"
-                                prop:disabled=move || busy.get()
-                                on:click=on_create
+                            <Button
+                                variant="primary"
+                                disabled=Signal::derive(move || busy.get())
+                                on_click=Callback::new(on_create)
                             >
                                 {move || if busy.get() { "Creating…" } else { "Create account" }}
-                            </button>
+                            </Button>
                         </div>
                     </Panel>
                 }.into_any()

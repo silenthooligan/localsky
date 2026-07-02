@@ -57,29 +57,35 @@ pub fn AdvisorExplanation(verdict: Signal<String>) -> impl IntoView {
         let _ = (verdict, set_state); // silence unused on SSR build
     }
 
-    view! {
-        <div class="advisor-tile">
-            <span class="advisor-label">"Advisor"</span>
-            <span class="advisor-body">
-                {move || match state.get() {
-                    AdvisorState::Loading => view! {
-                        <span class="advisor-state advisor-loading">"…"</span>
-                    }.into_any(),
-                    AdvisorState::Ready(text) => view! {
-                        <span class="advisor-text">{text}</span>
-                    }.into_any(),
-                    AdvisorState::Offline => view! {
-                        <span class="advisor-state advisor-offline">"offline"</span>
-                    }.into_any(),
-                    AdvisorState::Disabled => view! {
-                        <span class="advisor-state advisor-disabled">"disabled"</span>
-                    }.into_any(),
-                    AdvisorState::Empty => view! {
-                        <span class="advisor-state advisor-quiet">"running normally"</span>
-                    }.into_any(),
-                }}
-            </span>
-        </div>
+    // The advisor is now nested UNDER the deterministic explainer (the primary,
+    // always-correct "why"). It is supplementary colour, so when it has nothing
+    // to add (disabled or offline) it OMITS its tile entirely rather than
+    // rendering a faint "offline"/"disabled" badge: an advisor fault sitting
+    // beside a clear deterministic verdict reads as if the WHOLE decision is
+    // broken, which it is not. Only Loading / Ready / Empty render a tile.
+    move || match state.get() {
+        AdvisorState::Disabled | AdvisorState::Offline => ().into_any(),
+        other => view! {
+            <div class="advisor-tile">
+                <span class="advisor-label">"Advisor"</span>
+                <span class="advisor-body">
+                    {match other {
+                        AdvisorState::Loading => view! {
+                            <span class="advisor-state advisor-loading">"…"</span>
+                        }.into_any(),
+                        AdvisorState::Ready(text) => view! {
+                            <span class="advisor-text">{text}</span>
+                        }.into_any(),
+                        AdvisorState::Empty => view! {
+                            <span class="advisor-state advisor-quiet">"running normally"</span>
+                        }.into_any(),
+                        // Disabled/Offline already returned above; unreachable.
+                        _ => ().into_any(),
+                    }}
+                </span>
+            </div>
+        }
+        .into_any(),
     }
 }
 

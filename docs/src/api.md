@@ -37,7 +37,7 @@ Returns the running service version, the API contract version, and the mount pre
 ```json
 {
   "service": "localsky",
-  "service_version": "0.2.0-beta.1",
+  "service_version": "0.7.0-beta.1",
   "api_version": "1.6.0",
   "api_prefix": "/api/v1",
   "license": "Apache-2.0",
@@ -430,7 +430,7 @@ Liveness + readiness, always reachable. Authenticated (or auth-disabled) callers
 {
   "status": "ok",
   "config_present": true,
-  "version": "0.2.0-beta.1",
+  "version": "0.7.0-beta.1",
   "schema_version": 1,
   "uptime_s": 1234,
   "subsystems": { "config_store": "ok", "persistence": "ok" },

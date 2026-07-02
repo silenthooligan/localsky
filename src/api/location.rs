@@ -20,11 +20,12 @@ pub fn router(cfg_store: Arc<FileConfigStore>) -> Router {
     Router::new()
         .route("/", get(location))
         .route("/timezone", get(timezone))
+        .route("/elevation", get(elevation))
         .with_state(cfg_store)
 }
 
 #[derive(serde::Deserialize)]
-struct TzQuery {
+struct LatLonQuery {
     lat: f64,
     lon: f64,
 }
@@ -32,9 +33,61 @@ struct TzQuery {
 /// GET /api/v1/location/timezone?lat=..&lon=.. -> { timezone } via the
 /// offline tzf dataset. The wizard's Location step autofills with it.
 async fn timezone(
-    axum::extract::Query(q): axum::extract::Query<TzQuery>,
+    axum::extract::Query(q): axum::extract::Query<LatLonQuery>,
 ) -> Json<serde_json::Value> {
     Json(json!({ "timezone": crate::timeutil::tz_name_for(q.lat, q.lon) }))
+}
+
+/// GET /api/v1/location/elevation?lat=..&lon=.. -> { elevation_m } via the
+/// Open-Meteo elevation API. The wizard's Location step prefills the
+/// (manually overridable) elevation field with it. The value is in meters,
+/// matching the `deployment.location.elevation_m` config field.
+///
+/// On any upstream/parse failure this returns 502 with a trimmed category;
+/// the client ignores the error and leaves the field at manual entry.
+async fn elevation(
+    axum::extract::Query(q): axum::extract::Query<LatLonQuery>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let url = format!(
+        "https://api.open-meteo.com/v1/elevation?latitude={}&longitude={}",
+        q.lat, q.lon
+    );
+    let client = reqwest::Client::new();
+    let res = client.get(&url).send().await;
+    match res {
+        Ok(r) => match r.json::<serde_json::Value>().await {
+            // Open-Meteo returns {"elevation":[123.0]} (meters).
+            Ok(v) => match v
+                .get("elevation")
+                .and_then(|e| e.as_array())
+                .and_then(|a| a.first())
+                .and_then(|m| m.as_f64())
+            {
+                Some(meters) => Json(json!({ "elevation_m": meters })).into_response(),
+                None => (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": "elevation_parse_error" })),
+                )
+                    .into_response(),
+            },
+            Err(_) => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": "elevation_parse_error" })),
+            )
+                .into_response(),
+        },
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "error": "elevation_transport_error",
+                "detail": crate::net::reqwest_error_category(&e).to_string(),
+            })),
+        )
+            .into_response(),
+    }
 }
 
 async fn location(State(store): State<Arc<FileConfigStore>>) -> Json<serde_json::Value> {

@@ -15,8 +15,6 @@ pub mod snapshot;
 #[cfg(feature = "ssr")]
 pub mod mqtt_publish;
 #[cfg(feature = "ssr")]
-pub mod refresher;
-#[cfg(feature = "ssr")]
 pub mod rest;
 #[cfg(feature = "ssr")]
 pub mod store;
@@ -25,10 +23,14 @@ pub mod ws;
 
 #[cfg(feature = "ssr")]
 pub use mqtt_publish::{slugify, HaMqttPublisher, MqttPublishError};
+// The irrigation refresher now lives at the crate root (`crate::refresher`)
+// since it is native, not HA-specific (it supports HA OR native sources).
+// These re-exports are kept so existing `crate::ha::*` consumers are
+// unaffected by the move.
 #[cfg(feature = "ssr")]
-pub use refresher::{
-    resolve_snapshot_source, spawn_refresher, SnapshotSource, WateringPolicy, ZoneBudgetCfg,
-    ZoneRuntime, ZoneSoilCfg,
+pub use crate::refresher::{
+    resolve_snapshot_source, spawn_refresher, spawn_refresher_watchdog, SnapshotSource,
+    WateringPolicy, ZoneBudgetCfg, ZoneRuntime, ZoneSoilCfg,
 };
 #[cfg(feature = "ssr")]
 pub use store::IrrigationStore;

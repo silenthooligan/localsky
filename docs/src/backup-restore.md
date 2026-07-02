@@ -82,7 +82,7 @@ A cold `tar` of the whole directory captures everything, including the wizard dr
 
 ```bash
 curl -f -X POST \
-  -F bundle=@localsky-backup-0.2.0-beta.1-20260610-020000.tar.gz \
+  -F bundle=@localsky-backup-0.7.0-beta.1-20260610-020000.tar.gz \
   http://localhost:8090/api/v1/backup/restore
 docker restart localsky
 ```

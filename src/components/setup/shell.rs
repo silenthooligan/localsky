@@ -9,16 +9,20 @@
 use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
 
-use crate::components::ui::Panel;
+use crate::components::ui::{Button, Panel};
 
 /// (route id, human label, optional). Optional steps are skippable
 /// extras; the progress UI renders them as hollow dots.
 const STEPS: &[(&str, &str, bool)] = &[
     ("welcome", "Welcome", false),
     ("location", "Your location", false),
-    ("sources", "Weather", false),
-    ("controllers", "Controller", false),
-    ("zones", "Zones", false),
+    ("sources", "Weather & Sensors", false),
+    // Controller + Zones are OPTIONAL: a weather-station-only (or address +
+    // forecast) deployment is first-class, so a no-hardware user must not be
+    // told two sprinkler steps are mandatory. Matches the Welcome promise
+    // ("Any hardware, or none") and the engine's weather-only support.
+    ("controllers", "Controller", true),
+    ("zones", "Zones", true),
     ("sensors", "Sensors", true),
     ("llm", "AI advisor", true),
     ("notifications", "Notifications", true),
@@ -95,7 +99,7 @@ pub fn SetupShell() -> impl IntoView {
     };
 
     view! {
-        <main id="main-content" class="setup-shell">
+        <div class="setup-shell">
             <header class="setup-shell__header">
                 <h1 class="setup-shell__title">"Set up LocalSky"</h1>
                 <p class="setup-shell__subtitle">
@@ -116,22 +120,20 @@ pub fn SetupShell() -> impl IntoView {
                                 "written to disk until you finish on the Review step."
                             </p>
                             <div class="setup-reentry">
-                                <button
-                                    type="button"
-                                    class="setup-footer__btn setup-footer__btn--primary"
-                                    prop:disabled=move || gate_busy.get()
-                                    on:click=modify
+                                <Button
+                                    variant="primary"
+                                    disabled=Signal::derive(move || gate_busy.get())
+                                    on_click=Callback::new(modify)
                                 >
                                     {move || if gate_busy.get() { "Loading current setup…" } else { "Modify current setup" }}
-                                </button>
-                                <button
-                                    type="button"
-                                    class="setup-footer__btn setup-footer__btn--ghost"
-                                    on:click=fresh
-                                >"Start fresh"</button>
-                                <a class="setup-footer__btn setup-footer__btn--ghost" href="/settings">
+                                </Button>
+                                <Button
+                                    variant="ghost"
+                                    on_click=Callback::new(fresh)
+                                >"Start fresh"</Button>
+                                <Button variant="ghost" href="/settings">
                                     "Back to Settings"
-                                </a>
+                                </Button>
                             </div>
                             <p class="sensors-section__hint">
                                 "Modify pre-fills every step from the live config (sources, "
@@ -146,7 +148,7 @@ pub fn SetupShell() -> impl IntoView {
                     render_step(&current_step()).into_any()
                 }}
             </Panel>
-        </main>
+        </div>
     }
 }
 
@@ -263,13 +265,13 @@ pub fn SetupFooter(
     view! {
         <footer class="setup-footer">
             {move || prev.get().map(|href| view! {
-                <a class="setup-footer__btn setup-footer__btn--ghost" href=href>"Back"</a>
+                <Button variant="ghost" href=href>"Back"</Button>
             })}
-            <a class="setup-footer__btn setup-footer__btn--ghost" href="/">
+            <Button variant="ghost" href="/".to_string()>
                 "Save and finish later"
-            </a>
+            </Button>
             {move || next.get().map(|href| view! {
-                <a class="setup-footer__btn setup-footer__btn--primary" href=href>"Next"</a>
+                <Button variant="primary" href=href>"Next"</Button>
             })}
         </footer>
     }

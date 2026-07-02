@@ -27,7 +27,8 @@ pub use et0::{compute as compute_et0, Et0Diagnostics, Et0Inputs, Et0Result};
 pub use forecast_bias::{BiasModel, Observation as ForecastObservation};
 pub use skip_rules::{
     builtin_rule_catalog, decide_traced, et_heat_multiplier, evaluate as evaluate_skip,
-    evaluate_with as evaluate_skip_with, heat_index_f, Inputs as SkipInputs, PROTECTED_RULES,
+    evaluate_with as evaluate_skip_with, force_overrode_guard, heat_index_f, Inputs as SkipInputs,
+    PROTECTED_RULES,
 };
 pub use soil_catalog::{infiltration_mm_hr, lookup as soil_profile, raw_mm, taw_mm, SoilProfile};
 pub use soil_forecast::{project_zone as project_soil_forecast, ZoneSoilInputs};

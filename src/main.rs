@@ -24,6 +24,19 @@
 #![allow(clippy::unit_arg)]
 #![allow(clippy::manual_clamp)]
 
+/// P4-1: Prometheus exposition endpoint. Public (auth-exempt in middleware);
+/// renders the process-global metrics registry.
+#[cfg(feature = "ssr")]
+async fn metrics_handler() -> impl axum::response::IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
+        localsky::metrics::render(),
+    )
+}
+
 #[cfg(feature = "ssr")]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -97,9 +110,11 @@ async fn main() -> anyhow::Result<()> {
     };
     let history_conn = history_db.as_ref().map(|db| db.handle());
 
-    // Sample the live Tempest snapshot into sensor_history so the Weather
-    // home telemetry strip has real trend sparklines (and /api/health has
-    // freshness). Spawned in demo too, the demo feeder fills the store.
+    // Sample the live snapshot into sensor_history so the Weather home
+    // telemetry strip has real trend sparklines. Only records when the off-bus
+    // Tempest path (or the "Demo" feeder) owns the snapshot; bus sources are
+    // persisted by the bus recorder under their own id, so the sampler skips
+    // them to avoid double-recording. Spawned in demo too.
     if let Some(hc) = history_conn.clone() {
         localsky::persistence::spawn_weather_sampler(hc, tempest_store.clone());
     }
@@ -181,20 +196,28 @@ async fn main() -> anyhow::Result<()> {
     // from it. Empty defaults if the toml hasn't been written yet.
     let boot_cfg = cfg_store.load().await.ok();
 
-    // Open-Meteo forecast refresher. Coordinates come from the wizard
-    // config (config first, env fallback) and are re-read from the live
-    // config store each tick so a location change applies without a
-    // restart. The smart-morning scheduler reads its coordinates from
-    // boot_cfg separately below; only the forecast path changes here.
-    if !demo_mode {
-        spawn_forecast_refresher(
-            forecast_store.clone(),
-            boot_cfg
-                .as_ref()
-                .map(|c| (c.deployment.location.lat, c.deployment.location.lon)),
-            Some(cfg_store.clone()),
-        );
+    // Current-conditions arbitration priorities + per-field USER overrides:
+    // each source's config `priority` keyed by the writer label ("Tempest" for
+    // the UDP path, the source id otherwise), and the `field_source_overrides`
+    // pin map. Lets the user pick which LIVE source drives current conditions
+    // (the arbiter fails over on staleness) and pin a specific field to a
+    // specific source. Both are installed into the SHARED TempestStore via its
+    // `&self` arc-swap setters, so the SAME builders the config hot-reload path
+    // uses (runtime::source_priority_map / field_override_map) re-apply them on
+    // a PUT with no restart. An empty config installs empty maps -> the priority
+    // merge is byte-identical to no overrides.
+    if let Some(cfg) = boot_cfg.as_ref() {
+        tempest_store.set_priorities(localsky::runtime::source_priority_map(cfg));
+        tempest_store.set_max_ages(localsky::runtime::source_max_age_map(cfg));
+        tempest_store.set_field_overrides(localsky::runtime::field_override_map(cfg));
+        tempest_store.set_field_chains(localsky::runtime::field_chain_map(cfg));
     }
+
+    // Forecast is now source-agnostic: the Open-Meteo refresher + every other
+    // forecast source emit SourceEvent::Forecast onto the bus, and the
+    // forecast_bridge arbitrates them by priority into the ForecastStore. That
+    // wiring lives further down (after the bus is created), alongside the
+    // snapshot bridge. See "Forecast bus wiring" below.
 
     // Active zone list for the refresher: config zones when localsky.toml
     // exists (the wizard is the source of truth), LOCALSKY_ZONES env as the
@@ -233,44 +256,46 @@ async fn main() -> anyhow::Result<()> {
         None => std::collections::HashMap::new(),
     };
 
+    // P1-8c: resolve the deployment timezone once, before the schedulers spawn,
+    // so wall-clock firing + day-rollover dedupe key off the configured tz rather
+    // than the container TZ env.
+    if let Some(cfg) = boot_cfg.as_ref() {
+        localsky::timeutil::set_configured_tz(cfg);
+    }
+
+    // The engine-tunable subset of config (skip-rule thresholds, restrictions,
+    // seasonal dial, manual schedules, per-zone soil/budget, units), derived via
+    // the single `from_config` builder that the config hot-reload path also uses
+    // (so a reloaded policy is byte-identical to a boot policy for the same
+    // config). Wrapped in an Arc<ArcSwap<_>> HANDLE so a PUT /api/config can swap
+    // a new policy in and the refresher picks it up on its next tick, no restart.
     let watering_policy = match boot_cfg.as_ref() {
-        Some(cfg) => localsky::ha::WateringPolicy {
-            restrictions: cfg.engine.watering_restrictions.clone(),
-            address_parity: cfg.deployment.address_parity,
-            manual_schedules: cfg.manual_schedules.clone(),
-            location: (cfg.deployment.location.lat, cfg.deployment.location.lon),
-            // Per-zone soil config: each zone's assigned sensor + thresholds.
-            // Slugs underscore-normalized to match the refresher's zone list.
-            soil_zones: cfg
-                .zones
-                .iter()
-                .map(|(slug, z)| localsky::ha::ZoneSoilCfg {
-                    slug: slug.replace('-', "_"),
-                    name: z.display_name.clone(),
-                    soil_sensor_id: z.soil_sensor_id.clone(),
-                    saturation_pct: z.saturation_pct_soil,
-                    target_min_pct: z.target_min_pct_soil,
-                })
-                .collect(),
-            condition_rules: cfg.conditions.rules.clone(),
-            skip_rules: cfg.engine.skip_rules.clone(),
-            // Per-zone weekly-budget config for the standalone allocator
-            // (A5b). Slugs underscore-normalized to match the refresher's
-            // zone list, same as soil_zones above.
-            budget_zones: cfg
-                .zones
-                .iter()
-                .map(|(slug, z)| localsky::ha::ZoneBudgetCfg {
-                    slug: slug.replace('-', "_"),
-                    name: z.display_name.clone(),
-                    weekly_budget_in: z.weekly_budget_in,
-                    sessions_per_week: z.sessions_per_week,
-                })
-                .collect(),
-            ha_sprinkler_prefix: cfg.deployment.ha_sprinkler_prefix.clone(),
-        },
+        Some(cfg) => localsky::ha::WateringPolicy::from_config(cfg),
         None => localsky::ha::WateringPolicy::default(),
     };
+    let watering_policy_handle = Arc::new(arc_swap::ArcSwap::from_pointee(watering_policy.clone()));
+
+    // Shared manual-schedule handle. The manual dispatcher loads this live at the
+    // top of every tick and the config hot-reload path swaps it, so an added or
+    // edited schedule (including the FIRST one on a previously-empty config) takes
+    // effect on the next tick with no restart. Wrapped in Arc<ArcSwap<_>> exactly
+    // like the watering policy above.
+    let manual_schedules_handle: Arc<
+        arc_swap::ArcSwap<Vec<localsky::config::schema::ManualSchedule>>,
+    > = Arc::new(arc_swap::ArcSwap::from_pointee(
+        boot_cfg
+            .as_ref()
+            .map(|cfg| cfg.manual_schedules.clone())
+            .unwrap_or_default(),
+    ));
+
+    // Shared forecast-priority handle (forecast provider ranking + pin). Created
+    // here so the forecast bridge reads it live and the config hot-reload path
+    // can swap it; populated from the boot config below alongside the bridge.
+    let forecast_priority_handle: Arc<arc_swap::ArcSwap<std::collections::HashMap<String, i32>>> =
+        Arc::new(arc_swap::ArcSwap::from_pointee(
+            std::collections::HashMap::new(),
+        ));
 
     // Compile user-defined Rhai skip rules from the boot config. Augment-
     // only: applied as a post-pass on a "run" verdict, never clearing a
@@ -295,9 +320,31 @@ async fn main() -> anyhow::Result<()> {
         let runs_store = history_conn
             .as_ref()
             .map(|hc| localsky::persistence::runs::RunsStore::new(hc.clone()));
+        // P0-1b: the commanded-valve deadline ledger, shared by the dispatch path
+        // (arms on Run) and the reaper (enforces past-deadline shutoff).
+        let active_runs_store = history_conn
+            .as_ref()
+            .map(|hc| localsky::persistence::ActiveRunsStore::new(hc.clone()));
         let registry = localsky::controllers::registry::ControllerRegistry::new();
         if let (Some(cfg), Some(rs)) = (boot_cfg.as_ref(), runs_store.as_ref()) {
             registry.set(localsky::runtime::build_controllers(cfg, rs.clone()));
+            // P0-1: boot reconciliation. Close every zone on every controller and
+            // clear the stale deadline ledger before the schedulers or the API can
+            // dispatch, so a valve left open by a crash/redeploy mid-run (the MQTT
+            // path's shutoff is an in-process timer that dies with the process) is
+            // closed on the next start instead of staying open until a human
+            // notices. Best-effort, never fatal. (See reaper::boot_reconcile.)
+            let failed = localsky::controllers::reaper::boot_reconcile(
+                &registry,
+                active_runs_store.as_ref(),
+            )
+            .await;
+            if !failed.is_empty() {
+                tracing::warn!(
+                    controllers = ?failed,
+                    "boot reconcile: some controllers did not confirm stop_all (unreachable at boot)"
+                );
+            }
         } else if boot_cfg
             .as_ref()
             .map(|c| !c.controllers.is_empty())
@@ -317,7 +364,18 @@ async fn main() -> anyhow::Result<()> {
         // Wire the registry + runs store into POST /api/irrigation/action
         // so manual zone Run/Stop/StopAll dispatch through the same
         // adapters the schedulers use (native installs have no HA scripts).
-        localsky::api::irrigation::set_dispatch_handles(registry.clone(), runs_store.clone());
+        localsky::api::irrigation::set_dispatch_handles(
+            registry.clone(),
+            runs_store.clone(),
+            active_runs_store.clone(),
+        );
+        // P0-1b: the deadline reaper. Enforces the active-run ledger's shutoff
+        // deadlines independent of any controller's own (in-process) timer, so a
+        // valve cannot stay open past its deadline while the process is alive; boot
+        // reconcile + the watchdog restart cover the process-death case.
+        if let Some(ar) = active_runs_store.as_ref() {
+            localsky::controllers::reaper::spawn_run_reaper(ar.clone(), registry.clone());
+        }
         // Wire the config store + registry into GET /api/v1/sensors/inventory
         // so the unified Sensors view can resolve zone bindings, per-source
         // labels, and per-controller flow-meter capability + live GPM.
@@ -357,7 +415,9 @@ async fn main() -> anyhow::Result<()> {
             history_conn.clone(),
             push_dispatcher.clone(),
             zone_runtime,
-            watering_policy.clone(),
+            // Pass the SWAPPABLE handle (not a boot clone): the refresher loads
+            // it each tick so a hot-reloaded watering policy takes effect live.
+            watering_policy_handle.clone(),
             user_scripts,
             snapshot_source,
             registry.clone(),
@@ -365,11 +425,55 @@ async fn main() -> anyhow::Result<()> {
             control_store,
             boot_zones,
         );
+        // P0-8b: supervise the refresher. If its heartbeat goes stale (panic or
+        // hang in the one task that produces all live data + the today verdict),
+        // force-exit so restart:unless-stopped brings the process back and boot
+        // reconciliation runs, instead of the system silently freezing on a stale
+        // snapshot until a human notices.
+        localsky::ha::spawn_refresher_watchdog();
+
+        // Boot step 6: outbound HA MQTT discovery publisher. The HA-optional
+        // bridge the release advertises: with a broker configured, HA users
+        // get auto-created sensor.localsky_* / binary_sensor.localsky_*
+        // entities (discovery + live state on each engine tick) without
+        // LocalSky reading HA. Gated on three signals so a no-MQTT deploy is
+        // untouched: a [notifications.mqtt] block exists, the global
+        // features.enable_mqtt_publish toggle is on (default true), and the
+        // broker's own publish_enabled is on (default true). It subscribes to
+        // the same IrrigationStore snapshot signal the rest of boot uses and
+        // is fully self-supervising (reconnects on eventloop error; never
+        // panics boot).
+        if let Some(cfg) = boot_cfg.as_ref() {
+            if cfg.features.enable_mqtt_publish {
+                if let Some(mqtt_cfg) = cfg.notifications.mqtt.as_ref() {
+                    if mqtt_cfg.publish_enabled {
+                        localsky::ha::mqtt_publish::spawn(
+                            mqtt_cfg.clone(),
+                            cfg.deployment.display_name.clone(),
+                            irrigation_store.subscribe(),
+                        );
+                    } else {
+                        tracing::info!(
+                            "ha mqtt publisher: [notifications.mqtt] present but publish_enabled=false; not started"
+                        );
+                    }
+                }
+            } else {
+                tracing::info!(
+                    "ha mqtt publisher: features.enable_mqtt_publish=false; not started"
+                );
+            }
+        }
 
         // Manual schedule dispatcher + smart-morning dispatcher.
         //
-        // Manual scheduler fires operator-defined weekday/time slots. No-op
-        // when no schedules are configured.
+        // Manual scheduler fires operator-defined weekday/time slots. Spawned
+        // UNCONDITIONALLY (no !is_empty() guard) so a FIRST schedule added to a
+        // previously-empty config actuates on the next tick with no restart. The
+        // tick loads the live schedule set from the swappable handle each cycle and
+        // early-returns when it is empty, so an empty boot config costs one idle
+        // task. The config hot-reload path (apply_runtime_config) swaps the handle
+        // so an added/edited schedule is picked up on the next tick.
         //
         // Smart-morning is the LocalSky-native replacement for IU's nightly
         // sequence: computes today's sunrise, dispatches at sunrise-15 -
@@ -379,14 +483,22 @@ async fn main() -> anyhow::Result<()> {
         // zero). Honors LOCALSKY_SMART_DRY_RUN=1 for the safety-net
         // verification window before flipping IU's master switch off.
         if let (Some(cfg), Some(runs_store)) = (boot_cfg.as_ref(), runs_store) {
-            if !cfg.manual_schedules.is_empty() {
-                localsky::scheduler::manual::spawn(
-                    cfg.manual_schedules.clone(),
-                    watering_policy.clone(),
-                    registry.clone(),
-                    Some(runs_store.clone()),
-                );
-            }
+            localsky::scheduler::manual::spawn(
+                manual_schedules_handle.clone(),
+                // Pass the SWAPPABLE handle (not a boot clone): the dispatcher
+                // load_full()s it each tick so a hot-reloaded watering restriction /
+                // cap / skip reaches SCHEDULED valves on the next tick with no
+                // restart, mirroring the refresher's use of the same handle above. A
+                // boot-frozen value previously let a restriction meant to BLOCK
+                // watering bypass scheduled runs until a container restart.
+                watering_policy_handle.clone(),
+                registry.clone(),
+                Some(runs_store.clone()),
+                // P0-1b: thread the deadline ledger so operator recurring
+                // runs arm the reaper backstop (stuck-valve safety on
+                // MQTT/DIY controllers), mirroring the API path.
+                active_runs_store.clone(),
+            );
             // Optional run-history retention: prune daily when capped. The
             // default (0) keeps everything forever for long-range trends.
             let runs_retention = cfg.persistence.runs_retention_days;
@@ -415,6 +527,7 @@ async fn main() -> anyhow::Result<()> {
                 watering_policy.clone(),
                 registry,
                 Some(runs_store),
+                active_runs_store.clone(),
                 (cfg.deployment.location.lat, cfg.deployment.location.lon),
                 Some(std::sync::Arc::new(cfg.clone())),
                 Some(push_dispatcher.clone()),
@@ -571,15 +684,25 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let sensor_history = match rusqlite::Connection::open(&history_path) {
-        Ok(c) => Some(
-            localsky::persistence::SensorHistoryStore::new(Arc::new(tokio::sync::Mutex::new(c)))
+        Ok(c) => {
+            // Match the primary HistoryDb pragmas: this second handle to the same
+            // file was opening raw, so it took no busy timeout and dropped reads on
+            // contention. (Collapsing this onto history_db.handle() is a follow-up.)
+            c.busy_timeout(std::time::Duration::from_secs(5)).ok();
+            c.pragma_update(None, "journal_mode", "WAL").ok();
+            c.pragma_update(None, "synchronous", "NORMAL").ok();
+            Some(
+                localsky::persistence::SensorHistoryStore::new(Arc::new(tokio::sync::Mutex::new(
+                    c,
+                )))
                 .with_retention_days(
                     boot_cfg
                         .as_ref()
                         .map(|c| c.persistence.retention_days)
                         .unwrap_or_else(localsky::config::schema::default_retention_days),
                 ),
-        ),
+            )
+        }
         Err(e) => {
             tracing::warn!(
                 history = %history_path,
@@ -603,6 +726,11 @@ async fn main() -> anyhow::Result<()> {
                         entry.id.clone(),
                         c.clone(),
                         sensor_history.clone(),
+                        // Publish the gateway's outdoor weather onto the bus so
+                        // the snapshot bridge populates the dashboard + HA
+                        // entities (an EcowittGwPoll-only deployment otherwise
+                        // showed empty current conditions).
+                        Some(receiver_bus_tx.clone()),
                     );
                 }
             }
@@ -618,10 +746,18 @@ async fn main() -> anyhow::Result<()> {
     // wiring: source add/remove takes a restart (same contract as the
     // ecowitt_gw_poll spawns above).
     let source_last_seen = localsky::sources::SourceLastSeen::default();
+    // The reachability twin of source_last_seen: the bus recorder stamps it on
+    // every `Reachability { reachable: true }` event the adapters publish on a
+    // successful fetch. Threaded into BOTH HealthState.source_reachable and the
+    // runtime handles below so /api/health and /api/config/source_catalog compute
+    // the honest source-status taxonomy off the SAME reachability facts (a
+    // reachable-but-quiet rain source reads `watching`, never `offline`).
+    let source_reachable = localsky::sources::SourceReachability::default();
     localsky::sources::bus_recorder::spawn(
         receiver_bus_tx.clone(),
         sensor_history.clone(),
         source_last_seen.clone(),
+        source_reachable.clone(),
     );
     // Blitzortung community lightning (Blitzortung.org, CC BY-SA 4.0).
     // Spawned directly like the ecowitt_gw_poll pollers because it
@@ -652,9 +788,85 @@ async fn main() -> anyhow::Result<()> {
     // dropping it closes the channel and every source's select loop
     // would spin on the closed receiver.
     let (_source_shutdown_tx, source_shutdown_rx) = tokio::sync::watch::channel(false);
+    // Per-source forecast priority, fed to the forecast_bridge so a configured
+    // forecast source (NWS/OpenWeather/Pirate/Met.no) outranks the Open-Meteo
+    // default. Built from each forecast-capable source's own priority(), with
+    // the user's forecast_provider pin (if any) bumped to the winning priority.
+    // See runtime::forecast_priority_map. The boot map is published into
+    // `forecast_priority_handle` (created above) inside the block below; the
+    // bridge reads that swappable handle so a hot-reload re-ranks it live.
+    // Subscribe the forecast bridge BEFORE any forecast source spawns below, so
+    // the first emit isn't dropped (broadcast delivers only to live receivers,
+    // but buffers from the moment of subscribe()).
+    let forecast_bridge_rx = receiver_bus_tx.subscribe();
     if !demo_mode {
         if let Some(cfg) = boot_cfg.as_ref() {
             let polling = localsky::runtime::build_sources(cfg);
+
+            // Map every bus-publishing source to its live_current capability so
+            // the snapshot bridge only lets a real live station claim
+            // station-liveness (forecast sources populate display only). Built
+            // from each source's own capabilities() via a dyn coercion.
+            let mut source_live_current: std::collections::HashMap<String, bool> =
+                std::collections::HashMap::new();
+            for s in &polling {
+                source_live_current.insert(s.id().to_string(), s.capabilities().live_current);
+            }
+            for s in &ecowitt_sources {
+                let d: Arc<dyn localsky::ports::weather_source::WeatherSource> = s.clone();
+                source_live_current.insert(d.id().to_string(), d.capabilities().live_current);
+            }
+            for s in &webhook_sources {
+                let d: Arc<dyn localsky::ports::weather_source::WeatherSource> = s.clone();
+                source_live_current.insert(d.id().to_string(), d.capabilities().live_current);
+            }
+            // EcowittGwPoll publishes weather on the bus (see its spawn above)
+            // but isn't a WeatherSource instance; it's a live local poll, so
+            // mark its ids live_current=true.
+            for entry in cfg.sources.iter().filter(|s| s.enabled) {
+                if matches!(
+                    entry.source,
+                    localsky::config::schema::SourceKind::EcowittGwPoll(_)
+                ) {
+                    source_live_current.insert(entry.id.clone(), true);
+                }
+            }
+
+            // Forecast priority is USER-controlled: each enabled forecast
+            // source's config `priority` decides which one drives the forecast
+            // (higher wins; ties keep the incumbent), and the forecast_provider
+            // pin (if set) is bumped to the winning priority. An implicit
+            // Open-Meteo (no [[sources]] entry) isn't here, so it defaults to 0
+            // in the bridge -> lowest, the failover. ADDITIVE: an unset pin
+            // leaves this byte-identical to the per-source ranking.
+            let forecast_priority = localsky::runtime::forecast_priority_map(cfg);
+            if let Some(pinned) = cfg.forecast_provider.as_deref() {
+                if forecast_priority.contains_key(pinned) {
+                    tracing::info!(
+                        provider = %pinned,
+                        priority = forecast_priority.get(pinned).copied().unwrap_or_default(),
+                        "forecast_provider pin: forcing chosen forecast source to win"
+                    );
+                } else {
+                    tracing::warn!(
+                        provider = %pinned,
+                        "forecast_provider names no enabled forecast source; ignoring pin"
+                    );
+                }
+            }
+            // Publish the boot priority into the SWAPPABLE handle the bridge
+            // reads, so a hot-reloaded forecast-provider change re-ranks it live.
+            forecast_priority_handle.store(Arc::new(forecast_priority));
+
+            // Bridge non-Tempest bus observations into the live snapshot so they
+            // populate the dashboard, /api/snapshot, and the HA weather entities
+            // (previously only Tempest UDP/demo/Blitzortung wrote the snapshot).
+            localsky::sources::snapshot_bridge::spawn(
+                receiver_bus_tx.subscribe(),
+                tempest_store.clone(),
+                source_live_current,
+            );
+
             if !polling.is_empty() {
                 tracing::info!(count = polling.len(), "spawning configured weather sources");
             }
@@ -671,6 +883,48 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // ---- Forecast bus wiring ----
+    // Every forecast-capable source (Open-Meteo + NWS/OpenWeather/Pirate/Met.no)
+    // emits SourceEvent::Forecast; the forecast_bridge arbitrates them by
+    // priority into the ForecastStore (replacing the old single hardcoded
+    // Open-Meteo writer), so the user's chosen forecast source drives forecast.
+    if !demo_mode {
+        localsky::sources::forecast_bridge::spawn(
+            forecast_bridge_rx,
+            forecast_store.clone(),
+            // The SWAPPABLE handle (not the boot map): the bridge re-reads it on
+            // every forecast emit so a hot-reloaded provider/ranking change
+            // re-arbitrates without a restart.
+            forecast_priority_handle.clone(),
+        );
+
+        // Open-Meteo stays the no-auth default + lowest-priority failover.
+        // Opt out with an explicit disabled OpenMeteo source entry; otherwise it
+        // runs even pre-config (re-reading coords from the live config store).
+        let om = boot_cfg.as_ref().and_then(|c| {
+            c.sources
+                .iter()
+                .find(|s| matches!(s.source, localsky::config::schema::SourceKind::OpenMeteo(_)))
+        });
+        if om.map(|s| s.enabled).unwrap_or(true) {
+            let om_id = om
+                .map(|s| s.id.clone())
+                .unwrap_or_else(|| "open_meteo".to_string());
+            spawn_forecast_refresher(
+                receiver_bus_tx.clone(),
+                om_id,
+                boot_cfg
+                    .as_ref()
+                    .map(|c| (c.deployment.location.lat, c.deployment.location.lon)),
+                Some(cfg_store.clone()),
+            );
+        } else {
+            tracing::info!(
+                "Open-Meteo forecast disabled by config; relying on other forecast sources"
+            );
+        }
+    }
+
     let mk_health = || {
         axum::Router::new()
             .route("/", axum::routing::get(api::health::health))
@@ -681,6 +935,7 @@ async fn main() -> anyhow::Result<()> {
                 forecast_store: Some(forecast_store.clone()),
                 irrigation_store: Some(irrigation_store.clone()),
                 source_last_seen: Some(source_last_seen.clone()),
+                source_reachable: Some(source_reachable.clone()),
             })
     };
     let mk_ingest = || {
@@ -690,15 +945,49 @@ async fn main() -> anyhow::Result<()> {
             sensor_history: sensor_history.clone(),
         })
     };
-    let mk_config = || api::config::router(cfg_store.clone());
+    // Live runtime handles for config hot-reload: the SHARED tempest store +
+    // the swappable forecast-priority and watering-policy handles the
+    // background tasks read. Passed to the config + wizard APIs so a PUT
+    // /api/config / wizard apply / rollback re-applies the engine-tunable
+    // subset to the RUNNING system with no restart.
+    let runtime_handles = localsky::runtime::RuntimeHandles {
+        tempest_store: tempest_store.clone(),
+        forecast_priority: forecast_priority_handle.clone(),
+        watering_policy: watering_policy_handle.clone(),
+        manual_schedules: manual_schedules_handle.clone(),
+        source_reachable: source_reachable.clone(),
+        // Thread the SAME observation last-seen handle the bus recorder records
+        // into and /api/health reads, so /api/config/source_catalog feeds
+        // compute_source_status the same observation-liveness proof health does
+        // (a recently-observing source reads its calm status, not offline).
+        source_last_seen: Some(source_last_seen.clone()),
+    };
+    let mk_config = {
+        let cfg_store = cfg_store.clone();
+        let runtime_handles = runtime_handles.clone();
+        move || {
+            api::config::router(api::config::ConfigApiState {
+                store: cfg_store.clone(),
+                runtime: Some(runtime_handles.clone()),
+            })
+        }
+    };
     let mk_location = || api::location::router(cfg_store.clone());
-    let mk_wizard = || {
-        api::wizard::router(api::wizard::WizardApiState {
-            draft_store: draft_store.clone(),
-            config_store: cfg_store.clone(),
-            auth_rt: auth_rt.clone(),
-            tempest_store: Some(tempest_store.clone()),
-        })
+    let mk_wizard = {
+        let runtime_handles = runtime_handles.clone();
+        let draft_store = draft_store.clone();
+        let cfg_store = cfg_store.clone();
+        let auth_rt = auth_rt.clone();
+        let tempest_store = tempest_store.clone();
+        move || {
+            api::wizard::router(api::wizard::WizardApiState {
+                draft_store: draft_store.clone(),
+                config_store: cfg_store.clone(),
+                auth_rt: auth_rt.clone(),
+                tempest_store: Some(tempest_store.clone()),
+                runtime: Some(runtime_handles.clone()),
+            })
+        }
     };
     let mk_photos = {
         let photos_dir = photos_dir.clone();
@@ -706,6 +995,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let app = Router::new()
+        .route("/metrics", axum::routing::get(metrics_handler))
         .leptos_routes_with_context(
             &leptos_options,
             routes,
@@ -864,7 +1154,16 @@ async fn main() -> anyhow::Result<()> {
 
     // Mount the auth API + layer the enforcement middleware over the
     // complete router so it sees pages, APIs, and the static fallback.
-    // No history DB = no identity store; auth stays structurally off.
+    //
+    // No history DB = no identity store, so credential-based login is
+    // unavailable. But the STRUCTURAL protections (Origin check + the
+    // privileged config/backup/push/photo/actuation gate) must still layer
+    // and FAIL CLOSED: previously this branch layered nothing, so with no DB
+    // every state-changing route became reachable cross-origin and
+    // unauthenticated. We now layer a store-independent gate that admits only
+    // IP-vouched callers on privileged routes and refuses everyone else
+    // (LS-REC-05). It reads trusted_networks/proxies/origins from the config
+    // store on the same cadence as the full refresher.
     let auth_rt_for_mdns = auth_rt.clone();
     let app = if let Some(rt) = auth_rt {
         app.nest("/api/auth", mk_auth(rt.clone()))
@@ -874,8 +1173,16 @@ async fn main() -> anyhow::Result<()> {
                 localsky::auth::middleware::enforce,
             ))
     } else {
-        tracing::warn!("no history DB; built-in auth unavailable (mode stays disabled)");
-        app
+        tracing::warn!(
+            "no history DB; built-in login unavailable (mode stays disabled), but the Origin \
+             check + privileged-route gate still layer and FAIL CLOSED for anonymous callers"
+        );
+        let gate = std::sync::Arc::new(localsky::auth::NoStoreGate::new());
+        gate.spawn_refresh(cfg_store.clone());
+        app.layer(axum::middleware::from_fn_with_state(
+            gate,
+            localsky::auth::middleware::enforce_no_store,
+        ))
     };
 
     // Public-demo read-only gate. Outermost layer so it short-circuits
@@ -893,6 +1200,17 @@ async fn main() -> anyhow::Result<()> {
     } else {
         app
     };
+
+    // P3-1: gzip/brotli response compression. The ~24.5 MB hydrate wasm bundle
+    // ships ~2.8 MB (brotli) over the wire, the single highest cold-load win on
+    // every RPi / HA-OS-ingress deploy (one-time per version per client; the
+    // browser + service worker cache the compressed asset). Outermost layer so it
+    // covers the static /pkg fallback, the APIs, and the SSR pages alike.
+    // CompressionLayer::new() uses DefaultPredicate, which already skips
+    // text/event-stream (the live /stream SSE), images, gRPC, and tiny bodies,
+    // and respects Accept-Encoding (brotli preferred) -- so the /pkg crossorigin
+    // headers and hashed-asset cache discipline are untouched.
+    let app = app.layer(tower_http::compression::CompressionLayer::new());
 
     // Opt-in update check ([updates].check_enabled).
     if boot_cfg

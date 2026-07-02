@@ -90,6 +90,21 @@ fn interpolate_env(src: &str) -> Result<String, LoadError> {
     Ok(out)
 }
 
+/// Auto-mark the sole controller as default when none is set. The wizard
+/// Controllers step (and a hand-written single-controller config) can leave
+/// a single controller with `default = false`; the save gate below then
+/// hard-rejects it ("at least one controller must have default = true"),
+/// which is what made a happy-path single-controller wizard 422 at "Save and
+/// finish". When there is EXACTLY ONE controller and none is default, the
+/// choice is unambiguous, so mark it. With two or more controllers we do NOT
+/// guess: `validate::validate` surfaces a field-level `controller_default_missing`
+/// so the operator picks. Idempotent; a no-op when a default already exists.
+pub fn auto_default_controller(cfg: &mut Config) {
+    if cfg.controllers.len() == 1 && !cfg.controllers.iter().any(|c| c.default) {
+        cfg.controllers[0].default = true;
+    }
+}
+
 /// Basic post-parse invariants. Schema-level validation (types, enum
 /// variants, required fields) is already handled by serde; this catches
 /// structural things serde can't.
@@ -100,6 +115,21 @@ pub fn validate(cfg: &Config) -> Result<(), LoadError> {
             known: CURRENT_SCHEMA_VERSION,
         });
     }
+
+    // CANONICAL RULE SET (bug #9 parity). Every hard rule below is ALSO
+    // encoded in validate::validate as a field-level error, so the wizard
+    // Review step and this save/load gate can never diverge in the dangerous
+    // direction (Review saying "valid" while save 422s). validate::validate is
+    // a strict SUPERSET of this gate: anything rejected here is rejected there
+    // too. We keep this function's narrower, proven hard-fail set as the
+    // load/save gate (rather than delegating wholesale) so the LOAD path,
+    // which falls back to env_compat on any error and would otherwise wipe a
+    // config to defaults, does not start rejecting previously-loadable files
+    // (e.g. an env_compat 0,0 location, a blitzortung radius edge case). The
+    // single-controller zero-default case is auto-fixed before save by
+    // finalize_for_apply -> auto_default_controller, so it never reaches here
+    // from the wizard; a hand-written single-controller file is still caught
+    // below for the same runtime-resolution reason it always was.
 
     // Each source needs a unique id.
     let mut seen = std::collections::HashSet::new();
@@ -137,9 +167,16 @@ pub fn validate(cfg: &Config) -> Result<(), LoadError> {
         )));
     }
 
-    // Each zone's controller_id must reference a configured controller.
+    // Each zone's controller_id, WHEN SET, must reference a configured
+    // controller. An EMPTY controller_id is allowed: a weather-station-only /
+    // no-irrigation-hardware zone is a first-class setup (and validate::validate
+    // treats it the same, so the two gates agree). Previously an empty
+    // controller_id was rejected here because no controller has id "", which
+    // would have made Review pass a config the save then 422'd.
     for (slug, zone) in &cfg.zones {
-        if !cfg.controllers.iter().any(|c| c.id == zone.controller_id) {
+        if !zone.controller_id.is_empty()
+            && !cfg.controllers.iter().any(|c| c.id == zone.controller_id)
+        {
             return Err(LoadError::Validation(format!(
                 "zone {slug} references unknown controller_id {}",
                 zone.controller_id

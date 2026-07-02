@@ -165,6 +165,22 @@ pub struct StrikeEvent {
     pub lat: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lon: Option<f64>,
+    /// Stable per-strike identity for dedup: the source network's raw
+    /// nanosecond timestamp (Blitzortung). The community feed re-solves
+    /// and RE-PUBLISHES a strike under the same nanosecond time as late
+    /// station reports arrive, often at a slightly moved position; keying
+    /// on the full nanosecond value lets apply_strikes collapse those
+    /// refinements to a single strike (last-write-wins position) instead
+    /// of double-counting and double-plotting them. time_epoch (seconds)
+    /// is far too coarse a key: hundreds of distinct strikes routinely
+    /// share one second. 0 means no identity (Tempest distance rings,
+    /// and payloads recorded before this field existed).
+    #[serde(default, skip_serializing_if = "id_is_absent")]
+    pub id: i64,
+}
+
+fn id_is_absent(id: &i64) -> bool {
+    *id == 0
 }
 
 impl Default for StrikeEvent {
@@ -176,6 +192,7 @@ impl Default for StrikeEvent {
             source: default_strike_source(),
             lat: None,
             lon: None,
+            id: 0,
         }
     }
 }

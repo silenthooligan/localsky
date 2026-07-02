@@ -19,17 +19,84 @@ use serde::{Deserialize, Serialize};
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
+fn default_schema_version() -> u32 {
+    CURRENT_SCHEMA_VERSION
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Config {
-    /// Bumped on every breaking schema change. Migrations live in
-    /// src/config/migrate.rs and run once at boot if `schema_version`
-    /// is below CURRENT_SCHEMA_VERSION.
+    /// Bumped on every breaking schema change; defaults to
+    /// CURRENT_SCHEMA_VERSION when a hand-edited TOML omits it (so a
+    /// missing key does not fail the whole parse and silently drop into
+    /// env_compat synthesis). v1 is the only version today.
+    #[serde(default = "default_schema_version")]
     pub schema_version: u32,
+    #[serde(default)]
     pub deployment: Deployment,
     #[serde(default)]
     pub features: Features,
     #[serde(default)]
     pub sources: Vec<SourceEntry>,
+    /// Per-field weather-source overrides: a `WeatherField` snake_case name
+    /// (see `field_source_overrides::field_name`, e.g. `wind_mph`,
+    /// `rain_today_in`, `pressure_in_hg`) -> the `id` of the configured source
+    /// that should OWN that field's live merge. The user picks, per reading,
+    /// which station drives it ("wind from my Tempest, rain from a cloud
+    /// service") regardless of the priority ranking. ADDITIVE: an empty map
+    /// (the default) leaves the per-field priority merge exactly as it was, so
+    /// a deployment that never sets an override behaves byte-identically.
+    ///
+    /// Safety fallback: an override only wins while its chosen source has a
+    /// RECENT value for the field. If that source goes stale/offline the merge
+    /// falls back to the normal priority arbitration, so a preferred-but-down
+    /// source never blanks a reading. The override key is the source `id` as it
+    /// appears in `[[sources]]`; a TempestUdp source is keyed by its own id and
+    /// resolved to its writer label ("Tempest") at install time.
+    #[serde(default)]
+    pub field_source_overrides: BTreeMap<String, String>,
+    /// Per-field weather-source PRIORITY CHAINS: a `WeatherField` snake_case name
+    /// (the same keys as `field_source_overrides`, e.g. `wind_mph`,
+    /// `rain_today_in`) -> the ORDERED list of source `id`s that should own that
+    /// field's live merge, primary first. The generalization of
+    /// `field_source_overrides` from a single pin to a backup chain: the FIRST
+    /// source in the list that is currently FRESH owns the field, and if it goes
+    /// quiet the next-fresh entry takes over (ordered failover), so an operator
+    /// can express "rain from MRMS, but fall back to NWS, then Open-Meteo" instead
+    /// of a single hard pin.
+    ///
+    /// ADDITIVE: an empty map (the default) leaves the per-field priority merge
+    /// exactly as it was, so a deployment that never sets a chain behaves
+    /// byte-identically. A ONE-element chain behaves byte-for-byte like the
+    /// equivalent single `field_source_overrides` pin. When a field has NO chain
+    /// here but DOES have a legacy `field_source_overrides` pin, the pin is used
+    /// as a one-element chain (both mechanisms keep working).
+    ///
+    /// Safety fallback (never blank): a chain only wins while SOME entry has a
+    /// RECENT value for the field. When the ENTIRE chain is stale/absent the merge
+    /// falls back to the normal priority arbitration, so a preferred-but-down chain
+    /// never blanks a reading (a non-chain source can still win via priority). The
+    /// list values are source `id`s as they appear in `[[sources]]`; a TempestUdp
+    /// source is keyed by its own id and resolved to its writer label ("Tempest")
+    /// at install time. Soil is out of scope here (governed per-zone in the zone
+    /// editor via `soil_sensor_id`, a different axis).
+    #[serde(default)]
+    pub field_source_chains: BTreeMap<String, Vec<String>>,
+    /// The forecast/cloud source the user wants to drive the forecast pipeline
+    /// (daily/hourly arrays, ET0, rain-tomorrow). The value is a source `id` as
+    /// it appears in `[[sources]]` for a forecast-capable kind (open_meteo, nws,
+    /// met_norway, openweather, pirate_weather, weatherkit). The forecast is
+    /// arbitrated whole-snapshot by per-source priority in `forecast_bridge`;
+    /// naming a provider here pins it to the WINNING priority so it owns the
+    /// forecast regardless of the configured priority ranking.
+    ///
+    /// ADDITIVE: `None` (the default) leaves the forecast priority arbitration
+    /// exactly as it was (each forecast source's own `priority`, Open-Meteo the
+    /// lowest-priority failover), so a deployment that never sets this behaves
+    /// byte-identically. If the named id is absent or its source is disabled the
+    /// preference is silently ignored and the unchanged priority order applies,
+    /// so a pin never blanks the forecast.
+    #[serde(default)]
+    pub forecast_provider: Option<String>,
     #[serde(default)]
     pub controllers: Vec<ControllerEntry>,
     #[serde(default)]
@@ -79,6 +146,9 @@ impl Default for Config {
             deployment: Deployment::default(),
             features: Features::default(),
             sources: Vec::new(),
+            field_source_overrides: BTreeMap::new(),
+            field_source_chains: BTreeMap::new(),
+            forecast_provider: None,
             controllers: Vec::new(),
             zones: BTreeMap::new(),
             llm: None,
@@ -450,13 +520,11 @@ pub struct Location {
     pub elevation_m: Option<f64>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, Default, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Units {
-    #[default]
-    Imperial,
-    Metric,
-}
+// `Units` is defined in the both-features `ha::snapshot` module (so the hydrate
+// client can deserialize it off the irrigation snapshot) and re-exported here so
+// `deployment.units`, the wizard, and the settings UI keep their existing
+// `config::schema::Units` path.
+pub use crate::ha::snapshot::Units;
 
 // ----- Feature toggles -----
 
@@ -544,6 +612,23 @@ pub enum SourceKind {
     OpenWeather(OpenWeatherConfig),
     PirateWeather(PirateWeatherConfig),
     MetNorway(MetNorwayConfig),
+    /// Synoptic Data / MesoWest real-station observation network
+    /// (api.synopticdata.com). A free API token pulls the LATEST observation
+    /// from the nearest reporting station (wind, pressure, temp/humidity): a
+    /// real instrument report, like NWS, but from Synoptic's much denser mesonet
+    /// coverage. Emits only CURRENT scalars into the merge (not a forecast
+    /// snapshot), so it is excluded from `is_forecast()`.
+    #[serde(rename = "synoptic")]
+    Synoptic(SynopticConfig),
+    /// NOAA MRMS (Multi-Radar Multi-Sensor): the US national gauge-corrected
+    /// radar QPE grid. Keyless, US-only, observation-grade radar rain (it sees
+    /// the rain on your block, not just a distant airport). Refreshed about
+    /// every 2 minutes. Emits only the CURRENT rain scalars (rate + today total)
+    /// into the merge; it is NOT a forecast snapshot provider, so it is excluded
+    /// from `is_forecast()`. Auto-seeded in the US exactly like NWS (keyless
+    /// regional authority).
+    #[serde(rename = "noaa_mrms")]
+    NoaaMrms(NoaaMrmsConfig),
     AmbientWeather(AmbientWeatherConfig),
     Netatmo(NetatmoConfig),
     Yolink(YolinkConfig),
@@ -558,10 +643,63 @@ pub enum SourceKind {
     /// (Arduino, Pi script, custom commercial gateway) feeds LocalSky
     /// without needing MQTT or HA.
     HttpWebhook(HttpWebhookConfig),
+    /// Generic OUTBOUND REST poller: fetch any JSON HTTP API on an interval and
+    /// map JSON paths -> WeatherFields / per-zone soil. The counterpart to the
+    /// HTTP webhook receiver, for APIs LocalSky must pull. One adapter covers
+    /// WeatherUnderground PWS, Tomorrow.io, Aeris/Xweather, AcuRite cloud, Davis
+    /// WeatherLink cloud, RainMachine-as-source, and any other JSON weather API.
+    RestPoll(RestPollConfig),
+    /// Prometheus instant-query source: pull weather/soil readings a self-hoster
+    /// already scrapes into Prometheus (a station exporter, an ESPHome/MQTT
+    /// exporter, node_exporter with a sensor textfile, etc.) via PromQL. Each
+    /// query maps to a WeatherField or a per-zone soil channel.
+    Prometheus(PrometheusConfig),
+    /// InfluxDB source: pull weather/soil readings a self-hoster already stores
+    /// in InfluxDB via InfluxQL (`GET /query`, JSON results). Works against v1
+    /// (db + optional basic-auth) and v2 (org + token, v1-compat /query). Each
+    /// query maps to a WeatherField or a per-zone soil channel.
+    #[serde(rename = "influxdb")]
+    InfluxDb(InfluxDbConfig),
+    /// Apple WeatherKit REST forecast + current source. Needs an Apple Developer
+    /// WeatherKit key (team id, key id, service id, and the .p8 private key); the
+    /// adapter mints the ES256 JWT itself. Uses the app's configured location.
+    #[serde(rename = "weatherkit")]
+    WeatherKit(WeatherKitConfig),
     /// Blitzortung.org community lightning network (display-only map/
     /// dashboard layer). Opt-in, default OFF: see BlitzortungConfig.
     Blitzortung(BlitzortungConfig),
     DemoReplay(DemoReplayConfig),
+}
+
+impl SourceKind {
+    /// True for the forecast-model cloud kinds that emit a whole
+    /// `SourceEvent::Forecast` snapshot (daily/hourly arrays) into the
+    /// forecast pipeline: Open-Meteo, NWS, MET Norway, OpenWeather, Pirate
+    /// Weather, Apple WeatherKit. These are arbitrated whole-snapshot by the
+    /// `forecast_bridge`, and are the candidates the "Forecast source" picker
+    /// and the `forecast_provider` pin select among. The single source of truth
+    /// for "which kinds drive the forecast" so main.rs and the config API agree.
+    pub fn is_forecast(&self) -> bool {
+        use SourceKind::*;
+        matches!(
+            self,
+            OpenMeteo(_)
+                | Nws(_)
+                | OpenWeather(_)
+                | PirateWeather(_)
+                | MetNorway(_)
+                | WeatherKit(_)
+        )
+    }
+
+    /// True for a source that can supply radar map tiles. Today that is an
+    /// Open-Meteo source with `include_radar` enabled: it powers the radar
+    /// map's precipitation nowcast overlay (`/api/v1/radar/precip`). The radar
+    /// settings page surfaces a "no radar source" banner when no enabled source
+    /// satisfies this.
+    pub fn provides_radar_tiles(&self) -> bool {
+        matches!(self, SourceKind::OpenMeteo(c) if c.include_radar)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -592,7 +730,15 @@ pub struct OpenMeteoConfig {
     pub forecast_hours: u32,
     #[serde(default = "default_open_meteo_past_days")]
     pub past_days: u32,
-    #[serde(default)]
+    /// Whether this Open-Meteo source advertises itself as a radar-capable
+    /// source (`provides_radar_tiles`). On by default so a fresh install's
+    /// default Open-Meteo source powers the Live Radar map's precipitation
+    /// nowcast overlay with no manual step. It gates only the settings
+    /// "no radar source" banner and the precip overlay's on-demand fetch;
+    /// it adds no per-refresh server load (the `/api/v1/radar/precip` call
+    /// happens client-side only when the user opens that layer). Configs
+    /// that omit the field inherit true so radar works out of the box.
+    #[serde(default = "default_open_meteo_include_radar")]
     pub include_radar: bool,
     /// Open-Meteo weather model id (`&models=` parameter), from the
     /// forecast::model_catalog. The default "best_match" keeps the
@@ -610,6 +756,9 @@ fn default_open_meteo_forecast_hours() -> u32 {
 }
 fn default_open_meteo_past_days() -> u32 {
     1
+}
+fn default_open_meteo_include_radar() -> bool {
+    true
 }
 fn default_open_meteo_model() -> String {
     crate::forecast::model_catalog::DEFAULT_MODEL.to_string()
@@ -691,6 +840,77 @@ pub struct MetNorwayConfig {
     pub user_agent: String,
 }
 
+/// Synoptic Data (MesoWest) real-station observation source config. A free
+/// public API token from synopticdata.com pulls the latest observation from the
+/// nearest reporting station via `/v2/stations/nearesttime`. Mirrors the keyed
+/// pattern of `OpenWeatherConfig` (one required credential) plus an optional
+/// station pin + search radius; a config that omits either optional inherits its
+/// default (nearest station within the default radius), so older on-disk configs
+/// round-trip unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SynopticConfig {
+    /// Synoptic public API token from your synopticdata.com account. Treat like
+    /// a password (Synoptic bills against it). The adapter passes it as the
+    /// `token` query parameter.
+    pub token: String,
+    /// Optional station id to pin (STID, e.g. "KSLC"). When set the adapter
+    /// requests that exact station instead of the nearest to the deployment
+    /// location. Blank/None = nearest station.
+    #[serde(default)]
+    pub station_id: Option<String>,
+    /// Nearest-station search radius in miles used with the deployment lat/lon
+    /// when `station_id` is not pinned. Defaults to 25 miles; Synoptic's
+    /// `radius` param takes the value in miles.
+    #[serde(default = "default_synoptic_radius_mi")]
+    pub radius_mi: f64,
+}
+
+fn default_synoptic_radius_mi() -> f64 {
+    25.0
+}
+
+/// NOAA MRMS radar QPE source config. Keyless (no API key, no account): the
+/// MRMS grids are public NOAA data. US-only coverage. Reads TWO product grids
+/// each cycle: the gauge-corrected hourly QPE accumulation (`product`, the
+/// accurate but ~1 to 1.5 hr lagged rainfall total) and an instantaneous radar
+/// rain RATE (`rate_product`, valid ~now, refreshed every couple minutes). A
+/// config that omits either field inherits its default, so older on-disk
+/// configs and the keyless region auto-seed both round-trip unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct NoaaMrmsConfig {
+    /// MRMS ACCUMULATION product grid id. Defaults to the gauge-corrected
+    /// pass-2 1 hour QPE grid, the observation-grade gauge-corrected rainfall
+    /// total. This is the accurate (but inherently ~1 to 1.5 hr lagged) read of
+    /// how much rain actually fell. Kept a plain string so a future window (a
+    /// different accumulation product) is a config edit, not a schema change.
+    #[serde(default = "default_noaa_mrms_product")]
+    pub product: String,
+    /// MRMS instantaneous-RATE product grid id. Defaults to `PrecipRate`, the
+    /// radar rain rate in mm/hr, updated about every 2 minutes and valid ~now.
+    /// Read alongside `product` each cycle so MRMS provides BOTH a fresh
+    /// current rain rate and the accurate (lagged) accumulation. A plain string
+    /// for the same reason as `product`.
+    #[serde(default = "default_noaa_mrms_rate_product")]
+    pub rate_product: String,
+}
+
+fn default_noaa_mrms_product() -> String {
+    "MultiSensor_QPE_01H_Pass2".to_string()
+}
+
+fn default_noaa_mrms_rate_product() -> String {
+    "PrecipRate".to_string()
+}
+
+impl Default for NoaaMrmsConfig {
+    fn default() -> Self {
+        Self {
+            product: default_noaa_mrms_product(),
+            rate_product: default_noaa_mrms_rate_product(),
+        }
+    }
+}
+
 /// Davis WeatherLink Live (WLL) LAN gateway. Polls the WLL's local
 /// HTTP endpoint `http://{host}/v1/current_conditions` (no auth) on
 /// the configured interval. Compatible with Vantage Pro 2 + Vantage
@@ -704,6 +924,15 @@ pub struct DavisWllConfig {
     /// should set this to the appropriate transmitter id.
     #[serde(default = "default_davis_wll_txid")]
     pub txid: u32,
+    /// Map of WLL soil sensor CHANNEL number (1-4, from the type-2 soil/leaf
+    /// record's `moist_soil_1..4`) -> zone_slug. Each mapped channel is emitted
+    /// as a per-zone soil KeyedReading under `soilmoisture_<zone_slug>` (a zone
+    /// binds it via `soil_sensor_id = "source:<id>:soilmoisture_<zone_slug>"`),
+    /// mirroring the Ecowitt/MQTT/HA soil paths. Unmapped channels are dropped
+    /// (zone binding is required for soil). Leaf wetness needs no mapping; it is
+    /// emitted as the global LeafWetness reading.
+    #[serde(default)]
+    pub soil_zone_map: std::collections::BTreeMap<u32, String>,
 }
 
 fn default_davis_wll_txid() -> u32 {
@@ -748,8 +977,17 @@ pub struct YolinkConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct YolinkFieldMap {
-    /// WeatherField variant name (CamelCase or snake_case accepted).
+    /// WeatherField variant name (CamelCase or snake_case accepted). Ignored
+    /// when `zone_slug` is set (then this maps a per-zone soil channel).
+    #[serde(default)]
     pub field: String,
+    /// When set, this mapping is a per-ZONE soil channel, not a global
+    /// WeatherField: the value is emitted as a KeyedReading under
+    /// `soilmoisture_<zone_slug>` (a zone binds it via
+    /// `soil_sensor_id = "source:<id>:soilmoisture_<zone_slug>"`). Mirrors the
+    /// MQTT soil-subscription path.
+    #[serde(default)]
+    pub zone_slug: Option<String>,
     /// YoLink device id (deviceId from /api Home.getDeviceList).
     pub device_id: String,
     /// YoLink device type, used to compose the {Type}.getState method.
@@ -805,7 +1043,16 @@ pub struct TuyaCloudConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TuyaFieldMap {
+    /// WeatherField variant name. Ignored when `zone_slug` is set (then this
+    /// maps a per-zone soil channel).
+    #[serde(default)]
     pub field: String,
+    /// When set, emit a per-ZONE soil KeyedReading under
+    /// `soilmoisture_<zone_slug>` instead of a global WeatherField (a zone binds
+    /// it via `soil_sensor_id = "source:<id>:soilmoisture_<zone_slug>"`). Tuya
+    /// is the dominant cheap-soil-probe OEM, so this is the common soil path.
+    #[serde(default)]
+    pub zone_slug: Option<String>,
     pub device_id: String,
     /// Tuya status code (DP code). Examples: "temp_current", "humi_current",
     /// "water_total", "water_current", "battery_percentage".
@@ -861,6 +1108,12 @@ pub struct HaPassthroughConfig {
     /// stitch sensors from arbitrary HA integrations into the engine.
     #[serde(default)]
     pub field_map: BTreeMap<String, String>,
+    /// Map of HA entity_id -> zone_slug for per-ZONE soil probes. Each listed
+    /// entity is emitted as a KeyedReading under `soilmoisture_<zone_slug>`
+    /// (a zone binds it via `soil_sensor_id = "source:<id>:soilmoisture_
+    /// <zone_slug>"`) instead of a global WeatherField. Additive to field_map.
+    #[serde(default)]
+    pub soil_zone_map: BTreeMap<String, String>,
 }
 
 /// MQTT sensor subscription. Each topic maps to a (WeatherField, optional
@@ -940,10 +1193,166 @@ pub struct HttpWebhookConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct HttpWebhookField {
+    /// WeatherField variant name. Ignored when `zone_slug` is set (then this
+    /// maps a per-zone soil channel for a DIY gateway).
+    #[serde(default)]
     pub field: String,
+    /// When set, emit a per-ZONE soil KeyedReading under
+    /// `soilmoisture_<zone_slug>` instead of a global WeatherField (a zone binds
+    /// it via `soil_sensor_id = "source:<id>:soilmoisture_<zone_slug>"`).
+    #[serde(default)]
+    pub zone_slug: Option<String>,
     #[serde(default)]
     pub json_path: Option<String>,
     #[serde(default = "default_scale")]
+    pub scale: f64,
+    #[serde(default)]
+    pub offset: f64,
+}
+
+/// Generic outbound REST poller. Fetches a JSON HTTP API on an interval and maps
+/// JSON paths to WeatherFields / per-zone soil. Reuses the HTTP-webhook field
+/// shape; the only extra config is the request (url, method, headers, body) and
+/// the poll interval. Put query-param API keys in `url`; put header/bearer keys
+/// in `headers`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RestPollConfig {
+    /// Full URL to poll. HTTPS recommended. Query-param API keys go here.
+    pub url: String,
+    /// HTTP method: "GET" (default) or "POST".
+    #[serde(default = "default_rest_method")]
+    pub method: String,
+    /// Poll interval (seconds). Clamped to a 10s floor to stay API-friendly.
+    #[serde(default = "default_rest_interval_s")]
+    pub poll_interval_s: u64,
+    /// Extra request headers, e.g. {"Authorization": "Bearer XYZ"} or an
+    /// API-key header. Static values (no templating).
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    /// Optional request body (used when method = "POST").
+    #[serde(default)]
+    pub body: Option<String>,
+    /// Field mappings (same shape as the HTTP webhook): each picks a
+    /// WeatherField (or a per-zone soil channel via `zone_slug`), a JSON path
+    /// into the response, and a scale + offset for unit conversion.
+    pub fields: Vec<HttpWebhookField>,
+}
+
+fn default_rest_method() -> String {
+    "GET".to_string()
+}
+fn default_rest_interval_s() -> u64 {
+    300
+}
+
+/// Prometheus instant-query source. Polls `{url}/api/v1/query` once per query on
+/// the interval and maps each PromQL result to a WeatherField or per-zone soil
+/// channel. For self-hosters who already scrape weather/soil metrics into
+/// Prometheus (a PWS exporter, ESPHome-via-prometheus, node_exporter textfile).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PrometheusConfig {
+    /// Base URL of the Prometheus server (e.g. http://prometheus.lan:9090).
+    pub url: String,
+    /// Poll interval (seconds). Clamped to a 10s floor.
+    #[serde(default = "default_rest_interval_s")]
+    pub poll_interval_s: u64,
+    /// Optional HTTP basic-auth username (e.g. behind a reverse proxy).
+    #[serde(default)]
+    pub username: Option<String>,
+    /// Optional HTTP basic-auth password.
+    #[serde(default)]
+    pub password: Option<String>,
+    /// Each query maps one PromQL instant query to a reading.
+    #[serde(default)]
+    pub queries: Vec<PrometheusQuery>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PrometheusQuery {
+    /// WeatherField variant name (snake_case). Ignored when `zone_slug` is set
+    /// (then this maps a per-zone soil channel instead of a global field).
+    #[serde(default)]
+    pub field: String,
+    /// When set, emit a per-ZONE soil KeyedReading under `soilmoisture_<zone_slug>`
+    /// instead of a global WeatherField.
+    #[serde(default)]
+    pub zone_slug: Option<String>,
+    /// PromQL instant query that must evaluate to a single scalar/first-vector
+    /// sample, e.g. `weather_temp_f{station="backyard"}`.
+    pub query: String,
+    /// Linear scaling: out = raw * scale + offset.
+    #[serde(default = "default_one")]
+    pub scale: f64,
+    #[serde(default)]
+    pub offset: f64,
+}
+
+/// InfluxDB source. Polls `{url}/query` (InfluxQL, JSON results) once per query.
+/// Auth is a v2 token (Authorization: Token) when `token` is set, else v1 HTTP
+/// basic-auth from `username`/`password` (both optional for an open instance).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct InfluxDbConfig {
+    /// Base URL of the InfluxDB server (e.g. http://influxdb.lan:8086).
+    pub url: String,
+    /// Database (v1) or v1-compat bucket mapping (v2) passed as the `db` param.
+    pub database: String,
+    /// v2 organization, passed as the `org` param when set.
+    #[serde(default)]
+    pub org: Option<String>,
+    /// v2 API token (sent as `Authorization: Token <token>`). Takes precedence
+    /// over basic-auth when present.
+    #[serde(default)]
+    pub token: Option<String>,
+    /// v1 HTTP basic-auth username (optional).
+    #[serde(default)]
+    pub username: Option<String>,
+    /// v1 HTTP basic-auth password (optional).
+    #[serde(default)]
+    pub password: Option<String>,
+    /// Poll interval (seconds). Clamped to a 10s floor.
+    #[serde(default = "default_rest_interval_s")]
+    pub poll_interval_s: u64,
+    /// Each query maps one InfluxQL query to a reading.
+    #[serde(default)]
+    pub queries: Vec<InfluxQuery>,
+}
+
+/// Apple WeatherKit credentials. From the Apple Developer portal: a WeatherKit
+/// service id, your team id, the key id, and the PKCS#8 .p8 private key contents.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WeatherKitConfig {
+    /// Key ID of the WeatherKit key (the `kid` JWT header).
+    pub key_id: String,
+    /// Apple Developer Team ID (the JWT `iss`).
+    pub team_id: String,
+    /// WeatherKit service identifier (the JWT `sub`; combined with the team id
+    /// as `<team>.<service>` for the JWT `id` header).
+    pub service_id: String,
+    /// Contents of the downloaded `.p8` private key (PKCS#8 PEM). Treat like a
+    /// password. The adapter signs ES256 JWTs with it locally.
+    pub private_key_pem: String,
+    /// BCP-47 language for textual fields (default "en").
+    #[serde(default = "default_wk_language")]
+    pub language: String,
+}
+
+fn default_wk_language() -> String {
+    "en".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct InfluxQuery {
+    /// WeatherField variant name (snake_case). Ignored when `zone_slug` is set.
+    #[serde(default)]
+    pub field: String,
+    /// When set, emit a per-ZONE soil KeyedReading instead of a global field.
+    #[serde(default)]
+    pub zone_slug: Option<String>,
+    /// InfluxQL that returns one field, e.g.
+    /// `SELECT last("temp_f") FROM "weather" WHERE "station"='backyard'`.
+    pub query: String,
+    /// Linear scaling: out = raw * scale + offset.
+    #[serde(default = "default_one")]
     pub scale: f64,
     #[serde(default)]
     pub offset: f64,
@@ -975,13 +1384,89 @@ pub struct BlitzortungConfig {
     /// the radius is applied locally before buffering.
     #[serde(default = "default_blitzortung_radius_mi")]
     pub radius_mi: f64,
+    /// Transport. `websocket` (default) is the legacy public web-map
+    /// firehose (ws1/ws2/ws7/ws8); `mqtt` is the dedicated Blitzortung
+    /// broker (a sanctioned, credentialed endpoint that takes LocalSky
+    /// off the public web-map servers). The decoded strike shape is the
+    /// same on both, so only the connection differs.
+    #[serde(default)]
+    pub transport: BlitzortungTransport,
     /// WebSocket endpoints, rotated on failure. User-editable config
     /// rather than constants because the active host subset churns
     /// across Blitzortung web-client releases (the protocol is
     /// unversioned and serves their own map app first). An empty list
-    /// falls back to these same defaults.
+    /// falls back to these same defaults. Used only by the `websocket`
+    /// transport.
     #[serde(default = "default_blitzortung_hosts")]
     pub hosts: Vec<String>,
+    /// MQTT broker settings. Used only by the `mqtt` transport. The
+    /// credential is intentionally NOT baked in: a shared credential in
+    /// a self-hosted app that ships public source is effectively public,
+    /// so the operator supplies the values Blitzortung issued them.
+    #[serde(default)]
+    pub mqtt: BlitzortungMqtt,
+}
+
+/// Which Blitzortung endpoint LocalSky connects to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BlitzortungTransport {
+    /// Public web-map WebSocket firehose (ws1/ws2/ws7/ws8), the legacy
+    /// path. Anonymous handshake, LZW frames.
+    #[default]
+    WebSocket,
+    /// Dedicated Blitzortung MQTT broker: a credentialed, sanctioned
+    /// endpoint. Subscribe-only for LocalSky.
+    Mqtt,
+}
+
+/// Connection settings for the `mqtt` Blitzortung transport.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BlitzortungMqtt {
+    /// Broker hostname.
+    #[serde(default = "default_blitzortung_mqtt_host")]
+    pub host: String,
+    /// Broker port (plain MQTT).
+    #[serde(default = "default_blitzortung_mqtt_port")]
+    pub port: u16,
+    /// Topic to subscribe to. `strikes/core` is the lightweight per-strike
+    /// record (time/lat/lon, ~126 B) and is lossless for LocalSky, which
+    /// reads only those fields; `strikes/lzw_complete` is the LZW-compressed
+    /// full record (byte-identical to the WebSocket feed). Topics containing
+    /// `lzw` are LZW-decoded before parsing.
+    #[serde(default = "default_blitzortung_mqtt_topic")]
+    pub topic: String,
+    /// Broker username (issued by Blitzortung). Empty means connect
+    /// anonymously (the broker will reject it if it requires auth).
+    #[serde(default)]
+    pub username: String,
+    /// Broker password (issued by Blitzortung).
+    #[serde(default)]
+    pub password: String,
+}
+
+impl Default for BlitzortungMqtt {
+    fn default() -> Self {
+        Self {
+            host: default_blitzortung_mqtt_host(),
+            port: default_blitzortung_mqtt_port(),
+            topic: default_blitzortung_mqtt_topic(),
+            username: String::new(),
+            password: String::new(),
+        }
+    }
+}
+
+fn default_blitzortung_mqtt_host() -> String {
+    "mqtt.blitzortung.org".to_string()
+}
+
+fn default_blitzortung_mqtt_port() -> u16 {
+    1883
+}
+
+fn default_blitzortung_mqtt_topic() -> String {
+    "strikes/core".to_string()
 }
 
 impl Default for BlitzortungConfig {
@@ -989,7 +1474,9 @@ impl Default for BlitzortungConfig {
         Self {
             enabled: false,
             radius_mi: default_blitzortung_radius_mi(),
+            transport: BlitzortungTransport::default(),
             hosts: default_blitzortung_hosts(),
+            mqtt: BlitzortungMqtt::default(),
         }
     }
 }
@@ -1569,7 +2056,7 @@ fn default_smtp_port() -> u16 {
 // ----- Engine parameters -----
 //
 // Every constant that used to live inline in src/ha/skip_logic.rs and
-// src/ha/refresher.rs becomes a typed config field with documented
+// src/refresher.rs becomes a typed config field with documented
 // default. Operators rarely tune these, but the option is there.
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1595,6 +2082,18 @@ pub struct EngineParams {
     /// and gated inside skip_rules::decide() before weather checks.
     #[serde(default)]
     pub watering_restrictions: Vec<WateringRestriction>,
+    /// Seasonal water-budget adjustment ("trust dial"), percent of the computed
+    /// run depth. 100 = engine math as-is; clamped to [50, 150]. Lets an operator
+    /// dial every run shorter in a wet stretch or longer in a heat wave without
+    /// re-deriving per-zone math. Applied to run depth BEFORE the force-run floor
+    /// and the max-duration cap, so the snapshot's planned minutes already reflect
+    /// it (display + dispatch agree).
+    #[serde(default = "default_seasonal_adjust_pct")]
+    pub seasonal_adjust_pct: u32,
+}
+
+fn default_seasonal_adjust_pct() -> u32 {
+    100
 }
 
 impl Default for EngineParams {
@@ -1606,6 +2105,7 @@ impl Default for EngineParams {
             soak_minutes: default_soak_minutes(),
             et0_method: Et0Method::default(),
             watering_restrictions: Vec::new(),
+            seasonal_adjust_pct: default_seasonal_adjust_pct(),
         }
     }
 }
@@ -1714,6 +2214,33 @@ pub struct SkipRuleParams {
     /// Wind slack (mph) added to user max_wind_mph for forecast checks.
     #[serde(default = "default_wind_forecast_slack")]
     pub wind_forecast_slack_mph: f64,
+    /// Soil-probe QUARANTINE: enable distrusting a zone's soil probe when it is
+    /// offline (null) or a wild outlier versus its siblings, and inferring that
+    /// zone's effective soil from the trustworthy sibling median for the soil
+    /// gates (saturation + soil_floor). Catches a physically bad probe (e.g. one
+    /// reading 28% while siblings read 71-76% after the same rain) with no rain
+    /// trigger to cover it. Default true; set false for the exact pre-quarantine
+    /// behavior. Only the soil gates ever see the inferred value; global /
+    /// weather / safety / observed-rain gates and per-zone condition rules are
+    /// unchanged.
+    #[serde(default = "default_true")]
+    pub soil_quarantine_enabled: bool,
+    /// A present soil reading is a WILD OUTLIER (its probe distrusted) when it
+    /// deviates from the median of all present readings by more than this many
+    /// percentage points, AND at least 3 zones report (enough to judge an
+    /// outlier reliably). Operator-tunable; default 35.0 (loose enough to leave
+    /// real microclimate variation alone, tight enough to catch a bad probe).
+    /// Only consulted when `soil_quarantine_enabled` is true.
+    #[serde(default = "default_soil_outlier_threshold_pct")]
+    pub soil_outlier_threshold_pct: f64,
+    /// OBSERVED-recent-rain skip backstop: number of PAST days of measured
+    /// rain to add to today's observed total. Default 1 includes yesterday,
+    /// so the window is "today + yesterday". The gate fires (a hard skip that
+    /// binds every zone and beats the soil_floor override) when that observed
+    /// total reaches `rain_skip_in`. Sensor-independent: it does not rely on
+    /// any soil probe. 0 = today only.
+    #[serde(default = "default_rain_observed_window_days")]
+    pub rain_observed_window_days: u32,
     /// User-tunable defaults (also editable in HA helpers for legacy mode).
     #[serde(default = "default_max_wind_mph")]
     pub max_wind_mph: f64,
@@ -1745,6 +2272,9 @@ impl Default for SkipRuleParams {
             heat_advisory_humidity_pct: default_heat_advisory_humidity_pct(),
             heat_advisory_dry_days: default_heat_advisory_dry_days(),
             wind_forecast_slack_mph: default_wind_forecast_slack(),
+            soil_quarantine_enabled: default_true(),
+            soil_outlier_threshold_pct: default_soil_outlier_threshold_pct(),
+            rain_observed_window_days: default_rain_observed_window_days(),
             max_wind_mph: default_max_wind_mph(),
             min_temp_f: default_min_temp_f(),
             rain_skip_in: default_rain_skip_in(),
@@ -1777,6 +2307,18 @@ fn default_heat_advisory_dry_days() -> u32 {
 }
 fn default_wind_forecast_slack() -> f64 {
     5.0
+}
+fn default_soil_outlier_threshold_pct() -> f64 {
+    // 35pp, not 25pp: it must catch a genuinely bad probe (the 2026-06 incident was a
+    // ~45pp outlier: back_yard 28% vs a ~73% yard) while leaving headroom for LEGITIMATE
+    // microclimate variation (shade/slope/sandy-vs-clay routinely spread 25-40pp). At 25pp
+    // a real dry zone at the soil-floor (~30%) among siblings >=55% would be quarantined and
+    // inferred wet, silently neutralizing the soil-floor moat that exists to run dry zones.
+    // 35pp keeps the moat's "genuinely dry zones always run" guarantee intact. Operator-tunable.
+    35.0
+}
+fn default_rain_observed_window_days() -> u32 {
+    1
 }
 fn default_max_wind_mph() -> f64 {
     10.0
@@ -1845,6 +2387,19 @@ mod tests {
     }
 
     #[test]
+    fn open_meteo_radar_defaults_on() {
+        // Radar is on by default: an empty Open-Meteo table provides radar
+        // tiles so a fresh install's default source powers the radar map
+        // with no manual step. Configs that omit include_radar inherit true.
+        let om: OpenMeteoConfig = toml::from_str("").unwrap();
+        assert!(om.include_radar, "include_radar must default to true");
+        assert!(
+            SourceKind::OpenMeteo(om).provides_radar_tiles(),
+            "the default Open-Meteo source must provide radar tiles"
+        );
+    }
+
+    #[test]
     fn pre_model_config_loads_with_best_match() {
         // A config written before the `model` field existed must keep
         // parsing and land on best_match (identical fetch behavior).
@@ -1866,6 +2421,10 @@ mod tests {
             panic!("expected an open_meteo source");
         };
         assert_eq!(om.model, "best_match");
+        // A config predating the include_radar field still gets radar: the
+        // serde default fills it in as true, so old installs gain the radar
+        // map on upgrade without editing their config.
+        assert!(om.include_radar, "omitted include_radar must inherit true");
     }
 
     #[test]

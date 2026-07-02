@@ -77,9 +77,15 @@ This bites most often with `network_mode: host`, where the container shares the 
 The app runs as the non-root user uid 10001, and the container fixes the ownership of `/data` to that user on every startup, so a normal bind mount or named volume needs no manual `chown`. If you still see permission errors (the wizard cannot save `localsky.toml`, or history is disabled with a logged SQLite open failure), the cause is almost always one of:
 
 - **`/data` is mounted read-only.** The container cannot fix ownership of, or write to, a read-only mount. Mount `/data` read-write.
-- **You overrode the entrypoint** (for example `user: "0:0"` plus a separate non-root step, or a custom `entrypoint:`). Remove the override and let the image manage the privilege drop.
+- **`/data` is a NAS / NFS share the container can't chown (Synology, QNAP).** Exports with `root_squash` or "map all users" squash the container's root, so it is not allowed to chown the volume to uid 10001. LocalSky handles this automatically: when it detects `/data` isn't writable as 10001, it runs as the volume's actual owner instead and logs `running as its owner <uid>:<gid>`. If you'd rather pin it, set `PUID`/`PGID` to the uid:gid that owns the share (find it in Synology File Station, or run `id` on the NAS):
+  ```yaml
+  environment:
+    - PUID=1026     # the share's owning uid
+    - PGID=100      # the share's owning gid
+  ```
+- **You overrode the entrypoint** (a custom `entrypoint:`, or `user:` set to a uid that can't write the volume). Prefer `PUID`/`PGID` over `user:` so the entrypoint can still fix ownership and pick a working uid.
 
-As a last resort you can pre-own the host directory yourself: `sudo chown -R 10001:10001 /opt/localsky/data`.
+As a last resort you can pre-own the host directory yourself: `sudo chown -R 10001:10001 /opt/localsky/data` (use whatever uid you set in `PUID`).
 
 ### Low-power hardware
 

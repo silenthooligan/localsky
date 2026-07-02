@@ -167,16 +167,25 @@ pub fn SettingsAdvanced() -> impl IntoView {
     }
 
     view! {
-        <main id="main-content" class="settings-page">
+        <div class="settings-page">
             <header class="settings-page__header">
                 <a class="settings-page__back" href="/settings">"← Settings"</a>
                 <h1 class="settings-page__title">"Advanced"<HelpHint topic="advanced"/></h1>
                 <p class="settings-page__subtitle">
-                    "Debug visibility and rollback. None of these change the "
-                    "engine's behavior; they just expose what's already "
-                    "happening."
+                    "Per-device preferences and deployment maintenance. The "
+                    <strong>"This device"</strong>" options are local and harmless; the "
+                    <strong>"Maintenance & danger"</strong>" tools below change server-side "
+                    "config and can affect your whole deployment."
                 </p>
             </header>
+
+            <section class="settings-band">
+                <header class="settings-band__head">
+                    <h2 class="settings-band__title">"This device"</h2>
+                    <p class="settings-band__sub">
+                        "Per-browser preferences, stored locally. Safe to toggle."
+                    </p>
+                </header>
 
             <Panel title="Nerd mode".to_string()>
                 <Toggle
@@ -206,6 +215,16 @@ pub fn SettingsAdvanced() -> impl IntoView {
                 />
                 <UpdateStatusLine status=update_status/>
             </Panel>
+            </section>
+
+            <section class="settings-band settings-band--danger">
+                <header class="settings-band__head">
+                    <h2 class="settings-band__title">"Maintenance & danger"</h2>
+                    <p class="settings-band__sub">
+                        "These change server-side config. Backup, restore, raw editing, and "
+                        "rollback affect the whole deployment, not just this device."
+                    </p>
+                </header>
 
             <Panel title="Demo mode".to_string()>
                 <p class="settings-page__subtitle" style="margin: 0">
@@ -219,11 +238,8 @@ pub fn SettingsAdvanced() -> impl IntoView {
 
             <Panel title="Configuration history".to_string()>
                 <p class="settings-page__subtitle" style="margin: 0 0 1rem">
-                    "Every PUT /api/config snapshots the previous config "
-                    "before writing. Roll back to any of the last 20 "
-                    "versions via "
-                    <code>"POST /api/config/rollback?to=&lt;version&gt;"</code>
-                    "."
+                    "Every saved change snapshots the previous config first. "
+                    "Roll back to any of the last 20 versions using the list below."
                 </p>
                 <Show
                     when=move || !snapshots.get().is_empty()
@@ -287,7 +303,8 @@ pub fn SettingsAdvanced() -> impl IntoView {
                 </p>
                 <RawTomlEditor/>
             </Panel>
-        </main>
+            </section>
+        </div>
     }
 }
 
@@ -306,21 +323,27 @@ fn format_epoch(epoch: i64) -> String {
     }
 }
 
+/// One freshness row, now driven off the CONFIGURED sources reported by
+/// /api/v1/health rather than three hardcoded names. `label` is the source's
+/// own id + a friendly kind label, so a Davis / NWS / Open-Meteo-only user sees
+/// their actual sources instead of a phantom "Tempest weather station" row.
+/// `status` is the server-computed classification ("fresh" | "stale" |
+/// "offline"); `last_epoch` is its last-seen epoch (0 = never) for the age text.
 #[derive(Clone, Default)]
 struct SourceStatusRow {
-    label: &'static str,
+    label: String,
     last_epoch: i64,
-    reachable: bool,
-    /// When >0, an "expected interval" hint used to classify staleness.
-    /// E.g., the forecast refresher polls every 30 min, so >60 min since
-    /// the last successful fetch is "stale". The HA refresher cycles
-    /// every 10s, so >60s without a packet is "stale".
-    stale_after_s: i64,
+    /// Server-computed freshness: "fresh" | "stale" | "offline". Empty before
+    /// the first health fetch lands (the loading state).
+    status: String,
 }
 
 #[component]
 fn SourceStatusList() -> impl IntoView {
-    let rows: RwSignal<Vec<SourceStatusRow>> = RwSignal::new(default_rows());
+    // Empty until the first /api/v1/health fetch lands; SSR + first frame show
+    // the "loading" caption so the DOM matches before hydration.
+    let rows: RwSignal<Vec<SourceStatusRow>> = RwSignal::new(Vec::new());
+    let loaded = RwSignal::new(false);
 
     #[cfg(feature = "hydrate")]
     {
@@ -329,14 +352,27 @@ fn SourceStatusList() -> impl IntoView {
                 if let Some(fresh) = fetch_source_status().await {
                     rows.set(fresh);
                 }
+                loaded.set(true);
             });
         });
     }
 
     view! {
-        <ul class="source-status-list">
-            {move || rows.get().into_iter().map(|r| view! { <SourceStatusRowView row=r/> }.into_any()).collect::<Vec<_>>()}
-        </ul>
+        <Show
+            when=move || !rows.get().is_empty()
+            fallback=move || {
+                let msg = if loaded.get() {
+                    "No weather sources are configured yet. Add one under Devices."
+                } else {
+                    "Loading source freshness…"
+                };
+                view! { <p class="settings-page__subtitle" style="margin: 0">{msg}</p> }
+            }
+        >
+            <ul class="source-status-list">
+                {move || rows.get().into_iter().map(|r| view! { <SourceStatusRowView row=r/> }.into_any()).collect::<Vec<_>>()}
+            </ul>
+        </Show>
     }
 }
 
@@ -349,14 +385,15 @@ fn SourceStatusRowView(row: SourceStatusRow) -> impl IntoView {
     } else {
         i64::MAX
     };
-    let (status_text, status_class) = if !row.reachable {
-        ("offline", "source-status-pill source-status-pill-offline")
-    } else if age_s == i64::MAX {
-        ("waiting", "source-status-pill source-status-pill-waiting")
-    } else if row.stale_after_s > 0 && age_s > row.stale_after_s {
-        ("stale", "source-status-pill source-status-pill-stale")
-    } else {
-        ("fresh", "source-status-pill source-status-pill-fresh")
+    // Trust the server's classification (it knows each kind's expected cadence)
+    // rather than re-deriving a stale threshold client-side. A never-seen source
+    // reads as "waiting" instead of the raw "offline" so a just-added source
+    // does not look broken before its first reading.
+    let (status_text, status_class) = match row.status.as_str() {
+        "fresh" => ("fresh", "source-status-pill source-status-pill-fresh"),
+        "stale" => ("stale", "source-status-pill source-status-pill-stale"),
+        _ if age_s == i64::MAX => ("waiting", "source-status-pill source-status-pill-waiting"),
+        _ => ("offline", "source-status-pill source-status-pill-offline"),
     };
     let age_text = if age_s == i64::MAX {
         "no data yet".to_string()
@@ -374,29 +411,6 @@ fn SourceStatusRowView(row: SourceStatusRow) -> impl IntoView {
             <span class="source-status-age">{age_text}</span>
         </li>
     }
-}
-
-fn default_rows() -> Vec<SourceStatusRow> {
-    vec![
-        SourceStatusRow {
-            label: "Tempest weather station",
-            last_epoch: 0,
-            reachable: false,
-            stale_after_s: 60,
-        },
-        SourceStatusRow {
-            label: "Irrigation refresher",
-            last_epoch: 0,
-            reachable: false,
-            stale_after_s: 60,
-        },
-        SourceStatusRow {
-            label: "Open-Meteo forecast",
-            last_epoch: 0,
-            reachable: false,
-            stale_after_s: 60 * 60,
-        },
-    ]
 }
 
 #[derive(Clone, Default)]
@@ -636,57 +650,62 @@ impl CachedUpdate {
     }
 }
 
+/// Build the freshness rows off the CONFIGURED sources reported by
+/// /api/v1/health (its `sources` array, one entry per configured source with a
+/// server-computed `status`, `last_seen_epoch`, and `kind`). This replaces the
+/// old three-hardcoded-rows approach so a Davis / NWS / Open-Meteo-only user
+/// sees their actual sources, never a phantom "Tempest weather station" or a
+/// mislabeled "Open-Meteo forecast" row. Each row is labeled by the source id
+/// plus a friendly kind label. Returns None on a transport failure (the panel
+/// keeps its loading/empty state); Some(empty) when health reports no sources.
 #[cfg(feature = "hydrate")]
 async fn fetch_source_status() -> Option<Vec<SourceStatusRow>> {
     use gloo_net::http::Request;
     use serde_json::Value;
-    async fn get_json(url: &str) -> Option<Value> {
-        Request::get(url)
-            .send()
-            .await
-            .ok()?
-            .json::<Value>()
-            .await
-            .ok()
-    }
-    let (tempest, irrigation, forecast) = futures::join!(
-        get_json("/api/v1/snapshot"),
-        get_json("/api/v1/irrigation/snapshot"),
-        get_json("/api/v1/forecast/snapshot"),
-    );
-    let mut rows = default_rows();
-    if let Some(t) = tempest {
-        let last = t
-            .get("last_packet_epoch")
-            .and_then(Value::as_i64)
-            .unwrap_or(0);
-        rows[0].last_epoch = last;
-        rows[0].reachable = last > 0;
-    }
-    if let Some(i) = irrigation {
-        let last = i
-            .get("last_refresh_epoch")
-            .and_then(Value::as_i64)
-            .unwrap_or(0);
-        let reachable = i
-            .get("ha_reachable")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        rows[1].last_epoch = last;
-        rows[1].reachable = reachable;
-    }
-    if let Some(f) = forecast {
-        let last = f
-            .get("last_refresh_epoch")
-            .and_then(Value::as_i64)
-            .unwrap_or(0);
-        let reachable = f
-            .get("source_reachable")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        rows[2].last_epoch = last;
-        rows[2].reachable = reachable;
-    }
+    let health = Request::get("/api/v1/health")
+        .send()
+        .await
+        .ok()?
+        .json::<Value>()
+        .await
+        .ok()?;
+    let sources = health.get("sources").and_then(Value::as_array)?;
+    let rows = sources
+        .iter()
+        .map(|s| {
+            let id = s
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let kind = s.get("kind").and_then(Value::as_str).unwrap_or("");
+            // "id (Friendly kind)", e.g. "tempest_lan (Tempest UDP (LAN))". The
+            // kind label is the same one the source forms use, so an unknown
+            // kind reads "Unknown" rather than a raw slug.
+            let pretty = crate::components::sources_form::kind_pretty(kind);
+            let label = if pretty == "Unknown" || id.is_empty() {
+                if id.is_empty() {
+                    pretty.to_string()
+                } else {
+                    id
+                }
+            } else {
+                format!("{id} ({pretty})")
+            };
+            SourceStatusRow {
+                label,
+                last_epoch: s
+                    .get("last_seen_epoch")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0),
+                status: s
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            }
+        })
+        .collect();
     Some(rows)
 }
 

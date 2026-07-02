@@ -84,6 +84,37 @@ impl ControllerRegistry {
         ids.sort();
         ids
     }
+
+    /// Boot reconciliation (P0-1): close every zone on every registered
+    /// controller. Called once at startup, before the first dispatch window, so a
+    /// valve left open by a crash or redeploy (especially the MQTT path, whose
+    /// shutoff is an in-process timer that dies with the process) is closed on the
+    /// next boot. A legitimately-running cycle is re-evaluated by the scheduler;
+    /// cutting a run short is the safe direction versus a stranded-open valve.
+    /// Best-effort: an unreachable controller is logged and returned in the failed
+    /// list, never fatal. Returns the ids whose stop_all errored.
+    pub async fn reconcile_stop_all(&self) -> Vec<String> {
+        // Clone the Arcs out before any await so the ArcSwap load guard is not
+        // held across the controller network calls.
+        let controllers: Vec<(String, Arc<dyn IrrigationController>)> = {
+            let s = self.inner.load();
+            s.by_id
+                .iter()
+                .map(|(id, c)| (id.clone(), c.clone()))
+                .collect()
+        };
+        let mut failed = Vec::new();
+        for (id, c) in controllers {
+            match c.stop_all().await {
+                Ok(()) => tracing::info!(controller = %id, "boot reconcile: closed all zones"),
+                Err(e) => {
+                    tracing::warn!(controller = %id, error = %e, "boot reconcile: stop_all failed (controller unreachable?)");
+                    failed.push(id);
+                }
+            }
+        }
+        failed
+    }
 }
 
 impl Default for ControllerRegistry {
@@ -153,6 +184,114 @@ mod tests {
         assert_eq!(
             r.ids(),
             vec!["a".to_string(), "m".to_string(), "z".to_string()]
+        );
+    }
+
+    // --- P0-1 boot reconciliation -------------------------------------------
+    use crate::ports::irrigation_controller::{
+        ControllerCaps, ControllerError, ControllerResult, ControllerStatus, RunHandle, RunRecord,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Counts stop_all calls; optionally fails to model an unreachable controller.
+    struct Recorder {
+        id: String,
+        stop_all_calls: Arc<AtomicUsize>,
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl IrrigationController for Recorder {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn supports(&self) -> ControllerCaps {
+            ControllerCaps {
+                flow_meter: false,
+                rain_sensor: false,
+                master_valve: false,
+                multi_zone_parallel: false,
+                history_query: false,
+                remote_program_upload: false,
+            }
+        }
+        async fn run_zone(&self, slug: &str, duration_s: u32) -> ControllerResult<RunHandle> {
+            Ok(RunHandle {
+                controller_id: self.id.clone(),
+                zone_slug: slug.to_string(),
+                started_epoch: 0,
+                planned_duration_s: duration_s,
+                provider_ref: None,
+            })
+        }
+        async fn stop_zone(&self, _slug: &str) -> ControllerResult<()> {
+            Ok(())
+        }
+        async fn stop_all(&self) -> ControllerResult<()> {
+            self.stop_all_calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                Err(ControllerError::Transport("unreachable at boot".into()))
+            } else {
+                Ok(())
+            }
+        }
+        async fn status(&self) -> ControllerResult<ControllerStatus> {
+            Ok(ControllerStatus {
+                reachable: true,
+                master_enabled: None,
+                water_level_pct: None,
+                rain_sensor_tripped: None,
+                current_program: None,
+                zone_states: vec![],
+                flow_gpm: None,
+                flow_connected: false,
+                firmware: None,
+            })
+        }
+        async fn run_history(&self, _since_epoch: i64) -> ControllerResult<Vec<RunRecord>> {
+            Ok(vec![])
+        }
+    }
+
+    fn rec(id: &str, calls: Arc<AtomicUsize>, fail: bool) -> Arc<dyn IrrigationController> {
+        Arc::new(Recorder {
+            id: id.to_string(),
+            stop_all_calls: calls,
+            fail,
+        })
+    }
+
+    #[tokio::test]
+    async fn reconcile_stop_all_closes_every_controller() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let r = ControllerRegistry::new();
+        r.set(vec![
+            (rec("a", calls.clone(), false), true),
+            (rec("b", calls.clone(), false), false),
+        ]);
+        let failed = r.reconcile_stop_all().await;
+        assert!(failed.is_empty());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "stop_all on every controller"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_stop_all_reports_unreachable_without_failing() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let r = ControllerRegistry::new();
+        r.set(vec![
+            (rec("ok", calls.clone(), false), true),
+            (rec("bad", calls.clone(), true), false),
+        ]);
+        let failed = r.reconcile_stop_all().await;
+        assert_eq!(failed, vec!["bad".to_string()]);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "both attempted, best-effort"
         );
     }
 }

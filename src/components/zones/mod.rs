@@ -8,6 +8,7 @@ pub mod detail;
 
 use leptos::prelude::*;
 
+use crate::components::irrigation::anomaly_banner::AnomalyBanner;
 use crate::components::ui::StatTile;
 use crate::ha::snapshot::IrrigationSnapshot;
 use card::ZoneCard;
@@ -32,8 +33,48 @@ pub fn ZonesPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
 
     let detail_slug = Signal::derive(move || selected.get().unwrap_or_default());
 
+    // When the user picks a different zone the detail pane swaps in place
+    // (no navigation), so move focus into the pane and let SR/keyboard users
+    // follow the selection. Skip the first run so SSR/initial auto-select
+    // doesn't steal focus on load.
+    //
+    // The `.focus()` is DEFERRED to a microtask rather than called inline:
+    // setting `selected` from a card click re-renders `ZoneDetailView`'s whole
+    // subtree (via `detail_slug`) in the SAME reactive batch this effect runs
+    // in. Focusing the container synchronously then races that DOM swap, and on
+    // the first selection (the auto-select skeleton -> real-content transition)
+    // the focus/scroll lands mid-swap, so the click appeared to need a second
+    // tap to "take". Deferring lets the pane finish rendering first, so a single
+    // click reliably switches the zone while focus-on-change is preserved.
+    let detail_pane: NodeRef<leptos::html::Div> = NodeRef::new();
+    #[cfg(feature = "hydrate")]
+    {
+        Effect::new(move |prev: Option<Option<String>>| {
+            let cur = selected.get();
+            // First run (prev is None): just record, don't focus.
+            if let Some(prev_sel) = prev {
+                if prev_sel != cur && cur.is_some() {
+                    leptos::task::spawn_local(async move {
+                        // Yield one microtask so the detail-pane DOM swap that
+                        // this same selection triggered has been applied before
+                        // we move focus into the (now-current) pane.
+                        gloo_timers::future::TimeoutFuture::new(0).await;
+                        if let Some(el) = detail_pane.get_untracked() {
+                            let _ = el.focus();
+                        }
+                    });
+                }
+            }
+            cur
+        });
+    }
+
     view! {
         <div class="zones-page">
+            // Soil-anomaly surface, same component the irrigation page uses.
+            // Quiet when there are no anomalies; the single owner of soil
+            // offline/suspect warnings (never shown on the weather tab).
+            <AnomalyBanner snap/>
             <header class="zones-page__header">
                 <p class="zones-page__eyebrow">"Irrigation"</p>
                 <h1 class="zones-page__title">"Zones"</h1>
@@ -98,7 +139,12 @@ pub fn ZonesPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                             .into_any()
                     }}
                 </div>
-                <div class="zones-detail">
+                <div
+                    class="zones-detail"
+                    node_ref=detail_pane
+                    tabindex="-1"
+                    aria-live="polite"
+                >
                     <ZoneDetailView snap slug=detail_slug/>
                 </div>
             </div>

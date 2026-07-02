@@ -7,6 +7,7 @@
 // on either confirm or cancel.
 
 use crate::components::irrigation::controls::{post_action_then, toast_on_err};
+use crate::components::ui::{Button, Sheet};
 use leptos::prelude::*;
 use serde_json::json;
 
@@ -19,29 +20,28 @@ pub fn StopAllConfirm(visible: RwSignal<bool>, running_count: Signal<usize>) -> 
         visible.set(false);
     };
 
-    move || {
-        if !visible.get() {
-            return ().into_any();
-        }
-        let n = running_count.get();
-        let body = if n == 1 {
-            "Stop the running zone?".to_string()
-        } else {
-            format!("Stop {n} running zones?")
-        };
-
-        view! {
-            <div class="bottom-sheet-backdrop" on:click=close aria-hidden="true"></div>
-            <div class="bottom-sheet bottom-sheet-confirm" role="dialog" aria-modal="true">
-                <div class="bottom-sheet-handle" aria-hidden="true"></div>
-                <div class="bottom-sheet-title">"Stop all?"</div>
-                <p class="bottom-sheet-body">{body}</p>
-                <div class="bottom-sheet-actions">
-                    <button class="btn-clay" on:click=close>"Cancel"</button>
-                    <button class="btn-clay btn-clay-hot" on:click=confirm>"Stop all"</button>
-                </div>
+    // The <Sheet> handles the dialog chrome, focus trap + restore, Escape,
+    // backdrop dismiss and aria. We only supply the warning copy + actions.
+    view! {
+        <Sheet
+            open=visible
+            title="Stop all?".to_string()
+            aria_label="Stop all running zones".to_string()
+        >
+            <p class="bottom-sheet-body">
+                {move || {
+                    let n = running_count.get();
+                    if n == 1 {
+                        "Stop the running zone?".to_string()
+                    } else {
+                        format!("Stop {n} running zones?")
+                    }
+                }}
+            </p>
+            <div class="bottom-sheet-actions">
+                <Button variant="secondary" on_click=Callback::new(close)>"Cancel"</Button>
+                <Button variant="danger" on_click=Callback::new(confirm)>"Stop all"</Button>
             </div>
-        }
-        .into_any()
+        </Sheet>
     }
 }

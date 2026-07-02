@@ -1,34 +1,95 @@
-// LocalSky service worker — push-only (no asset caching).
+// LocalSky service worker: Web Push + a single offline shell.
 //
-// Why there is no fetch/caching handler: the /pkg JS/WASM/CSS filenames are
-// content-hashed (hash-files in Cargo.toml + LEPTOS_HASH_FILES at runtime), so
-// every build emits new immutable URLs. The browser's HTTP cache busts them
-// automatically and the SSR shell is always fetched fresh, so there is nothing
-// for a SW to cache-manage: no stale WASM, no two-reload-after-deploy, and no
-// LinkError from a js/wasm pair desyncing across deploys. This replaced a
-// version-namespaced caching SW whose only upside was offline rendering, which
-// a LAN irrigation dashboard does not need and which kept freezing clients on
-// stale bundles.
+// CACHING POLICY (deliberately tiny):
+//   - The ONLY thing this SW precaches is the branded offline shell
+//     (/offline.html) plus the PWA manifest + app icons. These are versioned
+//     static files that are safe to serve stale.
+//   - /pkg/* (the content-hashed JS/WASM/CSS) is NEVER touched by the SW: no
+//     precache, no cache-first, no respondWith. hash-files (Cargo.toml +
+//     LEPTOS_HASH_FILES) gives every build immutable /pkg URLs, so the browser
+//     busts them itself. Caching /pkg here is exactly the bug we fought
+//     (LinkError from a stale js/wasm pair desyncing across a deploy); do not
+//     reintroduce it.
+//   - Every other request (HTML navigations, /api, etc.) is network-first /
+//     pass-through. Navigations only fall back to the cached offline shell when
+//     the network throws (genuine offline / server unreachable), so an installed
+//     PWA shows an on-brand page instead of the raw browser dino.
 //
-// The SW now exists ONLY for Web Push (showing notifications + routing clicks).
-// SW_VERSION is still interpolated per deploy by the Rust /sw.js handler so a
-// byte-different /sw.js installs updated push logic immediately.
+// SW_VERSION is interpolated per deploy by the Rust /sw.js handler so a
+// byte-different /sw.js installs updated logic immediately. Bumping the cache
+// name with it makes a deploy re-fetch a fresh offline shell.
 
 const VERSION = '__SW_VERSION__';
+const SHELL_CACHE = `localsky-shell-${VERSION}`;
+const OFFLINE_URL = '/offline.html';
+// Small, stable, safe-to-serve-stale static assets. NOT /pkg/* (hashed) and
+// NOT any HTML route other than the dedicated offline shell.
+const PRECACHE = [
+  OFFLINE_URL,
+  '/manifest.webmanifest',
+  '/icons/icon-192.png',
+  '/icons/icon-512.png',
+];
 
-self.addEventListener('install', () => {
-  // Nothing to precache; take over as soon as possible.
-  self.skipWaiting();
+// Cache a precache entry only when the response is a real 200 and was not
+// redirected (a redirect to /login under the auth gate must never be stored as
+// the offline shell). Failures are swallowed so one missing icon can't abort
+// the whole install.
+async function precacheSafe(cache, url) {
+  try {
+    const res = await fetch(url, { cache: 'no-cache' });
+    if (res && res.ok && !res.redirected) {
+      await cache.put(url, res.clone());
+    }
+  } catch {
+    /* offline at install time, or asset missing: skip, never block install */
+  }
+}
+
+self.addEventListener('install', (event) => {
+  event.waitUntil((async () => {
+    const cache = await caches.open(SHELL_CACHE);
+    await Promise.all(PRECACHE.map((url) => precacheSafe(cache, url)));
+    self.skipWaiting();
+  })());
 });
 
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
-    // One-time migration off the old caching SW: delete every cache it left
-    // behind (localsky-shell/-assets/-snapshots-*). This SW caches nothing, so
-    // any surviving cache is dead weight that could only ever serve stale bytes.
+    // Drop every cache that is not the current shell cache. This both migrates
+    // off the old caching SW (localsky-assets/-snapshots-*) and prunes prior
+    // shell caches from earlier SW_VERSIONs, so only one fresh shell survives.
     const keys = await caches.keys();
-    await Promise.all(keys.map((k) => caches.delete(k)));
+    await Promise.all(keys.filter((k) => k !== SHELL_CACHE).map((k) => caches.delete(k)));
     await self.clients.claim();
+  })());
+});
+
+// ---- Offline shell (navigations only) ----
+//
+// Network-first: always try the real server. Only when the fetch rejects (the
+// device is offline / the server is unreachable) do we serve the cached offline
+// shell. We scope respondWith to navigation requests so /pkg, /api, images, and
+// everything else stay pure pass-through and keep their normal caching/hashing.
+self.addEventListener('fetch', (event) => {
+  const req = event.request;
+  if (req.method !== 'GET' || req.mode !== 'navigate') {
+    return; // pass-through: SW does not touch non-navigation requests
+  }
+  event.respondWith((async () => {
+    try {
+      return await fetch(req);
+    } catch {
+      const cache = await caches.open(SHELL_CACHE);
+      const shell = await cache.match(OFFLINE_URL);
+      return (
+        shell ||
+        new Response('You are offline.', {
+          status: 503,
+          headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+        })
+      );
+    }
   })());
 });
 

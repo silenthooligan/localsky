@@ -2,7 +2,7 @@
 # Stage 1 compiles the SSR binary + WASM client via cargo-leptos.
 # Stage 2 ships only the binary, the static `site/` bundle, and CA roots.
 
-FROM rust:slim-trixie@sha256:3b05f7c617a200c41c3506097f0d15fc193a1c93bfd8f141007b47cac8f95d3c AS builder
+FROM rust:slim-trixie@sha256:31ee7fc65186be7e0e0ccb3f2ca305f14e4739e7642a1ae65753aa5d7b874523 AS builder
 
 RUN apt-get update && apt-get install -y \
         pkg-config libssl-dev curl wget build-essential \
@@ -65,6 +65,12 @@ COPY docs ./docs
 ARG GIT_SHA=dev
 ENV GIT_SHA=${GIT_SHA}
 
+# NOTE (build memory): the front-end wasm-release compile (opt-level=z) peaks
+# above 16GB and OOM-kills on an under-provisioned runner ("cannot allocate
+# memory" / SIGKILL). CI pins this build to runner-210 (32GB); the wasm-release
+# profile uses thin LTO + 16 codegen units to keep the peak in check. If this
+# step starts OOM-ing again as the crate grows, raise the runner's RAM rather
+# than lowering opt-level (which would balloon the PWA bundle).
 RUN cargo leptos build --release
 
 # hash-files emits content-hashed /pkg names + a hash.txt manifest. leptos reads
@@ -86,18 +92,22 @@ RUN HASHTXT="$(find /build/target -name hash.txt -print -quit)" \
 RUN mdbook build docs
 
 # ── Runtime ──
-FROM debian:trixie-slim@sha256:4e401d95de7083948053197a9c3913343cd06b706bf15eb6a0c3ccd26f436a0e
+FROM debian:trixie-slim
 
-RUN apt-get update && apt-get install -y \
-        ca-certificates libssl3 curl gosu \
+# ca-certificates + OpenSSL 3 libs for outbound HTTPS, curl for the
+# healthcheck, tzdata for local-time rendering, and gosu for the
+# fix-perms-then-drop entrypoint (docker-entrypoint.sh chowns /data and /keys
+# as root, then drops to 10001:10001). The uid:10001 app user is created here
+# (the public base has no pre-baked app user).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates libssl3 curl tzdata gosu \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd --system --gid 10001 localsky \
-    && useradd --system --uid 10001 --gid 10001 --home-dir /app --shell /usr/sbin/nologin localsky
+    && useradd --uid 10001 --user-group --no-create-home --shell /usr/sbin/nologin localsky
 
 WORKDIR /app
 COPY --from=builder --chown=10001:10001 /build/target/release/localsky /app/localsky
 COPY --from=builder --chown=10001:10001 /build/target/site /app/site
-# hash.txt MUST sit next to the binary; leptos reads it from
+# hash.txt MUST sit next to the binary, leptos reads it from
 # current_exe().parent()/hash.txt to map /pkg names to their hashed forms.
 COPY --from=builder --chown=10001:10001 /build/hash.txt /app/hash.txt
 # Bundled documentation, served same-origin at /docs (LEPTOS_SITE_ROOT=
@@ -113,11 +123,11 @@ RUN mkdir -p /data /keys && chown -R 10001:10001 /data /keys
 
 ENV LEPTOS_SITE_ADDR="0.0.0.0:8090"
 ENV LEPTOS_SITE_ROOT="site"
-ENV RUST_LOG="info"
 # Emit content-hashed /pkg URLs (reads /app/hash.txt). No compile-time fallback
-# in leptos_config; must be set here or names go hashless and 404 the hashed
+# in leptos_config, must be set here or names go hashless and 404 the hashed
 # files on disk.
 ENV LEPTOS_HASH_FILES="true"
+ENV RUST_LOG="info"
 
 # Fix-perms-then-drop: the container starts as root, the entrypoint chowns the
 # writable mounts, then gosu-drops to uid 10001 to run the app unprivileged.

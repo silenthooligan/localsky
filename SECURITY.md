@@ -1,5 +1,9 @@
 # Security Policy
 
+For the detailed security/threat model (deployment postures, the privileged-path
+list, CSRF/Origin and trusted-proxy handling, and the deliberate LAN-SSRF stance),
+see [THREAT_MODEL.md](THREAT_MODEL.md).
+
 ## Supported Versions
 
 LocalSky is pre-1.0. The current minor release receives security patches; older minors do not.

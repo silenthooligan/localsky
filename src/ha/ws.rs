@@ -300,6 +300,8 @@ pub fn build_ha_devices(devs: &[Value], ents: &[Value]) -> Vec<Device> {
             online: None,
             last_seen_epoch: None,
             also_in_ha: false,
+            enabled: None,
+            source_kind: None,
             children,
         });
     }

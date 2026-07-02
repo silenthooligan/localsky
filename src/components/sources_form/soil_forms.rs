@@ -20,7 +20,7 @@
 
 use leptos::prelude::*;
 
-use crate::components::ui::FormField;
+use crate::components::ui::{Button, FormField};
 
 // ===================================================================
 // Pure logic: MQTT soil subscription round-trip
@@ -496,9 +496,9 @@ pub fn MqttSoilSubscriptions(
                                         prop:value=offset.to_string() on:input=set_offset/>
                                 </FormField>
                             </div>
-                            <button type="button" class="setup-footer__btn setup-footer__btn--danger" on:click=remove>
+                            <Button variant="danger" on_click=Callback::new(remove)>
                                 "Remove subscription"
-                            </button>
+                            </Button>
                         </div>
                     }
                 }).collect_view()
@@ -638,9 +638,9 @@ pub fn EcowittSoilCalibration(config_text: RwSignal<String>) -> impl IntoView {
                                         prop:value=ad_wet.to_string() on:input=set_wet/>
                                 </FormField>
                             </div>
-                            <button type="button" class="setup-footer__btn setup-footer__btn--danger" on:click=remove>
+                            <Button variant="danger" on_click=Callback::new(remove)>
                                 "Remove channel"
-                            </button>
+                            </Button>
                         </div>
                     }
                 }).collect_view()

@@ -38,8 +38,8 @@ pub fn builtin_rule_catalog() -> &'static [(&'static str, &'static str, &'static
         (
             "live_data",
             "Live weather availability",
-            "The engine will decide even with no station data and no forecast, instead of failing safe with a skip.",
-            false,
+            "Always on: when there is no station data and no forecast, the engine fails safe with a skip rather than deciding on fabricated values. This safety gate cannot be disabled.",
+            true,
         ),
         (
             "rain_now",
@@ -84,6 +84,12 @@ pub fn builtin_rule_catalog() -> &'static [(&'static str, &'static str, &'static
             false,
         ),
         (
+            "observed_rain",
+            "Observed recent rain",
+            "Watering can run even after heavy measured rain has fallen over the recent window (today plus the configured past days). This sensor-independent backstop normally skips the morning after a soaking even when a soil probe is offline.",
+            false,
+        ),
+        (
             "soil_saturation",
             "Soil saturation",
             "Watering can run even when soil moisture is at or above the saturation threshold (yard-wide and per zone).",
@@ -105,6 +111,12 @@ pub fn builtin_rule_catalog() -> &'static [(&'static str, &'static str, &'static
             "rain_3day",
             "Heavy rain (3 day)",
             "Watering can run even when the weighted 3 day rain outlook crosses the heavy rain threshold.",
+            false,
+        ),
+        (
+            "soil_floor",
+            "Dry-soil floor",
+            "A zone measured below its minimum soil moisture waters even when a forecast-rain skip (within 4h, tomorrow, or 3-day) would otherwise apply. Disabling this returns to forecast-only skips.",
             false,
         ),
         (

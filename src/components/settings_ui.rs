@@ -18,6 +18,78 @@
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
 
+use crate::components::ui::Button;
+
+/// Status hero for an integration/settings page: icon + title + a status chip +
+/// a plain-English meaning. Promotes the Home Assistant page's hero pattern into
+/// a shared component so every integration page (LLM, Notifications, Radar, ...)
+/// reads as one family. `ok` drives the chip color + the highlighted border;
+/// `chip` is the short status word; `meaning` is the one-line explanation.
+/// Also keeps each page's monomorphized view tree flat (it's one component, not
+/// inline nesting that overflows rustc's type-depth budget).
+#[component]
+pub fn StatusHero(
+    icon: &'static str,
+    title: &'static str,
+    #[prop(into)] ok: Signal<bool>,
+    #[prop(into)] chip: Signal<String>,
+    #[prop(into)] meaning: Signal<String>,
+) -> impl IntoView {
+    view! {
+        <div class="ha-hero" class:ha-hero--ok=move || ok.get()>
+            <span class="ha-hero__icon">
+                <crate::components::ui::Icon name=icon size=24/>
+            </span>
+            <div class="ha-hero__text">
+                <div class="ha-hero__row">
+                    <strong>{title}</strong>
+                    <span class=move || {
+                        if ok.get() { "ha-chip ha-chip--on" } else { "ha-chip ha-chip--off" }
+                    }>
+                        <span class="ha-chip__dot" aria-hidden="true"></span>
+                        {move || chip.get()}
+                    </span>
+                </div>
+                <p>{move || meaning.get()}</p>
+            </div>
+        </div>
+    }
+}
+
+/// The four first-class entities in LocalSky's mental model. Drives the
+/// left-stripe color + the uppercase identity badge on every entity card, so
+/// "is this a source, a sensor, a controller, or a zone?" is answerable at a
+/// glance. SOURCE provides -> SENSOR (a reading) binds to -> ZONE <- fired by
+/// CONTROLLER.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum EntityKind {
+    Source,
+    Sensor,
+    Controller,
+    Zone,
+}
+
+impl EntityKind {
+    /// CSS slug for the entity-stripe-- / entity-badge-- modifier classes.
+    pub fn slug(self) -> &'static str {
+        match self {
+            EntityKind::Source => "source",
+            EntityKind::Sensor => "sensor",
+            EntityKind::Controller => "controller",
+            EntityKind::Zone => "zone",
+        }
+    }
+    /// Badge label.
+    pub fn label(self) -> &'static str {
+        match self {
+            EntityKind::Source => "Source",
+            EntityKind::Sensor => "Sensor",
+            EntityKind::Controller => "Controller",
+            EntityKind::Zone => "Zone",
+        }
+    }
+}
+
 /// Semantic color tone for SettingsBadge.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum BadgeTone {
@@ -160,6 +232,16 @@ pub fn SettingsCard(
     /// zone species). Empty string hides the subtitle row.
     #[prop(default = String::new())]
     subtitle: String,
+    /// Entity identity. When set, the card gets a left color-stripe + an
+    /// uppercase identity badge so its category is instantly legible.
+    #[prop(default = None)]
+    entity: Option<EntityKind>,
+    /// True when the card opens an editor. Adds the shared `.is-editable`
+    /// affordance (a persistent pencil cue in the top-right per the affordance
+    /// grammar), so a native, editable device is distinguishable at rest without
+    /// having to expand it to discover the Edit button.
+    #[prop(default = false)]
+    editable: bool,
     /// Badges to the right of the title. Pass `move || view!{}` if
     /// none.
     badges: Children,
@@ -172,12 +254,21 @@ pub fn SettingsCard(
 ) -> impl IntoView {
     let expanded = RwSignal::new(false);
     let toggle = move |_| expanded.update(|v| *v = !*v);
+    // Entity stripe class is fixed for the card's lifetime; fold it into the
+    // (reactive) expanded class so the left color-stripe renders.
+    let stripe = entity
+        .map(|e| format!(" entity-stripe entity-stripe--{}", e.slug()))
+        .unwrap_or_default();
+    // The editable pencil cue is fixed for the card's lifetime; fold it into the
+    // (reactive) class alongside the stripe.
+    let editable_cls = if editable { " is-editable" } else { "" };
     let card_class = move || {
-        if expanded.get() {
+        let base = if expanded.get() {
             "settings-card is-expanded"
         } else {
             "settings-card"
-        }
+        };
+        format!("{base}{stripe}{editable_cls}")
     };
     let chevron_class = move || {
         if expanded.get() {
@@ -208,11 +299,18 @@ pub fn SettingsCard(
                 </span>
                 <span class="settings-card__head-text">
                     <span class="settings-card__title">{title}</span>
+                    <span class="settings-card__badges">
+                        {entity.map(|e| view! {
+                            <span class=format!("entity-badge entity-badge--{}", e.slug())>
+                                {e.label()}
+                            </span>
+                        })}
+                        {badges()}
+                    </span>
                     {show_subtitle.then(|| view! {
                         <span class="settings-card__subtitle">{subtitle}</span>
                     })}
                 </span>
-                <span class="settings-card__badges">{badges()}</span>
                 <span class=chevron_class aria-hidden="true">"\u{203A}"</span>
             </button>
             <div class="settings-card__body">
@@ -265,11 +363,10 @@ pub fn SettingsLoadError(
                 "fetch them. Editing is disabled until the load succeeds so a "
                 "save can't overwrite the real configuration with an empty form."
             </p>
-            <button
-                type="button"
-                class="setup-footer__btn setup-footer__btn--primary"
-                on:click=move |_| retry.update(|n| *n += 1)
-            >"Retry"</button>
+            <Button
+                variant="primary"
+                on_click=Callback::new(move |_| retry.update(|n| *n += 1))
+            >"Retry"</Button>
         </crate::components::ui::Panel>
     }
 }

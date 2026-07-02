@@ -288,6 +288,12 @@ pub fn apply_zone_rules(rules: &[ConditionRule], ctx: &ConditionCtx) -> Conditio
             } else {
                 None
             },
+            margin_label: None,
+            // P1: custom condition rules have a user-defined metric, so they carry
+            // no canonical engine operands (value/threshold/unit_kind stay None).
+            value: None,
+            threshold: None,
+            unit_kind: None,
         });
         if fired {
             match &rule.action {

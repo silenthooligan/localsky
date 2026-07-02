@@ -22,6 +22,7 @@
 - [Irrigation controllers](controllers.md)
 - [DIY & ESP32 controllers](diy-controllers.md)
 - [Forecast sources and merge](forecast.md)
+- [Weather providers and what they measure](provider-matrix.md)
 - [Live radar](radar.md)
 
 # Using LocalSky

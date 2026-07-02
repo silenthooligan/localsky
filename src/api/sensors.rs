@@ -306,47 +306,9 @@ struct FlowSensor {
 
 /// Source kind tag for the inventory (mirrors health's source_kind_label
 /// but local so the modules stay decoupled).
-fn source_kind_tag(kind: &crate::config::schema::SourceKind) -> &'static str {
-    use crate::config::schema::SourceKind::*;
-    match kind {
-        TempestUdp(_) => "tempest_udp",
-        TempestWs(_) => "tempest_ws",
-        OpenMeteo(_) => "open_meteo",
-        EcowittLocal(_) => "ecowitt_local",
-        EcowittGwPoll(_) => "ecowitt_gw_poll",
-        Nws(_) => "nws",
-        OpenWeather(_) => "openweather",
-        PirateWeather(_) => "pirate_weather",
-        MetNorway(_) => "met_norway",
-        AmbientWeather(_) => "ambient_weather",
-        Netatmo(_) => "netatmo",
-        Yolink(_) => "yolink",
-        Lacrosse(_) => "lacrosse",
-        TuyaCloud(_) => "tuya_cloud",
-        DavisWll(_) => "davis_wll",
-        HaPassthrough(_) => "ha_passthrough",
-        Mqtt(_) => "mqtt",
-        HttpWebhook(_) => "http_webhook",
-        Blitzortung(_) => "blitzortung",
-        DemoReplay(_) => "demo_replay",
-    }
-}
+use crate::config::kind_labels::source_kind_label as source_kind_tag;
 
-fn controller_kind_tag(kind: &crate::config::schema::ControllerKind) -> &'static str {
-    use crate::config::schema::ControllerKind::*;
-    match kind {
-        OpensprinklerDirect(_) => "opensprinkler_direct",
-        HaServiceCall(_) => "ha_service_call",
-        EsphomeNative(_) => "esphome_native",
-        Rachio(_) => "rachio",
-        Hydrawise(_) => "hydrawise",
-        Bhyve(_) => "bhyve",
-        Rainbird(_) => "rainbird",
-        MqttCommand(_) => "mqtt_command",
-        HttpGeneric(_) => "http_generic",
-        DryRun(_) => "dry_run",
-    }
-}
+use crate::config::kind_labels::controller_kind_label as controller_kind_tag;
 
 /// Map a soil-channel `key` to a friendly channel label.
 fn channel_label(key: &str) -> String {

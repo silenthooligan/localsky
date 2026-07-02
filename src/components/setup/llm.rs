@@ -6,7 +6,7 @@
 use leptos::prelude::*;
 
 use crate::components::setup::shell::{next_step_href, prev_step_href, SetupFooter};
-use crate::components::ui::{FormField, HelpHint, Panel, SecretInput, SegmentedControl};
+use crate::components::ui::{Button, FormField, HelpHint, Panel, SecretInput, SegmentedControl};
 
 #[cfg(feature = "hydrate")]
 async fn fetch_draft() -> Option<serde_json::Value> {
@@ -73,7 +73,11 @@ fn llm_json(
 
 #[component]
 pub fn LlmStep() -> impl IntoView {
-    let provider = RwSignal::new("auto".to_string());
+    // Default to "none": a user who clicks straight through the wizard must NOT
+    // ship a live advisor. "auto" persists config.llm = { provider: "auto" },
+    // which makes the running app probe localhost:11434/8080/1234 every tick and
+    // never connect on a no-LLM box. The user opts in by picking a provider.
+    let provider = RwSignal::new("none".to_string());
     let base_url = RwSignal::new(String::new());
     let model = RwSignal::new(String::new());
     let api_key = RwSignal::new(String::new());
@@ -95,7 +99,7 @@ pub fn LlmStep() -> impl IntoView {
                     let p = llm
                         .get("provider")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("auto")
+                        .unwrap_or("none")
                         .to_string();
                     let cfg = llm.get("config").cloned().unwrap_or_default();
                     base_url.set(
@@ -323,14 +327,13 @@ pub fn LlmStep() -> impl IntoView {
 
             <Show when=show_test>
                 <div class="settings-form-actions" style="justify-content:flex-start">
-                    <button
-                        type="button"
-                        class="setup-footer__btn setup-footer__btn--ghost"
-                        prop:disabled=move || testing.get()
-                        on:click=on_test
+                    <Button
+                        variant="ghost"
+                        disabled=Signal::derive(move || testing.get())
+                        on_click=Callback::new(on_test)
                     >
                         {move || if testing.get() { "Testing…" } else { "Test provider" }}
-                    </button>
+                    </Button>
                 </div>
             </Show>
             {move || {

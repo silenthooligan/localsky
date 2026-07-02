@@ -199,10 +199,11 @@ pub fn SettingsHomeAssistant() -> impl IntoView {
     };
 
     view! {
-        <div class="settings-section">
-            <header class="settings-section__head">
-                <h2 class="settings-section__title">"Home Assistant"</h2>
-                <p class="settings-section__sub">
+        <div class="settings-page">
+            <header class="settings-page__header">
+                <a class="settings-page__back" href="/settings">"← Settings"</a>
+                <h1 class="settings-page__title">"Home Assistant"</h1>
+                <p class="settings-page__subtitle">
                     "Don't use Home Assistant? Skip this page entirely; LocalSky "
                     "never needs it. If you do, one integration connects them."
                 </p>

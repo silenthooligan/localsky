@@ -9,6 +9,13 @@
 // tower_http::services::ServeDir mounted at /site/photos in main.rs,
 // so the URL this endpoint returns is directly fetchable by the
 // browser without any extra wiring.
+//
+// GATING (LS-REC-05): the upload POST is in the PRIVILEGED set
+// (auth::middleware::is_privileged_path), so in the shipped Disabled default
+// an anonymous internet caller cannot fill disk with 10 MB uploads; an
+// IP-vouched LAN/loopback caller (or an authenticated owner) still reaches
+// it. The gate runs in the middleware layer, not here, mirroring how POST
+// /irrigation/action is gated.
 
 use axum::{
     extract::{Multipart, State},

@@ -10,12 +10,13 @@
 
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
+use leptos_router::hooks::{use_location, use_navigate};
 
 use super::help::SettingsHelp;
 use super::{
-    SettingsAccount, SettingsAdvanced, SettingsControllers, SettingsDevices, SettingsHomeAssistant,
-    SettingsLlm, SettingsLocation, SettingsNotifications, SettingsRadar, SettingsRestrictions,
-    SettingsSchedules, SettingsSensors, SettingsSkipRules, SettingsSources, SettingsTheme,
+    SettingsAccount, SettingsAdvanced, SettingsControllers, SettingsDataSources, SettingsDevices,
+    SettingsHomeAssistant, SettingsLlm, SettingsLocation, SettingsNotifications, SettingsRadar,
+    SettingsRestrictions, SettingsSchedules, SettingsSensors, SettingsSkipRules, SettingsTheme,
     SettingsUnits, SettingsZones,
 };
 use crate::components::ui::Icon;
@@ -25,6 +26,9 @@ struct SectionLink {
     label: &'static str,
     helptext: &'static str,
     icon: &'static str,
+    /// Entity identity ("source"/"sensor"/"controller"/"zone") -> a left
+    /// color-stripe so the four hardware concepts are visually distinct.
+    entity: Option<&'static str>,
 }
 
 struct SectionGroup {
@@ -36,49 +40,43 @@ struct SectionGroup {
 const GROUPS: &[SectionGroup] = &[
     SectionGroup {
         title: "Hardware",
-        subtitle: "Wire up the physical world, set once, mostly.",
+        // One front door (Devices) for everything LocalSky talks to; Zones is
+        // the yard it waters. Sources, sensors and controllers are no longer
+        // separate doors -- they live inside Devices (a source carries its
+        // sensors; a controller runs its zones).
+        subtitle: "Everything LocalSky talks to, and the yard it waters.",
         links: &[
             SectionLink {
                 key: "devices",
                 label: "Devices",
-                helptext: "Every gateway, controller, and service, with what it provides",
+                helptext: "Add and edit your weather sources + controllers, see the sensors each source carries, and pick which source provides each reading",
                 icon: "controllers",
+                entity: None,
             },
+            // "Data sources" is no longer its own rail door: the per-field source
+            // picker is folded into the Devices hub (design #4), so there is one
+            // home for it. The /settings/data-sources route + ?section=data-sources
+            // still resolve (redirect / shell pane) for any stale deep-link.
             SectionLink {
-                key: "sensors",
-                label: "Sensors",
-                helptext: "Soil probes and flow meters: live readings, battery, zone binding",
-                icon: "gauge",
+                key: "zones",
+                label: "Zones",
+                helptext: "An AREA of yard: grass species, soil texture, area, sprinkler rate",
+                icon: "zones",
+                entity: Some("zone"),
             },
             SectionLink {
                 key: "home-assistant",
                 label: "Home Assistant",
                 helptext: "The bidirectional link: what flows in, what HA consumes",
                 icon: "home",
-            },
-            SectionLink {
-                key: "zones",
-                label: "Zones",
-                helptext: "Grass species, soil texture, area, sprinkler PR",
-                icon: "zones",
-            },
-            SectionLink {
-                key: "sources",
-                label: "Weather sources",
-                helptext: "Tempest, Ecowitt, Open-Meteo, and 18 more",
-                icon: "sources",
-            },
-            SectionLink {
-                key: "controllers",
-                label: "Controllers",
-                helptext: "OpenSprinkler, DIY/ESP32 (HTTP or MQTT), Rachio, Hydrawise, B-hyve, Home Assistant",
-                icon: "controllers",
+                entity: None,
             },
             SectionLink {
                 key: "location",
                 label: "Location",
                 helptext: "Lat / lon / elevation / timezone",
                 icon: "location",
+                entity: None,
             },
         ],
     },
@@ -91,24 +89,28 @@ const GROUPS: &[SectionGroup] = &[
                 label: "Skip rules",
                 helptext: "Rain, wind, freeze, heat-advisory thresholds",
                 icon: "rules",
+                entity: None,
             },
             SectionLink {
                 key: "restrictions",
                 label: "Restrictions",
                 helptext: "Day-of-week limits, time windows, blackout dates",
                 icon: "ban",
+                entity: None,
             },
             SectionLink {
                 key: "schedules",
                 label: "Schedules",
                 helptext: "Manual programs that override the engine",
                 icon: "calendar",
+                entity: None,
             },
             SectionLink {
                 key: "llm",
                 label: "LLM advisor",
                 helptext: "Ollama, llama.cpp, OpenAI-compatible",
                 icon: "llm",
+                entity: None,
             },
         ],
     },
@@ -121,52 +123,124 @@ const GROUPS: &[SectionGroup] = &[
                 label: "Account",
                 helptext: "Owner login + API tokens for integrations",
                 icon: "settings",
+                entity: None,
             },
             SectionLink {
                 key: "notifications",
                 label: "Notifications",
                 helptext: "Web Push, MQTT discovery, ntfy, Slack",
                 icon: "bell",
+                entity: None,
             },
             SectionLink {
                 key: "units",
                 label: "Units",
-                helptext: "Imperial, metric, or per-field overrides",
+                helptext: "Household default (imperial or metric), with optional per-device overrides",
                 icon: "units",
+                entity: None,
             },
             SectionLink {
                 key: "radar",
                 label: "Radar",
                 helptext: "Imagery providers + default map layers",
                 icon: "sources",
+                entity: None,
             },
             SectionLink {
                 key: "theme",
                 label: "Theme",
                 helptext: "Dark, light, auto, high-contrast",
                 icon: "theme",
+                entity: None,
             },
             SectionLink {
                 key: "help",
                 label: "Help & documentation",
                 helptext: "Installation guide, manual, migration, API",
                 icon: "info",
+                entity: None,
             },
             SectionLink {
                 key: "advanced",
                 label: "Advanced",
                 helptext: "Nerd mode, raw snapshots, rollback",
                 icon: "advanced",
+                entity: None,
             },
         ],
     },
 ];
 
+/// Map a `?section=` query value to its canonical static key, so a bogus query
+/// can't open a phantom pane. None = the hub.
+fn section_key(s: &str) -> Option<&'static str> {
+    const KEYS: &[&str] = &[
+        "devices",
+        "data-sources",
+        "sensors",
+        "home-assistant",
+        "zones",
+        "controllers",
+        "location",
+        "skip-rules",
+        "restrictions",
+        "schedules",
+        "llm",
+        "account",
+        "notifications",
+        "units",
+        "radar",
+        "theme",
+        "help",
+        "advanced",
+    ];
+    KEYS.iter().copied().find(|&k| k == s)
+}
+
 #[component]
 pub fn SettingsHome() -> impl IntoView {
-    // Selected section key. None = show the hub (and a placeholder pane on
-    // desktop). SSR + hydrate's first frame both see None, so no mismatch.
-    let selected: RwSignal<Option<&'static str>> = RwSignal::new(None);
+    // The open section is URL state (?section=KEY), not a bare signal: pushing a
+    // real history entry per section means the phone's back gesture returns to
+    // the settings menu instead of leaving settings entirely, and a section
+    // deep-links. SSR + hydrate both derive it from the same URL, so no
+    // mismatch. None = the hub.
+    let loc = use_location();
+    let selected = Signal::derive(move || {
+        loc.search
+            .get()
+            .trim_start_matches('?')
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("section=").map(str::to_string))
+            .and_then(|v| section_key(&v))
+    });
+    let nav_go = use_navigate();
+    let go: Callback<&'static str> = Callback::new(move |key: &'static str| {
+        nav_go(&format!("/settings?section={key}"), Default::default());
+    });
+    let nav_back = use_navigate();
+    let go_home: Callback<()> = Callback::new(move |_| {
+        nav_back("/settings", Default::default());
+    });
+
+    // Selecting a section swaps the detail pane in place (URL state, no full
+    // navigation), so move focus into the pane so SR/keyboard users follow.
+    // Skip the first run so the initial render (deep-link or hub) doesn't
+    // steal focus on load.
+    let detail_pane: NodeRef<leptos::html::Div> = NodeRef::new();
+    #[cfg(feature = "hydrate")]
+    {
+        Effect::new(move |prev: Option<Option<&'static str>>| {
+            let cur = selected.get();
+            if let Some(prev_sel) = prev {
+                if prev_sel != cur && cur.is_some() {
+                    if let Some(el) = detail_pane.get() {
+                        let _ = el.focus();
+                    }
+                }
+            }
+            cur
+        });
+    }
 
     view! {
         <div class="settings-page-wrap">
@@ -188,15 +262,21 @@ pub fn SettingsHome() -> impl IntoView {
                                 <h2 class="settings-group__title">{g.title}</h2>
                                 <p class="settings-group__sub">{g.subtitle}</p>
                             </div>
-                            <div class="settings-card">
+                            <div class="settings-nav-card">
                                 {g.links.iter().map(|s| {
                                     let key = s.key;
+                                    let cls = match s.entity {
+                                        Some(e) => format!(
+                                            "ui-list-item ui-list-item--link settings-row entity-stripe entity-stripe--{e}"
+                                        ),
+                                        None => "ui-list-item ui-list-item--link settings-row".to_string(),
+                                    };
                                     view! {
                                         <button
                                             type="button"
-                                            class="ui-list-item ui-list-item--link settings-row"
+                                            class=cls
                                             class:is-selected=move || selected.get() == Some(key)
-                                            on:click=move |_| selected.set(Some(key))
+                                            on:click=move |_| go.run(key)
                                         >
                                             <span class="ui-list-item__icon"><Icon name=s.icon size=18/></span>
                                             <span class="ui-list-item__text">
@@ -213,7 +293,12 @@ pub fn SettingsHome() -> impl IntoView {
                 }).collect_view()}
             </div>
 
-            <div class="settings-shell__detail">
+            <div
+                class="settings-shell__detail"
+                node_ref=detail_pane
+                tabindex="-1"
+                aria-live="polite"
+            >
                 // Header mirrors the left column's group heads so the pane
                 // card drops down and top-aligns with the left section cards.
                 <div class="settings-group__head">
@@ -224,13 +309,13 @@ pub fn SettingsHome() -> impl IntoView {
                 </div>
 
                 {move || match selected.get() {
-                    None => view! { <SettingsOverview selected=selected/> }.into_any(),
+                    None => view! { <SettingsOverview go=go/> }.into_any(),
                     Some(key) => view! {
                         <div class="settings-shell__pane">
                             <button
                                 type="button"
                                 class="settings-shell__back"
-                                on:click=move |_| selected.set(None)
+                                on:click=move |_| go_home.run(())
                             >
                                 <Icon name="chevron-right" size=16 class="settings-shell__back-icon".to_string()/>
                                 "Back"
@@ -254,7 +339,7 @@ pub fn SettingsHome() -> impl IntoView {
 /// counts with per-source freshness dots, plus quick links into the
 /// relevant sections.
 #[component]
-fn SettingsOverview(selected: RwSignal<Option<&'static str>>) -> impl IntoView {
+fn SettingsOverview(go: Callback<&'static str>) -> impl IntoView {
     let health: RwSignal<serde_json::Value> = RwSignal::new(serde_json::Value::Null);
 
     #[cfg(feature = "hydrate")]
@@ -365,8 +450,68 @@ fn SettingsOverview(selected: RwSignal<Option<&'static str>>) -> impl IntoView {
             })
             .collect_view();
 
+        // First-run guidance: a short "what's left" checklist driven by real
+        // state, shown until the hardware is configured, so a beginner who just
+        // finished the wizard has a path instead of a flat wall of sections.
+        let has_source = !sources.is_empty();
+        let has_controller = !controllers.is_empty();
+        let has_default = controllers
+            .iter()
+            .any(|c| c.get("default").and_then(|v| v.as_bool()) == Some(true));
+        let setup_done = has_source && has_controller && has_default;
+        let done_n = [has_source, has_controller, has_default]
+            .iter()
+            .filter(|b| **b)
+            .count();
+
         view! {
             <div class="settings-overview">
+                {(!setup_done).then(|| view! {
+                    <div class="settings-checklist">
+                        <div class="settings-checklist__head">
+                            <h3 class="settings-checklist__title">"Finish setting up"</h3>
+                            <span class="settings-checklist__count">{format!("{done_n} of 3")}</span>
+                        </div>
+                        <div class="settings-checklist__bar" aria-hidden="true">
+                            <div
+                                class="settings-checklist__bar-fill"
+                                style=format!("width: {}%", done_n * 100 / 3)
+                            ></div>
+                        </div>
+                        <ul class="settings-checklist__list">
+                            <li class=if has_source { "settings-checklist__item is-done" } else { "settings-checklist__item" }>
+                                <span class="settings-checklist__mark" aria-hidden="true">
+                                    {if has_source { "\u{2713}" } else { "\u{25CB}" }}
+                                </span>
+                                <span class="settings-checklist__label">"Add a weather source"</span>
+                                {(!has_source).then(|| view! {
+                                    <button type="button" class="settings-overview__jump settings-checklist__go"
+                                        on:click=move |_| go.run("devices")>"Set up"</button>
+                                })}
+                            </li>
+                            <li class=if has_controller { "settings-checklist__item is-done" } else { "settings-checklist__item" }>
+                                <span class="settings-checklist__mark" aria-hidden="true">
+                                    {if has_controller { "\u{2713}" } else { "\u{25CB}" }}
+                                </span>
+                                <span class="settings-checklist__label">"Add a controller"</span>
+                                {(!has_controller).then(|| view! {
+                                    <button type="button" class="settings-overview__jump settings-checklist__go"
+                                        on:click=move |_| go.run("devices")>"Set up"</button>
+                                })}
+                            </li>
+                            <li class=if has_default { "settings-checklist__item is-done" } else { "settings-checklist__item" }>
+                                <span class="settings-checklist__mark" aria-hidden="true">
+                                    {if has_default { "\u{2713}" } else { "\u{25CB}" }}
+                                </span>
+                                <span class="settings-checklist__label">"Pick a default controller"</span>
+                                {(!has_default).then(|| view! {
+                                    <button type="button" class="settings-overview__jump settings-checklist__go"
+                                        on:click=move |_| go.run("devices")>"Set up"</button>
+                                })}
+                            </li>
+                        </ul>
+                    </div>
+                })}
                 <div class="settings-overview__stats">
                     <div class="settings-overview__stat">
                         <span class="settings-overview__stat-label">"Status"</span>
@@ -385,8 +530,12 @@ fn SettingsOverview(selected: RwSignal<Option<&'static str>>) -> impl IntoView {
                 <div class="settings-overview__section">
                     <div class="settings-overview__section-head">
                         <h3>"Weather sources"</h3>
+                        // Land in the unified Devices hub, not the orphaned
+                        // raw-JSON sources editor (legacy /settings/sources now
+                        // redirects here anyway), so every "Edit" stays in one
+                        // place inside the settings shell.
                         <button type="button" class="settings-overview__jump"
-                            on:click=move |_| selected.set(Some("sources"))>"Edit"</button>
+                            on:click=move |_| go.run("devices")>"Edit"</button>
                     </div>
                     <ul class="settings-overview__list">{source_rows}</ul>
                 </div>
@@ -394,8 +543,10 @@ fn SettingsOverview(selected: RwSignal<Option<&'static str>>) -> impl IntoView {
                 <div class="settings-overview__section">
                     <div class="settings-overview__section-head">
                         <h3>"Controllers"</h3>
+                        // Same: the Devices hub owns controllers too (the legacy
+                        // /settings/controllers route redirects here).
                         <button type="button" class="settings-overview__jump"
-                            on:click=move |_| selected.set(Some("controllers"))>"Edit"</button>
+                            on:click=move |_| go.run("devices")>"Edit"</button>
                     </div>
                     <ul class="settings-overview__list">{controller_rows}</ul>
                 </div>
@@ -414,11 +565,11 @@ fn SettingsOverview(selected: RwSignal<Option<&'static str>>) -> impl IntoView {
 fn section_view(key: &str) -> leptos::prelude::AnyView {
     match key {
         "devices" => view! { <SettingsDevices/> }.into_any(),
+        "data-sources" => view! { <SettingsDataSources/> }.into_any(),
         "sensors" => view! { <SettingsSensors/> }.into_any(),
         "home-assistant" => view! { <SettingsHomeAssistant/> }.into_any(),
         "help" => view! { <SettingsHelp/> }.into_any(),
         "zones" => view! { <SettingsZones/> }.into_any(),
-        "sources" => view! { <SettingsSources/> }.into_any(),
         "controllers" => view! { <SettingsControllers/> }.into_any(),
         "location" => view! { <SettingsLocation/> }.into_any(),
         "skip-rules" => view! { <SettingsSkipRules/> }.into_any(),

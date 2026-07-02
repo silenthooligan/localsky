@@ -25,16 +25,27 @@
 use std::time::Duration;
 
 use serde_json::Value;
+use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
 use crate::config::schema::EcowittGwPollConfig;
 use crate::persistence::sensor_history::Reading;
 use crate::persistence::SensorHistoryStore;
+use crate::ports::weather_source::{SourceEvent, WeatherField};
 
 /// Parse the leading numeric portion of an Ecowitt `val` string. The gateway
 /// appends units and symbols ("56%", "3.13 mph", "0.0 in", "71.6"); we take
 /// the leading sign/digits/decimal run and parse that.
 fn parse_num(s: &str) -> Option<f64> {
+    parse_num_with_unit(s).map(|(v, _)| v)
+}
+
+/// Like `parse_num` but also returns the trailing unit token (everything after
+/// the number, degree-glyph-stripped + trimmed). The gateway reports values in
+/// its configured display units and suffixes most of them ("3.13 mph",
+/// "29.93 inHg", "5.0 mm"), so the suffix tells us whether to convert to
+/// canonical imperial. `None` unit = no suffix (e.g. outdoor temp "22.0").
+fn parse_num_with_unit(s: &str) -> Option<(f64, Option<String>)> {
     let trimmed = s.trim();
     let end = trimmed
         .char_indices()
@@ -45,7 +56,62 @@ fn parse_num(s: &str) -> Option<f64> {
     if head.is_empty() {
         return None;
     }
-    head.parse::<f64>().ok()
+    let value = head.parse::<f64>().ok()?;
+    let rest = trimmed[end..].replace('\u{00b0}', "");
+    let unit = rest.trim();
+    let unit = (!unit.is_empty()).then(|| unit.to_string());
+    Some((value, unit))
+}
+
+/// Map an Ecowitt sensor_history key to the WeatherField CLASS whose unit
+/// conversion applies (temp/pressure/wind/rain). Returns None for keys that
+/// are unitless or already canonical (soil moisture %, EC, humidity, UV,
+/// solar, battery) so they pass through untouched.
+fn ecowitt_field(key: &str) -> Option<WeatherField> {
+    use WeatherField::*;
+    if key == "dewpointf" || key.contains("temp") {
+        Some(AirTempF)
+    } else if key.starts_with("barom") {
+        Some(PressureInHg)
+    } else if key.contains("wind") || key == "maxdailygust" {
+        Some(WindMph)
+    } else if key.contains("rain") {
+        Some(RainTodayIn)
+    } else {
+        None
+    }
+}
+
+/// Convert an Ecowitt reading to canonical imperial given the gateway's
+/// reported unit for that key. Non-convertible keys pass through.
+fn convert(key: &str, value: f64, unit: Option<&str>) -> f64 {
+    match ecowitt_field(key) {
+        Some(field) => crate::sources::units::to_canonical(field, value, unit),
+        None => value,
+    }
+}
+
+/// Map an OUTDOOR weather sensor_history key to its global WeatherField for the
+/// merge bus, so the snapshot bridge can populate the dashboard + HA weather
+/// entities. Soil channels, indoor (tempinf/humidityin), and per-channel
+/// (temp{ch}f/humidity{ch}) keys return None: they're history-only, not the
+/// global current-conditions snapshot. Values are already canonical imperial.
+fn weather_field_for_key(key: &str) -> Option<WeatherField> {
+    use WeatherField::*;
+    Some(match key {
+        "tempf" => AirTempF,
+        "dewpointf" => DewPointF,
+        "humidity" => RhPct,
+        "windspeedmph" => WindMph,
+        "windgustmph" => WindGustMph,
+        "baromabsin" => PressureInHg,
+        "dailyrainin" => RainTodayIn,
+        "rainratein" => RainIntensityInHr,
+        "solarradiation" => SolarWm2,
+        "uv" => UvIndex,
+        "solarradiation_lux" => Illuminance,
+        _ => return None,
+    })
 }
 
 /// Map a `common_list` Ecowitt id code to the sensor_history key the push
@@ -93,6 +159,18 @@ pub fn parse_livedata(body: &Value, source_id: &str, epoch: i64) -> Vec<Reading>
         });
     };
 
+    // Gateway temperature display unit, from the wh25 block's `unit` field
+    // ("F"/"C"). This is the gateway-global temp unit and the only signal for
+    // the outdoor common_list temps (which carry no per-value suffix). Defaults
+    // to imperial (None -> to_canonical passes through).
+    let temp_unit: Option<String> = body
+        .get("wh25")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+        .and_then(|w| w.get("unit"))
+        .and_then(Value::as_str)
+        .map(|s| s.to_string());
+
     // common_list, outdoor temp / humidity / wind / solar / uv.
     if let Some(arr) = body.get("common_list").and_then(Value::as_array) {
         for item in arr {
@@ -102,13 +180,20 @@ pub fn parse_livedata(body: &Value, source_id: &str, epoch: i64) -> Vec<Reading>
             ) else {
                 continue;
             };
-            if let (Some(key), Some(v)) = (common_key(id), parse_num(val)) {
-                push(key.to_string(), v);
+            if let (Some(key), Some((v, val_unit))) = (common_key(id), parse_num_with_unit(val)) {
+                // Wind carries its own suffix (mph/m·s⁻¹/km·h⁻¹); outdoor temp
+                // has no suffix, so fall back to the gateway temp unit.
+                let unit = val_unit.or_else(|| {
+                    matches!(key, "tempf" | "dewpointf")
+                        .then(|| temp_unit.clone())
+                        .flatten()
+                });
+                push(key.to_string(), convert(key, v, unit.as_deref()));
             }
         }
     }
 
-    // rain block, daily/rate/etc.
+    // rain block, daily/rate/etc. (suffix tells us in vs mm).
     if let Some(arr) = body.get("rain").and_then(Value::as_array) {
         for item in arr {
             let (Some(id), Some(val)) = (
@@ -117,8 +202,8 @@ pub fn parse_livedata(body: &Value, source_id: &str, epoch: i64) -> Vec<Reading>
             ) else {
                 continue;
             };
-            if let (Some(key), Some(v)) = (rain_key(id), parse_num(val)) {
-                push(key.to_string(), v);
+            if let (Some(key), Some((v, unit))) = (rain_key(id), parse_num_with_unit(val)) {
+                push(key.to_string(), convert(key, v, unit.as_deref()));
             }
         }
     }
@@ -126,12 +211,13 @@ pub fn parse_livedata(body: &Value, source_id: &str, epoch: i64) -> Vec<Reading>
     // wh25, the gateway's own indoor temp / humidity / pressure block.
     if let Some(arr) = body.get("wh25").and_then(Value::as_array) {
         if let Some(item) = arr.first() {
+            let wh25_unit = item.get("unit").and_then(Value::as_str);
             if let Some(v) = item
                 .get("intemp")
                 .and_then(Value::as_str)
                 .and_then(parse_num)
             {
-                push("tempinf".to_string(), v);
+                push("tempinf".to_string(), convert("tempinf", v, wh25_unit));
             }
             if let Some(v) = item
                 .get("inhumi")
@@ -140,14 +226,18 @@ pub fn parse_livedata(body: &Value, source_id: &str, epoch: i64) -> Vec<Reading>
             {
                 push("humidityin".to_string(), v);
             }
-            // Absolute pressure preferred; fall back to relative.
-            if let Some(v) = item
+            // Absolute pressure preferred; fall back to relative. The val
+            // carries the unit suffix (inHg vs hPa).
+            if let Some((v, u)) = item
                 .get("abs")
                 .or_else(|| item.get("rel"))
                 .and_then(Value::as_str)
-                .and_then(parse_num)
+                .and_then(parse_num_with_unit)
             {
-                push("baromabsin".to_string(), v);
+                push(
+                    "baromabsin".to_string(),
+                    convert("baromabsin", v, u.as_deref()),
+                );
             }
         }
     }
@@ -172,7 +262,9 @@ pub fn parse_livedata(body: &Value, source_id: &str, epoch: i64) -> Vec<Reading>
                     push(format!("soilmoisture{ch}"), v);
                 }
                 if let Some(v) = item.get("temp").and_then(Value::as_str).and_then(parse_num) {
-                    push(format!("soiltemp{ch}f"), v);
+                    let key = format!("soiltemp{ch}f");
+                    let v = convert(&key, v, item.get("unit").and_then(Value::as_str));
+                    push(key, v);
                 }
                 if let Some(v) = item.get("ec").and_then(Value::as_str).and_then(parse_num) {
                     push(format!("soilec{ch}"), v);
@@ -199,7 +291,9 @@ pub fn parse_livedata(body: &Value, source_id: &str, epoch: i64) -> Vec<Reading>
                     continue;
                 };
                 if let Some(v) = item.get("temp").and_then(Value::as_str).and_then(parse_num) {
-                    push(format!("temp{ch}f"), v);
+                    let key = format!("temp{ch}f");
+                    let v = convert(&key, v, item.get("unit").and_then(Value::as_str));
+                    push(key, v);
                 }
                 if let Some(v) = item
                     .get("humidity")
@@ -253,7 +347,12 @@ pub fn parse_soilad(
     out
 }
 
-pub fn spawn(id: String, config: EcowittGwPollConfig, history: Option<SensorHistoryStore>) {
+pub fn spawn(
+    id: String,
+    config: EcowittGwPollConfig,
+    history: Option<SensorHistoryStore>,
+    bus: Option<broadcast::Sender<SourceEvent>>,
+) {
     let Some(history) = history else {
         warn!(source_id = %id, "ecowitt_gw_poll: no sensor_history store; poller disabled");
         return;
@@ -274,6 +373,12 @@ pub fn spawn(id: String, config: EcowittGwPollConfig, history: Option<SensorHist
                 Ok(body) => {
                     if last_ok != Some(true) {
                         info!(source_id = %id, "ecowitt_gw_poll reachable");
+                        if let Some(bus) = &bus {
+                            let _ = bus.send(SourceEvent::Reachability {
+                                source_id: id.clone(),
+                                reachable: true,
+                            });
+                        }
                         last_ok = Some(true);
                     }
                     let epoch = chrono::Utc::now().timestamp();
@@ -295,6 +400,24 @@ pub fn spawn(id: String, config: EcowittGwPollConfig, history: Option<SensorHist
                         debug!(source_id = %id, "ecowitt_gw_poll: no parseable readings");
                         continue;
                     }
+                    // Publish the outdoor weather subset onto the merge bus so
+                    // the snapshot bridge populates the dashboard + HA weather
+                    // entities (soil/channel keys stay history-only). Values are
+                    // already canonical imperial. live_current=true: it's a live
+                    // local poll of a real station.
+                    if let Some(bus) = &bus {
+                        let fields: Vec<(WeatherField, f64)> = readings
+                            .iter()
+                            .filter_map(|r| weather_field_for_key(&r.key).map(|f| (f, r.value)))
+                            .collect();
+                        if !fields.is_empty() {
+                            let _ = bus.send(SourceEvent::Observation {
+                                source_id: id.clone(),
+                                fields,
+                                at_epoch: epoch,
+                            });
+                        }
+                    }
                     let n = readings.len();
                     if let Err(e) = history.insert_many(readings).await {
                         warn!(source_id = %id, error = %e, "ecowitt_gw_poll sensor_history write failed");
@@ -305,6 +428,12 @@ pub fn spawn(id: String, config: EcowittGwPollConfig, history: Option<SensorHist
                 Err(e) => {
                     if last_ok != Some(false) {
                         warn!(source_id = %id, error = %e, "ecowitt_gw_poll unreachable");
+                        if let Some(bus) = &bus {
+                            let _ = bus.send(SourceEvent::Reachability {
+                                source_id: id.clone(),
+                                reachable: false,
+                            });
+                        }
                         last_ok = Some(false);
                     }
                 }
@@ -421,6 +550,39 @@ mod tests {
         assert_eq!(val(&rs, "uv"), Some(6.0));
         assert_eq!(val(&rs, "dailyrainin"), Some(0.24));
         assert_eq!(val(&rs, "rainratein"), Some(0.0));
+    }
+
+    #[test]
+    fn converts_metric_gateway_to_imperial() {
+        // A gateway configured for metric: outdoor temp has no suffix (the unit
+        // is taken from the wh25 block), wind/rain/pressure carry metric
+        // suffixes, channel temps declare their own unit.
+        let body = json!({
+            "common_list": [
+                {"id": "0x02", "val": "22.0"},
+                {"id": "0x03", "val": "12.0"},
+                {"id": "0x0B", "val": "10.0 km/h"}
+            ],
+            "rain": [
+                {"id": "0x10", "val": "25.4 mm"}
+            ],
+            "wh25": [{"intemp": "20.0", "unit": "C", "inhumi": "57%", "abs": "1013.0 hPa"}],
+            "ch_ec": [{"channel": "1", "humidity": "30%", "temp": "25.0", "unit": "C", "ec": "40 uS/cm"}]
+        });
+        let rs = parse_livedata(&body, "gw", 1);
+        let approx = |key: &str, want: f64| {
+            let g = val(&rs, key).unwrap_or_else(|| panic!("missing {key}"));
+            assert!((g - want).abs() < 0.05, "{key}: {g} != {want}");
+        };
+        approx("tempf", 71.6); // 22 C  (from wh25 unit)
+        approx("dewpointf", 53.6); // 12 C
+        approx("windspeedmph", 6.21); // 10 km/h
+        approx("dailyrainin", 1.0); // 25.4 mm
+        approx("tempinf", 68.0); // 20 C
+        approx("baromabsin", 29.91); // 1013 hPa
+        approx("soiltemp1f", 77.0); // 25 C
+                                    // Unitless channels untouched.
+        assert_eq!(val(&rs, "soilmoisture1"), Some(30.0));
     }
 
     #[test]

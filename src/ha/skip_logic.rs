@@ -4,7 +4,7 @@
 // the previous consts so call sites that use evaluate(inputs) without
 // passing params get identical verdicts to v0.1.
 //
-// Existing callers (src/ha/refresher.rs) use `skip_logic::Inputs`,
+// Existing callers (src/refresher.rs) use `skip_logic::Inputs`,
 // `skip_logic::evaluate`, `skip_logic::heat_index_f`, and
 // `skip_logic::et_heat_multiplier` -- all re-exported here verbatim.
 

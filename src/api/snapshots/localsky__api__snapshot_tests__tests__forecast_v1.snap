@@ -5,6 +5,7 @@ expression: "ForecastSnapshot::default()"
 {
   "last_refresh_epoch": 0,
   "source_reachable": false,
+  "source_label": "",
   "timezone": "",
   "daily": [],
   "past_daily": [],

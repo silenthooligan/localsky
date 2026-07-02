@@ -36,7 +36,7 @@ use hmac::{
     digest::{KeyInit, Mac},
     Hmac,
 };
-use reqwest::{Client, StatusCode};
+use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -57,7 +57,6 @@ const POLL_INTERVAL: Duration = Duration::from_secs(60);
 pub struct TuyaCloud {
     id: String,
     config: TuyaCloudConfig,
-    client: Client,
     mapping: Vec<ResolvedMapping>,
     tokens: Mutex<TokenCache>,
 }
@@ -71,7 +70,10 @@ struct TokenCache {
 
 #[derive(Debug, Clone)]
 struct ResolvedMapping {
-    field: WeatherField,
+    /// Global weather field (None when this is a per-zone soil channel).
+    field: Option<WeatherField>,
+    /// Per-zone soil channel slug (None for a normal weather mapping).
+    zone_slug: Option<String>,
     device_id: String,
     status_code: String,
     scale: f64,
@@ -115,14 +117,13 @@ impl TuyaCloud {
     pub fn new(id: impl Into<String>, config: TuyaCloudConfig) -> Self {
         let id = id.into();
         let mapping = build_mapping(&id, &config.device_field_map);
-        let client = Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .expect("reqwest client construction");
+        // P4-7: no stored client. Each request builds an SSRF-hardened client
+        // pinned to the (operator-overridable) base_url's resolved host via
+        // safe_fetch, so a base_url pointed at a private/loopback address is
+        // refused instead of probed.
         Self {
             id,
             config,
-            client,
             mapping,
             tokens: Mutex::new(TokenCache::default()),
         }
@@ -157,9 +158,10 @@ impl TuyaCloud {
         let url = format!("{}{path}", self.config.base_url.trim_end_matches('/'));
         let t = chrono::Utc::now().timestamp_millis();
         let sig = self.sign("GET", path, "", t, "");
-        let resp: TokenResponse = self
-            .client
-            .get(&url)
+        let (client, safe_url) =
+            crate::net::safe_fetch::build_safe_client(&url, Duration::from_secs(15)).await?;
+        let resp: TokenResponse = client
+            .get(safe_url)
             .header("client_id", &self.config.client_id)
             .header("sign", &sig)
             .header("t", t.to_string())
@@ -205,9 +207,10 @@ impl TuyaCloud {
         for attempt in 0..2 {
             let t = chrono::Utc::now().timestamp_millis();
             let sig = self.sign("GET", &path, "", t, &token);
-            let resp = self
-                .client
-                .get(&url)
+            let (client, safe_url) =
+                crate::net::safe_fetch::build_safe_client(&url, Duration::from_secs(15)).await?;
+            let resp = client
+                .get(safe_url)
                 .header("client_id", &self.config.client_id)
                 .header("access_token", &token)
                 .header("sign", &sig)
@@ -237,6 +240,23 @@ impl TuyaCloud {
 fn build_mapping(source_id: &str, field_map: &[TuyaFieldMap]) -> Vec<ResolvedMapping> {
     let mut out = Vec::new();
     for entry in field_map {
+        let zone = entry
+            .zone_slug
+            .as_deref()
+            .map(str::trim)
+            .filter(|z| !z.is_empty());
+        // Per-zone soil channel: emitted as a KeyedReading, no WeatherField.
+        if let Some(zone) = zone {
+            out.push(ResolvedMapping {
+                field: None,
+                zone_slug: Some(zone.to_string()),
+                device_id: entry.device_id.clone(),
+                status_code: entry.status_code.clone(),
+                scale: entry.scale,
+                offset: entry.offset,
+            });
+            continue;
+        }
         let Some(field) =
             parse_weather_field(&entry.field).or_else(|| parse_camel_field(&entry.field))
         else {
@@ -244,7 +264,8 @@ fn build_mapping(source_id: &str, field_map: &[TuyaFieldMap]) -> Vec<ResolvedMap
             continue;
         };
         out.push(ResolvedMapping {
-            field,
+            field: Some(field),
+            zone_slug: None,
             device_id: entry.device_id.clone(),
             status_code: entry.status_code.clone(),
             scale: entry.scale,
@@ -267,10 +288,14 @@ impl WeatherSource for TuyaCloud {
     fn capabilities(&self) -> SourceCaps {
         let mut fields = HashSet::new();
         for m in &self.mapping {
-            fields.insert(m.field);
+            if let Some(f) = m.field {
+                fields.insert(f);
+            }
         }
         SourceCaps {
-            live_current: !self.mapping.is_empty(),
+            // Live weather only counts mappings that carry a WeatherField
+            // (soil-only mappings don't make this a current-conditions source).
+            live_current: self.mapping.iter().any(|m| m.field.is_some()),
             hourly_forecast_hours: 0,
             daily_forecast_days: 0,
             radar_tiles: false,
@@ -281,7 +306,7 @@ impl WeatherSource for TuyaCloud {
 
     fn priority(&self, field: WeatherField) -> i32 {
         // Cloud-routed sensor: same tier as YoLink + AmbientWeather (70).
-        if self.mapping.iter().any(|m| m.field == field) {
+        if self.mapping.iter().any(|m| m.field == Some(field)) {
             70
         } else {
             i32::MIN
@@ -325,7 +350,20 @@ impl WeatherSource for TuyaCloud {
                                         debug!(source_id = %self.id, device_id, code = m.status_code, "tuya value not numeric");
                                         continue;
                                     };
-                                    fields.push((m.field, raw * m.scale + m.offset));
+                                    let value = raw * m.scale + m.offset;
+                                    // Per-zone soil channel -> KeyedReading.
+                                    if let Some(zone) = &m.zone_slug {
+                                        let _ = bus.send(SourceEvent::KeyedReading {
+                                            source_id: self.id.clone(),
+                                            key: crate::sources::bus_recorder::zone_soil_key(zone),
+                                            value,
+                                            at_epoch: chrono::Utc::now().timestamp(),
+                                        });
+                                        continue;
+                                    }
+                                    if let Some(f) = m.field {
+                                        fields.push((f, value));
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -375,6 +413,7 @@ mod tests {
                 status_code: "temp_current".into(),
                 scale: 0.18, // deci-°C -> °F: (v/10)*1.8 = v * 0.18 (offset adds 32)
                 offset: 32.0,
+                zone_slug: None,
             }],
         }
     }
@@ -429,6 +468,7 @@ mod tests {
             status_code: "x".into(),
             scale: 1.0,
             offset: 0.0,
+            zone_slug: None,
         }];
         assert!(build_mapping("test", &bad).is_empty());
     }

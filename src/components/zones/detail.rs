@@ -14,9 +14,19 @@ use crate::components::irrigation::controls::post_action_then;
 use crate::components::ui::{
     use_toast, Button, Icon, LineChart, Series, Sparkline, StatTile, Stepper,
 };
+use crate::components::units_fmt::{
+    depth_unit, depth_value_mm, fmt_rain_amount_mm, fmt_rain_rate_mm, temp_unit, temp_value,
+    use_unit_prefs, UnitPrefs,
+};
 use crate::ha::snapshot::{IrrigationSnapshot, ZoneMath, ZoneState};
 use crate::history::types::HistoryWindow;
 use leptos_router::hooks::use_params_map;
+
+/// Current UTC epoch in seconds. The instant is timezone-independent; the
+/// deployment-TZ rendering happens later in `timefmt::format_md`.
+fn now_epoch_secs() -> i64 {
+    Local::now().timestamp()
+}
 
 /// Daily watered-minutes buckets for one zone, oldest -> newest.
 fn zone_day_buckets(window: &HistoryWindow, slug: &str, days: i64) -> Vec<f64> {
@@ -56,6 +66,11 @@ pub fn ZoneDetailView(
         let s = slug.get();
         snap.get().zones.iter().find(|z| z.slug == s).cloned()
     };
+
+    // Per-device display-unit preferences. Read prefs.get() inside the
+    // reactive body so a units change re-renders the converted tiles;
+    // non-reactive child panels (ZoneMathPanel) take a UnitPrefs prop.
+    let prefs = use_unit_prefs();
 
     // 30-day history for the watered-minutes chart.
     let history = RwSignal::new(HistoryWindow::default());
@@ -166,16 +181,32 @@ pub fn ZoneDetailView(
                 .iter()
                 .find(|f| f.zone_slug == z.slug)
                 .cloned();
+            // Display-unit prefs for this render pass (reactive: re-reads on change).
+            let p = prefs.get();
+            // Deployment IANA timezone for every user-facing time render below
+            // (24-hour, deployment-local, not the viewer's browser TZ).
+            let tz = snap.get().timezone;
             let running = z.running;
-            let planned = ((z.planned_run_seconds + 30) / 60).to_string();
+            // A zone the engine will SKIP waters 0 minutes tonight regardless of
+            // any leftover planned duration on the snapshot, so the "Planned"
+            // tile and the status pill both reflect the skip (T4).
+            let zone_skipping = z.verdict.as_ref().is_some_and(|v| v.verdict == "skip");
+            let planned = if zone_skipping {
+                "0".to_string()
+            } else {
+                ((z.planned_run_seconds + 30) / 60).to_string()
+            };
             let today = format!("{:.0}", z.today_run_minutes);
-            let deficit = format!("{:.1}", z.bucket_mm);
+            // Bucket deficit is stored in mm; convert at the display boundary.
+            let deficit = depth_value_mm(z.bucket_mm, p);
+            let deficit_unit = depth_unit(p);
             let last_run = if z.last_run_epoch > 0 {
-                Local
-                    .timestamp_opt(z.last_run_epoch, 0)
-                    .single()
-                    .map(|dt| dt.format("%b %-d, %-I:%M %p").to_string())
-                    .unwrap_or_else(|| "-".into())
+                // "Jun 28, 14:05" in the deployment timezone (24-hour, local).
+                format!(
+                    "{}, {}",
+                    crate::timefmt::format_md(z.last_run_epoch, &tz),
+                    crate::timefmt::format_hm(z.last_run_epoch, &tz),
+                )
             } else {
                 "-".into()
             };
@@ -207,10 +238,16 @@ pub fn ZoneDetailView(
                 );
             };
             let pending_now = pending.get();
+            // A zone the engine will SKIP must not read "SCHEDULED" even when it
+            // carries a leftover planned duration: the skip verdict is the truth,
+            // so it reads "SKIPPING" (after the in-flight/running states, which
+            // still take precedence). (T4) Matches the zone card's status pill.
+            // (zone_skipping computed above with `planned`.)
             let status_label = match pending_now {
                 Some(true) if !running => "STARTING…",
                 Some(false) if running => "STOPPING…",
                 _ if running => "RUNNING",
+                _ if zone_skipping => "SKIPPING",
                 _ if z.planned_run_seconds > 0 => "SCHEDULED",
                 _ => "IDLE",
             };
@@ -218,6 +255,8 @@ pub fn ZoneDetailView(
                 "zone-detail__status zone-detail__status--pending"
             } else if running {
                 "zone-detail__status zone-detail__status--running"
+            } else if zone_skipping {
+                "zone-detail__status zone-detail__status--skipping"
             } else if z.planned_run_seconds > 0 {
                 "zone-detail__status zone-detail__status--scheduled"
             } else {
@@ -225,6 +264,8 @@ pub fn ZoneDetailView(
             };
             let math = z.math.clone();
             let chart_slug = zslug.clone();
+            // Own copy of the deployment tz for the chart-label closure below.
+            let chart_tz = tz.clone();
 
             // Per-zone verdict (decide_per_zone): colored pill + reason line.
             let verdict = z.verdict.clone();
@@ -237,7 +278,10 @@ pub fn ZoneDetailView(
                 .as_ref()
                 .filter(|v| !v.reason.is_empty())
                 .map(|v| {
-                    let r = v.reason.clone();
+                    // P2 units architecture: render the reason unit-aware from the
+                    // structured ZoneVerdict (soil reasons are percent /
+                    // unit-invariant; global-bound reasons fall back to baked).
+                    let r = crate::reason_render::render_zone_reason(v, p);
                     view! { <p class="zone-detail__verdict-reason">{r}</p> }
                 });
 
@@ -262,7 +306,7 @@ pub fn ZoneDetailView(
                     <div class="zone-detail__stats">
                         <StatTile label="Planned" value=planned unit="min" icon="droplet"/>
                         <StatTile label="Today" value=today unit="min" icon="history" accent="var(--accent-good)".to_string()/>
-                        <StatTile label="Deficit" value=deficit unit="mm" icon="gauge" accent="var(--accent-cool)".to_string()/>
+                        <StatTile label="Deficit" value=deficit unit=deficit_unit icon="gauge" accent="var(--accent-cool)".to_string()/>
                         <StatTile label="Last run" value=last_run icon="calendar" accent="var(--accent-warm)".to_string()/>
                     </div>
 
@@ -304,7 +348,7 @@ pub fn ZoneDetailView(
                                         {z.soil_temp_f.map(|t| view! {
                                             <div class="zone-soil__stat">
                                                 <span class="zone-soil__k">"Soil temp"</span>
-                                                <span class="zone-soil__v">{format!("{t:.0}")}<small>"°F"</small></span>
+                                                <span class="zone-soil__v">{temp_value(t, p)}<small>{temp_unit(p)}</small></span>
                                                 <span class="zone-soil__band">"frost gate input"</span>
                                             </div>
                                         })}
@@ -340,14 +384,14 @@ pub fn ZoneDetailView(
                             let b = zone_day_buckets(&history.get(), &chart_slug, 30);
                             let pts: Vec<(f64, f64)> = b.iter().enumerate().map(|(i, m)| (i as f64, *m)).collect();
                             let n = b.len();
-                            let today = Local::now().date_naive();
+                            // Buckets run oldest -> newest; bucket i is (n-1-i) days
+                            // back. Label each from an epoch, rendered "Jun 28"-style
+                            // in the DEPLOYMENT timezone (not the viewer's browser TZ).
+                            let now_epoch = now_epoch_secs();
                             let labels: Vec<String> = (0..n)
                                 .map(|i| {
-                                    // Buckets run oldest -> newest; label to match.
-                                    today
-                                        .checked_sub_days(chrono::Days::new((n - 1 - i) as u64))
-                                        .map(|d| d.format("%b %-d").to_string())
-                                        .unwrap_or_default()
+                                    let epoch = now_epoch - ((n - 1 - i) as i64) * 86_400;
+                                    crate::timefmt::format_md(epoch, &chart_tz)
                                 })
                                 .collect();
                             view! { <LineChart series=vec![Series::new("min", "var(--accent)", pts)] height=180 legend=false y_unit=" min".to_string() x_labels=labels/> }
@@ -379,7 +423,7 @@ pub fn ZoneDetailView(
                         }}
                     </section>
 
-                    {math.map(|m| view! { <ZoneMathPanel m/> })}
+                    {math.map(|m| view! { <ZoneMathPanel m prefs=p/> })}
                 </div>
             }
             .into_any()
@@ -389,20 +433,24 @@ pub fn ZoneDetailView(
 }
 
 #[component]
-fn ZoneMathPanel(m: ZoneMath) -> impl IntoView {
+fn ZoneMathPanel(m: ZoneMath, prefs: UnitPrefs) -> impl IntoView {
     let cap = if m.cap_binding {
         format!("capped at {} min", m.max_duration_seconds / 60)
     } else {
         format!("under {} min cap", m.max_duration_seconds / 60)
     };
+    // Bucket deficit (mm source) and throughput (mm/hr source) convert at
+    // the display boundary; the engine math itself stays in mm.
+    let deficit = fmt_rain_amount_mm(m.bucket_mm, prefs);
+    let throughput = fmt_rain_rate_mm(m.throughput_mm_hr, prefs);
     view! {
         <section class="zone-detail__panel">
             <h2 class="zone-detail__panel-title">"Why this duration?"</h2>
             <dl class="zone-detail__math">
-                <div><dt>"Bucket deficit"</dt><dd>{format!("{:.2} mm", m.bucket_mm)}</dd></div>
+                <div><dt>"Bucket deficit"</dt><dd>{deficit}</dd></div>
                 <div><dt>"Crop coefficient"</dt><dd>{format!("× {:.2}", m.kc)}</dd></div>
                 <div><dt>"Heat multiplier"</dt><dd>{format!("× {:.2}", m.heat_mult)}</dd></div>
-                <div><dt>"Throughput"</dt><dd>{format!("÷ {:.1} mm/hr", m.throughput_mm_hr)}</dd></div>
+                <div><dt>"Throughput"</dt><dd>{format!("÷ {throughput}")}</dd></div>
                 <div><dt>"Capture efficiency"</dt><dd>{format!("÷ {:.2}", m.capture_eff)}</dd></div>
                 <div class="zone-detail__math-final"><dt>"Scheduled"</dt><dd>{format!("{} min ({cap})", m.scheduled_seconds / 60)}</dd></div>
             </dl>

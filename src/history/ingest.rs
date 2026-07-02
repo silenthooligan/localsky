@@ -47,6 +47,19 @@ impl IngestState {
             } else if !zone.running && was_running {
                 // End of a run, emit the row.
                 let start = self.seen_running.remove(&zone.slug).unwrap_or(now);
+                // APPROXIMATE duration. Both `start` and `now` are
+                // snapshot.last_refresh_epoch values, so this is the span
+                // between the first poll that saw the zone running and the
+                // first poll that saw it idle: it is quantized to the ~10s
+                // refresher boundary and can read up to one poll short or long
+                // of the true on-time. This matters most for a cycle-soak run,
+                // whose valve toggles on/off per segment: the observer records
+                // one such approximate row per ON segment rather than a single
+                // whole-cycle row, so several short rows is expected here and
+                // not a runtime error. Treat every observer-written
+                // duration_s as approximate (~10s); the scheduler's own rows
+                // (history::db, source "smart_morning") carry the planned
+                // intent and are the exact figure when one is needed.
                 let duration = (now - start).max(0);
                 let rec = RunRecord {
                     zone: zone.slug.clone(),

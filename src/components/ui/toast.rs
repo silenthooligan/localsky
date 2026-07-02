@@ -39,6 +39,17 @@ impl ToastKind {
             ToastKind::Error => "ui-toast--error",
         }
     }
+    /// ARIA live-region role for a single toast. Error/danger toasts are
+    /// assertive (`role="alert"`) so a screen reader interrupts and announces
+    /// a failed Stop / override immediately; info, success, and warn stay
+    /// polite (`role="status"`) so routine confirmations queue without
+    /// cutting off whatever the user is doing.
+    fn role(self) -> &'static str {
+        match self {
+            ToastKind::Error => "alert",
+            ToastKind::Info | ToastKind::Success | ToastKind::Warn => "status",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -115,13 +126,18 @@ pub fn use_toast() -> ToastHub {
 pub fn ToastViewport() -> impl IntoView {
     let hub = use_toast();
     let items = hub.items;
+    // No container-level aria-live: each toast carries its own role so that
+    // error/danger toasts announce assertively (role="alert") while routine
+    // toasts stay polite (role="status"). A container aria-live would flatten
+    // every child to the same politeness and swallow the assertive alerts.
     view! {
-        <div class="ui-toast-viewport" aria-live="polite" aria-atomic="false">
+        <div class="ui-toast-viewport">
             {move || {
                 items.get().into_iter().map(|t| {
                     let id = t.id;
+                    let role = t.kind.role();
                     view! {
-                        <div class=format!("ui-toast {}", t.kind.class()) role="status">
+                        <div class=format!("ui-toast {}", t.kind.class()) role=role>
                             <span class="ui-toast__icon"><Icon name=t.kind.icon() size=16/></span>
                             <span class="ui-toast__msg">{t.message}</span>
                             <button

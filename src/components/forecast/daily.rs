@@ -3,9 +3,11 @@
 // gets a highlight ring so it's the visual anchor.
 
 use crate::components::forecast::glyph::weather_code_glyph;
-use crate::components::units_fmt::{fmt_rain_amount, fmt_temp_short, use_unit_prefs, UnitPrefs};
+use crate::components::units_fmt::{
+    fmt_rain_amount, fmt_temp_short, fmt_wind, use_unit_prefs, UnitPrefs,
+};
 use crate::forecast::snapshot::{DailyEntry, ForecastSnapshot};
-use chrono::{DateTime, Local, TimeZone};
+use crate::timefmt::{format_md, format_wday_short};
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
 
@@ -19,9 +21,10 @@ pub fn DailyForecast(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
                 <span class="forecast-section-meta">
                     {move || {
                         let s = snap.get();
-                        if !s.source_reachable { "Open-Meteo unreachable".to_string() }
+                        let label = if s.source_label.is_empty() { "Forecast" } else { &s.source_label };
+                        if !s.source_reachable { format!("{label} unreachable") }
                         else if s.daily.is_empty() { "Loading…".to_string() }
-                        else { format!("Open-Meteo · {}", s.timezone) }
+                        else { format!("{label} · {}", s.timezone) }
                     }}
                 </span>
             </header>
@@ -34,8 +37,9 @@ pub fn DailyForecast(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
                             view! { <crate::components::ui::Skeleton variant="block"/> }.into_any()
                         }).collect::<Vec<_>>().into_any()
                     } else {
+                        let tz = s.timezone.clone();
                         s.daily.iter().enumerate().take(7).map(|(idx, d)| {
-                            view! { <DailyCard entry=d.clone() is_today={idx == 0} prefs/> }.into_any()
+                            view! { <DailyCard entry=d.clone() is_today={idx == 0} prefs tz=tz.clone()/> }.into_any()
                         }).collect::<Vec<_>>().into_any()
                     }
                 }}
@@ -45,22 +49,21 @@ pub fn DailyForecast(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
 }
 
 #[component]
-fn DailyCard(entry: DailyEntry, is_today: bool, prefs: UnitPrefs) -> impl IntoView {
+fn DailyCard(entry: DailyEntry, is_today: bool, prefs: UnitPrefs, tz: String) -> impl IntoView {
     let (g, label) = weather_code_glyph(entry.weather_code, true);
+    // Weekday + month/day in the DEPLOYMENT timezone, not the viewer's browser
+    // TZ, so a traveling viewer sees the deployment's calendar day, not theirs.
     let day_label = if is_today {
         "Today".to_string()
     } else {
-        Local
-            .timestamp_opt(entry.time_epoch, 0)
-            .single()
-            .map(|d: DateTime<Local>| d.format("%a").to_string())
-            .unwrap_or_else(|| "-".to_string())
+        let d = format_wday_short(entry.time_epoch, &tz);
+        if d.is_empty() {
+            "-".to_string()
+        } else {
+            d
+        }
     };
-    let date_label = Local
-        .timestamp_opt(entry.time_epoch, 0)
-        .single()
-        .map(|d: DateTime<Local>| d.format("%-m/%-d").to_string())
-        .unwrap_or_default();
+    let date_label = format_md(entry.time_epoch, &tz);
     let class = if is_today {
         "daily-card daily-card-today"
     } else {
@@ -88,7 +91,7 @@ fn DailyCard(entry: DailyEntry, is_today: bool, prefs: UnitPrefs) -> impl IntoVi
             <dl class="daily-card-meta">
                 <div class="kv">
                     <dt class="k">"wind"</dt>
-                    <dd class="v">{format!("{:.0} mph", entry.wind_max_mph)}</dd>
+                    <dd class="v">{fmt_wind(entry.wind_max_mph, prefs)}</dd>
                 </div>
                 <div class="kv">
                     <dt class="k">"uv"</dt>
