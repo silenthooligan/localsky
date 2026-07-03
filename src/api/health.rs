@@ -546,11 +546,48 @@ pub async fn health(
                     // headline field (e.g. an Ecowitt gateway owning soil moisture)
                     // is still recognized as an owner. Empty when no live store is
                     // wired (the same posture that leaves `field_sources` empty).
-                    let owner_labels: std::collections::BTreeSet<String> = state
+                    let mut owner_labels: std::collections::BTreeSet<String> = state
                         .tempest_store
                         .as_ref()
                         .map(|s| s.current_owner_labels())
                         .unwrap_or_default();
+                    // A soil-providing source owns a field the headline
+                    // field_provenance never records (soil rides the per-zone
+                    // sensor-history path, not a WeatherField scalar), so
+                    // current_owner_labels alone cannot see it. Without this the
+                    // most irrigation-critical source on a native install (the
+                    // soil gateway) reads `falling_through` forever even while its
+                    // probes are fresh. Recognize a source as an owner when it is
+                    // the configured soil sensor for at least one zone whose soil
+                    // is NOT currently faulted (24h+ stale). Matches the mechanism
+                    // the soil_only_owner_is_active test already asserts.
+                    {
+                        let faulted: std::collections::HashSet<String> = state
+                            .irrigation_store
+                            .as_ref()
+                            .map(|s| {
+                                s.snapshot()
+                                    .soil_probe_faults
+                                    .iter()
+                                    .map(|f| f.sensor_id.clone())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        for z in cfg.zones.values() {
+                            let Some(sid) = z.soil_sensor_id.as_deref() else {
+                                continue;
+                            };
+                            if faulted.contains(sid) {
+                                continue;
+                            }
+                            if let Some((src_id, _)) = sid
+                                .strip_prefix("source:")
+                                .and_then(|rest| rest.split_once(':'))
+                            {
+                                owner_labels.insert(src_id.to_string());
+                            }
+                        }
+                    }
                     // The source priority map (writer label -> priority), the SAME
                     // map the merge ranks with and the SAME map /api/config passes,
                     // so the standby-vs-watching decision is priority-aware and
@@ -654,11 +691,23 @@ pub async fn health(
                             SourceKind::Lacrosse(_) => 3600,
                             _ => HARD_OFFLINE_WINDOW_S,
                         };
-                        let observing_recently = last_seen_epoch
-                            .map(|e| now - e <= obs_alive_window_s)
-                            .unwrap_or(false);
-                        let was_owner_now_fell_through =
-                            observing_recently && other_owns_a_field_it_could_provide;
+                        // FallingThrough is reserved for a source that GENUINELY
+                        // lost a field it once owned. We do not yet track per-source
+                        // prior ownership (the merge records only the CURRENT owner
+                        // in field_provenance), so we cannot honestly distinguish
+                        // "was owning, chain moved past it" from "emitting but
+                        // outranked / quiet". The old `observing_recently &&
+                        // other_owns_a_field_it_could_provide` fired for EVERY
+                        // emitting-but-outranked source, so a perfectly healthy
+                        // source (e.g. a quiet higher-priority radar-QPE while a
+                        // model holds the dry rain fill) read `falling_through`, and
+                        // it disagreed with the /config catalog (which hardcodes
+                        // false). Keep them congruent and let the observable cases
+                        // route correctly: a source outranked by a strictly
+                        // higher-priority owner reads `standby`, one that should be
+                        // winning but is quiet reads `watching`. Revisit if/when a
+                        // real last-owned-field epoch is tracked.
+                        let was_owner_now_fell_through = false;
                         let status = compute_source_status(SourceStatusInputs {
                             enabled: source_effectively_enabled(entry),
                             owns_field,

@@ -789,6 +789,7 @@ fn parse_daily(periods: &[ForecastPeriod]) -> Vec<DailyEntry> {
                 uv_index_max: 0.0,
                 sunrise_epoch: 0,
                 sunset_epoch: 0,
+                ..Default::default()
             });
             i += 1;
             continue;
@@ -817,6 +818,7 @@ fn parse_daily(periods: &[ForecastPeriod]) -> Vec<DailyEntry> {
             uv_index_max: 0.0,
             sunrise_epoch: 0,
             sunset_epoch: 0,
+            ..Default::default()
         };
 
         // Fold in the paired night period for the low temp + max POP.
@@ -870,6 +872,7 @@ fn parse_hourly(periods: &[ForecastPeriod]) -> Vec<HourlyEntry> {
                 .unwrap_or(0.0)
                 .round() as u32,
             cloud_cover_pct: 0,
+            ..Default::default()
         })
         .collect()
 }
@@ -915,6 +918,7 @@ impl Nws {
             daily,
             past_daily: vec![],
             hourly,
+            ..Default::default()
         };
         // Backfill any daily entry still missing RH from the hourly window
         // (the daytime period's relativeHumidity already populates most).

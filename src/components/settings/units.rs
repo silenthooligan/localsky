@@ -17,8 +17,8 @@
 
 use leptos::prelude::*;
 
-use crate::components::settings_ui::SettingsResult;
-use crate::components::ui::{Button, FormField, HelpHint, Panel, SegmentedControl};
+use crate::components::settings_ui::{SettingsLoadError, SettingsResult};
+use crate::components::ui::{Button, FormField, HelpHint, Panel, SegmentedControl, SkeletonRows};
 
 #[component]
 pub fn SettingsUnits() -> impl IntoView {
@@ -41,6 +41,11 @@ pub fn SettingsUnits() -> impl IntoView {
     // Household default (Imperial / Metric), fetched from + PUT to /api/config.
     let household = RwSignal::new("imperial".to_string());
     let household_loaded = RwSignal::new(false);
+    // Initial-load state: Some(err) when the household GET failed. The household
+    // form is replaced by a Retry banner in that case; `load_retry` bumps to
+    // re-run the household fetch.
+    let load_error: RwSignal<Option<String>> = RwSignal::new(None);
+    let load_retry = RwSignal::new(0u32);
     let saving = RwSignal::new(false);
     let result_msg = RwSignal::new(String::new());
     let result_ok = RwSignal::new(false);
@@ -94,10 +99,15 @@ pub fn SettingsUnits() -> impl IntoView {
         });
         // Household default from /api/config.
         Effect::new(move |_| {
+            let _ = load_retry.get();
             wasm_bindgen_futures::spawn_local(async move {
-                if let Ok(h) = fetch_household().await {
-                    household.set(h);
-                    household_loaded.set(true);
+                match fetch_household().await {
+                    Ok(h) => {
+                        household.set(h);
+                        household_loaded.set(true);
+                        load_error.set(None);
+                    }
+                    Err(e) => load_error.set(Some(e)),
                 }
             });
         });
@@ -284,6 +294,13 @@ pub fn SettingsUnits() -> impl IntoView {
                     "the irrigation snapshot so every device that follows the "
                     "household updates on the next tick."
                 </p>
+                // A failed household GET replaces the household form with a Retry
+                // banner rather than the "imperial" default a Save would write over
+                // the real deployment default.
+                <Show
+                    when=move || load_error.get().is_none()
+                    fallback=move || view! { <SettingsLoadError error=load_error retry=load_retry/> }
+                >
                 <FormField
                     label="System".to_string()
                     helptext="".to_string()
@@ -309,9 +326,8 @@ pub fn SettingsUnits() -> impl IntoView {
                 </div>
                 <SettingsResult result_msg=result_msg result_ok=result_ok/>
                 <Show when=move || !household_loaded.get()>
-                    <p class="settings-page__subtitle" style="margin-top: 1rem">
-                        "Loading household default from /api/config..."
-                    </p>
+                    <SkeletonRows count=2/>
+                </Show>
                 </Show>
             </Panel>
 

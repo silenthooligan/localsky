@@ -33,6 +33,91 @@ pub fn reqwest_error_category(e: &reqwest::Error) -> &'static str {
     }
 }
 
+/// True when `ip` is loopback in ANY representation: IPv4 127/8, IPv6 ::1, or
+/// an IPv4-mapped IPv6 loopback (::ffff:127.x.y.z). Companion of the LLM-probe
+/// carve-out below; kept mapped-address-aware so a loopback cannot be judged
+/// differently depending on which coat it wears.
+fn is_loopback_any(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_loopback(),
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+        }
+    }
+}
+
+/// LLM-scoped safe-fetch variant: identical to
+/// [`safe_fetch::build_safe_client`] EXCEPT that loopback targets are allowed.
+///
+/// WHY A SEPARATE POLICY (and why this does not weaken `safe_fetch`): the LLM
+/// auto-detect prober's entire job is finding an inference server the operator
+/// runs NEXT TO LocalSky: Ollama on localhost:11434, llama.cpp on :8080, LM
+/// Studio on :1234. On a native (or --network=host) install those are loopback
+/// by definition, so the strict device policy, which rightly treats loopback
+/// as never-a-weather-device, made the shipped "Auto" default unable to detect
+/// anything anywhere. Loopback is not an SSRF pivot for this path: the probe
+/// GETs fixed kind-specific paths (/api/tags, /v1/models) and reports only
+/// reachable-or-not, never the response body. Weather-source, controller, and
+/// soil-gateway probes keep the strict `build_safe_client`; only LLM endpoints
+/// route here.
+///
+/// Everything else is the same hardening, byte for byte:
+///   - http/https schemes only,
+///   - link-local + cloud metadata (169.254.0.0/16, fe80::/10), unspecified,
+///     multicast, and broadcast targets are still rejected,
+///   - the host resolves ONCE and the connection is pinned to the vetted IP
+///     (anti DNS-rebinding),
+///   - redirects are disabled.
+pub async fn build_llm_probe_client(
+    url_str: &str,
+    timeout: std::time::Duration,
+) -> Result<(reqwest::Client, reqwest::Url), safe_fetch::SafeFetchError> {
+    use safe_fetch::SafeFetchError;
+
+    let url = reqwest::Url::parse(url_str).map_err(|_| SafeFetchError::InvalidUrl)?;
+    match url.scheme() {
+        "http" | "https" => {}
+        _ => return Err(SafeFetchError::UnsupportedScheme),
+    }
+    let host = url
+        .host_str()
+        .ok_or(SafeFetchError::InvalidUrl)?
+        .to_string();
+    let port = url
+        .port_or_known_default()
+        .ok_or(SafeFetchError::InvalidUrl)?;
+
+    // Resolve once. A bare-IP host resolves to itself; a name hits DNS.
+    let candidates: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .map_err(|_| SafeFetchError::DnsFailed)?
+        .collect();
+    if candidates.is_empty() {
+        return Err(SafeFetchError::DnsFailed);
+    }
+
+    // Pick the first address that is not forbidden UNDER THE LLM POLICY:
+    // everything `is_forbidden_target` rejects except loopback.
+    let chosen = candidates
+        .into_iter()
+        .find(|addr| {
+            let ip = addr.ip();
+            !safe_fetch::is_forbidden_target(&ip) || is_loopback_any(&ip)
+        })
+        .ok_or(SafeFetchError::BlockedTarget)?;
+
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        // Pin DNS for this host:port to the vetted IP so reqwest connects to
+        // exactly what we checked, never a re-resolved (rebinding) one.
+        .resolve(&host, chosen)
+        .build()
+        .map_err(|e| SafeFetchError::ClientBuild(e.to_string()))?;
+
+    Ok((client, url))
+}
+
 /// Constant-time byte-string equality (SC-08). Compares the full length
 /// of both inputs in a fixed number of operations per byte so the time
 /// taken does not leak how many leading bytes matched, defeating a
@@ -78,6 +163,53 @@ mod tests {
         assert!(!constant_time_eq(b"hunter2", b"hunter"));
         assert!(!constant_time_eq(b"hunter", b"hunter2"));
         assert!(!constant_time_eq(b"secret", b""));
+    }
+
+    #[tokio::test]
+    async fn llm_probe_client_allows_loopback() {
+        // The whole point of the LLM policy: a localhost Ollama target builds a
+        // client instead of dying on BlockedTarget before a byte is sent.
+        let (_client, url) = super::build_llm_probe_client(
+            "http://127.0.0.1:11434/api/tags",
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .expect("loopback must be allowed on the LLM probe path");
+        assert_eq!(url.host_str(), Some("127.0.0.1"));
+    }
+
+    #[tokio::test]
+    async fn llm_probe_client_still_blocks_metadata_and_schemes() {
+        // Loopback is the ONLY relaxation: the metadata endpoint and non-http
+        // schemes stay rejected exactly like the strict device policy.
+        let err = super::build_llm_probe_client(
+            "http://169.254.169.254/latest/meta-data/",
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            super::safe_fetch::SafeFetchError::BlockedTarget
+        ));
+        let err =
+            super::build_llm_probe_client("file:///etc/passwd", std::time::Duration::from_secs(1))
+                .await
+                .unwrap_err();
+        assert!(matches!(
+            err,
+            super::safe_fetch::SafeFetchError::UnsupportedScheme
+        ));
+    }
+
+    #[test]
+    fn loopback_any_covers_v4_v6_and_mapped() {
+        use super::is_loopback_any;
+        assert!(is_loopback_any(&"127.0.0.1".parse().unwrap()));
+        assert!(is_loopback_any(&"::1".parse().unwrap()));
+        assert!(is_loopback_any(&"::ffff:127.0.0.1".parse().unwrap()));
+        assert!(!is_loopback_any(&"10.0.0.50".parse().unwrap()));
+        assert!(!is_loopback_any(&"169.254.169.254".parse().unwrap()));
     }
 
     #[tokio::test]

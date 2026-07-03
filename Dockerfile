@@ -89,7 +89,13 @@ RUN HASHTXT="$(find /build/target -name hash.txt -print -quit)" \
 # not invalidate the (slow) cargo build cache layer above. Output lands
 # in /build/docs/book and is copied into the site root in the runtime
 # stage so the server serves it at /docs.
-RUN mdbook build docs
+# The {{LOCALSKY_VERSION}} token in docs/src is substituted from Cargo.toml
+# first, so the docs banner always tracks the exact version being built
+# (introduction.md used to carry a hand-bumped literal that went stale).
+RUN VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2) \
+    && grep -rl '{{LOCALSKY_VERSION}}' docs/src \
+       | xargs -r sed -i "s/{{LOCALSKY_VERSION}}/${VERSION}/g" \
+    && mdbook build docs
 
 # ── Runtime ──
 FROM debian:trixie-slim

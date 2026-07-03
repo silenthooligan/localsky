@@ -108,16 +108,28 @@ pub fn spawn(
             // Sampled once per tick and passed into run_tick so the dispatch decision
             // is taken against a single, frozen instant (the test seam injects this).
             let now = crate::timeutil::now_local();
-            run_tick(
-                now,
-                &schedules,
-                &watering_policy,
-                &controllers,
-                runs.as_ref(),
-                active_runs.as_ref(),
-                &mut last_fired,
-            )
-            .await;
+            // P0-8 class: a panic inside one tick (an adapter bug, a poisoned
+            // lock) must not kill the scheduler for the process lifetime,
+            // silently ending all manual watering. catch_unwind turns it into
+            // a logged skip; `last_fired` lives OUTSIDE the wrapped future, so
+            // the dedup ledger survives and the next tick cannot double-fire.
+            {
+                use futures::FutureExt;
+                let outcome = std::panic::AssertUnwindSafe(run_tick(
+                    now,
+                    &schedules,
+                    &watering_policy,
+                    &controllers,
+                    runs.as_ref(),
+                    active_runs.as_ref(),
+                    &mut last_fired,
+                ))
+                .catch_unwind()
+                .await;
+                if outcome.is_err() {
+                    tracing::error!("manual scheduler: tick PANICKED; continuing on next tick");
+                }
+            }
         }
     });
 }

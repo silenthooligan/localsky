@@ -38,6 +38,13 @@ design. For an internet-facing deployment, narrow them at the proxy:
   the wizard before exposing the instance, or block these paths at the
   proxy until you have created the owner account (after that, LocalSky
   locks them itself).
+- **Consider blocking `/metrics` from the internet.** The Prometheus
+  exposition endpoint is public like `/api/v1/health`: it carries only
+  aggregate operational counters (verdict mix, refresh and degraded
+  counts, controller/cloud error counts, last-fetch latency), no secrets
+  or PII. That is safe to leave open on a LAN, but if you do not want the
+  numbers public, firewall or 403 `/metrics` at the proxy (let your
+  monitoring host reach it directly).
 - **Keep `/pkg/*` and `/sw.js` reachable without credentials.** These
   hydration assets are fetched by the browser without cookies; if a
   proxy-side auth layer intercepts them, the app shell breaks (see the

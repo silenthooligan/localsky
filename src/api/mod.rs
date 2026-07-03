@@ -94,6 +94,9 @@ pub fn router(
     devices: crate::devices::DeviceRegistry,
     // HA controller entity prefix for the POST /action handler.
     sprinkler_prefix: String,
+    // Config store for the manifest's capability gates (which source-provided
+    // readings, e.g. flow / leaf wetness, actually exist on this install).
+    cfg_store: Arc<crate::config::FileConfigStore>,
 ) -> Router {
     let tempest_routes = Router::new()
         .route("/snapshot", get(snapshot))
@@ -103,7 +106,7 @@ pub fn router(
     // Manifest needs the live irrigation snapshot to enumerate per-zone
     // entities, so it borrows the IrrigationStore Arc before we hand it
     // off to the irrigation routes' nested router.
-    let manifest_router = manifest::router(irrigation.clone());
+    let manifest_router = manifest::router(irrigation.clone(), cfg_store);
 
     let mut router = tempest_routes
         .nest(

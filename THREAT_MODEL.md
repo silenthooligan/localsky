@@ -54,6 +54,13 @@ because they actuate hardware or read/write configuration and secrets
   *not* in this set.
 - All `/api*/backup*` routes in every method (the download alone exfiltrates
   config + the SQLite DB).
+- `POST /api*/push/subscribe`, `POST /api*/push/unsubscribe`, and
+  `POST /api*/zones/photo` (LS-REC-05). In the Disabled default an
+  anonymous-internet caller could otherwise seed push subscriptions or fill
+  disk with photo uploads, so these state-changing routes clear the same bar.
+  A LAN / loopback / trusted-network caller is still vouched by IP, so a normal
+  self-hoster's own browser keeps working. (`GET /api*/push/vapid-key` stays
+  public: the frontend needs it before any subscription exists.)
 
 A stricter gate applies to **token administration** (`is_token_admin_path`):
 `POST /api*/auth/tokens` (mint) and `DELETE /api*/auth/tokens/{id}` (revoke)
@@ -104,13 +111,23 @@ many such gateways cannot present a credential. An optional per-source secret
 acceptable, set per-source secrets or front the port with an authenticating
 proxy.
 
-## 8. Static assets / `/pkg/*`
+## 8. Anonymous public surfaces (`/pkg/*`, `/metrics`, `/docs/*`)
 
 The hydration WASM/JS/CSS under `/pkg/*` is served anonymously (and with the
 crossorigin attributes browsers require) in both postures, so the SPA can boot
 before any login. These are public build artifacts containing no secrets; gating
 them would break hydration. Responses are compressed (brotli/gzip) transparently;
 the live SSE stream (`text/event-stream`) is excluded from compression.
+
+A few other endpoints are anonymous by design and carry nothing sensitive.
+`/metrics` is the Prometheus exposition endpoint: aggregate operational counters
+only (verdict mix, refresh and degraded counts, controller/cloud error counts,
+last-fetch latency), no secrets, config, or PII, so a scraper reaches it without
+credentials. A deployment that does not want its metrics public firewalls
+`/metrics` at the proxy. `/docs/*` serves the bundled handbook (static pages, no
+secrets) so in-app help and the setup guide work pre-login and on a fresh
+install. `/api/v1/health` is reachable for liveness, but trims per-source and
+topology detail for anonymous callers on an auth-required instance.
 
 ## 9. Secrets
 

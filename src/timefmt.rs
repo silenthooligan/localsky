@@ -93,6 +93,19 @@ mod imp {
             .unwrap_or_default()
     }
 
+    pub fn format_wday_full(epoch_secs: i64, tz_iana: &str) -> String {
+        let opts = options(tz_iana);
+        let _ = js_sys::Reflect::set(
+            &opts,
+            &JsValue::from_str("weekday"),
+            &JsValue::from_str("long"),
+        );
+        date(epoch_secs)
+            .to_locale_date_string("en-US", opts.as_ref())
+            .as_string()
+            .unwrap_or_default()
+    }
+
     pub fn format_md(epoch_secs: i64, tz_iana: &str) -> String {
         let opts = options(tz_iana);
         let _ = js_sys::Reflect::set(
@@ -139,6 +152,10 @@ mod imp {
         fmt(epoch_secs, tz_iana, "%a")
     }
 
+    pub fn format_wday_full(epoch_secs: i64, tz_iana: &str) -> String {
+        fmt(epoch_secs, tz_iana, "%A")
+    }
+
     pub fn format_md(epoch_secs: i64, tz_iana: &str) -> String {
         fmt(epoch_secs, tz_iana, "%b %-d")
     }
@@ -166,6 +183,10 @@ mod imp {
         fmt(epoch_secs, tz_iana, "%a")
     }
 
+    pub fn format_wday_full(epoch_secs: i64, tz_iana: &str) -> String {
+        fmt(epoch_secs, tz_iana, "%A")
+    }
+
     pub fn format_md(epoch_secs: i64, tz_iana: &str) -> String {
         fmt(epoch_secs, tz_iana, "%b %-d")
     }
@@ -178,9 +199,18 @@ pub fn format_hm(epoch_secs: i64, tz_iana: &str) -> String {
     imp::format_hm(epoch_secs, tz_iana)
 }
 
-/// Short weekday name (e.g. "Mon") for `epoch_secs` in `tz_iana`.
+/// Short weekday name (e.g. "Mon") for `epoch_secs` in `tz_iana`. Calendar
+/// contexts only (strip / week column headers, where the row is unmistakably
+/// days): RUN DESCRIPTIONS must use `format_wday_full`, because "Sun" in
+/// running prose reads as sunshine (a weather reason), not a day.
 pub fn format_wday_short(epoch_secs: i64, tz_iana: &str) -> String {
     imp::format_wday_short(epoch_secs, tz_iana)
+}
+
+/// Full weekday name (e.g. "Monday") for `epoch_secs` in `tz_iana`. Use this in
+/// run-description prose ("next likely run Sunday").
+pub fn format_wday_full(epoch_secs: i64, tz_iana: &str) -> String {
+    imp::format_wday_full(epoch_secs, tz_iana)
 }
 
 /// Short month + day (e.g. "Jun 28") for `epoch_secs` in `tz_iana`.

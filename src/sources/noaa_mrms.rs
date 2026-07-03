@@ -17,11 +17,16 @@
 //     radar feed is lagging and we drop it rather than hand the merge a fresh
 //     freshness window on an old reading.
 //   * ACCUMULATION (MultiSensor_QPE_01H_Pass2): the gauge-corrected 1 hour
-//     rainfall total in mm. This is the ACCURATE read of how much rain fell, but
-//     pass-2 publishes ~80 min late so its valid time is inherently ~1 to 1.5 hr
-//     behind. It maps to RainTodayIn and we reject it only past
-//     `ACCUM_MAX_STALENESS` (~3 hr): a gauge-corrected hourly product is
-//     expected to lag and is still decision-useful at 1 to 1.5 hr.
+//     rainfall total in mm. This is the ACCURATE read of how much rain fell in
+//     that hour, but pass-2 publishes ~80 min late so its valid time is inherently
+//     ~1 to 1.5 hr behind. Because it is a 1 HOUR window (not a daily total) it
+//     maps to RainIntensityInHr (the hour's average rate), NOT RainTodayIn:
+//     rain_in_today is overwrite-only downstream, so letting a 1 hour reading
+//     drive "rain today" would erase the day's real total once the storm passed.
+//     A genuine multi-hour QPE window (e.g. _QPE_24H_) is a real day-scale total
+//     and does map to RainTodayIn. We reject either only past `ACCUM_MAX_STALENESS`
+//     (~3 hr): a gauge-corrected product is expected to lag and is still
+//     decision-useful at 1 to 1.5 hr.
 // Each product emits a SEPARATE SourceEvent::Observation stamped with that
 // grid's own valid time, so the fresh rate and the lagged accumulation never
 // share a single timestamp and the merge ages each field on its own clock.
@@ -408,17 +413,24 @@ fn rain_fields(kind: RainKind, value: f64) -> Vec<(WeatherField, f64)> {
             vec![(WeatherField::RainIntensityInHr, in_hr)]
         }
         RainKind::Accumulation { accum_is_hourly } => {
-            // mm accumulated -> inches accumulated.
-            let inches = to_canonical(WeatherField::RainTodayIn, value, Some("mm"));
-            let mut out = vec![(WeatherField::RainTodayIn, inches)];
             if accum_is_hourly {
-                // A 1 hour accumulation reads, over that hour, as an in/hr rate,
-                // so it also feeds the intensity field (same treatment the NWS
-                // adapter gives its last-hour gauge total).
+                // A 1 hour QPE total (MultiSensor_QPE_01H_Pass2, our default) is
+                // NOT a daily total, so it maps ONLY to RainIntensityInHr: over
+                // its one hour the mm accumulation reads as an average in/hr rate
+                // (the same treatment the NWS adapter gives precipitationLastHour).
+                // It must NOT be written to RainTodayIn, because apply_source_fields
+                // OVERWRITES rain_in_today with no server-side accumulation: a
+                // post-storm 0.0 an hour after the rain ended would erase the day's
+                // real measured total and let the engine water a soaked yard.
                 let in_hr = to_canonical(WeatherField::RainIntensityInHr, value, Some("mm"));
-                out.push((WeatherField::RainIntensityInHr, in_hr));
+                vec![(WeatherField::RainIntensityInHr, in_hr)]
+            } else {
+                // A genuine multi-hour QPE window (e.g. _QPE_24H_) IS a day-scale
+                // accumulation total, so it maps to RainTodayIn. No in/hr rate: the
+                // window is not one hour, so a rate reading would be meaningless.
+                let inches = to_canonical(WeatherField::RainTodayIn, value, Some("mm"));
+                vec![(WeatherField::RainTodayIn, inches)]
             }
-            out
         }
     }
 }
@@ -820,25 +832,26 @@ mod tests {
     }
 
     #[test]
-    fn hourly_accumulation_emits_both_fields_mm_to_in() {
-        // 25.4 mm over the last hour == 1.0 inch accumulation AND a 1.0 in/hr
-        // rate over that hour (matches the NWS last-hour-gauge treatment).
+    fn hourly_accumulation_emits_rate_only_not_daily_total() {
+        // 25.4 mm over the last hour reads as a 1.0 in/hr rate over that hour
+        // (matches the NWS last-hour-gauge treatment). It must NOT emit
+        // RainTodayIn: a 1 hour product is not a daily total, and because
+        // apply_source_fields overwrites rain_in_today, letting the last hour
+        // drive "rain today" would erase the day's real measured rain once the
+        // storm passed and the 01H grid fell back to 0.
         let fields = rain_fields(
             RainKind::Accumulation {
                 accum_is_hourly: true,
             },
             25.4,
         );
-        let today = fields
-            .iter()
-            .find(|(f, _)| *f == WeatherField::RainTodayIn)
-            .map(|(_, v)| *v);
-        let rate = fields
-            .iter()
-            .find(|(f, _)| *f == WeatherField::RainIntensityInHr)
-            .map(|(_, v)| *v);
-        assert!((today.unwrap() - 1.0).abs() < 1e-9, "today inches");
-        assert!((rate.unwrap() - 1.0).abs() < 1e-9, "in/hr rate");
+        assert_eq!(fields.len(), 1, "hourly QPE emits the rate only");
+        assert_eq!(fields[0].0, WeatherField::RainIntensityInHr);
+        assert!((fields[0].1 - 1.0).abs() < 1e-9, "in/hr rate");
+        assert!(
+            !fields.iter().any(|(f, _)| *f == WeatherField::RainTodayIn),
+            "hourly QPE must never write the overwriting RainTodayIn"
+        );
     }
 
     #[test]
@@ -886,7 +899,9 @@ mod tests {
     #[test]
     fn zero_accumulation_is_a_real_dry_reading() {
         // A real measured 0.0 mm (radar saw the cell, no rain fell) is a VALID
-        // reading and must emit, distinct from a negative no-coverage flag.
+        // reading and must emit, distinct from a negative no-coverage flag. For
+        // the hourly product that valid dry reading is a 0.0 in/hr RATE, not a
+        // RainTodayIn zero (which would overwrite the day's real measured total).
         let fields = rain_fields(
             RainKind::Accumulation {
                 accum_is_hourly: true,
@@ -896,7 +911,11 @@ mod tests {
         assert!(!fields.is_empty());
         assert!(fields
             .iter()
-            .any(|(f, v)| *f == WeatherField::RainTodayIn && *v == 0.0));
+            .any(|(f, v)| *f == WeatherField::RainIntensityInHr && *v == 0.0));
+        assert!(
+            !fields.iter().any(|(f, _)| *f == WeatherField::RainTodayIn),
+            "hourly zero must not emit an overwriting RainTodayIn 0.0"
+        );
     }
 
     #[test]
@@ -1080,15 +1099,10 @@ mod tests {
         // Stamped with the GRIB valid time, NOT `now`.
         assert_eq!(obs.valid_epoch, FIXTURE_VALID_EPOCH);
 
-        // 74.6 mm over the hour == 2.9370 in: emitted as BOTH the accumulation
-        // total and the in/hr intensity (hourly QPE), proving the mm->in seam ran
-        // on a real decoded value.
-        let today = obs
-            .fields
-            .iter()
-            .find(|(f, _)| *f == WeatherField::RainTodayIn)
-            .map(|(_, v)| *v)
-            .expect("RainTodayIn emitted");
+        // 74.6 mm over the hour == 2.9370 in: the hourly QPE emits it as the
+        // in/hr intensity ONLY (a 1 hour window is not a daily total), proving
+        // the mm->in seam ran on a real decoded value. It must NOT emit
+        // RainTodayIn (that field is overwrite-only downstream).
         let rate = obs
             .fields
             .iter()
@@ -1097,12 +1111,14 @@ mod tests {
             .expect("RainIntensityInHr emitted");
         let expect_in = WET_MM / 25.4;
         assert!(
-            (today - expect_in).abs() < 1e-3,
-            "RainTodayIn ~{expect_in} in, got {today}"
-        );
-        assert!(
             (rate - expect_in).abs() < 1e-3,
             "RainIntensityInHr ~{expect_in} in/hr, got {rate}"
+        );
+        assert!(
+            !obs.fields
+                .iter()
+                .any(|(f, _)| *f == WeatherField::RainTodayIn),
+            "hourly QPE must not emit RainTodayIn"
         );
     }
 

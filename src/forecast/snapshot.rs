@@ -36,6 +36,42 @@ pub struct DailyEntry {
     pub uv_index_max: f64,
     pub sunrise_epoch: i64,
     pub sunset_epoch: i64,
+    // ---- Extended variables (2026-07, Open-Meteo only; every other
+    // provider leaves them at the serde default, meaning "unknown"). All
+    // additive so persisted caches and older API clients keep parsing. ----
+    /// Hours of the day with measurable precipitation (Open-Meteo
+    /// precipitation_hours). Distinguishes an all-day soaker from a burst:
+    /// the same 0.3in over 8h infiltrates, over 20min it mostly runs off.
+    /// 0 = dry day OR provider doesn't report it (check `precip_sum_in`).
+    #[serde(default)]
+    pub precip_hours: f64,
+    /// Stratiform rain component, inches (rain_sum). With `showers_sum_in`
+    /// splits the day's precip into steady vs convective character.
+    #[serde(default)]
+    pub rain_sum_in: f64,
+    /// Convective showers component, inches (showers_sum).
+    #[serde(default)]
+    pub showers_sum_in: f64,
+    /// Snowfall total, inches (snowfall_sum; follows precipitation_unit).
+    #[serde(default)]
+    pub snowfall_sum_in: f64,
+    /// Seconds of actual sunshine (sunshine_duration). Compare against
+    /// daylight (sunset - sunrise) for a cloudiness/solar-stress read.
+    #[serde(default)]
+    pub sunshine_s: f64,
+    /// Peak apparent ("feels like") temperature, °F.
+    #[serde(default)]
+    pub apparent_temp_max_f: f64,
+    /// Peak CAPE, J/kg (cape_max): thunderstorm fuel. >1000 unstable,
+    /// >2500 strongly unstable. Display/advisor only; never a skip input.
+    #[serde(default)]
+    pub cape_max_jkg: f64,
+    /// FAO-56 reference evapotranspiration for the day, inches
+    /// (et0_fao_evapotranspiration; follows precipitation_unit). The
+    /// provider's own ET0, useful as a cross-check against the engine's
+    /// station-data FAO-56 computation.
+    #[serde(default)]
+    pub et0_in: f64,
 }
 
 /// One hour in the 48-hour rolling forecast.
@@ -51,6 +87,57 @@ pub struct HourlyEntry {
     pub wind_dir_deg: u32,
     pub humidity_pct: u32,
     pub cloud_cover_pct: u32,
+    // ---- Extended variables (2026-07, Open-Meteo only; serde defaults =
+    // "unknown" for other providers and pre-upgrade persisted caches). ----
+    /// FAO-56 reference ET for this hour, inches. Summing the hours since
+    /// local midnight gives "ET spent so far today", which the water
+    /// balance card uses instead of charging the whole day's ET up front.
+    #[serde(default)]
+    pub et0_in: f64,
+    /// Vapour pressure deficit, kPa. Sustained > ~1.6 kPa means high
+    /// transpiration stress (plants lose water faster than typical Kc
+    /// assumptions); advisor signal only.
+    #[serde(default)]
+    pub vpd_kpa: f64,
+    /// Modeled volumetric soil moisture, m³/m³, 3-9 cm layer (turf root
+    /// zone top). Model data, NOT a probe: measured soil always wins.
+    #[serde(default)]
+    pub soil_moisture_3_9_vwc: f64,
+    /// Modeled volumetric soil moisture, m³/m³, 9-27 cm layer (deep roots).
+    #[serde(default)]
+    pub soil_moisture_9_27_vwc: f64,
+    /// Modeled soil temperature at 6 cm, °F. Drives dormancy/germination
+    /// context (cool-season vs warm-season turf activity).
+    #[serde(default)]
+    pub soil_temp_6cm_f: f64,
+    /// Wind gusts, mph. The hourly companion to the daily gust max; spray
+    /// drift timing wants the per-hour shape, not just the day peak.
+    #[serde(default)]
+    pub wind_gusts_mph: f64,
+    /// Snowfall this hour, inches.
+    #[serde(default)]
+    pub snowfall_in: f64,
+    // ---- Condition-awareness variables (2026-07). Same additive rules. ----
+    /// Snow currently on the ground, feet (snow_depth; follows the imperial
+    /// request). Mountain/winter installs; 0 elsewhere.
+    #[serde(default)]
+    pub snow_depth_ft: f64,
+    /// Freezing level altitude, feet MSL. Rain-vs-snow line for mountain
+    /// users; compare against local elevation.
+    #[serde(default)]
+    pub freezing_level_ft: f64,
+    /// Visibility, feet. Fog/marine-layer awareness (5280 ft = 1 mile).
+    #[serde(default)]
+    pub visibility_ft: f64,
+    /// Mean-sea-level pressure, hPa. The TREND (falling fast = storm
+    /// approach) matters more than the value.
+    #[serde(default)]
+    pub pressure_msl_hpa: f64,
+    /// Wet-bulb temperature, F. Heat-safety ceiling: evaporative cooling
+    /// stops working as this approaches body temperature; sustained 80+ is
+    /// dangerous for outdoor work regardless of the heat index.
+    #[serde(default)]
+    pub wet_bulb_f: f64,
 }
 
 /// Top-level forecast snapshot. Cheap to clone; arc-swapped into the
@@ -67,6 +154,13 @@ pub struct ForecastSnapshot {
     /// Empty only before the first forecast lands.
     #[serde(default)]
     pub source_label: String,
+    /// True when the source serving this forecast is NOT the top-priority
+    /// enabled forecast source: the configured primary is quiet and a
+    /// lower-ranked provider failed over. Stamped by the forecast_bridge
+    /// from the live priority map at store time, so the UI can say
+    /// "via NWS · backup" instead of presenting failover data as primary.
+    #[serde(default)]
+    pub source_is_backup: bool,
     /// IANA timezone name for the forecast point (e.g. America/New_York).
     pub timezone: String,
     /// 7 entries: today plus next 6.
@@ -92,6 +186,205 @@ impl ForecastSnapshot {
     /// Saturates on short snapshots; returns 0 when hourly is empty.
     pub fn next_n_hours_precip_in(&self, n: usize) -> f64 {
         self.hourly.iter().take(n).map(|h| h.precip_in).sum()
+    }
+
+    /// Epoch of the NEXT local midnight in the model's own frame:
+    /// tomorrow's daily entry starts at 00:00 local (that is Open-Meteo's
+    /// daily contract under timezone=auto), so no tz math is needed here.
+    /// i64::MAX when the snapshot has no tomorrow (treat "rest of today"
+    /// as unbounded rather than cutting the window short).
+    fn next_local_midnight_epoch(&self) -> i64 {
+        self.daily.get(1).map(|d| d.time_epoch).unwrap_or(i64::MAX)
+    }
+
+    /// Model ET0 already SPENT today, mm. The hourly window is
+    /// forward-only (now +47h), so spent is derived by subtraction:
+    /// today's full-day ET0 minus the remaining hourly ET0 between now
+    /// and local midnight. 0 when the provider sends no hourly ET0 curve
+    /// (every remaining hour 0 would otherwise claim the whole day is
+    /// already spent).
+    pub fn eto_spent_today_mm(&self) -> f64 {
+        let Some(today) = self.daily.first() else {
+            return 0.0;
+        };
+        if today.et0_in <= 0.0 {
+            return 0.0;
+        }
+        let midnight = self.next_local_midnight_epoch();
+        let remaining_in: f64 = self
+            .hourly
+            .iter()
+            .filter(|h| h.time_epoch < midnight)
+            .map(|h| h.et0_in)
+            .sum();
+        let has_hourly_curve = self.hourly.iter().any(|h| h.et0_in > 0.0);
+        if !has_hourly_curve {
+            return 0.0;
+        }
+        ((today.et0_in - remaining_in) * 25.4).max(0.0)
+    }
+
+    /// True when this snapshot carries any of the extended model series
+    /// (ET0 curve, VPD, model soil). Today only Open-Meteo produces them;
+    /// the check is capability-based, not provider-based, so any future
+    /// producer that sends them counts.
+    pub fn has_extended_series(&self) -> bool {
+        // Check BOTH hourly and daily. `graft_extended_from` fills daily too, so
+        // a daily-only owner (e.g. NWS when its optional hourly endpoint failed)
+        // that received a daily graft must report `true` here, or the retro-graft
+        // one-shot guard (`!current.has_extended_series()`) never trips and every
+        // donor emit re-stores the same snapshot forever (a spurious SSE push +
+        // disk write each cycle). The daily-extended fields below are Open-Meteo
+        // only; no non-OM provider sets them, so this never false-positives on a
+        // pristine owner.
+        self.hourly
+            .iter()
+            .any(|h| h.et0_in > 0.0 || h.vpd_kpa > 0.0 || h.soil_moisture_3_9_vwc > 0.0)
+            || self.daily.iter().any(|d| {
+                d.precip_hours > 0.0 || d.cape_max_jkg > 0.0 || d.et0_in > 0.0 || d.sunshine_s > 0.0
+            })
+    }
+
+    /// Graft the ADVISORY extended series from `donor` into this snapshot,
+    /// filling only fields that are zero here and only entries whose
+    /// `time_epoch` matches exactly, so mixed data can never misalign.
+    ///
+    /// Why: forecast arbitration is whole-snapshot (mixing core fields
+    /// across providers would produce an incoherent forecast), and the US
+    /// default chain ranks NWS above Open-Meteo, but the extended series
+    /// are Open-Meteo-only. Without this graft, the advisory surfaces
+    /// (VPD stress, model soil, ET-spent, rain character) would blank on
+    /// every install whose primary is not Open-Meteo, i.e. the default US
+    /// install. Core fields (temps, precip, wind, codes) are NEVER
+    /// touched: the owner's forecast stays the owner's forecast.
+    ///
+    /// LOCATION SAFETY: the donor is task-local state in the bridge that
+    /// survives a wizard location change (only the priority map hot-reloads),
+    /// and hourly epochs are top-of-hour UTC, IDENTICAL across locations, so a
+    /// pure epoch match would copy the OLD location's soil/VPD/fog onto the NEW
+    /// location's forecast until the donor re-emits. Gate on the timezone: a
+    /// forecast for a materially different location almost always carries a
+    /// different IANA zone, so a mismatch means "not the same place" and the
+    /// graft is skipped. (Same-zone nudges within a region still graft; the
+    /// advisory conditions are near-identical there.)
+    pub fn graft_extended_from(&mut self, donor: &ForecastSnapshot) {
+        if !donor.timezone.is_empty()
+            && !self.timezone.is_empty()
+            && donor.timezone != self.timezone
+        {
+            return;
+        }
+        for h in &mut self.hourly {
+            let Some(dh) = donor.hourly.iter().find(|d| d.time_epoch == h.time_epoch) else {
+                continue;
+            };
+            if h.et0_in == 0.0 {
+                h.et0_in = dh.et0_in;
+            }
+            if h.vpd_kpa == 0.0 {
+                h.vpd_kpa = dh.vpd_kpa;
+            }
+            if h.soil_moisture_3_9_vwc == 0.0 {
+                h.soil_moisture_3_9_vwc = dh.soil_moisture_3_9_vwc;
+            }
+            if h.soil_moisture_9_27_vwc == 0.0 {
+                h.soil_moisture_9_27_vwc = dh.soil_moisture_9_27_vwc;
+            }
+            if h.soil_temp_6cm_f == 0.0 {
+                h.soil_temp_6cm_f = dh.soil_temp_6cm_f;
+            }
+            if h.wind_gusts_mph == 0.0 {
+                h.wind_gusts_mph = dh.wind_gusts_mph;
+            }
+            if h.snowfall_in == 0.0 {
+                h.snowfall_in = dh.snowfall_in;
+            }
+            if h.snow_depth_ft == 0.0 {
+                h.snow_depth_ft = dh.snow_depth_ft;
+            }
+            if h.freezing_level_ft == 0.0 {
+                h.freezing_level_ft = dh.freezing_level_ft;
+            }
+            if h.visibility_ft == 0.0 {
+                h.visibility_ft = dh.visibility_ft;
+            }
+            if h.pressure_msl_hpa == 0.0 {
+                h.pressure_msl_hpa = dh.pressure_msl_hpa;
+            }
+            if h.wet_bulb_f == 0.0 {
+                h.wet_bulb_f = dh.wet_bulb_f;
+            }
+        }
+        for d in &mut self.daily {
+            // Match by the donor DAY that CONTAINS this entry, not nearest-epoch.
+            // Open-Meteo stamps 00:00 local; NWS stamps period starts (06:00
+            // daytime, 18:00 for a lone-night "Tonight" row). Nearest-epoch sent
+            // an 18:00 owner entry to the donor's NEXT 00:00 (6h away < same-day
+            // 18h), grafting TOMORROW's rain/CAPE/ET onto today's card ~half of
+            // every day on the default NWS install. Donor entries are 00:00-local
+            // and ~24h apart, so the day containing a target T is the donor entry
+            // with the greatest midnight <= T (with 3h slack for a target stamped
+            // just before midnight), accepted only if within ~30h (a full day +
+            // the period-start offset) so a far-future target with no donor day
+            // is left ungrafted rather than matched to the last day.
+            let Some(dd) = donor
+                .daily
+                .iter()
+                .filter(|x| x.time_epoch <= d.time_epoch + 3 * 3600)
+                .max_by_key(|x| x.time_epoch)
+                .filter(|x| d.time_epoch - x.time_epoch < 30 * 3600)
+            else {
+                continue;
+            };
+            if d.precip_hours == 0.0 {
+                d.precip_hours = dd.precip_hours;
+            }
+            if d.rain_sum_in == 0.0 {
+                d.rain_sum_in = dd.rain_sum_in;
+            }
+            if d.showers_sum_in == 0.0 {
+                d.showers_sum_in = dd.showers_sum_in;
+            }
+            if d.snowfall_sum_in == 0.0 {
+                d.snowfall_sum_in = dd.snowfall_sum_in;
+            }
+            if d.sunshine_s == 0.0 {
+                d.sunshine_s = dd.sunshine_s;
+            }
+            if d.apparent_temp_max_f == 0.0 {
+                d.apparent_temp_max_f = dd.apparent_temp_max_f;
+            }
+            if d.cape_max_jkg == 0.0 {
+                d.cape_max_jkg = dd.cape_max_jkg;
+            }
+            if d.et0_in == 0.0 {
+                d.et0_in = dd.et0_in;
+            }
+        }
+    }
+
+    /// Vapour pressure deficit (kPa): the current hour's value and the
+    /// peak across the rest of today. (0.0, 0.0) when the provider sends
+    /// no VPD.
+    pub fn vpd_now_and_max_today(&self) -> (f64, f64) {
+        // First hour WITH a value, not first hour: a non-OM owner's hourly
+        // window can start in the past, before the donor's graft coverage,
+        // so hourly[0] may be an ungrafted zero while the current hour is
+        // fully decorated (observed live on the NWS 156h window).
+        let now = self
+            .hourly
+            .iter()
+            .map(|h| h.vpd_kpa)
+            .find(|v| *v > 0.0)
+            .unwrap_or(0.0);
+        let midnight = self.next_local_midnight_epoch();
+        let max_today = self
+            .hourly
+            .iter()
+            .filter(|h| h.time_epoch < midnight)
+            .map(|h| h.vpd_kpa)
+            .fold(0.0_f64, f64::max);
+        (now, max_today)
     }
 
     /// Probability-weighted rain forecast over the next `n` future days
@@ -379,5 +672,114 @@ mod tests {
         assert!((fc.past_n_day_precip_in(9) - 1.80).abs() < 1e-9);
         // Empty past window is 0.
         assert!((ForecastSnapshot::default().past_n_day_precip_in(3) - 0.0).abs() < 1e-9);
+    }
+
+    // ---- extended-series graft (advisory backfill across providers) ----
+
+    fn hourly_at(epoch: i64) -> HourlyEntry {
+        HourlyEntry {
+            time_epoch: epoch,
+            temp_f: 80.0,
+            precip_in: 0.1,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn graft_fills_only_zeroed_extended_fields_by_exact_epoch() {
+        // NWS-style owner: core fields present, extended series absent.
+        let mut owner = ForecastSnapshot {
+            hourly: vec![hourly_at(1000), hourly_at(4600)],
+            daily: vec![DailyEntry {
+                time_epoch: 500,
+                precip_sum_in: 0.4,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(!owner.has_extended_series());
+
+        // Open-Meteo-style donor: same epochs, extended series present,
+        // plus one entry at an epoch the owner lacks (must be ignored).
+        let donor = ForecastSnapshot {
+            hourly: vec![
+                HourlyEntry {
+                    et0_in: 0.02,
+                    vpd_kpa: 1.4,
+                    soil_moisture_3_9_vwc: 0.19,
+                    soil_temp_6cm_f: 78.0,
+                    wind_gusts_mph: 14.0,
+                    ..hourly_at(1000)
+                },
+                HourlyEntry {
+                    et0_in: 0.03,
+                    ..hourly_at(9999)
+                },
+            ],
+            daily: vec![DailyEntry {
+                time_epoch: 500,
+                precip_hours: 5.0,
+                rain_sum_in: 0.3,
+                showers_sum_in: 0.1,
+                sunshine_s: 20000.0,
+                apparent_temp_max_f: 101.0,
+                cape_max_jkg: 2400.0,
+                et0_in: 0.19,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(donor.has_extended_series());
+
+        owner.graft_extended_from(&donor);
+        // Epoch 1000 matched: extended fields filled, core untouched.
+        assert!((owner.hourly[0].et0_in - 0.02).abs() < 1e-9);
+        assert!((owner.hourly[0].vpd_kpa - 1.4).abs() < 1e-9);
+        assert!((owner.hourly[0].soil_moisture_3_9_vwc - 0.19).abs() < 1e-9);
+        assert!(
+            (owner.hourly[0].temp_f - 80.0).abs() < 1e-9,
+            "core stays owner's"
+        );
+        // Epoch 4600 has no donor match: stays zero.
+        assert!((owner.hourly[1].et0_in - 0.0).abs() < 1e-9);
+        // Daily grafted by epoch, core precip untouched.
+        assert!((owner.daily[0].precip_hours - 5.0).abs() < 1e-9);
+        assert!((owner.daily[0].cape_max_jkg - 2400.0).abs() < 1e-9);
+        assert!(
+            (owner.daily[0].precip_sum_in - 0.4).abs() < 1e-9,
+            "core stays owner's"
+        );
+        assert!(
+            owner.has_extended_series(),
+            "owner now carries the advisory series"
+        );
+    }
+
+    #[test]
+    fn graft_never_overwrites_a_provider_own_extended_value() {
+        let mut owner = ForecastSnapshot {
+            hourly: vec![HourlyEntry {
+                vpd_kpa: 0.9,
+                ..hourly_at(1000)
+            }],
+            ..Default::default()
+        };
+        let donor = ForecastSnapshot {
+            hourly: vec![HourlyEntry {
+                vpd_kpa: 1.8,
+                et0_in: 0.02,
+                ..hourly_at(1000)
+            }],
+            ..Default::default()
+        };
+        owner.graft_extended_from(&donor);
+        assert!(
+            (owner.hourly[0].vpd_kpa - 0.9).abs() < 1e-9,
+            "own value wins"
+        );
+        assert!(
+            (owner.hourly[0].et0_in - 0.02).abs() < 1e-9,
+            "zeroed field fills"
+        );
     }
 }

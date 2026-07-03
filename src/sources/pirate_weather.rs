@@ -228,6 +228,7 @@ impl PirateWeather {
                         uv_index_max: d.uv_index.unwrap_or(0.0),
                         sunrise_epoch: d.sunrise_time.unwrap_or(0),
                         sunset_epoch: d.sunset_time.unwrap_or(0),
+                        ..Default::default()
                     })
                     .collect()
             })
@@ -253,6 +254,7 @@ impl PirateWeather {
                             .unwrap_or(0),
                         humidity_pct: h.humidity.map(frac_to_pct).unwrap_or(0),
                         cloud_cover_pct: h.cloud_cover.map(frac_to_pct).unwrap_or(0),
+                        ..Default::default()
                     })
                     .collect()
             })
@@ -266,6 +268,7 @@ impl PirateWeather {
             daily,
             past_daily: vec![],
             hourly,
+            ..Default::default()
         };
         // Pair each day's high temp with THAT day's afternoon humidity (hourly).
         snap.backfill_daily_humidity();

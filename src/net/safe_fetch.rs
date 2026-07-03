@@ -24,13 +24,30 @@
 // Callers keep their own timeouts: build_safe_client takes the timeout so
 // the existing per-call budgets (8s soil probe, 10s controller, 30s LLM)
 // are preserved exactly.
+//
+// The timeout bounds DURATION, not SIZE: reqwest's .json()/.text()/.bytes()
+// buffer the whole body unbounded, so a target that streams garbage faster
+// than the timeout can still exhaust memory. read_body_capped /
+// read_json_capped are the companion body readers that close that hole;
+// use them instead of reqwest's own readers on any response fetched from
+// an operator-named target.
 
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use reqwest::{Client, Url};
 
-/// Why a safe-fetch client could not be built for a user-supplied target.
+/// Hard ceiling on a response body read through the safe-fetch pathway.
+/// The per-request timeout bounds how LONG a target may talk, not how MUCH:
+/// a malicious or broken device that streams a multi-GB body fast enough
+/// beats the timeout and OOMs the process if the body is buffered
+/// unbounded. 8 MiB is generous for every payload these clients consume
+/// (weather/controller/LLM JSON runs KiB to low MiB) while keeping the
+/// worst-case buffer harmless.
+pub const MAX_RESPONSE_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+/// Why a safe-fetch client could not be built for a user-supplied target,
+/// or a response body could not be safely read from it.
 /// Deliberately coarse: a caller surfaces a category, never the raw
 /// upstream response, so this is not an information-leak oracle.
 #[derive(Debug)]
@@ -46,6 +63,12 @@ pub enum SafeFetchError {
     BlockedTarget,
     /// reqwest client construction failed (TLS root load, etc.).
     ClientBuild(String),
+    /// Response body exceeded [`MAX_RESPONSE_BODY_BYTES`]; read aborted.
+    BodyTooLarge,
+    /// Body could not be read or decoded. Carries the COARSE category from
+    /// `net::reqwest_error_category`, never raw reqwest text (whose Display
+    /// embeds the target URL).
+    BodyRead(&'static str),
 }
 
 impl std::fmt::Display for SafeFetchError {
@@ -58,6 +81,8 @@ impl std::fmt::Display for SafeFetchError {
                 write!(f, "target address is not a permitted device endpoint")
             }
             SafeFetchError::ClientBuild(e) => write!(f, "client build failed: {e}"),
+            SafeFetchError::BodyTooLarge => write!(f, "response body exceeded the size cap"),
+            SafeFetchError::BodyRead(c) => write!(f, "body read failed: {c}"),
         }
     }
 }
@@ -150,6 +175,55 @@ pub async fn build_safe_client(
     Ok((client, url))
 }
 
+/// Read a response body to completion under a hard byte ceiling
+/// ([`MAX_RESPONSE_BODY_BYTES`]). Use this instead of reqwest's
+/// `.json()`/`.text()`/`.bytes()` on any response from an operator-named
+/// target (everything build_safe_client serves): those readers buffer with
+/// no bound, so the only size cap a hostile body ever meets is this one.
+/// A Content-Length already over the cap fails fast without reading; a
+/// chunked or lying response is caught by the streaming accounting, which
+/// aborts (dropping the connection) the moment the cap would be crossed.
+pub async fn read_body_capped(resp: reqwest::Response) -> Result<Vec<u8>, SafeFetchError> {
+    read_body_capped_limit(resp, MAX_RESPONSE_BODY_BYTES).await
+}
+
+/// [`read_body_capped`] with an explicit cap, kept separate so tests can
+/// exercise the limit without shoveling 8 MiB through loopback.
+async fn read_body_capped_limit(
+    mut resp: reqwest::Response,
+    cap: usize,
+) -> Result<Vec<u8>, SafeFetchError> {
+    if let Some(len) = resp.content_length() {
+        if len > cap as u64 {
+            return Err(SafeFetchError::BodyTooLarge);
+        }
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| SafeFetchError::BodyRead(crate::net::reqwest_error_category(&e)))?
+    {
+        if buf.len() + chunk.len() > cap {
+            return Err(SafeFetchError::BodyTooLarge);
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
+/// [`read_body_capped`] + JSON parse, the shape nearly every safe-fetch
+/// call site wants. A parse failure maps to the same coarse bucket
+/// reqwest's own decode errors use, so callers keep surfacing a category,
+/// never upstream bytes.
+pub async fn read_json_capped<T: serde::de::DeserializeOwned>(
+    resp: reqwest::Response,
+) -> Result<T, SafeFetchError> {
+    let body = read_body_capped(resp).await?;
+    serde_json::from_slice(&body)
+        .map_err(|_| SafeFetchError::BodyRead("response could not be decoded"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,5 +305,77 @@ mod tests {
                 .await
                 .expect("private LAN target must be allowed");
         assert_eq!(url.host_str(), Some("10.0.0.50"));
+    }
+
+    /// A reqwest::Response over an in-memory body (no network); the
+    /// exact-size body makes content_length() report the true length.
+    fn canned_response(body: Vec<u8>) -> reqwest::Response {
+        reqwest::Response::from(
+            axum::http::Response::builder()
+                .body(reqwest::Body::from(body))
+                .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn capped_read_passes_a_small_body_and_parses_json() {
+        let body = read_body_capped(canned_response(b"hello".to_vec()))
+            .await
+            .expect("small body must pass");
+        assert_eq!(body, b"hello");
+
+        let v: serde_json::Value = read_json_capped(canned_response(b"{\"ok\":true}".to_vec()))
+            .await
+            .expect("small JSON body must parse");
+        assert_eq!(v["ok"], serde_json::Value::Bool(true));
+    }
+
+    #[tokio::test]
+    async fn capped_read_rejects_an_over_cap_body() {
+        // 256 bytes against a 64-byte cap: refused (fast-fail on the known
+        // length, or the streaming accounting; either way BodyTooLarge).
+        let err = read_body_capped_limit(canned_response(vec![b'x'; 256]), 64)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SafeFetchError::BodyTooLarge));
+    }
+
+    #[tokio::test]
+    async fn capped_read_aborts_a_stream_with_no_declared_length() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // A close-delimited body advertises NO length, so the fast-fail
+        // cannot fire and the chunk accounting must abort once the cap is
+        // crossed, however much more the peer intends to send. Loopback is
+        // fine here: the reader takes any Response, only build_safe_client
+        // forbids loopback targets.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            // Drain the request head before answering.
+            let mut head = [0u8; 1024];
+            let _ = sock.read(&mut head).await;
+            let _ = sock
+                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                .await;
+            // Try to send 16x the cap; the reader hangs up first.
+            let block = [b'x'; 1024];
+            for _ in 0..64 {
+                if sock.write_all(&block).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let resp = client
+            .get(format!("http://{addr}/stream"))
+            .send()
+            .await
+            .expect("local test server must answer");
+        let err = read_body_capped_limit(resp, 4 * 1024).await.unwrap_err();
+        assert!(matches!(err, SafeFetchError::BodyTooLarge));
     }
 }

@@ -504,6 +504,123 @@ pub fn validate(cfg: &Config) -> ValidationReport {
         }
     }
 
+    // Per-field source overrides/chains + the forecast-provider pin must
+    // reference canonical field names and configured source ids. The merge
+    // layer deliberately SKIPS anything it can't resolve (runtime::
+    // field_override_map / field_chain_map drop unknown keys and dead ids;
+    // forecast_priority_map ignores an unresolvable pin) so a bad entry can
+    // never blank a reading, but that also means a typo'd field name or a
+    // stale id has ZERO runtime signal: the user believes "rain is pinned to
+    // MRMS then NWS" while plain priority arbitration quietly drives skip
+    // decisions. Surface them here as WARNINGS (degraded-but-runnable,
+    // matching zone_soil_source_missing): blocking a save over a leftover id
+    // from a deleted source would be hostile.
+    //
+    // Values are validated against config SOURCE IDS only: the merge resolves
+    // a chain/override entry by config id (runtime::field_chain_map keys its
+    // lookup table by `entry.id`) and only THEN translates a TempestUdp id to
+    // its writer label, so the literal label ("Tempest") is never a valid
+    // config value and needs no special case here.
+    let enabled_source_ids: std::collections::HashSet<&str> = cfg
+        .sources
+        .iter()
+        .filter(|s| s.enabled)
+        .map(|s| s.id.as_str())
+        .collect();
+    for (field, source_id) in &cfg.field_source_overrides {
+        if crate::config::field_overrides::parse_field_name(field).is_none() {
+            r.warn(
+                "field_override_unknown_field",
+                format!(
+                    "field_source_overrides key '{field}' is not a known weather field name and \
+                     is ignored (valid names are the snake_case field ids, e.g. 'wind_mph', \
+                     'rain_today_in')"
+                ),
+            );
+            continue;
+        }
+        if !source_ids.contains(source_id.as_str()) {
+            r.warn(
+                "field_override_source_missing",
+                format!(
+                    "field_source_overrides['{field}'] references source '{source_id}' which \
+                     does not exist; the override is ignored and priority arbitration applies"
+                ),
+            );
+        } else if !enabled_source_ids.contains(source_id.as_str()) {
+            r.warn(
+                "field_override_source_disabled",
+                format!(
+                    "field_source_overrides['{field}'] references source '{source_id}' which is \
+                     disabled; the override is ignored until the source is re-enabled"
+                ),
+            );
+        }
+    }
+    for (field, chain) in &cfg.field_source_chains {
+        if crate::config::field_overrides::parse_field_name(field).is_none() {
+            r.warn(
+                "field_chain_unknown_field",
+                format!(
+                    "field_source_chains key '{field}' is not a known weather field name and the \
+                     whole chain is ignored (valid names are the snake_case field ids, e.g. \
+                     'wind_mph', 'rain_today_in')"
+                ),
+            );
+            continue;
+        }
+        for source_id in chain {
+            if !source_ids.contains(source_id.as_str()) {
+                r.warn(
+                    "field_chain_source_missing",
+                    format!(
+                        "field_source_chains['{field}'] entry '{source_id}' does not match any \
+                         configured source id and is dropped from the chain"
+                    ),
+                );
+            } else if !enabled_source_ids.contains(source_id.as_str()) {
+                r.warn(
+                    "field_chain_source_disabled",
+                    format!(
+                        "field_source_chains['{field}'] entry '{source_id}' is disabled and is \
+                         dropped from the chain until the source is re-enabled"
+                    ),
+                );
+            }
+        }
+    }
+    // The forecast pin only engages for an ENABLED, forecast-capable source
+    // (runtime::forecast_priority_map bumps it to the winning priority only
+    // when its id is in the enabled-forecast map); anything else is silently
+    // inert and the per-source priority order applies.
+    if let Some(pin) = cfg.forecast_provider.as_deref() {
+        match cfg.sources.iter().find(|s| s.id == pin) {
+            None => r.warn(
+                "forecast_provider_source_missing",
+                format!(
+                    "forecast_provider references source '{pin}' which does not exist; the pin \
+                     is ignored and forecast priority arbitration applies"
+                ),
+            ),
+            Some(s) if !s.enabled => r.warn(
+                "forecast_provider_source_disabled",
+                format!(
+                    "forecast_provider references source '{pin}' which is disabled; the pin is \
+                     ignored until the source is re-enabled"
+                ),
+            ),
+            Some(s) if !s.source.is_forecast() => r.warn(
+                "forecast_provider_not_forecast_capable",
+                format!(
+                    "forecast_provider references source '{pin}' which is not a forecast-capable \
+                     kind (open_meteo, nws, met_norway, openweather, pirate_weather, weatherkit); \
+                     the pin is ignored"
+                ),
+            ),
+            Some(_) => {}
+        }
+    }
+
     r
 }
 
@@ -914,5 +1031,171 @@ mod tests {
         );
         let r = validate(&cfg);
         assert!(!r.errors.iter().any(|i| i.code == "zone_controller_missing"));
+    }
+
+    fn disabled_openweather_source(id: &str) -> SourceEntry {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "kind": "openweather",
+            "enabled": false,
+            "config": { "api_key": "k" },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn field_override_unknown_field_warns_not_errors() {
+        // "rain_today" is the classic typo for "rain_today_in": the merge
+        // silently ignores it, so validate must say so (warning, still saves).
+        let mut cfg = base();
+        cfg.sources.push(open_meteo_source("best_match"));
+        cfg.field_source_overrides
+            .insert("rain_today".into(), "open_meteo".into());
+        let r = validate(&cfg);
+        assert!(r.ok(), "an inert override must not block saving");
+        assert!(r
+            .warnings
+            .iter()
+            .any(|i| i.code == "field_override_unknown_field"));
+    }
+
+    #[test]
+    fn field_override_ghost_source_warns() {
+        let mut cfg = base();
+        cfg.field_source_overrides
+            .insert("wind_mph".into(), "ghost".into());
+        let r = validate(&cfg);
+        assert!(r.ok());
+        assert!(r
+            .warnings
+            .iter()
+            .any(|i| i.code == "field_override_source_missing"));
+    }
+
+    #[test]
+    fn field_override_disabled_source_warns() {
+        let mut cfg = base();
+        cfg.sources.push(disabled_openweather_source("owm"));
+        cfg.field_source_overrides
+            .insert("wind_mph".into(), "owm".into());
+        let r = validate(&cfg);
+        assert!(r.ok());
+        assert!(r
+            .warnings
+            .iter()
+            .any(|i| i.code == "field_override_source_disabled"));
+    }
+
+    #[test]
+    fn field_chain_unknown_field_warns() {
+        let mut cfg = base();
+        cfg.sources.push(open_meteo_source("best_match"));
+        cfg.field_source_chains
+            .insert("sharknado".into(), vec!["open_meteo".into()]);
+        let r = validate(&cfg);
+        assert!(r.ok());
+        assert!(r
+            .warnings
+            .iter()
+            .any(|i| i.code == "field_chain_unknown_field"));
+    }
+
+    #[test]
+    fn field_chain_ghost_and_disabled_entries_warn_per_entry() {
+        // A chain mixing a live id, a deleted id, and a disabled id gets one
+        // warning per broken entry (the live entry keeps the chain running).
+        let mut cfg = base();
+        cfg.sources.push(open_meteo_source("best_match"));
+        cfg.sources.push(disabled_openweather_source("owm"));
+        cfg.field_source_chains.insert(
+            "rain_today_in".into(),
+            vec!["open_meteo".into(), "ghost".into(), "owm".into()],
+        );
+        let r = validate(&cfg);
+        assert!(r.ok());
+        assert!(r
+            .warnings
+            .iter()
+            .any(|i| i.code == "field_chain_source_missing"));
+        assert!(r
+            .warnings
+            .iter()
+            .any(|i| i.code == "field_chain_source_disabled"));
+    }
+
+    #[test]
+    fn valid_overrides_chains_and_forecast_pin_pass_clean() {
+        let mut cfg = base();
+        cfg.sources.push(open_meteo_source("best_match"));
+        cfg.field_source_overrides
+            .insert("wind_mph".into(), "open_meteo".into());
+        cfg.field_source_chains
+            .insert("rain_today_in".into(), vec!["open_meteo".into()]);
+        cfg.forecast_provider = Some("open_meteo".into());
+        let r = validate(&cfg);
+        assert!(r.ok());
+        for code in [
+            "field_override_unknown_field",
+            "field_override_source_missing",
+            "field_override_source_disabled",
+            "field_chain_unknown_field",
+            "field_chain_source_missing",
+            "field_chain_source_disabled",
+            "forecast_provider_source_missing",
+            "forecast_provider_source_disabled",
+            "forecast_provider_not_forecast_capable",
+        ] {
+            assert!(
+                !r.warnings.iter().any(|i| i.code == code),
+                "clean config must not warn '{code}'"
+            );
+        }
+    }
+
+    #[test]
+    fn forecast_provider_ghost_warns() {
+        let mut cfg = base();
+        cfg.forecast_provider = Some("ghost".into());
+        let r = validate(&cfg);
+        assert!(r.ok());
+        assert!(r
+            .warnings
+            .iter()
+            .any(|i| i.code == "forecast_provider_source_missing"));
+    }
+
+    #[test]
+    fn forecast_provider_disabled_warns() {
+        let mut cfg = base();
+        cfg.sources.push(disabled_openweather_source("owm"));
+        cfg.forecast_provider = Some("owm".into());
+        let r = validate(&cfg);
+        assert!(r.ok());
+        assert!(r
+            .warnings
+            .iter()
+            .any(|i| i.code == "forecast_provider_source_disabled"));
+    }
+
+    #[test]
+    fn forecast_provider_non_forecast_kind_warns() {
+        // An Ecowitt gateway is a live station: pinning the forecast to it can
+        // never engage (forecast_priority_map only maps forecast kinds).
+        let mut cfg = base();
+        cfg.sources.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "gw",
+                "kind": "ecowitt_gw_poll",
+                "config": { "host": "192.0.2.61" },
+            }))
+            .unwrap(),
+        );
+        cfg.forecast_provider = Some("gw".into());
+        let r = validate(&cfg);
+        assert!(r.ok());
+        assert!(r
+            .warnings
+            .iter()
+            .any(|i| i.code == "forecast_provider_not_forecast_capable"));
     }
 }

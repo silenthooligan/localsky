@@ -31,7 +31,10 @@ Per source, per tick, LocalSky records:
 - Solar irradiance (W/m²)
 - Atmospheric pressure (kPa; elevation-derived if missing)
 - Rainfall (gross + intensity)
+- Observed rain over the recent window (today plus prior days' measured totals, sensor-independent so a dropped soil probe or a paused source can't hide real rain that already fell)
 - Day-of-year + latitude + elevation
+
+Rainfall carries an honesty tier alongside the value: measured (a real gauge caught it), radar (a radar/QPE estimate), or model (a forecast figure). Downstream skip logic weights a measured total differently from a model guess.
 
 Soil inputs (natively polled from the Ecowitt GW1100B gateway's LAN address):
 
@@ -106,6 +109,8 @@ ETc = ET₀ * Kc(species, DOY) * heat_multiplier(heat_index)
 
 `heat_multiplier` is the NOAA Steadman heat index applied as an ET boost from 1.00 at HI <= 85°F up to 1.30 at HI >= 105°F. Captures the empirical observation that 100°F + 70% RH dries a lawn faster than ET₀ alone predicts. Defined in [src/engine/skip_rules.rs](../src/engine/skip_rules.rs).
 
+The heat index is computed per day: each day's high temperature is paired with that same day's humidity (the humidity at the time they co-occur), not the current "now" humidity. Pairing a cool, damp morning reading with the afternoon peak would inflate the multiplier, so the engine keeps the co-occurring pair intact.
+
 ## Soil water balance
 
 Per zone, LocalSky tracks one number: `depletion_mm`, the millimetres of water below field capacity. State evolves daily:
@@ -165,9 +170,11 @@ Implementation: [src/engine/cycle_soak.rs](../src/engine/cycle_soak.rs).
 
 ## Skip rules
 
-Before any zone fires, the engine runs a deterministic 17-rule ladder. First matching rule wins. Order encodes intent: explicit user overrides > paused > current-conditions safety (raining now, freeze, soil frost, wind) > soil saturation > forecast skips > heat advisory > dry-run > run.
+Before any zone fires, the engine runs a deterministic rule ladder. First matching rule wins. Order encodes intent: explicit user overrides > paused > current-conditions safety (raining now, freeze, soil frost, wind) > observed recent rain > soil saturation > forecast skips > heat advisory > dry-run > run.
 
-Full enumeration in [skip-rules.md](skip-rules.md). All thresholds are typed config fields in `cfg.engine.skip_rules`; defaults match v0.1 hardcoded values exactly so upgrading doesn't change any verdict for unchanged inputs.
+Observed recent rain (measured and sensor-independent) is checked before both the soil and forecast gates: if enough real rain has already fallen over the recent window, the zone skips regardless of what a probe or a forecast says. A soft forecast-rain skip is not the last word, though: when a zone reads measured-dry, the engine can demote that forecast skip back to a run so soil truth wins over an uncertain forecast (the soil floor moat). And an offline or outlier soil probe does not silently break a zone: its state is inferred from trustworthy neighbouring probes (soil quarantine) so one bad reading can't force a skip or a needless run.
+
+Full enumeration in [skip-rules.md](skip-rules.md). All thresholds are typed config fields in `cfg.engine.skip_rules`; defaults match the original hardcoded values exactly so upgrading doesn't change any verdict for unchanged inputs.
 
 ## Heat advisory pre-water
 

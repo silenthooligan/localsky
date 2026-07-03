@@ -104,7 +104,12 @@
   --text: #e6ecf5;
   --text-bright: #ffffff;
   --text-dim: #94a0b6;
-  --text-faint: #6f7c95;
+  // Faint but still AA: the old #6f7c95 fell to 3.69:1 on elev-3, where
+  // it colors real reading text (placeholders, hints, empty states,
+  // gate explanations). #828ea8 clears 4.5:1 on every elev surface
+  // (4.72:1 on elev-3, 5.19:1 on elev-2, 5.51:1 on elev-1) while
+  // staying visibly dimmer than --text-dim.
+  --text-faint: #828ea8;
 
   // Borders.
   --border: #232a3a;
@@ -266,6 +271,16 @@
   // visual that ties the logomark's wifi (blue) to its cloud outline
   // (teal). Use sparingly on headers + CTAs.
   --grad-flow: linear-gradient(135deg, var(--brand-blue-500) 0%, var(--brand-teal-500) 100%);
+  // CTA-surface variant of the flow gradient, for button BACKGROUNDS only
+  // (.btn--primary et al). The dark --grad-flow endpoints (blue-500 #1490dc,
+  // teal-500 #149c92) give white-text contrast of just 3.47:1 / 3.39:1, under
+  // WCAG AA 4.5:1 for the 0.92rem/600 button label (not "large" text). Deepen
+  // to blue-600 -> teal-600 (min 4.67:1 white across the sweep) for buttons
+  // WITHOUT darkening the many decorative --grad-flow uses (hero glows, 3px
+  // accent stripes, progress fills). Light + HC reuse their own --grad-flow
+  // (light is already blue-600 -> teal-600; HC is a light solid whose existing
+  // black-text override carries the contrast).
+  --grad-flow-cta: linear-gradient(135deg, var(--brand-blue-600) 0%, var(--brand-teal-600) 100%);
   --grad-sky: linear-gradient(180deg, var(--brand-blue-700) 0%, var(--brand-navy-900) 100%);
   --grad-rain: linear-gradient(180deg, var(--brand-blue-400) 0%, var(--brand-blue-700) 100%);
   --grad-hero: linear-gradient(135deg, var(--brand-navy-800) 0%, var(--brand-navy-900) 100%);
@@ -602,6 +617,21 @@
   top: 8px;
 }
 
+// Screen-reader-only utility (standard clip-rect recipe). display:none
+// or visibility:hidden would remove the node from the accessibility
+// tree; this keeps it announceable while rendering nothing.
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 // Honor reduced-motion globally. Specific component animations may
 // still respect this individually but having a fleet-wide guard
 // prevents any future addition from forgetting.
@@ -655,8 +685,13 @@
   --accent-cool: var(--brand-blue-500);
   --accent-rain: var(--brand-blue-500);
   --accent-good: var(--brand-teal-600);
-  --accent-warm: #d97a00;
-  --accent-warn: #c97a00;
+  // Deepened for AA text: the old #d97a00 / #c97a00 measured 2.96:1 and
+  // 3.18:1 on snow-50 (3.12 / 3.35 on white) yet color normal-size text
+  // (chain fall-through warnings, restart banners, stale badges). These
+  // keep the warm-orange vs amber hue split and clear 4.5:1 on both
+  // white and snow-50 (warm 4.67:1, warn 4.78:1 on snow-50).
+  --accent-warm: #a85e00;
+  --accent-warn: #a06000;
   --accent-hot:  #d63838;
   --accent-danger: #c43b3b;
   --accent-lightning: #c69400;
@@ -707,6 +742,9 @@
   // Light-mode gradients pull from the brand scale's deeper end so the
   // sweep is still visible on near-white panels.
   --grad-flow: linear-gradient(135deg, var(--brand-blue-600) 0%, var(--brand-teal-600) 100%);
+  // Light --grad-flow already passes AA with white (blue-600 -> teal-600, min
+  // 4.67:1), so the CTA gradient just reuses it here.
+  --grad-flow-cta: var(--grad-flow);
   --grad-sky: linear-gradient(180deg, var(--brand-blue-100) 0%, var(--brand-snow-50) 100%);
   --grad-rain: linear-gradient(180deg, var(--brand-blue-400) 0%, var(--brand-blue-700) 100%);
   --grad-hero: linear-gradient(135deg, var(--brand-snow-50) 0%, #ffffff 100%);
@@ -765,6 +803,10 @@
     background: rgba(15, 21, 37, 0.05);
   }
   .uv-bar { background: rgba(15, 21, 37, 0.08); }
+  // The dry-run ribbon fills with --accent-warm, which light mode
+  // deepens for AA text; the shared dark-ink ribbon text would drop to
+  // about 3.5:1 on the deeper amber, so flip it to white (5.0:1).
+  @at-root html#{&}[data-dry-run="true"]::before { color: #ffffff; }
 }
 [data-theme="light"] { @include localsky-light-element-overrides; }
 @media (prefers-color-scheme: light) {
@@ -820,6 +862,12 @@
 
   // Disable brand gradients in HC: solid colors only.
   --grad-flow: var(--brand-blue-300);
+  // CTA gradient in HC MUST stay the light solid (= --grad-flow), NOT inherit
+  // the dark base blue-600 -> teal-600: .btn--primary is in the HC black-text
+  // override list, and black on the light brand-blue-300 (#5fb4ff) is 9.46:1,
+  // whereas black on the dark blue-600 would be ~4.49:1 (a regression). Reuse
+  // --grad-flow so HC .btn--primary renders exactly as before.
+  --grad-flow-cta: var(--grad-flow);
   --grad-sky: #000000;
   --grad-rain: var(--brand-blue-300);
   --grad-hero: #000000;
@@ -1340,6 +1388,14 @@ a { color: var(--accent); }
   display: flex;
   flex-direction: column;
   gap: 1.25rem;
+}
+// #main-content carries tabindex="-1" and receives programmatic focus
+// from the skip link and on SPA route changes (RouteFocus in app.rs).
+// It is a landmark, not an interactive control: never ring the whole
+// page column.
+.page:focus,
+.page:focus-visible {
+  outline: none;
 }
 
 // Route-change polish: client-side navigations swap the route subtree
@@ -2778,7 +2834,18 @@ a { color: var(--accent); }
   background: var(--clay-surface);
   border-radius: 999px;
   box-shadow: var(--clay-shadow-pressed);
+  // outline:none strips the UA focus ring; these sliders set real watering
+  // behavior (soil threshold + seasonal adjust), so keyboard focus MUST stay
+  // visible (WCAG 2.4.7). :focus-visible restores it: the ring + halo match the
+  // global :focus-visible / .btn pattern, and we KEEP the pressed clay track
+  // shadow alongside the halo so the track does not flatten while focused.
   outline: none;
+
+  &:focus-visible {
+    outline: var(--focus-ring);
+    outline-offset: var(--focus-ring-offset);
+    box-shadow: var(--clay-shadow-pressed), var(--focus-halo);
+  }
 
   &::-webkit-slider-thumb {
     -webkit-appearance: none;
@@ -3149,6 +3216,12 @@ html { scroll-behavior: smooth; }
 // front-door polish: the trailing chevron nudges right on hover, signalling
 // "this opens the full page", consistent with the design language.
 .home-watering-verdict {
+  // contain:inline-size severs a mobile LAYOUT-VIEWPORT blowout: the reason span
+  // is white-space:nowrap (inline-styled in src/app.rs), and its min-content
+  // width otherwise propagates to the document preferred width, so mobile Chrome
+  // expands the layout viewport to fit it (the home verdict strip inflated the
+  // phone layout to ~1085px). Same fix as .hourly-scroll.
+  contain: inline-size;
   // Trailing chevron is the last child; ease it on hover so the strip reads as
   // a door into /irrigation, not a static banner.
   > span:last-child {
@@ -4168,9 +4241,23 @@ html { scroll-behavior: smooth; }
   align-items: baseline;
   justify-content: space-between;
   gap: var(--space-4);
+  flex-wrap: wrap;
   &__k {
     font-size: var(--text-body-sm);
     color: var(--text-dim);
+  }
+  // Intraday sub-note under a figure ("1.9mm spent so far"): full-row,
+  // right-aligned under the value it annotates.
+  &__note {
+    flex-basis: 100%;
+    text-align: right;
+    font-size: var(--text-meta);
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    display: flex;
+    justify-content: flex-end;
+    align-items: baseline;
+    gap: 2px;
   }
   &__v {
     display: flex;
@@ -4573,6 +4660,33 @@ html { scroll-behavior: smooth; }
   transition: width 400ms ease-out;
 }
 
+// Measured-carry segment: rain that already FELL (today, measured) but still
+// counts toward this day's skip decision. A hatched leading stripe over the
+// first --carry-pct of the fill distinguishes "already in the ground" from
+// forecast rain, without changing the two-tone threshold semantics behind it.
+.rain-bar-fill::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: var(--carry-pct, 0%);
+  border-radius: 999px 0 0 999px;
+  background: repeating-linear-gradient(
+    -55deg,
+    rgba(255, 255, 255, 0.28) 0 3px,
+    transparent 3px 7px
+  );
+  pointer-events: none;
+}
+// (.rain-bar-track is already position:relative above; the fill needs it
+// for the ::before carry overlay.)
+.rain-bar-fill { position: relative; }
+.rain-bar-carry-note {
+  color: var(--text-dim);
+  font-size: 0.85em;
+  cursor: help;
+}
+.rain-bar-foot-carry { color: var(--text-dim); cursor: help; }
+
 .rain-bar-threshold {
   position: absolute;
   top: -3px;
@@ -4660,6 +4774,17 @@ html { scroll-behavior: smooth; }
   color: var(--text-faint);
   letter-spacing: 0.04em;
 }
+
+// Failover provenance: the forecast is being served by a backup provider,
+// not the configured primary. Amber (caution, not error) + a link into the
+// Devices hub for per-source status.
+.forecast-source-backup {
+  color: var(--accent-warn, #e5c07b);
+  text-decoration: none;
+  border-bottom: 1px dotted currentColor;
+}
+.forecast-source-backup:hover { text-decoration: none; border-bottom-style: solid; }
+.forecast-source-backup:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
 
 .forecast-daily,
 .forecast-hourly {
@@ -4794,6 +4919,28 @@ html { scroll-behavior: smooth; }
     font-size: 0.66rem;
     color: var(--text-faint);
     letter-spacing: 0.04em;
+  }
+}
+
+// Rain-character chip from the extended daily variables: "burst" (short,
+// heavy, partial runoff likely) vs "soaker" (long, steady, infiltrates).
+// Advisory context only; quiet mono chip so it never competes with the
+// rain amount above it.
+.daily-card-rainchar {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 999px;
+  cursor: help;
+  &--burst {
+    color: var(--accent-warn, #e5c07b);
+    border: 1px solid color-mix(in oklab, var(--accent-warn, #e5c07b) 45%, transparent);
+  }
+  &--soaker {
+    color: var(--accent-rain);
+    border: 1px solid color-mix(in oklab, var(--accent-rain) 45%, transparent);
   }
 }
 
@@ -6834,6 +6981,13 @@ html[data-no-irrigation="true"] {
   box-shadow:
     0 6px 24px color-mix(in oklab, var(--accent-warn) 14%, transparent),
     var(--specular);
+  // contain:inline-size severs a mobile LAYOUT-VIEWPORT blowout: .anomaly-banner-line
+  // is white-space:nowrap, and its min-content width otherwise propagates to the
+  // document preferred width, so mobile Chrome expands the layout viewport to fit
+  // it (an active anomaly blew /irrigation + /zones out to ~637px on a 390px
+  // phone). The line already carries overflow:hidden + text-overflow:ellipsis;
+  // they only engage once this flex parent is contained. Same fix as .hourly-scroll.
+  contain: inline-size;
 }
 
 .anomaly-banner-icon {
@@ -7474,37 +7628,9 @@ html[data-no-irrigation="true"] {
   text-transform: uppercase;
 }
 
-.duration-slider {
-  width: 100%;
-  appearance: none;
-  -webkit-appearance: none;
-  height: 6px;
-  border-radius: 3px;
-  background: linear-gradient(to right, rgba(74, 200, 255, 0.55), rgba(255, 255, 255, 0.06));
-  outline: none;
-}
-
-.duration-slider::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  background: #4ac8ff;
-  border: 2px solid rgba(255, 255, 255, 0.5);
-  box-shadow: 0 2px 8px rgba(74, 200, 255, 0.5);
-  cursor: pointer;
-}
-
-.duration-slider::-moz-range-thumb {
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  background: #4ac8ff;
-  border: 2px solid rgba(255, 255, 255, 0.5);
-  box-shadow: 0 2px 8px rgba(74, 200, 255, 0.5);
-  cursor: pointer;
-}
+// (Removed the orphaned .duration-slider block: it had zero references in any
+// .rs/.html/.js source - every range input uses .slider-clay or
+// .ui-slider__input - so it was dead CSS with the same invisible-focus defect.)
 
 // Stop-all confirm sheet: same visual chrome as duration sheet, just
 // uses the .bottom-sheet-confirm modifier to drop the picker-specific
@@ -8047,6 +8173,89 @@ html[data-no-irrigation="true"] {
 [data-theme="hc"] .ui-skel { background: var(--elev-2); border: 1px solid var(--elev-border); }
 [data-theme="hc"] .ui-skel::after { animation: none; background: none; }
 
+// ---- <ConditionCards/> ("Heads up" condition-aware strip) ----
+// Cards exist only while their condition holds; the whole section
+// disappears on a calm day. .is-alert escalates the border/title.
+.condition-cards { margin-bottom: var(--space-4); }
+.condition-cards-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 0.6rem;
+}
+.condition-card {
+  background: var(--elev-1);
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius-md);
+  padding: 0.7rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+.condition-card__head {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--text);
+  font-weight: 600;
+}
+.condition-card__rows {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  .kv {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-3);
+    align-items: baseline;
+  }
+  .k { color: var(--text-dim); font-size: var(--text-body-sm); }
+  .v {
+    color: var(--text-bright);
+    font-family: var(--font-mono);
+    font-size: var(--text-body-sm);
+    text-align: right;
+  }
+}
+.condition-card.is-alert {
+  border-color: color-mix(in oklab, var(--accent-warn) 55%, transparent);
+  .condition-card__head { color: var(--accent-warn); }
+}
+
+// ---- <ForecastPending/> ----
+// Skeleton-then-honest-note for the forecast panels (48h chart, 7-day row,
+// verdict strip). The ghost wrapper uses display:contents so its 7 tiles
+// become direct children of the surrounding 7-col grid / phone flex rail
+// and size exactly like the real cells.
+.forecast-pending-ghosts { display: contents; }
+.forecast-pending {
+  // Span the full band whether the parent is a grid or a flex rail.
+  grid-column: 1 / -1;
+  flex: 1 0 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  align-items: flex-start;
+  padding: 1rem 1.15rem;
+  border-radius: var(--radius-md);
+  background: var(--elev-1);
+  border: 1px dashed var(--elev-border);
+  color: var(--text-dim);
+}
+.forecast-pending__title { color: var(--text); font-weight: 600; }
+.forecast-pending__body { font-size: 0.9rem; line-height: 1.45; max-width: 60ch; }
+.forecast-pending__link {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+}
+.forecast-pending__link:hover { text-decoration: underline; }
+.forecast-pending__link:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+
 // ---- .ui-empty ----
 .ui-empty {
   text-align: center;
@@ -8058,7 +8267,9 @@ html[data-no-irrigation="true"] {
 .ui-empty__body { margin: 0 0 1.25rem; line-height: 1.5; }
 .ui-empty__cta {
   display: inline-block;
-  background: var(--grad-flow);
+  // AA-safe deepened flow for white button text (plain --grad-flow is ~3.4:1
+  // white-on-dark). Same fix as .btn--primary.
+  background: var(--grad-flow-cta);
   color: #fff;
   padding: 0.65rem 1.4rem;
   border-radius: var(--radius-sm);
@@ -9725,7 +9936,8 @@ html[data-no-irrigation="true"] {
 // Primary: the signature blue->teal flow gradient (matches .btn--primary).
 .setup-footer__btn--primary {
   margin-left: auto;
-  background: var(--grad-flow);
+  // AA-safe deepened flow for white button text, matching .btn--primary.
+  background: var(--grad-flow-cta);
   color: #fff;
   box-shadow: var(--specular), var(--shadow-1);
 }
@@ -10040,7 +10252,8 @@ html[data-no-irrigation="true"] {
 }
 
 .setup-apply-btn {
-  background: var(--grad-flow);
+  // AA-safe deepened flow for white button text, matching .btn--primary.
+  background: var(--grad-flow-cta);
   color: #fff;
   border: 1px solid transparent;
   padding: 0.85rem 2rem;
@@ -10232,6 +10445,10 @@ html[data-readonly="true"] body::before {
   justify-content: center;
   width: 1.35rem;
   height: 1.35rem;
+  // WCAG 2.5.8 floor on every pointer (1.35rem is only ~21.6px); the
+  // pointer:coarse block raises this to 44px.
+  min-width: 24px;
+  min-height: 24px;
   border-radius: 50%;
   border: 1px solid var(--glass-border, rgba(255, 255, 255, 0.12));
   background: var(--glass-bg, rgba(15, 19, 28, 0.55));
@@ -10346,8 +10563,11 @@ html[data-readonly="true"] body::before {
 .btn--lg { padding: 0.75rem 1.25rem; font-size: var(--text-body); min-height: 44px; }
 .btn--block { display: flex; width: 100%; }
 
+// Primary CTA. Backed by --grad-flow-cta (the AA-safe deepened flow), NOT plain
+// --grad-flow: on dark, white text on --grad-flow is only ~3.4:1 (fails WCAG AA
+// for this 0.92rem/600 label). --grad-flow-cta clears 4.5:1 in every theme.
 .btn--primary {
-  background: var(--grad-flow);
+  background: var(--grad-flow-cta);
   color: #fff;
   box-shadow: var(--specular), var(--shadow-1);
   &:hover:not(:disabled) { box-shadow: var(--specular), var(--shadow-2); filter: brightness(1.06); transform: translateY(-1px); }
@@ -10371,9 +10591,14 @@ html[data-readonly="true"] body::before {
 }
 // Positive "go / confirm / install" actions. Solid green, same prominent
 // treatment as --primary so it reads as a real call-to-action (replaces the
-// legacy .btn-clay-good). White on teal-500/600 clears AA for bold button text.
+// legacy .btn-clay-good). Deepened to teal-600 -> teal-700: white on the old
+// teal-500 endpoint was only 3.39:1 (failed WCAG AA for this 0.92rem/600
+// label); teal-600 -> teal-700 gives min 4.81:1 white across the sweep. The raw
+// brand palette is not re-themed, so this stays a dark teal in HC too, where
+// white text is correct (4.81 - 6.92:1) - do NOT add it to the HC black-text
+// list (black on this dark teal is only 3.0 - 4.4:1, a regression).
 .btn--success {
-  background: linear-gradient(135deg, var(--brand-teal-500), var(--brand-teal-600));
+  background: linear-gradient(135deg, var(--brand-teal-600), var(--brand-teal-700));
   color: #fff;
   box-shadow: var(--specular), var(--shadow-1);
   &:hover:not(:disabled) { box-shadow: var(--specular), var(--shadow-2); filter: brightness(1.06); transform: translateY(-1px); }
@@ -10612,6 +10837,16 @@ html[data-readonly="true"] body::before {
   pointer-events: none;
   max-width: min(92vw, 360px);
 }
+// The two permanently-mounted live-region containers (toast.rs): plain
+// flex wrappers so toasts keep the stacked-column layout. Intentionally
+// NOT display:contents, which some browser/AT pairs still mishandle on
+// elements carrying live-region semantics. Empty regions collapse to
+// zero height.
+.ui-toast-region {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
 .ui-toast {
   pointer-events: auto;
   display: flex;
@@ -10638,7 +10873,13 @@ html[data-readonly="true"] body::before {
   color: var(--text-faint);
   cursor: pointer;
   display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 2px;
+  // WCAG 2.5.8 floor on every pointer (the icon alone is ~18px);
+  // pointer:coarse raises this to 44px further down.
+  min-width: 24px;
+  min-height: 24px;
   &:hover { color: var(--text); }
 }
 .ui-toast--info { border-left-color: var(--accent); .ui-toast__icon { color: var(--accent); } }
@@ -11443,12 +11684,23 @@ button.mobile-tab {
 }
 .rulelab-tab:hover { color: var(--text-bright); }
 .rulelab-tab.is-active { color: var(--accent); border-bottom-color: var(--accent); }
-.rulelab-gates { border: 1px solid var(--elev-border); border-radius: var(--radius-md); background: var(--elev-1); }
+// contain:inline-size is a belt-and-suspenders guard against a mobile
+// LAYOUT-VIEWPORT blowout: it stops any nowrap descendant's min-content width
+// (here the long .rulelab-gates__cta .btn label) from propagating out to the
+// document preferred width, which mobile Chrome would otherwise expand the
+// layout viewport to fit. Same technique as .hourly-scroll.
+.rulelab-gates { border: 1px solid var(--elev-border); border-radius: var(--radius-md); background: var(--elev-1); contain: inline-size; }
 .rulelab-gates summary { cursor: pointer; padding: var(--space-3); font-weight: 600; color: var(--text-dim); }
 .rulelab-gates__body { padding: 0 var(--space-3) var(--space-3); display: flex; flex-direction: column; gap: var(--space-1); }
 // Make the "Configure thresholds" link read as a real button, left-aligned
 // (the global --primary rule sets margin-left:auto for footer rows).
-.rulelab-gates__cta { margin-left: 0 !important; align-self: flex-start; margin-top: var(--space-3); text-decoration: none; }
+// white-space:normal + text-align:left let the long label WRAP. It is a .btn
+// (which sets white-space:nowrap), and that nowrap intrinsic min-content width
+// otherwise propagates to the document preferred width, so mobile Chrome
+// expands the LAYOUT VIEWPORT to fit it (/rules rendered zoomed-out, ~563px
+// wide on a 390px phone). Wrapping severs the propagation, matching the fix at
+// .hourly-scroll.
+.rulelab-gates__cta { margin-left: 0 !important; align-self: flex-start; margin-top: var(--space-3); text-decoration: none; white-space: normal; text-align: left; }
 .rulelab-gates__row { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-1) 0; }
 .rulelab-gates__cat { font-family: var(--font-mono); font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.05em; padding: 1px 6px; border-radius: var(--radius-sm); background: var(--surface-soft); color: var(--text-faint); min-width: 5.5rem; text-align: center; }
 .rulelab-gates__cat--safety { color: var(--verdict-skip); background: color-mix(in oklab, var(--verdict-skip) 14%, transparent); }
@@ -11855,14 +12107,19 @@ button.mobile-tab {
   text-transform: uppercase; color: var(--accent); font-weight: 700;
 }
 .hist-page__title { margin: 0; font-size: var(--text-h1); letter-spacing: var(--tracking-display); color: var(--text-bright); }
-.hist-page__tools { display: flex; align-items: center; gap: var(--space-2); }
+// flex-wrap lets the 5-button toolbar (30d / 90d / 1yr + Print + Download CSV)
+// drop to a second row instead of forcing a nowrap min-content width that
+// expands the mobile LAYOUT VIEWPORT to ~465px on a 390px phone. These are real
+// tappable buttons, so wrap (keep them all on-screen) rather than a
+// contain:inline-size scroller. The gap already spaces both axes.
+.hist-page__tools { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
 .hist-range {
   font-family: var(--font-mono); font-weight: 700; font-size: var(--text-meta);
   padding: 0.45rem 0.7rem; border-radius: var(--radius-sm);
   background: var(--elev-1); border: 1px solid var(--elev-border); color: var(--text-dim);
   cursor: pointer; transition: all var(--motion-fast) var(--ease-out);
   &:hover { color: var(--text); border-color: var(--elev-border-strong); }
-  &.is-on { background: var(--grad-flow); color: #fff; border-color: transparent; }
+  &.is-on { background: var(--grad-flow-cta); color: #fff; border-color: transparent; }
 }
 .hist-kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--space-4); }
 .hist-panel {
@@ -12433,6 +12690,21 @@ html[data-kiosk="true"] .beta-fb,
     display: inline-flex;
     align-items: center;
     justify-content: center;
+  }
+
+  // Icon-only micro controls: source-chain reorder arrows (25.6px, two
+  // adjacent, and a mis-tap immediately PUTs a reordered config), the
+  // help "?" disclosure, toast close, and the banner dismissals. All
+  // grow to a real 44px square on touch; a transparent hit-halo is NOT
+  // used because the paired chain arrows would overlap each other's
+  // halos and keep mis-firing.
+  .data-source-chain__move,
+  .help-hint__trigger,
+  .ui-toast__close,
+  .health-banner__dismiss,
+  .welcome-card__dismiss {
+    min-width: 44px;
+    min-height: 44px;
   }
 }
 

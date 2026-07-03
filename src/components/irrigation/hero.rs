@@ -12,8 +12,8 @@
 
 use crate::components::irrigation::advisor::AdvisorExplanation;
 use crate::components::units_fmt::{
-    depth_unit, depth_value_mm, fmt_rain_amount, fmt_temp_short, fmt_wind, temp_unit,
-    use_unit_prefs, wind_unit, wind_value,
+    depth_unit, depth_value_mm, fmt_rain_amount, fmt_wind, temp_unit, temp_value, use_unit_prefs,
+    wind_unit, wind_value,
 };
 use crate::ha::snapshot::IrrigationSnapshot;
 use crate::reason_render::render_skip_reason;
@@ -105,6 +105,15 @@ pub struct NextRunStatus {
     /// slot runs. Derived from the verdict that describes THIS slot, not a generic
     /// guess.
     pub skip_reason_short: String,
+    /// The slot verdict's structured reason code ("restrictions",
+    /// "tomorrow_rain", ...), empty when the slot runs. Feeds the decision
+    /// explainer so its "next run" lead is decided by the SAME source as this
+    /// status (post-dispatch, today's trace can legitimately name a different
+    /// rung than the next slot).
+    pub skip_reason_code: String,
+    /// The slot verdict's full engine-written reason sentence, empty when the
+    /// slot runs. Fallback prose for the explainer when the code is unmapped.
+    pub skip_reason_full: String,
     /// Epoch of the next FORWARD day predicted to water after a skipping slot, for
     /// "Next likely run: <day>". 0 when no upcoming day in the 7-day window runs.
     pub next_likely_run_epoch: i64,
@@ -137,6 +146,8 @@ pub fn resolve_next_run(s: &IrrigationSnapshot) -> NextRunStatus {
             slot_skips: false,
             slot_epoch: 0,
             skip_reason_short: String::new(),
+            skip_reason_code: String::new(),
+            skip_reason_full: String::new(),
             next_likely_run_epoch: 0,
             all_week_skips: false,
         };
@@ -220,6 +231,16 @@ pub fn resolve_next_run(s: &IrrigationSnapshot) -> NextRunStatus {
         } else {
             String::new()
         },
+        skip_reason_code: if slot_skips {
+            slot_reason_code
+        } else {
+            String::new()
+        },
+        skip_reason_full: if slot_skips {
+            slot_reason
+        } else {
+            String::new()
+        },
         next_likely_run_epoch,
         all_week_skips,
     }
@@ -262,14 +283,16 @@ fn plain_skip_phrase(reason_code: &str, reason: &str) -> String {
     }
 }
 
-/// The HONEST hero tag for a skipping next slot. Leads with the plain reason,
-/// shows the slot time ONLY as a re-evaluation ("Re-checks HH:MM", never "next
-/// run"), then points at the next likely run so a water-conscious user can plan,
-/// or says nothing is planned this week. "(based on current conditions)" keeps it
-/// honest about the prediction without burying the truth that it is currently not
-/// going to water. Pure so it is unit-testable. Public so the Weather-home
-/// watering strip (app.rs HomeWateringVerdict) renders the SAME honest skip copy
-/// as the hero instead of a second, divergent implementation.
+/// The HONEST hero tag for a skipping next slot. Structure: WHY it is skipping,
+/// then WHEN it re-checks, then WHAT is next (the next likely run, or that
+/// nothing is planned this week). The old "(based on current conditions)"
+/// parenthetical is dropped: it was redundant with "Re-checks HH:MM" (both mean
+/// "provisional"), and for a schedule reason (watering restrictions) or a
+/// forecast reason (rain tomorrow) it was actively wrong, since neither is a
+/// "current condition". "Re-checks HH:MM" alone carries the provisional meaning.
+/// Pure so it is unit-testable. Public so the Weather-home watering strip
+/// (app.rs HomeWateringVerdict) renders the SAME honest skip copy as the hero
+/// instead of a second, divergent implementation.
 pub fn skip_tag_string(nr: &NextRunStatus, tz: &str) -> String {
     let reason = if nr.skip_reason_short.is_empty() {
         "current conditions".to_string()
@@ -278,19 +301,19 @@ pub fn skip_tag_string(nr: &NextRunStatus, tz: &str) -> String {
     };
     let recheck = format!("Re-checks {}", crate::timefmt::format_hm(nr.slot_epoch, tz));
     let plan = if nr.all_week_skips {
-        "No watering planned this week, re-checks daily".to_string()
+        "no watering planned this week".to_string()
     } else if nr.next_likely_run_epoch > 0 {
         format!(
-            "Next likely run {}",
-            format_relative_time(nr.next_likely_run_epoch, tz)
+            "next likely run {}",
+            format_relative_day(nr.next_likely_run_epoch, tz)
         )
     } else {
         String::new()
     };
     if plan.is_empty() {
-        format!("Skipping, {reason} (based on current conditions) \u{b7} {recheck}")
+        format!("Skipping: {reason} \u{b7} {recheck}")
     } else {
-        format!("Skipping, {reason} (based on current conditions) \u{b7} {recheck} \u{b7} {plan}")
+        format!("Skipping: {reason} \u{b7} {recheck} \u{b7} {plan}")
     }
 }
 
@@ -481,7 +504,7 @@ pub fn NextRunHero(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 // tense and name the zones, so the user sees what is coming BEFORE
                 // it runs. The per-zone summary is the substance; fall back to the
                 // zone count + minutes.
-                let summary = crate::explain::zone_run_summary(&zone_lines(&s));
+                let summary = crate::explain::zone_run_summary(&zone_lines(&s), false);
                 if !summary.is_empty() {
                     return summary;
                 }
@@ -693,12 +716,22 @@ fn DecisionExplainer(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         let Some(trace) = s.decision_trace.clone() else {
             return ().into_any();
         };
+        // The reconciled next-slot preview: once this morning has passed, the
+        // explainer leads with THIS (the same source as the hero headline), so
+        // "next run" and the headline above it can never name different reasons.
+        let nr = resolve_next_run(&s);
+        let preview = crate::explain::NextSlotPreview {
+            skips: nr.slot_skips,
+            reason_code: nr.skip_reason_code.clone(),
+            reason: nr.skip_reason_full.clone(),
+        };
         let e = crate::explain::explain_decision_with_zones(
             &trace,
             today_run_passed(&s),
             &zone_lines(&s),
+            Some(&preview),
         );
-        // WHICH zones the upcoming run touches, the primary "what to expect".
+        // WHICH zones the run touches, the primary "what to expect".
         let zones_line = (!e.zones_summary.is_empty()).then(|| {
             view! {
                 <p
@@ -896,11 +929,13 @@ fn SkipBreakdown(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                     label="Freeze"
                     value=Signal::derive(move || {
                         let p = prefs.get();
-                        format!("{}{}", fmt_temp_short(snap.get().skip_check.temp_now_f, p), temp_unit(p))
+                        // temp_value + temp_unit (fmt_temp_short carries its own
+                        // degree sign; composing it with temp_unit doubles it).
+                        format!("{}{}", temp_value(snap.get().skip_check.temp_now_f, p), temp_unit(p))
                     })
                     threshold=Signal::derive(move || {
                         let p = prefs.get();
-                        format!("≥ {}{}", fmt_temp_short(snap.get().skip_check.min_temp_f, p), temp_unit(p))
+                        format!("≥ {}{}", temp_value(snap.get().skip_check.min_temp_f, p), temp_unit(p))
                     })
                     tripped=Signal::derive(move || {
                         let s = snap.get();
@@ -972,11 +1007,14 @@ fn SkipBreakdown(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                     label="Overnight low"
                     value=Signal::derive(move || {
                         let p = prefs.get();
-                        format!("{}{}", fmt_temp_short(snap.get().skip_check.temp_min_24h_f, p), temp_unit(p))
+                        // temp_value (bare number) + temp_unit: fmt_temp_short already
+                        // carries the degree sign, so composing IT with temp_unit
+                        // rendered a doubled symbol ("34°°F").
+                        format!("{}{}", temp_value(snap.get().skip_check.temp_min_24h_f, p), temp_unit(p))
                     })
                     threshold=Signal::derive(move || {
                         let p = prefs.get();
-                        format!("≥ {}{}", fmt_temp_short(snap.get().skip_check.min_temp_f, p), temp_unit(p))
+                        format!("≥ {}{}", temp_value(snap.get().skip_check.min_temp_f, p), temp_unit(p))
                     })
                     tripped=Signal::derive(move || {
                         // Validity flag (not the old 0.0 sentinel) so a real
@@ -991,11 +1029,11 @@ fn SkipBreakdown(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                     label="Heat index 3d"
                     value=Signal::derive(move || {
                         let p = prefs.get();
-                        format!("{}{}", fmt_temp_short(snap.get().skip_check.heat_index_max_3day_f, p), temp_unit(p))
+                        format!("{}{}", temp_value(snap.get().skip_check.heat_index_max_3day_f, p), temp_unit(p))
                     })
                     threshold=Signal::derive(move || {
                         let p = prefs.get();
-                        format!("< {}{}", fmt_temp_short(95.0, p), temp_unit(p))
+                        format!("< {}{}", temp_value(95.0, p), temp_unit(p))
                     })
                     tripped=Signal::derive(move || snap.get().skip_check.heat_index_max_3day_f >= 95.0)
                 />
@@ -1038,7 +1076,7 @@ fn SkipRow(
 /// "within a week -> weekday" bucket uses coarse epoch arithmetic (a DST day is
 /// off by an hour, which never crosses the 7-day bucket boundary in practice).
 fn format_relative_time(epoch: i64, tz: &str) -> String {
-    use crate::timefmt::{format_hm, format_md, format_wday_short};
+    use crate::timefmt::{format_hm, format_md, format_wday_full};
     if epoch <= 0 {
         return "-".to_string();
     }
@@ -1054,9 +1092,37 @@ fn format_relative_time(epoch: i64, tz: &str) -> String {
     } else if !target_md.is_empty() && target_md == tomorrow_md {
         format!("TOMORROW · {hhmm}")
     } else if epoch - now < 7 * 86_400 {
-        format!("{} · {hhmm}", format_wday_short(epoch, tz).to_uppercase())
+        // FULL day name: "SUN" in run prose reads as sunshine (a weather
+        // reason), not a day. "SUNDAY · 03:41" is unambiguous.
+        format!("{} · {hhmm}", format_wday_full(epoch, tz).to_uppercase())
     } else {
         format!("{} · {hhmm}", target_md.to_uppercase())
+    }
+}
+
+/// Day-form of [`format_relative_time`] for STRIP DAY-CELL epochs. The 7-day
+/// verdict cells carry local-midnight day buckets, not real slot times, so
+/// rendering their clock ("Sun · 00:00") read as a promise to water at
+/// midnight. A day is all we honestly know about a future likely run; the
+/// actual slot time is sunrise-relative and computed on that morning.
+fn format_relative_day(epoch: i64, tz: &str) -> String {
+    use crate::timefmt::{format_md, format_wday_full};
+    if epoch <= 0 {
+        return "-".to_string();
+    }
+    let now = chrono::Utc::now().timestamp();
+    let target_md = format_md(epoch, tz);
+    let today_md = format_md(now, tz);
+    let tomorrow_md = format_md(now + 86_400, tz);
+    if !target_md.is_empty() && target_md == today_md {
+        "today".to_string()
+    } else if !target_md.is_empty() && target_md == tomorrow_md {
+        "tomorrow".to_string()
+    } else if epoch - now < 7 * 86_400 {
+        // FULL day name ("Sunday"): "Sun" in run prose reads as sunshine.
+        format_wday_full(epoch, tz)
+    } else {
+        target_md
     }
 }
 
@@ -1128,13 +1194,13 @@ mod tests {
         // The rendered hero tag must lead with the truthful status and present the
         // slot time as a RE-CHECK, never as a promised "next run at <time>".
         let tag = skip_tag_string(&nr, TZ);
-        assert!(tag.starts_with("Skipping, recent rain"), "tag={tag:?}");
+        assert!(tag.starts_with("Skipping: recent rain"), "tag={tag:?}");
         assert!(
             tag.contains("Re-checks 03:25"),
             "tag must show the slot time as a re-check, tag={tag:?}"
         );
         assert!(
-            tag.contains("Next likely run"),
+            tag.contains("next likely run"),
             "tag must point at the next likely run, tag={tag:?}"
         );
         assert!(
@@ -1179,10 +1245,7 @@ mod tests {
         assert_eq!(nr.skip_reason_short, "rain forecast");
 
         let tag = skip_tag_string(&nr, TZ);
-        assert!(
-            tag.contains("No watering planned this week, re-checks daily"),
-            "tag={tag:?}"
-        );
+        assert!(tag.contains("no watering planned this week"), "tag={tag:?}");
         assert!(tag.contains("Re-checks 03:25"), "tag={tag:?}");
         assert!(!tag.contains('\u{2014}'), "no em dashes, tag={tag:?}");
     }

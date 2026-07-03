@@ -15,7 +15,7 @@
 //           "temp": 75.0, "hum": 60.0, "dew_point": 60.0,
 //           "wind_speed_last": 5.0, "wind_dir_last": 180,
 //           "wind_speed_hi_last_10_min": 10.0,
-//           "rain_rate_last_in": 0.0, "rainfall_daily_in": 0.0,
+//           "rain_rate_last": 0, "rainfall_daily": 0, "rain_size": 1,
 //           "uv_index": 5.0, "solar_rad": 800 },
 //         { "data_structure_type": 3, "bar_sea_level": 30.0, ... },  // barometer
 //         { "data_structure_type": 4, "temp_in": 72.0, "hum_in": 45.0 }  // indoor
@@ -86,10 +86,20 @@ struct Condition {
     wind_dir_last: Option<f64>,
     #[serde(default)]
     wind_speed_hi_last_10_min: Option<f64>,
+    // Rain is reported in TIP COUNTS, not inches: `rain_rate_last` is counts
+    // per hour and `rainfall_daily` is counts since local midnight. The tip
+    // size is carried in `rain_size` (1 = 0.01 in, 2 = 0.2 mm, 3 = 0.1 mm,
+    // 4 = 0.001 in), so counts must be multiplied by the per-tip inches before
+    // emitting (see `davis_rain_size_in` + the mapping in `extract`). The old
+    // `rain_rate_last_in` / `rainfall_daily_in` keys do NOT exist in the WLL
+    // local API, so they always deserialized to None and Davis rain never fed
+    // the engine.
     #[serde(default)]
-    rain_rate_last_in: Option<f64>,
+    rain_rate_last: Option<f64>,
     #[serde(default)]
-    rainfall_daily_in: Option<f64>,
+    rainfall_daily: Option<f64>,
+    #[serde(default)]
+    rain_size: Option<u8>,
     #[serde(default)]
     uv_index: Option<f64>,
     #[serde(default)]
@@ -131,6 +141,20 @@ fn soil_cb_to_pct(cb: f64) -> f64 {
 /// Davis leaf wetness is a 0-15 index; scale to 0-100%.
 fn leaf_index_to_pct(idx: f64) -> f64 {
     (idx * 100.0 / 15.0).clamp(0.0, 100.0)
+}
+
+/// Inches of rain per tip for a Davis `rain_size` code (WeatherLink Live local
+/// API): 1 = 0.01 in, 2 = 0.2 mm, 3 = 0.1 mm, 4 = 0.001 in. `rain_rate_last`
+/// (counts/hr) and `rainfall_daily` (counts since midnight) are multiplied by
+/// this to reach in/hr and inches. Unknown codes fall back to 0.01 in (US).
+fn davis_rain_size_in(rain_size: u8) -> f64 {
+    match rain_size {
+        1 => 0.01,
+        2 => 0.2 / 25.4,
+        3 => 0.1 / 25.4,
+        4 => 0.001,
+        _ => 0.01,
+    }
 }
 
 /// What one poll yields: global weather fields (Observation) plus per-zone soil
@@ -196,11 +220,16 @@ fn extract(
                 if let Some(v) = c.wind_dir_last {
                     out.fields.push((WeatherField::WindBearingDeg, v));
                 }
-                if let Some(v) = c.rain_rate_last_in {
-                    out.fields.push((WeatherField::RainIntensityInHr, v));
+                // Scale tip COUNTS to inches by the reported tip size. Default
+                // to 0.01 in (the US Davis default) only when rain_size is
+                // absent, which a rain-capable ISS never omits.
+                let tip_in = davis_rain_size_in(c.rain_size.unwrap_or(1));
+                if let Some(v) = c.rain_rate_last {
+                    out.fields
+                        .push((WeatherField::RainIntensityInHr, v * tip_in));
                 }
-                if let Some(v) = c.rainfall_daily_in {
-                    out.fields.push((WeatherField::RainTodayIn, v));
+                if let Some(v) = c.rainfall_daily {
+                    out.fields.push((WeatherField::RainTodayIn, v * tip_in));
                 }
                 if let Some(v) = c.uv_index {
                     out.fields.push((WeatherField::UvIndex, v));
@@ -420,8 +449,9 @@ mod tests {
                         "wind_speed_last": 5.0,
                         "wind_dir_last": 180,
                         "wind_speed_hi_last_10_min": 12.0,
-                        "rain_rate_last_in": 0.0,
-                        "rainfall_daily_in": 0.0,
+                        "rain_rate_last": 5.0,
+                        "rainfall_daily": 63.0,
+                        "rain_size": 2,
                         "uv_index": 6.0,
                         "solar_rad": 800
                     },
@@ -456,6 +486,22 @@ mod tests {
         assert_eq!(temp, 75.0);
         assert!((press - 30.05).abs() < 0.001);
         assert_eq!(solar, 800.0);
+        // Rain is TIP COUNTS scaled by rain_size (2 = 0.2 mm/tip). Daily 63
+        // counts -> 63 * 0.2/25.4 = 0.496 in; rate 5 counts/hr -> 0.0394 in/hr.
+        // (Proves the real API keys deserialize and the count->inch conversion
+        // runs; the old `_in` keys left rain permanently None.)
+        let daily = f
+            .iter()
+            .find(|(k, _)| *k == WeatherField::RainTodayIn)
+            .expect("RainTodayIn emitted")
+            .1;
+        let rate = f
+            .iter()
+            .find(|(k, _)| *k == WeatherField::RainIntensityInHr)
+            .expect("RainIntensityInHr emitted")
+            .1;
+        assert!((daily - 0.496).abs() < 1e-3, "daily inches, got {daily}");
+        assert!((rate - 0.0394).abs() < 1e-3, "in/hr rate, got {rate}");
         // Confirm only one AirTempF (from ISS, not type 4).
         let temp_count = f
             .iter()

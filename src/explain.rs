@@ -51,6 +51,26 @@ pub struct ZoneLine {
     pub source: String,
 }
 
+/// What the NEXT scheduled slot is predicted to do, as reconciled by the hero's
+/// `resolve_next_run` (the 7-day cell matched to `next_run_epoch`). Once this
+/// morning's window has passed, THIS is the upcoming decision the lead must
+/// explain: the live trace still describes the (completed) morning, and its
+/// deciding rung can legitimately differ from the next slot's (e.g. today
+/// skipped on observed rain at 05:37 while tomorrow is a restricted day), so
+/// previewing "next run" from today's trace showed a different reason than the
+/// hero headline right above it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NextSlotPreview {
+    /// True when the slot is predicted to skip.
+    pub skips: bool,
+    /// Structured reason id for the slot's skip ("restrictions",
+    /// "tomorrow_rain", ...). Empty when the slot runs or the code is unknown.
+    pub reason_code: String,
+    /// The engine-written reason sentence for the slot's skip. Empty when the
+    /// slot runs.
+    pub reason: String,
+}
+
 /// Build the plain-English explanation, LEADING with the upcoming run so the
 /// user learns WHY the next run will happen and WHICH zones BEFORE it runs (the
 /// owner's #1 ask). The aggregate `trace` carries the deciding rule + checks;
@@ -64,43 +84,69 @@ pub struct ZoneLine {
 ///   day. The lead becomes that FUTURE run (future tense), and what happened
 ///   this morning drops to a secondary past-tense `outcome` line below it.
 pub fn explain_decision(trace: &DecisionTrace, today_done: bool) -> DecisionExplanation {
-    explain_decision_with_zones(trace, today_done, &[])
+    explain_decision_with_zones(trace, today_done, &[], None)
 }
 
-/// As [`explain_decision`], but threading the per-zone verdicts so the result
-/// carries the "which zones" summary. Callers with the full snapshot (the
-/// irrigation hero) use this; callers without per-zone data (the welcome card)
-/// use the 2-arg [`explain_decision`], which supplies an empty slice.
+/// As [`explain_decision`], but threading the per-zone verdicts and the
+/// reconciled next-slot preview. Callers with the full snapshot (the irrigation
+/// hero) pass both; callers without (the welcome card) use the 2-arg
+/// [`explain_decision`], which supplies an empty slice and no preview.
 pub fn explain_decision_with_zones(
     trace: &DecisionTrace,
     today_done: bool,
     zones: &[ZoneLine],
+    next: Option<&NextSlotPreview>,
 ) -> DecisionExplanation {
-    // The lead always describes the NEXT run. Its verdict: when today is still
-    // ahead, that's the trace's verdict; once today is behind us the next run is
-    // a future day, but the same deterministic ladder applies, so the trace's
-    // verdict is still the best available preview of it.
-    let headline = match trace.verdict.as_str() {
-        "skip" => "Skipping next run",
-        "run_extended" => "Watering longer next run",
-        _ => "Watering next run",
+    // The lead always describes the NEXT run. When today's window is still
+    // ahead, the live trace IS that run. Once the morning is behind us the next
+    // run is a FUTURE slot: its verdict comes from the reconciled next-slot
+    // preview (the same source as the hero headline), NOT from re-purposing
+    // today's trace, whose deciding rung can legitimately differ (today skipped
+    // on observed rain at dawn; tomorrow is a restricted day). Without a preview
+    // (welcome card), the trace remains the best available approximation.
+    let lead_from_preview = today_done && next.is_some();
+    let headline = if lead_from_preview {
+        let n = next.expect("checked is_some");
+        if n.skips {
+            "Skipping next run"
+        } else {
+            "Watering next run"
+        }
+    } else {
+        match trace.verdict.as_str() {
+            "skip" => "Skipping next run",
+            "run_extended" => "Watering longer next run",
+            _ => "Watering next run",
+        }
     }
     .to_string();
 
-    // The deciding rule is the one that fired (at most one, by ladder design).
-    // Phrased in FUTURE tense because the lead is the upcoming run.
-    let why = match trace.rules.iter().find(|r| r.outcome == "fired") {
-        Some(r) => why_for_fired(r),
-        None => "Every check passes and at least one zone needs water, so the \
+    // The deciding factor for the LEAD, in plain language.
+    let why = if lead_from_preview {
+        let n = next.expect("checked is_some");
+        if n.skips {
+            why_for_next_slot(&n.reason_code, &n.reason)
+        } else {
+            "Every check is expected to pass, so the next run goes as scheduled.".to_string()
+        }
+    } else {
+        match trace.rules.iter().find(|r| r.outcome == "fired") {
+            Some(r) => why_for_fired(r),
+            None => "Every check passes and at least one zone needs water, so the \
                  next run goes as scheduled."
-            .to_string(),
+                .to_string(),
+        }
     };
 
-    // WHICH zones the upcoming run touches, in plain language (owner's explicit
-    // "if it is a single zone, give me the reason").
-    let zones_summary = zone_run_summary(zones);
+    // WHICH zones, in plain language (owner's explicit "if it is a single zone,
+    // give me the reason"). The per-zone verdicts describe TODAY's decision, so
+    // once the morning is behind us they are past-tense context, not the
+    // upcoming run.
+    let zones_summary = zone_run_summary(zones, today_done);
 
-    // Reassurance: the key safety / weather gates that PASS, in ladder order.
+    // Reassurance: the key safety / weather gates that PASS right now, in
+    // ladder order. These are live current-conditions facts, so they read
+    // correctly in both tenses.
     let considered: Vec<String> = trace
         .rules
         .iter()
@@ -111,16 +157,11 @@ pub fn explain_decision_with_zones(
         .collect();
 
     // Secondary context: only once this morning's window is behind us is there a
-    // distinct "what already happened today" to report. Before then the lead IS
-    // today's run, so there is nothing to add.
-    let outcome = today_done.then(|| {
-        match trace.verdict.as_str() {
-            "skip" => "Skipped this morning.",
-            "run_extended" => "Watered longer this morning.",
-            _ => "Watered this morning.",
-        }
-        .to_string()
-    });
+    // distinct "what already happened today" to report. Names the SPECIFIC rule
+    // that decided the morning (with its measured margin when available) so the
+    // outcome line answers "why was today skipped" on its own, instead of a bare
+    // "Skipped this morning." next to a lead about a different day.
+    let outcome = today_done.then(|| outcome_for_today(trace));
 
     DecisionExplanation {
         headline,
@@ -132,11 +173,93 @@ pub fn explain_decision_with_zones(
     }
 }
 
-/// Plain-language summary of which zones the upcoming run waters and which skip,
-/// derived purely from the per-zone verdicts. Honors the owner's explicit
-/// shapes: all run, mixed, exactly one, all skip. Empty string when there are no
-/// per-zone verdicts to summarize (weather-only deployments / pre-first-refresh).
-pub fn zone_run_summary(zones: &[ZoneLine]) -> String {
+/// Past-tense, self-contained summary of what TODAY's decision did and why,
+/// built from today's trace: verdict + the fired rule's plain name, plus the
+/// rule's measured margin ("1.02\" over the window") when the engine recorded
+/// one. This is the "why was today skipped" answer once the lead has moved on
+/// to a future slot.
+fn outcome_for_today(trace: &DecisionTrace) -> String {
+    let lead = match trace.verdict.as_str() {
+        "skip" => "Skipped this morning",
+        "run_extended" => "Watered longer this morning",
+        _ => "Watered this morning",
+    };
+    let fired = trace.rules.iter().find(|r| r.outcome == "fired");
+    match fired {
+        Some(r) => {
+            let name = if r.label.is_empty() {
+                r.id.clone()
+            } else {
+                r.label.clone()
+            };
+            // lowercase the rule label so it reads as prose, not a heading.
+            let mut name = name;
+            if let Some(first) = name.get(..1) {
+                let lower = first.to_lowercase();
+                name.replace_range(..1, &lower);
+            }
+            match &r.margin_label {
+                Some(m) if !m.is_empty() => format!("{lead}: {name} ({m})."),
+                _ => format!("{lead}: {name}."),
+            }
+        }
+        None => format!("{lead}."),
+    }
+}
+
+/// Plain-language sentence for WHY the next slot is predicted to skip, keyed on
+/// the slot's structured reason code (the same rule-id vocabulary the ladder
+/// emits). Future-phrased, because the subject is an upcoming day. Falls back to
+/// the engine-written reason sentence so an unmapped code still reads.
+fn why_for_next_slot(reason_code: &str, reason: &str) -> String {
+    match reason_code {
+        "restrictions" => {
+            "Local watering restrictions do not allow watering on that day.".to_string()
+        }
+        "already_wet" | "observed_rain" => {
+            "Recent rain already covers it, so that run is not needed.".to_string()
+        }
+        "rain_now" => "Rain is expected then, so watering would be wasted.".to_string(),
+        "rain_next_4h" => {
+            "Rain is expected around that time, so watering would be wasted.".to_string()
+        }
+        "tomorrow_rain" => {
+            "Rain is likely the following day, so the run is skipped to let it do the work."
+                .to_string()
+        }
+        "rain_3day" => {
+            "Heavy rain is expected over the surrounding days, so the run is skipped.".to_string()
+        }
+        "freeze_now" | "overnight_freeze" | "soil_frost" => {
+            "Freezing conditions are expected, so watering is held to avoid ice damage.".to_string()
+        }
+        "wind_now" | "wind_forecast" => {
+            "High wind is expected; spray would drift, so the run is held.".to_string()
+        }
+        "soil_saturation" => {
+            "The soil is projected to still be saturated, so no watering is needed.".to_string()
+        }
+        "override" => "A manual override is in effect for that day.".to_string(),
+        "paused" | "pause_until" => "Watering is paused (vacation mode).".to_string(),
+        "dry_run" => "Dry-run mode is on, so nothing is actually watered.".to_string(),
+        _ if !reason.is_empty() => {
+            let r = reason.trim_end_matches('.');
+            format!("{r}.")
+        }
+        _ => "The engine predicts a skip for that day.".to_string(),
+    }
+}
+
+/// Plain-language summary of which zones the run waters and which skip, derived
+/// purely from the per-zone verdicts. Honors the owner's explicit shapes: all
+/// run, mixed, exactly one, all skip. Empty string when there are no per-zone
+/// verdicts to summarize (weather-only deployments / pre-first-refresh).
+///
+/// `past` flips the summary to past tense: the per-zone verdicts always describe
+/// TODAY's decision, so once the morning window has passed they narrate what
+/// already happened ("All zones skipped this morning: ...") instead of
+/// masquerading as the upcoming run.
+pub fn zone_run_summary(zones: &[ZoneLine], past: bool) -> String {
     let total = zones.len();
     if total == 0 {
         return String::new();
@@ -148,11 +271,23 @@ pub fn zone_run_summary(zones: &[ZoneLine]) -> String {
 
     // All zones skip -> name the dominant skip reason.
     if run_n == 0 {
+        if past {
+            return format!(
+                "All zones skipped this morning: {}.",
+                dominant_skip_reason(&skipping)
+            );
+        }
         return format!("Skipping all zones: {}.", dominant_skip_reason(&skipping));
     }
 
     // All zones run.
     if skip_n == 0 {
+        if past {
+            if total == 1 {
+                return format!("{} watered this morning.", running[0].name);
+            }
+            return format!("All {total} zones watered this morning.");
+        }
         if total == 1 {
             return format!("Watering {}.", running[0].name);
         }
@@ -164,6 +299,20 @@ pub fn zone_run_summary(zones: &[ZoneLine]) -> String {
     if run_n == 1 {
         let only = running[0];
         let why_one = why_single_runs(only);
+        if past {
+            let others = if skip_n == 1 {
+                format!("the other 1 was {}", dominant_skip_reason(&skipping))
+            } else {
+                format!(
+                    "the other {skip_n} were {}",
+                    dominant_skip_reason(&skipping)
+                )
+            };
+            return format!(
+                "Only {} watered this morning: {why_one}; {others}.",
+                only.name
+            );
+        }
         let others = if skip_n == 1 {
             format!("the other 1 is {}", dominant_skip_reason(&skipping))
         } else {
@@ -173,6 +322,13 @@ pub fn zone_run_summary(zones: &[ZoneLine]) -> String {
     }
 
     // Mixed: several run, several skip.
+    if past {
+        return format!(
+            "{} watered this morning ({run_n} of {total}); {skip_n} skipped ({}).",
+            join_names(&running),
+            dominant_skip_reason(&skipping)
+        );
+    }
     format!(
         "Watering {} ({run_n} of {total}); {skip_n} skipping ({}).",
         join_names(&running),
@@ -271,6 +427,9 @@ fn why_for_fired(r: &RuleEval) -> String {
         "already_wet" => {
             "Enough rain has already fallen today, so the lawn does not need watering."
         }
+        "observed_rain" => {
+            "Enough rain has fallen in the last few days, so the yard is already covered."
+        }
         "soil_saturation" => "The soil is already saturated, so no watering is needed.",
         "rain_next_4h" => {
             "Rain is expected within the next few hours, so watering now would be wasted."
@@ -356,7 +515,7 @@ mod tests {
             false,
             vec![rule("rain_now", "passed"), rule("rain_next_4h", "fired")],
         );
-        let e = explain_decision_with_zones(&t, false, &[]);
+        let e = explain_decision_with_zones(&t, false, &[], None);
         assert_eq!(e.headline, "Skipping next run");
         assert!(
             e.why.contains("within the next few hours"),
@@ -369,10 +528,15 @@ mod tests {
         // Before this morning passes there is no separate "today" context.
         assert_eq!(e.outcome, None);
         // Once the morning run-time has passed, today's outcome drops to a
-        // secondary past-tense line while the lead still describes the NEXT run.
-        let past = explain_decision_with_zones(&t, true, &[]);
+        // secondary past-tense line that NAMES the rule that decided it (so it
+        // stands alone as "why was today skipped"), while the lead still
+        // describes the NEXT run.
+        let past = explain_decision_with_zones(&t, true, &[], None);
         assert_eq!(past.headline, "Skipping next run");
-        assert_eq!(past.outcome.as_deref(), Some("Skipped this morning."));
+        assert_eq!(
+            past.outcome.as_deref(),
+            Some("Skipped this morning: rain_next_4h label.")
+        );
     }
 
     #[test]
@@ -382,12 +546,12 @@ mod tests {
             false,
             vec![rule("rain_now", "passed"), rule("freeze_now", "passed")],
         );
-        let e = explain_decision_with_zones(&t, false, &[]);
+        let e = explain_decision_with_zones(&t, false, &[], None);
         assert_eq!(e.headline, "Watering next run");
         assert!(e.why.contains("Every check passes"));
         assert_eq!(e.considered.len(), 2);
         // Once today is behind us, the outcome line reports it in past tense.
-        let past = explain_decision_with_zones(&t, true, &[]);
+        let past = explain_decision_with_zones(&t, true, &[], None);
         assert_eq!(past.headline, "Watering next run");
         assert_eq!(past.outcome.as_deref(), Some("Watered this morning."));
     }
@@ -395,7 +559,7 @@ mod tests {
     #[test]
     fn soil_floor_run_explains_the_moat() {
         let t = trace("run", false, vec![rule("soil_floor", "fired")]);
-        let e = explain_decision_with_zones(&t, false, &[]);
+        let e = explain_decision_with_zones(&t, false, &[], None);
         assert_eq!(e.headline, "Watering next run");
         assert!(e.why.contains("below its minimum soil moisture"));
     }
@@ -404,22 +568,22 @@ mod tests {
     fn run_extended_leads_with_the_next_run() {
         let t = trace("run_extended", false, vec![rule("heat_advisory", "fired")]);
         assert_eq!(
-            explain_decision_with_zones(&t, false, &[]).headline,
+            explain_decision_with_zones(&t, false, &[], None).headline,
             "Watering longer next run"
         );
         // The past outcome line is tense-correct once the window is behind us.
-        let past = explain_decision_with_zones(&t, true, &[]);
+        let past = explain_decision_with_zones(&t, true, &[], None);
         assert_eq!(past.headline, "Watering longer next run");
         assert_eq!(
             past.outcome.as_deref(),
-            Some("Watered longer this morning.")
+            Some("Watered longer this morning: heat_advisory label.")
         );
     }
 
     #[test]
     fn degraded_is_carried_through() {
         let t = trace("skip", true, vec![rule("rain_3day", "fired")]);
-        let e = explain_decision_with_zones(&t, false, &[]);
+        let e = explain_decision_with_zones(&t, false, &[], None);
         assert!(e.degraded);
         assert!(e.why.contains("Heavy rain"));
     }
@@ -427,7 +591,7 @@ mod tests {
     #[test]
     fn unknown_fired_rule_falls_back_to_label() {
         let t = trace("skip", false, vec![rule("some_future_gate", "fired")]);
-        let e = explain_decision_with_zones(&t, false, &[]);
+        let e = explain_decision_with_zones(&t, false, &[], None);
         assert!(e.why.contains("some_future_gate label"));
     }
 
@@ -447,15 +611,80 @@ mod tests {
             false,
             passed.iter().map(|id| rule(id, "passed")).collect(),
         );
-        let e = explain_decision_with_zones(&t, false, &[]);
+        let e = explain_decision_with_zones(&t, false, &[], None);
         assert_eq!(e.considered.len(), 5);
+    }
+
+    #[test]
+    fn post_dispatch_lead_is_the_next_slot_reason_not_todays() {
+        // The exact reported case: today skipped on OBSERVED RAIN at dawn, but
+        // the next slot is a RESTRICTED day. Once the morning has passed, the
+        // lead must describe the NEXT slot (restrictions), while the outcome
+        // line reports what today did (observed rain). Previously the lead
+        // reused today's trace and read "recent rain", contradicting the
+        // headline that already said restrictions.
+        let t = trace("skip", false, vec![rule("observed_rain", "fired")]);
+        let next = NextSlotPreview {
+            skips: true,
+            reason_code: "restrictions".into(),
+            reason: "Watering restriction: no watering Wednesdays".into(),
+        };
+        let e = explain_decision_with_zones(&t, true, &[], Some(&next));
+        assert_eq!(e.headline, "Skipping next run");
+        assert!(
+            e.why.contains("restrictions do not allow"),
+            "lead should explain the NEXT slot (restrictions), got: {}",
+            e.why
+        );
+        // The morning's own reason is still reported, in the outcome line.
+        assert_eq!(
+            e.outcome.as_deref(),
+            Some("Skipped this morning: observed_rain label.")
+        );
+    }
+
+    #[test]
+    fn post_dispatch_next_slot_runs_leads_future_positive() {
+        // Today skipped, but the next slot is predicted to run: the lead flips
+        // to the upcoming run even though today's trace verdict is "skip".
+        let t = trace("skip", false, vec![rule("already_wet", "fired")]);
+        let next = NextSlotPreview {
+            skips: false,
+            reason_code: String::new(),
+            reason: String::new(),
+        };
+        let e = explain_decision_with_zones(&t, true, &[], Some(&next));
+        assert_eq!(e.headline, "Watering next run");
+        assert!(e.why.contains("expected to pass"));
+        assert_eq!(
+            e.outcome.as_deref(),
+            Some("Skipped this morning: already_wet label.")
+        );
+    }
+
+    #[test]
+    fn zones_summary_is_past_tense_once_the_morning_passed() {
+        let zones = [
+            zline("Back Yard", "skip", "global", "recent rain"),
+            zline("Front Yard", "skip", "global", "recent rain"),
+        ];
+        // Ahead of the window: present tense.
+        assert_eq!(
+            zone_run_summary(&zones, false),
+            "Skipping all zones: recent rain."
+        );
+        // Behind the window: past tense, so it does not masquerade as the next run.
+        assert_eq!(
+            zone_run_summary(&zones, true),
+            "All zones skipped this morning: recent rain."
+        );
     }
 
     // ── zone_run_summary: the four owner-named shapes ──
 
     #[test]
     fn zone_summary_empty_when_no_zones() {
-        assert_eq!(zone_run_summary(&[]), "");
+        assert_eq!(zone_run_summary(&[], false), "");
     }
 
     #[test]
@@ -465,13 +694,13 @@ mod tests {
             zline("Front Yard", "run", "default", ""),
             zline("Side Yard", "run_extended", "heat", ""),
         ];
-        assert_eq!(zone_run_summary(&zones), "Watering all 3 zones.");
+        assert_eq!(zone_run_summary(&zones, false), "Watering all 3 zones.");
     }
 
     #[test]
     fn zone_summary_single_zone_total_names_it() {
         let zones = [zline("Back Yard", "run", "default", "")];
-        assert_eq!(zone_run_summary(&zones), "Watering Back Yard.");
+        assert_eq!(zone_run_summary(&zones, false), "Watering Back Yard.");
     }
 
     #[test]
@@ -483,7 +712,7 @@ mod tests {
             zline("Shrubs", "skip", "soil_saturation", "Soil saturated"),
         ];
         assert_eq!(
-            zone_run_summary(&zones),
+            zone_run_summary(&zones, false),
             "Watering Back Yard and Front Yard (2 of 4); 2 skipping (soil saturated)."
         );
     }
@@ -497,7 +726,7 @@ mod tests {
             zline("Shrubs", "skip", "soil_saturation", "Soil saturated"),
         ];
         assert_eq!(
-            zone_run_summary(&zones),
+            zone_run_summary(&zones, false),
             "Watering Back Yard only: it's the one zone below its soil target; \
              the other 3 are soil saturated."
         );
@@ -509,6 +738,9 @@ mod tests {
             zline("Back Yard", "skip", "global", "Rain forecast tomorrow"),
             zline("Front Yard", "skip", "global", "Rain forecast tomorrow"),
         ];
-        assert_eq!(zone_run_summary(&zones), "Skipping all zones: recent rain.");
+        assert_eq!(
+            zone_run_summary(&zones, false),
+            "Skipping all zones: recent rain."
+        );
     }
 }

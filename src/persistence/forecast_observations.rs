@@ -143,6 +143,41 @@ impl ForecastObservationsStore {
         }
         Ok(out)
     }
+
+    /// Sum measured (gauge) daily rainfall over the last `window_days`,
+    /// EXCLUDING today. The engine's observed-rain backstop already counts
+    /// today's measured rain separately (`rain_today_in`), so this covers the
+    /// preceding days only. It exists because the live ladder's observed-rain
+    /// gate otherwise reads Open-Meteo's regional `past_daily` archive, which
+    /// misses hyperlocal convection: a pop-up storm the gauge measured but the
+    /// model never saw would not suppress the next morning's run. The caller
+    /// max()es this against the model archive so neither source alone can hide
+    /// real rain. Returns 0.0 when there are no rows in range.
+    pub async fn observed_rain_last_n_days(
+        &self,
+        window_days: i64,
+    ) -> Result<f64, ForecastObservationsError> {
+        let c = self.conn.clone();
+        let today_naive = chrono::Local::now().date_naive();
+        let today = today_naive.format("%Y-%m-%d").to_string();
+        let start = (today_naive - chrono::Duration::days(window_days.max(0)))
+            .format("%Y-%m-%d")
+            .to_string();
+        let total = tokio::task::spawn_blocking(move || -> rusqlite::Result<f64> {
+            let conn = c.blocking_lock();
+            conn.query_row(
+                "SELECT COALESCE(SUM(observed_in), 0.0)
+                 FROM forecast_observations
+                 WHERE date >= ?1 AND date < ?2",
+                params![start, today],
+                |r| r.get::<_, f64>(0),
+            )
+        })
+        .await
+        .map_err(|e| ForecastObservationsError::Sqlite(format!("join: {e}")))?
+        .map_err(|e| ForecastObservationsError::Sqlite(e.to_string()))?;
+        Ok(total)
+    }
 }
 
 #[cfg(test)]

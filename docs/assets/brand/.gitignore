@@ -1,4 +1,4 @@
-# Build-time intermediates produced by build_logo.py — checked-in are:
+# Build-time intermediates produced by build_logo.py. Checked-in are:
 #   reference.jpg         (the brand reference image, source of truth)
 #   logomark-master.png   (the cleaned, transparent-bg cropped art)
 #   logomark-master-dark.png (the ink->teal recolor variant)

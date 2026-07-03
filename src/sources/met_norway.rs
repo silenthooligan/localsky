@@ -19,9 +19,12 @@
 // canonical imperial (degF, mph, inches) before publishing.
 //
 // HOURLY: one entry per timeseries step, anchored at "now", capped at 48.
-// DAILY: timeseries grouped by UTC calendar day (met.no returns UTC),
-// aggregated into temp max/min, precip sum, peak wind. POP/UV/sunrise/
-// sunset are unavailable in compact and stay at Default (0). Capped at 7.
+// DAILY: timeseries grouped by LOCAL calendar day, aggregated into temp
+// max/min, precip sum, peak wind. Steps past the ~48-60h horizon are
+// 6-hourly and carry only next_6_hours (then a summary-only next_12_hours
+// on the far tail), so the daily aggregation reads the finest next_*
+// block present per step. UV/sunrise/sunset are unavailable in compact
+// and stay at Default (0). Capped at 7.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -76,6 +79,14 @@ struct TimeStepData {
     instant: InstantBlock,
     #[serde(rename = "next_1_hours")]
     next_1_hours: Option<NextBlock>,
+    /// Past the hourly horizon (~48-60h out) the steps go 6-hourly and
+    /// this is the ONLY precip-carrying block on them.
+    #[serde(rename = "next_6_hours")]
+    next_6_hours: Option<NextBlock>,
+    /// Summary-only in compact (details carry no precipitation_amount);
+    /// the last-resort symbol/POP signal on the far tail of the series.
+    #[serde(rename = "next_12_hours")]
+    next_12_hours: Option<NextBlock>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -266,6 +277,7 @@ fn build_snapshot(resp: &ForecastResponse, lat: f64, lon: f64, now_epoch: i64) -
             wind_dir_deg: d.wind_from_direction.map(|x| x.round() as u32).unwrap_or(0),
             humidity_pct: d.relative_humidity.map(|x| x.round() as u32).unwrap_or(0),
             cloud_cover_pct: d.cloud_area_fraction.map(|x| x.round() as u32).unwrap_or(0),
+            ..Default::default()
         });
     }
 
@@ -293,7 +305,20 @@ fn build_snapshot(resp: &ForecastResponse, lat: f64, lon: f64, now_epoch: i64) -
         let key = local_day_key(time_epoch, tz);
 
         let d = &step.data.instant.details;
-        let next = step.data.next_1_hours.as_ref();
+        // Finest-window fallback: hourly steps carry next_1_hours, but past
+        // the ~48-60h horizon met.no switches to 6-hourly steps carrying only
+        // next_6_hours (and a summary-only next_12_hours on the far tail).
+        // Take exactly ONE block per step, the finest present, so consecutive
+        // steps contribute non-overlapping windows: an hourly step never adds
+        // its co-present 6h block on top (that would 6x the sum), and a
+        // 6-hourly step's 6h window tiles exactly against its neighbors.
+        // Without this, days 3+ always summed to 0.00 in / 0% POP.
+        let next = step
+            .data
+            .next_1_hours
+            .as_ref()
+            .or(step.data.next_6_hours.as_ref())
+            .or(step.data.next_12_hours.as_ref());
         let symbol = next
             .and_then(|n| n.summary.as_ref())
             .and_then(|s| s.symbol_code.as_deref());
@@ -353,6 +378,7 @@ fn build_snapshot(resp: &ForecastResponse, lat: f64, lon: f64, now_epoch: i64) -
             // Compact has no sunrise/sunset (that's the sunrise/2.0 API).
             sunrise_epoch: 0,
             sunset_epoch: 0,
+            ..Default::default()
         });
     }
 
@@ -364,6 +390,7 @@ fn build_snapshot(resp: &ForecastResponse, lat: f64, lon: f64, now_epoch: i64) -
         daily,
         past_daily: vec![],
         hourly,
+        ..Default::default()
     };
     // Pair each day's high temp with THAT day's afternoon humidity (hourly).
     snap.backfill_daily_humidity();
@@ -764,5 +791,127 @@ mod tests {
         assert_eq!(d1.time_epoch, 1_782_388_800);
         assert!((d1.temp_max_f - 59.0).abs() < 0.01); // 15C -> 59F
         assert_eq!(d1.weather_code, 3); // "cloudy"
+    }
+
+    // The compact response past the hourly horizon: day one is hourly steps
+    // carrying BOTH next_1_hours and next_6_hours (the finest window must win
+    // or the co-present 6h amounts double-count), day two is 6-hourly steps
+    // carrying only next_6_hours, day three is a summary-only next_12_hours
+    // tail step (no precipitation_amount in compact).
+    const SIX_HOURLY_SAMPLE: &str = r#"{
+      "properties": {
+        "timeseries": [
+          {
+            "time": "2026-06-24T12:00:00Z",
+            "data": {
+              "instant": { "details": { "air_temperature": 20.0 } },
+              "next_1_hours": {
+                "summary": { "symbol_code": "rain" },
+                "details": { "precipitation_amount": 2.54 }
+              },
+              "next_6_hours": {
+                "summary": { "symbol_code": "rain" },
+                "details": { "precipitation_amount": 25.4 }
+              }
+            }
+          },
+          {
+            "time": "2026-06-24T13:00:00Z",
+            "data": {
+              "instant": { "details": { "air_temperature": 21.0 } },
+              "next_1_hours": {
+                "summary": { "symbol_code": "rain" },
+                "details": { "precipitation_amount": 2.54 }
+              },
+              "next_6_hours": {
+                "summary": { "symbol_code": "rain" },
+                "details": { "precipitation_amount": 22.86 }
+              }
+            }
+          },
+          {
+            "time": "2026-06-25T00:00:00Z",
+            "data": {
+              "instant": { "details": { "air_temperature": 15.0 } },
+              "next_6_hours": {
+                "summary": { "symbol_code": "rain" },
+                "details": { "precipitation_amount": 12.7 }
+              }
+            }
+          },
+          {
+            "time": "2026-06-25T06:00:00Z",
+            "data": {
+              "instant": { "details": { "air_temperature": 16.0 } },
+              "next_6_hours": {
+                "summary": { "symbol_code": "rain" },
+                "details": { "precipitation_amount": 12.7 }
+              }
+            }
+          },
+          {
+            "time": "2026-06-25T12:00:00Z",
+            "data": {
+              "instant": { "details": { "air_temperature": 18.0 } },
+              "next_6_hours": {
+                "summary": { "symbol_code": "cloudy" },
+                "details": { "precipitation_amount": 0.0 }
+              }
+            }
+          },
+          {
+            "time": "2026-06-26T00:00:00Z",
+            "data": {
+              "instant": { "details": { "air_temperature": 17.0 } },
+              "next_12_hours": {
+                "summary": { "symbol_code": "rain" },
+                "details": {}
+              }
+            }
+          }
+        ]
+      }
+    }"#;
+
+    #[test]
+    fn daily_precip_falls_back_to_coarser_windows_past_hourly_horizon() {
+        let resp: ForecastResponse =
+            serde_json::from_str(SIX_HOURLY_SAMPLE).expect("sample parses");
+        // (0,0) -> tz None -> UTC bucketing, keeping the grouping deterministic.
+        let snap = build_snapshot(&resp, 0.0, 0.0, 1_700_000_000);
+        assert_eq!(snap.daily.len(), 3);
+
+        // Day 0 (hourly steps carrying BOTH blocks): only the finest 1h
+        // amounts sum (2 x 2.54mm = 0.2 in). The co-present 6h blocks
+        // (25.4 + 22.86 mm) must NOT be counted on top.
+        let d0 = &snap.daily[0];
+        assert!(
+            (d0.precip_sum_in - 0.2).abs() < 0.001,
+            "hourly day must sum 1h windows only, got {}",
+            d0.precip_sum_in
+        );
+
+        // Day 1 (6-hourly steps, next_6_hours only): the fallback keeps the
+        // far-day total NONZERO and exact: 12.7 + 12.7 + 0 mm = 1.0 in, each
+        // step contributing its own non-overlapping window once.
+        let d1 = &snap.daily[1];
+        assert!(
+            (d1.precip_sum_in - 1.0).abs() < 0.001,
+            "6-hourly day must sum to 1.0 in, got {}",
+            d1.precip_sum_in
+        );
+        assert_eq!(d1.precip_probability_max, 100); // synth: amount present
+        assert_eq!(d1.weather_code, 61); // "rain" from the 6h summary
+
+        // Day 2 (summary-only next_12_hours tail): nothing to sum, but the
+        // precip-class symbol still drives the synthesized POP + condition.
+        let d2 = &snap.daily[2];
+        assert_eq!(d2.precip_sum_in, 0.0);
+        assert_eq!(d2.precip_probability_max, 50);
+        assert_eq!(d2.weather_code, 61);
+
+        // Hourly rows keep the 1h-only read: a 6-hourly step (no
+        // next_1_hours) contributes no hourly precip.
+        assert_eq!(snap.hourly[2].precip_in, 0.0);
     }
 }

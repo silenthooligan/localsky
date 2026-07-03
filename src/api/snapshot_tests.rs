@@ -26,27 +26,36 @@ mod tests {
     use crate::ha::snapshot::IrrigationSnapshot;
     use crate::tempest::state::Snapshot as TempestSnapshot;
     use insta::assert_json_snapshot;
-    use serde::Serialize;
     use serde_json::json;
 
     /// `/api/v1/info` shape. Locked separately from the test in info.rs
     /// (which validates SemVer format) because that one doesn't catch
-    /// added or renamed fields.
-    #[derive(Serialize)]
-    struct InfoFixture {
-        service: &'static str,
-        service_version: &'static str,
-        api_version: &'static str,
-    }
-
+    /// added or renamed fields. Snapshots the REAL `info::Info` struct (not a
+    /// hand-rolled subset), so a rename or removal of ANY field the HACS
+    /// integration reads (uuid, auth_required, has_irrigation, ...) trips this
+    /// gate. The volatile version + uuid fields are redacted so a crate/api
+    /// version bump does not churn the snap.
     #[test]
     fn info_v1_shape() {
-        let fixture = InfoFixture {
+        // Fixed placeholder values for the version + uuid fields (insta is built
+        // without the redactions feature), so a crate/api version bump does not
+        // churn this SHAPE snapshot; the real values are validated by info.rs's
+        // own SemVer test. A field rename/removal still trips this gate.
+        let info = super::super::info::Info {
             service: "localsky",
-            service_version: "0.2.0-beta.1",
-            api_version: super::super::info::API_VERSION,
+            service_version: "0.0.0-test",
+            api_version: "0.0.0-test",
+            api_prefix: "/api/v1",
+            license: "Apache-2.0",
+            repository: "https://github.com/silenthooligan/localsky",
+            dry_run: false,
+            demo: false,
+            auth_required: false,
+            uuid: Some("00000000-0000-0000-0000-000000000000".into()),
+            has_irrigation: false,
+            nerd_mode_default: false,
         };
-        assert_json_snapshot!("info_v1", fixture);
+        assert_json_snapshot!("info_v1", info);
     }
 
     /// `/api/v1/snapshot` (Tempest weather). Default-state instance so
@@ -219,5 +228,94 @@ mod tests {
             "months": months,
         });
         assert_json_snapshot!("forecast_bias_v1", body);
+    }
+
+    /// `/api/v1/health` response shape (declared contractual by the
+    /// API_VERSION changelog: soil_probe_faults landed in 1.8.0). The
+    /// handler assembles this from live state, so the snapshot locks a
+    /// fully-populated instance with FIXED placeholder values for the
+    /// volatile fields (version, uptime, epochs), the same way info_v1
+    /// pins version/uuid. One deterministic entry per nested collection
+    /// locks the per-entry shapes (SourceFreshness, ControllerSummary,
+    /// SoilProbeFault, HaIntegration, ConditionsProvenance) that would
+    /// otherwise vanish behind their skip_serializing_if attributes.
+    #[test]
+    fn health_v1_shape() {
+        use super::super::health::{
+            ConditionsProvenance, ControllerSummary, HaIntegration, HealthResponse,
+            SourceFreshness, SubsystemReport,
+        };
+        let health = HealthResponse {
+            status: "ok",
+            config_present: true,
+            version: "0.0.0-test",
+            schema_version: Some(0),
+            uptime_s: 0,
+            subsystems: SubsystemReport {
+                config_store: "ok",
+                persistence: "ok",
+            },
+            sources: vec![SourceFreshness {
+                id: "open_meteo".into(),
+                kind: "open_meteo",
+                enabled: true,
+                last_seen_epoch: Some(0),
+                stale_for_s: Some(0),
+                status: "active",
+            }],
+            controllers: vec![ControllerSummary {
+                id: "opensprinkler".into(),
+                kind: "opensprinkler",
+                default: true,
+                enabled: true,
+            }],
+            soil_probe_faults: vec![crate::ha::snapshot::SoilProbeFault {
+                zone_slug: "back_yard".into(),
+                zone_name: "Back yard".into(),
+                sensor_id: "source:ecowitt_gw:soilmoisture1".into(),
+                since_epoch: Some(0),
+            }],
+            ha: Some(HaIntegration {
+                env_configured: false,
+                reachable: false,
+                snapshot_source: "standalone",
+                passthrough_sources: vec![("ha_weather".to_string(), 0)],
+                service_call_controllers: vec!["ha_valves".to_string()],
+                mqtt_discovery: false,
+                hacs_last_seen_epoch: 0,
+                hacs_streaming: false,
+            }),
+            conditions: vec![ConditionsProvenance {
+                field: "Air temperature",
+                source: "Open-Meteo".into(),
+            }],
+        };
+        assert_json_snapshot!("health_v1", health);
+    }
+
+    /// The static core of every `/api/v1/config/source_catalog` entry:
+    /// each cloud kind's CloudSourceMeta (kind, data_nature, rain_nature,
+    /// the verbatim audit copy, key_tier, emits_current_rain,
+    /// pop_is_synthetic, honesty_rank, irrigation_rank, upgrade_reason),
+    /// which the handler serde-flattens to the top level of each
+    /// CloudCatalogEntry. Catalog order (highest honesty first) is part
+    /// of the lock, so a kind rename or reorder trips this gate.
+    ///
+    /// RESIDUAL GAP (documented): CloudCatalogEntry itself is private to
+    /// api::config and adds nine live per-deployment fields
+    /// (live_current_fields, field_natures, recommended_here,
+    /// region_priority, region_appropriate, upgrade_available,
+    /// already_configured, configured_present, status) that cannot be
+    /// constructed here; those stay outside the shape gate.
+    #[test]
+    fn source_catalog_meta_v1_shape() {
+        let metas: Vec<_> = crate::sources::cloud_catalog::cloud_kinds()
+            .iter()
+            .map(|k| {
+                crate::sources::cloud_catalog::cloud_meta(k)
+                    .expect("every catalog kind has cloud meta")
+            })
+            .collect();
+        assert_json_snapshot!("source_catalog_meta_v1", metas);
     }
 }

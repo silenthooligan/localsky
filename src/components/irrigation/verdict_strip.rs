@@ -51,19 +51,19 @@ pub fn VerdictStrip(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                     // Render 7 shimmer cells (the same skeleton primitive the
                     // daily-forecast row uses) until the verdicts arrive.
                     if s.seven_day_verdicts.is_empty() {
-                        // One shimmer tile per grid column (the 7-col grid sizes
-                        // them), so the lead band reads as "loading" not "broken".
-                        // .ui-skel--tile is the shared skeleton primitive (the
-                        // daily-forecast row uses the same family), carrying the
-                        // shimmer + radius + reduced-motion + high-contrast rules.
-                        return (0..7)
-                            .map(|_| {
-                                view! {
-                                    <crate::components::ui::Skeleton variant="tile"/>
-                                }
-                                .into_any()
-                            })
-                            .collect::<Vec<_>>();
+                        // ForecastPending renders 7 shimmer tiles (the grid
+                        // sizes them via display:contents) for a grace period,
+                        // then an honest "provider hasn't answered" note, so a
+                        // forecast outage doesn't shimmer here forever. The
+                        // verdicts need a forecast to exist, so "no verdicts"
+                        // past the grace window IS a forecast-supply problem.
+                        return vec![view! {
+                            <crate::components::forecast::ForecastPending
+                                variant="tiles"
+                                what="verdict outlook"
+                            />
+                        }
+                        .into_any()];
                     }
                     // Deployment IANA tz for the weekday labels (24h local,
                     // not the viewer's browser zone). Empty -> browser-local.

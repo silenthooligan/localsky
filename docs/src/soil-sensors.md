@@ -22,6 +22,9 @@ which zones each source feeds.
   saturation threshold says otherwise.
 - At or above saturation: the zone skips on its own, even when the day's
   verdict is Run, and the skip reason names the probe.
+- If a probe goes offline, or reads as a wild outlier versus its
+  neighbours, it is flagged as an anomaly on the irrigation and zones
+  views.
 
 The Sensors hub and each zone's detail show the probe's live reading,
 the target band, and a 7-day no-watering projection so you can sanity

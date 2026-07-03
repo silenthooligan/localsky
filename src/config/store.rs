@@ -25,11 +25,21 @@ const SNAPSHOT_KEEP: usize = 20;
 
 pub struct FileConfigStore {
     path: PathBuf,
+    /// Serializes WRITERS (save / save_raw_toml / rollback all funnel through
+    /// here). Without it two concurrent saves (a settings PUT racing a wizard
+    /// apply or a backup restore) interleave on the SHARED <path>.toml.tmp:
+    /// writer B's File::create truncates the tmp mid-write of A, and A's
+    /// rename can then commit B's torn bytes over localsky.toml. Readers are
+    /// unaffected (the rename stays atomic); this only queues writers.
+    save_lock: tokio::sync::Mutex<()>,
 }
 
 impl FileConfigStore {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            save_lock: tokio::sync::Mutex::new(()),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -62,6 +72,7 @@ impl FileConfigStore {
     /// PUT /api/config/raw editor so direct edits also get rollback
     /// points and fsynced writes.
     pub async fn save_raw_toml(&self, body: String) -> Result<(), ConfigStoreError> {
+        let _guard = self.save_lock.lock().await;
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || -> std::io::Result<()> {
             snapshot_current_blocking(&path)?;
@@ -177,6 +188,8 @@ impl ConfigStore for FileConfigStore {
         let toml_str = toml::to_string_pretty(cfg)
             .map_err(|e| ConfigStoreError::Io(format!("toml serialize: {e}")))?;
 
+        // Queue behind any concurrent writer (see save_lock).
+        let _guard = self.save_lock.lock().await;
         let path = self.path.clone();
 
         tokio::task::spawn_blocking(move || -> std::io::Result<()> {

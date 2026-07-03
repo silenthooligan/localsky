@@ -12,6 +12,9 @@ schema_version = 1
 [deployment]
 [features]
 [[sources]]
+forecast_provider = "..."     # optional: pin the forecast provider (a source id)
+[field_source_overrides]      # optional: per-reading single pin (reading -> source id)
+[field_source_chains]         # optional: per-reading ordered backup chain
 [[controllers]]
 [zones.<slug>]
 [llm]
@@ -23,6 +26,8 @@ schema_version = 1
 [auth]
 [network]
 [updates]
+[persistence]
+[ui]
 ```
 
 Every section except `deployment` is optional (zero-source / zero-controller configs are valid for first boots before the wizard has been completed). `schema_version` is required; a config whose `schema_version` is higher than the binary supports is refused at load (see [Upgrading LocalSky](upgrading.md#downgrading-and-rollback)).
@@ -82,14 +87,62 @@ bind_addr = "0.0.0.0:50222"
 hub_serial = null  # filter to a specific Tempest hub; null = accept any
 ```
 
-Supported `kind` values: `tempest_udp`, `tempest_ws`, `open_meteo`, `ecowitt_local`, `ecowitt_gw_poll`, `davis_wll`, `nws`, `openweather`, `pirate_weather`, `met_norway`, `ambient_weather`, `netatmo`, `yolink`, `lacrosse`, `tuya_cloud`, `ha_passthrough`, `mqtt`, `http_webhook`, `demo_replay`. See [src/config/schema.rs](../src/config/schema.rs) `SourceKind` enum for per-kind config fields.
+Supported `kind` values: `tempest_udp`, `tempest_ws`, `open_meteo`, `ecowitt_local`, `ecowitt_gw_poll`, `davis_wll`, `nws`, `openweather`, `pirate_weather`, `met_norway`, `synoptic`, `noaa_mrms`, `ambient_weather`, `netatmo`, `yolink`, `lacrosse`, `tuya_cloud`, `ha_passthrough`, `mqtt`, `http_webhook`, `rest_poll`, `prometheus`, `influxdb`, `weatherkit`, `demo_replay`. See [src/config/schema.rs](../src/config/schema.rs) `SourceKind` enum for per-kind config fields.
+
+New in 0.7.0: `synoptic` (Synoptic Data / MesoWest, a dense real-station observation network keyed by a free API token, current wind/pressure/temp/humidity like NWS but from a much denser mesonet) and `noaa_mrms` (NOAA Multi-Radar Multi-Sensor, keyless US-only gauge-corrected radar rain that sees the rain on your block, refreshed about every 2 minutes). Both emit only current scalars into the merge, not forecast snapshots.
 
 Two kinds deserve a callout because they accept data from anything:
 
 - `mqtt` subscribes to broker topics (Tasmota, ESPHome, Zigbee2MQTT, any raw publisher). Config: `broker_host`, `broker_port` (default 1883), optional `username`/`password`, and a `subscriptions` list mapping each topic to a weather field with optional scale/offset.
 - `http_webhook` accepts JSON POSTs at a path you choose under `/ingest/` from anything that can speak HTTP (Arduino, a Pi script, a commercial gateway). Config: `path`, optional shared-secret `token` (sent as the `X-LocalSky-Token` header or `?token=` query parameter), and a `fields` mapping list.
 
-`priority` matters when multiple sources report the same field. Convention: 100 = LAN station; 50 = forecast model; 10 = fallback.
+`priority` matters when multiple sources report the same field. Convention: 100 = LAN station; 50 = forecast model; 10 = fallback. Cloud forecast sources added through the UI are re-ranked automatically to the researched region defaults (US: NWS 70 > Pirate 60 > OpenWeather/WeatherKit 55 > Open-Meteo 50; Europe/Nordics: Met.no 70; NWS is auto-disabled outside the US where it has no coverage).
+
+### Default forecast failover chain
+
+Every located install automatically carries its region's keyless forecast authority alongside Open-Meteo: **NWS + NOAA MRMS** in the US, **MET Norway** in Europe and the Nordics. They are seeded once, at their region rank (above the Open-Meteo 50 backstop), including on existing installs at upgrade, so a single provider outage cannot blank the forecast, the 7-day verdicts, or the rain-skip inputs. Deleting a seeded source is permanent; LocalSky records the id in `seeded_source_ids` and never re-adds it. When a lower-ranked provider is serving because the primary has gone quiet, the forecast header shows an amber "via [provider] · backup" link into the source status page. Open-Meteo itself also retries against two verified Open-Meteo mirror hosts before giving up, and data served that way is labeled "Open-Meteo (mirror)".
+
+### Self-hosting Open-Meteo
+
+Open-Meteo's engine is open source, and LocalSky can point at your own instance: set `endpoint` on the `open_meteo` source to its base URL. Your instance becomes the FIRST rung of the endpoint ladder; the hosted api.open-meteo.com and its mirrors stay behind it as automatic fallback, so a down self-hosted box degrades gracefully instead of blanking the forecast. Data served this way is labeled "Open-Meteo (self-hosted)".
+
+```toml
+[[sources]]
+id = "open_meteo"
+[sources.config]
+endpoint = "http://192.0.2.10:8080"
+```
+
+What self-hosting actually does: the open-meteo container serves the same `/v1/forecast` API from model data it syncs to local disk. The data still comes from upstream (it downloads processed model runs from Open-Meteo's public AWS open-data bucket on a schedule), so you are not eliminating the data dependency; you are moving the failure domain. The API tier becomes yours (LAN latency, no rate limits, immune to api.open-meteo.com outages like 2026-07), while the sync runs in the background and a missed sync just means a gradually aging model run instead of an immediate outage.
+
+Honest sizing: one regional high-resolution model with a limited history window is a few GB of disk and modest steady bandwidth; adding global models multiplies that quickly (tens of GB and up). A reasonable single-home setup syncs just the model that covers you (e.g. `ncep_hrrr_conus` plus `ncep_gfs013` fallback in the US, `dwd_icon_d2` + `dwd_icon` in Europe). See [github.com/open-meteo/open-meteo](https://github.com/open-meteo/open-meteo/blob/main/docs/getting-started.md) for the container and sync configuration. For most installs the hosted service plus LocalSky's built-in mirror ladder and regional failover chain is plenty; self-host when you want LAN-only forecasts, you hit rate limits, or you simply like running your own weather API.
+
+## Per-field source selection
+
+Three optional top-level keys let you steer which source drives each reading, on top of the per-source `priority`. All three are additive: leave them out and the plain priority merge applies unchanged.
+
+`field_source_chains` maps a reading name (`temperature`, `humidity`, `wind_mph`, `rain_today_in`, `pressure_in_hg`, and so on) to an ordered list of source ids. The first source in the chain that is reporting fresh data owns the reading; if it goes quiet the next takes over. A reading with no chain falls back to the global per-source priority arbitration. Example:
+
+```toml
+[field_source_chains]
+rain_today_in = ["ecowitt", "nws", "open_meteo"]
+wind_mph = ["tempest", "open_meteo"]
+```
+
+`field_source_overrides` is the older single-pin form of the same idea: a reading name mapped to one source id. A pin is just a one-element chain, and the safety fallback is the same (the pin only wins while its source has a fresh value; otherwise the priority merge takes over). New configs should prefer `field_source_chains`; a bare pin still works.
+
+```toml
+[field_source_overrides]
+pressure_in_hg = "davis"
+```
+
+`forecast_provider` pins which forecast-capable source drives the whole forecast pipeline (the daily/hourly arrays, ET0, and rain-tomorrow). The value is a source `id` for a forecast kind (`open_meteo`, `nws`, `met_norway`, `openweather`, `pirate_weather`, `weatherkit`). `null` (the default) keeps the priority arbitration, with Open-Meteo as the low-priority failover; naming a provider pins it to win regardless of ranking. An absent or disabled id is silently ignored, so a pin never blanks the forecast.
+
+```toml
+forecast_provider = "nws_forecast"
+```
+
+The Settings > Devices data-sources editor is the visual equivalent: drag rows or use arrow keys to reorder each reading's chain (toggling between Automatic smart defaults and Custom), and pick the forecast provider. Soil moisture is out of scope here; it is bound per zone via `soil_sensor_id`.
 
 ## `[[controllers]]`
 
@@ -109,6 +162,10 @@ poll_interval_s = 10
 Exactly one controller should have `default = true`. The validator rejects PUTs that leave the system with zero defaults when any controller exists.
 
 Supported `kind` values: `opensprinkler_direct`, `http_generic`, `mqtt_command`, `ha_service_call`, `rachio`, `hydrawise`, `bhyve`, `rainbird`, `dry_run`. (`esphome_native` is scaffolded but not yet built, so it is not offered in the UI; use `mqtt_command` or `http_generic` for ESPHome hardware.)
+
+## Editable, migrating ids
+
+Source and controller `id` fields are editable. Renaming one migrates every reference automatically: the `field_source_chains` picks, the `forecast_provider` pin, each zone's `soil_sensor_id`, and each zone's `controller_id`. A rename never leaves a dangling reference. Rename through the Settings UI or by editing the config and applying it.
 
 ## `[zones.<slug>]`
 
@@ -312,6 +369,32 @@ check_enabled = false   # default: false
 
 Off by default; nothing phones home. When enabled (restart required), LocalSky polls the project version manifest at `localsky.io/latest.json` about once a day (the running version travels in the User-Agent, nothing per-install) and serves the comparison at `GET /api/v1/updates`. Nothing self-updates; `docker pull` stays the upgrade mechanism. See [Upgrading LocalSky](upgrading.md#update-notifications).
 
+## `[persistence]`
+
+Local-history retention knobs for the SQLite database. Both default to sensible values; set them only if disk is tight.
+
+```toml
+[persistence]
+retention_days      = 90   # default: 90
+runs_retention_days = 0    # default: 0 (keep forever)
+```
+
+- `retention_days`: days of raw `sensor_history` readings to keep. Rows older than this are pruned opportunistically as new readings arrive. `0` disables pruning (keep everything forever).
+- `runs_retention_days`: days of run / skip / decision history to keep. `0` (the default) keeps everything forever, which is what makes year-over-year trends in History possible. Set a cap only if disk is genuinely tight.
+
+## `[ui]`
+
+Server-side UI presentation defaults. These set the baseline; per-browser choices persist in each device's localStorage and win over them once a user changes something.
+
+```toml
+[ui.radar]
+providers      = []                          # default: [] (Auto, region-smart set)
+default_layers = ["precip", "nexrad", "..."] # overlays on for a browser with no saved preference
+```
+
+- `ui.radar.providers`: the radar tile providers offered in the layer menu, by catalog id (see `radar_catalog::providers()`). Empty (the default) means Auto: the region-smart recommended set for your station location. Non-empty means exactly this menu, in this order; any catalog provider is allowed anywhere, so you can deliberately switch on an out-of-region source to compare.
+- `ui.radar.default_layers`: which overlays are enabled by default for a browser that has no stored preference yet. Accepts provider ids and feature ids from the radar catalog. Once a user toggles layers, their per-browser choice persists in localStorage and wins over this list.
+
 ## Env var interpolation
 
 Anywhere a string field appears, you can interpolate environment variables via `${NAME}`. Useful for secrets:
@@ -340,7 +423,21 @@ Bad PUTs return 422 with the specific failure; on-disk file is untouched.
 
 On boot, the migration runner replays any database migrations the file has not seen yet. Schema bumps live in [src/persistence/migrations/](../src/persistence/migrations/) as numbered SQL files, each applied in its own transaction and recorded in the `schema_migrations` table. The config file's own `schema_version` is currently `1`; older configs gain new fields via defaults, and a config newer than the binary is refused at load. Details: [Upgrading LocalSky](upgrading.md#what-happens-on-first-boot-after-an-upgrade).
 
-A config rollback endpoint exists (`POST /api/v1/config/rollback?to=<version>`, snapshot list at `GET /api/v1/backup/snapshots`), but this beta does not record config snapshots on save yet, so it always returns 404. Keep backup bundles as your config history for now.
+LocalSky records a config snapshot on every save. Each successful write (a settings `PUT`, a raw-TOML save, or the wizard apply) first copies the previous on-disk `localsky.toml` to `<config_dir>/snapshots/<unix_ts>.toml`, keeping the newest 20 and pruning older ones. To list and restore them:
+
+```bash
+# List available snapshots (newest first).
+curl http://localhost:8090/api/v1/config/snapshots
+# -> {"snapshots":[{"ts":1765400000,"applied_at_epoch":1765400000,"schema_version":1,"note":null}, ...]}
+
+# Roll back to one. The snapshot is validated before the swap, and the
+# current config is snapshotted first so the rollback is itself reversible.
+curl -X POST -H 'Content-Type: application/json' \
+    -d '{"ts": 1765400000}' \
+    http://localhost:8090/api/v1/config/rollback
+```
+
+`POST /api/v1/config/rollback` also accepts the legacy `?to=<ts>` query form. A rollback hot-reloads the restored config into the running engine just like a normal save. Snapshots cover config only; keep [backup bundles](backup-restore.md) for full config-plus-database history.
 
 ## Programmatic schema
 

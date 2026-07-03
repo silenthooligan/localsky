@@ -28,6 +28,7 @@ Examples: Ecowitt WH51 / WH52 (battery), Aqara Zigbee, Sonoff Zigbee, capacitive
 - **Per-zone soil moisture display**: a horizontal bar per zone showing current moisture vs. target band.
 - **Soil-moisture projection**: 7-day forward curve under no-irrigation, color-coded for "stays in healthy band" vs. "will dry out".
 - **Smarter dry-out detection**: catches the case where ET-based math underestimates actual drying (heavy clay holding water visibly longer than expected, or sandy spots draining faster).
+- **Anomaly detection** (new in 0.7.0): a probe that goes offline, or reads as a wild outlier versus its neighbours, is flagged on the irrigation and zones views so you know when to check the hardware.
 
 **Connect via**: the native Ecowitt gateway poll, the Ecowitt LAN push receiver, or any Home Assistant soil entity. Once the readings are flowing, assign each probe to its zone; see [Assigning soil probes to zones](#assigning-soil-probes-to-zones) below.
 
@@ -45,6 +46,7 @@ Examples: Ecowitt RG200, AcuRite tipping bucket, RainWise.
 **Unlocks**:
 - **Higher rain-today accuracy** when your weather station's onboard gauge is less reliable than a dedicated unit (or you don't have a weather station at all).
 - **Merge engine takes the max** across rain sources, so adding a gauge can only improve accuracy.
+- **Honesty labels** (new in 0.7.0): every reading carries an honesty label so you know how it was obtained: measured (a real gauge or station), radar (live Doppler, for example NOAA MRMS rain), real-time nowcast, or model forecast.
 
 ### Lightning detector
 
@@ -152,6 +154,7 @@ Once a source is providing the field, the tile lights up and the skip rules inco
 | Ecowitt WH51/WH52 (soil) | Live (v0.1) | Yes | Polled natively via gateway; LocalSky calibrates moisture per zone against dry/wet AD endpoints in its own config; battery-powered, 868/915 MHz |
 | Aqara Zigbee | Via HA | Yes | Soil moisture + temp probes; needs Zigbee coordinator |
 | Sonoff Zigbee | Via HA | Yes | Same as Aqara |
+| Synoptic Data | Live (v0.7.0) | N/A | A free token pulls the nearest real weather station's measured wind, pressure, temperature, and humidity from a dense mesonet. Measured readings, but from the nearest station, which may be a few miles away |
 | Ambient Weather | Planned | Yes | Cloud API; socket.io |
 | AcuRite tipping bucket | Via Ecowitt or HA | Yes | |
 | PurpleAir / AirGradient | Display only | Yes | No engine integration |

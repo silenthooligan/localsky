@@ -5,6 +5,11 @@
 //      Samsung Internet on Android + desktop Chrome). We capture the event,
 //      stash it, and reveal a "Install app" button that calls .prompt()
 //      on tap, that's the only way to invoke the native UA install dialog.
+//      Chrome fires the event once, often before the multi-MB WASM bundle
+//      finishes hydrating, so the SSR shell (app.rs shell()) also runs a
+//      tiny synchronous inline capture that preventDefault()s and stashes
+//      the event on window.__lsBipEvent; init_install_detection checks
+//      that stash first so an early event is not silently lost.
 //
 //   2. We're on iOS Safari, not yet running standalone, and the user hasn't
 //      dismissed the banner. iOS doesn't fire beforeinstallprompt; the only
@@ -141,6 +146,18 @@ fn init_install_detection(mode: RwSignal<Mode>) {
     let _ =
         win.add_event_listener_with_callback("appinstalled", cb_installed.as_ref().unchecked_ref());
     cb_installed.forget();
+
+    // The SSR shell's inline capture may have stashed a beforeinstallprompt
+    // event that fired while the WASM bundle was still loading; if so, the
+    // native install path is already available. (Events firing from here on
+    // are handled by the listener registered above; either way the stash is
+    // the same window.__lsBipEvent slot trigger_native_install reads.)
+    let stashed = js_sys::Reflect::get(&win, &wasm_bindgen::JsValue::from_str("__lsBipEvent"))
+        .ok()
+        .filter(|v| !v.is_undefined() && !v.is_null());
+    if stashed.is_some() {
+        mode.set(Mode::Native);
+    }
 
     // iOS Safari: detect by UA + lack of beforeinstallprompt firing.
     if is_ios_safari() && !is_standalone() {

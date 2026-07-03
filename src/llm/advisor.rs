@@ -52,14 +52,36 @@ struct Inner {
 
 impl AdvisorState {
     pub fn from_env() -> Self {
-        let client = LlmClient::from_env().unwrap_or_else(|e| {
-            tracing::error!("llm client init failed (will run disabled): {e:#}");
-            // Construct a "disabled" client by setting the env var and
-            // re-trying, but simpler: re-run with the disabled flag set.
-            // If from_env fails twice, we rebuild manually.
-            std::env::set_var("LLM_ADVISOR_DISABLED", "1");
-            LlmClient::from_env().expect("disabled client never errors")
-        });
+        Self::from_config_or_env(None)
+    }
+
+    /// Build the advisor from the UI/wizard-configured `[llm]` block when it
+    /// names a concrete single-endpoint provider (Ollama / OpenAI-compat /
+    /// llama.cpp), else fall back to env (LLM_BASE_URL etc). This is what makes a
+    /// provider set in Settings actually drive the live advisor: previously the
+    /// live advisor used the env-only client, so a UI-configured provider (whose
+    /// wizard Test button passes via a DIFFERENT code path) was silently ignored
+    /// and the advisor stayed offline. `Auto` still resolves via env here (its
+    /// runtime probing is the separate LlmProvider path).
+    pub fn from_config_or_env(cfg: Option<&crate::config::schema::LlmConfig>) -> Self {
+        let disabled_client = || {
+            LlmClient::from_env().unwrap_or_else(|e| {
+                tracing::error!("llm client init failed (will run disabled): {e:#}");
+                // Force the disabled flag and rebuild; a disabled client never errors.
+                std::env::set_var("LLM_ADVISOR_DISABLED", "1");
+                LlmClient::from_env().expect("disabled client never errors")
+            })
+        };
+        let client = cfg
+            .and_then(LlmClient::from_config)
+            .and_then(|r| match r {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    tracing::error!("llm client from config failed (falling back to env): {e:#}");
+                    None
+                }
+            })
+            .unwrap_or_else(disabled_client);
         Self {
             inner: Arc::new(Inner {
                 client,
@@ -340,10 +362,42 @@ fn strip_json_fence(s: &str) -> &str {
     s
 }
 
+/// Byte-budgeted truncation that never splits a UTF-8 codepoint: when `max`
+/// lands mid-character, walk back to the nearest char boundary before slicing.
+/// LLM bodies routinely carry multibyte text (the prompts themselves embed
+/// "°F"), and `&s[..max]` on a non-boundary index panics inside the axum
+/// handler task, 500ing the advisor request. Log-trimming only, so losing a
+/// few bytes to the boundary walk is fine.
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max])
+        return s.to_string();
+    }
+    let mut cut = max;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}…", &s[..cut])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate;
+
+    #[test]
+    fn truncate_never_splits_a_multibyte_codepoint() {
+        // "°" is two bytes (0xC2 0xB0): a cut at byte 2 of "7°F" lands in the
+        // middle of the codepoint and must walk back instead of panicking.
+        let s = "7°F";
+        assert_eq!(truncate(s, 2), "7…");
+        // A budget that lands exactly on a boundary keeps the full prefix.
+        assert_eq!(truncate(s, 3), "7°…");
+        // Short-enough input is returned untouched.
+        assert_eq!(truncate(s, s.len()), s);
+        // Plain ASCII behavior is unchanged.
+        assert_eq!(truncate("abcdef", 3), "abc…");
+        // All-multibyte input cut mid-codepoint (each "…" is three bytes):
+        // the cut walks back to the first ellipsis, then the marker appends.
+        assert_eq!(truncate("……", 4), "……");
+        assert_eq!(truncate("……", 2), "…");
     }
 }

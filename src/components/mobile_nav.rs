@@ -64,9 +64,12 @@ fn Tab(
     icon: &'static str,
     label: &'static str,
 ) -> impl IntoView {
-    let loc = use_location();
+    let pathname = use_location().pathname;
+    // One shared active predicate feeds both the class and aria-current
+    // so visual state and the SR-exposed state cannot drift.
+    let is_on = move || active_tab(&crate::base::route_path(&pathname.get())) == tab;
     let cls = move || {
-        if active_tab(&crate::base::route_path(&loc.pathname.get())) == tab {
+        if is_on() {
             "mobile-tab is-on"
         } else {
             "mobile-tab"
@@ -82,7 +85,12 @@ fn Tab(
         navigate(&crate::base::url(href), NavigateOptions::default());
     };
     view! {
-        <a href=href class=cls on:click=on_click>
+        <a
+            href=href
+            class=cls
+            aria-current=move || is_on().then_some("page")
+            on:click=on_click
+        >
             <span class="mobile-tab-glyph" aria-hidden="true"><Icon name=icon size=22/></span>
             <span class="mobile-tab-label">{label}</span>
         </a>
@@ -91,6 +99,8 @@ fn Tab(
 
 #[component]
 fn MoreTab(more_open: RwSignal<bool>) -> impl IntoView {
+    // No aria-current here: More is a sheet trigger, not a page link;
+    // its expanded state is what aria-expanded below already conveys.
     let loc = use_location();
     let cls = move || {
         if active_tab(&crate::base::route_path(&loc.pathname.get())) == "more" {

@@ -1120,16 +1120,26 @@ async fn export(
     let days = q.days.clamp(1, 3650);
     let now = chrono::Utc::now().timestamp();
     let from = now - (days as i64) * 86400;
+    // JSON error envelope like every other API error path (an integrator's
+    // resp.json() error handler must never hit bare text here).
     let runs = match db::window(conn.clone(), from, now).await {
         Ok(w) => w.runs,
         Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
         }
     };
     let decisions = match db::decisions_window(conn, from, now).await {
         Ok(w) => w.decisions,
         Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
         }
     };
 

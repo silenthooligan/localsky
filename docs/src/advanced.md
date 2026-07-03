@@ -33,15 +33,22 @@ can be locked down while your own browser keeps full control.
 
 ## Source freshness
 
-A live status list for the data sources the engine depends on: your
-configured weather station (labeled by kind, for example "Tempest weather
-station"), the irrigation refresher, and the forecast source. Each
-row shows whether the source is reachable and how long ago it last
-reported, with a colored pill (fresh, stale, waiting, or offline).
-Staleness is judged against each source's expected cadence, so a forecast
-that polls every 30 minutes and a station that reports every few seconds
-are each graded on their own clock. Use this to confirm a source is alive
-before chasing a verdict you do not understand.
+Source freshness now lives in the unified device list under **Settings,
+Devices**. Every source you have configured appears there exactly once,
+whatever its kind: local weather stations, cloud services, the irrigation
+refresher, and the forecast source. Each entry shows its live status with
+a colored pill (fresh, stale, waiting, or offline), when it last reported,
+the sensors it provides, and an enable/disable toggle so you can take a
+source out of rotation without deleting it.
+
+Staleness is judged against each source's own expected cadence, so a
+forecast that polls every 30 minutes and a station that reports every few
+seconds are each graded on their own clock. Use this to confirm a source
+is alive before chasing a verdict you do not understand.
+
+Cloud services you have not enabled yet do not clutter the configured
+list. They appear separately as "coverage you can add", so you can see at
+a glance which extra data sources are available to turn on.
 
 ## Update check
 

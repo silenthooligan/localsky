@@ -28,9 +28,12 @@
 //
 // Everything else (GET browsing, SSE streams, the read-only auth status,
 // health, info, docs, static assets) passes untouched, so the demo stays
-// fully functional for read browsing. Non-/api paths are NEVER touched:
-// /ingest/* (the demo's own data feed), /pkg, /docs, static, and SSE all
-// pass, so the demo keeps populating and browsing.
+// fully functional for read browsing. Non-/api paths pass with ONE
+// exception: /ingest/* is a WRITE surface (the push receivers real weather
+// hardware POSTs to), and the demo needs no real gateway (its feeder
+// synthesizes data in-process, never over HTTP), so ingest writes are
+// denied too. /pkg, /docs, static assets, and SSE all pass, so the demo
+// keeps populating and browsing.
 //
 // Outside demo mode the layer is a no-op (one bool check then pass-through),
 // so prod, the owner's live instance, and a self-hoster are never touched.
@@ -90,9 +93,22 @@ fn is_blocked_demo_request(method: &Method, path: &str) -> bool {
         return true;
     }
 
-    // Non-/api requests (Leptos pages, /ingest/* data feed, /pkg, /docs,
-    // static assets, SSE streams) are NEVER touched, so the demo keeps
-    // populating + browsing. Only the /api surface is default-denied below.
+    // /ingest/* is the one non-/api surface that WRITES: the push receivers
+    // real weather hardware POSTs into sensor_history (mounted at both
+    // /ingest and /api/v1/ingest). The demo feeder synthesizes its data
+    // in-process and no real gateway posts to the public demo, while the
+    // seeded EcowittLocal source carries no shared_secret, so an anonymous
+    // internet POST here would inject forged readings into the read-only
+    // demo. Deny writes; reads fall through like any browse path. (The
+    // /api/v1/ingest mount was normalized to /api/ingest above and is
+    // caught by the /api default-deny below.)
+    if is_write && (path == "/ingest" || path.starts_with("/ingest/")) {
+        return true;
+    }
+
+    // Other non-/api requests (Leptos pages, /pkg, /docs, static assets,
+    // SSE streams) are NEVER touched, so the demo keeps populating +
+    // browsing. Only the /api surface is default-denied below.
     if !path.starts_with("/api/") {
         return false;
     }
@@ -186,7 +202,10 @@ mod tests {
 
     #[test]
     fn allows_wizard_reads() {
-        // Read-only wizard surface stays browsable (state, geocode, draft GET).
+        // Read-only wizard surface stays browsable (state, geocode, draft
+        // GET). Geocode is not blocked HERE, but its handler now carries
+        // the same ProbeGuard as the other outbound wizard endpoints, so a
+        // public internet caller on the demo still gets 403 (wizard.rs).
         assert!(!blocked(Method::GET, "/api/wizard/draft"));
         assert!(!blocked(Method::GET, "/api/wizard/state"));
         assert!(!blocked(Method::GET, "/api/wizard/geocode"));
@@ -228,12 +247,11 @@ mod tests {
 
     #[test]
     fn lets_general_browsing_through() {
-        // Pages, snapshots, streams, ingest, docs, assets: never blocked.
+        // Pages, snapshots, docs, assets: never blocked.
         assert!(!blocked(Method::GET, "/"));
         assert!(!blocked(Method::GET, "/zones"));
         assert!(!blocked(Method::GET, "/api/v1/snapshot"));
         assert!(!blocked(Method::GET, "/api/v1/info"));
-        assert!(!blocked(Method::POST, "/ingest/ecowitt"));
         assert!(!blocked(Method::GET, "/docs/getting-started"));
         assert!(!blocked(Method::GET, "/pkg/localsky.wasm"));
     }
@@ -278,14 +296,37 @@ mod tests {
     }
 
     #[test]
-    fn non_api_paths_are_never_blocked() {
-        // Non-/api writes pass: the demo's data feed (/ingest), the service
-        // worker, and any static/page POST-like surface stay untouched.
-        assert!(!blocked(Method::POST, "/ingest/ecowitt"));
-        assert!(!blocked(Method::POST, "/ingest/tempest"));
+    fn non_api_paths_pass_except_ingest_writes() {
+        // Non-/api writes pass (Leptos server fns, service worker, static
+        // surfaces), with the ONE exception of /ingest/* covered below.
         assert!(!blocked(Method::POST, "/some/leptos/server/fn"));
         assert!(!blocked(Method::GET, "/sw.js"));
-        // A path that merely contains "api" but is not under /api/ is safe.
+        // A path that merely contains "api" but is not under /api/ is safe,
+        // and so is one that shares the /ingest prefix letters without
+        // being the ingest mount.
         assert!(!blocked(Method::POST, "/apiary"));
+        assert!(!blocked(Method::POST, "/ingestion"));
+    }
+
+    #[test]
+    fn blocks_ingest_writes() {
+        // /ingest/* is a WRITE surface, not a browse path: the demo's
+        // seeded EcowittLocal source has no shared_secret, so an anonymous
+        // internet POST would inject forged readings into the read-only
+        // demo's sensor history (the audit finding). The demo feeder
+        // synthesizes data in-process, never over HTTP, so nothing legit
+        // breaks.
+        assert!(blocked(Method::POST, "/ingest"));
+        assert!(blocked(Method::POST, "/ingest/ecowitt"));
+        assert!(blocked(Method::POST, "/ingest/webhook/rain1"));
+        assert!(blocked(Method::PUT, "/ingest/ecowitt"));
+        assert!(blocked(Method::DELETE, "/ingest/webhook/x"));
+        // The /api/v1 mount of the same receivers is caught by the /api
+        // default-deny (the version prefix normalizes first).
+        assert!(blocked(Method::POST, "/api/v1/ingest/ecowitt"));
+        assert!(blocked(Method::POST, "/api/ingest/ecowitt"));
+        // Reads under /ingest stay open like any other browse path (the
+        // receivers only route POST anyway).
+        assert!(!blocked(Method::GET, "/ingest/ecowitt"));
     }
 }

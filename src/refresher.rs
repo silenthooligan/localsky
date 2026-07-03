@@ -280,6 +280,40 @@ fn seasonal_capped(raw_seconds: u32, seasonal_pct: u32, max_dur: u32) -> u32 {
     }
 }
 
+/// Apply each zone's custom condition-rule watering multiplier (from an
+/// `AdjustMultiplier` rule action, clamped to [0.5, 1.5] by the engine in
+/// `decide_per_zone`) to its dispatched run time, so a "halve the veg garden
+/// when humidity is high" style rule actually shrinks (or extends) the run
+/// instead of being a silent no-op. `planned_run_seconds` already reflects the
+/// seasonal dial, the ET heat multiplier, and the per-zone / regulatory
+/// max-duration cap; this layers the user's explicit rule on top and RE-CAPS
+/// at the zone's `max_duration_seconds` so a >1.0 multiplier can never push a
+/// run past its safety ceiling. A multiplier of exactly 1.0 (every zone with
+/// no `AdjustMultiplier` rule) is a no-op, so installs without such a rule are
+/// byte-identical. Call this ONCE per refresh, after `planned_run_seconds` is
+/// finalized and `apply_engine` has back-filled `z.verdict`.
+fn apply_verdict_multiplier(snap: &mut crate::ha::snapshot::IrrigationSnapshot) {
+    for z in snap.zones.iter_mut() {
+        if z.planned_run_seconds == 0 {
+            continue;
+        }
+        let mult = z.verdict.as_ref().map(|v| v.multiplier).unwrap_or(1.0);
+        if (mult - 1.0).abs() <= f64::EPSILON {
+            continue;
+        }
+        let max_dur = z.math.as_ref().map(|m| m.max_duration_seconds).unwrap_or(0);
+        let scaled = ((z.planned_run_seconds as f64) * mult).round().max(0.0) as u32;
+        z.planned_run_seconds = if max_dur > 0 {
+            scaled.min(max_dur)
+        } else {
+            scaled
+        };
+        if let Some(m) = z.math.as_mut() {
+            m.scheduled_seconds = z.planned_run_seconds;
+        }
+    }
+}
+
 /// Resolve the HA controller entity prefix, falling back to a sensible
 /// default when unset (the WateringPolicy::default / env-compat path).
 fn sprinkler_prefix(policy: &WateringPolicy) -> &str {
@@ -869,7 +903,7 @@ async fn refresh_once(
                 .map(|id| (id.to_string(), v.clone()))
         })
         .collect();
-    Ok(build_from_map(
+    let mut snap = build_from_map(
         map,
         forecast_store,
         tempest_store,
@@ -881,7 +915,13 @@ async fn refresh_once(
         forecast_obs,
         None,
     )
-    .await)
+    .await;
+    // Custom-rule watering multiplier (AdjustMultiplier condition action) is
+    // applied to the finalized per-zone run time here, where both the planned
+    // seconds and the back-filled verdict are final. No-op for the common case
+    // (no such rule => multiplier 1.0).
+    apply_verdict_multiplier(&mut snap);
+    Ok(snap)
 }
 
 /// Build the `IrrigationSnapshot` from a pre-fetched entity `map` plus the
@@ -1329,10 +1369,29 @@ async fn build_from_map(
     // (already the max of station + model) plus the configured window of PAST
     // observed daily rain. Feeds the engine's hard observed-rain skip gate so a
     // soaking the morning before still suppresses the run even if a soil probe is
-    // bad/offline. Reads measured rain, not the forecast, so an Open-Meteo outage
-    // cannot inflate it.
+    // bad/offline.
+    // The PAST component is the MAX of the model's regional past_daily archive and
+    // the station GAUGE's measured daily totals from forecast_observations: the
+    // gauge's memory beats the regional model for hyperlocal convection (a pop-up
+    // storm that soaked this yard but never showed in Open-Meteo's past_daily now
+    // still carries into the next morning's hard skip), and on any non-Open-Meteo
+    // forecast source (which ship an empty past_daily) the gauge is the ONLY past
+    // record, so this is what keeps the backstop from degenerating to today-only.
+    // Same gauge-beats-model rule already used for days_since_significant_rain.
+    let window_days = watering_policy.skip_rules.rain_observed_window_days;
+    let observed_past_gauge = match forecast_obs {
+        Some(store) => store
+            .observed_rain_last_n_days(window_days as i64)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::debug!(error = %e, "observed_rain_last_n_days query failed");
+                0.0
+            }),
+        None => 0.0,
+    };
     let rain_observed_recent = rain_today_used
-        + fc.past_n_day_precip_in(watering_policy.skip_rules.rain_observed_window_days as usize);
+        + fc.past_n_day_precip_in(window_days as usize)
+            .max(observed_past_gauge);
     // Option end-to-end: None = no hourly forecast window. The engine's
     // overnight-freeze gate keys applicability off is_some(), so a real
     // sub-zero low is no longer confused with "no data".
@@ -1479,6 +1538,34 @@ async fn build_from_map(
         heat_index_max_3day_f: heat_index_3day,
         heat_multiplier: heat_mult,
         days_since_significant_rain: days_since_rain,
+        // Extended model context (all 0 when the provider lacks the series).
+        eto_spent_today_mm: fc.eto_spent_today_mm(),
+        vpd_now_kpa: fc.vpd_now_and_max_today().0,
+        vpd_max_today_kpa: fc.vpd_now_and_max_today().1,
+        // First hour WITH a value (a non-OM owner's window can start in the
+        // past, before graft coverage; see vpd_now_and_max_today).
+        soil_temp_6cm_now_f: fc
+            .hourly
+            .iter()
+            .map(|h| h.soil_temp_6cm_f)
+            .find(|v| *v > 0.0)
+            .unwrap_or(0.0),
+        soil_moisture_3_9_now_vwc: fc
+            .hourly
+            .iter()
+            .map(|h| h.soil_moisture_3_9_vwc)
+            .find(|v| *v > 0.0)
+            .unwrap_or(0.0),
+        // Last NONZERO reading, not .last(): a non-OM owner's hourly window
+        // can extend past the donor's 48h graft coverage, leaving trailing
+        // zeros that would fake a dry-down to 0%.
+        soil_moisture_3_9_in48h_vwc: fc
+            .hourly
+            .iter()
+            .rev()
+            .map(|h| h.soil_moisture_3_9_vwc)
+            .find(|v| *v > 0.0)
+            .unwrap_or(0.0),
     };
 
     // Native per-zone soil extras (temp/EC/battery) from the gateway poll.
@@ -1742,6 +1829,11 @@ async fn refresh_once_native(
             m.scheduled_seconds = z.planned_run_seconds;
         }
     }
+    // Custom-rule watering multiplier (AdjustMultiplier), applied after the
+    // native allocator finalized planned_run_seconds (which overwrote the
+    // value build_from_map computed), so display + dispatch agree. No-op
+    // when no zone carries such a rule.
+    apply_verdict_multiplier(&mut snap);
     snap.next_run_total_minutes = snap
         .zones
         .iter()
@@ -2861,6 +2953,43 @@ mod watchdog_tests {
         assert_eq!(force_run_floor("skip", "run", 0, 1200), 0);
         // Unset max_dur falls back to the default, not 0.
         assert_eq!(force_run_floor("run", "auto", 0, 0), FORCE_RUN_DEFAULT_S);
+    }
+
+    #[test]
+    fn verdict_multiplier_scales_and_caps_dispatch() {
+        use crate::ha::snapshot::{IrrigationSnapshot, ZoneMath, ZoneState, ZoneVerdict};
+        let mk = |slug: &str, planned: u32, mult: f64, max_dur: u32| ZoneState {
+            slug: slug.into(),
+            planned_run_seconds: planned,
+            verdict: Some(ZoneVerdict {
+                zone_slug: slug.into(),
+                verdict: "run".into(),
+                multiplier: mult,
+                ..Default::default()
+            }),
+            math: Some(ZoneMath {
+                max_duration_seconds: max_dur,
+                scheduled_seconds: planned,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut snap = IrrigationSnapshot {
+            zones: vec![
+                mk("a", 600, 1.0, 1200), // no rule -> unchanged (byte-identical case)
+                mk("b", 600, 0.5, 1200), // halve -> 300
+                mk("c", 600, 1.5, 1200), // extend -> 900, under the cap
+                mk("d", 600, 1.5, 720),  // extend -> 900 held to the 720s ceiling
+                mk("e", 0, 0.5, 1200),   // a skipped zone (0s) stays 0
+            ],
+            ..Default::default()
+        };
+        apply_verdict_multiplier(&mut snap);
+        let planned: Vec<u32> = snap.zones.iter().map(|z| z.planned_run_seconds).collect();
+        assert_eq!(planned, vec![600, 300, 900, 720, 0]);
+        // math.scheduled_seconds mirrors the dispatched value so the "why this
+        // duration" tile agrees with what the controller receives.
+        assert_eq!(snap.zones[3].math.as_ref().unwrap().scheduled_seconds, 720);
     }
 
     #[test]

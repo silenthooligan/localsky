@@ -152,8 +152,10 @@ pub const MAX_AGE_MRMS_RATE_S: u64 = 900;
 /// `MAX_AGE_MRMS_S` so its lagged hourly-accumulation field stays fresh; the
 /// keyed current-conditions providers (OpenWeather, Pirate, WeatherKit) get the
 /// 3900s window matching the `/api/health` kind bucket so a normal ~10 to 60 min
-/// poll gap does not read stale and flap the rain owner; every other kind keeps
-/// `None` (the kind-default freshness window, e.g. live local stations).
+/// poll gap does not read stale and flap the rain owner; Synoptic gets an 1800s
+/// window (~3x its 600s poll cadence) so one failed poll does not flap it
+/// stale; every other kind keeps `None` (the kind-default freshness window,
+/// e.g. live local stations).
 pub fn default_max_age_for(kind: &SourceKind) -> Option<u64> {
     // NOAA MRMS reads a gauge-corrected hourly accumulation that is inherently
     // ~1 to 1.5 hr behind, so it needs a wider freshness window than the 1800s
@@ -177,6 +179,16 @@ pub fn default_max_age_for(kind: &SourceKind) -> Option<u64> {
         // matches the `/api/health` kind bucket so the merge and health agree
         // on freshness.
         Some(3900)
+    } else if matches!(kind, SourceKind::Synoptic(_)) {
+        // Synoptic polls its mesonet station every 600s with no in-cycle
+        // retry, and stations report every ~5 to 15 min, so the 600s
+        // live-freshness fallback equals the poll cadence: a single failed
+        // or late poll opens a gap the merge judges stale, flapping the
+        // wind/pressure fill to the model backstop until the next success.
+        // 1800s = ~3 poll cycles of headroom, wide enough to ride out one
+        // transient failure while still going stale before a real outage
+        // matters for a station-authority (priority 70) source.
+        Some(1800)
     } else {
         None
     }
@@ -384,9 +396,20 @@ pub fn normalize_new_cloud_sources(
         if existing_ids.contains(entry.id.as_str()) {
             continue;
         }
-        // Only the researched cloud forecast kinds get a region-aware rank;
-        // everything else keeps the priority its own add path chose.
-        if !entry.source.is_forecast() {
+        // The researched cloud kinds get a region-aware rank; everything else
+        // keeps the priority its own add path chose. This includes the forecast
+        // kinds AND the observation-grade cloud kinds Synoptic (mesonet stations)
+        // and NOAA MRMS (radar QPE): NOT forecasts, but they DO have a researched
+        // rank (70 / 75-in-US) in default_priority_for. Without them here a
+        // hand-added Synoptic/MRMS landed at the serde-default 50 (below Pirate /
+        // OpenWeather / WeatherKit), inverting the documented order so model
+        // clouds beat real observations for the current-conditions / rain fill.
+        let needs_region_rank = entry.source.is_forecast()
+            || matches!(
+                entry.source,
+                SourceKind::Synoptic(_) | SourceKind::NoaaMrms(_)
+            );
+        if !needs_region_rank {
             continue;
         }
         entry.priority = default_priority_for(&entry.source, lat, lon);
@@ -469,11 +492,65 @@ pub fn region_keyless_authority_entries(
         .collect()
 }
 
+/// Boot-time upgrade seeding: append the region's keyless forecast
+/// authorities to an EXISTING configured install that predates them.
+///
+/// The original seeding (wizard + env_compat) only fires on an empty
+/// source list, on the theory that a hardware install shouldn't get an
+/// unsolicited cloud. The 2026-07 Open-Meteo outage disproved that
+/// theory for FORECAST kinds specifically: a LAN station observes but
+/// does not forecast, so a hardware install with only Open-Meteo still
+/// had a single point of failure for the entire forecast pipeline (7-day
+/// verdicts, rain-skip, ET0). Policy now: every located install carries
+/// its region's keyless authority chain (NWS in the US, Met.no in the
+/// Nordics; nothing extra elsewhere) at the researched region rank, with
+/// the priority merge + provenance labels keeping it honest about which
+/// provider actually serves.
+///
+/// Deletions stick: every id this pass handles is recorded in
+/// `cfg.seeded_source_ids` (whether appended or already present), and
+/// ids on that list are never touched again. Keyed providers are never
+/// seeded. Returns `(appended_log_lines, config_changed)`: `changed` is
+/// true whenever the config was mutated AT ALL, including the
+/// marker-only case (source already present by hand, id newly recorded),
+/// which the caller must persist too or a later deletion of that
+/// hand-added source would be resurrected on the next boot.
+pub fn seed_missing_forecast_authorities(
+    cfg: &mut crate::config::schema::Config,
+) -> (Vec<String>, bool) {
+    let (lat, lon) = (cfg.deployment.location.lat, cfg.deployment.location.lon);
+    // Location never set: the region is unknowable, and a fresh install
+    // gets its authorities from the wizard once a location exists.
+    if lat == 0.0 && lon == 0.0 {
+        return (Vec::new(), false);
+    }
+    let mut appended = Vec::new();
+    let mut changed = false;
+    for entry in region_keyless_authority_entries(lat, lon) {
+        if cfg.seeded_source_ids.contains(&entry.id) {
+            continue;
+        }
+        cfg.seeded_source_ids.push(entry.id.clone());
+        changed = true;
+        if cfg.sources.iter().any(|s| s.id == entry.id) {
+            // Already configured by hand: just mark it handled so a later
+            // deletion is never resurrected by this pass.
+            continue;
+        }
+        appended.push(format!(
+            "seeded region forecast authority '{}' (priority {}, enabled {})",
+            entry.id, entry.priority, entry.enabled
+        ));
+        cfg.sources.push(entry);
+    }
+    (appended, changed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::schema::{
-        MetNorwayConfig, NwsConfig, OpenWeatherConfig, PirateWeatherConfig,
+        MetNorwayConfig, NwsConfig, OpenWeatherConfig, PirateWeatherConfig, SynopticConfig,
     };
 
     // Representative points.
@@ -510,6 +587,13 @@ mod tests {
     fn ow() -> SourceKind {
         SourceKind::OpenWeather(OpenWeatherConfig {
             api_key: "x".into(),
+        })
+    }
+    fn synoptic() -> SourceKind {
+        SourceKind::Synoptic(SynopticConfig {
+            token: "x".into(),
+            station_id: None,
+            radius_mi: 25.0,
         })
     }
 
@@ -690,6 +774,7 @@ mod tests {
                 entry("open_meteo_2", om(), 50, true),
                 entry("openweather", ow(), 50, true),
                 entry("pirate_weather", pirate(), 50, true),
+                entry("synoptic", synoptic(), 50, true),
             ],
         );
         normalize_new_cloud_sources(None, &mut next);
@@ -704,6 +789,9 @@ mod tests {
         // window so a normal poll gap does not read stale and flap the rain owner.
         assert_eq!(max_age("openweather"), Some(3900));
         assert_eq!(max_age("pirate_weather"), Some(3900));
+        // A hand-added Synoptic seeds its 1800s (~3 poll cycle) window through
+        // the same normalize path, so one failed 600s poll does not flap it.
+        assert_eq!(max_age("synoptic"), Some(1800));
     }
 
     #[test]
@@ -770,6 +858,10 @@ mod tests {
         // or flap the rain owner). They are no longer None.
         assert_eq!(default_max_age_for(&ow()), Some(3900));
         assert_eq!(default_max_age_for(&pirate()), Some(3900));
+        // Synoptic polls every 600s; without its own arm it fell to the 600s
+        // live-freshness fallback (window == cadence) and a single failed poll
+        // flapped a healthy station stale. It now seeds ~3 poll cycles.
+        assert_eq!(default_max_age_for(&synoptic()), Some(1800));
         // The MRMS rate gets its own tight per-field window, separate from the
         // wide accumulation window (used by max_age_for_field in the merge).
         assert_eq!(MAX_AGE_MRMS_RATE_S, 900);
@@ -954,5 +1046,100 @@ mod tests {
             region_keyless_authority_entries(SYDNEY.0, SYDNEY.1).is_empty(),
             "a non-US/Nordic install synthesizes no extra keyless authority"
         );
+    }
+
+    // ---- seed_missing_forecast_authorities (boot upgrade seeding) ----
+
+    #[test]
+    fn seeding_appends_us_authorities_to_existing_hardware_install() {
+        // A pre-existing US install: LAN station + Open-Meteo only (exactly the
+        // 2026-07 outage shape: observations local, forecast single-provider).
+        let mut cfg = cfg_at(
+            ORLANDO.0,
+            ORLANDO.1,
+            vec![entry("open_meteo", om(), 50, true)],
+        );
+        let (appended, changed) = seed_missing_forecast_authorities(&mut cfg);
+        assert!(changed);
+        assert_eq!(appended.len(), 2, "US gains NWS + NOAA MRMS: {appended:?}");
+        let nws_e = cfg.sources.iter().find(|s| s.id == "nws").unwrap();
+        assert_eq!(nws_e.priority, 70, "NWS lands at the researched US rank");
+        assert!(nws_e.enabled);
+        assert!(nws_e.max_age_s.is_some(), "slow-cadence window seeded");
+        assert!(cfg.seeded_source_ids.contains(&"nws".to_string()));
+        assert!(cfg.seeded_source_ids.contains(&"noaa_mrms".to_string()));
+
+        // Second boot: idempotent, untouched.
+        let before = cfg.sources.len();
+        let (appended2, changed2) = seed_missing_forecast_authorities(&mut cfg);
+        assert!(appended2.is_empty() && !changed2);
+        assert_eq!(cfg.sources.len(), before);
+    }
+
+    #[test]
+    fn seeding_never_resurrects_a_deleted_authority() {
+        let mut cfg = cfg_at(
+            ORLANDO.0,
+            ORLANDO.1,
+            vec![entry("open_meteo", om(), 50, true)],
+        );
+        let _ = seed_missing_forecast_authorities(&mut cfg);
+        // The user deletes the seeded NWS.
+        cfg.sources.retain(|s| s.id != "nws");
+        let (appended, changed) = seed_missing_forecast_authorities(&mut cfg);
+        assert!(!changed, "tombstoned id must not mutate the config");
+        assert!(appended.is_empty());
+        assert!(
+            !cfg.sources.iter().any(|s| s.id == "nws"),
+            "deleted authority stays deleted"
+        );
+    }
+
+    #[test]
+    fn seeding_marks_hand_added_authority_so_its_deletion_sticks_too() {
+        // The user added NWS by hand before this pass ever ran.
+        let mut cfg = cfg_at(
+            ORLANDO.0,
+            ORLANDO.1,
+            vec![
+                entry("open_meteo", om(), 50, true),
+                entry("nws", nws(), 42, true),
+            ],
+        );
+        let (appended, changed) = seed_missing_forecast_authorities(&mut cfg);
+        // Marker-only for nws (mrms still appends): the hand-tuned entry is
+        // untouched but the id is recorded, and the change must persist.
+        assert!(changed);
+        let nws_e = cfg.sources.iter().find(|s| s.id == "nws").unwrap();
+        assert_eq!(
+            nws_e.priority, 42,
+            "hand-tuned entry is left byte-identical"
+        );
+        assert!(cfg.seeded_source_ids.contains(&"nws".to_string()));
+        assert!(!appended.iter().any(|l| l.contains("'nws'")));
+
+        cfg.sources.retain(|s| s.id != "nws");
+        let (_, changed2) = seed_missing_forecast_authorities(&mut cfg);
+        assert!(!changed2);
+        assert!(!cfg.sources.iter().any(|s| s.id == "nws"));
+    }
+
+    #[test]
+    fn seeding_skips_unlocated_and_global_installs() {
+        // Null Island: region unknowable, config untouched.
+        let mut unlocated = cfg_at(0.0, 0.0, vec![entry("open_meteo", om(), 50, true)]);
+        let (a, c) = seed_missing_forecast_authorities(&mut unlocated);
+        assert!(a.is_empty() && !c);
+        assert!(unlocated.seeded_source_ids.is_empty());
+
+        // Global region: no extra keyless authority exists to seed.
+        let mut sydney = cfg_at(
+            SYDNEY.0,
+            SYDNEY.1,
+            vec![entry("open_meteo", om(), 50, true)],
+        );
+        let (a2, c2) = seed_missing_forecast_authorities(&mut sydney);
+        assert!(a2.is_empty() && !c2);
+        assert_eq!(sydney.sources.len(), 1);
     }
 }

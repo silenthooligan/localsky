@@ -16,10 +16,12 @@ If you enabled [authentication](authentication.md), add `-H "Authorization: Bear
 
 The image is published at `ghcr.io/silenthooligan/localsky`:
 
-- **Pinned version** (`ghcr.io/silenthooligan/localsky:v0.7.0-beta.1`): you decide exactly when to move and what release notes apply. Recommended while LocalSky is in beta.
+- **Pinned version** (`ghcr.io/silenthooligan/localsky:v0.7.0`): you decide exactly when to move and what release notes apply. Recommended while LocalSky is pre-1.0.
 - **`:latest`**: always points at the newest release. Convenient, but a routine `docker compose pull` can move you across versions without you reading the release notes first.
 
 Either way, read the release notes on GitHub before upgrading. Releases that change the database or config schema say so explicitly.
+
+**0.7.0 integration lockstep.** As of 0.7.0 the Home Assistant integration ships in version lockstep with the app. The 0.7.0 integration requires the app at 0.7.0 or newer (API 1.12.0 or newer); an older app build cannot pair the new integration until the app is upgraded. Upgrade the app first, then the integration.
 
 ## The upgrade
 
@@ -49,7 +51,7 @@ Auto-updaters (Watchtower, Diun notifications, Renovate on a pinned compose file
 
 ## What happens on first boot after an upgrade
 
-1. **Database migrations run.** LocalSky keeps a chain of numbered SQLite migrations (M0001 through M0009 as of this release) and records each applied one in a `schema_migrations` table. On boot it applies only the ones your database has not seen yet. Each migration runs inside a single transaction, so a failure rolls back cleanly rather than leaving a half-migrated database. Skipping releases is fine: the chain applies in order, however many versions you jumped.
+1. **Database migrations run.** LocalSky keeps a chain of numbered SQLite migrations (M0001 through M0012 as of this release) and records each applied one in a `schema_migrations` table. On boot it applies only the ones your database has not seen yet. Each migration runs inside a single transaction, so a failure rolls back cleanly rather than leaving a half-migrated database. Skipping releases is fine: the chain applies in order, however many versions you jumped.
 2. **The config file loads.** `/data/localsky.toml` carries a `schema_version` field (currently `1`). Fields added by newer releases are filled with documented defaults when missing from an older file, and unknown leftover fields are ignored, so old configs keep loading.
 3. **The app comes up** at the same address with the same data, zones, and history.
 
@@ -75,7 +77,7 @@ docker run -d \
   --restart unless-stopped \
   -p 8090:8090 \
   -v /opt/localsky/data:/data \
-  ghcr.io/silenthooligan/localsky:v0.7.0-beta.1
+  ghcr.io/silenthooligan/localsky:v0.7.0
 ```
 
 Two things to know:
@@ -83,7 +85,16 @@ Two things to know:
 - **Database migrations are not reversed.** An older binary simply ignores migration entries it does not know about. That often works, but if the release you are leaving changed table shapes, the older code may misread them. The supported downgrade path is to restore the backup you took before upgrading (see [restore](backup-restore.md#restoring)).
 - **A config from the future is refused.** If a newer release ever bumps `schema_version` above what the running binary supports, the loader refuses it with `refusing to load a config newer than this binary` and LocalSky boots as if unconfigured rather than guessing. Restore the pre-upgrade `localsky.toml` from your backup (or re-upgrade). As of this release `schema_version` is still `1`, so this cannot bite you yet.
 
-There is also a config rollback endpoint (`POST /api/v1/config/rollback?to=<version>`), but in this beta nothing records config snapshots yet, so it always answers 404. Treat backup bundles as your rollback mechanism for now.
+There is also a config rollback path that is independent of the image tag. LocalSky snapshots `localsky.toml` on every save (newest 20 kept), so you can list and restore an earlier config without touching the container:
+
+```bash
+curl http://localhost:8090/api/v1/config/snapshots
+curl -X POST -H 'Content-Type: application/json' \
+    -d '{"ts": <snapshot ts>}' \
+    http://localhost:8090/api/v1/config/rollback
+```
+
+This rolls back the *config* only, not the database or the image. For a full downgrade, restore the pre-upgrade backup bundle. See the [configuration reference](configuration.md#migrations) for details.
 
 ## Update notifications
 
@@ -104,10 +115,10 @@ curl http://localhost:8090/api/v1/updates
 
 ```json
 {
-  "current": "0.7.0-beta.1",
-  "latest": "v0.7.0",
+  "current": "0.7.0",
+  "latest": "v0.7.1",
   "update_available": true,
-  "release_url": "https://github.com/silenthooligan/localsky/releases/tag/v0.7.0",
+  "release_url": "https://github.com/silenthooligan/localsky/releases/tag/v0.7.1",
   "checked_at_epoch": 1765432100,
   "check_enabled": true
 }

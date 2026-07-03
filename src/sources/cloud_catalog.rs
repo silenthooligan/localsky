@@ -264,6 +264,7 @@ pub fn cloud_kinds() -> Vec<SourceKind> {
             past_days: 1,
             include_radar: false,
             model: "best_match".to_string(),
+            endpoint: None,
         }),
         SourceKind::MetNorway(MetNorwayConfig {
             user_agent: "LocalSky (catalog)".to_string(),
@@ -469,6 +470,11 @@ pub fn cloud_meta(kind: &SourceKind) -> Option<CloudSourceMeta> {
         },
         // Apple WeatherKit: an ML blend, the most location-precise cloud option,
         // but still an algorithm. Paid (Apple Developer, 99 dollars a year).
+        // Apple's WeatherKit terms require displaying "Apple Weather"
+        // attribution plus a link to Apple's legal-attribution page wherever
+        // WeatherKit data is used; the source card renders these lines
+        // verbatim, so the attribution sentence below is that user-visible
+        // credit (docs/src/sources.md carries the companion note).
         WeatherKit(_) => CloudSourceMeta {
             kind: "weatherkit",
             data_nature: CloudDataNature::Forecast,
@@ -477,7 +483,7 @@ pub fn cloud_meta(kind: &SourceKind) -> Option<CloudSourceMeta> {
             localization:
                 "The most location-precise cloud option, tuned to your coordinates, but still an algorithm.",
             watering_risk:
-                "Most precise cloud estimate, but still a prediction, so an on-site gauge can disagree.",
+                "Most precise cloud estimate, but still a prediction, so an on-site gauge can disagree. Weather data provided by Apple Weather (weatherkit.apple.com/legal-attribution.html).",
             key_tier: KeyTier::Paid,
             emits_current_rain: true,
             pop_is_synthetic: false,
@@ -624,6 +630,29 @@ mod tests {
         for tag in ["noaa_mrms", "nws", "pirate_weather", "open_meteo"] {
             assert!(rank(tag) < 100, "{tag} ranks below a local gauge");
         }
+    }
+
+    #[test]
+    fn weatherkit_carries_apple_weather_attribution() {
+        // Apple's WeatherKit terms require an "Apple Weather" attribution plus
+        // a link to the legal-attribution page wherever WeatherKit data is
+        // shown. The source card renders these catalog lines verbatim, so the
+        // credit must live in the copy itself; pin it so a copy edit cannot
+        // silently drop the required attribution.
+        let wk = cloud_kinds()
+            .into_iter()
+            .map(|k| cloud_meta(&k).unwrap())
+            .find(|m| m.kind == "weatherkit")
+            .unwrap();
+        assert!(
+            wk.watering_risk.contains("Apple Weather"),
+            "WeatherKit copy must credit Apple Weather"
+        );
+        assert!(
+            wk.watering_risk
+                .contains("weatherkit.apple.com/legal-attribution.html"),
+            "WeatherKit copy must carry the legal-attribution link"
+        );
     }
 
     #[test]

@@ -112,8 +112,8 @@ Once the container is up, open http://localhost:8090/setup to start the first-ru
 Nine steps; none take more than a minute. Three of them (AI advisor, Notifications, Account) are optional, and the progress strip renders them as hollow dots.
 
 1. **Welcome**: what LocalSky is and the Apache-2.0 license acknowledgement. No telemetry, no analytics, no email signup.
-2. **Your location**: search for your address (built-in geocoding) or enter latitude and longitude directly. Elevation improves the FAO-56 ET₀ math; the timezone autofills from an offline dataset whenever lat/lon change.
-3. **Weather**: add weather and sensor sources with the same editor used in the Sensors hub. A one-click network scan finds Tempest and Ecowitt hardware on your LAN. Skipping is fine; sources can be added any time afterward.
+2. **Your location**: search for your address (built-in geocoding) or enter latitude and longitude directly. Elevation auto-fills from your location (still editable) and improves the FAO-56 ET₀ math; the timezone autofills from an offline dataset whenever lat/lon change.
+3. **Weather**: add weather and sensor sources with the same editor used in the Devices hub. A one-click network scan finds Tempest and Ecowitt hardware on your LAN. Skipping is fine: LocalSky uses free Open-Meteo automatically for cloud weather and forecasts, so you see weather immediately even without adding a source. Sources can be added or changed any time under Settings > Devices.
 4. **Controller**: add your irrigation controller with the same editor as Settings, test it live against the real hardware, and scan it for zones. Scanned stations can be imported as zone stubs.
 5. **Zones**: explains LocalSky's zone model and shows the grass-species gallery so you pick the right species. Zone editing itself lives under `/settings/zones` after the wizard; zones imported from a controller scan arrive there pre-populated.
 6. **AI advisor** (optional): pick an LLM provider, or None. You can test the connection live before finishing. See [llm.md](llm.md).
@@ -122,6 +122,8 @@ Nine steps; none take more than a minute. Three of them (AI advisor, Notificatio
 9. **Review & apply**: a per-section summary with edit links back into each step. Save and finish writes the config and sends you to the dashboard.
 
 ### After the wizard
+
+Every step is optional and configurable later under Settings: Devices (the unified hub for weather sources and controllers, per-reading priority and backup chains, and the forecast source picker), Units (display units for temperature, rainfall, wind, pressure, distance, and zone area, a household default that any device can override), and Zones (add or edit zones, link soil sensors, choose a controller).
 
 Everything is editable under `/settings`. See [docs/configuration.md](configuration.md) for the field-by-field reference.
 
@@ -233,8 +235,8 @@ The full list of supported controllers and their integration shape lives in [doc
 - **OpenSprinkler** (firmware 2.1.9+), the ideal controller. Direct HTTP API on the LAN, no cloud, US$130-180 hardware (US pricing; varies by region).
 - **OpenSprinkler Pi**: same protocol as the boxed version; runs on a Raspberry Pi
 - **Home Assistant service call**: works with any HA-driven irrigation integration (opensprinkler HACS, irrigation_unlimited, rachio, esphome sprinkler component, hubitat sprinkler, etc.)
-- **ESPHome sprinkler component** (planned), DIY ESP32-based controllers
-- **Rachio** Gen 2 / 3 (planned), cloud API, US$130-250 hardware
+- **DIY / ESP32 controllers**: an ESP32 + relay board driven over MQTT or a small HTTP contract (the native ESPHome protobuf adapter is still scaffolded, not built; use MQTT or HTTP for ESPHome hardware). US$5-40 in parts
+- **Cloud controllers**: Rachio Gen 2/3, Hunter Hydrawise, Orbit B-hyve, and Rain Bird, each driven natively through its vendor cloud with your account. US$80-300 hardware
 - **DryRun**: no-op for testing + demos
 
 LocalSky's controller HAL is a Rust trait; adding new adapters takes ~100-200 lines. See [CONTRIBUTING.md](../CONTRIBUTING.md).

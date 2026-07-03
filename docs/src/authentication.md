@@ -145,6 +145,8 @@ These paths never require credentials, by design:
 | `/login`, `/api/v1/auth/{status,login,setup}` | The way in |
 | `/ingest/*`, `/api/v1/ingest/*` | Weather hardware (Ecowitt consoles, webhooks) cannot authenticate; block at the proxy for internet-facing deployments ([details](reverse-proxy.md#what-to-expose)) |
 | `/api/v1/health` | Liveness for Docker healthchecks; anonymous callers get a trimmed body (no source, controller, or HA detail) |
+| `/metrics` | Prometheus aggregate counters (verdict mix, refresh and degraded counts, controller/cloud error counts, last-fetch latency). No secrets, config, or PII, so a scraper reaches it without credentials. Firewall it at the proxy if you do not want it public |
+| `/docs/*` | The bundled handbook, so in-app help and the setup guide work pre-login and on fresh installs. Static pages, no secrets |
 | `/setup` + wizard APIs | Only until the first account exists |
 
 ## Accounts

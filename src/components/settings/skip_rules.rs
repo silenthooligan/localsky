@@ -9,8 +9,8 @@
 
 use leptos::prelude::*;
 
-use crate::components::settings_ui::SettingsResult;
-use crate::components::ui::{Button, FormField, HelpHint, Panel, Slider};
+use crate::components::settings_ui::{SettingsLoadError, SettingsResult};
+use crate::components::ui::{Button, FormField, HelpHint, Panel, SkeletonRows, Slider};
 use crate::components::units_fmt::{temp_unit, wind_unit, UnitPrefs};
 
 #[component]
@@ -32,6 +32,11 @@ pub fn SettingsSkipRules() -> impl IntoView {
     let seasonal_adjust_pct = RwSignal::new(100u32);
 
     let loaded = RwSignal::new(false);
+    // Initial-load state: Some(err) when the config GET failed. The editor body is
+    // replaced by a Retry banner in that case; `load_retry` bumps to re-run the
+    // load effect.
+    let load_error: RwSignal<Option<String>> = RwSignal::new(None);
+    let load_retry = RwSignal::new(0u32);
     let saving = RwSignal::new(false);
     let result_msg = RwSignal::new(String::new());
     let result_ok = RwSignal::new(false);
@@ -39,22 +44,27 @@ pub fn SettingsSkipRules() -> impl IntoView {
     #[cfg(feature = "hydrate")]
     {
         Effect::new(move |_| {
+            let _ = load_retry.get();
             wasm_bindgen_futures::spawn_local(async move {
-                if let Ok(d) = fetch_skip_rules().await {
-                    already_wet_in.set(d.already_wet_in);
-                    rain_now_in_hr.set(d.rain_now_in_hr);
-                    rain_next_4h_skip_in.set(d.rain_next_4h_skip_in);
-                    rain_3day_factor.set(d.rain_3day_factor);
-                    heat_advisory_temp_f.set(d.heat_advisory_temp_f);
-                    heat_advisory_humidity_pct.set(d.heat_advisory_humidity_pct);
-                    heat_advisory_dry_days.set(d.heat_advisory_dry_days);
-                    wind_forecast_slack_mph.set(d.wind_forecast_slack_mph);
-                    max_wind_mph.set(d.max_wind_mph);
-                    min_temp_f.set(d.min_temp_f);
-                    rain_skip_in.set(d.rain_skip_in);
-                    frost_skip_soil_f.set(d.frost_skip_soil_f);
-                    seasonal_adjust_pct.set(d.seasonal_adjust_pct);
-                    loaded.set(true);
+                match fetch_skip_rules().await {
+                    Ok(d) => {
+                        already_wet_in.set(d.already_wet_in);
+                        rain_now_in_hr.set(d.rain_now_in_hr);
+                        rain_next_4h_skip_in.set(d.rain_next_4h_skip_in);
+                        rain_3day_factor.set(d.rain_3day_factor);
+                        heat_advisory_temp_f.set(d.heat_advisory_temp_f);
+                        heat_advisory_humidity_pct.set(d.heat_advisory_humidity_pct);
+                        heat_advisory_dry_days.set(d.heat_advisory_dry_days);
+                        wind_forecast_slack_mph.set(d.wind_forecast_slack_mph);
+                        max_wind_mph.set(d.max_wind_mph);
+                        min_temp_f.set(d.min_temp_f);
+                        rain_skip_in.set(d.rain_skip_in);
+                        frost_skip_soil_f.set(d.frost_skip_soil_f);
+                        seasonal_adjust_pct.set(d.seasonal_adjust_pct);
+                        loaded.set(true);
+                        load_error.set(None);
+                    }
+                    Err(e) => load_error.set(Some(e)),
                 }
             });
         });
@@ -136,6 +146,14 @@ pub fn SettingsSkipRules() -> impl IntoView {
                     <a href="/rules" style="color: var(--accent)">"Rule Lab"</a>"."
                 </p>
             </header>
+
+            // A failed initial GET replaces the whole editor with a Retry banner
+            // rather than a form pre-filled with compile-time defaults (a Save from
+            // which would overwrite every live threshold).
+            <Show
+                when=move || load_error.get().is_none()
+                fallback=move || view! { <SettingsLoadError error=load_error retry=load_retry/> }
+            >
 
             // P2-6: the seasonal trust dial, first because it's the control an
             // operator reaches for most across the seasons.
@@ -311,7 +329,11 @@ pub fn SettingsSkipRules() -> impl IntoView {
             <div class="settings-actions">
                 <Button
                     variant="primary"
-                    disabled=Signal::derive(move || saving.get())
+                    // Gate Save on a successful load: the form fields init to
+                    // compile-time defaults, so saving before the GET resolves
+                    // (or after it errored) would silently overwrite every live
+                    // watering threshold with defaults.
+                    disabled=Signal::derive(move || saving.get() || !loaded.get())
                     on_click=Callback::new(on_save)
                 >
                     {move || if saving.get() { "Saving…" } else { "Save changes" }}
@@ -320,13 +342,12 @@ pub fn SettingsSkipRules() -> impl IntoView {
                     "Reset to defaults"
                 </Button>
             </div>
+            </Show>
 
             <SettingsResult result_msg=result_msg result_ok=result_ok/>
 
-            <Show when=move || !loaded.get()>
-                <p class="settings-page__subtitle" style="margin-top: 1rem">
-                    "Loading current values from /api/config..."
-                </p>
+            <Show when=move || !loaded.get() && load_error.get().is_none()>
+                <SkeletonRows count=4/>
             </Show>
         </div>
     }

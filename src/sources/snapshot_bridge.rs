@@ -36,34 +36,56 @@ pub fn spawn(
             sources = live_current.len(),
             "snapshot bridge started (non-Tempest sources -> live snapshot)"
         );
+        // P0-8 class supervisor: for a non-Tempest install this bridge IS the
+        // dashboard + engine data path, so a panic inside one event (a merge
+        // edge in apply_source_fields) must not kill it for the process
+        // lifetime. catch_unwind logs + restarts the recv loop; the receiver
+        // is borrowed (not moved) by the inner future so it survives the
+        // unwind, and a resubscribe() drops any mid-poll state (events during
+        // the gap are lost, the same semantics as Lagged).
         loop {
-            match rx.recv().await {
-                Ok(SourceEvent::Observation {
-                    source_id,
-                    fields,
-                    at_epoch,
-                }) => {
-                    let lc = live_current.get(&source_id).copied().unwrap_or(false);
-                    store.apply_source_fields(&fields, at_epoch, lc, &source_id);
-                    debug!(
-                        source_id = %source_id,
-                        fields = fields.len(),
-                        live_current = lc,
-                        "snapshot bridge applied source fields"
-                    );
+            use futures::FutureExt;
+            let outcome = std::panic::AssertUnwindSafe(async {
+                loop {
+                    match rx.recv().await {
+                        Ok(SourceEvent::Observation {
+                            source_id,
+                            fields,
+                            at_epoch,
+                        }) => {
+                            let lc = live_current.get(&source_id).copied().unwrap_or(false);
+                            store.apply_source_fields(&fields, at_epoch, lc, &source_id);
+                            debug!(
+                                source_id = %source_id,
+                                fields = fields.len(),
+                                live_current = lc,
+                                "snapshot bridge applied source fields"
+                            );
+                        }
+                        // KeyedReading (zone-bound soil channels) + Reachability are not
+                        // global snapshot fields; the bus_recorder / health layer own them.
+                        Ok(_) => {}
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            debug!(
+                                skipped = n,
+                                "snapshot bridge lagged; some observations dropped"
+                            );
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            info!("snapshot bridge: bus closed, exiting");
+                            break;
+                        }
+                    }
                 }
-                // KeyedReading (zone-bound soil channels) + Reachability are not
-                // global snapshot fields; the bus_recorder / health layer own them.
-                Ok(_) => {}
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    debug!(
-                        skipped = n,
-                        "snapshot bridge lagged; some observations dropped"
-                    );
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    info!("snapshot bridge: bus closed, exiting");
-                    break;
+            })
+            .catch_unwind()
+            .await;
+            match outcome {
+                Ok(()) => break,
+                Err(_) => {
+                    tracing::error!("snapshot bridge PANICKED; resubscribing and restarting");
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    rx = rx.resubscribe();
                 }
             }
         }

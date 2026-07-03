@@ -110,19 +110,12 @@ async fn main() -> anyhow::Result<()> {
     };
     let history_conn = history_db.as_ref().map(|db| db.handle());
 
-    // Sample the live snapshot into sensor_history so the Weather home
-    // telemetry strip has real trend sparklines. Only records when the off-bus
-    // Tempest path (or the "Demo" feeder) owns the snapshot; bus sources are
-    // persisted by the bus recorder under their own id, so the sampler skips
-    // them to avoid double-recording. Spawned in demo too.
-    if let Some(hc) = history_conn.clone() {
-        localsky::persistence::spawn_weather_sampler(hc, tempest_store.clone());
-    }
-
     // Restart resilience for the rain-today accumulator: Tempest UDP
     // packets carry per-minute deltas, so a mid-storm restart would zero
     // the daily total the skip rules read. Seed it from today's persisted
-    // MAX(rain_today_in) (recorded by the weather sampler above).
+    // MAX(rain_today_in), recorded by the weather sampler (spawned after
+    // the config load below so it prunes with the configured retention;
+    // this seed reads rows from PRIOR runs, so ordering does not matter).
     // Best-effort and non-blocking: any failure just leaves the
     // accumulator to rebuild from live packets.
     if !demo_mode {
@@ -172,7 +165,22 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let forecast_store = Arc::new(ForecastStore::new());
+    // Last-good forecast persists next to the history DB so a container
+    // restart during a provider outage rehydrates the previous snapshot
+    // (with its ORIGINAL fetch epoch, so staleness guards stay honest)
+    // instead of serving empty weather/verdict panels until the provider
+    // answers again. Demo mode skips it: the feeder regenerates synthetic
+    // forecasts every minute and shouldn't churn writes or leak demo data
+    // into a real /data mount.
+    let forecast_store = if demo_mode {
+        Arc::new(ForecastStore::new())
+    } else {
+        let cache_path = std::path::Path::new(&history_path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("/data"))
+            .join("forecast-cache.json");
+        Arc::new(ForecastStore::new().with_persistence(cache_path))
+    };
     // (Refresher spawned below once the boot config is loaded, so it can
     // use the wizard-configured deployment.location.)
 
@@ -194,7 +202,111 @@ async fn main() -> anyhow::Result<()> {
     let cfg_store = Arc::new(FileConfigStore::new(&boot_config_path));
     // Load cfg once and derive both per-zone runtime + watering policy
     // from it. Empty defaults if the toml hasn't been written yet.
-    let boot_cfg = cfg_store.load().await.ok();
+    let boot_cfg = match cfg_store.load().await {
+        Ok(cfg) => Some(cfg),
+        Err(localsky::ports::config_store::ConfigStoreError::NotFound) => {
+            // No config file yet: a genuinely fresh install boots into the wizard.
+            None
+        }
+        Err(e) => {
+            // The file EXISTS but failed to load: a TOML syntax error, an unset
+            // ${VAR} interpolation, a hard validation failure, or a source/
+            // controller kind written by a NEWER binary that this one cannot
+            // parse (an image rollback). Do NOT silently boot as unconfigured
+            // while impersonating a fresh install (that disables ALL irrigation
+            // and invites re-running the wizard over a recoverable file). Log
+            // loudly with the concrete error; the instance still comes up
+            // (degraded, wizard-empty) rather than crash-looping, and rollback/
+            // backup-restore stay reachable.
+            tracing::error!(
+                error = %e,
+                config_path = %boot_config_path,
+                "FAILED to load an existing localsky config; booting UNCONFIGURED \
+                 (no zones, no controllers, no scheduled watering). This is NOT a \
+                 fresh install: fix the config file (or roll back the image) before \
+                 re-running the setup wizard."
+            );
+            None
+        }
+    };
+
+    // LOCALSKY_DEMO: the demo feeder synthesizes live weather + irrigation
+    // snapshots, but the config-driven surfaces (the `has_irrigation` nav gate
+    // in /api/v1/info, the Devices page, the Zones/settings editors) read the
+    // on-disk config, which is empty on a fresh demo volume, so the demo
+    // collapses to a weather-only shell. Seed a synthetic config (four zones
+    // keyed to the SAME slugs the feeder emits, a dry-run controller, a spread
+    // of sources) so the demo shows the whole product. Idempotent: only seeds
+    // when no controllers/zones are configured yet, so a persisted demo volume
+    // is left alone. The direct save() call is not an HTTP request, so the
+    // demo read-only middleware never sees it.
+    let boot_cfg = if demo_mode
+        && boot_cfg
+            .as_ref()
+            .map(|c| c.controllers.is_empty() && c.zones.is_empty())
+            .unwrap_or(true)
+    {
+        let synthetic = localsky::demo_data::seed_config();
+        match cfg_store.save(&synthetic).await {
+            Ok(_) => {
+                tracing::info!(
+                    "LOCALSKY_DEMO=1: seeded synthetic demo config (4 zones, 4 sources, dry-run controller)"
+                );
+                Some(synthetic)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "LOCALSKY_DEMO=1: demo config seed failed ({e}); continuing weather-only"
+                );
+                boot_cfg
+            }
+        }
+    } else {
+        boot_cfg
+    };
+
+    // Upgrade seeding for configured installs that predate the region
+    // keyless forecast authorities (or the 2026-07 policy change that
+    // extends them to hardware installs): append NWS (US) / Met.no
+    // (Nordics) once, record the ids so user deletions stick, persist,
+    // and boot from the updated config so the sources wire this boot.
+    // Demo mode is excluded (its synthetic config owns the source list).
+    let boot_cfg = match boot_cfg {
+        Some(mut cfg) if !demo_mode => {
+            let (appended, changed) =
+                localsky::config::region::seed_missing_forecast_authorities(&mut cfg);
+            for line in &appended {
+                tracing::info!("{line}");
+            }
+            if changed {
+                if let Err(e) = cfg_store.save(&cfg).await {
+                    tracing::warn!(
+                        error = %e,
+                        "failed to persist region authority seeding; sources still \
+                         active this boot, will retry next boot"
+                    );
+                }
+            }
+            Some(cfg)
+        }
+        other => other,
+    };
+
+    // Sample the live snapshot into sensor_history so the Weather home telemetry
+    // strip has real trend sparklines. Only records when the off-bus Tempest path
+    // (or the "Demo" feeder) owns the snapshot; bus sources are persisted by the
+    // bus recorder under their own id, so the sampler skips them to avoid double-
+    // recording. Spawned in demo too. Threaded with the CONFIGURED retention (its
+    // hourly piggyback prune is table-wide, so the default 90d would otherwise
+    // delete every source's older rows even when the operator set a longer window
+    // or keep-forever). Spawned here (after the config load) so retention is real.
+    if let Some(hc) = history_conn.clone() {
+        let retention_days = boot_cfg
+            .as_ref()
+            .map(|c| c.persistence.retention_days)
+            .unwrap_or_else(localsky::config::schema::default_retention_days);
+        localsky::persistence::spawn_weather_sampler(hc, tempest_store.clone(), retention_days);
+    }
 
     // Current-conditions arbitration priorities + per-field USER overrides:
     // each source's config `priority` keyed by the writer label ("Tempest" for
@@ -327,7 +439,7 @@ async fn main() -> anyhow::Result<()> {
             .map(|hc| localsky::persistence::ActiveRunsStore::new(hc.clone()));
         let registry = localsky::controllers::registry::ControllerRegistry::new();
         if let (Some(cfg), Some(rs)) = (boot_cfg.as_ref(), runs_store.as_ref()) {
-            registry.set(localsky::runtime::build_controllers(cfg, rs.clone()));
+            registry.set(localsky::runtime::build_controllers(cfg, Some(rs.clone())));
             // P0-1: boot reconciliation. Close every zone on every controller and
             // clear the stale deadline ledger before the schedulers or the API can
             // dispatch, so a valve left open by a crash/redeploy mid-run (the MQTT
@@ -345,20 +457,27 @@ async fn main() -> anyhow::Result<()> {
                     "boot reconcile: some controllers did not confirm stop_all (unreachable at boot)"
                 );
             }
-        } else if boot_cfg
-            .as_ref()
-            .map(|c| !c.controllers.is_empty())
-            .unwrap_or(false)
-        {
-            // Controllers are configured but the persistence DB is not
-            // available, so build_controllers cannot run and the registry
-            // stays EMPTY: no watering (scheduled or manual) will dispatch.
-            // Loud by design, a silent empty registry is a dry lawn.
+        } else if let Some(cfg) = boot_cfg.as_ref().filter(|c| !c.controllers.is_empty()) {
+            // The persistence DB failed to open, so the GLOBAL registry stays
+            // EMPTY (no scheduled/manual watering dispatches without a run
+            // history + deadline backstop, fail-safe). BUT a valve left open by
+            // a crash must still be reconciled closed at boot: the disk fault
+            // that crashed the process and the DB-open failure are one
+            // correlated event, and the MQTT/DIY shutoff is an in-process timer
+            // that died with the crash. So build a THROWAWAY stop-only registry
+            // (no RunsStore, only DryRun needs one and it never actuates), close
+            // every zone, then discard it. Loud by design.
+            let reconcile_registry = localsky::controllers::registry::ControllerRegistry::new();
+            reconcile_registry.set(localsky::runtime::build_controllers(cfg, None));
+            let failed =
+                localsky::controllers::reaper::boot_reconcile(&reconcile_registry, None).await;
             tracing::error!(
                 history_db = %history_path,
+                reconcile_failed = ?failed,
                 "controllers are configured but the persistence DB failed to open; the controller \
-                 registry is EMPTY and NO watering (scheduled or manual) will dispatch. Fix the \
-                 /data mount (HISTORY_DB_PATH) and restart."
+                 registry is EMPTY and NO watering (scheduled or manual) will dispatch. Any valve \
+                 left open by a crash was reconciled closed best-effort at boot. Fix the /data \
+                 mount (HISTORY_DB_PATH) and restart."
             );
         }
         // Wire the registry + runs store into POST /api/irrigation/action
@@ -558,8 +677,11 @@ async fn main() -> anyhow::Result<()> {
     // LLM advisor: wraps an OpenAI-compatible client + a TTL cache
     // for explanations + anomalies. Lazy: never calls upstream until
     // an /explanation or /anomalies request hits.
+    // Built from the UI/wizard-configured [llm] block (falling back to env), so
+    // a provider set in Settings actually drives the live advisor. Resolved at
+    // BOOT, so apply_runtime_config flags a restart when the [llm] block changes.
     // Set LLM_ADVISOR_DISABLED=1 to short-circuit (tile reads "disabled").
-    let advisor = AdvisorState::from_env();
+    let advisor = AdvisorState::from_config_or_env(boot_cfg.as_ref().and_then(|c| c.llm.as_ref()));
 
     // Configured skip thresholds for POST /simulate's What-If traces, so
     // the simulator matches the production ladder rather than defaults.
@@ -601,6 +723,43 @@ async fn main() -> anyhow::Result<()> {
     // automations) target /api/v1; the bare /api/* aliases stay until
     // we cut the legacy paths in a major release. State is Arc-shared
     // so cloning is cheap.
+    // ONE error shape on the API surface: axum's built-in extractor
+    // rejections (a typoed ?days=abc query, malformed JSON, a wrong
+    // Content-Type) reply text/plain, while every handler-authored error is
+    // the JSON {"error": ...} envelope integrators are told to parse. This
+    // layer rewrites any text/plain ERROR response into the envelope so a
+    // client's resp.json() error handler never throws on the transport
+    // layer's own rejections. Only error statuses with a text/plain body are
+    // touched (HTML error pages and JSON pass through); rejection bodies are
+    // tiny, the 64KB read cap is pure defense.
+    async fn json_error_envelope(
+        req: axum::extract::Request,
+        next: axum::middleware::Next,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        let res = next.run(req).await;
+        let status = res.status();
+        if !(status.is_client_error() || status.is_server_error()) {
+            return res;
+        }
+        let is_plain = res
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|ct| ct.starts_with("text/plain"))
+            .unwrap_or(false);
+        if !is_plain {
+            return res;
+        }
+        let (parts, body) = res.into_parts();
+        let bytes = axum::body::to_bytes(body, 64 * 1024)
+            .await
+            .unwrap_or_default();
+        let msg = String::from_utf8_lossy(&bytes).trim().to_string();
+        let mut out = axum::response::Json(serde_json::json!({ "error": msg })).into_response();
+        *out.status_mut() = parts.status;
+        out
+    }
     let api_router = api::router(
         tempest_store.clone(),
         irrigation_store.clone(),
@@ -610,7 +769,9 @@ async fn main() -> anyhow::Result<()> {
         router_source,
         device_registry.clone(),
         router_prefix.clone(),
-    );
+        cfg_store.clone(),
+    )
+    .layer(axum::middleware::from_fn(json_error_envelope));
     let api_router_v1 = api::router(
         tempest_store.clone(),
         irrigation_store.clone(),
@@ -620,7 +781,9 @@ async fn main() -> anyhow::Result<()> {
         router_source,
         device_registry.clone(),
         router_prefix.clone(),
-    );
+        cfg_store.clone(),
+    )
+    .layer(axum::middleware::from_fn(json_error_envelope));
 
     // Settings + wizard + health + ingest routes are always mounted.
     // The wizard writes /data/localsky.toml on apply; until the file
@@ -1084,6 +1247,7 @@ async fn main() -> anyhow::Result<()> {
                 snapshots: history_conn
                     .clone()
                     .map(localsky::persistence::ConfigSnapshotStore::new),
+                runtime: Some(runtime_handles.clone()),
             }),
         )
         .route(
@@ -1106,16 +1270,39 @@ async fn main() -> anyhow::Result<()> {
         // never resolves to the app shell. Ingress strips the prefix
         // before forwarding, so the server route stays plain /docs.
         .nest("/docs", localsky::docs_serve::router(&site_root))
-        // Force revalidation on every request. Without this, browsers
-        // (notably mobile Chrome) apply heuristic caching to /pkg/*.css
-        // and serve a stale stylesheet from a previous deploy. With
-        // no-cache + the existing Last-Modified header, the browser
-        // sends If-Modified-Since each visit; the server replies 304
-        // when unchanged so the bytes are still cached, just always
-        // verified fresh.
-        .layer(SetResponseHeaderLayer::overriding(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("no-cache"),
+        // Cache policy, path-aware:
+        //   - CONTENT-HASHED /pkg assets (localsky.<hash>.js/.wasm/.css, the
+        //     LEPTOS_HASH_FILES output) are immutable BY NAME: a new deploy
+        //     mints new URLs, so browsers may cache them forever. The old
+        //     blanket no-cache forced a revalidation round-trip on the ~6.5MB
+        //     wasm every visit for nothing.
+        //   - EVERYTHING ELSE (HTML shell, hashless assets, /docs) stays
+        //     no-cache: force revalidation on every request. Without this,
+        //     browsers (notably mobile Chrome) apply heuristic caching and
+        //     serve stale bytes from a previous deploy; with no-cache + the
+        //     existing Last-Modified, the browser sends If-Modified-Since and
+        //     gets a 304 when unchanged.
+        // Hashed detection = a /pkg basename with 3+ dot segments
+        // (name.hash.ext); a hashless dev-mode localsky.js (2 segments)
+        // correctly stays no-cache.
+        .layer(axum::middleware::from_fn(
+            |req: axum::extract::Request, next: axum::middleware::Next| async move {
+                let immutable = req
+                    .uri()
+                    .path()
+                    .strip_prefix("/pkg/")
+                    .map(|f| f.split('.').count() >= 3)
+                    .unwrap_or(false);
+                let mut res = next.run(req).await;
+                let v = if immutable {
+                    "public, max-age=31536000, immutable"
+                } else {
+                    "no-cache"
+                };
+                res.headers_mut()
+                    .insert(header::CACHE_CONTROL, HeaderValue::from_static(v));
+                res
+            },
         ))
         // App-baseline security headers (WH-01 / LS-REC-02). Conservative,
         // app-wide, and deliberately limited to headers that cannot break

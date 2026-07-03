@@ -54,6 +54,11 @@ pub fn spawn_forecast_refresher(
         let mut last_good: Option<ForecastSnapshot> = None;
         let client = match Client::builder()
             .timeout(Duration::from_secs(10))
+            // Separate connect budget so a dead host (like the 2026-07
+            // single-IP outage) fails fast and the ladder reaches a live
+            // mirror within one refresh tick instead of burning the whole
+            // 10s request budget per host on TCP timeouts.
+            .connect_timeout(Duration::from_secs(4))
             .user_agent("localsky/forecast")
             .build()
         {
@@ -73,7 +78,9 @@ pub fn spawn_forecast_refresher(
         loop {
             let (lat, lon) = resolve_coords(cfg_store.as_deref(), boot_coords).await;
             let model = resolve_model(cfg_store.as_deref()).await;
-            let sleep_for = match refresh_once(&client, lat, lon, &model).await {
+            let endpoint = resolve_endpoint(cfg_store.as_deref()).await;
+            let sleep_for = match refresh_once(&client, lat, lon, &model, endpoint.as_deref()).await
+            {
                 Ok((snap, current)) => {
                     let at = snap.last_refresh_epoch;
                     last_good = Some(snap.clone());
@@ -184,6 +191,28 @@ async fn resolve_model(cfg_store: Option<&FileConfigStore>) -> String {
     DEFAULT_MODEL.to_string()
 }
 
+/// The configured self-hosted Open-Meteo endpoint for one refresh tick
+/// (None = hosted ladder only). Live config wins, same pattern as
+/// resolve_model, so pointing at a self-hosted instance applies on the
+/// next tick with no restart.
+async fn resolve_endpoint(cfg_store: Option<&FileConfigStore>) -> Option<String> {
+    if let Some(store) = cfg_store {
+        if let Ok(cfg) = store.load().await {
+            return configured_open_meteo_endpoint(&cfg);
+        }
+    }
+    None
+}
+
+/// The configured Open-Meteo self-hosted base URL: the first open_meteo
+/// source entry's `endpoint`. None when unset (hosted service).
+pub fn configured_open_meteo_endpoint(cfg: &Config) -> Option<String> {
+    cfg.sources.iter().find_map(|s| match &s.source {
+        SourceKind::OpenMeteo(c) => c.endpoint.clone(),
+        _ => None,
+    })
+}
+
 /// The configured Open-Meteo model: the first open_meteo source entry's
 /// `model`, defaulting to best_match when none is configured. Enabled
 /// state is deliberately ignored: the refresher runs unconditionally
@@ -236,16 +265,34 @@ fn backoff(n: u32) -> Duration {
 /// without depending on the SQLite history layer.
 const PAST_DAYS: usize = 3;
 
-/// Build the forecast URL. `&models=` is appended ONLY for a
-/// non-default model so the best_match URL stays byte-identical to the
-/// pre-model-selection one (same upstream behavior, same cache keys).
-fn forecast_url(lat: f64, lon: f64, model: &str) -> String {
+/// Open-Meteo endpoint ladder, tried in order per refresh. The primary
+/// is a SINGLE A record (verified 2026-07-03 during a >24h outage of
+/// 188.40.99.226: no DNS failover exists upstream), but Open-Meteo runs
+/// its other products on separate servers, and two of them serve the
+/// standard /v1/forecast route with the complete production payload
+/// (current block, 48h hourly incl. precipitation_probability, past +
+/// future daily): the historical-forecast archive and the previous-runs
+/// service, both backed by the same live model runs. Both were verified
+/// byte-compatible with the primary's response shape on 2026-07-03.
+/// Order matters: the primary stays first so normal operation is
+/// unchanged; mirrors only serve when it is down.
+const FORECAST_BASES: [&str; 3] = [
+    "https://api.open-meteo.com",
+    "https://historical-forecast-api.open-meteo.com",
+    "https://previous-runs-api.open-meteo.com",
+];
+
+/// Build the forecast URL against one host of the ladder. `&models=` is
+/// appended ONLY for a non-default model so the best_match URL stays
+/// byte-identical to the pre-model-selection one (same upstream
+/// behavior, same cache keys).
+fn forecast_url(base: &str, lat: f64, lon: f64, model: &str) -> String {
     let mut url = format!(
-        "https://api.open-meteo.com/v1/forecast?\
+        "{base}/v1/forecast?\
          latitude={lat}&longitude={lon}&\
          current=temperature_2m,relative_humidity_2m,dew_point_2m,apparent_temperature,wind_speed_10m,wind_gusts_10m,wind_direction_10m,surface_pressure,precipitation,precipitation_probability,weather_code,cloud_cover,shortwave_radiation,uv_index&\
-         daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max,uv_index_max,et0_fao_evapotranspiration,sunrise,sunset&\
-         hourly=weather_code,temperature_2m,apparent_temperature,precipitation,precipitation_probability,wind_speed_10m,wind_direction_10m,relative_humidity_2m,cloud_cover&\
+         daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max,uv_index_max,et0_fao_evapotranspiration,sunrise,sunset,precipitation_hours,rain_sum,showers_sum,snowfall_sum,sunshine_duration,apparent_temperature_max,cape_max&\
+         hourly=weather_code,temperature_2m,apparent_temperature,precipitation,precipitation_probability,wind_speed_10m,wind_direction_10m,relative_humidity_2m,cloud_cover,et0_fao_evapotranspiration,vapour_pressure_deficit,soil_moisture_3_to_9cm,soil_moisture_9_to_27cm,soil_temperature_6cm,wind_gusts_10m,snowfall,snow_depth,freezing_level_height,visibility,pressure_msl,wet_bulb_temperature_2m&\
          temperature_unit=fahrenheit&\
          wind_speed_unit=mph&\
          precipitation_unit=inch&\
@@ -266,25 +313,138 @@ fn forecast_url(lat: f64, lon: f64, model: &str) -> String {
 /// optional LIVE current-conditions scalars (`current=` block). Both come from
 /// the SAME single HTTP request, mirroring how the WeatherSource adapters
 /// (NWS/OpenWeather) emit a Forecast and an Observation from one fetch.
+///
+/// Walks the endpoint ladder: primary first, then the verified mirrors.
+/// A response served by a mirror is labeled "Open-Meteo (mirror)" so the
+/// UI provenance stays honest about where the data came from. Only the
+/// LAST host's error surfaces (by then every host has failed).
 async fn refresh_once(
     client: &Client,
     lat: f64,
     lon: f64,
     model: &str,
+    custom_endpoint: Option<&str>,
 ) -> Result<(ForecastSnapshot, Option<(Vec<(WeatherField, f64)>, i64)>)> {
-    let url = forecast_url(lat, lon, model);
-    let resp: Raw = client
-        .get(&url)
-        .send()
-        .await
-        .context("GET open-meteo forecast")?
-        .error_for_status()
-        .context("open-meteo non-2xx")?
-        .json()
-        .await
-        .context("decode open-meteo json")?;
-    let current = resp.current_fields();
-    Ok((resp.into_snapshot(), current))
+    let mut last_err: Option<anyhow::Error> = None;
+    // A configured self-hosted instance leads the ladder; the hosted service
+    // and its mirrors stay behind it as automatic fallback, so a down
+    // self-hosted box degrades to hosted instead of a dead forecast. Normalize
+    // the operator value: trim() (a pasted URL may carry whitespace), strip
+    // trailing slashes, and require an http(s) scheme; a malformed value is
+    // dropped (with a warn) so the ladder falls straight through to the hosted
+    // service instead of building a broken URL that fails every rung.
+    let custom = custom_endpoint
+        .map(|e| e.trim().trim_end_matches('/').to_string())
+        .filter(|e| !e.is_empty());
+    let custom = match custom {
+        Some(e) if e.starts_with("http://") || e.starts_with("https://") => Some(e),
+        Some(bad) => {
+            tracing::warn!(
+                endpoint = %bad,
+                "self-hosted open-meteo endpoint is not an http(s) URL; ignoring it"
+            );
+            None
+        }
+        None => None,
+    };
+    let bases: Vec<(String, &'static str)> = custom
+        .iter()
+        .map(|e| (e.clone(), "self-hosted"))
+        .chain(
+            FORECAST_BASES
+                .iter()
+                .enumerate()
+                .map(|(i, b)| (b.to_string(), if i == 0 { "primary" } else { "mirror" })),
+        )
+        .collect();
+    for (i, (base, tier)) in bases.iter().enumerate() {
+        let host = base.as_str();
+        let url = forecast_url(host, lat, lon, model);
+        match fetch_forecast_raw(client, tier, host, &url).await {
+            Ok(resp) => {
+                let current = resp.current_fields();
+                let mut snap = resp.into_snapshot();
+                // An endpoint that answers 200 with empty arrays (a self-hosted
+                // instance whose model data has not synced, say) must NOT
+                // short-circuit the ladder: treat empty as a soft failure and
+                // fall through to the next rung so a working provider still wins.
+                if snap.daily.is_empty() && snap.hourly.is_empty() {
+                    if i + 1 < bases.len() {
+                        tracing::debug!(host, "endpoint returned an empty forecast; trying next");
+                    }
+                    last_err = Some(anyhow::anyhow!("empty forecast from {host}"));
+                    continue;
+                }
+                if i > 0 {
+                    tracing::info!(
+                        host,
+                        tier,
+                        "earlier forecast endpoint down; fallback answered"
+                    );
+                }
+                match *tier {
+                    "self-hosted" => {
+                        snap.source_label = "Open-Meteo (self-hosted)".to_string();
+                    }
+                    "mirror" => {
+                        snap.source_label = "Open-Meteo (mirror)".to_string();
+                    }
+                    _ => {}
+                }
+                return Ok((snap, current));
+            }
+            Err(e) => {
+                if i + 1 < bases.len() {
+                    tracing::debug!(host, error = %format!("{e:#}"), "endpoint failed; trying next");
+                }
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no forecast hosts configured")))
+}
+
+/// Fetch + decode one forecast endpoint into `Raw`. The self-hosted rung is an
+/// OPERATOR-SUPPLIED URL, so it goes through the SSRF-hardened path
+/// (`net::safe_fetch`: resolve-once IP pin defeating DNS rebinding, redirects
+/// disabled, loopback/link-local/metadata targets rejected, response body
+/// capped) exactly like every other operator-configurable fetch in the
+/// codebase (Rain Bird, REST poll, HTTP webhook). The hosted hosts are
+/// hardcoded public constants, not operator-controlled, so they keep the
+/// shared fast-failover client (4s connect timeout), matching the windgrid
+/// fetcher, which also hits `api.open-meteo.com` with a plain client.
+async fn fetch_forecast_raw(shared: &Client, tier: &str, base: &str, url: &str) -> Result<Raw> {
+    if tier == "self-hosted" {
+        let (client, _pinned) =
+            crate::net::safe_fetch::build_safe_client(base, Duration::from_secs(10))
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("self-hosted open-meteo endpoint rejected ({base}): {e}")
+                })?;
+        // `url` shares `base`'s host, so the resolve() pin built for `base`
+        // applies to this request; the query path is our own, not attacker data.
+        let resp = client
+            .get(url)
+            .send()
+            .await
+            .with_context(|| format!("GET self-hosted open-meteo ({base})"))?
+            .error_for_status()
+            .with_context(|| format!("self-hosted open-meteo non-2xx ({base})"))?;
+        crate::net::safe_fetch::read_json_capped::<Raw>(resp)
+            .await
+            .map_err(|e| anyhow::anyhow!("decode self-hosted open-meteo ({base}): {e}"))
+    } else {
+        shared
+            .get(url)
+            .send()
+            .await
+            .with_context(|| format!("GET open-meteo forecast ({base})"))?
+            .error_for_status()
+            .with_context(|| format!("open-meteo non-2xx ({base})"))?
+            .json::<Raw>()
+            .await
+            .with_context(|| format!("decode open-meteo json ({base})"))
+    }
 }
 
 // Open-Meteo response shape: parallel arrays per series.
@@ -406,6 +566,23 @@ struct RawDaily {
     et0_fao_evapotranspiration: Vec<Option<f64>>,
     sunrise: Vec<i64>,
     sunset: Vec<i64>,
+    // ---- Extended daily variables (2026-07). All defaulted + Option-element
+    // so an older cached response, a mirror that trims a series, or a model
+    // that lacks one (nulls) still parses. ----
+    #[serde(default)]
+    precipitation_hours: Vec<Option<f64>>,
+    #[serde(default)]
+    rain_sum: Vec<Option<f64>>,
+    #[serde(default)]
+    showers_sum: Vec<Option<f64>>,
+    #[serde(default)]
+    snowfall_sum: Vec<Option<f64>>,
+    #[serde(default)]
+    sunshine_duration: Vec<Option<f64>>,
+    #[serde(default)]
+    apparent_temperature_max: Vec<Option<f64>>,
+    #[serde(default)]
+    cape_max: Vec<Option<f64>>,
 }
 
 #[derive(Deserialize)]
@@ -420,9 +597,58 @@ struct RawHourly {
     wind_direction_10m: Vec<u32>,
     relative_humidity_2m: Vec<u32>,
     cloud_cover: Vec<u32>,
+    // ---- Extended hourly variables (2026-07), same tolerance rules. ----
+    #[serde(default)]
+    et0_fao_evapotranspiration: Vec<Option<f64>>,
+    #[serde(default)]
+    vapour_pressure_deficit: Vec<Option<f64>>,
+    #[serde(default)]
+    soil_moisture_3_to_9cm: Vec<Option<f64>>,
+    #[serde(default)]
+    soil_moisture_9_to_27cm: Vec<Option<f64>>,
+    #[serde(default)]
+    soil_temperature_6cm: Vec<Option<f64>>,
+    #[serde(default)]
+    wind_gusts_10m: Vec<Option<f64>>,
+    #[serde(default)]
+    snowfall: Vec<Option<f64>>,
+    #[serde(default)]
+    snow_depth: Vec<Option<f64>>,
+    #[serde(default)]
+    freezing_level_height: Vec<Option<f64>>,
+    #[serde(default)]
+    visibility: Vec<Option<f64>>,
+    #[serde(default)]
+    pressure_msl: Vec<Option<f64>>,
+    #[serde(default)]
+    wet_bulb_temperature_2m: Vec<Option<f64>>,
 }
 
 impl Raw {
+    /// Index of "today" in the daily arrays: the day whose local-midnight
+    /// (00:00 in the response timezone, per `timezone=auto`) is the most recent
+    /// one at or before `now`. The hosted service (`past_days=3`) puts today at
+    /// index 3, but a self-hosted or forecast-only instance that ignores
+    /// `past_days` returns `[today, t+1, ...]` with today at 0. Anchoring the
+    /// past/future split and the rain/ET-today fills by DATE, not by the
+    /// `PAST_DAYS` constant, keeps them correct for any past-day count instead
+    /// of silently filing tomorrow as "today". Clamped to a valid index (0 when
+    /// the array is empty or entirely in the future).
+    fn today_daily_index(&self) -> usize {
+        let now = Utc::now().timestamp();
+        let n = self.daily.time.len();
+        if n == 0 {
+            return 0;
+        }
+        self.daily
+            .time
+            .iter()
+            .filter(|&&t| t <= now)
+            .count()
+            .saturating_sub(1)
+            .min(n - 1)
+    }
+
     fn into_snapshot(self) -> ForecastSnapshot {
         let now = Utc::now().timestamp();
 
@@ -438,6 +664,19 @@ impl Raw {
                 wind_dir_deg: pick(&self.hourly.wind_direction_10m, i),
                 humidity_pct: pick(&self.hourly.relative_humidity_2m, i),
                 cloud_cover_pct: pick(&self.hourly.cloud_cover, i),
+                et0_in: pick(&self.hourly.et0_fao_evapotranspiration, i).unwrap_or(0.0),
+                vpd_kpa: pick(&self.hourly.vapour_pressure_deficit, i).unwrap_or(0.0),
+                soil_moisture_3_9_vwc: pick(&self.hourly.soil_moisture_3_to_9cm, i).unwrap_or(0.0),
+                soil_moisture_9_27_vwc: pick(&self.hourly.soil_moisture_9_to_27cm, i)
+                    .unwrap_or(0.0),
+                soil_temp_6cm_f: pick(&self.hourly.soil_temperature_6cm, i).unwrap_or(0.0),
+                wind_gusts_mph: pick(&self.hourly.wind_gusts_10m, i).unwrap_or(0.0),
+                snowfall_in: pick(&self.hourly.snowfall, i).unwrap_or(0.0),
+                snow_depth_ft: pick(&self.hourly.snow_depth, i).unwrap_or(0.0),
+                freezing_level_ft: pick(&self.hourly.freezing_level_height, i).unwrap_or(0.0),
+                visibility_ft: pick(&self.hourly.visibility, i).unwrap_or(0.0),
+                pressure_msl_hpa: pick(&self.hourly.pressure_msl, i).unwrap_or(0.0),
+                wet_bulb_f: pick(&self.hourly.wet_bulb_temperature_2m, i).unwrap_or(0.0),
             })
             .collect();
 
@@ -461,9 +700,20 @@ impl Raw {
                 uv_index_max: pick(&self.daily.uv_index_max, i).unwrap_or(0.0),
                 sunrise_epoch: self.daily.sunrise.get(i).copied().unwrap_or(0),
                 sunset_epoch: self.daily.sunset.get(i).copied().unwrap_or(0),
+                precip_hours: pick(&self.daily.precipitation_hours, i).unwrap_or(0.0),
+                rain_sum_in: pick(&self.daily.rain_sum, i).unwrap_or(0.0),
+                showers_sum_in: pick(&self.daily.showers_sum, i).unwrap_or(0.0),
+                snowfall_sum_in: pick(&self.daily.snowfall_sum, i).unwrap_or(0.0),
+                sunshine_s: pick(&self.daily.sunshine_duration, i).unwrap_or(0.0),
+                apparent_temp_max_f: pick(&self.daily.apparent_temperature_max, i).unwrap_or(0.0),
+                cape_max_jkg: pick(&self.daily.cape_max, i).unwrap_or(0.0),
+                et0_in: pick(&self.daily.et0_fao_evapotranspiration, i).unwrap_or(0.0),
             })
             .collect();
-        let split = PAST_DAYS.min(all_daily.len());
+        // Date-anchored split (not the PAST_DAYS constant), so a self-hosted or
+        // forecast-only instance with a different past-day count still splits
+        // past vs future at the real "today".
+        let split = self.today_daily_index();
         let past_daily = all_daily[..split].to_vec();
         let daily = all_daily[split..].to_vec();
 
@@ -471,6 +721,9 @@ impl Raw {
             last_refresh_epoch: now,
             source_reachable: true,
             source_label: "Open-Meteo".to_string(),
+            // The bridge recomputes this against the live priority map on
+            // every store; producers always emit "not backup".
+            source_is_backup: false,
             timezone: self.timezone,
             daily,
             past_daily,
@@ -634,7 +887,12 @@ impl Raw {
         // in the picker was a silent no-op (fix: now Open-Meteo owns it as a
         // live_current=false fill). precipitation_unit=inch is requested, so the
         // daily sum is already inches (canonical); no conversion.
-        if let Some(rain_today) = self.daily.precipitation_sum.get(PAST_DAYS).copied() {
+        if let Some(rain_today) = self
+            .daily
+            .precipitation_sum
+            .get(self.today_daily_index())
+            .copied()
+        {
             fields.push((WeatherField::RainTodayIn, rain_today));
         }
         // Pop: current-hour precipitation probability (percent) from the current
@@ -657,7 +915,11 @@ impl Raw {
         // current block has no ET0 scalar, so we read it from daily; a cloud-only
         // deployment gets a real Et0Today fill without a native ET0 station. The
         // value is a daily Option (gaps -> the day is skipped, not zero-filled).
-        if let Some(Some(et0)) = self.daily.et0_fao_evapotranspiration.get(PAST_DAYS) {
+        if let Some(Some(et0)) = self
+            .daily
+            .et0_fao_evapotranspiration
+            .get(self.today_daily_index())
+        {
             fields.push((WeatherField::Et0Today, *et0));
         }
         // weather_code / cloud_cover are not scalar merge fields; cloud_cover is
@@ -711,21 +973,61 @@ mod tests {
             "precipitation,precipitation_probability,weather_code,cloud_cover,shortwave_radiation,uv_index",
             "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,",
             "precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max,uv_index_max,",
-            "et0_fao_evapotranspiration,sunrise,sunset",
+            "et0_fao_evapotranspiration,sunrise,sunset,",
+            // Extended daily variables (2026-07): rain character, snow,
+            // sunshine, feels-like peak, storm potential.
+            "precipitation_hours,rain_sum,showers_sum,snowfall_sum,sunshine_duration,",
+            "apparent_temperature_max,cape_max",
             "&hourly=weather_code,temperature_2m,apparent_temperature,precipitation,",
             "precipitation_probability,wind_speed_10m,wind_direction_10m,",
-            "relative_humidity_2m,cloud_cover",
+            "relative_humidity_2m,cloud_cover,",
+            // Extended hourly variables (2026-07): ET curve, VPD, model soil,
+            // gusts, snow.
+            "et0_fao_evapotranspiration,vapour_pressure_deficit,soil_moisture_3_to_9cm,",
+            "soil_moisture_9_to_27cm,soil_temperature_6cm,wind_gusts_10m,snowfall,",
+            // Condition-awareness variables (2026-07): winter, fog, storm,
+            // heat safety. All unit-converted by the imperial request
+            // (snow_depth/freezing_level/visibility arrive in ft, wet bulb
+            // in F; pressure_msl stays hPa).
+            "snow_depth,freezing_level_height,visibility,pressure_msl,wet_bulb_temperature_2m",
             "&temperature_unit=fahrenheit&wind_speed_unit=mph&precipitation_unit=inch",
             "&past_days=3&forecast_days=7&forecast_hours=48&timezone=auto&timeformat=unixtime"
         );
-        assert_eq!(forecast_url(28.5, -81.4, "best_match"), expected);
+        assert_eq!(
+            forecast_url("https://api.open-meteo.com", 28.5, -81.4, "best_match"),
+            expected
+        );
     }
 
     #[test]
     fn non_default_model_appends_models_param_only() {
-        let base = forecast_url(48.14, 11.58, "best_match");
-        let pinned = forecast_url(48.14, 11.58, "icon_seamless");
+        let base = forecast_url("https://api.open-meteo.com", 48.14, 11.58, "best_match");
+        let pinned = forecast_url("https://api.open-meteo.com", 48.14, 11.58, "icon_seamless");
         assert_eq!(pinned, format!("{base}&models=icon_seamless"));
+    }
+
+    #[test]
+    fn endpoint_ladder_keeps_primary_first_and_only_swaps_host() {
+        assert_eq!(FORECAST_BASES[0], "https://api.open-meteo.com");
+        let primary = forecast_url(FORECAST_BASES[0], 28.5, -81.4, "best_match");
+        for mirror in &FORECAST_BASES[1..] {
+            let url = forecast_url(mirror, 28.5, -81.4, "best_match");
+            // Identical query on every rung: mirrors were verified to speak
+            // the exact production /v1/forecast contract, so ONLY the host
+            // may differ.
+            assert_eq!(
+                url.replace(*mirror, FORECAST_BASES[0]),
+                primary,
+                "mirror {mirror} must differ from primary by host only"
+            );
+        }
+        // A self-hosted base slots in with its own scheme + port, same query.
+        let selfhosted = forecast_url("http://192.0.2.10:8080", 28.5, -81.4, "best_match");
+        assert!(selfhosted.starts_with("http://192.0.2.10:8080/v1/forecast?"));
+        assert_eq!(
+            selfhosted.replace("http://192.0.2.10:8080", FORECAST_BASES[0]),
+            primary
+        );
     }
 
     /// A representative Open-Meteo response with a `current` block in the units

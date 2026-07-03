@@ -35,6 +35,7 @@ pub fn FormField(
     let fid = FIELD_SEQ.fetch_add(1, Ordering::Relaxed);
     let err_id = format!("ui-ff-{fid}-err");
     let err_id_for_div = err_id.clone();
+    let input_id = format!("ui-ff-{fid}-input");
     let root: NodeRef<leptos::html::Div> = NodeRef::new();
 
     #[cfg(feature = "hydrate")]
@@ -55,8 +56,39 @@ pub fn FormField(
             let _ = input.remove_attribute("aria-invalid");
         }
     });
+    // Associate the label with the wrapped control so the field has an
+    // accessible NAME (screen readers announce it; clicking the label focuses
+    // the control). Hydrate-only + idempotent to match the error wiring above
+    // (SSR markup untouched, no SSR/hydrate id mismatch). Skips a control that
+    // already carries its own name (id / non-empty aria-label / aria-labelledby)
+    // so a caller-provided one always wins.
+    #[cfg(feature = "hydrate")]
+    {
+        let input_id = input_id.clone();
+        Effect::new(move |_| {
+            let Some(div) = root.get() else {
+                return;
+            };
+            let el: &web_sys::Element = div.as_ref();
+            let Ok(Some(input)) = el.query_selector("input, select, textarea") else {
+                return;
+            };
+            let has_name = input.get_attribute("id").is_some()
+                || input
+                    .get_attribute("aria-label")
+                    .is_some_and(|s| !s.is_empty())
+                || input.get_attribute("aria-labelledby").is_some();
+            if has_name {
+                return;
+            }
+            let _ = input.set_attribute("id", &input_id);
+            if let Ok(Some(label)) = el.query_selector("label.ui-form-field__label") {
+                let _ = label.set_attribute("for", &input_id);
+            }
+        });
+    }
     #[cfg(not(feature = "hydrate"))]
-    let _ = &err_id;
+    let _ = (&err_id, &input_id);
 
     view! {
         <div

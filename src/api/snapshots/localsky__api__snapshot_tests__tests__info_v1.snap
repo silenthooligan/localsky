@@ -1,10 +1,18 @@
 ---
 source: src/api/snapshot_tests.rs
-assertion_line: 49
-expression: fixture
+expression: info
 ---
 {
   "service": "localsky",
-  "service_version": "0.2.0-beta.1",
-  "api_version": "1.13.0"
+  "service_version": "0.0.0-test",
+  "api_version": "0.0.0-test",
+  "api_prefix": "/api/v1",
+  "license": "Apache-2.0",
+  "repository": "https://github.com/silenthooligan/localsky",
+  "dry_run": false,
+  "demo": false,
+  "auth_required": false,
+  "uuid": "00000000-0000-0000-0000-000000000000",
+  "has_irrigation": false,
+  "nerd_mode_default": false
 }

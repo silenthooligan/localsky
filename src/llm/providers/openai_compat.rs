@@ -49,7 +49,11 @@ impl OpenaiCompatProvider {
     /// multicast are rejected, the resolved IP is pinned (anti DNS-
     /// rebinding) and redirects are disabled.
     async fn safe_client(&self, url: &str) -> Result<(Client, reqwest::Url), LlmError> {
-        crate::net::safe_fetch::build_safe_client(url, DEFAULT_TIMEOUT)
+        // Loopback-permitting probe client: a self-hosted Ollama / OpenAI-compatible
+        // endpoint on 127.0.0.1 is the expected local-AI case, and the strict
+        // safe_fetch client blocks loopback (so Auto could detect but never
+        // reach a local provider). Same anti-SSRF hardening otherwise.
+        crate::net::build_llm_probe_client(url, DEFAULT_TIMEOUT)
             .await
             .map_err(|e| LlmError::Transport(e.to_string()))
     }

@@ -17,7 +17,7 @@ One HA device per LocalSky instance, populated from LocalSky's live entity manif
 ## Requirements
 
 - Home Assistant **2024.11.0** or newer (enforced by HACS).
-- LocalSky **0.2.0** or newer. The integration probes `GET /api/v1/info` during setup and refuses to pair with older instances (you will see a "service too old" error in the config flow).
+- LocalSky app **0.7.0** or newer. The integration and app ship in lockstep from 0.7.0. The integration probes `GET /api/v1/info` during setup and refuses to pair with older instances (you will see a "service too old" error in the config flow), and it requires API version **1.12.0** or newer.
 - Network reachability from HA to LocalSky's HTTP port (default **8090**).
 
 ## Install
@@ -78,7 +78,7 @@ Entity inventory comes from LocalSky's manifest, so the exact set depends on you
 
 One `weather.*` entity built from the live station snapshot, with a 7 day daily forecast, plus individual sensors:
 
-Units below are LocalSky's native (imperial) reporting units; Home Assistant converts sensors with supported device classes (temperature, wind speed, precipitation, pressure, distance) to your configured unit system automatically.
+Sensors report in the app's configured display units (**Settings > Units**: a household default that any device can override). Home Assistant then converts sensors with supported device classes (temperature, wind speed, precipitation, pressure, distance) to your HA unit system.
 
 | Sensor | Unit |
 |---|---|
@@ -200,7 +200,7 @@ Pause watering for three days when vacation mode turns on, resume on return:
 
 **LocalSky is not discovered.** mDNS does not cross subnets or Docker bridge networks by default. LocalSky's compose file runs with `network_mode: host` so the announcement reaches the LAN; if your HA and LocalSky sit on different subnets, skip discovery and add the integration manually with host and port.
 
-**Setup fails with "service too old".** The integration requires LocalSky 0.2.0 or newer. Upgrade the LocalSky container and retry.
+**Setup fails with "service too old".** The integration requires the LocalSky app 0.7.0 or newer (API 1.12.0 or newer). Upgrade the LocalSky container and retry.
 
 **Repeating 401 / reauth loop.** The stored token is no longer valid. Open LocalSky **Settings > Account**, delete the old token, create a new one, and complete the reauth prompt in HA. If you are fronting LocalSky with a proxy auth gate, re-pair against port 8090 directly; the gate's redirects can masquerade as auth failures.
 

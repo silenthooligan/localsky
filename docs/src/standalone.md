@@ -31,6 +31,8 @@ That's a fair trade if you don't already run HA.
 
 ## Sensor ingestion without Home Assistant
 
+Cloud weather sources are first-class without Home Assistant: an install with no hardware uses Open-Meteo (free, no API key) automatically, so you see weather immediately. Add more sources (Tempest, Ecowitt, NWS, NOAA MRMS radar rain, Synoptic Data, and others) and set per-reading priority chains so each source provides its strongest readings.
+
 This is the question that surfaces most often: "I have soil moisture sensors. How do they get into LocalSky without HA?" Three paths, none requiring HA.
 
 ### Path 1: MQTT broker (the universal path)
@@ -190,6 +192,10 @@ Vendor cloud or LAN APIs, no HA required. LocalSky ships direct adapters for all
 ### Existing setups: what if I already have HA driving Rachio / Hunter / B-hyve?
 
 Use the `ha_service_call` controller. LocalSky dispatches through your existing HA setup. This is the "legacy continuity" mode; you keep HA in the loop because the integration to your hardware already lives there.
+
+## Weather and controller management
+
+Everything lives in Settings > Devices: per-reading priority chains (drag to order which source owns each reading; the first reporting wins, the next takes over if it goes quiet), the forecast source picker, live source and controller status, and edit or remove without hand-editing config. Every reading shows an honesty label (measured, radar, real-time nowcast, or model forecast).
 
 ## Reaching LocalSky remotely without HA
 

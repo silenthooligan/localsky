@@ -7,6 +7,13 @@
 // The stack starts empty on SSR (no toasts exist server-side), so the
 // SSR/hydrate first frame match, toasts only ever appear from
 // client-side event handlers.
+//
+// A11y: the viewport keeps two permanently-mounted live-region
+// containers (polite role="status" + assertive role="alert"), rendered
+// empty from SSR, and toast messages are inserted INTO them. ARIA live
+// regions are only reliably announced when the region exists in the DOM
+// before its content changes; a role="status" node inserted together
+// with its text is skipped by several screen reader / browser pairs.
 
 use std::time::Duration;
 
@@ -37,17 +44,6 @@ impl ToastKind {
             ToastKind::Success => "ui-toast--success",
             ToastKind::Warn => "ui-toast--warn",
             ToastKind::Error => "ui-toast--error",
-        }
-    }
-    /// ARIA live-region role for a single toast. Error/danger toasts are
-    /// assertive (`role="alert"`) so a screen reader interrupts and announces
-    /// a failed Stop / override immediately; info, success, and warn stay
-    /// polite (`role="status"`) so routine confirmations queue without
-    /// cutting off whatever the user is doing.
-    fn role(self) -> &'static str {
-        match self {
-            ToastKind::Error => "alert",
-            ToastKind::Info | ToastKind::Success | ToastKind::Warn => "status",
         }
     }
 }
@@ -126,32 +122,57 @@ pub fn use_toast() -> ToastHub {
 pub fn ToastViewport() -> impl IntoView {
     let hub = use_toast();
     let items = hub.items;
-    // No container-level aria-live: each toast carries its own role so that
-    // error/danger toasts announce assertively (role="alert") while routine
-    // toasts stay polite (role="status"). A container aria-live would flatten
-    // every child to the same politeness and swallow the assertive alerts.
+    // Two permanently-mounted sibling live regions, both present (empty)
+    // in the SSR HTML so they pre-exist any content change: routine
+    // toasts (info/success/warn) go into the polite role="status"
+    // region, error toasts into the assertive role="alert" region. This
+    // preserves the per-kind politeness the old per-toast roles encoded
+    // while making announcements actually fire (dynamically-inserted
+    // role="status" nodes are skipped by several SR/browser combos).
+    // aria-atomic="false" scopes re-announcement to the toast that was
+    // added instead of re-reading the whole stack.
     view! {
         <div class="ui-toast-viewport">
-            {move || {
-                items.get().into_iter().map(|t| {
-                    let id = t.id;
-                    let role = t.kind.role();
-                    view! {
-                        <div class=format!("ui-toast {}", t.kind.class()) role=role>
-                            <span class="ui-toast__icon"><Icon name=t.kind.icon() size=16/></span>
-                            <span class="ui-toast__msg">{t.message}</span>
-                            <button
-                                type="button"
-                                class="ui-toast__close"
-                                aria-label="Dismiss"
-                                on:click=move |_| hub.dismiss(id)
-                            >
-                                <Icon name="x" size=14/>
-                            </button>
-                        </div>
-                    }
-                }).collect_view()
-            }}
+            <div class="ui-toast-region" role="status" aria-live="polite" aria-atomic="false">
+                {move || {
+                    items
+                        .get()
+                        .into_iter()
+                        .filter(|t| t.kind != ToastKind::Error)
+                        .map(|t| toast_view(t, hub))
+                        .collect_view()
+                }}
+            </div>
+            <div class="ui-toast-region" role="alert" aria-atomic="false">
+                {move || {
+                    items
+                        .get()
+                        .into_iter()
+                        .filter(|t| t.kind == ToastKind::Error)
+                        .map(|t| toast_view(t, hub))
+                        .collect_view()
+                }}
+            </div>
+        </div>
+    }
+}
+
+/// One toast row. Built fresh inside the viewport's reactive closures
+/// (never pre-built and cloned in, per the view-clone rule).
+fn toast_view(t: ToastItem, hub: ToastHub) -> impl IntoView {
+    let id = t.id;
+    view! {
+        <div class=format!("ui-toast {}", t.kind.class())>
+            <span class="ui-toast__icon"><Icon name=t.kind.icon() size=16/></span>
+            <span class="ui-toast__msg">{t.message}</span>
+            <button
+                type="button"
+                class="ui-toast__close"
+                aria-label="Dismiss"
+                on:click=move |_| hub.dismiss(id)
+            >
+                <Icon name="x" size=14/>
+            </button>
         </div>
     }
 }

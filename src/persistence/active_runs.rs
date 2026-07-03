@@ -35,8 +35,17 @@ impl ActiveRunsStore {
     }
 
     /// Arm (or re-arm) a zone's shutoff deadline on a successful run_zone.
-    /// INSERT OR REPLACE keyed by zone_slug: a fresh run supersedes any stale row
-    /// (a zone cannot run twice at once; the dispatch path also serializes Run).
+    /// DEADLINE-MONOTONIC on conflict: keep MAX(existing, new) off-deadline (and
+    /// the earliest start). The dispatch `zone_run_lock` only serializes the
+    /// commanding INSTANT, not the run DURATION, so a zone can legitimately have
+    /// two overlapping commanded-on windows (a smart-morning cycle plus a manual
+    /// run of the same zone). A plain INSERT OR REPLACE let the shorter, later
+    /// arm SHRINK the deadline, so the reaper would fire mid-cycle and cut a
+    /// still-running smart-morning segment short (and drop the backstop for the
+    /// rest of the cycle). Keeping the MAX means an overlapping run can only
+    /// EXTEND the shutoff window, never retract it: the ledger always reflects
+    /// the latest instant any commanded-on window must be closed by, which is
+    /// the fail-safe direction. Completion still clears the row via `disarm`.
     pub async fn arm(
         &self,
         zone_slug: String,
@@ -48,9 +57,13 @@ impl ActiveRunsStore {
         tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
             let conn = c.blocking_lock();
             conn.execute(
-                "INSERT OR REPLACE INTO active_runs
+                "INSERT INTO active_runs
                     (zone_slug, controller_id, started_epoch, off_deadline_epoch)
-                 VALUES (?1, ?2, ?3, ?4)",
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(zone_slug) DO UPDATE SET
+                    off_deadline_epoch = MAX(off_deadline_epoch, excluded.off_deadline_epoch),
+                    started_epoch = MIN(started_epoch, excluded.started_epoch),
+                    controller_id = excluded.controller_id",
                 params![zone_slug, controller_id, started_epoch, off_deadline_epoch],
             )?;
             Ok(())
@@ -151,13 +164,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn arm_replaces_stale_row_for_same_zone() {
+    async fn arm_extends_to_a_later_deadline() {
         let s = mem();
         s.arm("z".into(), "ctrl".into(), 100, 130).await.unwrap();
-        // Re-arm the same zone with a later deadline (a fresh run supersedes).
+        // Re-arm the same zone with a LATER deadline: the window extends.
         s.arm("z".into(), "ctrl".into(), 500, 800).await.unwrap();
-        assert!(s.due(200).await.unwrap().is_empty(), "old deadline gone");
+        assert!(
+            s.due(200).await.unwrap().is_empty(),
+            "old deadline extended"
+        );
         assert_eq!(s.due(900).await.unwrap()[0].off_deadline_epoch, 800);
+    }
+
+    #[tokio::test]
+    async fn arm_is_deadline_monotonic_overlap_cannot_shrink_backstop() {
+        let s = mem();
+        // A smart-morning cycle arms a long whole-cycle shutoff deadline.
+        s.arm("z".into(), "cycle".into(), 100, 900).await.unwrap();
+        // An overlapping manual run of the SAME zone arms a SHORTER deadline.
+        // It must NOT shrink the backstop, or the reaper would fire at 560 and
+        // cut the still-running cycle short, dropping shutoff coverage for the
+        // rest of the cycle (the exact stuck-valve case this ledger prevents).
+        s.arm("z".into(), "manual".into(), 500, 560).await.unwrap();
+        assert!(
+            s.due(600).await.unwrap().is_empty(),
+            "an overlapping shorter run must not shrink the shutoff deadline"
+        );
+        // The original MAX deadline is still enforced later.
+        let due = s.due(1000).await.unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].off_deadline_epoch, 900);
+        // controller_id follows the latest commander.
+        assert_eq!(due[0].controller_id, "manual");
     }
 
     #[tokio::test]

@@ -94,7 +94,12 @@ impl Bhyve {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ControllerError::Transport(format!("bhyve POST /session: {e}")))?;
+            .map_err(|e| {
+                ControllerError::Transport(format!(
+                    "bhyve POST /session: {}",
+                    crate::net::reqwest_error_category(&e)
+                ))
+            })?;
         let status = resp.status();
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             return Err(ControllerError::AuthFailed);
@@ -102,10 +107,12 @@ impl Bhyve {
         if !status.is_success() {
             return Err(ControllerError::Remote(format!("bhyve session {status}")));
         }
-        let sr: SessionResponse = resp
-            .json()
-            .await
-            .map_err(|e| ControllerError::Transport(format!("bhyve session decode: {e}")))?;
+        let sr: SessionResponse = resp.json().await.map_err(|e| {
+            ControllerError::Transport(format!(
+                "bhyve session decode: {}",
+                crate::net::reqwest_error_category(&e)
+            ))
+        })?;
         *self.session_token.lock().await = Some(sr.orbit_session_token.clone());
         Ok(sr.orbit_session_token)
     }
@@ -132,10 +139,12 @@ impl Bhyve {
             if let Some(b) = &body {
                 req = req.json(b);
             }
-            let resp = req
-                .send()
-                .await
-                .map_err(|e| ControllerError::Transport(format!("bhyve {method} {url}: {e}")))?;
+            let resp = req.send().await.map_err(|e| {
+                ControllerError::Transport(format!(
+                    "bhyve {method} {url}: {}",
+                    crate::net::reqwest_error_category(&e)
+                ))
+            })?;
             let status = resp.status();
             if status == StatusCode::UNAUTHORIZED && attempt == 0 {
                 // Session expired; re-login and retry once.
@@ -152,10 +161,12 @@ impl Bhyve {
             if !status.is_success() {
                 return Err(ControllerError::Remote(format!("bhyve {status}")));
             }
-            return resp
-                .json()
-                .await
-                .map_err(|e| ControllerError::Transport(format!("bhyve decode: {e}")));
+            return resp.json().await.map_err(|e| {
+                ControllerError::Transport(format!(
+                    "bhyve decode: {}",
+                    crate::net::reqwest_error_category(&e)
+                ))
+            });
         }
         // Unreachable, the loop returns or errors on every iteration.
         Err(ControllerError::Remote("bhyve retry exhausted".into()))

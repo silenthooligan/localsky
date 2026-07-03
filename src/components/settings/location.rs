@@ -7,8 +7,8 @@
 
 use leptos::prelude::*;
 
-use crate::components::settings_ui::SettingsResult;
-use crate::components::ui::{Button, FormField, Panel};
+use crate::components::settings_ui::{SettingsLoadError, SettingsResult};
+use crate::components::ui::{Button, FormField, Panel, SkeletonRows};
 
 #[component]
 pub fn SettingsLocation() -> impl IntoView {
@@ -29,6 +29,11 @@ pub fn SettingsLocation() -> impl IntoView {
     let results: RwSignal<Vec<(String, f64, f64)>> = RwSignal::new(Vec::new());
 
     let loaded = RwSignal::new(false);
+    // Initial-load state: Some(err) when the config GET failed. The editor body is
+    // replaced by a Retry banner in that case; `load_retry` bumps to re-run the
+    // load effect.
+    let load_error: RwSignal<Option<String>> = RwSignal::new(None);
+    let load_retry = RwSignal::new(0u32);
     let saving = RwSignal::new(false);
     let result_msg = RwSignal::new(String::new());
     let result_ok = RwSignal::new(false);
@@ -37,19 +42,24 @@ pub fn SettingsLocation() -> impl IntoView {
     #[cfg(feature = "hydrate")]
     {
         Effect::new(move |_| {
+            let _ = load_retry.get();
             wasm_bindgen_futures::spawn_local(async move {
-                if let Ok(cfg) = fetch_config().await {
-                    lat.set(cfg.lat);
-                    lon.set(cfg.lon);
-                    elevation.set(cfg.elevation);
-                    // A persisted non-zero elevation is treated as a manual
-                    // value: don't auto-overwrite it on the next location set.
-                    if cfg.elevation != 0.0 {
-                        elevation_user_edited.set(true);
+                match fetch_config().await {
+                    Ok(cfg) => {
+                        lat.set(cfg.lat);
+                        lon.set(cfg.lon);
+                        elevation.set(cfg.elevation);
+                        // A persisted non-zero elevation is treated as a manual
+                        // value: don't auto-overwrite it on the next location set.
+                        if cfg.elevation != 0.0 {
+                            elevation_user_edited.set(true);
+                        }
+                        tz.set(cfg.tz);
+                        display_name.set(cfg.display_name);
+                        loaded.set(true);
+                        load_error.set(None);
                     }
-                    tz.set(cfg.tz);
-                    display_name.set(cfg.display_name);
-                    loaded.set(true);
+                    Err(e) => load_error.set(Some(e)),
                 }
             });
         });
@@ -249,6 +259,14 @@ pub fn SettingsLocation() -> impl IntoView {
                 </p>
             </header>
 
+            // A failed initial GET replaces the whole editor with a Retry banner
+            // rather than a form seeded with 0,0 (a VALID coordinate a Save would
+            // write over the real location).
+            <Show
+                when=move || load_error.get().is_none()
+                fallback=move || view! { <SettingsLoadError error=load_error retry=load_retry/> }
+            >
+
             <Panel title="Coordinates".to_string() help_topic="location">
                 <FormField
                     label="Find by address".to_string()
@@ -367,19 +385,21 @@ pub fn SettingsLocation() -> impl IntoView {
             <div class="settings-actions">
                 <Button
                     variant="primary"
-                    disabled=Signal::derive(move || !can_save() || saving.get())
+                    // Gate Save on a successful load: lat/lon init to 0.0 (a
+                    // VALID coordinate), so saving before the GET resolves or
+                    // after it errored would silently write location 0,0.
+                    disabled=Signal::derive(move || !can_save() || saving.get() || !loaded.get())
                     on_click=Callback::new(on_save)
                 >
                     {move || if saving.get() { "Saving…" } else { "Save changes" }}
                 </Button>
             </div>
+            </Show>
 
             <SettingsResult result_msg=result_msg result_ok=result_ok/>
 
-            <Show when=move || !loaded.get()>
-                <p class="settings-page__subtitle" style="margin-top: 1rem">
-                    "Loading current location from /api/config..."
-                </p>
+            <Show when=move || !loaded.get() && load_error.get().is_none()>
+                <SkeletonRows count=3/>
             </Show>
         </div>
     }

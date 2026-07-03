@@ -371,8 +371,11 @@ pub fn App() -> impl IntoView {
                 // instead, panicking with failed_to_cast_element at
                 // hydration.rs:163).
                 <a href="#main-content" class="skip-link">"Skip to main content"</a>
+                <RouteFocus/>
                 <Sidebar/>
-                <main class="page" id="main-content">
+                // tabindex="-1" makes the landmark programmatically
+                // focusable: the skip link and RouteFocus both target it.
+                <main class="page" id="main-content" tabindex="-1">
                     <InstallPrompt/>
                     <PageHeader/>
                     <crate::components::health_banner::HealthBanner/>
@@ -578,6 +581,40 @@ pub fn App() -> impl IntoView {
     }
 }
 
+/// Invisible helper mounted inside the Router: moves keyboard focus to
+/// the #main-content landmark on client-side route changes. Every nav
+/// path calls navigate() with prevent_default, so the browser's native
+/// full-load focus reset never happens; without this, focus stays on
+/// the clicked control and screen readers get no page-change cue. The
+/// first (hydration) run only records the path, so initial load never
+/// steals focus. Renders nothing; all DOM work is hydrate-only and uses
+/// non-panicking accessors.
+#[component]
+fn RouteFocus() -> impl IntoView {
+    #[cfg(feature = "hydrate")]
+    {
+        use wasm_bindgen::JsCast;
+        let pathname = leptos_router::hooks::use_location().pathname;
+        Effect::new(move |prev: Option<Option<String>>| {
+            let path = pathname.try_get();
+            // First run: remember where we are, do not move focus.
+            let Some(prev) = prev else {
+                return path;
+            };
+            if path.is_some() && prev != path {
+                if let Some(el) = web_sys::window()
+                    .and_then(|w| w.document())
+                    .and_then(|d| d.get_element_by_id("main-content"))
+                    .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+                {
+                    let _ = el.focus();
+                }
+            }
+            path
+        });
+    }
+}
+
 #[component]
 fn WeatherHome(
     snap: ReadSignal<Snapshot>,
@@ -615,6 +652,11 @@ fn WeatherHome(
             {view! { <SolarPanel snap/> }.into_any()}
             {render_radar().into_any()}
             <div class="weather-extra">
+                // Condition-aware cards: render only while a winter / fog /
+                // storm / heat condition actually holds at this location, so
+                // the dashboard surfaces what matters locally (mountain vs
+                // coastal vs plains) and stays quiet on a calm day.
+                {view! { <crate::components::forecast::ConditionCards snap=forecast/> }.into_any()}
                 {view! { <HourlyForecast snap=forecast/> }.into_any()}
                 {view! { <DailyForecast snap=forecast/> }.into_any()}
             </div>
@@ -758,7 +800,9 @@ fn HomeWateringVerdict(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 // 24h local clock (WAVE-1 timefmt, never the browser TZ).
                 if s.next_run_epoch > 0 {
                     let tz = s.timezone.as_str();
-                    let day = crate::timefmt::format_wday_short(s.next_run_epoch, tz);
+                    // FULL day name ("Sunday"): "Sun" in run prose reads as sunshine
+                    // (a weather reason), not a day.
+                    let day = crate::timefmt::format_wday_full(s.next_run_epoch, tz);
                     let hm = crate::timefmt::format_hm(s.next_run_epoch, tz);
                     if day.is_empty() {
                         format!("Next run {hm}")
@@ -990,6 +1034,13 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 // mode reads localStorage.readonly ("1"|"true") and
                 // adds data-readonly="true" so CSS rules can hide
                 // destructive controls before any user interaction.
+                //
+                // The same pre-hydration script also captures
+                // beforeinstallprompt: Chrome fires it once, often before
+                // the WASM bundle has hydrated, so the listener stashes the
+                // event on window.__lsBipEvent (and suppresses the default
+                // mini-infobar); install_prompt.rs checks the stash after
+                // hydration and can still offer the native install flow.
                 <script>{r#"
                     try {
                         var t = localStorage.getItem('theme');
@@ -1001,6 +1052,10 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                             document.documentElement.setAttribute('data-readonly', 'true');
                         }
                     } catch (e) { /* localStorage blocked in private mode */ }
+                    window.addEventListener('beforeinstallprompt', function (e) {
+                        e.preventDefault();
+                        window.__lsBipEvent = e;
+                    });
                 "#}</script>
             </head>
             <body>

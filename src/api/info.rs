@@ -48,7 +48,25 @@ use serde::{Deserialize, Serialize};
 /// + `nerd_mode_default` here, so the client can hide irrigation nav on a
 /// weather-only install and seed Simple vs Nerd mode from server config
 /// instead of hard-coding new users into Nerd mode.
-pub const API_VERSION: &str = "1.13.0";
+/// 1.14.0 (additive): GET /config/source_catalog + POST /config/field_sources
+/// (per-field priority + backup-chain editor), the `__renames` PUT /config
+/// hint (rename a source/controller id), and the corrected sources[].status
+/// taxonomy on /health (a fresh but outranked source now reads `standby`, not
+/// `falling_through`, which is reserved for a source that previously owned a
+/// field and no longer does). All additive or bug-fix; no response-shape break.
+/// 1.15.0 (additive): manifest schema 1.3: optional `group` sub-device hint
+/// on entity descriptors (files the forecast scalars under the Forecast
+/// device), the force_overrode_guard sensor, and capability-gated flow/leaf
+/// publishing (no phantom always-0 sensors on installs without the hardware).
+/// 1.16.0 (additive): forecast failover + extended model variables.
+/// ForecastSnapshot gains `source_is_backup` (failover provenance) and the
+/// extended Open-Meteo series on daily (precip_hours, rain/showers/snow
+/// split, sunshine_s, apparent_temp_max_f, cape_max_jkg, et0_in) + hourly
+/// (et0_in, vpd_kpa, soil moisture 3-9/9-27cm, soil_temp_6cm_f, gusts,
+/// snowfall_in). IrrigationSnapshot.forecast gains eto_spent_today_mm,
+/// vpd_now/max_today_kpa, and the model-soil advisory scalars. Config gains
+/// `seeded_source_ids` (region-authority upgrade seeding tombstones).
+pub const API_VERSION: &str = "1.16.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {

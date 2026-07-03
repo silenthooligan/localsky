@@ -26,8 +26,8 @@
 
 use leptos::prelude::*;
 
-use crate::components::settings_ui::SettingsResult;
-use crate::components::ui::{Button, Panel};
+use crate::components::settings_ui::{SettingsLoadError, SettingsResult};
+use crate::components::ui::{Button, Icon, Panel, SkeletonRows};
 
 /// One configured source the chain editor can rank for a field.
 #[derive(Clone, Debug, Default)]
@@ -140,30 +140,50 @@ pub fn SettingsDataSources(
     let live_tz: RwSignal<String> = RwSignal::new(String::new());
 
     let loaded = RwSignal::new(false);
+    // Initial-load state: Some(err) when the field-sources GET failed. The editor
+    // body is replaced by a Retry banner in that case; `load_retry` bumps to
+    // re-run the load effect.
+    let load_error: RwSignal<Option<String>> = RwSignal::new(None);
+    let load_retry = RwSignal::new(0u32);
     let saving = RwSignal::new(false);
     // Set when a reorder/reset arrives WHILE a save is in flight; the in-flight
     // save's loop picks it up and re-PUTs the latest order, so a rapid reorder is
     // never silently lost (the mutation already landed in `chains`).
     let dirty = RwSignal::new(false);
     // Keyboard reorder re-renders the whole chain list, dropping focus. A move via
-    // the up/down buttons records "field|new_index" + a bump counter here; the
-    // effect below re-focuses that row once the DOM settles, so a keyboard user can
-    // press the arrow repeatedly to walk a source through the chain. The counter
-    // makes two moves to the same index distinct (so the effect re-runs) and, since
-    // the effect never writes this signal, there is no reactive cycle.
-    let focus_row: RwSignal<(String, u32)> = RwSignal::new((String::new(), 0));
+    // the up/down buttons records "field|new_index" + WHICH arrow was pressed + a
+    // bump counter here; the effect below re-focuses that same arrow button on the
+    // moved row once the DOM settles, so a keyboard user can press it repeatedly to
+    // walk a source through the chain (focusing the row itself made every step cost
+    // two extra Tabs back to the button). The counter makes two moves to the same
+    // index distinct (so the effect re-runs) and, since the effect never writes
+    // this signal, there is no reactive cycle.
+    let focus_row: RwSignal<(String, &'static str, u32)> = RwSignal::new((String::new(), "", 0));
     #[cfg(feature = "hydrate")]
     Effect::new(move |_| {
-        let (sel, n) = focus_row.get();
+        let (sel, btn, n) = focus_row.get();
         if n == 0 || sel.is_empty() {
             return;
         }
         wasm_bindgen_futures::spawn_local(async move {
-            // Defer past the list re-render, then focus the row now at that index.
+            // Defer past the list re-render, then restore focus to the SAME
+            // up/down button on the row now at that index.
             gloo_timers::future::TimeoutFuture::new(0).await;
             if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+                use wasm_bindgen::JsCast;
+                let btn_q = format!("[data-frow=\"{sel}\"] [data-move=\"{btn}\"]");
+                if let Ok(Some(el)) = doc.query_selector(&btn_q) {
+                    // A row moved to an end disables the pressed arrow, and a
+                    // disabled button cannot take focus; fall through to the
+                    // row in that case.
+                    if !el.has_attribute("disabled") {
+                        if let Some(h) = el.dyn_ref::<web_sys::HtmlElement>() {
+                            let _ = h.focus();
+                            return;
+                        }
+                    }
+                }
                 if let Ok(Some(el)) = doc.query_selector(&format!("[data-frow=\"{sel}\"]")) {
-                    use wasm_bindgen::JsCast;
                     if let Some(h) = el.dyn_ref::<web_sys::HtmlElement>() {
                         let _ = h.focus();
                     }
@@ -184,25 +204,30 @@ pub fn SettingsDataSources(
     #[cfg(feature = "hydrate")]
     {
         Effect::new(move |_| {
+            let _ = load_retry.get();
             wasm_bindgen_futures::spawn_local(async move {
-                if let Ok(d) = fetch_field_sources().await {
-                    // Seed the editable chains from what is saved: a field with a
-                    // saved custom chain uses it verbatim; a field with only a
-                    // single pin (the legacy override) seeds a one-element chain
-                    // (a pin IS a one-item chain); a field with neither stays
-                    // ABSENT so it renders the region-default "Automatic" order.
-                    let mut seed: std::collections::BTreeMap<String, Vec<String>> =
-                        d.field_source_chains.clone();
-                    for (field, id) in &d.overrides {
-                        if !id.is_empty() {
-                            seed.entry(field.clone())
-                                .or_insert_with(|| vec![id.clone()]);
+                match fetch_field_sources().await {
+                    Ok(d) => {
+                        // Seed the editable chains from what is saved: a field with a
+                        // saved custom chain uses it verbatim; a field with only a
+                        // single pin (the legacy override) seeds a one-element chain
+                        // (a pin IS a one-item chain); a field with neither stays
+                        // ABSENT so it renders the region-default "Automatic" order.
+                        let mut seed: std::collections::BTreeMap<String, Vec<String>> =
+                            d.field_source_chains.clone();
+                        for (field, id) in &d.overrides {
+                            if !id.is_empty() {
+                                seed.entry(field.clone())
+                                    .or_insert_with(|| vec![id.clone()]);
+                            }
                         }
+                        chains.set(seed);
+                        forecast_pick.set(d.forecast_provider.clone().unwrap_or_default());
+                        data.set(d);
+                        loaded.set(true);
+                        load_error.set(None);
                     }
-                    chains.set(seed);
-                    forecast_pick.set(d.forecast_provider.clone().unwrap_or_default());
-                    data.set(d);
-                    loaded.set(true);
+                    Err(e) => load_error.set(Some(e)),
                 }
                 let live = fetch_live_owners().await;
                 live_owners.set(live.owners);
@@ -249,27 +274,38 @@ pub fn SettingsDataSources(
                 // when a PUT completes with no new reorder pending (or on error).
                 // Assigned on every loop pass before the break (the loop always
                 // runs at least once), so there is no unread initializer.
+                // DISPOSE SAFETY: everything past the first await can outlive
+                // this component (the user can swap settings sections or leave
+                // the page while a PUT is in flight, disposing these signals).
+                // A bare .get() on a disposed signal panics, and wasm-release
+                // is panic=abort, which would poison the whole app. Every READ
+                // in this task is therefore a try_* with a clean bail; writes
+                // (.set/.update) are already dispose-safe no-ops.
                 let mut last: Result<Vec<String>, String>;
                 loop {
                     dirty.set(false);
                     // Snapshot the chains; drop empty vecs so an emptied chain
                     // reverts the field to Automatic rather than persisting blank.
-                    let chosen: std::collections::BTreeMap<String, Vec<String>> = chains
-                        .get()
+                    let Some(snapshot) = chains.try_get_untracked() else {
+                        return;
+                    };
+                    let chosen: std::collections::BTreeMap<String, Vec<String>> = snapshot
                         .into_iter()
                         .filter(|(_, v)| !v.is_empty())
                         .collect();
                     // "" (Auto by priority) -> None so we clear any saved pin.
-                    let forecast_choice: Option<String> = {
-                        let v = forecast_pick.get();
-                        if v.is_empty() {
-                            None
-                        } else {
-                            Some(v)
-                        }
+                    let Some(pick) = forecast_pick.try_get_untracked() else {
+                        return;
                     };
+                    let forecast_choice: Option<String> =
+                        if pick.is_empty() { None } else { Some(pick) };
                     last = patch_field_chains(chosen, forecast_choice).await;
-                    if last.is_err() || !dirty.get() {
+                    // The view may have been disposed during the PUT round trip;
+                    // the write itself already landed server-side, so just exit.
+                    let Some(still_dirty) = dirty.try_get_untracked() else {
+                        return;
+                    };
+                    if last.is_err() || !still_dirty {
                         break;
                     }
                 }
@@ -614,6 +650,13 @@ pub fn SettingsDataSources(
 
             <RestartBanner reasons=restart_reasons dismissed=restart_dismissed/>
 
+            // A failed initial GET replaces the whole editor with a Retry banner:
+            // an empty form here reads as data loss, and a Save from it would PUT a
+            // hollow config over the real one.
+            <Show
+                when=move || load_error.get().is_none()
+                fallback=move || view! { <SettingsLoadError error=load_error retry=load_retry/> }
+            >
             <Panel title="Forecast source".to_string() help_topic="sources">
                 <p class="settings-page__subtitle">
                     "Pick which cloud service supplies your forecast: the daily and "
@@ -625,19 +668,32 @@ pub fn SettingsDataSources(
                 </p>
                 <Show
                     when=move || has_forecast()
-                    fallback=|| view! {
-                        <p class="settings-page__subtitle">
-                            "No forecast source is configured. Add Open-Meteo (free, no "
-                            "key) under Devices to get a forecast."
-                        </p>
+                    fallback=move || view! {
+                        // Gate the false-empty "none configured" line on a completed
+                        // load: during the initial GET `has_forecast` is false only
+                        // because the data has not arrived yet, not because none is
+                        // configured.
+                        <Show when=move || loaded.get()>
+                            <p class="settings-page__subtitle">
+                                "No forecast source is configured. Add Open-Meteo (free, no "
+                                "key) under Devices to get a forecast."
+                            </p>
+                        </Show>
                     }
                 >
                     <div class="data-source-row">
                         <div class="data-source-row__label">
-                            <span class="data-source-row__field">"Forecast provider"</span>
+                            // A real <label for=..> so the select has an accessible
+                            // name (a screen reader otherwise announces only the
+                            // picked option). Only one instance of this editor
+                            // mounts at a time, so the fixed id cannot collide.
+                            <label class="data-source-row__field" for="ls-forecast-provider">
+                                "Forecast provider"
+                            </label>
                             <span class="data-source-row__owner">{forecast_caption}</span>
                         </div>
                         <select
+                            id="ls-forecast-provider"
                             class="ui-input data-source-row__picker"
                             on:change=move |ev| {
                                 forecast_pick.set(event_target_value(&ev));
@@ -741,13 +797,12 @@ pub fn SettingsDataSources(
                     {move || if saving.get() { "Saving…" } else { "Save changes" }}
                 </Button>
             </div>
+            </Show>
 
             <SettingsResult result_msg=result_msg result_ok=result_ok/>
 
-            <Show when=move || !loaded.get()>
-                <p class="settings-page__subtitle" style="margin-top: 1rem">
-                    "Loading sources from /api/config..."
-                </p>
+            <Show when=move || !loaded.get() && load_error.get().is_none()>
+                <SkeletonRows count=4/>
             </Show>
         </div>
     }
@@ -807,7 +862,8 @@ fn nature_badge(nature: &str) -> impl IntoView {
 /// constant), matched against each row's own writer label so exactly one row reads
 /// "reporting now" (a station and same-kind clouds all resolve correctly).
 /// `move_to(field, from, to)` reorders + persists; the drag/drop + arrow handlers
-/// all call it. `focus_row` re-focuses a keyboard-moved row after the re-render.
+/// all call it. `focus_row` re-focuses the pressed arrow button on a
+/// keyboard-moved row after the re-render (row key, "up"/"down", bump counter).
 #[allow(clippy::too_many_arguments)]
 fn chain_row<F>(
     field: String,
@@ -818,7 +874,7 @@ fn chain_row<F>(
     len: usize,
     owner: Option<String>,
     move_to: F,
-    focus_row: RwSignal<(String, u32)>,
+    focus_row: RwSignal<(String, &'static str, u32)>,
 ) -> impl IntoView
 where
     F: Fn(String, usize, usize) + Copy + 'static,
@@ -945,11 +1001,18 @@ where
                     if let Some(dt) = ev.data_transfer() {
                         if let Ok(from_s) = dt.get_data("text/plain") {
                             if let Ok(from) = from_s.parse::<usize>() {
-                                // Direction-correct so a drop ALWAYS lands before
-                                // the target row: dragging DOWN, removing the source
-                                // first shifts the target up by one, so target at
-                                // idx-1; dragging UP the target index is unchanged.
-                                let to = if from < idx { idx.saturating_sub(1) } else { idx };
+                                // Drop-on-row means "take that row's index".
+                                // move_to removes the dragged row FIRST, so with
+                                // to = idx a downward drag lands directly after
+                                // the dragged-over row (the target shifts up to
+                                // idx-1 after the remove) and an upward drag
+                                // lands directly before it. Crucially the common
+                                // one-step-down drop is a SWAP now, not the old
+                                // to = idx-1 == from silent no-op ("lands before
+                                // the target" made moving down one slot require
+                                // dropping on the row TWO below). Dropping a row
+                                // on itself is from == to, which move_to ignores.
+                                let to = idx;
                                 move_to(field_drop.clone(), from, to);
                             }
                         }
@@ -969,17 +1032,25 @@ where
             })}
             {primary_off}
             <span class="data-source-chain__moves">
+                // The aria-labels carry "position N of M": after a move, focus
+                // returns to this button on the re-rendered row, so the fresh
+                // label doubles as the screen-reader confirmation of the new
+                // order. `data-move` is the focus-restore hook the effect above
+                // queries; it carries no styling.
                 <button
                     type="button"
                     class="data-source-chain__move"
-                    aria-label=format!("Move {name} up")
+                    data-move="up"
+                    aria-label=format!("Move {name} up, position {ordinal} of {len}")
                     disabled=is_first
                     on:click=move |_| {
                         if !is_first {
                             move_to(field_up.clone(), idx, idx - 1);
-                            // Re-focus the row at its new index after the re-render.
-                            focus_row.update(|(s, n)| {
+                            // Re-focus this same arrow on the row at its new
+                            // index after the re-render.
+                            focus_row.update(|(s, b, n)| {
                                 *s = format!("{}\u{7c}{}", field_up, idx - 1);
+                                *b = "up";
                                 *n += 1;
                             });
                         }
@@ -990,14 +1061,17 @@ where
                 <button
                     type="button"
                     class="data-source-chain__move"
-                    aria-label=format!("Move {name} down")
+                    data-move="down"
+                    aria-label=format!("Move {name} down, position {ordinal} of {len}")
                     disabled=is_last
                     on:click=move |_| {
                         if !is_last {
                             move_to(field_down.clone(), idx, idx + 1);
-                            // Re-focus the row at its new index after the re-render.
-                            focus_row.update(|(s, n)| {
+                            // Re-focus this same arrow on the row at its new
+                            // index after the re-render.
+                            focus_row.update(|(s, b, n)| {
                                 *s = format!("{}\u{7c}{}", field_down, idx + 1);
+                                *b = "down";
                                 *n += 1;
                             });
                         }
@@ -1016,6 +1090,11 @@ where
 /// hot-reload and report restart_required=false, so callers pass an empty
 /// `reasons` for those and the banner stays hidden.
 ///
+/// Built entirely on shared primitives so it tracks the design system on every
+/// page that mounts it: the `.health-banner` classes (the warn-tinted banner
+/// surface used across the app) and the Button component for Dismiss. No inline
+/// styles.
+///
 /// Cross-component contract: any settings page that PUTs config can render this
 /// by owning a `reasons: RwSignal<Vec<String>>` (empty = hidden) plus a
 /// `dismissed: RwSignal<bool>` (reset to false on each save so a fresh
@@ -1031,40 +1110,29 @@ pub fn RestartBanner(
     let show = move || !reasons.get().is_empty() && !dismissed.get();
     view! {
         <Show when=show>
-            <div
-                class="setup-result"
-                role="status"
-                style="margin: 0 0 1rem; display: flex; gap: 0.75rem; \
-                       align-items: flex-start; \
-                       background: color-mix(in oklab, var(--accent-warn) 12%, transparent); \
-                       color: var(--accent-warn); \
-                       border: 1px solid var(--accent-warn);"
-            >
-                <div style="flex: 1 1 auto; min-width: 0;">
-                    <strong>"Restart required to apply"</strong>
-                    <p style="margin: 0.35rem 0 0; color: var(--text); font-size: 0.92rem;">
-                        "Your change is saved, but it needs a container restart "
-                        "to take effect. Everything else applied live."
-                    </p>
-                    <ul style="margin: 0.5rem 0 0; padding-left: 1.1rem; \
-                               color: var(--text); font-size: 0.92rem;">
-                        {move || reasons.get()
-                            .into_iter()
-                            .map(|r| view! { <li>{r}</li> })
-                            .collect_view()}
-                    </ul>
+            <div class="health-banner" role="status">
+                <span class="health-banner__icon" aria-hidden="true">
+                    <Icon name="alert-triangle" size=16/>
+                </span>
+                <div class="health-banner__text">
+                    <strong>"Restart required to apply."</strong>
+                    " Your change is saved, but it needs a container restart to "
+                    "take effect. Everything else applied live."
+                    // One line per server reason; plain divs keep the banner
+                    // tight (no default list margins to fight).
+                    {move || reasons.get()
+                        .into_iter()
+                        .map(|r| view! { <div>{r}</div> })
+                        .collect_view()}
                 </div>
-                <button
-                    type="button"
-                    aria-label="Dismiss restart-required notice"
-                    style="flex: 0 0 auto; align-self: flex-start; padding: 0.2rem 0.7rem; \
-                           cursor: pointer; background: transparent; font: inherit; \
-                           color: var(--accent-warn); border: 1px solid var(--accent-warn); \
-                           border-radius: var(--radius-sm);"
-                    on:click=move |_| dismissed.set(true)
+                <Button
+                    variant="ghost"
+                    size="sm"
+                    aria_label="Dismiss restart-required notice"
+                    on_click=Callback::new(move |_| dismissed.set(true))
                 >
                     "Dismiss"
-                </button>
+                </Button>
             </div>
         </Show>
     }

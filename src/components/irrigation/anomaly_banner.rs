@@ -48,11 +48,11 @@ pub fn AnomalyBanner(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             .collect();
 
         // (b) Offline probes: configured but producing no valid reading.
-        // One calm line per fault that names the ZONE, the SENSOR (device
-        // family parsed from the spec, e.g. "WH51" for an Ecowitt soil
-        // channel, else a generic "soil probe"), the SINCE date (24h local
-        // via crate::timefmt), and a remediation verb, so the operator knows
-        // which physical probe to touch and what to do, not just which zone.
+        // One calm line per fault that names the ZONE, a generic "soil probe"
+        // (LocalSky reads only the channel VALUE + calibration, never a model
+        // string, so it must not claim a hardware model it cannot verify), the
+        // SINCE date (24h local via crate::timefmt), and a remediation verb, so
+        // the operator knows which physical probe to touch and what to do.
         let tz = s.timezone.clone();
         lines.extend(s.soil_probe_faults.iter().map(|f| fault_line(f, &tz)));
 
@@ -94,15 +94,14 @@ fn suspect_line(name: &str, reason: Option<&str>) -> String {
 }
 
 /// Build the one-line offline summary for a faulted soil probe. Names the
-/// ZONE, the SENSOR by its device family (parsed from `f.sensor_id`, e.g.
-/// "WH51" for an Ecowitt soil channel, otherwise a generic "soil probe"),
-/// the SINCE moment (the channel's last good reading as a 24h-local short
-/// date via `crate::timefmt`, in the deployment `tz`; "no reading yet" when
-/// the channel never produced a valid value), and a remediation VERB so the
-/// operator knows which physical probe to touch and what to do.
+/// ZONE, a generic "soil probe" (see `device_family`), the SINCE moment (the
+/// channel's last good reading as a 24h-local short date via `crate::timefmt`,
+/// in the deployment `tz`; "no reading yet" when the channel never produced a
+/// valid value), and a remediation VERB so the operator knows which physical
+/// probe to touch and what to do.
 ///
 /// Examples:
-///   "Back Yard WH51 soil probe offline since Jun 28. Reseat or replace it."
+///   "Back Yard soil probe offline since Jun 28. Reseat or replace it."
 ///   "Side Bed soil probe offline, no reading yet. Reseat or replace it."
 fn fault_line(f: &SoilProbeFault, tz: &str) -> String {
     let device = device_family(&f.sensor_id);
@@ -121,20 +120,17 @@ fn fault_line(f: &SoilProbeFault, tz: &str) -> String {
     format!("{} {device} {since}. Reseat or replace it.", f.zone_name)
 }
 
-/// Friendly device hint for a configured soil-sensor spec. The known Ecowitt
-/// soil channel (`source:<id>:soilmoisture<N>`) is a WH51; everything else
-/// (an `ha:` entity, a legacy bare id, an unrecognized channel key) falls
-/// back to a generic "soil probe" so the line never reads awkwardly.
-fn device_family(sensor_id: &str) -> &'static str {
-    // `source:<id>:<key>` -> inspect the trailing channel key. An Ecowitt
-    // soil channel keys as `soilmoisture<N>`, which is a WH51 in the field.
-    if let Some(rest) = sensor_id.strip_prefix("source:") {
-        if let Some((_, key)) = rest.split_once(':') {
-            if key.starts_with("soilmoisture") {
-                return "WH51 soil probe";
-            }
-        }
-    }
+/// Generic device hint for a faulted soil-sensor spec. LocalSky's Ecowitt
+/// poller reads only the soil channel VALUE (`soilmoisture<N>`) and its
+/// calibration; the sensor MODEL lives on a different gateway endpoint
+/// (`get_sensors_info`) that is not polled and, crucially, does not report a
+/// faulted (offline) sensor at all, i.e. exactly when this banner fires. So the
+/// model is unknowable here and must not be guessed: a previous version
+/// hardcoded "WH51 soil probe" for every Ecowitt soil channel, which was simply
+/// wrong for anyone running a different soil sensor (WH52 and others). Always a
+/// generic "soil probe"; a future model-aware label would have to come from a
+/// cached `get_sensors_info` reading captured while the sensor was online.
+fn device_family(_sensor_id: &str) -> &'static str {
     "soil probe"
 }
 
@@ -152,22 +148,21 @@ mod tests {
     }
 
     #[test]
-    fn device_family_names_ecowitt_soil_channel_as_wh51() {
-        // The canonical Ecowitt soil channel spec resolves to a WH51.
+    fn device_family_never_fabricates_a_hardware_model() {
+        // Every spec resolves to a generic "soil probe": LocalSky reads only
+        // the soil channel VALUE, never a model, so it must not name a part
+        // (a prior version hardcoded "WH51" for every Ecowitt soil channel,
+        // which was wrong for anyone whose physical sensor was labeled
+        // otherwise). Ecowitt channel, ha: entity, bare id, non-soil channel,
+        // and empty all read the same.
         assert_eq!(
             device_family("source:ecowitt_gw:soilmoisture2"),
-            "WH51 soil probe"
+            "soil probe"
         );
         assert_eq!(
             device_family("source:gw:soilmoisture_back_yard"),
-            "WH51 soil probe"
+            "soil probe"
         );
-    }
-
-    #[test]
-    fn device_family_falls_back_to_generic_for_unknown_specs() {
-        // ha: entity, legacy bare id, and a non-soil source channel all read
-        // as a generic "soil probe" so the line never names the wrong part.
         assert_eq!(device_family("ha:sensor.back_yard_moisture"), "soil probe");
         assert_eq!(device_family("sensor.back_yard_moisture"), "soil probe");
         assert_eq!(device_family("source:gw:temperature"), "soil probe");
@@ -184,7 +179,7 @@ mod tests {
         );
         assert_eq!(
             line,
-            "Side Bed WH51 soil probe offline, no reading yet. Reseat or replace it."
+            "Side Bed soil probe offline, no reading yet. Reseat or replace it."
         );
     }
 
@@ -216,7 +211,7 @@ mod tests {
         );
         assert_eq!(
             line,
-            "Back Yard WH51 soil probe offline since Jun 28. Reseat or replace it."
+            "Back Yard soil probe offline since Jun 28. Reseat or replace it."
         );
     }
 }

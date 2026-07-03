@@ -18,9 +18,18 @@ const SOURCE_ID: &str = "tempest";
 
 /// Spawn the sampler. Records ~one sample per Tempest packet, polling every
 /// 60s. No-op rows (INSERT OR IGNORE) make restarts and overlapping epochs
-/// harmless.
-pub fn spawn_weather_sampler(conn: Arc<Mutex<Connection>>, tempest: Arc<TempestStore>) {
-    let store = SensorHistoryStore::new(conn);
+/// harmless. `retention_days` MUST be the configured `[persistence].retention_days`:
+/// the sampler's hourly piggyback prune runs a TABLE-WIDE delete over
+/// sensor_history, so building the store with the default (90) instead of the
+/// configured value would silently delete every source's rows older than 90
+/// days even when the operator set retention to 0 (keep forever) or a larger
+/// window, contradicting the documented knob.
+pub fn spawn_weather_sampler(
+    conn: Arc<Mutex<Connection>>,
+    tempest: Arc<TempestStore>,
+    retention_days: u32,
+) {
+    let store = SensorHistoryStore::new(conn).with_retention_days(retention_days);
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(60));
         let mut last_epoch = 0i64;

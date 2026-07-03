@@ -10,8 +10,11 @@ The chain, top to bottom:
 2. **Crop coefficient (Kc)**: the species' seasonal multiplier on
    reference ET (see the grass species catalog). Hemisphere-aware:
    south of the equator the curve shifts six months.
-3. **Heat multiplier**: optional extension when forecast highs cross
-   the heat-advisory threshold.
+3. **Heat multiplier**: optional extension when the peak heat index
+   crosses the heat-advisory threshold. Each day's heat index pairs
+   that day's high temperature with that same day's humidity (not the
+   current, often night-time, humidity), so a cool morning's humidity
+   is never combined with a hot afternoon's peak to inflate the run.
 4. **Throughput (mm/hr)**: how fast your sprinklers actually apply
    water, either measured (catch cups) or the catalog default for the
    head type.

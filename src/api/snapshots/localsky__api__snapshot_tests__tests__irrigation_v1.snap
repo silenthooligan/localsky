@@ -1,6 +1,5 @@
 ---
 source: src/api/snapshot_tests.rs
-assertion_line: 63
 expression: "IrrigationSnapshot::default()"
 ---
 {
@@ -80,7 +79,13 @@ expression: "IrrigationSnapshot::default()"
     "heat_index_now_f": 0.0,
     "heat_index_max_3day_f": 0.0,
     "heat_multiplier": 0.0,
-    "days_since_significant_rain": 0
+    "days_since_significant_rain": 0,
+    "eto_spent_today_mm": 0.0,
+    "vpd_now_kpa": 0.0,
+    "vpd_max_today_kpa": 0.0,
+    "soil_temp_6cm_now_f": 0.0,
+    "soil_moisture_3_9_now_vwc": 0.0,
+    "soil_moisture_3_9_in48h_vwc": 0.0
   },
   "seven_day_verdicts": [],
   "soil_forecasts": [],

@@ -891,7 +891,9 @@ pub fn SettingsDevices() -> impl IntoView {
                 // promising Zones + a Controller they may not have built, so the
                 // strip only shows while the list is empty. The Zone/Controller half
                 // is dimmed (it is the part a brand-new user has not built yet).
-                {move || devices.get().is_empty().then(|| view! {
+                // Gated on `loaded` so a fully-configured install does not flash the
+                // new-user strip during the initial GET (empty-but-not-loaded).
+                {move || (loaded.get() && devices.get().is_empty()).then(|| view! {
                     <div class="entity-pipeline" aria-hidden="true">
                         <span class="entity-badge entity-badge--source">"Source"</span>
                         <span class="entity-pipeline__rel">"carries \u{2192}"</span>
@@ -1060,6 +1062,26 @@ fn migrate_source_id_refs(cfg: &mut serde_json::Value, old: &str, new: &str) {
             }
         }
     }
+    // Per-field priority + backup chains: field -> ORDERED [source id, ...].
+    // The chain editor (data_sources.rs) made this the CANONICAL store for
+    // per-field ownership (it clears field_source_overrides on save), so a
+    // rename that skipped it silently dropped the user's custom order and left
+    // the chain editor rendering a struck-through ghost row. Rewrite every
+    // occurrence of `old` inside each chain, preserving order.
+    if let Some(chains) = root
+        .get_mut("field_source_chains")
+        .and_then(|v| v.as_object_mut())
+    {
+        for chain in chains.values_mut() {
+            if let Some(arr) = chain.as_array_mut() {
+                for entry in arr.iter_mut() {
+                    if entry.as_str() == Some(old) {
+                        *entry = serde_json::Value::String(new.to_string());
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Repoint every config reference to a renamed controller id from `old` to
@@ -1145,6 +1167,21 @@ fn clear_source_id_refs(cfg: &mut serde_json::Value, id: &str) {
                 zobj.insert("soil_sensor_id".into(), serde_json::Value::Null);
             }
         }
+    }
+    // Per-field chains: drop the removed id from every chain, and drop a chain
+    // that becomes empty (so the field returns to Automatic order rather than
+    // rendering a permanent struck-through ghost row + a false "primary is off"
+    // warning in the chain editor).
+    if let Some(chains) = root
+        .get_mut("field_source_chains")
+        .and_then(|v| v.as_object_mut())
+    {
+        for chain in chains.values_mut() {
+            if let Some(arr) = chain.as_array_mut() {
+                arr.retain(|entry| entry.as_str() != Some(id));
+            }
+        }
+        chains.retain(|_, chain| chain.as_array().is_some_and(|a| !a.is_empty()));
     }
 }
 
@@ -1390,6 +1427,13 @@ mod tests {
                 "wind_speed": "ecowitt_gw",   // -> dropped
                 "rain_rate": "noaa_mrms"      // unrelated, untouched
             },
+            "field_source_chains": {
+                // The removed id is dropped from each chain; a chain that
+                // becomes empty is removed entirely, one that still has entries
+                // keeps them in order.
+                "temp_f": ["tempest", "ecowitt_gw", "open_meteo"],
+                "pressure": ["ecowitt_gw"]
+            },
             "forecast_provider": "ecowitt_gw", // -> nulled
             "zones": {
                 "front_lawn": {
@@ -1407,6 +1451,13 @@ mod tests {
         // Pick that pinned the removed source is gone; the unrelated pick survives.
         assert!(cfg["field_source_overrides"].get("wind_speed").is_none());
         assert_eq!(cfg["field_source_overrides"]["rain_rate"], "noaa_mrms");
+        // Chain drops the removed id but keeps order; a chain emptied by the
+        // removal is dropped so the field returns to Automatic.
+        assert_eq!(
+            cfg["field_source_chains"]["temp_f"],
+            serde_json::json!(["tempest", "open_meteo"])
+        );
+        assert!(cfg["field_source_chains"].get("pressure").is_none());
         // Forecast pin nulled.
         assert!(cfg["forecast_provider"].is_null());
         // The removed source's zone soil binding nulled; the other zone untouched.
@@ -1437,6 +1488,11 @@ mod tests {
                 "wind_speed": "ecowitt_gw",   // -> new id
                 "rain_rate": "noaa_mrms"      // unrelated, untouched
             },
+            "field_source_chains": {
+                // Order preserved; only the renamed id is rewritten.
+                "temp_f": ["tempest", "ecowitt_gw", "open_meteo"],
+                "rain_rate": ["noaa_mrms", "open_meteo"] // no renamed id, untouched
+            },
             "forecast_provider": "ecowitt_gw", // -> new id
             "zones": {
                 "front_lawn": {
@@ -1453,6 +1509,14 @@ mod tests {
 
         assert_eq!(cfg["field_source_overrides"]["wind_speed"], "yard_soil");
         assert_eq!(cfg["field_source_overrides"]["rain_rate"], "noaa_mrms");
+        assert_eq!(
+            cfg["field_source_chains"]["temp_f"],
+            serde_json::json!(["tempest", "yard_soil", "open_meteo"])
+        );
+        assert_eq!(
+            cfg["field_source_chains"]["rain_rate"],
+            serde_json::json!(["noaa_mrms", "open_meteo"])
+        );
         assert_eq!(cfg["forecast_provider"], "yard_soil");
         assert_eq!(
             cfg["zones"]["front_lawn"]["soil_sensor_id"],

@@ -16,7 +16,7 @@ So a sensor never connects to LocalSky directly. It rides in through a source or
 
 Every device card is tagged with its origin:
 
-- **Native** devices are ones LocalSky owns directly: a source or controller you added here. Native devices are editable in place. Click **Edit** on the card to open the same source or controller editor used elsewhere, change it, and save; the device registry hot-reloads shortly after.
+- **Native** devices are ones LocalSky owns directly: a source or controller you added here. Native devices are editable in place. Click **Edit** on the card to open the same source or controller editor used elsewhere, change it, and save; the device registry hot-reloads shortly after. You can also enable or disable a source with the toggle on its card, which controls whether it contributes to weather readings without removing its configuration.
 - **Home Assistant** devices are mirrored in from a configured HA bridge. They are read-only here, because HA owns them. The card says "Managed in Home Assistant" instead of an Edit button. To change one, change it in HA; the mirror follows.
 
 A native device that also exists in Home Assistant carries a small **+ HA** badge, so you can tell at a glance that the same physical thing is visible on both sides without it being a duplicate. Cards also show an **Online** or **Offline** pill when LocalSky has a reachability signal, and a small badge with a count of how many items the device carries. Expand the card to see what those items are: the sensors and zones the device brings in, broken out as child rows.
@@ -29,6 +29,8 @@ The **Add a device** bar gives you two direct paths and one discovery path:
 - **Controller**: opens the controller editor. Pick a kind and configure it. Exactly one controller is the default; new zones inherit it.
 - **Scan network**: sweeps the LAN for supported gateways (Ecowitt today) that broadcast on your network.
 
+Sources you add join one unified list of every source LocalSky knows about, each with live status and an enable/disable toggle. Cloud services available in your region that you have not enabled yet appear separately as "coverage you can add": toggle one on to start using it immediately.
+
 ### Scan and adopt
 
 The fastest way to add an Ecowitt gateway is to let LocalSky find it:
@@ -39,6 +41,10 @@ The fastest way to add an Ecowitt gateway is to let LocalSky find it:
 4. Once saved, LocalSky starts polling the gateway, and its soil channels appear as sensors under it (visible here and on the [Sensors](sensors.md) page), ready to bind to a zone.
 
 If a scan finds nothing, the gateway may not be on the same subnet, or it may not broadcast; in that case add it by hand with **Weather source**, choosing the Ecowitt gateway kind and typing the IP into the `host` field.
+
+## Per-reading source priority and backup chains
+
+Each headline reading (temperature, humidity, wind, rain, pressure, solar/UV) has its own ordered chain of sources. The first source in the chain that is reporting fresh data owns the reading; if it goes quiet the next takes over, so a reading is never lost while any source in its chain is fresh. "Automatic" is the smart default order for your region and enabled sources. To customize it, open Settings > Devices > Data sources and drag a reading's source rows into the order you want (or use the up and down arrow keys); that becomes "Custom". The order you set is exactly the priority the engine uses for that reading. A one-source chain behaves like a single hard pin.
 
 ## Where to go next
 

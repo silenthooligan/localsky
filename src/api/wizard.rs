@@ -39,13 +39,15 @@
 // SECURITY. The hardening for this surface is authorization + demo lock,
 // not a mount gate:
 //   - ProbeGuard re-asserts authz INSIDE each outbound handler
-//     (test_*/scan_zones/probe_soil/discover): a probe runs only for an
-//     authenticated identity, a trusted-network client, or a private/LAN
-//     client IP (loopback + RFC1918 + IPv6 ULA, which is what a fresh
-//     self-hoster onboarding from their own LAN sends with auth off and no
-//     trusted_networks set). A bare internet-anonymous caller is refused
-//     regardless of global AuthMode or the pre-setup exemption (was an
-//     unauthenticated SSRF trigger before).
+//     (test_*/scan_zones/probe_soil/discover/geocode): a probe runs only
+//     for an authenticated identity, a trusted-network client, or a
+//     private/LAN client IP (loopback + RFC1918 + IPv6 ULA, which is what
+//     a fresh self-hoster onboarding from their own LAN sends with auth
+//     off and no trusted_networks set). A bare internet-anonymous caller
+//     is refused regardless of global AuthMode or the pre-setup exemption
+//     (was an unauthenticated SSRF trigger before). Geocode additionally
+//     carries a per-IP rate limit: it relays to the shared Nominatim
+//     service, whose usage policy bans bulk callers.
 //   - The public read-only demo (LOCALSKY_DEMO=1) 403s every wizard
 //     mutation + the outbound /discover GET at the outermost layer (see
 //     auth::demo_guard), so demo.localsky.io cannot be driven or used to
@@ -55,9 +57,10 @@
 use std::sync::Arc;
 
 use axum::{
+    body::Body,
     extract::{FromRequestParts, Query, State},
     http::request::Parts,
-    http::StatusCode,
+    http::{Request, StatusCode},
     response::{IntoResponse, Json, Response},
     routing::{delete, get, post},
     Router,
@@ -732,7 +735,10 @@ async fn post_probe_soil(
         .await
         .and_then(|r| r.error_for_status())
     {
-        Ok(r) => match r.json::<serde_json::Value>().await {
+        // Capped body read (never reqwest's unbounded .json()): an
+        // operator-named target streaming an endless body must not be able
+        // to OOM the service (see safe_fetch::MAX_RESPONSE_BODY_BYTES).
+        Ok(r) => match crate::net::safe_fetch::read_json_capped::<serde_json::Value>(r).await {
             Ok(v) => v,
             // Do NOT reflect the raw parse error / upstream body: it would
             // turn this into an SSRF exfil oracle. A category is enough.
@@ -841,7 +847,8 @@ async fn ecowitt_soil_channels(ip: &str) -> u32 {
         .await
         .and_then(|r| r.error_for_status())
     {
-        Ok(r) => match r.json::<serde_json::Value>().await {
+        // Capped read, same rationale as post_probe_soil.
+        Ok(r) => match crate::net::safe_fetch::read_json_capped::<serde_json::Value>(r).await {
             Ok(v) => v,
             Err(_) => return 0,
         },
@@ -975,12 +982,98 @@ struct GeocodeResult {
     lon: String,
 }
 
-async fn get_geocode(Query(q): Query<GeocodeQuery>) -> impl IntoResponse {
+/// Geocode limiter budget: max 10 requests per fixed one-minute window per
+/// client IP, the same budget AuthRuntime::allow_login_attempt grants
+/// login/setup. Generous for a human (the UI fires ONE request per Search
+/// click and serializes them behind a `searching` flag) and far under
+/// Nominatim's absolute 1 req/s ceiling.
+const GEOCODE_MAX_PER_MIN: u32 = 10;
+
+/// Geocode limiter state: ip -> (attempts, window_start_epoch). Mirrors
+/// AuthRuntime::login_attempts but is deliberately its OWN bucket: sharing
+/// the login map would let address searches consume login attempts (and
+/// failed logins block address search), coupling two unrelated surfaces.
+static GEOCODE_ATTEMPTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, (u32, i64)>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Fixed-window limiter for the geocode relay, same shape as
+/// AuthRuntime::allow_login_attempt (count per IP, window reset after 60s,
+/// opportunistic shrink so the map cannot grow unbounded).
+fn allow_geocode_attempt(ip: std::net::IpAddr) -> bool {
+    let now = chrono::Utc::now().timestamp();
+    let mut map = GEOCODE_ATTEMPTS.lock().expect("geocode limiter lock");
+    let entry = map.entry(ip).or_insert((0, now));
+    if now - entry.1 >= 60 {
+        *entry = (0, now);
+    }
+    entry.0 += 1;
+    let allowed = entry.0 <= GEOCODE_MAX_PER_MIN;
+    if map.len() > 4096 {
+        map.retain(|_, (_, start)| now - *start < 60);
+    }
+    allowed
+}
+
+/// GET /api/wizard/geocode?q= -> Nominatim search relay. ProbeGuard-gated
+/// like every other outbound wizard handler: without it this was an
+/// unauthenticated, un-rate-limited relay any internet-anonymous caller
+/// (the public demo above all) could drive, and Nominatim bans bulk
+/// callers BY User-Agent, so one abuser could break address search for
+/// every LocalSky deployment sharing the agent string.
+async fn get_geocode(
+    _guard: ProbeGuard,
+    State(s): State<WizardApiState>,
+    Query(q): Query<GeocodeQuery>,
+    req: Request<Body>,
+) -> impl IntoResponse {
+    // Per-IP rate limit on top of the guard: even an admitted LAN client
+    // must not be able to turn this instance into a bulk geocoding relay
+    // (Nominatim usage policy: absolute max 1 req/s, no bulk). Client IP
+    // via the same trusted-proxy/XFF derivation the guard + login limiter
+    // use, so a spoofed X-Forwarded-For cannot mint fresh buckets. No
+    // derivable IP (no ConnectInfo, e.g. some test harnesses) skips the
+    // limit, matching the login limiter's posture in auth.rs.
+    let policy = s.auth_rt.as_ref().map(|rt| rt.policy.load_full());
+    let trusted_proxies = policy
+        .as_ref()
+        .map(|p| p.trusted_proxies.as_slice())
+        .unwrap_or(&[]);
+    if let Some(ip) = crate::auth::middleware::client_ip(&req, trusted_proxies) {
+        if !allow_geocode_attempt(ip) {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(ApiError {
+                    error: "rate_limited".into(),
+                    detail: Some("too many geocode requests; wait a minute".into()),
+                }),
+            )
+                .into_response();
+        }
+    }
+
     let url = format!(
         "https://nominatim.openstreetmap.org/search?q={}&format=json&limit=5",
         urlencode(&q.q)
     );
-    let client = reqwest::Client::new();
+    // Bounded budget: Client::new() has NO total timeout, so a stalled
+    // upstream would pin handler tasks for as long as it likes.
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(ApiError {
+                    error: "geocode_transport_error".into(),
+                    detail: Some("client build failed".into()),
+                }),
+            )
+                .into_response()
+        }
+    };
     let res = client
         .get(&url)
         // Nominatim ToS requires a meaningful User-Agent identifying the
@@ -993,7 +1086,9 @@ async fn get_geocode(Query(q): Query<GeocodeQuery>) -> impl IntoResponse {
     // with the other probe handlers (Nominatim is a fixed cloud host so the
     // SSRF-oracle risk is low, but keep the no-raw-upstream-text rule uniform).
     match res {
-        Ok(r) => match r.json::<Vec<GeocodeResult>>().await {
+        // Capped body read, like the other outbound handlers: a fixed host
+        // is still an unbounded-buffer risk behind a broken CDN/proxy.
+        Ok(r) => match crate::net::safe_fetch::read_json_capped::<Vec<GeocodeResult>>(r).await {
             Ok(results) => Json(results).into_response(),
             Err(_) => (
                 StatusCode::BAD_GATEWAY,
@@ -1380,6 +1475,57 @@ mod probe_guard_tests {
             guard_allows(&mut parts, &state).await,
             "an authenticated User identity must always pass the guard"
         );
+    }
+
+    #[tokio::test]
+    async fn geocode_refuses_public_anonymous_caller() {
+        // get_geocode relays outbound (Nominatim) and sits behind the SAME
+        // ProbeGuard as the other outbound wizard handlers. A public
+        // anonymous caller must get 403 from the extractor, BEFORE the
+        // handler body runs, so this test never touches the network.
+        use tower::ServiceExt;
+        let state = state_with_policy(AuthPolicy::default());
+        let app = router(state);
+        let mut req = axum::http::Request::builder()
+            .method(Method::GET)
+            .uri("/geocode?q=paris")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+            "203.0.113.5".parse().unwrap(),
+            40000,
+        )));
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "public anonymous geocode must be refused by ProbeGuard"
+        );
+    }
+}
+
+#[cfg(test)]
+mod geocode_rate_limit_tests {
+    use super::*;
+
+    #[test]
+    fn fixed_window_allows_then_refuses_per_ip() {
+        // Unique TEST-NET IPs so parallel tests sharing the static map
+        // cannot collide; the limiter buckets strictly per IP.
+        let hot: std::net::IpAddr = "198.51.100.77".parse().unwrap();
+        let cold: std::net::IpAddr = "198.51.100.78".parse().unwrap();
+        for i in 0..GEOCODE_MAX_PER_MIN {
+            assert!(
+                allow_geocode_attempt(hot),
+                "attempt {i} within the budget must be allowed"
+            );
+        }
+        assert!(
+            !allow_geocode_attempt(hot),
+            "the attempt past the budget must be refused"
+        );
+        // Another client is unaffected (per-IP buckets, not global).
+        assert!(allow_geocode_attempt(cold));
     }
 }
 

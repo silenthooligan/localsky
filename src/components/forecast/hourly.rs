@@ -20,7 +20,9 @@ pub fn HourlyForecast(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
                 <span class="forecast-section-meta">
                     {move || {
                         let s = snap.get();
-                        if s.hourly.is_empty() { "Loading…".to_string() }
+                        // Empty: say nothing. The body panel explains the wait
+                        // honestly; a perpetual "Loading…" here contradicted it.
+                        if s.hourly.is_empty() { String::new() }
                         else {
                             let last_idx = (s.hourly.len() - 1).min(47);
                             let epoch = s.hourly[last_idx].time_epoch;
@@ -42,7 +44,8 @@ pub fn HourlyForecast(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
                     let entries: Vec<HourlyEntry> = s.hourly.into_iter().take(48).collect();
                     let prefs = unit_prefs.get();
                     if entries.is_empty() {
-                        view! { <crate::components::ui::Skeleton variant="chart"/> }.into_any()
+                        view! { <super::ForecastPending variant="chart" what="hourly forecast"/> }
+                            .into_any()
                     } else {
                         view! { <HourlyChart entries prefs tz/> }.into_any()
                     }

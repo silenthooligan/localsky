@@ -106,7 +106,19 @@ pub fn spawn_run_reaper(store: ActiveRunsStore, registry: ControllerRegistry) {
         let mut tick = tokio::time::interval(REAP_INTERVAL);
         loop {
             tick.tick().await;
-            reap_once(&store, &registry, Utc::now().timestamp()).await;
+            // P0-8 class: the reaper is the LAST line of stuck-valve defense,
+            // so a panic inside one reap (a poisoned lock, an adapter bug)
+            // must not kill the loop for the process lifetime. catch_unwind
+            // turns it into a logged skip; the next tick retries against the
+            // same persisted ledger. Mirrors the push dispatcher's supervisor.
+            use futures::FutureExt;
+            let outcome =
+                std::panic::AssertUnwindSafe(reap_once(&store, &registry, Utc::now().timestamp()))
+                    .catch_unwind()
+                    .await;
+            if outcome.is_err() {
+                tracing::error!("run reaper: reap tick PANICKED; continuing on next tick");
+            }
         }
     });
 }

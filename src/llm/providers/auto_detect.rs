@@ -61,16 +61,18 @@ pub async fn detect(targets: Vec<ProbeTarget>, model: String) -> Option<Arc<dyn 
         };
         let url = format!("{}{}", target.base_url.trim_end_matches('/'), probe_path);
         debug!("auto-detect probing {url}");
-        // SSRF-hardened, IP-pinned probe: the probe_order is operator-
-        // supplied and reachable from the wizard's test_llm endpoint, so
-        // each candidate goes through the same forbidden-target +
-        // anti-rebinding + no-redirect client the real providers use. The
-        // built-in localhost defaults are loopback and so are rejected here
-        // (consistent with the OpenAI-compat provider's loopback policy); in
-        // a containerized deployment localhost is the container itself, not a
-        // real LLM host, so the operator points probe_order at the LAN/host.
+        // SSRF-hardened, IP-pinned probe via the LLM-scoped fetch policy: the
+        // probe_order is operator-supplied and reachable from the wizard's
+        // test_llm endpoint, so each candidate still gets the forbidden-target
+        // (metadata/link-local/multicast) + anti-rebinding + no-redirect
+        // treatment, but LOOPBACK IS ALLOWED: the built-in defaults above are
+        // localhost by design (a native or --network=host install runs Ollama
+        // next to LocalSky), and the strict device policy made the shipped
+        // "Auto" default unable to detect anything anywhere. In a bridged
+        // container localhost is the container itself, so operators there
+        // point probe_order at the LAN/host address instead; both now work.
         let (client, safe_url) =
-            match crate::net::safe_fetch::build_safe_client(&url, Duration::from_secs(3)).await {
+            match crate::net::build_llm_probe_client(&url, Duration::from_secs(3)).await {
                 Ok(pair) => pair,
                 Err(e) => {
                     debug!("auto-detect: {url} not a permitted target: {e}");
@@ -118,12 +120,52 @@ mod tests {
 
     #[tokio::test]
     async fn detect_with_unreachable_targets_returns_none() {
-        // All targets are bogus ports on localhost; nothing should respond.
+        // All targets are bogus ports on localhost; the loopback client BUILDS
+        // (the LLM policy allows it) and the GET then fails to connect.
         let targets = vec![ProbeTarget {
             kind: ProbeKind::Ollama,
             base_url: "http://127.0.0.1:1".into(),
         }];
         let p = detect(targets, "model".into()).await;
         assert!(p.is_none());
+    }
+
+    #[tokio::test]
+    async fn detect_finds_a_live_loopback_endpoint() {
+        // Regression for the shipped-default dead end: a listener on loopback
+        // (an Ollama/LM Studio stand-in) must be detectable. The old strict
+        // safe_fetch policy rejected every loopback candidate before sending a
+        // byte, so "Auto" could never succeed on the very host it advertises.
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            // Serve a couple of requests; the probe needs exactly one.
+            for _ in 0..4 {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let body = b"{}";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.write_all(body).await;
+            }
+        });
+        let targets = vec![ProbeTarget {
+            kind: ProbeKind::OpenaiCompat,
+            base_url: format!("http://127.0.0.1:{}", addr.port()),
+        }];
+        let p = detect(targets, "model".into()).await;
+        let p = p.expect("a live loopback endpoint must be detected");
+        assert!(
+            p.id().starts_with("auto:openai_compat:"),
+            "detected provider id carries the endpoint: {}",
+            p.id()
+        );
     }
 }

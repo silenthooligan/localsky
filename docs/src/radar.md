@@ -63,6 +63,7 @@ two kinds:
 | **LibreWXR** | Radar + nowcast | US, Canada, Europe, Japan, Taiwan, SE Asia | The regional default where covered: real radar plus a 60-minute nowcast |
 | **RainViewer** | Radar | Global | The worldwide fallback: animated precipitation anywhere on Earth |
 | **IEM NEXRAD** | Reflectivity (WMS) | US (CONUS) | Sharp, street-scale US base reflectivity |
+| **NOAA MRMS** | Radar rain | US (CONUS) | Observation-grade gauge-corrected radar rainfall; the best off-yard read of the rain that actually fell on your location |
 | **NOAA nowCOAST** | Reflectivity (WMS) | US incl. Alaska, Hawaii, Caribbean, Guam | US detail beyond the contiguous 48 |
 | **Environment Canada GeoMet** | Reflectivity (WMS) | Canada | National 1 km precip-rate composite |
 | **DWD** | Reflectivity (WMS) | Germany / Central Europe | RADOLAN precipitation composite |

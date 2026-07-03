@@ -11,8 +11,6 @@
 
 use std::collections::HashSet;
 
-use chrono::{Local, TimeZone};
-
 use crate::config::schema::{AddressParity, SkipRuleParams, WateringRestriction};
 use crate::engine::conditions::{apply_zone_rules, ConditionCtx, ConditionRule};
 use crate::engine::restrictions;
@@ -880,8 +878,16 @@ fn pre_soil(
     // `now_epoch` interpreted as local time so the DST-vs-EST window math
     // matches the operator's clock. Runs before all weather gates so the
     // verdict reason explains the legal block, not the weather.
+    // TZ: interpret now_epoch in the CONFIGURED deployment timezone (via
+    // timeutil), not chrono::Local (the container TZ). A container left at
+    // UTC would otherwise shift every weekday/parity/forbidden-hours window
+    // and could water on a legally banned day or block every legal morning.
+    // Same fix as format_pause_until above.
     if !i.watering_restrictions.is_empty() && i.now_epoch > 0 {
-        if let Some(now_local) = Local.timestamp_opt(i.now_epoch, 0).single() {
+        let tz_offset = *crate::timeutil::now_local().offset();
+        if let Some(now_local) =
+            chrono::DateTime::from_timestamp(i.now_epoch, 0).map(|dt| dt.with_timezone(&tz_offset))
+        {
             let v = restrictions::evaluate(now_local, &i.watering_restrictions, i.address_parity);
             if v.skip {
                 return Some((
@@ -1835,8 +1841,13 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
     // Jurisdictional / HOA watering restrictions.
     {
         let applicable = !i.watering_restrictions.is_empty() && i.now_epoch > 0;
+        // TZ: configured deployment timezone, not chrono::Local. Mirrors
+        // pre_soil so the trace matches the live decision.
+        let tz_offset = *crate::timeutil::now_local().offset();
         let (cond, reason) = if applicable {
-            match Local.timestamp_opt(i.now_epoch, 0).single() {
+            match chrono::DateTime::from_timestamp(i.now_epoch, 0)
+                .map(|dt| dt.with_timezone(&tz_offset))
+            {
                 Some(now_local) => {
                     let v = restrictions::evaluate(
                         now_local,
@@ -2309,11 +2320,18 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
     DecisionTrace {
         verdict,
         reason,
-        // Anything short of fresh station data OR a stale forecast marks the
-        // trace degraded so the Rule Lab / API can flag that the decision ran on
-        // substituted or aged inputs. (Previously only station staleness set this,
-        // so a multi-hour-old forecast produced a confident, non-degraded verdict.)
-        degraded: i.live_readings != LiveReadings::Station || i.forecast_stale,
+        // "Degraded" means the decision ran on genuinely poor inputs: either
+        // the live conditions are UNAVAILABLE (no live station AND no forecast,
+        // so the engine fell back to fabricated defaults) or the forecast itself
+        // is STALE. A ForecastFallback (a headline field served by a valid
+        // current-hour forecast, e.g. wind provided by a configured forecast
+        // source in the per-field chain) is the NORMAL steady state, NOT a
+        // degradation: it drives the "lower confidence" push prefix and the
+        // localsky_refresh_degraded_total metric, both of which were pinned at
+        // 100% on every healthy chain install when this also tripped on
+        // ForecastFallback, making the metric useless and training users to
+        // ignore the daily "backup data" qualifier on the day it is real.
+        degraded: i.live_readings == LiveReadings::Unavailable || i.forecast_stale,
         reason_code,
         rules,
     }
@@ -2450,6 +2468,30 @@ mod tests {
         assert!(
             stale.degraded,
             "a stale forecast must mark the decision trace degraded"
+        );
+    }
+
+    #[test]
+    fn forecast_fallback_is_not_degraded_but_unavailable_is() {
+        // A headline field served by a valid current-hour forecast (the normal
+        // steady state on a per-field-chain install, e.g. wind from a configured
+        // forecast source) must NOT flag the decision degraded: it drives the
+        // "backup data" push prefix and the degraded-rate metric, which were
+        // pinned at 100% forever when ForecastFallback tripped this.
+        let p = SkipRuleParams::default();
+        let mut i = base();
+        i.forecast_stale = false;
+        i.live_readings = LiveReadings::ForecastFallback;
+        assert!(
+            !decide_traced(&i, &p).degraded,
+            "a forecast-filled headline field with a fresh forecast is not degraded"
+        );
+        // Genuinely flying blind (no live station AND no forecast, so inputs are
+        // fabricated defaults) still flags degraded.
+        i.live_readings = LiveReadings::Unavailable;
+        assert!(
+            decide_traced(&i, &p).degraded,
+            "unavailable live inputs must mark the decision trace degraded"
         );
     }
 
@@ -3454,14 +3496,18 @@ mod tests {
     }
 
     #[test]
-    fn forecast_fallback_runs_but_marks_trace_degraded() {
+    fn forecast_fallback_runs_and_is_not_degraded() {
         let p = SkipRuleParams::default();
         let mut i = base();
         i.live_readings = LiveReadings::ForecastFallback;
         let t = decide_traced(&i, &p);
         assert_eq!(t.verdict, "run");
-        assert!(t.degraded);
-        // Fresh station data is not degraded.
+        // A headline field served by a valid current-hour forecast (normal on a
+        // per-field-chain install) is NOT a degradation: it must not pin the
+        // degraded-rate metric or the daily "backup data" push at 100%. Only
+        // Unavailable inputs (fabricated defaults) or a stale forecast degrade.
+        assert!(!t.degraded);
+        // Fresh station data is not degraded either.
         let t2 = decide_traced(&base(), &p);
         assert!(!t2.degraded);
     }

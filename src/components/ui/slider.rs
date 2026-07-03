@@ -42,7 +42,7 @@ pub fn Slider(
                 max=move || max.to_string()
                 step=move || step.to_string()
                 prop:value=move || value.get()
-                aria-label=move || if aria_range.is_empty() { String::new() } else { aria_range.clone() }
+                aria-label=move || (!aria_range.is_empty()).then(|| aria_range.clone())
                 on:input=move |ev| {
                     if let Ok(v) = event_target_value(&ev).parse::<f64>() {
                         value.set(v.clamp(min, max));
@@ -57,7 +57,7 @@ pub fn Slider(
                     max=move || max.to_string()
                     step=move || step.to_string()
                     prop:value=move || format!("{:.*}", precision, value.get())
-                    aria-label=move || if aria_num.is_empty() { String::new() } else { aria_num.clone() }
+                    aria-label=move || (!aria_num.is_empty()).then(|| aria_num.clone())
                     on:input=move |ev| {
                         if let Ok(v) = event_target_value(&ev).parse::<f64>() {
                             value.set(v.clamp(min, max));

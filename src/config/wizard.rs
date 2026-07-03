@@ -324,6 +324,15 @@ impl WizardStore {
             // NEVER a keyed source (Pirate/OpenWeather/WeatherKit): those stay
             // operator opt-in.
             for entry in crate::config::region::region_keyless_authority_entries(lat, lon) {
+                // Record the tombstone AT CREATION, not just at the later boot
+                // seeding pass. Otherwise a user who deletes a seeded authority
+                // BEFORE the first restart loses the deletion: boot's
+                // seed_missing_forecast_authorities would see the id absent from
+                // both sources and seeded_source_ids and re-add it. Writing the
+                // id here means the tombstone exists the instant the source does.
+                if !draft.config.seeded_source_ids.contains(&entry.id) {
+                    draft.config.seeded_source_ids.push(entry.id.clone());
+                }
                 draft.config.sources.push(entry);
             }
         }
@@ -694,6 +703,33 @@ mod tests {
         }
         // No keyed source was ever auto-enabled.
         assert!(by("pirate_weather").is_none() && by("openweather").is_none());
+    }
+
+    #[test]
+    fn finalize_sources_tombstones_authorities_so_delete_before_restart_sticks() {
+        // Regression (adversarial finding, HIGH): the wizard must record each
+        // seeded authority id in seeded_source_ids AT CREATION, not leave it to
+        // the boot seeding pass. Otherwise a user who deletes a seeded authority
+        // before the first restart loses the deletion: boot's seed_missing sees
+        // the id in neither sources nor the (still-empty) tombstone list and
+        // re-adds it.
+        let mut d = draft_at(28.5, -81.4); // Orlando, US
+        WizardStore::finalize_sources(&mut d);
+        // The tombstones exist the instant the authorities do.
+        assert!(d.config.seeded_source_ids.contains(&"nws".to_string()));
+        assert!(d
+            .config
+            .seeded_source_ids
+            .contains(&"noaa_mrms".to_string()));
+
+        // User deletes NWS from the UI before any restart records a tombstone.
+        d.config.sources.retain(|s| s.id != "nws");
+        // First boot seeding runs against the wizard-produced config.
+        let _ = crate::config::region::seed_missing_forecast_authorities(&mut d.config);
+        assert!(
+            !d.config.sources.iter().any(|s| s.id == "nws"),
+            "an authority deleted before the first restart must NOT be resurrected"
+        );
     }
 
     #[test]

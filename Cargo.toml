@@ -1,6 +1,6 @@
 [package]
 name = "localsky"
-version = "0.7.0"
+version = "0.7.2"
 edition = "2021"
 license = "Apache-2.0"
 description = "Local-first weather and irrigation control with native FAO-56 ET, multi-source weather merge, multi-controller HAL, optional Home Assistant, and optional local LLM advisor."
@@ -289,6 +289,13 @@ bin-default-features = false
 lib-features = ["hydrate"]
 lib-default-features = false
 lib-profile-release = "wasm-release"
+
+# Server (SSR) binary profile. Cargo's default release profile keeps the full
+# symbol table (roughly 15MB of the binary); stripping it shrinks the binary and
+# the shipped image at zero runtime cost (RAM and CPU are unaffected). The wasm
+# frontend inherits this and is additionally size-tuned below.
+[profile.release]
+strip = true
 
 [profile.wasm-release]
 inherits = "release"

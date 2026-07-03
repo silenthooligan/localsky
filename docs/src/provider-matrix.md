@@ -62,6 +62,7 @@ that fill in when you have no hardware for a given reading.
 | **La Crosse** (your station, cloud) | Measured | Measured | Measured | - | Measured | - | - | - | - |
 | **NWS** (official station) | Measured | Measured | Measured | Measured | - | Measured | - | - | - |
 | **NOAA MRMS** (radar rain) | - | - | - | Radar | Radar | - | - | - | - |
+| **Synoptic Data** (nearest real station) | Measured | Measured | Measured | - | - | Measured | - | - | - |
 | **Pirate Weather** | Nowcast | Nowcast | Nowcast | Forecast | - | Nowcast | - | Nowcast | - |
 | **OpenWeather** | Model | Model | Model | Forecast | - | Model | - | Model | - |
 | **Apple WeatherKit** | Model | Model | Model | Forecast | - | Model | - | Model | - |
@@ -96,6 +97,7 @@ on purpose.
 | **La Crosse** (your station, cloud) | free key | Real station via cloud | 5min | 3900s (65min) | Your exact yard |
 | **NWS** (official station) | none | Official observation, lags 30-90min | 30min | 2100s (35min) | Nearest station, often an airport 5-30 miles away |
 | **NOAA MRMS** (radar rain) | none | Radar QPE (observation grade) | 3min | Rate 900s (15min), accum 7200s (2hr) | 1 km radar grid over your block |
+| **Synoptic Data** (nearest real station) | free key | Real station observation | 10min | 3900s (65min) | Nearest station, can be several miles away |
 | **Pirate Weather** | free key | Split: live nowcast + model rain forecast | 10min | 3900s (65min) | ~3 km grid in the US |
 | **OpenWeather** | paid | Model forecast | 10min | 3900s (65min) | ~500 m to 2 km cell |
 | **Apple WeatherKit** | paid | Model forecast | 10min | 3900s (65min) | Tuned to your coordinates (most precise cloud) |
@@ -137,6 +139,11 @@ A few rows reward a second look:
 - **NOAA MRMS is rain only, and it is Radar, not a forecast.** It measures the
   rain that actually fell on a 1 km cell over your block: the best off-yard rain
   read short of your own gauge. It supplies nothing else.
+- **Synoptic Data is a real Measured observation, just possibly several miles
+  away.** It locates the nearest real observation station and supplies its
+  measured wind, pressure, temperature, and humidity (Measured, but possibly
+  several miles away, like NWS). It supplies no rain reading, and it needs a free
+  token.
 - **Pirate Weather splits.** Its temp, humidity, wind, pressure, and UV are a
   live **Nowcast** (live radar plus station reports, seconds of lag in the US),
   but its **rain is a Forecast**, HRRR and GEFS model output, not radar. So the

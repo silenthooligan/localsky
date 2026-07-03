@@ -200,6 +200,7 @@ fn build_snapshot(resp: &OneCallResponse, now_epoch: i64) -> ForecastSnapshot {
                 uv_index_max: d.uvi.unwrap_or(0.0),
                 sunrise_epoch: d.sunrise.unwrap_or(0),
                 sunset_epoch: d.sunset.unwrap_or(0),
+                ..Default::default()
             }
         })
         .collect();
@@ -220,6 +221,7 @@ fn build_snapshot(resp: &OneCallResponse, now_epoch: i64) -> ForecastSnapshot {
             wind_dir_deg: (h.wind_deg.unwrap_or(0.0).round() as i64).rem_euclid(360) as u32,
             humidity_pct: (h.humidity.unwrap_or(0.0).round() as i64).clamp(0, 100) as u32,
             cloud_cover_pct: (h.clouds.unwrap_or(0.0).round() as i64).clamp(0, 100) as u32,
+            ..Default::default()
         })
         .collect();
 
@@ -231,6 +233,7 @@ fn build_snapshot(resp: &OneCallResponse, now_epoch: i64) -> ForecastSnapshot {
         daily,
         past_daily: vec![],
         hourly,
+        ..Default::default()
     };
     // Pair each day's high temp with THAT day's afternoon humidity (hourly).
     snap.backfill_daily_humidity();

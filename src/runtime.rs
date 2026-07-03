@@ -136,7 +136,7 @@ impl Runtime {
         let sources = SourceRegistry::new();
         sources.set(build_sources(&config.load()));
         let controllers = ControllerRegistry::new();
-        controllers.set(build_controllers(&config.load(), runs.clone()));
+        controllers.set(build_controllers(&config.load(), Some(runs.clone())));
 
         // ----- Step 5: LLM provider -----
         let llm = build_llm(&config.load()).await;
@@ -784,6 +784,16 @@ pub fn apply_runtime_config(
                     .to_string(),
             );
         }
+        // The zone->station map is baked into each controller at construction,
+        // so a station remap (or moving a zone to another controller) on an
+        // otherwise-unchanged zone set still needs a boot.
+        if zone_station_fingerprint(prev) != zone_station_fingerprint(new_cfg) {
+            reasons.push(
+                "a zone's controller or station binding changed (the zone-to-station map \
+                 is baked into the controller at boot)"
+                    .to_string(),
+            );
+        }
         // Listen address / Leptos site config is read once at boot.
         if prev.deployment.mode != new_cfg.deployment.mode {
             reasons.push(
@@ -799,6 +809,22 @@ pub fn apply_runtime_config(
                     .to_string(),
             );
         }
+        // Web Push dispatcher resolves its VAPID keypair once at boot.
+        if web_push_fingerprint(prev) != web_push_fingerprint(new_cfg) {
+            reasons.push(
+                "Web Push (VAPID) configuration changed (the push dispatcher \
+                 resolves its keypair at boot)"
+                    .to_string(),
+            );
+        }
+        // The LLM advisor client is built once at boot from cfg.llm.
+        if llm_fingerprint(prev) != llm_fingerprint(new_cfg) {
+            reasons.push(
+                "the LLM advisor configuration changed (the advisor client is \
+                 built at boot)"
+                    .to_string(),
+            );
+        }
     }
     ConfigApplyOutcome {
         restart_required: !reasons.is_empty(),
@@ -806,11 +832,16 @@ pub fn apply_runtime_config(
     }
 }
 
-/// Identity of the source-connection wiring: (id, kind tag, enabled) per source,
-/// sorted. Excludes priority + field overrides (both hot-reloaded), so this only
-/// changes when a connection must be (de)spawned at boot.
-fn source_wiring_fingerprint(cfg: &Config) -> Vec<(String, &'static str, bool)> {
-    let mut v: Vec<(String, &'static str, bool)> = cfg
+/// Identity of the source-connection wiring: (id, kind tag, enabled, inner
+/// config) per source, sorted. The serialized inner config is included so a
+/// change to an adapter's host / token / poll interval / calibration flips
+/// restart_required: source adapters hold their config MOVED-IN at spawn() and
+/// do NOT hot-reload it (only `priority` and the per-field override/chain maps
+/// hot-reload, and those live on the SourceEntry / Config, not inside
+/// `e.source`, so they are excluded here). serde_json is deterministic for a
+/// given config (struct field order + sorted BTreeMaps).
+fn source_wiring_fingerprint(cfg: &Config) -> Vec<(String, &'static str, bool, String)> {
+    let mut v: Vec<(String, &'static str, bool, String)> = cfg
         .sources
         .iter()
         .map(|e| {
@@ -818,6 +849,7 @@ fn source_wiring_fingerprint(cfg: &Config) -> Vec<(String, &'static str, bool)> 
                 e.id.clone(),
                 crate::config::kind_labels::source_kind_label(&e.source),
                 e.enabled,
+                serde_json::to_string(&e.source).unwrap_or_default(),
             )
         })
         .collect();
@@ -825,10 +857,13 @@ fn source_wiring_fingerprint(cfg: &Config) -> Vec<(String, &'static str, bool)> 
     v
 }
 
-/// Identity of the controller wiring: (id, kind tag, enabled, default) per
-/// controller, sorted. Changes only when a controller must be rebuilt at boot.
-fn controller_wiring_fingerprint(cfg: &Config) -> Vec<(String, &'static str, bool, bool)> {
-    let mut v: Vec<(String, &'static str, bool, bool)> = cfg
+/// Identity of the controller wiring: (id, kind tag, enabled, default, inner
+/// config) per controller, sorted. Like the source fingerprint, the serialized
+/// inner config is included so an OpenSprinkler host / credential / any adapter
+/// field edit flips restart_required (controllers are built once at boot and the
+/// dispatch registry is not hot-swapped).
+fn controller_wiring_fingerprint(cfg: &Config) -> Vec<(String, &'static str, bool, bool, String)> {
+    let mut v: Vec<(String, &'static str, bool, bool, String)> = cfg
         .controllers
         .iter()
         .map(|e| {
@@ -837,11 +872,61 @@ fn controller_wiring_fingerprint(cfg: &Config) -> Vec<(String, &'static str, boo
                 crate::config::kind_labels::controller_kind_label(&e.controller),
                 e.enabled,
                 e.default,
+                serde_json::to_string(&e.controller).unwrap_or_default(),
             )
         })
         .collect();
     v.sort();
     v
+}
+
+/// Per-zone controller binding: (zone slug, controller_id, controller_station),
+/// sorted. The zone->station map is baked into each controller at construction
+/// (e.g. OpenSprinklerDirect), so remapping a zone's station or moving a zone to
+/// a different controller needs a boot to take effect even when the controller
+/// ENTRY and the zone SET are both unchanged. Without this a valve rewire (say
+/// front_yard station 2 -> 3) would report "applied, no restart needed" and keep
+/// actuating the old physical station until an unrelated restart.
+fn zone_station_fingerprint(cfg: &Config) -> Vec<(String, String, String)> {
+    let mut v: Vec<(String, String, String)> = cfg
+        .zones
+        .iter()
+        .map(|(slug, z)| {
+            (
+                slug.clone(),
+                z.controller_id.clone(),
+                z.controller_station.clone(),
+            )
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// The [llm] advisor provider config, so changing it flags a restart: the
+/// advisor client (AdvisorState) is built ONCE at boot from cfg.llm. Without
+/// this a user who configures an LLM provider in Settings (whose wizard Test
+/// passes via a different path) gets no restart banner and the live advisor
+/// keeps its boot-time (often env-only / disabled) client.
+fn llm_fingerprint(cfg: &Config) -> Option<String> {
+    cfg.llm
+        .as_ref()
+        .map(|l| serde_json::to_string(l).unwrap_or_default())
+}
+
+/// The Web Push (VAPID) identity, so enabling or changing notifications.web_push
+/// flags a restart: the push dispatcher resolves its VAPID keypair EXACTLY ONCE
+/// at boot and, when it is absent, silently drops every event. Without this a
+/// user who enables Web Push in the wizard/settings gets no restart banner and
+/// notifications never fire until a manual restart.
+fn web_push_fingerprint(cfg: &Config) -> Option<(String, String, String)> {
+    cfg.notifications.web_push.as_ref().map(|w| {
+        (
+            w.vapid_public.clone(),
+            w.vapid_private_path.clone(),
+            w.vapid_subject.clone(),
+        )
+    })
 }
 
 /// Whether the HA MQTT discovery publisher would be started, plus its broker
@@ -873,7 +958,11 @@ fn field_set_names(fields: Vec<crate::ports::weather_source::WeatherField>) -> V
 
 pub fn build_controllers(
     cfg: &Config,
-    runs: RunsStore,
+    // Optional: only the DryRun controller records into it. Passing None lets
+    // the caller build a stop-capable registry when the persistence DB is
+    // unavailable, so a valve left open by a crash can still be reconciled
+    // closed at boot (real controllers never need the runs store).
+    runs: Option<RunsStore>,
 ) -> Vec<(Arc<dyn IrrigationController>, bool)> {
     let mut out: Vec<(Arc<dyn IrrigationController>, bool)> = Vec::new();
     for entry in &cfg.controllers {
@@ -898,7 +987,7 @@ pub fn build_controllers(
             ControllerKind::DryRun(c) => Some(Arc::new(DryRunController::new(
                 entry.id.clone(),
                 c.clone(),
-                Some(runs.clone()),
+                runs.clone(),
             ))),
             ControllerKind::OpensprinklerDirect(c) => {
                 // Build zone -> station map from cfg.zones for this
@@ -1256,6 +1345,7 @@ mod tests {
                 past_days: 1,
                 include_radar: false,
                 model: crate::forecast::model_catalog::DEFAULT_MODEL.to_string(),
+                endpoint: None,
             }),
         };
         SourceEntry {
@@ -1345,6 +1435,7 @@ mod tests {
                 past_days: 1,
                 include_radar: false,
                 model: crate::forecast::model_catalog::DEFAULT_MODEL.to_string(),
+                endpoint: None,
             }),
         });
         // A cloud AUTHORITY (NOAA MRMS) with NO max_age_s -> present at its per-kind
@@ -1898,6 +1989,27 @@ mod tests {
         assert!(
             !outcome.restart_required,
             "re-ranking + pinning existing sources is a pure hot-reload: {:?}",
+            outcome.restart_reasons
+        );
+    }
+
+    #[test]
+    fn restart_required_true_when_a_source_inner_config_changes() {
+        // Editing an EXISTING source's inner config (host / token / interval /
+        // calibration) cannot hot-reload: adapters hold their config moved-in at
+        // spawn(). Same id/kind/enabled, only the Tempest hub_serial changed, so
+        // the OLD (id, kind, enabled)-only fingerprint reported no restart while
+        // the adapter kept the stale value.
+        let cfg0 = cfg_two_live_sources(60, 90, &[]);
+        let h = handles_with(&cfg0);
+        let mut cfg1 = cfg0.clone();
+        if let SourceKind::TempestUdp(c) = &mut cfg1.sources[0].source {
+            c.hub_serial = Some("HB-00042".into());
+        }
+        let outcome = apply_runtime_config(&h, Some(&cfg0), &cfg1);
+        assert!(
+            outcome.restart_required,
+            "changing a source's inner config must flag restart_required: {:?}",
             outcome.restart_reasons
         );
     }

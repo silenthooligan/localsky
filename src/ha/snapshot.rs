@@ -344,6 +344,33 @@ pub struct Forecast {
     pub heat_multiplier: f64,
     /// Days since last ≥ 0.05" rain day (heat-advisory input).
     pub days_since_significant_rain: u32,
+
+    // ── Extended model context (2026-07, Open-Meteo extended variables;
+    // every field additive + defaulted: 0 = provider doesn't report it) ──
+    /// Model ET0 already SPENT today (local midnight to now), mm. The
+    /// full-day figure stays in `eto_today_mm`; this makes the midday
+    /// water-balance honest instead of charging the whole day up front.
+    #[serde(default)]
+    pub eto_spent_today_mm: f64,
+    /// Vapour pressure deficit now, kPa. Sustained > ~1.6 kPa = high
+    /// transpiration stress (advisory display only, never a skip input).
+    #[serde(default)]
+    pub vpd_now_kpa: f64,
+    /// Peak VPD across the rest of today, kPa.
+    #[serde(default)]
+    pub vpd_max_today_kpa: f64,
+    /// Modeled soil temperature at 6 cm now, °F. Model data, NOT a probe;
+    /// zones with real probes keep their own `soil_temp_f`.
+    #[serde(default)]
+    pub soil_temp_6cm_now_f: f64,
+    /// Modeled 3-9 cm volumetric soil moisture now, m³/m³.
+    #[serde(default)]
+    pub soil_moisture_3_9_now_vwc: f64,
+    /// Modeled 3-9 cm volumetric soil moisture ~48 h out (dry-down read:
+    /// falling vs `soil_moisture_3_9_now_vwc` means the model expects the
+    /// root zone to dry).
+    #[serde(default)]
+    pub soil_moisture_3_9_in48h_vwc: f64,
 }
 
 /// One day in the 7-day forward verdict strip. Result of running the

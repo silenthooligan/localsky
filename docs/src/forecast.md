@@ -15,3 +15,16 @@ the number you see is the number the engine acted on.
 Sources are health-tracked: a polled model is "fresh" within its
 poll cadence (about 30 minutes for Open-Meteo) and the merge fails
 over to the next source when one goes quiet.
+
+## Choosing your forecast source
+
+An install with no hardware uses Open-Meteo automatically (free, no API
+key), so you see a forecast immediately; it is the recommended
+zero-config pick. To drive the forecast pipeline with a different
+provider, open Settings > Devices > Data sources and use the forecast
+source picker. "Automatic" keeps Open-Meteo as the low-priority
+failover; selecting a provider (NWS, Pirate Weather, MET Norway,
+OpenWeather, or any enabled forecast-capable source) pins it to win
+regardless of the per-source priority ranking. If the pinned source
+goes offline the forecast still works by falling back to the next
+source, so a pin never blanks the forecast.

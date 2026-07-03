@@ -19,6 +19,7 @@ Source: [src/engine/skip_rules.rs](../src/engine/skip_rules.rs).
 | 9 | Wind too high now | `wind_now_mph > max_wind_mph` | 10 mph (16 km/h) | `max_wind_mph` |
 | 10 | Windy day forecast | `wind_max_today_mph > max_wind_mph + 5` | +5 mph (8 km/h) slack | `wind_forecast_slack_mph` |
 | 11 | Already wet | `rain_today_in >= 0.05` | 0.05 in (1.3 mm) | `already_wet_in` |
+| 11b | Observed rain recently | `rain_observed_recent_in >= rain_skip_in` | 0.25 in (6.4 mm) over the recent window | `rain_skip_in`, `rain_observed_window_days` |
 | 12 | All zones soil-saturated | every zone's moisture % >= saturation threshold | per-zone | per-zone soil settings |
 | 13 | Rain in next 4 hours | `rain_next_4h_in >= 0.10` | 0.10 in (2.5 mm) | `rain_next_4h_skip_in` |
 | 14 | Tomorrow rain (confidence-weighted) | `forecast_in * prob/100 >= rain_skip_in` | 0.25 in (6.4 mm), weighted | `rain_skip_in` |
@@ -41,6 +42,8 @@ The ladder returns one of three verdicts:
 
 Live precipitation intensity from the Tempest hub (or merged from any source advertising `RainIntensityInHr`). 0.01 in/hr (0.25 mm/hr) is essentially "you can see the pavement getting wet"; anything above triggers the skip.
 
+A hard "currently raining" skip only applies when the rain source is observation-grade: a local gauge, an NWS observation, or NOAA MRMS radar. A model forecast rain rate is treated as a soft skip that a measured-dry zone can demote to a run (see [Soil floor (the moat)](#soil-floor-the-moat)).
+
 ### Freeze + soil frost (rules 6-8)
 
 Three independent freeze checks. Air temp now blocks daytime watering on a cold front. Forecast overnight low blocks a 6 AM run when the lawn would freeze later. Soil frost is the strongest signal: cold soil + a sprinkler is how you ice a lawn.
@@ -55,6 +58,10 @@ Two thresholds: live wind right now, and forecast peak with a 5 mph (8 km/h) sla
 
 Fixed floor at 0.05 in (1.3 mm) of accumulated rain today. Configurable but rarely changed, it's a sanity check that says "I'm not going to add water to a wet lawn."
 
+### Observed rain recently (rule 11b)
+
+The sensor-independent backstop. `rain_observed_recent_in` sums today's measured rain plus the past `rain_observed_window_days` (default 1) of measured daily rain totals, and skips watering on its own when that sum reaches `rain_skip_in` (default 0.25 in / 6.4 mm). This is what makes a real afternoon rain suppress the NEXT morning's run: it carries measured rain forward independent of any soil probe or forecast. Because it reads PAST observed rain rather than a forecast, it is not gated on forecast staleness. It is a hard skip that binds every zone (the soil-floor moat below never demotes it).
+
 ### Yard-wide soil saturation (rule 12)
 
 Skip only when EVERY zone reports moisture >= its per-zone saturation threshold AND every zone has a current reading (no None / probe-offline). A single dry zone or a single missing reading breaks the skip. The per-zone HA automation `irrigation_per_zone_saturation_skip` still mutes individual saturated zones; this rule operates at the sequence level.
@@ -62,6 +69,14 @@ Skip only when EVERY zone reports moisture >= its per-zone saturation threshold 
 ### Forecast rain (rules 13-15)
 
 Three look-ahead windows: next 4 hours (hourly forecast), tomorrow (probability-weighted to deflate uncertain forecasts), and 3-day rollup. The 3-day uses a 1.5x multiplier on the user's rain-skip threshold to require more total rain before skipping (a wider window is a weaker signal).
+
+### Soil floor (the moat)
+
+A soft, forecast-based rain skip (next 4 hours, tomorrow, or the 3-day rollup) may be demoted to a run when a zone is measured healthy-dry: its soil percent is below its per-zone dry floor, `target_min_pct_soil`, with a present probe reading above zero. This honours measured soil truth over an uncertain forecast. Hard skips (measured rain now, observed recent rain, freeze, wind, soil saturation) are never demotable, and observation-grade rain (a real gauge or MRMS radar) never demotes.
+
+### Bad or offline soil probes (quarantine)
+
+When `soil_quarantine_enabled` is true (the default), a probe that is offline or reads as a wild outlier versus its siblings (beyond `soil_outlier_threshold_pct`, default 35 pp) is distrusted, and that zone's effective soil for the saturation and dry-floor gates is inferred from the trustworthy sibling readings. This stops a single bad-spot probe from driving a saturated zone to water, while a genuinely saturated zone still skips. Set `soil_quarantine_enabled` to false to restore the exact pre-quarantine behavior.
 
 ### Heat advisory pre-water (rule 16)
 
@@ -92,6 +107,9 @@ max_wind_mph             = 10.0   # 16 km/h
 min_temp_f               = 38.0   # 3.3 C
 rain_skip_in             = 0.25   # 6.4 mm
 frost_skip_soil_f        = 35.0   # 1.7 C
+rain_observed_window_days = 1     # today + N past days of measured rain
+soil_quarantine_enabled  = true   # distrust offline / outlier probes
+soil_outlier_threshold_pct = 35.0 # pp from sibling median before distrust
 ```
 
 Edit via `PUT /api/config` (the settings UI does this); changes apply on the next engine tick (default 60s).

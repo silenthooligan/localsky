@@ -42,6 +42,10 @@ pub struct AmbientWeather {
 #[derive(Debug, Deserialize)]
 struct Observation {
     tempf: Option<f64>,
+    // Ambient returns the calculated dew point as camelCase `dewPoint`; without
+    // the rename it deserialized to None and DewPointF was never emitted despite
+    // capabilities() advertising it (matches pirate_weather's `dewPoint` handling).
+    #[serde(rename = "dewPoint")]
     dewpoint: Option<f64>,
     humidity: Option<f64>,
     baromrelin: Option<f64>, // inHg already
@@ -232,5 +236,112 @@ mod tests {
         // Cloud-routed station priority should beat the typical 25-50 of
         // a forecast source.
         assert!(a.priority(WeatherField::AirTempF) > 50);
+    }
+
+    /// A realistic GET /v1/devices/{mac}?limit=1 body, field names exactly
+    /// as ambientweather.net returns them (the API docs' device-data
+    /// example): camelCase CALCULATED fields (feelsLike, dewPoint),
+    /// epoch-ms dateutc, the full rain family, and indoor/battery fields
+    /// the adapter does not read. Everything unknown must parse-tolerate.
+    const REALISTIC_DEVICE_PAYLOAD: &str = r#"[
+      {
+        "dateutc": 1751212345000,
+        "tempf": 84.2,
+        "humidity": 57,
+        "windspeedmph": 4.7,
+        "windgustmph": 8.1,
+        "maxdailygust": 14.5,
+        "winddir": 193,
+        "baromrelin": 29.921,
+        "baromabsin": 29.362,
+        "tempinf": 74.1,
+        "humidityin": 48,
+        "hourlyrainin": 0.118,
+        "eventrainin": 0.24,
+        "dailyrainin": 0.36,
+        "weeklyrainin": 1.02,
+        "monthlyrainin": 2.75,
+        "totalrainin": 48.61,
+        "solarradiation": 612.4,
+        "uv": 6,
+        "battout": 1,
+        "feelsLike": 88.9,
+        "dewPoint": 67.3,
+        "lastRain": "2026-06-29T10:04:00.000Z",
+        "date": "2026-06-29T16:32:25.000Z"
+      }
+    ]"#;
+
+    /// The payload-parse path fetch_latest feeds run(): a realistic
+    /// /v1/devices document deserializes into the Observation the field
+    /// mapping reads, with each engine-bound field carried by the right
+    /// JSON key in the right unit.
+    #[test]
+    fn realistic_payload_extracts_engine_fields_with_expected_units() {
+        let body: Vec<Observation> =
+            serde_json::from_str(REALISTIC_DEVICE_PAYLOAD).expect("realistic payload parses");
+        let o = body.into_iter().next().expect("one observation");
+
+        // Fahrenheit / percent / mph / degrees / index / W/m2, passed
+        // through 1:1 to AirTempF / RhPct / WindMph / WindGustMph /
+        // WindBearingDeg / UvIndex / SolarWm2.
+        assert_eq!(o.tempf, Some(84.2));
+        assert_eq!(o.humidity, Some(57.0));
+        assert_eq!(o.windspeedmph, Some(4.7));
+        assert_eq!(o.windgustmph, Some(8.1));
+        assert_eq!(o.winddir, Some(193.0));
+        assert_eq!(o.uv, Some(6.0));
+        assert_eq!(o.solarradiation, Some(612.4));
+
+        // Pressure: baromRELin (sea-level RELATIVE, already inHg) is the
+        // key mapped to PressureInHg, NOT baromabsin (absolute). The two
+        // differ in the payload, so a key mixup would show here.
+        assert_eq!(o.baromrelin, Some(29.921));
+
+        // RAIN units: dailyrainin is the day's ACCUMULATION (inches) ->
+        // RainTodayIn; hourlyrainin is the current RATE (in/hr) ->
+        // RainIntensityInHr. The values differ, so swapping the keys (or
+        // grabbing eventrainin/weeklyrainin) would mis-feed the
+        // observed-rain gate and fail here.
+        assert_eq!(o.dailyrainin, Some(0.36));
+        assert_eq!(o.hourlyrainin, Some(0.118));
+    }
+
+    /// ambientweather.net serves the calculated dew point as camelCase
+    /// "dewPoint" (see the API docs' device-data example); the `#[serde(rename)]`
+    /// maps it so DewPointF is actually emitted (capabilities() advertises it).
+    #[test]
+    fn realistic_payload_parses_camelcase_dew_point() {
+        let body: Vec<Observation> =
+            serde_json::from_str(REALISTIC_DEVICE_PAYLOAD).expect("realistic payload parses");
+        let o = body.into_iter().next().expect("one observation");
+        assert_eq!(
+            o.dewpoint,
+            Some(67.3),
+            "camelCase dewPoint maps to `dewpoint`"
+        );
+    }
+
+    /// A station without a rain gauge / solar sensor omits those keys
+    /// entirely: they must parse as None (fields not emitted), never a
+    /// fabricated 0.0 that would feed a false-dry into the observed-rain
+    /// gate. An empty device array (brand-new station) yields no
+    /// observation at all.
+    #[test]
+    fn sparse_and_empty_payloads_yield_none_not_zero() {
+        let body: Vec<Observation> = serde_json::from_str(r#"[{ "tempf": 51.3, "humidity": 82 }]"#)
+            .expect("sparse payload parses");
+        let o = body.into_iter().next().expect("one observation");
+        assert_eq!(o.tempf, Some(51.3));
+        assert_eq!(o.humidity, Some(82.0));
+        assert_eq!(o.dailyrainin, None, "absent rain key must stay None");
+        assert_eq!(o.hourlyrainin, None);
+        assert_eq!(o.baromrelin, None);
+        assert_eq!(o.windspeedmph, None);
+        assert_eq!(o.solarradiation, None);
+
+        // Empty response array: fetch_latest's `.into_iter().next()` view.
+        let body: Vec<Observation> = serde_json::from_str("[]").expect("empty array parses");
+        assert!(body.into_iter().next().is_none());
     }
 }

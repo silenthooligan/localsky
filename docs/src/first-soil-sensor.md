@@ -12,7 +12,7 @@ LocalSky talks about hardware in three tiers. Keeping them straight is the one t
 
 So a soil probe never connects to LocalSky directly. It rides in through a source: an Ecowitt gateway polls it, an MQTT topic carries it, or Home Assistant already owns it and LocalSky reads it from there. Add the source first, and its sensors show up underneath it, ready to bind to a zone.
 
-You manage all of this in two places. **Settings, Devices** is the hub where you add sources and controllers and see every device LocalSky knows about. **Settings, Sensors** is the lens that lists just the probes and meters, grouped by the source or controller they arrive through, with the control to bind each one to a zone.
+You manage all of this in two places. **Settings, Devices** is the unified hub where you add sources and controllers, each with live status and an enable/disable toggle, and see every device LocalSky knows about (plus any you already have in Home Assistant). **Settings, Sensors** is the lens that lists just the probes and meters, grouped by the source or controller they arrive through, with the control to bind each one to a zone.
 
 ## The three ways in
 
@@ -88,7 +88,7 @@ How the engine uses a bound probe:
 - **Inside the band**: healthy; scheduled runs still apply unless the saturation threshold says otherwise.
 - **At or above saturation**: the zone skips on its own, even when the day's overall verdict is Run, and the skip reason names the zone's moisture reading and the saturation threshold (for example, "Soil saturated (76% ≥ 65% threshold)").
 
-If a bound probe goes offline, the zone falls back to the modeled bucket automatically. Nothing blocks; a missing probe never stops a run.
+If a bound probe goes offline, the zone falls back to the modeled bucket automatically. Nothing blocks; a missing probe never stops a run. If a probe reads as a wild outlier versus its neighbours, or goes offline entirely, the irrigation and zones views flag it as an anomaly so you know to check the hardware.
 
 ## A note on flow meters: capable vs connected
 

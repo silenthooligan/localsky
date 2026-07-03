@@ -1,0 +1,64 @@
+---
+source: src/api/snapshot_tests.rs
+expression: health
+---
+{
+  "status": "ok",
+  "config_present": true,
+  "version": "0.0.0-test",
+  "schema_version": 0,
+  "uptime_s": 0,
+  "subsystems": {
+    "config_store": "ok",
+    "persistence": "ok"
+  },
+  "sources": [
+    {
+      "id": "open_meteo",
+      "kind": "open_meteo",
+      "enabled": true,
+      "last_seen_epoch": 0,
+      "stale_for_s": 0,
+      "status": "active"
+    }
+  ],
+  "controllers": [
+    {
+      "id": "opensprinkler",
+      "kind": "opensprinkler",
+      "default": true,
+      "enabled": true
+    }
+  ],
+  "soil_probe_faults": [
+    {
+      "zone_slug": "back_yard",
+      "zone_name": "Back yard",
+      "sensor_id": "source:ecowitt_gw:soilmoisture1",
+      "since_epoch": 0
+    }
+  ],
+  "ha": {
+    "env_configured": false,
+    "reachable": false,
+    "snapshot_source": "standalone",
+    "passthrough_sources": [
+      [
+        "ha_weather",
+        0
+      ]
+    ],
+    "service_call_controllers": [
+      "ha_valves"
+    ],
+    "mqtt_discovery": false,
+    "hacs_last_seen_epoch": 0,
+    "hacs_streaming": false
+  },
+  "conditions": [
+    {
+      "field": "Air temperature",
+      "source": "Open-Meteo"
+    }
+  ]
+}

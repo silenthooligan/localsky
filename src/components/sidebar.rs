@@ -138,24 +138,28 @@ fn NavLink(
     label: &'static str,
     #[prop(optional)] sub: bool,
 ) -> impl IntoView {
-    let loc = use_location();
-    let active_class = move || {
+    let pathname = use_location().pathname;
+    // Shared active predicate: feeds the class AND aria-current="page"
+    // so visual state and the SR-exposed state cannot drift.
+    let is_active = move || {
         // route_path strips any ingress/base prefix so the compare against
         // route literals holds in both serving modes.
-        let path = crate::base::route_path(&loc.pathname.get());
+        let path = crate::base::route_path(&pathname.get());
         // Exact match for the root route to keep Weather from
         // light-housing on /irrigation/zone/* and /settings/*.
-        let is_active = if href == "/" {
+        if href == "/" {
             path == "/"
         } else {
             path == href || path.starts_with(&format!("{href}/"))
-        };
+        }
+    };
+    let active_class = move || {
         let base = if sub {
             "sidebar-link sidebar-link--sub"
         } else {
             "sidebar-link"
         };
-        if is_active {
+        if is_active() {
             format!("{base} is-active")
         } else {
             base.to_string()
@@ -178,7 +182,14 @@ fn NavLink(
             // text label is hidden and hover/long-press needs a tooltip.
             // aria-label guarantees SR announcement when the visible label
             // is collapsed away in the icon rail (title is not reliably read).
-            <a class=active_class href=href on:click=on_click title=label aria-label=label>
+            <a
+                class=active_class
+                href=href
+                on:click=on_click
+                title=label
+                aria-label=label
+                aria-current=move || is_active().then_some("page")
+            >
                 <span class="sidebar-link-icon"><Icon name=icon/></span>
                 <span class="sidebar-link-label">{label}</span>
             </a>

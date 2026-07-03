@@ -4,6 +4,62 @@ All notable changes to LocalSky are documented here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-07-03
+
+Forecast resilience and a weather product that adapts to your climate: a default multi-provider failover chain, restart-proof forecasts, the full Open-Meteo variable set, and condition-aware dashboard cards. No breaking changes; upgrade in place.
+
+### Added
+
+- Forecast failover, on by default: every located install now carries its region's free forecast authority alongside Open-Meteo (NWS and NOAA MRMS radar in the US, MET Norway in Europe and the Nordics), so one provider going down no longer takes the forecast, the 7-day verdicts, or rain-skip inputs with it. Existing installs get the sources automatically on upgrade; delete one and it stays deleted. When a backup is serving, the forecast header says so ("via NWS · backup") and links to source status, and data served by an Open-Meteo mirror is labeled "(mirror)".
+- Open-Meteo endpoint resilience: if the primary Open-Meteo host is unreachable, LocalSky transparently retries against two verified Open-Meteo mirror hosts before failing over to another provider.
+- The forecast now survives restarts: the last good forecast is persisted and rehydrated at boot (with its original fetch time, so staleness rules still apply), instead of starting empty until a provider answers. If no forecast has ever arrived, the weather panels and verdict strip now say so plainly after a few seconds instead of shimmering forever.
+- Richer forecast data on the 7-day cards: "burst" and "soaker" chips describe each rain day's character (short and heavy vs long and steady), from the model's precipitation-hours data.
+- Transpiration stress tile (VPD): flags days when plants lose water faster than usual (sustained vapour pressure deficit above 1.6 kPa). Advisory only; it never changes a skip decision.
+- Model soil, advisory (nerd mode): the weather model's own root-zone moisture estimate and its 48-hour drying trend, plus 6 cm soil temperature. Zone probes remain authoritative everywhere decisions are made.
+- Today's water balance now notes how much of the day's evapotranspiration the model says has already been spent, so a morning glance isn't charged the whole day's loss up front.
+- Condition-aware "Heads up" cards on the Weather home: Winter (snowfall, snow on the ground, freezing level, coldest night), Low visibility (fog windows), Storm potential (instability, peak gusts, pressure trend), and Heat (feels-like and wet-bulb peaks). Each card appears only while its condition actually holds at your location, so a mountain install, a coastal install, and a plains install each see what matters locally and nothing else.
+- Self-hosted Open-Meteo support: point the open_meteo source's new `endpoint` option at your own open-meteo instance and it leads the endpoint ladder, with the hosted service and its mirrors as automatic fallback. Served data is labeled "(self-hosted)".
+
+### Changed
+
+- The rain outlook's "Tomorrow" bar now shows the decision's real input: rain measured today that still counts toward tomorrow's skip appears as a hatched "carried" segment with the combined total, instead of a bare forecast zero that appeared to contradict a "skipping on recent rain" verdict.
+- The in-app documentation version banner now always matches the running release.
+
+### Fixed
+
+- Offline soil-probe warnings no longer name a specific sensor model. LocalSky reads only the soil channel's reading, never the hardware model, so it now says "soil probe" instead of guessing a model that could be wrong for your hardware.
+
+### Security
+
+- The self-hosted Open-Meteo endpoint is fetched through the same SSRF-hardened, IP-pinned client (redirects disabled, loopback/link-local/cloud-metadata targets refused, response size capped) that every other operator-configurable URL in LocalSky already uses.
+
+## [0.7.1] - 2026-07-02
+
+A hardening and polish release on top of 0.7.0: more robust watering safety backstops, honest source health, a broad accessibility pass, and Home Assistant fixes for weather-only installs. No breaking changes; upgrade in place.
+
+### Fixed
+
+- Home Assistant, weather-only installs: an install with no controller or zone now keeps its forecast sensors (evapotranspiration, days since rain, rain-tomorrow probability, wind-gust forecast, forecast source) and its Home Assistant connectivity sensor. Previously these were dropped along with the irrigation entities. (Update the LocalSky integration to 0.7.1.)
+- Home Assistant: forecast sensors now group under a "Forecast" device instead of "Irrigation", and flow-rate and leaf-wetness sensors are published only when a source actually provides them, so installs without that hardware no longer get always-zero phantom sensors. A new "Force override guard" sensor names the safety rule a forced run overrode, so an automation can alert on it.
+- Watering safety backstops made more robust: a scheduled cycle interrupted by an unreachable controller mid-sequence keeps its automatic shut-off timer armed (so a valve that failed to close is still closed by the backstop), overlapping runs of the same zone can no longer shorten that timer, and a valve left open by a crash is reconciled closed at boot even when the history database is unavailable. The background schedulers and the shut-off enforcer now survive an internal error and keep running rather than stopping silently.
+- The freeze and heat-advisory chips on the irrigation view no longer show a doubled degree symbol.
+- Faster loads: content-hashed app assets are cached long-term by the browser (they already change name every release) instead of being re-checked on every visit.
+
+### Changed
+
+- Honest source status: a healthy weather source that is simply outranked by a higher-priority one now reads "standby" or "watching" instead of "falling through", and the soil gateway that provides your zones' moisture reads "active". The health summary and the source list now agree.
+- The daily "decided on backup data" notice and the degraded-data health metric now fire only when the decision truly ran on missing live data or a stale forecast, not when a reading is served by a configured backup source in the normal way.
+- Restoring a configuration from a backup now applies to the running engine immediately (thresholds, restrictions, schedules) and tells you when a restart is still needed. A configuration file that exists but fails to load (a typo, an unset variable, an older build) now logs a clear error instead of quietly starting as if unconfigured.
+- Data retention is honored by every writer: "keep forever" and custom retention are no longer overridden by a 90-day default on one path.
+- Broad accessibility pass: chart data carries a text summary for screen readers, navigation announces the current page, status is never conveyed by color alone, more text meets AA contrast, focus is managed on page changes and trapped correctly in dialogs, and the installed app is no longer locked to portrait.
+
+### Security
+
+- The configuration read (`GET /api/config`) now redacts secrets that ride inside a source's URL, request headers, or request body (generic HTTP and REST-poll sources), plus the username-half of cloud credential pairs.
+- Cloud-controller API keys can no longer appear in an error message or log line when the controller is unreachable.
+- Outbound requests to user-configured hosts are size-capped, and backup restore is hardened against a decompression bomb and a wrong-database upload.
+- The public read-only demo no longer accepts anonymous sensor-data posts, and the address-search relay is no longer reachable unauthenticated.
+
 ## [0.7.0] - 2026-07-01
 
 LocalSky's version jumps from 0.5 to 0.7 to bring the whole portfolio onto one shared version: the app, the Home Assistant integration (localsky-ha), and the Home Assistant add-on now all ship as 0.7.0 and move in lockstep from here. (0.6 was an internal-only iteration; the public app moves straight to 0.7.0.)

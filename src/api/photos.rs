@@ -18,7 +18,7 @@
 // /irrigation/action is gated.
 
 use axum::{
-    extract::{Multipart, State},
+    extract::{DefaultBodyLimit, Multipart, State},
     http::StatusCode,
     response::Json,
     routing::post,
@@ -43,6 +43,11 @@ pub fn router(dir: PathBuf) -> Router {
     let state = PhotosState { dir: Arc::new(dir) };
     Router::new()
         .route("/photo", post(upload_photo))
+        // Raise axum's stock 2 MiB Multipart body cap to our documented 10 MB
+        // (plus a small headroom for the multipart envelope), so a normal phone
+        // photo reaches the handler and hits the friendly 413 with the real cap
+        // instead of a generic 400 "length limit exceeded" at 2 MiB.
+        .layer(DefaultBodyLimit::max(MAX_BYTES + 64 * 1024))
         .with_state(state)
 }
 

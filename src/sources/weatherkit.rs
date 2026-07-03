@@ -265,6 +265,7 @@ fn build_snapshot(resp: &WkResponse, timezone: &str, now_epoch: i64) -> Forecast
                         uv_index_max: d.max_uv_index.unwrap_or(0.0),
                         sunrise_epoch: d.sunrise.as_deref().map(iso_to_epoch).unwrap_or(0),
                         sunset_epoch: d.sunset.as_deref().map(iso_to_epoch).unwrap_or(0),
+                        ..Default::default()
                     }
                 })
                 .collect()
@@ -289,6 +290,7 @@ fn build_snapshot(resp: &WkResponse, timezone: &str, now_epoch: i64) -> Forecast
                         as u32,
                     humidity_pct: frac_to_pct(h.humidity.unwrap_or(0.0)),
                     cloud_cover_pct: frac_to_pct(h.cloud_cover.unwrap_or(0.0)),
+                    ..Default::default()
                 })
                 .collect()
         })
@@ -302,6 +304,7 @@ fn build_snapshot(resp: &WkResponse, timezone: &str, now_epoch: i64) -> Forecast
         daily,
         past_daily: vec![],
         hourly,
+        ..Default::default()
     };
     // Pair each day's high temp with THAT day's afternoon humidity (hourly).
     snap.backfill_daily_humidity();

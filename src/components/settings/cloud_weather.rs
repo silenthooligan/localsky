@@ -1647,7 +1647,19 @@ fn CloudRow(
                     class="cloud-row__identity is-interactive"
                     role="button"
                     tabindex="0"
+                    aria-expanded=move || if expanded.get() { "true" } else { "false" }
                     on:click=toggle_open
+                    // role="button" on a div gives button semantics but NOT the
+                    // native Enter/Space activation, so a focusable row that
+                    // ignores the keyboard is a dead control; synthesize it.
+                    on:keydown=move |ev| {
+                        let k = ev.key();
+                        if k == "Enter" || k == " " {
+                            // Space would otherwise scroll the page.
+                            ev.prevent_default();
+                            expanded.update(|v| *v = !*v);
+                        }
+                    }
                 >
                     <span class="cloud-row__title">{title.clone()}</span>
                     // The "Default for you" 6px dot, tooltip-only, replaces the

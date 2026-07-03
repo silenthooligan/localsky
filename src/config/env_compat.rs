@@ -68,6 +68,7 @@ pub fn synthesize() -> Config {
         // the serde default in schema::default_open_meteo_include_radar.
         include_radar: true,
         model: crate::forecast::model_catalog::DEFAULT_MODEL.to_string(),
+        endpoint: None,
     });
     let (om_lat, om_lon) = (cfg.deployment.location.lat, cfg.deployment.location.lon);
     // Snapshot BEFORE the Open-Meteo push: a genuinely no-hardware install has no
@@ -101,6 +102,13 @@ pub fn synthesize() -> Config {
                 "synthesized region keyless authority source '{}' (priority {}, enabled {})",
                 entry.id, entry.priority, entry.enabled
             ));
+            // Tombstone AT CREATION so a delete-before-first-restart sticks (see
+            // the same fix in wizard.rs finalize_sources): without this the boot
+            // seeding pass would resurrect an authority the user removed before
+            // any restart recorded the id.
+            if !cfg.seeded_source_ids.contains(&entry.id) {
+                cfg.seeded_source_ids.push(entry.id.clone());
+            }
             cfg.sources.push(entry);
         }
     }

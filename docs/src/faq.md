@@ -17,11 +17,11 @@ No. LocalSky is a complete standalone product: its own engine, scheduler, contro
 
 ### What hardware works with it?
 
-Weather: Tempest, Ecowitt gateways and soil probes, Davis WeatherLink Live, plus cloud and generic MQTT/webhook sources; see [Weather + soil sensors](sensors.md). Irrigation: OpenSprinkler is the canonical direct-LAN controller, with HA service-call, MQTT, cloud (Rachio, Hydrawise, B-hyve), and others; see [Controllers](controllers.md).
+Weather: Tempest, Ecowitt gateways and soil probes, Davis WeatherLink Live, Synoptic Data (pulls your nearest real station over a free token), NOAA MRMS radar rain (US radar-derived rainfall), plus cloud and generic MQTT/webhook sources; see [Weather + soil sensors](sensors.md). When you configure more than one source, per-field priority chains let each reading (rain, wind, temperature, and so on) fall through an ordered primary-then-backup list, so the merged picture keeps updating even if one source goes quiet. Irrigation: OpenSprinkler is the canonical direct-LAN controller, with HA service-call, MQTT, cloud (Rachio, Hydrawise, B-hyve, Rain Bird), and others; see [Controllers](controllers.md).
 
 ### What does "beta" mean here?
 
-The current release is v0.7.0-beta.1. The engine math (FAO-56) is stable, but the API wire format is not semver-locked until 1.0, and features and config fields can still change between releases. Config files carry a `schema_version` and migrate forward automatically at boot, so upgrades are safe; still, keep backups, and rehearse new controller setups with the `dry_run` controller before letting the engine drive real valves.
+LocalSky is in its 0.x release line (check Settings > About, or `GET /api/v1/info`, for the exact version you are running). The engine math (FAO-56) is stable, but the API wire format is not semver-locked until 1.0, and features and config fields can still change between releases. Config files carry a `schema_version` and migrate forward automatically at boot, so upgrades are safe; still, keep backups, and rehearse new controller setups with the `dry_run` controller before letting the engine drive real valves.
 
 ### Where is my data?
 
@@ -41,7 +41,7 @@ There is always a recorded reason per zone: rain already received, rain expected
 
 ### Can I enter thresholds in metric?
 
-Display follows your units preference (Settings > Units): readouts convert to °C, mm, and km/h when you pick metric. The skip-threshold input fields (already-wet, max wind, min temperature, rain skip, and friends) currently accept imperial values only; metric input is on the roadmap. The docs list metric equivalents next to every default so you can translate while you tune.
+Display units are configurable in Settings > Units. You choose the units for temperature, rainfall, wind, pressure, distance, and zone area independently, and the choice sets a household default that any individual device can override with its own preference. Every reading and every plain-language reason renders in the units you picked. The one exception is input: the skip-threshold input fields (already-wet, max wind, min temperature, rain skip, and friends) currently accept imperial values only; metric input is on the roadmap. The docs list metric equivalents next to every default so you can translate while you tune.
 
 ### Does it need internet access?
 

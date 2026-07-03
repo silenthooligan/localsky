@@ -334,6 +334,17 @@ pub struct RainOwner {
 #[cfg(feature = "ssr")]
 pub struct TempestStore {
     current: ArcSwap<Snapshot>,
+    /// Serializes the snapshot WRITERS (apply_obs / apply_source_fields /
+    /// apply_rapid_wind / apply_strikes / apply_battery / seed_rain_today).
+    /// Each writer does load-clone-mutate-store on `current`; two concurrent
+    /// writers (the UDP listener racing the bus bridge) would otherwise clone
+    /// the same `prev` and the second store would silently DROP the first
+    /// writer's fields for that tick. Readers never take this lock (ArcSwap
+    /// loads stay lock-free); writers are low-rate (~1/s UDP, per-event bus),
+    /// so serializing them costs nothing. Lock ordering: this gate is always
+    /// the OUTERMOST writer lock (field_owners / fill_owners / rolling nest
+    /// inside it).
+    write_gate: Mutex<()>,
     tx: watch::Sender<Arc<Snapshot>>,
     rx: watch::Receiver<Arc<Snapshot>>,
     rolling: Mutex<RollingBuffers>,
@@ -449,6 +460,7 @@ impl TempestStore {
         let (tx, rx) = watch::channel(initial.clone());
         Self {
             current: ArcSwap::from(initial),
+            write_gate: Mutex::new(()),
             tx,
             rx,
             rolling: Mutex::new(RollingBuffers::default()),
@@ -952,6 +964,8 @@ impl TempestStore {
     /// counted when they already exceed the seed. Returns true when the
     /// seed was applied.
     pub fn seed_rain_today(&self, rain_in: f64, day_epoch: i64) -> bool {
+        // Snapshot-writer gate: see the write_gate field doc.
+        let _write = self.write_gate.lock().unwrap();
         let bucket = local_day_ordinal(day_epoch);
         let today = local_day_ordinal(chrono::Utc::now().timestamp());
         if bucket != today || rain_in <= 0.0 {
@@ -973,6 +987,8 @@ impl TempestStore {
     }
 
     pub fn apply_obs(&self, station_serial: &str, hub_serial: &str, obs: &ObsSt) {
+        // Snapshot-writer gate (OUTERMOST writer lock; rolling nests inside).
+        let _write = self.write_gate.lock().unwrap();
         let mut roll = self.rolling.lock().unwrap();
 
         // Trim pressure buffer to last 6 hours.
@@ -1223,6 +1239,8 @@ impl TempestStore {
     }
 
     pub fn apply_rapid_wind(&self, ob: &RapidWindOb) {
+        // Snapshot-writer gate: see the write_gate field doc.
+        let _write = self.write_gate.lock().unwrap();
         let prev = self.current.load_full();
         // Rapid wind is Tempest-specific; only update the snapshot while Tempest
         // owns current conditions (or before any source has claimed), so it can't
@@ -1262,6 +1280,8 @@ impl TempestStore {
         live_current: bool,
         source_label: &str,
     ) {
+        // Snapshot-writer gate (OUTERMOST; field_owners/fill_owners nest inside).
+        let _write = self.write_gate.lock().unwrap();
         use crate::ports::weather_source::WeatherField as F;
         let prev = self.current.load_full();
         let prio = self.priority_for(source_label);
@@ -1464,6 +1484,8 @@ impl TempestStore {
     /// community network can deliver several strikes per second during
     /// an outbreak and each swap broadcasts a full snapshot.
     pub fn apply_strikes(&self, evts: &[StrikeEvent]) {
+        // Snapshot-writer gate (OUTERMOST writer lock; rolling nests inside).
+        let _write = self.write_gate.lock().unwrap();
         let Some(newest) = evts.iter().max_by_key(|e| e.time_epoch).cloned() else {
             return;
         };
@@ -1521,6 +1543,8 @@ impl TempestStore {
     }
 
     pub fn apply_battery(&self, voltage: f64) {
+        // Snapshot-writer gate: see the write_gate field doc.
+        let _write = self.write_gate.lock().unwrap();
         let prev = self.current.load_full();
         let new = Arc::new(Snapshot {
             battery_v: voltage,

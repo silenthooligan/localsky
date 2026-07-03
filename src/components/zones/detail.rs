@@ -132,8 +132,18 @@ pub fn ZoneDetailView(
             let gen = pending_gen.with_value(|g| *g);
             leptos::task::spawn_local(async move {
                 gloo_timers::future::TimeoutFuture::new(25_000).await;
-                let still_current = pending_gen.with_value(|g| *g) == gen;
-                if still_current && pending.get_untracked().is_some() {
+                // This continuation is detached, so it can outlive the
+                // route-scoped view: navigating away disposes pending /
+                // pending_gen while the timer is still pending. Read them
+                // with the non-panicking try_* accessors (get_untracked /
+                // with_value abort on a disposed signal, and wasm-release
+                // is panic=abort, which would poison the whole app). If the
+                // view is gone there is nothing to time out; just exit.
+                let Some(cur_gen) = pending_gen.try_get_value() else {
+                    return;
+                };
+                let still_current = cur_gen == gen;
+                if still_current && pending.try_get_untracked().flatten().is_some() {
                     pending.set(None);
                     use_toast()
                         .warn("Controller didn't confirm the change; check the Sensors hub.");

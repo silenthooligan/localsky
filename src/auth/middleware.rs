@@ -186,6 +186,14 @@ fn is_public_asset(path: &str) -> bool {
     if path.starts_with("/pkg/") || path == "/sw.js" {
         return true;
     }
+    // The service worker's install-time precache: the offline shell and the
+    // PWA icons (sw.template.js PRECACHE list). The SW fetches these with no
+    // credentials the moment it installs; on an auth-required instance a 401
+    // here fails the whole precache, so the offline shell and push
+    // notification icons never work. Static brand/shell bytes, no secrets.
+    if path == "/offline.html" || path.starts_with("/icons/") {
+        return true;
+    }
     if path.starts_with("/site/photos") {
         return false;
     }
@@ -669,7 +677,11 @@ pub async fn enforce_no_store(
                 .get("x-forwarded-host")
                 .and_then(|v| v.to_str().ok());
             if !origin_allowed(origin, host, fwd_host, &policy.trusted_origins) {
-                return (StatusCode::FORBIDDEN, "cross-origin write rejected").into_response();
+                return (
+                    StatusCode::FORBIDDEN,
+                    axum::Json(serde_json::json!({ "error": "cross-origin write rejected" })),
+                )
+                    .into_response();
             }
         }
     }
@@ -788,7 +800,11 @@ pub async fn enforce(
                 .get("x-forwarded-host")
                 .and_then(|v| v.to_str().ok());
             if !origin_allowed(origin, host, fwd_host, &policy.trusted_origins) {
-                return (StatusCode::FORBIDDEN, "cross-origin write rejected").into_response();
+                return (
+                    StatusCode::FORBIDDEN,
+                    axum::Json(serde_json::json!({ "error": "cross-origin write rejected" })),
+                )
+                    .into_response();
             }
         }
     }
@@ -1385,5 +1401,446 @@ mod tests {
             None,
             &trusted
         ));
+    }
+
+    #[test]
+    fn offline_shell_and_icons_are_public_assets() {
+        // sw.template.js PRECACHE fetches these with no credentials at
+        // install time; gating them fails the whole precache (no offline
+        // shell, no push-notification icons) on an auth-required instance.
+        assert!(is_public_asset("/offline.html"));
+        assert!(is_public_asset("/icons/icon-192.png"));
+        assert!(is_public_asset("/icons/badge-96.png"));
+        assert!(is_public_asset("/icons/nested/anything.svg"));
+        // Lookalikes are NOT swept in.
+        assert!(!is_public_asset("/offline.html/evil"));
+        assert!(!is_public_asset("/iconsx/icon.png"));
+        assert!(!is_public_asset("/api/icons/icon.png"));
+    }
+
+    // ── enforce() end-to-end (in-memory oneshot, no HTTP server) ──
+    //
+    // The gate is exercised through the real middleware layering
+    // (Router::fallback(200) + from_fn_with_state(enforce)), driving the
+    // COMPOSED order: origin check -> token-admin gate -> privileged gate ->
+    // mode gate -> credential precedence. The router answers 200 to
+    // everything, so any non-200 is the middleware's decision.
+
+    use tower::ServiceExt;
+
+    /// A live AuthRuntime over an in-memory SQLite DB (same shape as
+    /// store.rs's test helper), with the given mode and no trusted
+    /// networks / proxies / origins. Returns the shared connection so a
+    /// test can backdate session rows.
+    fn auth_runtime(required: bool) -> (Arc<AuthRuntime>, Arc<Mutex<rusqlite::Connection>>) {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::persistence::run_migrations(&mut conn).unwrap();
+        let db = Arc::new(Mutex::new(conn));
+        let rt = Arc::new(AuthRuntime::new(AuthStore::new(db.clone())));
+        rt.policy.store(Arc::new(AuthPolicy {
+            required,
+            session_ttl_days: 30,
+            trusted: vec![],
+            trusted_proxies: vec![],
+            trusted_origins: vec![],
+        }));
+        (rt, db)
+    }
+
+    /// enforce() layered over a catch-all 200 router.
+    fn gated_app(rt: Arc<AuthRuntime>) -> axum::Router {
+        axum::Router::new()
+            .fallback(|| async { "ok" })
+            .layer(axum::middleware::from_fn_with_state(rt, enforce))
+    }
+
+    /// Request with a socket peer (what client_ip reads absent trusted
+    /// proxies) and optional extra headers.
+    fn gated_req(
+        method: Method,
+        path: &str,
+        peer: &str,
+        headers: &[(&str, &str)],
+    ) -> Request<Body> {
+        let mut builder = Request::builder().method(method).uri(path);
+        for (k, v) in headers {
+            builder = builder.header(*k, *v);
+        }
+        let mut req = builder.body(Body::empty()).unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+                peer.parse().unwrap(),
+                40000,
+            )));
+        req
+    }
+
+    #[tokio::test]
+    async fn enforce_disabled_mode_privileged_matrix() {
+        let (rt, _db) = auth_runtime(false);
+        let app = gated_app(rt);
+
+        // (method, path, peer, expected, why): Disabled mode, no credential.
+        let cases: &[(Method, &str, &str, StatusCode, &str)] = &[
+            (
+                Method::PUT,
+                "/api/config",
+                "203.0.113.5",
+                StatusCode::UNAUTHORIZED,
+                "privileged config write refused for anonymous PUBLIC even in Disabled mode",
+            ),
+            (
+                Method::PUT,
+                "/api/config",
+                "127.0.0.1",
+                StatusCode::OK,
+                "loopback is vouched on the privileged gate",
+            ),
+            (
+                Method::PUT,
+                "/api/config",
+                "10.0.0.50",
+                StatusCode::OK,
+                "a private-LAN caller is vouched in the Disabled default",
+            ),
+            (
+                Method::GET,
+                "/api/config/raw",
+                "203.0.113.5",
+                StatusCode::UNAUTHORIZED,
+                "raw-config GET is privileged and refused for public-anonymous",
+            ),
+            (
+                Method::GET,
+                "/api/v1/backup",
+                "203.0.113.5",
+                StatusCode::UNAUTHORIZED,
+                "backup surface refused for public-anonymous",
+            ),
+            (
+                Method::GET,
+                "/api/v1/backup",
+                "10.0.0.7",
+                StatusCode::OK,
+                "backup surface admitted for a private-LAN caller in Disabled mode",
+            ),
+            (
+                Method::POST,
+                "/api/irrigation/action",
+                "203.0.113.5",
+                StatusCode::UNAUTHORIZED,
+                "valve actuation refused for public-anonymous",
+            ),
+            (
+                Method::GET,
+                "/api/v1/snapshot",
+                "203.0.113.5",
+                StatusCode::OK,
+                "ordinary reads stay anonymous in Disabled mode, even from public",
+            ),
+            (
+                Method::GET,
+                "/zones",
+                "203.0.113.5",
+                StatusCode::OK,
+                "app pages stay open in Disabled mode",
+            ),
+        ];
+        for (method, path, peer, expect, why) in cases {
+            let resp = app
+                .clone()
+                .oneshot(gated_req(method.clone(), path, peer, &[]))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), *expect, "{method} {path} from {peer}: {why}");
+        }
+
+        // A public peer claiming a LAN address via XFF stays refused: with
+        // no trusted_proxies configured the header is ignored entirely.
+        let resp = app
+            .clone()
+            .oneshot(gated_req(
+                Method::PUT,
+                "/api/config",
+                "203.0.113.5",
+                &[("x-forwarded-for", "10.0.0.50")],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "spoofed XFF from an untrusted public peer must not vouch the caller"
+        );
+    }
+
+    #[tokio::test]
+    async fn enforce_token_admin_requires_real_credential_even_loopback_disabled() {
+        let (rt, _db) = auth_runtime(false);
+        let app = gated_app(rt.clone());
+
+        // Loopback + Disabled is the MOST permissive posture; mint/revoke
+        // still refuse without a real credential (LS-API-06): IP vouching
+        // never applies to token admin.
+        for (method, path) in [
+            (Method::POST, "/api/auth/tokens"),
+            (Method::POST, "/api/v1/auth/tokens"),
+            (Method::DELETE, "/api/auth/tokens/7"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(gated_req(method.clone(), path, "127.0.0.1", &[]))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} {path} must refuse a credential-less loopback caller"
+            );
+        }
+
+        // A real session is accepted.
+        let uid = rt
+            .store
+            .create_user("owner", "hunter22valid")
+            .await
+            .unwrap();
+        let cookie = rt.store.create_session(uid, 30, None).await.unwrap();
+        let cookie_header = format!("{}={}", crate::auth::SESSION_COOKIE, cookie);
+        let resp = app
+            .clone()
+            .oneshot(gated_req(
+                Method::POST,
+                "/api/auth/tokens",
+                "127.0.0.1",
+                &[("cookie", cookie_header.as_str())],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a valid session may mint a token"
+        );
+
+        // A valid API token (Bearer) is also a real credential here, from
+        // any network position.
+        let tok = rt.store.create_api_token(uid, "ci").await.unwrap();
+        let bearer = format!("Bearer {tok}");
+        let resp = app
+            .clone()
+            .oneshot(gated_req(
+                Method::POST,
+                "/api/auth/tokens",
+                "203.0.113.5",
+                &[("authorization", bearer.as_str())],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a valid Bearer token may mint a token"
+        );
+    }
+
+    #[tokio::test]
+    async fn enforce_required_mode_assets_credentials_and_expiry() {
+        let (rt, db) = auth_runtime(true);
+        let app = gated_app(rt.clone());
+
+        // The SW install-time precache (offline shell + icons) and the
+        // hydration assets stay public for an ANONYMOUS PUBLIC caller: a
+        // 401 on any of these breaks the precache / hydration wholesale.
+        for path in [
+            "/offline.html",
+            "/icons/icon-192.png",
+            "/pkg/localsky_bg.wasm",
+            "/sw.js",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(gated_req(Method::GET, path, "203.0.113.5", &[]))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "{path} must stay public in Required mode"
+            );
+        }
+
+        // An ordinary API read is refused anonymously with the Bearer
+        // challenge; loopback is NOT exempt on ordinary paths in Required
+        // mode (only trusted_networks or a credential admits).
+        for peer in ["203.0.113.5", "127.0.0.1"] {
+            let resp = app
+                .clone()
+                .oneshot(gated_req(Method::GET, "/api/v1/snapshot", peer, &[]))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "anonymous {peer} must be refused in Required mode"
+            );
+            assert!(
+                resp.headers().contains_key(header::WWW_AUTHENTICATE),
+                "401 carries the Bearer challenge"
+            );
+        }
+
+        // A live session cookie is accepted.
+        let uid = rt
+            .store
+            .create_user("owner", "hunter22valid")
+            .await
+            .unwrap();
+        let cookie = rt.store.create_session(uid, 30, None).await.unwrap();
+        let cookie_header = format!("{}={}", crate::auth::SESSION_COOKIE, cookie);
+        let resp = app
+            .clone()
+            .oneshot(gated_req(
+                Method::GET,
+                "/api/v1/snapshot",
+                "203.0.113.5",
+                &[("cookie", cookie_header.as_str())],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "a live session is accepted");
+
+        // A live API token is accepted.
+        let tok = rt.store.create_api_token(uid, "hacs").await.unwrap();
+        let bearer = format!("Bearer {tok}");
+        let resp = app
+            .clone()
+            .oneshot(gated_req(
+                Method::GET,
+                "/api/v1/snapshot",
+                "203.0.113.5",
+                &[("authorization", bearer.as_str())],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a live API token is accepted"
+        );
+
+        // EXPIRED session: backdate expires_at past now; the SAME cookie is
+        // then refused end-to-end (validate_session's expiry predicate).
+        {
+            let conn = db.lock().await;
+            conn.execute(
+                "UPDATE auth_sessions SET expires_at = ?1",
+                rusqlite::params![chrono::Utc::now().timestamp() - 10],
+            )
+            .unwrap();
+        }
+        let resp = app
+            .clone()
+            .oneshot(gated_req(
+                Method::GET,
+                "/api/v1/snapshot",
+                "203.0.113.5",
+                &[("cookie", cookie_header.as_str())],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "an expired session must be refused"
+        );
+    }
+
+    /// The session-store TTL expiry predicate, tested directly (the
+    /// session_lifecycle test never exercises an EXPIRED session): a
+    /// session whose expires_at has passed validates to None, and the
+    /// rolling-expiry bump can never resurrect it (the bump only applies
+    /// to a row the expiry predicate still matches).
+    #[tokio::test]
+    async fn expired_session_validates_to_none() {
+        let (rt, db) = auth_runtime(false);
+        let uid = rt
+            .store
+            .create_user("owner", "hunter22valid")
+            .await
+            .unwrap();
+        let cookie = rt.store.create_session(uid, 30, None).await.unwrap();
+        assert_eq!(
+            rt.store.validate_session(&cookie, 30).await.unwrap(),
+            Some(uid),
+            "fresh session validates"
+        );
+
+        // Simulate the TTL passing: backdate creation by 31 days and the
+        // expiry to just past now.
+        let now = chrono::Utc::now().timestamp();
+        {
+            let conn = db.lock().await;
+            conn.execute(
+                "UPDATE auth_sessions SET created_at = ?1, last_seen_at = ?1, expires_at = ?2",
+                rusqlite::params![now - 31 * 86_400, now - 1],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            rt.store.validate_session(&cookie, 30).await.unwrap(),
+            None,
+            "an expired session must validate to None"
+        );
+        // Still None on re-validation: no resurrection via the rolling bump.
+        assert_eq!(rt.store.validate_session(&cookie, 30).await.unwrap(), None);
+    }
+
+    /// The Origin gate runs BEFORE the privileged gate's IP vouching: a
+    /// cross-origin browser write from a fully IP-vouched LAN caller is
+    /// still refused (CSRF / DNS rebinding), and the same-origin twin
+    /// passes. Pins the composed order inside enforce().
+    #[tokio::test]
+    async fn enforce_origin_check_precedes_ip_vouching_on_writes() {
+        let (rt, _db) = auth_runtime(false);
+        let app = gated_app(rt);
+
+        let resp = app
+            .clone()
+            .oneshot(gated_req(
+                Method::PUT,
+                "/api/config",
+                "10.0.0.50",
+                &[
+                    ("origin", "http://evil.example"),
+                    ("host", "10.0.0.60:3000"),
+                ],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-origin write refused before IP vouching applies"
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(gated_req(
+                Method::PUT,
+                "/api/config",
+                "10.0.0.50",
+                &[
+                    ("origin", "http://10.0.0.60:3000"),
+                    ("host", "10.0.0.60:3000"),
+                ],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "same-origin write from a vouched LAN caller passes"
+        );
     }
 }

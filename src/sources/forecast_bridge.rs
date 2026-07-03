@@ -29,6 +29,14 @@ use crate::ports::weather_source::SourceEvent;
 /// couple of missed refreshes before failing over to a backup provider.
 const FORECAST_OWNER_STALE_SECS: i64 = 90 * 60;
 
+/// How old the extended-series donor snapshot (the freshest emit carrying
+/// ET0/VPD/model-soil, i.e. Open-Meteo) may be and still get grafted onto
+/// the owning provider's forecast. Same tolerance rationale as the owner
+/// staleness above: a couple of missed refreshes are fine, but a dead
+/// extended provider must not keep decorating live forecasts with hours-old
+/// model context.
+const EXTENDED_DONOR_STALE_SECS: i64 = 2 * 60 * 60;
+
 /// Spawn the bus -> ForecastStore bridge. `priority` maps each forecast
 /// source's id to its `priority(ForecastDaily)`; an id we can't classify
 /// defaults to 0 (below any real forecast source).
@@ -51,10 +59,27 @@ pub fn spawn(
             sources = priority.load().len(),
             "forecast bridge started (forecast sources -> ForecastStore)"
         );
-        // (owner_id, owner_priority, owner_last_epoch)
-        let mut owner: Option<(String, i32, i64)> = None;
+        // P0-8 class supervisor: on a non-Open-Meteo forecast install this
+        // bridge is the ONLY ForecastStore writer, so a panic must not kill it
+        // for the process lifetime. The `owner` arbitration state re-derives
+        // from the next emits after a restart; a resubscribe() drops events
+        // during the gap (same semantics as Lagged).
         loop {
-            match rx.recv().await {
+            use futures::FutureExt;
+            let outcome = std::panic::AssertUnwindSafe(async {
+                // (owner_id, owner_priority, owner_last_epoch)
+                let mut owner: Option<(String, i32, i64)> = None;
+                // Freshest snapshot that carries the EXTENDED model series
+                // (ET0 curve / VPD / model soil; today only Open-Meteo sends
+                // them). Kept aside so the advisory series can be grafted
+                // onto whichever provider owns the forecast: the US default
+                // chain ranks NWS above Open-Meteo, and without the graft
+                // the advisory surfaces would blank on exactly the default
+                // install. Capability-detected, never id-matched.
+                let mut extended_donor: Option<(crate::forecast::snapshot::ForecastSnapshot, i64)> =
+                    None;
+                loop {
+                    match rx.recv().await {
                 Ok(SourceEvent::Forecast {
                     source_id,
                     snapshot,
@@ -64,6 +89,9 @@ pub fn spawn(
                     // forecast-provider pin / re-rank is honored immediately.
                     let priority = priority.load();
                     let prio = priority.get(&source_id).copied().unwrap_or(0);
+                    if snapshot.has_extended_series() {
+                        extended_donor = Some((snapshot.clone(), at_epoch));
+                    }
                     let take = match &owner {
                         None => true,
                         // The owner refreshing itself always wins.
@@ -91,10 +119,50 @@ pub fn spawn(
                         if snapshot.source_label.is_empty() {
                             snapshot.source_label = source_id.clone();
                         }
+                        // Provenance honesty: flag failover data. The serving
+                        // source is a BACKUP when some enabled forecast source
+                        // outranks it in the live map (the pin already folds
+                        // into the map as max+1, so a pinned provider is never
+                        // flagged). Recomputed per store so a re-rank or the
+                        // primary's recovery clears it within one emit.
+                        let top = priority.values().copied().max().unwrap_or(0);
+                        snapshot.source_is_backup = prio < top;
+                        // Advisory-series graft (fills only zeroed extended
+                        // fields, entries matched by exact epoch; core
+                        // forecast fields are never touched). Donor must be
+                        // reasonably fresh: a dead extended provider must
+                        // not keep decorating live forecasts with old model
+                        // context forever.
+                        if !snapshot.has_extended_series() {
+                            if let Some((donor, donor_at)) = &extended_donor {
+                                if at_epoch.saturating_sub(*donor_at) <= EXTENDED_DONOR_STALE_SECS {
+                                    snapshot.graft_extended_from(donor);
+                                }
+                            }
+                        }
                         store.store(snapshot);
                         owner = Some((source_id.clone(), prio, at_epoch));
                         debug!(source_id = %source_id, prio, "forecast bridge stored forecast");
                     } else {
+                        // Not taking ownership, but if THIS emit is the extended
+                        // donor and the currently-stored owner snapshot lacks the
+                        // advisory series, retro-graft and re-store it now. This
+                        // closes the boot race: at startup the owner (NWS) and
+                        // the donor (Open-Meteo) fire near-simultaneously, and
+                        // when the owner lands first its snapshot sat blank for
+                        // a full refresh cycle (observed live: every restart had
+                        // ~30 min with no VPD/soil/ET/condition data).
+                        if snapshot.has_extended_series() {
+                            let current = store.snapshot();
+                            if !current.has_extended_series()
+                                && (!current.daily.is_empty() || !current.hourly.is_empty())
+                            {
+                                let mut regrafted = (*current).clone();
+                                regrafted.graft_extended_from(&snapshot);
+                                store.store(regrafted);
+                                debug!(source_id = %source_id, "retro-grafted advisory series onto stored owner");
+                            }
+                        }
                         debug!(source_id = %source_id, prio, "forecast bridge kept higher-priority owner");
                     }
                 }
@@ -110,6 +178,18 @@ pub fn spawn(
                 Err(broadcast::error::RecvError::Closed) => {
                     info!("forecast bridge: bus closed, exiting");
                     break;
+                }
+                    }
+                }
+            })
+            .catch_unwind()
+            .await;
+            match outcome {
+                Ok(()) => break,
+                Err(_) => {
+                    tracing::error!("forecast bridge PANICKED; resubscribing and restarting");
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    rx = rx.resubscribe();
                 }
             }
         }

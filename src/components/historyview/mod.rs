@@ -950,10 +950,22 @@ pub fn HistoryPage() -> impl IntoView {
                 <h2 class="hist-panel__title">"Watering calendar"</h2>
                 <p class="hist-panel__hint">"Each square is a day, aligned by weekday; greener = more watering, empty = a skip day."</p>
                 {move || {
+                    // Gate on `loaded` like the KPI + line-chart sections. cal_weeks
+                    // derives its grid structure (leading blanks + whole-week row
+                    // count) from Local::now(), which resolves to the SERVER TZ at
+                    // SSR and the BROWSER TZ on hydrate: when those dates straddle a
+                    // week boundary the two renders emit a different number of
+                    // <div> children and the tachys hydration walker panics (=abort,
+                    // dead app). Keeping SSR and hydrate's first frame both on the
+                    // skeleton makes them structurally identical; cal_weeks only runs
+                    // post-load on the client.
+                    if !loaded.get() {
+                        return view! { <crate::components::ui::Skeleton variant="chart"/> }.into_any();
+                    }
                     let w = window.get();
                     let b = day_buckets(&w.runs, days.get(), None);
                     let max = b.iter().cloned().fold(0.0f64, f64::max).max(1.0);
-                    cal_weeks(&b, max, &tz.get())
+                    cal_weeks(&b, max, &tz.get()).into_any()
                 }}
             </section>
 

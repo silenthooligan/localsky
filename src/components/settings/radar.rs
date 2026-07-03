@@ -20,8 +20,10 @@
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
 
-use crate::components::settings_ui::{BadgeTone, SettingsBadge, SettingsResult, StatusHero};
-use crate::components::ui::{Button, HelpHint, Panel};
+use crate::components::settings_ui::{
+    BadgeTone, SettingsBadge, SettingsLoadError, SettingsResult, StatusHero,
+};
+use crate::components::ui::{Button, HelpHint, Panel, SkeletonRows};
 
 #[component]
 pub fn SettingsRadar() -> impl IntoView {
@@ -43,6 +45,11 @@ pub fn SettingsRadar() -> impl IntoView {
     let has_radar_source = RwSignal::new(true);
 
     let loaded = RwSignal::new(false);
+    // Initial-load state: Some(err) when the config GET failed. The editor body is
+    // replaced by a Retry banner in that case; `load_retry` bumps to re-run the
+    // load effect.
+    let load_error: RwSignal<Option<String>> = RwSignal::new(None);
+    let load_retry = RwSignal::new(0u32);
     let saving = RwSignal::new(false);
     let result_msg = RwSignal::new(String::new());
     let result_ok = RwSignal::new(false);
@@ -50,19 +57,24 @@ pub fn SettingsRadar() -> impl IntoView {
     #[cfg(feature = "hydrate")]
     {
         Effect::new(move |_| {
+            let _ = load_retry.get();
             wasm_bindgen_futures::spawn_local(async move {
-                if let Ok(d) = fetch_radar_ui().await {
-                    lat.set(d.lat);
-                    lon.set(d.lon);
-                    has_radar_source.set(d.has_radar_source);
-                    custom.set(!d.providers.is_empty());
-                    enabled.set(if d.providers.is_empty() {
-                        recommended_ids(d.lat, d.lon)
-                    } else {
-                        d.providers
-                    });
-                    defaults.set(d.default_layers);
-                    loaded.set(true);
+                match fetch_radar_ui().await {
+                    Ok(d) => {
+                        lat.set(d.lat);
+                        lon.set(d.lon);
+                        has_radar_source.set(d.has_radar_source);
+                        custom.set(!d.providers.is_empty());
+                        enabled.set(if d.providers.is_empty() {
+                            recommended_ids(d.lat, d.lon)
+                        } else {
+                            d.providers
+                        });
+                        defaults.set(d.default_layers);
+                        loaded.set(true);
+                        load_error.set(None);
+                    }
+                    Err(e) => load_error.set(Some(e)),
                 }
             });
         });
@@ -240,6 +252,14 @@ pub fn SettingsRadar() -> impl IntoView {
                 </p>
             </header>
 
+            // A failed initial GET replaces the whole editor with a Retry banner
+            // rather than a form seeded with placeholder Auto/40,-75 defaults (a
+            // Save from which would overwrite the real ui.radar block).
+            <Show
+                when=move || load_error.get().is_none()
+                fallback=move || view! { <SettingsLoadError error=load_error retry=load_retry/> }
+            >
+
             <StatusHero
                 icon="sources"
                 title="Radar"
@@ -362,13 +382,12 @@ pub fn SettingsRadar() -> impl IntoView {
                     {move || if saving.get() { "Saving…" } else { "Save changes" }}
                 </Button>
             </div>
+            </Show>
 
             <SettingsResult result_msg=result_msg result_ok=result_ok/>
 
-            <Show when=move || !loaded.get()>
-                <p class="settings-page__subtitle" style="margin-top: 1rem">
-                    "Loading current values from /api/config..."
-                </p>
+            <Show when=move || !loaded.get() && load_error.get().is_none()>
+                <SkeletonRows count=4/>
             </Show>
         </div>
     }

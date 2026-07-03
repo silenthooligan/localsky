@@ -4,19 +4,20 @@ LocalSky's `IrrigationController` port abstracts the act of firing valves. The s
 
 ## Supported controllers
 
-| Controller | Path | Cloud required? | Hardware cost (US$) | Status in v0.1 |
+| Controller | Path | Cloud required? | Hardware cost (US$) | Status |
 |---|---|---|---|---|
-| **OpenSprinkler** (boxed) | Direct HTTP on LAN | No | 130-180 | Tested |
-| **OpenSprinkler Pi** | Direct HTTP on LAN | No | ~80 (Pi) + relay board | Tested |
-| **[DIY / ESP32](diy-controllers.md)** (HTTP) | Direct HTTP on LAN | No | 5-40 ESP32 + valves | Tested |
-| **[DIY / ESP32](diy-controllers.md)** (MQTT) | MQTT (ESPHome, Tasmota, Z2M) | No | 5-40 ESP32 + valves | Tested |
-| **Home Assistant service call** | HA REST | No (HA local) | Whatever HA drives | Tested |
-| **Rachio** Gen 2/3 | Rachio cloud API | Yes | 130-250 | Planned |
-| **Hunter Hydrawise** | Cloud API | Yes | 130-300 | Community / planned |
-| **B-hyve** | Cloud API | Yes | 80-150 | Community / planned |
-| **DryRun** | No-op | No | None | Tested |
+| **OpenSprinkler** (boxed) | Direct HTTP on LAN | No | 130-180 | Shipped |
+| **OpenSprinkler Pi** | Direct HTTP on LAN | No | ~80 (Pi) + relay board | Shipped |
+| **[DIY / ESP32](diy-controllers.md)** (HTTP) | Direct HTTP on LAN | No | 5-40 ESP32 + valves | Shipped |
+| **[DIY / ESP32](diy-controllers.md)** (MQTT) | MQTT (ESPHome, Tasmota, Z2M) | No | 5-40 ESP32 + valves | Shipped |
+| **Home Assistant service call** | HA REST | No (HA local) | Whatever HA drives | Shipped |
+| **Rachio** Gen 2/3 | Rachio cloud API | Yes | 130-250 | Shipped |
+| **Hunter Hydrawise** | Hydrawise cloud API | Yes | 130-300 | Shipped |
+| **Orbit B-hyve** | B-hyve cloud API | Yes | 80-150 | Shipped |
+| **Rain Bird** | Rain Bird cloud API | Yes | 100-300 | Shipped |
+| **DryRun** | No-op | No | None | Shipped |
 
-Prices are US retail; availability and cost vary by region. Rachio, B-hyve, and Hydrawise are sold mostly through North American retail; OpenSprinkler and ESP32 hardware ship worldwide, which makes them the natural picks outside North America too.
+Prices are US retail; availability and cost vary by region. Rachio, B-hyve, Hydrawise, and Rain Bird are sold mostly through North American retail; OpenSprinkler and ESP32 hardware ship worldwide, which makes them the natural picks outside North America too. All four cloud controllers are offered in the controller picker as of 0.7.
 
 > Rolling your own with an ESP32 or another relay board? See [DIY & ESP32 controllers](diy-controllers.md) for the two supported paths (a small HTTP contract, or MQTT) with copy-and-flash reference firmware, beginner to advanced.
 
@@ -96,7 +97,7 @@ LocalSky's payload to HA is normalized: `{"entity_id": "<from map>", "duration_s
 
 Use cases:
 - Migrating from an HA-driven irrigation setup without re-wiring schedules
-- Using a controller LocalSky doesn't have a native adapter for (Hunter, B-hyve via HA), but the HA integration does
+- Using a controller LocalSky has no native adapter for yet, when a Home Assistant integration for it already exists
 - Wanting irrigation runs to flow through HA's automation engine for additional logic
 
 ## ESP32 / DIY (ESPHome, Tasmota, custom)
@@ -108,27 +109,82 @@ An ESP32 with a relay board is a smart irrigation controller for ~$15-40 in part
 
 > A native ESPHome protobuf adapter (`esphome_native`) is scaffolded but not yet built, so it is not offered in the controller picker. Use MQTT or HTTP above for ESPHome hardware today.
 
-## Rachio Gen 2/3 (planned)
+## Cloud controllers (Rachio, Hydrawise, B-hyve, Rain Bird)
 
-Rachio is cloud-tethered but well-documented. The v1 API takes a bearer token and exposes zone start, zone stop, schedule query.
+Four vendor controllers are driven natively through their own clouds; all ship in 0.7 and appear in the controller picker under "Cloud account". Each authenticates with your vendor account (an API token, or account email + password) and maps LocalSky zone slugs to that controller's zones/stations. Put secrets in env vars and interpolate them with `${...}` so they never sit in the config in cleartext.
+
+You do **not** need Home Assistant for any of these; the native adapter talks to the vendor cloud directly. (Driving one through HA with `ha_service_call` is still an option if you already do that.)
+
+### Rachio Gen 2/3
+
+Uses a Rachio API token. Map each zone slug to its Rachio zone UUID.
 
 ```toml
 [[controllers]]
 id = "rachio_main"
 default = true
+enabled = true
 kind = "rachio"
 [controllers.config]
 api_token = "${RACHIO_API_TOKEN}"
-device_id = "..."
+device_id = "..."   # Rachio device id
 [controllers.config.zone_uuid_map]
-back_yard = "..."  # Rachio zone UUID
+back_yard = "..."   # Rachio zone UUID
 ```
 
-Status: schema variant exists, adapter implementation deferred. Until then, drive your Rachio through HA's Rachio integration and use `ha_service_call`.
+### Hunter Hydrawise
 
-## Hunter Hydrawise / B-hyve / others (community)
+Uses a Hydrawise API key. `controller_id` scopes commands when your account has more than one controller; map each zone slug to its Hydrawise relay id.
 
-Both speak cloud APIs that HA integrations exist for. The LocalSky path until native adapters exist: drive them through HA + `ha_service_call`.
+```toml
+[[controllers]]
+id = "hydrawise_main"
+default = true
+enabled = true
+kind = "hydrawise"
+[controllers.config]
+api_key = "${HYDRAWISE_API_KEY}"
+controller_id = 0            # controller serial / id
+[controllers.config.zone_relay_map]
+back_yard = 1                # Hydrawise relay_id
+```
+
+### Orbit B-hyve
+
+Signs in with your B-hyve account email and password. `device_id` (from the account's device list) scopes commands; map each zone slug to its B-hyve station number (1-based).
+
+```toml
+[[controllers]]
+id = "bhyve_main"
+default = true
+enabled = true
+kind = "bhyve"
+[controllers.config]
+email = "${BHYVE_EMAIL}"
+password = "${BHYVE_PASSWORD}"
+device_id = "..."            # from the account's /v1/devices list
+[controllers.config.zone_station_map]
+back_yard = 1                # B-hyve station number (1-based)
+```
+
+### Rain Bird
+
+Signs in with your Rain Bird account email and password. `controller_id` comes from your account's controller list; map each zone slug to its Rain Bird station number (1-based). `base_url` defaults to the production endpoint and only needs setting if Rain Bird rotates hosts.
+
+```toml
+[[controllers]]
+id = "rainbird_main"
+default = true
+enabled = true
+kind = "rainbird"
+[controllers.config]
+email = "${RAINBIRD_EMAIL}"
+password = "${RAINBIRD_PASSWORD}"
+controller_id = "..."                       # from the account's controller list
+base_url = "https://rdz-rest.rainbird.com"  # default; override only if the host changes
+[controllers.config.zone_station_map]
+back_yard = 1                               # Rain Bird station number (1-based)
+```
 
 ## DryRun (no-op)
 
@@ -154,6 +210,10 @@ The `ControllerRegistry` supports any number of controllers. Use cases:
 - **HA-bridged + direct**: legacy HA-driven zones + new direct-controlled zones in the same deployment
 
 Per-zone `controller_id` in `ZoneConfig` picks which controller fires that zone. Exactly one controller must have `default = true`; new zones inherit that.
+
+## Editing and renaming controllers
+
+Controller IDs are editable, even after zones are linked. When you rename a controller (in Settings > Devices), every zone that points to it migrates to the new id automatically, so there are no dangling references and no manual fixup. The default controller flag migrates the same way: change which controller is the default and new unassigned zones inherit it.
 
 ## Adding a new controller
 

@@ -12,6 +12,7 @@ LocalSky exposes a REST + SSE API mounted at **`/api/v1/`** (canonical) and **`/
 - [Irrigation control endpoints](#irrigation-control-endpoints)
 - [Devices](#devices)
 - [Sensors and weather history](#sensors-and-weather-history)
+- [Radar map data](#radar-map-data)
 - [Web Push endpoints](#web-push-endpoints)
 - [Zone photos](#zone-photos)
 - [Ingest endpoints](#ingest-endpoints)
@@ -37,21 +38,25 @@ Returns the running service version, the API contract version, and the mount pre
 ```json
 {
   "service": "localsky",
-  "service_version": "0.7.0-beta.1",
-  "api_version": "1.6.0",
+  "service_version": "0.7.0",
+  "api_version": "1.15.0",
   "api_prefix": "/api/v1",
   "license": "Apache-2.0",
   "repository": "https://github.com/silenthooligan/localsky",
   "dry_run": false,
   "demo": false,
   "auth_required": true,
-  "uuid": "1f0a4c2e-9b7d-4e21-a3c5-08d2f6b7e914"
+  "uuid": "1f0a4c2e-9b7d-4e21-a3c5-08d2f6b7e914",
+  "has_irrigation": true,
+  "nerd_mode_default": false
 }
 ```
 
 - `auth_required` tells a client whether it must present credentials before touching anything else. Integration clients (the HACS integration) read this on probe and prompt for an API token.
 - `uuid` is the stable per-install id, also broadcast in the mDNS TXT record (`_localsky._tcp.`), so clients can dedupe an instance across IP or hostname changes.
 - `dry_run` and `demo` flag instances running with `LOCALSKY_SMART_DRY_RUN=1` or `LOCALSKY_DEMO=1`.
+- `has_irrigation` is true when any controller or zone is configured; a weather-only install reads false, and the UI hides the irrigation navigation on it.
+- `nerd_mode_default` is the server-configured `features.nerd_mode_default`; the UI seeds Simple vs Nerd presentation from it.
 
 ## Authentication
 
@@ -81,6 +86,8 @@ These are exempt from authentication, straight from the middleware's exemption t
 | `/login`, `/api/v1/auth/status`, `/api/v1/auth/login`, `/api/v1/auth/setup` (and the `/api/auth/*` aliases) | The way in. `setup` only succeeds while zero accounts exist |
 | `/ingest/*`, `/api/v1/ingest/*` | Weather hardware (Ecowitt consoles, webhook devices) cannot authenticate. See [what to expose through a proxy](reverse-proxy.md#what-to-expose) |
 | `/api/v1/health`, `/api/health` | Always reachable for Docker healthchecks, but anonymous callers get a trimmed liveness-only body (no source, controller, or HA detail) |
+| `/metrics` | Prometheus exposition endpoint. Aggregate operational counters only (verdict mix, refresh and degraded counts, controller/cloud error counts, last-fetch latency); no secrets, config, or PII. Firewall it at the proxy if you do not want it public |
+| `/docs/*` | The bundled handbook (served from the image), so in-app help works pre-login and on a fresh install. Static pages, no secrets |
 | `/setup`, `/setup/*`, `/api/v1/wizard/*`, `/api/wizard/*` | Only until the first account exists, so `docker run` -> browser -> wizard works; locked once setup completes |
 
 Everything else, including every other `/api/v1/*` endpoint, the dashboard pages, and `/site/photos/*`, requires credentials.
@@ -105,7 +112,7 @@ Login and setup are rate limited to 10 attempts per minute per client address.
 
 ## Snapshot endpoints (read-only)
 
-These serve the dashboard's primary data. Both REST (one-shot) and SSE (push-on-change) variants exist for every snapshot type. All SSE feeds emit events named `snapshot` with a keep-alive every 15 seconds.
+These serve the dashboard's primary data. Both REST (one-shot) and SSE (push-on-change) variants exist for every snapshot type. All SSE feeds emit events named `snapshot`. The weather (`/api/v1/stream`) and irrigation (`/api/v1/irrigation/stream`) feeds send a keep-alive every 15 seconds; the forecast feed (`/api/v1/forecast/stream`) sends one every 30 seconds.
 
 ### `GET /api/v1/snapshot`
 
@@ -244,18 +251,32 @@ Structured validation report (errors + warnings) for the config as currently on 
 
 Dry-run validation. Body: `{ "candidate": <Config JSON> }`. Runs validation and returns `{ "ok": true|false, "errors": [...] }` without writing anything. Useful for client-side "validate before save" flows.
 
-### `POST /api/v1/config/rollback?to=<version>`
+### `GET /api/v1/config/snapshots`
 
-Restore a previous snapshot. Reachable even when the engine is degraded; use it to recover from a bad config push.
+The on-disk config snapshot history, newest first. Every save snapshots the previous `localsky.toml` (newest 20 kept). Returns `{ "snapshots": [ { "ts", "applied_at_epoch", "schema_version", "note" }, ... ] }`. (`GET /api/v1/backup/snapshots` returns the same history.)
+
+### `POST /api/v1/config/rollback`
+
+Restore a previous snapshot. Body `{ "ts": <snapshot ts> }` (the legacy `?to=<ts>` query is also accepted). The snapshot is validated before the swap, the current config is snapshotted first so the rollback is itself reversible, and the restored config hot-reloads. Reachable even when the engine is degraded; use it to recover from a bad config push.
 
 ```bash
 curl -X POST -H 'Authorization: Bearer lsk_...' \
-    'http://localhost:8090/api/v1/config/rollback?to=12'
+    -H 'Content-Type: application/json' \
+    -d '{"ts": 1765400000}' \
+    http://localhost:8090/api/v1/config/rollback
 ```
 
 ### `GET /api/v1/config/raw` and `PUT /api/v1/config/raw`
 
 Read and write the raw TOML text instead of the JSON projection, for operators who prefer editing `localsky.toml` directly through the Settings raw editor.
+
+### `GET /api/v1/config/field_sources`
+
+The dataset behind the Data sources page: the user-facing fields with a per-field picker (`user_fields`), every enabled source with the fields it can provide plus its tier (`device` / `cloud`), data nature, and region priority (`sources`), the saved per-field pins and ordered chains (`overrides`, `field_source_chains`), the forecast-capable candidates and the saved pin (`forecast_candidates`, `forecast_provider`), and a `region_label` for the "Automatic (region default)" tag. A field absent from both `overrides` and `field_source_chains` uses the automatic region order (sort that field's candidates by `region_priority` descending). This is the read side of the chain editor; writes go through the normal config PUT.
+
+### `GET /api/v1/config/source_catalog`
+
+The honest cloud-source catalog behind the cloud weather panel: one entry per cloud weather kind (highest honesty first), each carrying the static facts (data nature per field, key tier, real-time / localization / watering-risk copy, honesty and irrigation ranks), the live current-field list, region recommendation flags, whether the kind is already configured, and a live `status` computed by the same taxonomy as [`/api/v1/health`](#get-apiv1health) (`active` / `watching` / `standby` / `falling_through` / `offline`). Top-level shape: `{ "lat": ..., "lon": ..., "cloud_sources": [ ... ] }`.
 
 ## Wizard endpoints
 
@@ -271,6 +292,7 @@ Used during first-run; always mounted, and **public only until the first account
 | `/api/v1/wizard/test_controller` | POST | `{ "controller": <ControllerEntry> }`; live connect + status read. Returns `{ ok, reachable, master_enabled, water_level_pct, zone_count, firmware }`, `502` if unreachable, `422` if unsupported |
 | `/api/v1/wizard/test_llm` | POST | `{ "llm": <LlmConfig> }`; live probe of the configured LLM provider |
 | `/api/v1/wizard/scan_zones` | POST | `{ "controller": <ControllerEntry> }`; zone discovery for controllers that support it, pre-populates the zone editor |
+| `/api/v1/wizard/probe_soil` | POST | `{ "host": "<gateway host>", "source_id": "..." }` (`source_id` optional); reads an Ecowitt gateway's live soil channels off its local API so the Sensors step can offer them for zone binding. `422` for an empty or non-LAN host, `502` if unreachable |
 | `/api/v1/wizard/discover` | GET | One LAN sweep: passive Tempest, Ecowitt broadcast, OpenSprinkler probe |
 | `/api/v1/wizard/geocode?q=<address>` | GET | Server-side proxy to Nominatim with the required User-Agent |
 
@@ -306,16 +328,21 @@ Dispatch a controller action. The body is a tagged enum; shape varies by `kind`:
 { "kind": "set_pause_until", "epoch": 1765500000 }
 { "kind": "clear_pause_until" }
 { "kind": "set_override_tomorrow", "mode": "skip" }
-{ "kind": "run_sequence_now" }
+{ "kind": "set_global_override", "mode": "run" }
+{ "kind": "set_zone_override", "zone": "back_yard", "mode": "skip" }
 ```
 
 Notes:
 
 - `run` is clamped server-side to 7200 seconds (2 hours) regardless of what the client sends.
 - `set_threshold` accepts only the known keys `max_wind_mph`, `min_temp_f`, `rain_skip_in`.
-- `set_override_tomorrow` takes `"none" | "skip" | "run"`.
+- `set_override_tomorrow` takes `"none" | "skip" | "run"` (a one-day, HA-helper override).
 - `set_pause_until` with `epoch: 0` clears the vacation pause (same as `clear_pause_until`).
-- `run_sequence_now` triggers the full irrigation sequence immediately, bypassing the skip-check.
+- `set_global_override` takes `"auto" | "skip" | "run"`. It is a **sticky** global override, LocalSky-native (its own state, no nightly reset): `"run"` forces watering past the skip conditions, `"skip"` force-skips, `"auto"` follows the engine. It stays in effect until you change it.
+- `set_zone_override` takes a `zone` slug plus `"auto" | "skip" | "run"`, the same sticky semantics scoped to one zone. **A zone override beats the global override**; `"auto"` clears the zone override so the zone falls back to the global override, then the engine verdict.
+- The two override actions are always handled by LocalSky's own state (a small SQLite store) whenever a persistence DB is mounted, so they work on both standalone and Home-Assistant-sourced deployments.
+
+> `run_sequence_now` was removed along with Irrigation Unlimited support. The action still deserializes so an old client gets a clear **`410 Gone`** (`{"error": "run_sequence_now was removed along with Irrigation Unlimited support; use per-zone Run instead"}`) rather than a parse error. Use a per-zone `run` instead.
 
 ### `GET /api/v1/irrigation/history?days=30`
 
@@ -336,6 +363,14 @@ Rows with a non-null `skip_reason` are skip events rather than completed runs.
 ### `GET /api/v1/irrigation/decisions?days=30`
 
 Verdict-transition history: one record per change of the skip-check verdict, so you can answer "did we actually skip on day X, and why" weeks later. Same `days` parameter semantics as `/history`.
+
+### `GET /api/v1/irrigation/export?days=365&format=csv`
+
+Portable history export. `format=csv` (the default) streams the run/skip events as `timestamp_utc,zone,event,duration_s,reason` rows; `format=json` returns the full `{ from_epoch, to_epoch, runs, decisions }` structure. `days` defaults to 365 and clamps to 1..3650. Served with a `Content-Disposition: attachment` header, so a browser hit downloads a file.
+
+### `GET /api/v1/irrigation/accuracy?days=30`
+
+The forecast-accuracy scoreboard: one row per local day pairing that morning's verdict with the rain that actually fell, plus the matched/scored tally. `days` defaults to 30 and clamps to 1..365. Like `/history` and `/decisions`, this mounts only when the history database is available.
 
 ### `POST /api/v1/irrigation/simulate`
 
@@ -387,6 +422,16 @@ These endpoints are mounted only when the history database is available (it is, 
 | `/api/v1/weather/history?hours=24` | GET | Recent observed-weather series (oldest to newest) for the headline fields; powers the dashboard sparklines |
 | `/api/v1/weather/readings` | GET | Recent raw readings from the sensor-history table |
 
+## Radar map data
+
+Server-side data services for the radar map's overlay layers. Canonical prefix only (`/api/v1/radar/*`, no legacy `/api` alias). All three are built from upstream feeds with server-side caching, so map panning does not hammer the upstreams; on an upstream failure they return `502` and the frontend degrades the layer silently.
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/v1/radar/windgrid?bbox=minLon,minLat,maxLon,maxLat` | GET | Wind field for the leaflet-velocity layer: a grib2json-style two-record array (U then V components in m/s) over an 8x8 grid clamped to the bbox. Cached about 30 minutes |
+| `/api/v1/radar/precip?bbox=minLon,minLat,maxLon,maxLat` | GET | Short-range precipitation nowcast grid: 8 future 15-minute frames (the next 2 hours) of mm-per-15-min values over the same 8x8 grid, plus a `max_mm` scale hint. Cached about 15 minutes |
+| `/api/v1/radar/tropical` | GET | Basin-aware tropical cyclone GeoJSON, normalized from the NHC/CPHC, JMA, and JTWC feeds into one FeatureCollection (positions, tracks, forecast tracks, cones) plus a per-agency `sources` health array. Cached 10 minutes |
+
 ## Web Push endpoints
 
 ### `GET /api/v1/push/vapid-key`
@@ -430,7 +475,7 @@ Liveness + readiness, always reachable. Authenticated (or auth-disabled) callers
 {
   "status": "ok",
   "config_present": true,
-  "version": "0.7.0-beta.1",
+  "version": "0.7.0",
   "schema_version": 1,
   "uptime_s": 1234,
   "subsystems": { "config_store": "ok", "persistence": "ok" },
@@ -441,7 +486,7 @@ Liveness + readiness, always reachable. Authenticated (or auth-disabled) callers
       "enabled": true,
       "last_seen_epoch": 1765399990,
       "stale_for_s": 12,
-      "status": "fresh"
+      "status": "active"
     }
   ],
   "controllers": [
@@ -451,7 +496,15 @@ Liveness + readiness, always reachable. Authenticated (or auth-disabled) callers
 }
 ```
 
-Per-source `status` is `"fresh"` (seen within 5 minutes), `"stale"` (5 minutes to 1 hour), or `"offline"` (over 1 hour, or never). On an auth-required instance, **anonymous** callers get a trimmed liveness-only body: no `sources`, `controllers`, or `ha` detail, so Docker healthchecks keep working without leaking topology.
+Per-source `status` reflects each source's role in the live per-field merge, not a raw age bucket. It is one of:
+
+- `active`: the source currently owns at least one live reading (it is the winning provider for a field right now).
+- `watching`: reachable and quiet. It fetched fine but has nothing to report this cycle (a dry or no-coverage rain authority), or it is a reachable non-owner whose reading is currently held only by a lower-or-equal-priority source. It should be winning and simply has nothing to add yet.
+- `standby`: reachable and owns nothing because a strictly higher-priority source currently owns the reading(s) it could provide. It is ready to take over if that source goes quiet.
+- `falling_through`: it previously owned a reading, has since gone stale past that reading's freshness window, and another source has taken over (the backup chain handled it). Reserved: current releases do not yet assert this state (prior ownership is not tracked), so a source in that situation reads `standby` or `watching` instead; treat it as part of the vocabulary, not a status to alert on.
+- `offline`: no successful fetch and no observation for the hard-offline window (about 30 minutes), or never seen. **This is the only status that marks the instance `degraded`;** `watching`, `standby`, and `falling_through` are all calm (the fall-through chain working as designed).
+
+`last_seen_epoch` and `stale_for_s` remain on the wire as diagnostics but no longer drive the status; the taxonomy above is computed from reachability plus live per-field ownership. On an auth-required instance, **anonymous** callers get a trimmed liveness-only body: no `sources`, `controllers`, or `ha` detail, so Docker healthchecks keep working without leaking topology.
 
 When `config_present` is false the server is in wizard mode; the dashboard redirects to `/setup`.
 
@@ -466,6 +519,14 @@ The configured map center (lat/lon/zoom) for the radar, from `deployment.locatio
 ### `GET /api/v1/location/timezone?lat=<lat>&lon=<lon>`
 
 Offline IANA timezone lookup for a coordinate.
+
+### `GET /api/v1/location/elevation?lat=<lat>&lon=<lon>`
+
+Elevation lookup for a coordinate via the Open-Meteo elevation API, returning `{ "elevation_m": <meters> }` (the same unit as the config's `deployment.location.elevation_m`, which the wizard prefills from it). Returns `502` on an upstream or parse failure; the wizard falls back to manual entry.
+
+### `GET /metrics`
+
+Prometheus exposition endpoint (`text/plain; version=0.0.4`), served at the origin root (not under `/api/v1`) and always public. Aggregate operational counters only: verdict mix, refresh and degraded counts, controller and cloud error counts, last-fetch latency. No secrets, config, or PII; firewall it at the proxy if you do not want it exposed.
 
 ## Backup and restore
 

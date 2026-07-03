@@ -308,21 +308,39 @@ pub fn spawn(
                     "smart morning: catch-up, missed today's window, attempting late dispatch"
                 );
             }
-            dispatch_today(
-                &snap,
-                &controllers,
-                runs.as_ref(),
-                active_runs.as_ref(),
-                push.as_ref(),
-                cfg.as_ref(),
-                today,
-                now_utc,
-                zones_to_run,
-                total_dispatch_s,
-                dry_run,
-                late,
-            )
-            .await;
+            // P0-8 class: a panic inside the dispatch (an adapter bug, a
+            // budget-math edge, a poisoned lock) must not kill the scheduler
+            // for the process lifetime, silently ending every future morning.
+            // On panic the day is STILL marked fired (fail-safe: some zones
+            // may already have run, and re-entering next tick would
+            // double-water; any valve left commanded on is closed by the
+            // armed active-run deadline via the reaper).
+            {
+                use futures::FutureExt;
+                let outcome = std::panic::AssertUnwindSafe(dispatch_today(
+                    &snap,
+                    &controllers,
+                    runs.as_ref(),
+                    active_runs.as_ref(),
+                    push.as_ref(),
+                    cfg.as_ref(),
+                    today,
+                    now_utc,
+                    zones_to_run,
+                    total_dispatch_s,
+                    dry_run,
+                    late,
+                ))
+                .catch_unwind()
+                .await;
+                if outcome.is_err() {
+                    tracing::error!(
+                        "smart morning: dispatch PANICKED mid-sequence; marking today \
+                         handled (no re-fire) and relying on the reaper deadline to \
+                         close any valve left commanded on"
+                    );
+                }
+            }
             last_fired.insert(today, true);
         }
     });
@@ -618,15 +636,32 @@ async fn dispatch_today(
                         failure_notified = true;
                     }
                     // P0-1b: the whole-cycle shutoff deadline was armed for this
-                    // zone before the segment loop, but this segment's dispatch
-                    // failed so no valve was commanded on. Disarm it before we
-                    // break, otherwise the reaper later wakes on a deadline for a
-                    // run that never started and logs a misleading "enforcing
-                    // shutoff" line (it self-heals, but the log is wrong).
-                    if let Some(ar) = active_runs {
-                        if let Err(e) = ar.disarm(&zone.slug).await {
-                            warn!(zone = %zone.slug, error = %e, "active-run disarm after dispatch failure failed");
+                    // zone before the segment loop. Disarm it ONLY when the
+                    // FIRST segment failed (no valve was ever commanded on, so
+                    // the deadline covers a run that never started and the
+                    // reaper would log a misleading "enforcing shutoff" line).
+                    // When a LATER segment fails, an EARLIER segment's valve WAS
+                    // commanded on and its own self-shutoff may be the very
+                    // thing that is failing (same unreachable-controller blip),
+                    // so the deadline must STAY armed: it is the only backstop
+                    // that closes that valve. The reaper stopping an
+                    // already-closed valve is a harmless no-op; a stuck-open
+                    // valve with no backstop is the failure mode P0-1b exists
+                    // to prevent.
+                    if idx == 0 {
+                        if let Some(ar) = active_runs {
+                            if let Err(e) = ar.disarm(&zone.slug).await {
+                                warn!(zone = %zone.slug, error = %e, "active-run disarm after dispatch failure failed");
+                            }
                         }
+                    } else {
+                        warn!(
+                            zone = %zone.slug,
+                            segment = idx,
+                            "keeping the whole-cycle shutoff deadline armed: an earlier \
+                             segment commanded the valve on and the reaper backstop must \
+                             cover it"
+                        );
                     }
                     break;
                 }
@@ -715,13 +750,25 @@ async fn abandon_cycle(
         zone = current_zone,
         "smart morning: manual stop requested; abandoning the rest of the sequence"
     );
-    if let Err(e) = controller.stop_all().await {
-        warn!(error = %e, "smart morning: stop_all after manual stop failed");
-    }
-    // P0-1b: stop_all physically closed every valve, so clear the deadline ledger
-    // (no reaper backstop is needed for valves now known off).
-    if let Some(ar) = active_runs {
-        let _ = ar.clear_all().await;
+    // P0-1b: only clear the shutoff-deadline ledger when stop_all actually
+    // CONFIRMED every valve is off. On failure (unreachable controller, DIY
+    // on/off board mid-blip) the valves may still be open, so we KEEP the
+    // deadline rows and let the reaper retry the stop every tick until it
+    // succeeds. Mirrors the API stop paths, which also disarm only in the
+    // Ok arm, and honors the reaper invariant ("a stop that fails is
+    // retried next tick, the row is kept, so we never give up on a shutoff").
+    match controller.stop_all().await {
+        Ok(()) => {
+            if let Some(ar) = active_runs {
+                let _ = ar.clear_all().await;
+            }
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                "smart morning: stop_all after manual stop failed; keeping active-run deadlines for reaper retry"
+            );
+        }
     }
     if let Some(rs) = runs {
         let row = NewRun {

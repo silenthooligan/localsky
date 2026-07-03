@@ -107,6 +107,43 @@ pub fn LineChart(
     let ymin_label = format!("{:.0}{}", ymin, y_unit);
     let empty = all.is_empty();
 
+    // Accessible text alternative: the SVG stays aria-hidden and the
+    // scrub tooltip is pointer-only, so a visually-hidden role="img"
+    // node carries the data non-visually: per series the latest value
+    // plus the observed min/max. Computed from props, so SSR and the
+    // hydrate first frame render the identical string.
+    let summary = if empty {
+        "Line chart with no data.".to_string()
+    } else {
+        let parts: Vec<String> = series
+            .iter()
+            .filter(|s| !s.points.is_empty())
+            .map(|s| {
+                let latest = s
+                    .points
+                    .iter()
+                    .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|p| p.1)
+                    .unwrap_or_default();
+                let (lo, hi) = s
+                    .points
+                    .iter()
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| {
+                        (lo.min(p.1), hi.max(p.1))
+                    });
+                let name = if s.label.is_empty() {
+                    "Series"
+                } else {
+                    s.label.as_str()
+                };
+                format!(
+                    "{name}: latest {latest:.1}{y_unit}, min {lo:.1}{y_unit}, max {hi:.1}{y_unit}"
+                )
+            })
+            .collect();
+        format!("Line chart. {}.", parts.join("; "))
+    };
+
     // Scrub state: pointer x as a 0..1 fraction of the plot width. None
     // when the pointer is outside. Hover only ever changes client-side,
     // so SSR and the first hydrate frame render no crosshair (DOM match).
@@ -196,6 +233,10 @@ pub fn LineChart(
 
     view! {
         <div class="ui-line-chart">
+            // role="img" makes the children presentational, so the inner
+            // text is not double-announced; it only keeps the node
+            // non-empty (some SR/browser pairs prune empty labelled spans).
+            <span class="sr-only" role="img" aria-label=summary.clone()>{summary.clone()}</span>
             <div class="ui-line-chart__plot"
                 on:pointermove=on_move
                 on:pointerleave=on_leave

@@ -4,7 +4,7 @@
 
 use crate::components::forecast::glyph::weather_code_glyph;
 use crate::components::units_fmt::{
-    fmt_rain_amount, fmt_temp_short, fmt_wind, use_unit_prefs, UnitPrefs,
+    fmt_rain_amount, fmt_rain_rate, fmt_temp_short, fmt_wind, use_unit_prefs, UnitPrefs,
 };
 use crate::forecast::snapshot::{DailyEntry, ForecastSnapshot};
 use crate::timefmt::{format_md, format_wday_short};
@@ -21,10 +21,29 @@ pub fn DailyForecast(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
                 <span class="forecast-section-meta">
                     {move || {
                         let s = snap.get();
-                        let label = if s.source_label.is_empty() { "Forecast" } else { &s.source_label };
-                        if !s.source_reachable { format!("{label} unreachable") }
-                        else if s.daily.is_empty() { "Loading…".to_string() }
-                        else { format!("{label} · {}", s.timezone) }
+                        let label = if s.source_label.is_empty() { "Forecast".to_string() } else { s.source_label.clone() };
+                        if s.daily.is_empty() {
+                            // Empty: the body panel explains the wait honestly.
+                            view! { <span></span> }.into_any()
+                        } else if !s.source_reachable {
+                            // Data is showing but its provider has gone quiet
+                            // (stale re-emit or a rehydrated cache): keep the
+                            // unreachable badge over the backup/normal labels.
+                            view! { <span>{format!("{label} unreachable")}</span> }.into_any()
+                        } else if s.source_is_backup {
+                            // Failover honesty: this data is NOT from the
+                            // configured primary. Say so, and link to the
+                            // Devices hub where per-source status lives.
+                            view! {
+                                <a class="forecast-source-backup"
+                                    href="/settings/devices"
+                                    title="The primary forecast source is not answering; a backup provider is serving this forecast. Click for source status.">
+                                    {format!("via {label} · backup")}
+                                </a>
+                            }.into_any()
+                        } else {
+                            view! { <span>{format!("{label} · {}", s.timezone)}</span> }.into_any()
+                        }
                     }}
                 </span>
             </header>
@@ -33,9 +52,8 @@ pub fn DailyForecast(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
                     let s = snap.get();
                     let prefs = unit_prefs.get();
                     if s.daily.is_empty() {
-                        (0..7).map(|_| {
-                            view! { <crate::components::ui::Skeleton variant="block"/> }.into_any()
-                        }).collect::<Vec<_>>().into_any()
+                        view! { <super::ForecastPending variant="blocks" what="7-day forecast"/> }
+                            .into_any()
                     } else {
                         let tz = s.timezone.clone();
                         s.daily.iter().enumerate().take(7).map(|(idx, d)| {
@@ -69,6 +87,41 @@ fn DailyCard(entry: DailyEntry, is_today: bool, prefs: UnitPrefs, tz: String) ->
     } else {
         "daily-card"
     };
+    // Rain-character chip from the extended daily variables. Mean intensity
+    // (total / wet-hours) splits a soaking day from a burst: the same 0.3in
+    // over 8 hours infiltrates, over 40 minutes it partly runs off. Only
+    // rendered when the provider reports precipitation_hours (Open-Meteo);
+    // advisory context only, the engine still counts the full total.
+    let rain_character = {
+        let wet = entry.precip_sum_in >= 0.1 && entry.precip_hours > 0.0;
+        if !wet {
+            None
+        } else {
+            let rate = entry.precip_sum_in / entry.precip_hours;
+            if rate >= 0.35 {
+                Some((
+                    "burst",
+                    format!(
+                        "{:.1}h of rain at ~{}: short and heavy, some may run off before soaking in",
+                        entry.precip_hours,
+                        // Unit-correct rate (in/hr or mm/hr per prefs), not a
+                        // hardcoded imperial "in/h" for metric users.
+                        fmt_rain_rate(rate, prefs)
+                    ),
+                ))
+            } else if entry.precip_hours >= 6.0 {
+                Some((
+                    "soaker",
+                    format!(
+                        "~{:.0}h of steady rain: slow delivery that soaks in well",
+                        entry.precip_hours
+                    ),
+                ))
+            } else {
+                None
+            }
+        }
+    };
 
     view! {
         <article class=class>
@@ -88,6 +141,11 @@ fn DailyCard(entry: DailyEntry, is_today: bool, prefs: UnitPrefs, tz: String) ->
                 <span class="daily-card-rain-amt">{fmt_rain_amount(entry.precip_sum_in, prefs)}</span>
                 <span class="daily-card-rain-pct">{format!("{}%", entry.precip_probability_max)}</span>
             </div>
+            {rain_character.map(|(kind, explain)| view! {
+                <span class=format!("daily-card-rainchar daily-card-rainchar--{kind}") title=explain.clone() aria-label=explain>
+                    {kind}
+                </span>
+            })}
             <dl class="daily-card-meta">
                 <div class="kv">
                     <dt class="k">"wind"</dt>

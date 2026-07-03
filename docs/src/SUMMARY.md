@@ -21,7 +21,9 @@
 - [Soil probes and zones](soil-sensors.md)
 - [Irrigation controllers](controllers.md)
 - [DIY & ESP32 controllers](diy-controllers.md)
+- [Zones](zones.md)
 - [Forecast sources and merge](forecast.md)
+- [Data sources and priority](sources.md)
 - [Weather providers and what they measure](provider-matrix.md)
 - [Live radar](radar.md)
 
@@ -35,6 +37,8 @@
 - [History and reporting](history.md)
 - [Notifications](notifications.md)
 - [AI advisor](llm.md)
+- [Display units](units.md)
+- [Theme](theme.md)
 
 # How the Engine Works
 

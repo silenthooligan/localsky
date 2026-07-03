@@ -97,6 +97,18 @@ pub struct Config {
     /// so a pin never blanks the forecast.
     #[serde(default)]
     pub forecast_provider: Option<String>,
+    /// Source ids the boot-time region seeding has ALREADY handled, so it
+    /// never re-adds one the user has since deleted. The upgrade path for
+    /// pre-existing installs: a config written before the region keyless
+    /// authorities existed (or before the hardware-install seeding policy
+    /// of 2026-07) gets its region's keyless forecast authority (NWS in the
+    /// US, Met.no in the Nordics) appended ONCE at boot, and the id is
+    /// recorded here whether it was appended or already present. Deleting
+    /// the source afterwards therefore sticks forever: seeding consults
+    /// this list before the source list. ADDITIVE: empty on old configs
+    /// (serde default) and omitted from the TOML until first used.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seeded_source_ids: Vec<String>,
     #[serde(default)]
     pub controllers: Vec<ControllerEntry>,
     #[serde(default)]
@@ -149,6 +161,7 @@ impl Default for Config {
             field_source_overrides: BTreeMap::new(),
             field_source_chains: BTreeMap::new(),
             forecast_provider: None,
+            seeded_source_ids: Vec::new(),
             controllers: Vec::new(),
             zones: BTreeMap::new(),
             llm: None,
@@ -746,6 +759,16 @@ pub struct OpenMeteoConfig {
     /// configs written before this field existed behave unchanged.
     #[serde(default = "default_open_meteo_model")]
     pub model: String,
+    /// Base URL of a SELF-HOSTED Open-Meteo instance (the open-meteo
+    /// Docker image serving /v1/forecast from locally synced model data),
+    /// e.g. "http://192.0.2.10:8080". When set it becomes the FIRST
+    /// rung of the endpoint ladder; the hosted api.open-meteo.com and its
+    /// verified mirrors remain behind it as automatic fallback, so a down
+    /// self-hosted instance degrades to the hosted service instead of a
+    /// dead forecast. None (the default) keeps the hosted ladder exactly
+    /// as before. Scheme + host [+ port]; no trailing path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
 }
 
 fn default_open_meteo_forecast_days() -> u32 {

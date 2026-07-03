@@ -105,7 +105,17 @@ pub fn compute(fc: &ForecastSnapshot, today: &Inputs, params: &SkipRuleParams) -
         // (today + window) so the strip previews the same observed-rain gate.
         let observed_recent = {
             let window = params.rain_observed_window_days as usize;
-            let mut acc = d.precip_sum_in;
+            // For TODAY's own cell (day_idx 0) the day-back loop below is empty
+            // (1..=0), so the base must itself fold in the MEASURED rain to date:
+            // mirror the refresher's rain_today_used = max(station, model) so a
+            // real afternoon downpour today shows as a skip on today's cell, not
+            // just tomorrow's. Future cells have no measurement, so they stay on
+            // the forecast precip.
+            let mut acc = if day_idx == 0 {
+                d.precip_sum_in.max(today.rain_today_in)
+            } else {
+                d.precip_sum_in
+            };
             let mut taken = 0usize;
             // Walk back through already-simulated forecast days first.
             for back in 1..=day_idx {
@@ -133,6 +143,16 @@ pub fn compute(fc: &ForecastSnapshot, today: &Inputs, params: &SkipRuleParams) -
                 }
                 acc += past.precip_sum_in;
                 taken += 1;
+            }
+            // TODAY's cell: never claim LESS observed-recent rain than the live
+            // engine's own gauge-informed value (which maxes the station gauge
+            // history against the model's past_daily). The strip only sees the
+            // model archive here, so after hyperlocal rain the model missed, the
+            // day-0 cell would read RUN while the morning actually skipped on
+            // observed rain, contradicting "same engine as the morning check"
+            // right above it. Future cells have no live value to anchor to.
+            if day_idx == 0 {
+                acc = acc.max(today.rain_observed_recent_in);
             }
             acc
         };
@@ -228,6 +248,32 @@ mod tests {
     use crate::engine::skip_rules::Inputs;
     use crate::forecast::snapshot::{DailyEntry, ForecastSnapshot};
 
+    /// A mild, dry forecast day no rule fires on by itself.
+    fn mild_day() -> DailyEntry {
+        DailyEntry {
+            temp_max_f: 72.0,
+            temp_min_f: 55.0,
+            precip_sum_in: 0.0,
+            precip_probability_max: 0,
+            ..Default::default()
+        }
+    }
+
+    /// Baseline `today` Inputs matching the existing carry-forward test:
+    /// the user rain threshold + a benign overnight low, everything else
+    /// default.
+    fn base_inputs() -> Inputs {
+        Inputs {
+            rain_skip_in: 0.25,
+            temp_min_24h_f: Some(55.0),
+            ..Default::default()
+        }
+    }
+
+    fn default_params() -> SkipRuleParams {
+        serde_json::from_str("{}").expect("default skip params")
+    }
+
     // Rain that ACTUALLY fell today (measured) must carry into TOMORROW's skip
     // decision. Before the fix, tomorrow's observed-rain look-back summed today's
     // FORECAST rain, not the measured value, so a real 0.36in afternoon downpour
@@ -285,5 +331,307 @@ mod tests {
             "tomorrow should skip after 0.36in measured today, got {} ({})",
             tomo_wet.verdict, tomo_wet.reason
         );
+    }
+
+    /// A missing forecast produces an empty strip, never a panic or a
+    /// fabricated cell.
+    #[test]
+    fn empty_forecast_yields_empty_strip() {
+        let fc = ForecastSnapshot::default();
+        assert!(fc.daily.is_empty(), "default snapshot has no daily entries");
+        let v = compute(&fc, &base_inputs(), &default_params());
+        assert!(v.is_empty(), "no forecast days -> no strip cells");
+    }
+
+    /// The strip length tracks the forecast: shorter than 7 days yields one
+    /// cell per day (contiguous day_offset + per-day epochs), longer is
+    /// capped at 7.
+    #[test]
+    fn strip_length_tracks_daily_len_capped_at_seven() {
+        let params = default_params();
+
+        // 3-day forecast -> exactly 3 cells, offsets 0..=2, epochs copied.
+        let fc = ForecastSnapshot {
+            daily: (0..3i64)
+                .map(|i| DailyEntry {
+                    time_epoch: 1_700_000_000 + i * 86_400,
+                    ..mild_day()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let v = compute(&fc, &base_inputs(), &params);
+        assert_eq!(v.len(), 3, "3 forecast days -> 3 cells");
+        assert_eq!(
+            v.iter().map(|d| d.day_offset).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(v[2].time_epoch, 1_700_000_000 + 2 * 86_400);
+        assert!(v.iter().all(|d| d.verdict == "run"), "every mild cell runs");
+
+        // 10-day forecast -> capped at 7 cells.
+        let fc = ForecastSnapshot {
+            daily: vec![mild_day(); 10],
+            ..Default::default()
+        };
+        let v = compute(&fc, &base_inputs(), &params);
+        assert_eq!(v.len(), 7, "strip is capped at 7 cells");
+    }
+
+    /// window=2: measured rain today ACCUMULATES with yesterday's observed
+    /// past_daily rain into tomorrow's cell (neither day alone clears the
+    /// 0.25in threshold), and the carry EXPIRES once a later cell's
+    /// look-back window slides past the measured days.
+    #[test]
+    fn multi_day_observed_accumulation_window_two_and_boundary() {
+        let fc = ForecastSnapshot {
+            daily: vec![mild_day(); 4],
+            // Yesterday's OBSERVED rain (past_daily is stored earliest ->
+            // latest; a single entry IS yesterday).
+            past_daily: vec![DailyEntry {
+                precip_sum_in: 0.15,
+                ..mild_day()
+            }],
+            ..Default::default()
+        };
+        let params: SkipRuleParams =
+            serde_json::from_str(r#"{ "rain_observed_window_days": 2 }"#).unwrap();
+        let today = Inputs {
+            rain_today_in: 0.15,
+            ..base_inputs()
+        };
+
+        let v = compute(&fc, &today, &params);
+        // Tomorrow looks back 2 days: measured today 0.15 + past_daily
+        // yesterday 0.15 = 0.30 >= 0.25 -> observed-rain skip.
+        let d1 = v.iter().find(|d| d.day_offset == 1).expect("day 1");
+        assert_eq!(
+            d1.verdict, "skip",
+            "tomorrow must skip on ACCUMULATED observed rain, got {} ({})",
+            d1.verdict, d1.reason
+        );
+        assert_eq!(d1.reason_code, "observed_rain");
+
+        // Day 2's two back-days are forecast day 1 (0.0) + measured today
+        // (0.15); yesterday's past_daily rain is past the window: 0.15 <
+        // 0.25 -> run. The carry expires across the window boundary.
+        let d2 = v.iter().find(|d| d.day_offset == 2).expect("day 2");
+        assert_eq!(
+            d2.verdict, "run",
+            "day 2 is past the observed window, got {} ({})",
+            d2.verdict, d2.reason
+        );
+
+        // Control: with the DEFAULT window=1 tomorrow sees only today's
+        // 0.15 (no past_daily spill), so nothing fires: window=2 is
+        // provably what accumulated above.
+        let v1 = compute(&fc, &today, &default_params());
+        let d1 = v1.iter().find(|d| d.day_offset == 1).expect("day 1");
+        assert_eq!(
+            d1.verdict, "run",
+            "window=1 control must run, got {} ({})",
+            d1.verdict, d1.reason
+        );
+    }
+
+    /// The day-0 cell folds the MEASURED rain-to-date into its own observed
+    /// total (max(forecast, measured), mirroring the refresher's
+    /// rain_today_used), so after a real 0.36in downpour on a dry-forecast day
+    /// today's strip cell skips exactly like the live engine, and tomorrow's
+    /// cell carries the measurement too. (Previously the day-0 look-back was the
+    /// empty range 1..=0, so today's cell used forecast precip only and diverged
+    /// from the live verdict.)
+    #[test]
+    fn day_zero_cell_reflects_measured_rain_today() {
+        let fc = ForecastSnapshot {
+            daily: vec![mild_day(); 3],
+            ..Default::default()
+        };
+        let params = default_params();
+        let today = Inputs {
+            rain_today_in: 0.36,
+            ..base_inputs()
+        };
+
+        let v = compute(&fc, &today, &params);
+        let d0 = v.iter().find(|d| d.day_offset == 0).expect("day 0");
+        let d1 = v.iter().find(|d| d.day_offset == 1).expect("day 1");
+        assert_eq!(
+            d1.verdict, "skip",
+            "tomorrow carries the measured rain (the carry-forward fix)"
+        );
+
+        // The live engine, fed the same measured rain, skips today.
+        let live = evaluate_with(
+            &Inputs {
+                rain_today_in: 0.36,
+                rain_observed_recent_in: 0.36,
+                ..base_inputs()
+            },
+            &params,
+        );
+        assert_eq!(live.verdict, "skip", "live verdict skips on 0.36in today");
+
+        // Today's strip cell now agrees with the live verdict.
+        assert_eq!(
+            d0.verdict, "skip",
+            "today's strip cell reflects measured rain, got {} ({})",
+            d0.verdict, d0.reason
+        );
+    }
+
+    /// TODAY's cell anchors to the live engine's gauge-informed observed-recent
+    /// value: hyperlocal rain YESTERDAY that the model's past_daily missed (the
+    /// gauge recorded it; the model archive shows ~0) made the morning skip on
+    /// observed rain, so the day-0 cell must not read RUN under the header
+    /// "same engine as the morning check".
+    #[test]
+    fn day_zero_cell_anchors_to_gauge_informed_observed_recent() {
+        // Dry forecast, empty model archive (a non-Open-Meteo provider, or the
+        // model simply missed the pop-up storm).
+        let fc = ForecastSnapshot {
+            daily: vec![mild_day(); 3],
+            ..Default::default()
+        };
+        let params = default_params();
+        // The refresher's gauge-informed window value: 0.36in fell YESTERDAY on
+        // the yard's own gauge (rain_today is 0.0, it is a new dry day).
+        let today = Inputs {
+            rain_today_in: 0.0,
+            rain_observed_recent_in: 0.36,
+            ..base_inputs()
+        };
+
+        let v = compute(&fc, &today, &params);
+        let d0 = v.iter().find(|d| d.day_offset == 0).expect("day 0");
+        assert_eq!(
+            d0.verdict, "skip",
+            "day-0 cell must match the gauge-informed live gate, got {} ({})",
+            d0.verdict, d0.reason
+        );
+        // The anchor is day-0 only: future cells stay on the forecast (the
+        // look-back carry uses the forecast/model chain as before, and this
+        // 0.36 from yesterday is outside tomorrow's window=1 look-back, which
+        // sees only today's 0.0).
+        let d2 = v.iter().find(|d| d.day_offset == 2).expect("day 2");
+        assert_eq!(d2.verdict, "run", "future dry cells unaffected");
+    }
+
+    /// days_since_significant_rain falls back through past_daily when no
+    /// already-simulated forecast day was wet: a wet day 3 past-days back
+    /// leaves a dry streak long enough for the heat-advisory rule
+    /// (run_extended), while rain just yesterday resets the streak and the
+    /// same hot cell is a plain run.
+    #[test]
+    fn days_since_rain_falls_back_through_past_daily_for_dry_streak_rule() {
+        let hot = DailyEntry {
+            temp_max_f: 98.0,
+            temp_min_f: 74.0,
+            ..mild_day()
+        };
+        let dry = mild_day();
+        // Significant (>= 0.05) but under every observed-skip threshold, so
+        // ONLY the streak arithmetic distinguishes the two arrangements.
+        let wet = DailyEntry {
+            precip_sum_in: 0.10,
+            ..mild_day()
+        };
+        let params = default_params();
+        let today = Inputs {
+            humidity_now_pct: 70.0,
+            temp_min_24h_f: Some(74.0),
+            ..base_inputs()
+        };
+
+        // Wet 3 days back (earliest), then two dry days -> streak = 3 >= 2.
+        let fc = ForecastSnapshot {
+            daily: vec![hot.clone(), mild_day(), mild_day()],
+            past_daily: vec![wet.clone(), dry.clone(), dry.clone()],
+            ..Default::default()
+        };
+        let v = compute(&fc, &today, &params);
+        let d0 = v.iter().find(|d| d.day_offset == 0).expect("day 0");
+        assert_eq!(
+            d0.verdict, "run_extended",
+            "dry streak via past_daily + heat -> heat advisory, got {} ({})",
+            d0.verdict, d0.reason
+        );
+        assert_eq!(d0.reason_code, "heat_advisory");
+
+        // Control: wet YESTERDAY (latest past day) -> streak = 1 < 2; same
+        // heat, same humidity, no advisory.
+        let fc = ForecastSnapshot {
+            daily: vec![hot, mild_day(), mild_day()],
+            past_daily: vec![dry.clone(), dry, wet],
+            ..Default::default()
+        };
+        let v = compute(&fc, &today, &params);
+        let d0 = v.iter().find(|d| d.day_offset == 0).expect("day 0");
+        assert_eq!(
+            d0.verdict, "run",
+            "wet yesterday resets the streak, got {} ({})",
+            d0.verdict, d0.reason
+        );
+    }
+
+    /// The strip is a WEATHER-ONLY projection: a healthy-dry soil zone
+    /// demotes a soft forecast-rain skip in the LIVE engine (the soil_floor
+    /// moat), but every strip cell is built with soil_zones = [] by design
+    /// (there is no per-day soil forecast), so the forecast skip stands on
+    /// the strip. Pins the containment so today's soil state can never
+    /// silently leak into the 7-day cells (or the moat silently vanish from
+    /// the live path).
+    #[test]
+    fn soil_floor_demotion_does_not_leak_into_future_strip_cells() {
+        let params = default_params();
+        let dry_zone = crate::engine::skip_rules::ZoneSoil {
+            slug: "back_yard".into(),
+            name: "Back yard".into(),
+            pct: Some(12.0),
+            saturation_pct: 60.0,
+            target_min_pct: 25.0,
+        };
+
+        // LIVE engine control: a tomorrow-rain skip (0.6in x 100% >= 0.25)
+        // WITH the dry zone present is demoted to a run by the moat.
+        let live = evaluate_with(
+            &Inputs {
+                forecast_in: 0.6,
+                rain_tomorrow_prob_pct: 100,
+                soil_zones: vec![dry_zone.clone()],
+                ..base_inputs()
+            },
+            &params,
+        );
+        assert_eq!(
+            live.verdict, "run",
+            "control: soil_floor demotes the live tomorrow-rain skip, got {} ({})",
+            live.verdict, live.reason
+        );
+        assert_eq!(live.reason_code, "soil_floor");
+
+        // Day 3 forecasts the same heavy, certain rain; cell day 2 sees it
+        // as "tomorrow rain". Today's Inputs carry the SAME dry zone.
+        let wet_day3 = DailyEntry {
+            precip_sum_in: 0.6,
+            precip_probability_max: 100,
+            ..mild_day()
+        };
+        let fc = ForecastSnapshot {
+            daily: vec![mild_day(), mild_day(), mild_day(), wet_day3],
+            ..Default::default()
+        };
+        let today = Inputs {
+            soil_zones: vec![dry_zone],
+            ..base_inputs()
+        };
+        let v = compute(&fc, &today, &params);
+        let d2 = v.iter().find(|d| d.day_offset == 2).expect("day 2");
+        assert_eq!(
+            d2.verdict, "skip",
+            "day 2 keeps its forecast-rain skip (weather-only cells), got {} ({})",
+            d2.verdict, d2.reason
+        );
+        assert_eq!(d2.reason_code, "tomorrow_rain");
     }
 }

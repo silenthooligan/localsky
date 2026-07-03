@@ -32,6 +32,7 @@ pub fn ForecastPanel(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 {view! { <StressFlags snap/> }.into_any()}
                 {view! { <MultiDayRainBlock snap/> }.into_any()}
                 {view! { <BalanceBlock snap/> }.into_any()}
+                {view! { <ModelSoilBlock snap/> }.into_any()}
                 {view! { <DayBlock snap/> }.into_any()}
             </div>
         </section>
@@ -86,6 +87,22 @@ fn BalanceHeadline(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                         {move || format!("-{}", depth_value_mm(et_mm(), prefs.get()))}
                         <span class="balance-fig__u">{move || depth_unit(prefs.get())}</span>
                     </span>
+                    // Intraday honesty: the figure above is the FULL day's
+                    // budget; this notes how much the model says is already
+                    // spent, so a morning reader isn't shown a whole day of
+                    // loss charged up front. Hidden when the provider has no
+                    // hourly ET curve.
+                    {move || {
+                        let spent = snap.get().forecast.eto_spent_today_mm;
+                        let p = prefs.get();
+                        // Unit glued to the number ("1.9mm spent so far"), not in a
+                        // trailing span (which laid out as "1.9 spent so far mm").
+                        (spent > 0.05).then(|| view! {
+                            <span class="balance-fig__note">
+                                {format!("{}{} spent so far", depth_value_mm(spent, p), depth_unit(p))}
+                            </span>
+                        })
+                    }}
                 </div>
                 <div class=move || {
                     if drying() {
@@ -169,6 +186,23 @@ fn StressFlags(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                         flag_note="too windy"
                     />
                 }.into_any()}
+                // Transpiration stress (VPD): model data, advisory only.
+                // Sustained VPD above ~1.6 kPa means plants lose water
+                // faster than the standard Kc assumes; the tile flags the
+                // condition without ever changing a skip decision. Hidden
+                // entirely when the provider sends no VPD series.
+                {move || {
+                    let f = snap.get().forecast;
+                    (f.vpd_now_kpa > 0.0 || f.vpd_max_today_kpa > 0.0).then(|| view! {
+                        <StressTile
+                            label="Transpiration (VPD)"
+                            value=Signal::derive(move || format!("{:.2} kPa", snap.get().forecast.vpd_now_kpa))
+                            sub=Signal::derive(move || format!("peak {:.2} kPa today", snap.get().forecast.vpd_max_today_kpa))
+                            flagged=Signal::derive(move || snap.get().forecast.vpd_max_today_kpa >= 1.6)
+                            flag_note="high water demand"
+                        />
+                    }.into_any())
+                }}
             </div>
         </div>
     }
@@ -343,6 +377,15 @@ fn RainBlock(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                     threshold=Signal::derive(move || snap.get().skip_check.rain_skip_in)
                     threshold_label="Rain-skip threshold"
                     prefs=prefs.get()
+                    // Recency carry: rain measured TODAY still counts toward
+                    // tomorrow's observed-rain skip (same carry the verdict
+                    // strip and morning check apply), so the bar shows the
+                    // decision's real input instead of a bare forecast 0
+                    // that contradicts a "skipping on recent rain" cell.
+                    carry=Signal::derive(move || {
+                        let f = snap.get().forecast;
+                        f.rain_today_tempest_in.max(f.rain_today_om_in)
+                    })
                 />
                 <RainBar
                     label="Next 3 days"
@@ -365,10 +408,30 @@ fn RainBar(
     // value/threshold are INCHES; the bar math stays in inches internally,
     // only the displayed figures convert via the unit prefs.
     prefs: UnitPrefs,
+    /// Rain already MEASURED that this day's decision ALSO counts (the
+    /// observed-recency carry: rain that fell today counts toward
+    /// tomorrow's skip). Rendered as a leading hatched segment so the bar
+    /// shows the decision's real input instead of a bare forecast 0 that
+    /// contradicts a "skipping on recent rain" verdict. Optional; bars
+    /// without a carry render exactly as before.
+    #[prop(optional, into)]
+    carry: Option<Signal<f64>>,
 ) -> impl IntoView {
+    let carry_in = move || carry.map(|c| c.get()).unwrap_or(0.0).max(0.0);
+    // The decision-relevant total: measured carry + this day's forecast.
+    let total = move || value.get() + carry_in();
     let pct = move || {
         let max = (threshold.get() * 1.2).max(0.01);
-        ((value.get() / max).clamp(0.0, 1.0) * 100.0).round()
+        ((total() / max).clamp(0.0, 1.0) * 100.0).round()
+    };
+    // The carry's share OF the fill (leading segment).
+    let carry_share_pct = move || {
+        let t = total();
+        if t > 0.0 {
+            (carry_in() / t * 100.0).clamp(0.0, 100.0).round()
+        } else {
+            0.0
+        }
     };
     let threshold_pct = move || {
         let max = (threshold.get() * 1.2).max(0.01);
@@ -377,30 +440,55 @@ fn RainBar(
     // Two-tone fill: BLUE (wet, still accumulating) up to where the threshold
     // sits WITHIN the fill, then TEAL (satisfied/saturated) for the portion
     // beyond it. The threshold's position relative to the fill is
-    // threshold/value (not threshold/max) so it lands at the actual mark. When
-    // value <= threshold the threshold is at/after the fill end, so thr_pct
-    // clamps to 100 -> all blue; once value > threshold, thr_pct < 100 and the
+    // threshold/total (not threshold/max) so it lands at the actual mark. When
+    // total <= threshold the threshold is at/after the fill end, so thr_pct
+    // clamps to 100 -> all blue; once total > threshold, thr_pct < 100 and the
     // teal segment appears past the mark.
     let thr_pct = move || {
-        let v = value.get();
-        if v > 0.0 {
-            (threshold.get() / v * 100.0).clamp(0.0, 100.0)
+        // The blue->teal ("satisfied") split, as a fraction of the FILL width.
+        // The fill saturates at 100% once total >= max (=1.2x threshold), so the
+        // split must reference total.min(max), not total: otherwise once the fill
+        // clamps, threshold/total keeps shrinking and the boundary slides left of
+        // the threshold tick (which sits at threshold/max of the track). With the
+        // min, the boundary lands exactly on the tick at and past saturation.
+        let t = total();
+        let max = (threshold.get() * 1.2).max(0.01);
+        let denom = t.min(max);
+        if denom > 0.0 {
+            (threshold.get() / denom * 100.0).clamp(0.0, 100.0)
         } else {
             100.0
         }
     };
+    let has_carry = move || carry_in() > 0.005;
+    let carry_title = move || {
+        format!(
+            "{} already fell (measured) and still counts toward this day's skip decision",
+            fmt_rain_amount(carry_in(), prefs)
+        )
+    };
     view! {
         <div class=move || {
-            if value.get() >= threshold.get() { "rain-bar rain-bar-above" } else { "rain-bar" }
+            if total() >= threshold.get() { "rain-bar rain-bar-above" } else { "rain-bar" }
         }>
             <div class="rain-bar-head">
                 <span class="rain-bar-label">{label}</span>
-                <span class="rain-bar-value">{move || fmt_rain_amount(value.get(), prefs)}</span>
+                <span class="rain-bar-value">
+                    {move || fmt_rain_amount(value.get(), prefs)}
+                    {move || has_carry().then(|| view! {
+                        <span class="rain-bar-carry-note" title=carry_title>
+                            {format!(" +{} carried", fmt_rain_amount(carry_in(), prefs))}
+                        </span>
+                    })}
+                </span>
             </div>
             <div class="rain-bar-track">
                 <div
                     class="rain-bar-fill"
-                    style=move || format!("width:{}%; --thr-pct:{}%", pct(), thr_pct())
+                    style=move || format!(
+                        "width:{}%; --thr-pct:{}%; --carry-pct:{}%",
+                        pct(), thr_pct(), carry_share_pct()
+                    )
                 ></div>
                 <div
                     class="rain-bar-threshold"
@@ -410,6 +498,11 @@ fn RainBar(
             </div>
             <div class="rain-bar-foot">
                 {threshold_label} ": " {move || fmt_rain_amount(threshold.get(), prefs)}
+                {move || has_carry().then(|| view! {
+                    <span class="rain-bar-foot-carry" title=carry_title>
+                        {format!(" · counts {} total with today's rain", fmt_rain_amount(total(), prefs))}
+                    </span>
+                })}
             </div>
         </div>
     }
@@ -533,6 +626,57 @@ fn BalanceBlock(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 </div>
             </div>
         </div>
+    }
+}
+
+/// Model soil (advisory, nerd mode): the forecast model's own root-zone
+/// soil state. Model data, NEVER a probe substitute: zones with real
+/// probes keep their measured readings everywhere decisions are made.
+/// What this adds is the model's forward view, the 48h dry-down trend a
+/// probe can't see. Hidden entirely when the provider has no soil series.
+#[component]
+fn ModelSoilBlock(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
+    let prefs = use_unit_prefs();
+    let has_data = move || snap.get().forecast.soil_moisture_3_9_now_vwc > 0.0;
+    let now_pct = move || snap.get().forecast.soil_moisture_3_9_now_vwc * 100.0;
+    let later_pct = move || snap.get().forecast.soil_moisture_3_9_in48h_vwc * 100.0;
+    let trend = move || {
+        let delta = later_pct() - now_pct();
+        if delta <= -1.0 {
+            format!("drying to {:.0}% in 48h", later_pct())
+        } else if delta >= 1.0 {
+            format!("wetting to {:.0}% in 48h", later_pct())
+        } else {
+            "steady over 48h".to_string()
+        }
+    };
+    move || {
+        has_data().then(|| view! {
+            <div class="forecast-block nerd-only">
+                <div class="forecast-block-title">"Model soil (advisory)"</div>
+                <div class="kv-grid">
+                    <div class="kv">
+                        <span class="k">"Root zone moisture (3-9cm)"</span>
+                        <span class="v">{move || format!("{:.0}%", now_pct())}</span>
+                    </div>
+                    <div class="kv">
+                        <span class="k">"48h trend"</span>
+                        <span class=move || {
+                            if later_pct() < now_pct() - 1.0 { "v v-warn" } else { "v" }
+                        }>{trend}</span>
+                    </div>
+                    <div class="kv">
+                        <span class="k">"Soil temp (6cm)"</span>
+                        <span class="v">
+                            {move || fmt_temp_short(snap.get().forecast.soil_temp_6cm_now_f, prefs.get())}
+                        </span>
+                    </div>
+                </div>
+                <div class="forecast-block-foot">
+                    "Weather-model estimate for context; zone probes stay authoritative."
+                </div>
+            </div>
+        })
     }
 }
 

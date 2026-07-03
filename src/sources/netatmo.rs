@@ -23,7 +23,9 @@
 //   GET  /api/getstationsdata?device_id={mac}   station + modules tree
 //
 // Modules we read:
-//   - Indoor module (the main station):  Temperature, Humidity, Pressure (mbar)
+//   - Indoor module (the main station):  Temperature, Humidity, Pressure
+//     (mbar, sea-level normalized; AbsolutePressure is the raw station
+//     reading and only a fallback)
 //   - Outdoor (NAModule1):                Temperature, Humidity
 //   - Rain gauge (NAModule3):             Rain (1h sum in mm)
 //   - Anemometer (NAModule2):             WindStrength (km/h), WindAngle, GustStrength
@@ -223,7 +225,17 @@ fn extract_fields(station: &Value) -> Vec<(WeatherField, f64)> {
         if let Some(h) = d.get("Humidity").and_then(|v| v.as_f64()) {
             out.push((WeatherField::RhPct, h));
         }
-        if let Some(p_mbar) = d.get("AbsolutePressure").and_then(|v| v.as_f64()) {
+        // Netatmo reports two pressures: `Pressure` is normalized to sea
+        // level, `AbsolutePressure` is the raw station-elevation reading.
+        // The fleet convention is SEA LEVEL (Davis bar_sea_level, Ambient
+        // baromrelin, Synoptic sea_level_pressure, ...), so prefer
+        // Pressure; the absolute reading is only a fallback so a body
+        // missing the sea-level field still yields a value.
+        if let Some(p_mbar) = d
+            .get("Pressure")
+            .and_then(|v| v.as_f64())
+            .or_else(|| d.get("AbsolutePressure").and_then(|v| v.as_f64()))
+        {
             // 1 mbar = 0.02953 inHg
             out.push((WeatherField::PressureInHg, p_mbar * 0.02953));
         }
@@ -587,6 +599,52 @@ mod tests {
         assert_eq!(tempf.len(), 1, "exactly one AirTempF should remain");
         // 5C = 41F
         assert!((tempf[0].1 - 41.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn extract_prefers_sea_level_pressure() {
+        // Netatmo reports both pressures on the main module: `Pressure` is
+        // sea-level normalized, `AbsolutePressure` is the raw station
+        // reading. Every other adapter emits sea level, so Pressure must
+        // win or a station at elevation disagrees with every other source
+        // (~1 inHg low at 300 m).
+        let body = json!({
+            "body": {
+                "devices": [{
+                    "dashboard_data": { "Pressure": 1013.0, "AbsolutePressure": 978.0 },
+                    "modules": []
+                }]
+            }
+        });
+        let f = extract_fields(&body);
+        let p = f
+            .iter()
+            .find(|(k, _)| *k == WeatherField::PressureInHg)
+            .unwrap()
+            .1;
+        // 1013 mbar (sea level) -> ~29.91 inHg, NOT 978 -> ~28.88.
+        assert!((p - 1013.0 * 0.02953).abs() < 0.001, "pressure {p}");
+    }
+
+    #[test]
+    fn extract_falls_back_to_absolute_pressure() {
+        // A body missing the sea-level field still yields the raw station
+        // pressure rather than dropping the field entirely.
+        let body = json!({
+            "body": {
+                "devices": [{
+                    "dashboard_data": { "AbsolutePressure": 978.0 },
+                    "modules": []
+                }]
+            }
+        });
+        let f = extract_fields(&body);
+        let p = f
+            .iter()
+            .find(|(k, _)| *k == WeatherField::PressureInHg)
+            .unwrap()
+            .1;
+        assert!((p - 978.0 * 0.02953).abs() < 0.001, "pressure {p}");
     }
 
     #[test]

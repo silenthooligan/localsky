@@ -128,6 +128,28 @@ fn dot_color(status: &str) -> &'static str {
     }
 }
 
+/// The `.status-chip--*` tone modifier + plain status word for a source row in
+/// the rail, from the /api/v1/health source taxonomy (active / watching /
+/// standby / falling_through / offline). Pairs the WORD with the color so the
+/// dot never carries health alone (the dot+text status-chip law); a
+/// deliberately-disabled source reads a calm "off", never the fault word.
+fn status_chip(status: &str, enabled: bool) -> (&'static str, &'static str) {
+    if !enabled {
+        return ("status-chip--unknown", "off");
+    }
+    match status {
+        "active" => ("status-chip--online", "active"),
+        "watching" => ("status-chip--unknown", "watching"),
+        "standby" => ("status-chip--unknown", "standby"),
+        "falling_through" => ("status-chip--stale", "falling through"),
+        "offline" => ("status-chip--offline", "offline"),
+        // Legacy freshness strings, congruent with dot_color above.
+        "fresh" => ("status-chip--online", "fresh"),
+        "stale" => ("status-chip--stale", "stale"),
+        _ => ("status-chip--unknown", "unknown"),
+    }
+}
+
 fn dir_card(deg: f64) -> &'static str {
     const P: [&str; 16] = [
         "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW",
@@ -523,6 +545,10 @@ pub fn SensorsPage(
                             let kind =
                                 crate::components::sources_form::friendly_source_name(&r.kind);
                             let dotc = dot_color(&r.status);
+                            // Health as dot + WORD (status-chip), never color
+                            // alone, so a stale or offline source reads off the
+                            // rail without opening its detail card.
+                            let chip = status_chip(&r.status, r.enabled);
                             view! {
                                 <SensorRow
                                     active=Signal::derive(move || selected.get() == Sel::Source(id_a.clone()))
@@ -530,6 +556,7 @@ pub fn SensorsPage(
                                     dot=Signal::derive(move || dotc)
                                     title=id
                                     sub=Signal::derive(move || kind.clone())
+                                    status=chip
                                 />
                             }
                         };
@@ -634,13 +661,25 @@ fn SensorRow(
     dot: Signal<&'static str>,
     #[prop(into)] title: String,
     sub: Signal<String>,
+    /// Optional (tone modifier, word) rendered after the sub line as a
+    /// `.status-chip` (the dot+text pattern), so health never reads from the
+    /// leading dot's color alone. None keeps the legacy two-line row for rows
+    /// whose sub already carries the state in words (soil "probe offline").
+    #[prop(optional)]
+    status: Option<(&'static str, &'static str)>,
 ) -> impl IntoView {
     view! {
         <button type="button" class="sensor-row" class:is-active=move || active.get() on:click=move |_| on_pick.run(())>
             <span class="sensor-row__dot" style=move || format!("background:{}", dot.get())></span>
             <span class="sensor-row__text">
                 <span class="sensor-row__title">{title}</span>
-                <span class="sensor-row__sub">{move || sub.get()}</span>
+                <span class="sensor-row__sub">
+                    {move || sub.get()}
+                    {status.map(|(tone, word)| view! {
+                        " "
+                        <span class=format!("status-chip {tone}")>{word}</span>
+                    })}
+                </span>
             </span>
         </button>
     }

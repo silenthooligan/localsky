@@ -1,15 +1,16 @@
 # LocalSky
 
-<!-- TODO: template this banner from Cargo.toml's version at mdbook build
-     (a preprocessor / build step) so it never drifts from the binary again.
-     Until then the literal below must be bumped by hand on every release. -->
-> These docs track LocalSky v0.7.0-beta.1.
+<!-- The version token below is substituted from Cargo.toml at build time by
+     both doc builders (the Dockerfile before its `mdbook build docs`, and the
+     docs-publishing CI workflow before its build), so this banner follows
+     every release automatically. Do not replace it with a literal. -->
+> These docs track LocalSky v{{LOCALSKY_VERSION}}.
 
 **Hyperlocal weather on your hardware. Smart irrigation when you want it.**
 
 LocalSky is two products in one Docker container.
 
-A **self-hosted weather dashboard** that reads your weather station over the LAN (Tempest, Ecowitt, Ambient Weather, Davis, and more), merges Open-Meteo with regional forecast sources (NWS in the US, MET Norway, OpenWeather, Pirate Weather) with per-field provenance, and renders the result in a fast installable PWA with built-in radar (RainViewer worldwide, IEM NEXRAD in the US) and lightning. Useful on its own, even if you never irrigate anything.
+A **self-hosted weather dashboard** that is cloud-first out of the box: a new install with no hardware picks up Open-Meteo automatically and shows you weather immediately, then reads your weather station over the LAN when you add one (Tempest, Ecowitt, Ambient Weather, Davis, and more). It merges Open-Meteo with regional forecast sources (NWS in the US, MET Norway, OpenWeather, Pirate Weather) using per-field priority chains, so you set the backup order for each reading yourself, and it labels every reading with an honesty tag (measured, radar, nowcast, or forecast) so you always know where a number came from. Display units are configurable, with a household default and a per-device override. The result renders in a fast installable PWA with built-in radar (RainViewer worldwide, NOAA MRMS and IEM NEXRAD in the US) and lightning. Useful on its own, even if you never irrigate anything.
 
 A **smart irrigation engine** that pairs the same weather data with peer-reviewed agronomy (FAO-56 reference ET, USDA soil textures, species-aware Kc curves, a 17-rule skip ladder) and drives OpenSprinkler, Rachio, Rain Bird, Hydrawise, B-hyve, or any valve reachable over MQTT or Home Assistant. Optional. Off until you wire a controller.
 

@@ -628,7 +628,7 @@ fn soil_probe_row(
 fn no_probes_hint() -> impl IntoView {
     view! {
         <p class="sensors-section__hint" style="margin-top: var(--space-3)">
-            "No soil probes are reporting on your gateway(s) yet. Make sure each WH51/WS-soil "
+            "No soil probes are reporting on your gateway(s) yet. Make sure each soil "
             "probe is paired to the gateway (in the Ecowitt WS View app) and reading, then use "
             "Re-read probes above. You can also bind them later under Settings, Sensors. "
             <a href=doc_url("first-soil-sensor") target="_blank" rel="noopener noreferrer"

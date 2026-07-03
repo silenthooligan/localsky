@@ -947,13 +947,25 @@ async fn put_raw_toml(
     let mut leftover = Vec::new();
     remaining_sentinels(&candidate_json, "$", &mut leftover);
     if !leftover.is_empty() {
+        // Unlike PUT /api/config, the raw path has NO __renames hint (the
+        // editor is free text; neither it nor we can tell a renamed id from
+        // a brand-new entry), so renaming a source/controller id here
+        // always strands that entry's sentinels and lands in this branch.
+        // Adding rename logic is not wanted; instead the message must be
+        // honest about WHY and name the two paths that actually work.
         return (
             StatusCode::BAD_REQUEST,
             Json(ApiError {
                 error: "unmatched_redacted_secret".into(),
                 detail: Some(format!(
-                    "redacted placeholder(s) with no stored value at: {}; supply the real secret",
-                    leftover.join(", ")
+                    "redacted placeholder(s) with no stored value at: {}. If you renamed a \
+                     source or controller id in the raw TOML, its stored secrets cannot be \
+                     matched from the redacted text. Either rename it in Settings > Devices \
+                     (which migrates its secrets and references automatically), or paste the \
+                     real secret value in place of each {} placeholder under the renamed \
+                     entry.",
+                    leftover.join(", "),
+                    SECRET_REDACTED_SENTINEL
                 )),
             }),
         )
@@ -1082,12 +1094,107 @@ async fn get_config(
 /// and preserves the existing stored value.
 pub const SECRET_REDACTED_SENTINEL: &str = "***redacted***";
 
+/// A configured source/controller URL carries a credential when it has
+/// userinfo (`user:pass@host`) or a secret-looking query parameter (RestPoll's
+/// docs say "put query-param API keys in the url"). Used to decide whether GET
+/// /api/config must redact the WHOLE url. Conservative: a substring match on the
+/// query is fine, a false positive only hides a non-secret url, which still
+/// round-trips through PUT via the by-id unredact.
+fn url_carries_secret(url: &str) -> bool {
+    if let Some((_, rest)) = url.split_once("://") {
+        // Userinfo is everything before '@' within the authority (before the
+        // first '/').
+        let authority = rest.split('/').next().unwrap_or("");
+        if authority.contains('@') {
+            return true;
+        }
+    }
+    if let Some((_, query)) = url.split_once('?') {
+        let q = query.to_ascii_lowercase();
+        const SECRET_PARAMS: &[&str] = &[
+            "api_key",
+            "apikey",
+            "app_key",
+            "appid",
+            "access_token",
+            "token",
+            "auth",
+            "secret",
+            "password",
+            "passwd",
+            "pwd",
+            "sig",
+            "signature",
+            "key=",
+        ];
+        return SECRET_PARAMS.iter().any(|p| q.contains(p));
+    }
+    false
+}
+
+/// A request-header name whose VALUE should be treated as secret (Authorization,
+/// X-Api-Key, *-Token, Cookie, ...). Innocuous headers (Content-Type, Accept)
+/// stay visible. Conservative substring matching (false positives acceptable).
+fn header_name_is_secret(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.contains("authorization")
+        || n.contains("cookie")
+        || n.contains("token")
+        || n.contains("secret")
+        || n.contains("auth")
+        || n.contains("password")
+        || n.contains("credential")
+        || n.contains("key")
+}
+
 pub(crate) fn redact_secrets(v: &mut serde_json::Value) {
     use serde_json::Value;
     match v {
         Value::Object(map) => {
             for (k, val) in map.iter_mut() {
                 let lk = k.to_lowercase();
+                // Value/context-aware redaction for the generic-HTTP source
+                // configs (RestPoll / HttpGeneric / Prometheus / InfluxDb): a
+                // secret can ride inside the URL query string, a request HEADER
+                // value, or a request BODY, none of which the key-name allowlist
+                // below catches. Whole-value redaction (never partial) so the
+                // by-id unredact round-trip on PUT restores it cleanly.
+                match lk.as_str() {
+                    "url" => {
+                        if let Value::String(s) = val {
+                            if url_carries_secret(s) {
+                                *s = SECRET_REDACTED_SENTINEL.to_string();
+                            }
+                            continue;
+                        }
+                    }
+                    "headers" => {
+                        if let Value::Object(hmap) = val {
+                            for (hk, hv) in hmap.iter_mut() {
+                                if header_name_is_secret(hk) {
+                                    if let Value::String(s) = hv {
+                                        if !s.is_empty() {
+                                            *s = SECRET_REDACTED_SENTINEL.to_string();
+                                        }
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                    "body" => {
+                        // A POST body can carry a credential (OAuth
+                        // client_secret, a form password) and cannot be safely
+                        // parsed, so redact it wholesale when non-empty.
+                        if let Value::String(s) = val {
+                            if !s.is_empty() {
+                                *s = SECRET_REDACTED_SENTINEL.to_string();
+                            }
+                            continue;
+                        }
+                    }
+                    _ => {}
+                }
                 let is_secret = lk == "password_md5"
                     || lk == "bearer_token"
                     || lk == "api_key"
@@ -1136,7 +1243,18 @@ pub(crate) fn redact_secrets(v: &mut serde_json::Value) {
                     // skip the whole notifications.email subtree and leak its
                     // smtp username/password. See the string-vs-recurse handling
                     // below.
-                    || lk == "email";
+                    || lk == "email"
+                    // Cloud OAuth/API-key PAIR IDENTIFIER: YoLink (the UAID),
+                    // Tuya (the access_id) and Netatmo all authenticate with a
+                    // client_id + client_secret pair. The secret half is
+                    // already redacted above; leaving client_id in the clear
+                    // half-leaks the credential, the same gap the account
+                    // `email` entry closes for the password-based cloud
+                    // controllers. The MQTT source/command client_id (a broker
+                    // session name, not a credential) is swept up too; that is
+                    // the same conservative trade `username` already makes, and
+                    // the id-keyed unredact restores it losslessly on PUT.
+                    || lk == "client_id";
                 // Redact only when the secret-named key holds a STRING value;
                 // otherwise (object/array under a secret-named key, e.g. the
                 // notifications `email` EmailConfig object) fall through to
@@ -1598,6 +1716,7 @@ mod tests {
                 past_days: 1,
                 include_radar: false,
                 model: "best_match".into(),
+                endpoint: None,
             }),
         });
         let entry = &cfg.sources[0];
@@ -1921,6 +2040,134 @@ mod tests {
     }
 
     #[test]
+    fn redact_covers_cloud_oauth_client_id() {
+        // YoLink (UAID), Tuya (access_id) and Netatmo authenticate with a
+        // client_id + client_secret pair. The secret half was already
+        // redacted; this proves the client_id (the app/account identifier
+        // half) is too, that non-secret device ids survive, and that the
+        // id-keyed unredact restores the pair on the PUT round-trip.
+        let original = serde_json::json!({
+            "sources": [{
+                "id": "yolink_main",
+                "kind": "yolink",
+                "config": {
+                    "client_id": "ua_0123456789abcdef",
+                    "client_secret": "sec_fedcba9876543210",
+                    "device_field_map": {}
+                }
+            }, {
+                "id": "netatmo_main",
+                "kind": "netatmo",
+                "config": {
+                    "client_id": "netatmo-app-5f3c",
+                    "client_secret": "netatmo_secret_x",
+                    "refresh_token": "netatmo_refresh_y",
+                    "device_id": "70:ee:50:00:11:22"
+                }
+            }]
+        });
+        let mut v = original.clone();
+        redact_secrets(&mut v);
+        let s = serde_json::to_string(&v).unwrap();
+        assert!(!s.contains("ua_0123456789abcdef"), "YoLink UAID leaked");
+        assert!(!s.contains("netatmo-app-5f3c"), "Netatmo client_id leaked");
+        assert!(!s.contains("sec_fedcba9876543210"), "client_secret leaked");
+        assert!(!s.contains("netatmo_refresh_y"), "refresh_token leaked");
+        // Non-credential device identifier stays visible for the form.
+        assert!(
+            s.contains("70:ee:50:00:11:22"),
+            "device_id unexpectedly redacted"
+        );
+
+        // Round-trip: re-submitting the redacted config restores the pair
+        // by id, so a settings save that did not touch them is lossless.
+        let mut candidate = v.clone();
+        unredact_secrets(&mut candidate, &original);
+        assert_eq!(
+            candidate["sources"][0]["config"]["client_id"],
+            "ua_0123456789abcdef"
+        );
+        assert_eq!(
+            candidate["sources"][1]["config"]["client_id"],
+            "netatmo-app-5f3c"
+        );
+        assert_eq!(
+            candidate["sources"][1]["config"]["client_secret"],
+            "netatmo_secret_x"
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_put_rename_rejection_names_the_working_paths() {
+        // The raw-TOML editor has no __renames hint (free text; a renamed id
+        // is indistinguishable from a new entry), so renaming a source id in
+        // the redacted text ALWAYS strands that entry's sentinels and 400s.
+        // The rejection must be honest and actionable: name the
+        // rename-in-Settings path (which migrates secrets automatically) and
+        // the paste-the-real-secret alternative.
+        use crate::config::schema::*;
+        let dir =
+            std::env::temp_dir().join(format!("localsky-raw-rename-reject-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(FileConfigStore::new(dir.join("localsky.toml")));
+
+        // Stored config: one source with a real secret under id "ha_pass".
+        let mut cfg = Config::default();
+        cfg.sources.push(SourceEntry {
+            id: "ha_pass".into(),
+            priority: 30,
+            enabled: true,
+            max_age_s: None,
+            source: SourceKind::HaPassthrough(HaPassthroughConfig {
+                base_url: "http://ha.local:8123".into(),
+                bearer_token: "supersecret_ha_token_xyz".into(),
+                field_map: Default::default(),
+                soil_zone_map: Default::default(),
+            }),
+        });
+        store.save(&cfg).await.unwrap();
+
+        // Simulate the Advanced-editor round-trip after an id rename: the
+        // fetched (redacted) TOML with the id changed and the secret still
+        // sitting as the sentinel.
+        let mut renamed = cfg.clone();
+        renamed.sources[0].id = "ha_pass_renamed".into();
+        let SourceKind::HaPassthrough(ha) = &mut renamed.sources[0].source else {
+            panic!("expected ha_passthrough source");
+        };
+        ha.bearer_token = SECRET_REDACTED_SENTINEL.to_string();
+        let body = toml::to_string_pretty(&renamed).unwrap();
+
+        let resp = put_raw_toml(State(ConfigApiState::store_only(store)), body)
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"], "unmatched_redacted_secret");
+        let detail = v["detail"].as_str().expect("detail is a string");
+        // The stranded entry is still named by path...
+        assert!(
+            detail.contains("ha_pass_renamed"),
+            "detail must name the stranded entry: {detail}"
+        );
+        // ...and both working paths are spelled out.
+        assert!(
+            detail.contains("Settings > Devices"),
+            "detail must point at the Settings rename path: {detail}"
+        );
+        assert!(
+            detail.contains(SECRET_REDACTED_SENTINEL),
+            "detail must tell the user to paste the real value over the placeholder: {detail}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn redact_covers_weatherkit_private_key() {
         // The Apple WeatherKit `.p8` ES256 signing key
         // (WeatherKitConfig.private_key_pem) is a credential: it must never
@@ -1997,6 +2244,21 @@ mod tests {
                 service_id: "com.example.weather".into(),
                 private_key_pem: format!("{M}_apple_p8_key"),
                 language: "en".into(),
+            }),
+        });
+        // OAuth pair where the client_id is the account/app identifier half
+        // of the credential (Netatmo; same shape as YoLink UAID + Tuya
+        // access_id). Both halves must be swallowed by the redactor.
+        cfg.sources.push(SourceEntry {
+            id: "netatmo_main".into(),
+            priority: 35,
+            enabled: true,
+            max_age_s: None,
+            source: SourceKind::Netatmo(NetatmoConfig {
+                client_id: format!("{M}_netatmo_client_id"),
+                client_secret: format!("{M}_netatmo_client_secret"),
+                refresh_token: format!("{M}_netatmo_refresh"),
+                device_id: "70:ee:50:00:11:22".into(),
             }),
         });
 
@@ -2076,6 +2338,10 @@ mod tests {
             s.contains("BPublicKeyNotSecret"),
             "public VAPID key must survive"
         );
+        assert!(
+            s.contains("70:ee:50:00:11:22"),
+            "public Netatmo device_id must survive"
+        );
     }
 
     #[test]
@@ -2088,6 +2354,64 @@ mod tests {
         redact_secrets(&mut v);
         // Empty stays empty (so the UI can distinguish "no token set" from "redacted")
         assert_eq!(v["config"]["api_key"], "");
+    }
+
+    #[test]
+    fn redact_http_source_url_headers_and_body() {
+        use serde_json::json;
+        // RestPoll: api_key in the URL query, an Authorization header value, a
+        // benign Content-Type header, and a credential-bearing body. Plus a
+        // Prometheus source whose URL carries no credential.
+        let original = json!({
+            "sources": [
+                {
+                    "id": "restpoll1",
+                    "config": {
+                        "url": "https://api.example.com/v1/obs?station=x&api_key=SUPERSECRET",
+                        "headers": {
+                            "Authorization": "Bearer SECRETBEARER",
+                            "Content-Type": "application/json"
+                        },
+                        "body": "client_secret=HUSH"
+                    }
+                },
+                {
+                    "id": "prom1",
+                    "config": { "url": "http://prometheus.lan:9090/api/v1/query" }
+                }
+            ]
+        });
+        let mut v = original.clone();
+        redact_secrets(&mut v);
+        let s = serde_json::to_string(&v).unwrap();
+        assert!(!s.contains("SUPERSECRET"), "url api_key leaked: {s}");
+        assert!(!s.contains("SECRETBEARER"), "auth header value leaked: {s}");
+        assert!(!s.contains("HUSH"), "body credential leaked: {s}");
+        // Benign header and the clean Prometheus URL stay visible.
+        assert_eq!(
+            v["sources"][0]["config"]["headers"]["Content-Type"],
+            "application/json"
+        );
+        assert_eq!(
+            v["sources"][1]["config"]["url"],
+            "http://prometheus.lan:9090/api/v1/query"
+        );
+        // Round-trip: re-submitting the redacted config restores every secret
+        // by id, so a settings save that did not touch them is lossless.
+        let mut candidate = v.clone();
+        unredact_secrets(&mut candidate, &original);
+        assert_eq!(
+            candidate["sources"][0]["config"]["url"],
+            "https://api.example.com/v1/obs?station=x&api_key=SUPERSECRET"
+        );
+        assert_eq!(
+            candidate["sources"][0]["config"]["headers"]["Authorization"],
+            "Bearer SECRETBEARER"
+        );
+        assert_eq!(
+            candidate["sources"][0]["config"]["body"],
+            "client_secret=HUSH"
+        );
     }
 
     #[test]
@@ -2207,7 +2531,10 @@ mod tests {
         // The OAuth-style source secrets (Ambient Weather app_key, Netatmo /
         // YoLink / Tuya client_secret + refresh_token) must be redacted on the
         // GET path and round-trip back on a PUT that sends the sentinel
-        // unchanged. client_id is a PUBLIC identifier and must NOT be redacted.
+        // unchanged. client_id is redacted too: it is the account/app
+        // identifier HALF of the credential pair (YoLink UAID, Tuya
+        // access_id), so leaving it clear half-leaks the credential, the
+        // same reasoning as the account-email redaction.
         let original = serde_json::json!({
             "schema_version": 1,
             "sources": [{
@@ -2234,8 +2561,8 @@ mod tests {
             }]
         });
 
-        // GET path: redaction hides every new secret but leaves client_id +
-        // non-secret fields visible.
+        // GET path: redaction hides every new secret (both credential
+        // halves) but leaves non-secret fields visible.
         let mut redacted = original.clone();
         redact_secrets(&mut redacted);
         let s = serde_json::to_string(&redacted).unwrap();
@@ -2249,10 +2576,10 @@ mod tests {
         );
         assert!(!s.contains("ambient_secret_app_key_zzz"), "app_key leaked");
         assert!(!s.contains("ambient_secret_api_key_yyy"), "api_key leaked");
-        // client_id is public: it must survive verbatim.
+        // client_id is the username half of the OAuth pair: redacted too.
         assert!(
-            s.contains("63abc_public_client_id"),
-            "client_id must NOT be redacted (public identifier)"
+            !s.contains("63abc_public_client_id"),
+            "client_id (credential pair identifier) leaked"
         );
         assert!(
             s.contains("70:ee:50:00:11:22"),

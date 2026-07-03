@@ -97,7 +97,9 @@ impl Rachio {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ControllerError::Transport(e.to_string()))?;
+            .map_err(|e| {
+                ControllerError::Transport(crate::net::reqwest_error_category(&e).to_string())
+            })?;
         let status = resp.status();
         if status.as_u16() == 401 || status.as_u16() == 403 {
             return Err(ControllerError::AuthFailed);
@@ -120,7 +122,9 @@ impl Rachio {
             .bearer_auth(&self.config.api_token)
             .send()
             .await
-            .map_err(|e| ControllerError::Transport(e.to_string()))?;
+            .map_err(|e| {
+                ControllerError::Transport(crate::net::reqwest_error_category(&e).to_string())
+            })?;
         let status = resp.status();
         if status.as_u16() == 401 || status.as_u16() == 403 {
             return Err(ControllerError::AuthFailed);

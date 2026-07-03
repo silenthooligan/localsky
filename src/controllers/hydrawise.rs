@@ -110,7 +110,17 @@ impl Hydrawise {
             .get(&url)
             .send()
             .await
-            .map_err(|e| ControllerError::Transport(format!("hydrawise GET failed: {e}")))?;
+            // Collapse the reqwest error to a category string, NEVER the raw
+            // Display: reqwest attaches the full request URL to transport errors,
+            // and every Hydrawise URL embeds ?api_key=<secret>, so the raw error
+            // would leak the account key into the /irrigation/action JSON error
+            // body and the warn logs. (Same guard rainbird/http_generic use.)
+            .map_err(|e| {
+                ControllerError::Transport(format!(
+                    "hydrawise GET failed: {}",
+                    crate::net::reqwest_error_category(&e)
+                ))
+            })?;
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             return Err(ControllerError::AuthFailed);
@@ -121,10 +131,12 @@ impl Hydrawise {
         if !status.is_success() {
             return Err(ControllerError::Remote(format!("hydrawise {status}")));
         }
-        let v: Value = resp
-            .json()
-            .await
-            .map_err(|e| ControllerError::Transport(format!("hydrawise decode failed: {e}")))?;
+        let v: Value = resp.json().await.map_err(|e| {
+            ControllerError::Transport(format!(
+                "hydrawise decode failed: {}",
+                crate::net::reqwest_error_category(&e)
+            ))
+        })?;
         // Hydrawise returns 200 OK with {"message":"error blah"} for
         // failures. Surface those as Remote.
         if let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
