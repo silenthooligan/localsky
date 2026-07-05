@@ -58,6 +58,11 @@ struct Device {
 /// Mirror of `crate::devices::DeviceChild` with the flattened child-kind tag.
 #[derive(Clone, Debug, Deserialize)]
 struct DeviceChild {
+    /// Canonical address (`source:<src>:<key>`), the SAME spec string a
+    /// zone's `soil_sensor_id` carries. This is what the inline soil
+    /// bind/remove actions address a probe by.
+    #[serde(default)]
+    id: String,
     label: String,
     /// "sensor" | "zone" (the DeviceChildKind tag).
     #[serde(rename = "type")]
@@ -123,6 +128,12 @@ async fn fetch_config() -> Result<serde_json::Value, String> {
         .send()
         .await
         .map_err(|e| e.to_string())?;
+    // Reject non-2xx BEFORE decoding: an auth/error body is valid JSON, and
+    // without this check it would poison the config signal (the failure-path
+    // refetch would then "restore" garbage instead of truth).
+    if !resp.ok() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
     resp.json::<serde_json::Value>()
         .await
         .map_err(|e| e.to_string())
@@ -619,6 +630,117 @@ pub fn SettingsDevices() -> impl IntoView {
         });
     });
 
+    // BIND a soil probe to a zone (or unbind: empty slug) straight from its
+    // device card. One binding per probe: any zone currently holding this
+    // probe id is cleared first, then the chosen zone (if any) takes it. Same
+    // read-modify-write + save_config path as every other card mutation.
+    let on_bind_soil = Callback::new(move |(probe_id, zone_slug): (String, String)| {
+        let mut cfg = config.get();
+        if let Some(zones) = cfg.get_mut("zones").and_then(|v| v.as_object_mut()) {
+            for (slug, z) in zones.iter_mut() {
+                let Some(zobj) = z.as_object_mut() else {
+                    continue;
+                };
+                let holds =
+                    zobj.get("soil_sensor_id").and_then(|v| v.as_str()) == Some(probe_id.as_str());
+                if slug == &zone_slug {
+                    zobj.insert(
+                        "soil_sensor_id".into(),
+                        serde_json::Value::String(probe_id.clone()),
+                    );
+                } else if holds {
+                    zobj.insert("soil_sensor_id".into(), serde_json::Value::Null);
+                }
+            }
+        }
+        config.set(cfg.clone());
+        result_msg.set(String::new());
+        #[cfg(feature = "hydrate")]
+        wasm_bindgen_futures::spawn_local(async move {
+            match save_config(cfg).await {
+                Ok(reasons) => {
+                    crate::components::settings_ui::toast_saved(
+                        result_msg,
+                        result_ok,
+                        if zone_slug.is_empty() {
+                            "Probe unbound. The zone waters on schedule and forecast."
+                        } else {
+                            "Probe bound to the zone."
+                        },
+                    );
+                    restart_dismissed.set(false);
+                    restart_reasons.set(reasons);
+                    // No device-list refetch here on purpose: rebuilding the
+                    // card list collapses the expanded card the user is
+                    // binding probes on, and a bind only mutates zone config
+                    // (which the soil rows already read reactively from the
+                    // config signal). The children themselves are unchanged.
+                }
+                Err(e) => {
+                    result_ok.set(false);
+                    result_msg.set(e);
+                    refetch_after_mutation();
+                }
+            }
+        });
+        #[cfg(not(feature = "hydrate"))]
+        let _ = zone_slug;
+    });
+
+    // REMOVE a soil probe from its device card: clears any zone binding (which
+    // also silences that zone's offline warning) and, when the gateway login is
+    // configured on the source, unregisters the sensor on the gateway too. Same
+    // endpoint the soil-probe manager uses; the result toast reports each side
+    // honestly.
+    let on_remove_soil = Callback::new(move |probe_id: String| {
+        #[cfg(feature = "hydrate")]
+        {
+            let confirmed = web_sys::window()
+                .map(|w| {
+                    w.confirm_with_message(
+                        "Remove this soil probe? Its zone binding is cleared, and if the \
+                         gateway login is set on the source it is unregistered from the \
+                         gateway as well.",
+                    )
+                    .unwrap_or(false)
+                })
+                .unwrap_or(false);
+            if !confirmed {
+                return;
+            }
+            result_msg.set(String::new());
+            wasm_bindgen_futures::spawn_local(async move {
+                match crate::components::settings::sensors::remove_soil_probe(probe_id, true).await
+                {
+                    Ok(r) => {
+                        crate::components::settings_ui::toast_saved(
+                            result_msg,
+                            result_ok,
+                            &format!(
+                                "Probe removed ({} zone binding{} cleared). {}",
+                                r.zones_unbound,
+                                if r.zones_unbound == 1 { "" } else { "s" },
+                                r.detail
+                            ),
+                        );
+                        if let Ok(list) = fetch_devices().await {
+                            devices.set(list);
+                        }
+                        if let Ok(cfg) = fetch_config().await {
+                            config.set(cfg);
+                        }
+                    }
+                    Err(e) => {
+                        result_ok.set(false);
+                        result_msg.set(e);
+                    }
+                }
+            });
+        }
+        #[cfg(not(feature = "hydrate"))]
+        let _ = probe_id;
+    });
+
     // Edit dispatch from a device card: resolve the device id to its config
     // entry and open the right editor. Card only calls this for editable cards.
     let on_edit = Callback::new(move |dev_id: String| {
@@ -749,7 +871,16 @@ pub fn SettingsDevices() -> impl IntoView {
                     .into_iter()
                     .map(|d| {
                         let status = status_for(&d);
-                        device_card(d, on_edit, on_toggle, on_remove, status)
+                        device_card(
+                            d,
+                            on_edit,
+                            on_toggle,
+                            on_remove,
+                            config,
+                            on_bind_soil,
+                            on_remove_soil,
+                            status,
+                        )
                     })
                     .collect();
                 view! {
@@ -1190,6 +1321,15 @@ fn device_card(
     on_edit: Callback<String>,
     on_toggle: Callback<(String, bool)>,
     on_remove: Callback<String>,
+    // Live config, for the inline soil rows: zone list + current binding per
+    // probe are derived reactively so a bind made here (or anywhere) updates
+    // the row without a refetch of the device list.
+    config: RwSignal<serde_json::Value>,
+    // Inline soil-probe management on the card itself (bind to a zone /
+    // remove the probe): the card is where the probe is SEEN, so it is also
+    // where it is managed, not a separate lens the user has to find.
+    on_bind_soil: Callback<(String, String)>,
+    on_remove_soil: Callback<String>,
     // The calm status word for a weather-source card: (semantic slug, word),
     // rendered in the header via the same `cloud-word--<slug>` classes the panel
     // rows use. None for controllers / HA bridges / non-weather kinds.
@@ -1256,6 +1396,15 @@ fn device_card(
     let toggle_source_id = source_id.clone();
     let remove_source_id = source_id.clone();
     let enabled_now = dev.enabled != Some(false);
+    // A soil-bearing source gets a "Manage probes" action into the sensors
+    // lens (bind to zone, remove probe, gateway health). Phase 2a delisted
+    // the standalone Sensors section (Devices is the single front door), so
+    // without this affordance the lens is reachable only by URL and the
+    // per-probe actions are undiscoverable.
+    let has_soil = dev
+        .children
+        .iter()
+        .any(|c| c.role.as_deref() == Some("soil"));
 
     // Map the device kind to its entity identity so the card carries the
     // canonical stripe + badge (Source = brings data in, Controller = sends
@@ -1267,13 +1416,28 @@ fn device_card(
         _ => None,
     };
 
+    // Soil probes are pulled OUT of the chip wall and rendered as managed
+    // rows (bind select + Remove) below: this card is where a probe is
+    // managed, not just displayed. Everything else stays a quiet chip.
+    let soil_children: Vec<(String, String)> = dev
+        .children
+        .iter()
+        .filter(|c| c.role.as_deref() == Some("soil") && !c.id.is_empty())
+        .map(|c| (c.id.clone(), c.label.clone()))
+        .collect();
     // Cap the child-chip block (persona D: a Tempest lists ~13 sensor chips) so
     // the expand stays scannable. Show at most CHILD_CAP chips, then a single
     // "+N more" row that states the remainder rather than the wall of chips.
+    // Soil rows are never capped (a gateway carries at most 8 channels and each
+    // row is actionable).
     const CHILD_CAP: usize = 8;
-    let overflow = child_count.saturating_sub(CHILD_CAP);
-    let child_rows: Vec<_> = dev
+    let plain_children: Vec<&DeviceChild> = dev
         .children
+        .iter()
+        .filter(|c| c.role.as_deref() != Some("soil") || c.id.is_empty())
+        .collect();
+    let overflow = plain_children.len().saturating_sub(CHILD_CAP);
+    let child_rows: Vec<_> = plain_children
         .iter()
         .take(CHILD_CAP)
         .map(|c| {
@@ -1302,7 +1466,7 @@ fn device_card(
         }
     });
 
-    let details_empty = child_rows.is_empty();
+    let details_empty = child_rows.is_empty() && soil_children.is_empty();
     let is_ha = origin == "home_assistant";
 
     view! {
@@ -1353,7 +1517,82 @@ fn device_card(
                         view! { <p class="device-child-empty">"No sensors or zones listed yet."</p> }
                             .into_any()
                     } else {
-                        view! { <ul class="device-child-list">{child_rows}{overflow_row}</ul> }.into_any()
+                        // Managed soil rows: label + reactive zone-bind select +
+                        // Remove. The select reads the live config signal so a
+                        // bind made anywhere updates here without a refetch.
+                        let soil_rows: Vec<_> = soil_children
+                            .iter()
+                            .map(|(id, label)| {
+                                let bind_pid = id.clone();
+                                let remove_pid = id.clone();
+                                let row_pid = id.clone();
+                                let label = label.clone();
+                                view! {
+                                    <li class="device-child device-child--soil">
+                                        <span class="device-child__label">{label}</span>
+                                        <span class="entity-badge entity-badge--sensor">"soil"</span>
+                                        {move || {
+                                            let cfg = config.get();
+                                            let pid = row_pid.clone();
+                                            // (slug, name) zone list + the zone currently holding this probe.
+                                            let mut bound: Option<String> = None;
+                                            let zones: Vec<(String, String)> = cfg
+                                                .get("zones")
+                                                .and_then(|z| z.as_object())
+                                                .map(|zs| {
+                                                    zs.iter()
+                                                        .map(|(slug, z)| {
+                                                            if z.get("soil_sensor_id").and_then(|v| v.as_str())
+                                                                == Some(pid.as_str())
+                                                            {
+                                                                bound = Some(slug.clone());
+                                                            }
+                                                            (
+                                                                slug.clone(),
+                                                                z.get("display_name")
+                                                                    .and_then(|v| v.as_str())
+                                                                    .unwrap_or(slug)
+                                                                    .to_string(),
+                                                            )
+                                                        })
+                                                        .collect()
+                                                })
+                                                .unwrap_or_default();
+                                            let sel_pid = bind_pid.clone();
+                                            view! {
+                                                <select
+                                                    class="device-soil__bind"
+                                                    aria-label="Bind probe to a zone"
+                                                    on:change=move |ev| {
+                                                        on_bind_soil.run((sel_pid.clone(), event_target_value(&ev)));
+                                                    }
+                                                >
+                                                    <option value="" selected=bound.is_none()>"Not bound"</option>
+                                                    {zones
+                                                        .into_iter()
+                                                        .map(|(slug, name)| {
+                                                            let is_bound = bound.as_deref() == Some(slug.as_str());
+                                                            view! {
+                                                                <option value=slug selected=is_bound>{name}</option>
+                                                            }
+                                                        })
+                                                        .collect_view()}
+                                                </select>
+                                            }
+                                        }}
+                                        <button
+                                            type="button"
+                                            class="soil-card__remove"
+                                            title="Remove this probe: clears its zone binding, and unregisters it on the gateway when the gateway login is set"
+                                            on:click=move |_| { on_remove_soil.run(remove_pid.clone()); }
+                                        >
+                                            "Remove"
+                                        </button>
+                                    </li>
+                                }
+                            })
+                            .collect();
+                        view! { <ul class="device-child-list">{soil_rows}{child_rows}{overflow_row}</ul> }.into_any()
                     }
                 })
                 actions=Box::new(move || {
@@ -1379,6 +1618,15 @@ fn device_card(
                             />
                         }
                     });
+                    // Into the sensors lens, only on a card that actually has
+                    // soil probes (a Tempest or a cloud source has nothing to
+                    // manage there). Same settings-shell URL pattern as the
+                    // /sensors page's "Manage all devices" button.
+                    let probes_btn = has_soil.then(|| {
+                        view! {
+                            <Button variant="ghost" href="/settings?section=sensors">"Manage probes"</Button>
+                        }
+                    });
                     // Edit, for a native editable source/controller.
                     let edit_btn = editable.then(|| {
                         let id = edit_id.clone();
@@ -1400,6 +1648,7 @@ fn device_card(
                     });
                     view! {
                         {toggle}
+                        {probes_btn}
                         {edit_btn}
                         {remove_btn}
                         {ha_note}

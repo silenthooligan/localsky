@@ -368,7 +368,10 @@ struct RemoveSoilResp {
     detail: String,
 }
 
-async fn remove_soil(Json(req): Json<RemoveSoilReq>) -> Json<RemoveSoilResp> {
+async fn remove_soil(
+    axum::extract::State(db): axum::extract::State<Arc<Mutex<Connection>>>,
+    Json(req): Json<RemoveSoilReq>,
+) -> Json<RemoveSoilResp> {
     use crate::config::schema::SourceKind;
     use crate::sources::ecowitt_gw_mgmt::{
         soil_channel_of, unregister_soil_channel, UnregisterOutcome,
@@ -458,6 +461,39 @@ async fn remove_soil(Json(req): Json<RemoveSoilReq>) -> Json<RemoveSoilResp> {
                 &gw,
                 format!("gateway: {detail}; but config save FAILED: {e}"),
             );
+        }
+    }
+
+    // Delete the channel's retained readings (plus its battery/temp/EC
+    // siblings). Without this the probe RESURRECTS: the Devices list and the
+    // sensor pickers derive soil children from the latest reading per channel
+    // over ALL retained history, so a "removed" probe re-renders on the very
+    // next refetch for up to the retention window. Only `source:` specs have
+    // history rows; an `ha:` probe has nothing to delete here.
+    if let Some((src_id, key)) = spec.strip_prefix("source:").and_then(|r| r.split_once(':')) {
+        let store = SensorHistoryStore::new(db);
+        let mut keys = vec![key.to_string()];
+        for f in [
+            |n: &str| format!("soilbatt{n}"),
+            |n: &str| format!("soiltemp{n}f"),
+            |n: &str| format!("soilec{n}"),
+        ] {
+            if let Some(k) = sibling_key(key, f) {
+                keys.push(k);
+            }
+        }
+        let mut dropped = 0usize;
+        for k in keys {
+            dropped += store
+                .delete_channel(src_id.to_string(), k)
+                .await
+                .unwrap_or(0);
+        }
+        if dropped > 0 {
+            if !detail.is_empty() {
+                detail.push_str("; ");
+            }
+            detail.push_str(&format!("cleared {dropped} recorded readings"));
         }
     }
     resp(zones_unbound, &gw, detail)

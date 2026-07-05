@@ -952,6 +952,16 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
         .then(|| view! { <link rel="manifest" href="/manifest.webmanifest"/> });
     // base is sanitized to [A-Za-z0-9/_-.] so single-quoted embedding is
     // injection-safe.
+    //
+    // The Request branch must MATERIALIZE the body (arrayBuffer) and build a
+    // fresh Request from bytes, never `new Request(url, oldRequest)`: that
+    // constructor re-streams the source body, and Chromium only allows
+    // streamed uploads over HTTP/2, so every bodied PUT/POST through plain
+    // HTTP ingress died with "Failed to fetch" AFTER losing this try block
+    // (the wizard's draft saves, the license accept, every settings save on
+    // HAOS). GET/HEAD have no body and keep the cheap one-arg copy. The
+    // wrapper is async, which is transparent to callers (fetch already
+    // returns a promise).
     let shim = if base.is_empty() {
         String::new()
     } else {
@@ -959,7 +969,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
             "(function(){{\
                var B='{base}';\
                var f=window.fetch;\
-               window.fetch=function(i,n){{\
+               window.fetch=async function(i,n){{\
                  try{{\
                    if(typeof i==='string'||i instanceof URL){{\
                      var s=String(i);\
@@ -967,7 +977,18 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                    }}else if(i instanceof Request){{\
                      var u=new URL(i.url);\
                      if(u.origin===location.origin&&u.pathname.indexOf(B+'/')!==0&&u.pathname!==B){{\
-                       i=new Request(B+u.pathname+u.search+u.hash,i);\
+                       var t=B+u.pathname+u.search+u.hash;\
+                       if(i.method==='GET'||i.method==='HEAD'){{\
+                         i=new Request(t,i);\
+                       }}else{{\
+                         var y=await i.clone().arrayBuffer();\
+                         i=new Request(t,{{method:i.method,headers:i.headers,\
+                           body:y.byteLength?y:undefined,mode:i.mode,\
+                           credentials:i.credentials,cache:i.cache,\
+                           redirect:i.redirect,referrer:i.referrer,\
+                           referrerPolicy:i.referrerPolicy,integrity:i.integrity,\
+                           keepalive:i.keepalive,signal:i.signal}});\
+                       }}\
                      }}\
                    }}\
                  }}catch(e){{}}\

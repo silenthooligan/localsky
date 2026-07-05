@@ -17,11 +17,23 @@ into the upstream device on your behalf.
 
 ## Removing a soil probe
 
-On **Settings, Sensors**, each soil probe has a **Remove probe** button. It
-always does two things safely on the LocalSky side:
+Soil probes are managed wherever you see them:
+
+- **Settings, Devices**: the gateway or source that carries soil probes lists
+  each probe on its card with a bind-to-zone selector and a **Remove** action
+  right there. The card also links to the full soil-probe manager.
+- **Sensors** (the main sensors view): click a probe and its detail view
+  carries a **Remove probe** action; the header's **Manage soil probes**
+  button opens the full manager.
+
+The Remove action is the same everywhere. It
+always does three things safely on the LocalSky side:
 
 1. Clears the probe's binding from whatever zone used it.
 2. Suppresses that zone's offline warning (a removed probe is not a fault).
+3. Deletes the probe's recorded readings, so it disappears from the device
+   list and the sensor pickers instead of lingering until data retention
+   ages it out.
 
 If the probe lives on an **Ecowitt gateway** and you have set the gateway login
 on that source (see below), LocalSky can also **unregister the sensor on the

@@ -4,6 +4,23 @@ All notable changes to LocalSky are documented here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-07-04
+
+In-place device management, HA ingress write fix, and a major query perf win. No breaking changes.
+
+### Added
+
+- Devices: soil probes on a device card are managed rows (bind-to-zone select + Remove), not read-only chips.
+- Sensors: probe detail view carries the same Remove action + a link to the soil-probe manager.
+
+### Fixed
+
+- HA ingress: writes now work from the HA sidebar. Two independent blockers: the ingress URL shim rebuilt bodied requests (PUT/POST) as streamed uploads, which browsers refuse over HTTP/1.1; and the CSRF origin check rejected HA's UI origin. Bodies now pass as bytes, and Supervisor-ingress requests (X-Ingress-Path, session-validated upstream) are exempt from the origin check. Fixes wizard draft saves, license accept, and all settings saves.
+- Fresh install: `GET /api/config` 404'd with no config file and locked every settings pane. Now returns the default config; saving creates the file.
+- Perf: latest-reading-per-channel queries ran correlated MAX(epoch) subqueries over full history (~15s at 2M rows, serializing the shared SQLite connection). Covering index + group-max rewrite: ~0.1s.
+- Probe removal deletes the channel's recorded readings (incl. battery/temp/EC siblings), so removed probes no longer resurrect from history.
+- Soil-probe manager was unreachable from navigation; now linked from soil-carrying Devices cards and the Sensors page header.
+
 ## [0.7.3] - 2026-07-04
 
 Single-pane device management and a Home Assistant ingress fix: retire a soil probe (and clear its Ecowitt gateway registration) in one click, and in-app navigation now works when LocalSky is opened from the Home Assistant sidebar. No breaking changes; upgrade in place.

@@ -300,13 +300,22 @@ impl SensorHistoryStore {
         let c = self.conn.clone();
         tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<Reading>> {
             let conn = c.blocking_lock();
+            // Group-max via idx_sh_source_key_epoch (M0013), NOT a correlated
+            // MAX(epoch) subquery per row: every historical soil reading
+            // matches the LIKE, so the correlated form executed the subquery
+            // 362k times on a mature prod install (~15s while holding the
+            // shared connection lock, serializing every sensors/devices
+            // endpoint behind it). The inner GROUP BY walks the covering
+            // index once (~137ms on the same data).
             let mut stmt = conn.prepare(
-                "SELECT epoch, source_id, key, value FROM sensor_history s
-                 WHERE (key LIKE 'soilmoisture%' OR key LIKE '%soil_moisture%')
-                   AND epoch = (SELECT MAX(epoch) FROM sensor_history
-                                WHERE source_id = s.source_id AND key = s.key)
-                 GROUP BY source_id, key
-                 ORDER BY source_id, key",
+                "SELECT h.epoch, h.source_id, h.key, h.value
+                 FROM (SELECT source_id, key, MAX(epoch) AS epoch
+                       FROM sensor_history GROUP BY source_id, key) m
+                 JOIN sensor_history h
+                   ON h.source_id = m.source_id AND h.key = m.key
+                  AND h.epoch = m.epoch
+                 WHERE h.key LIKE 'soilmoisture%' OR h.key LIKE '%soil_moisture%'
+                 ORDER BY h.source_id, h.key",
             )?;
             let rows = stmt
                 .query_map([], |r| {
@@ -325,6 +334,30 @@ impl SensorHistoryStore {
         .map_err(|e| SensorHistoryError::Sqlite(e.to_string()))
     }
 
+    /// Delete every reading for one (source_id, key) channel. Powers probe
+    /// REMOVAL: the Devices list and the sensor pickers derive their soil
+    /// children from the latest retained reading per channel, so a removed
+    /// probe whose history survives resurrects on the very next refetch (for
+    /// up to the retention window). Removal therefore deletes the channel's
+    /// rows; the caller enumerates sibling keys (battery/temp/EC).
+    pub async fn delete_channel(
+        &self,
+        source_id: String,
+        key: String,
+    ) -> Result<usize, SensorHistoryError> {
+        let c = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
+            let conn = c.blocking_lock();
+            conn.execute(
+                "DELETE FROM sensor_history WHERE source_id = ? AND key = ?",
+                params![source_id, key],
+            )
+        })
+        .await
+        .map_err(|e| SensorHistoryError::Sqlite(format!("join: {e}")))?
+        .map_err(|e| SensorHistoryError::Sqlite(e.to_string()))
+    }
+
     /// Latest value for every distinct key a source has reported, newest
     /// first. Powers the Sensors page "what is this integration actually
     /// reporting right now?" view.
@@ -335,13 +368,17 @@ impl SensorHistoryStore {
         let c = self.conn.clone();
         tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<Reading>> {
             let conn = c.blocking_lock();
+            // Same group-max-over-index shape as soil_channels (see comment
+            // there): the correlated MAX(epoch) form re-ran the subquery for
+            // every historical row of the source, which made the Sensors
+            // page drill-in crawl on a mature install.
             let mut stmt = conn.prepare(
-                "SELECT epoch, source_id, key, value FROM sensor_history s
-                 WHERE source_id = ?1
-                   AND epoch = (SELECT MAX(epoch) FROM sensor_history
-                                WHERE source_id = ?1 AND key = s.key)
-                 GROUP BY key
-                 ORDER BY key",
+                "SELECT h.epoch, h.source_id, h.key, h.value
+                 FROM (SELECT key, MAX(epoch) AS epoch FROM sensor_history
+                       WHERE source_id = ?1 GROUP BY key) m
+                 JOIN sensor_history h
+                   ON h.source_id = ?1 AND h.key = m.key AND h.epoch = m.epoch
+                 ORDER BY h.key",
             )?;
             let rows = stmt
                 .query_map(params![source_id], |r| {
@@ -496,6 +533,50 @@ mod tests {
             !rows.iter().any(|r| r.key == "tempf"),
             "non-soil keys excluded"
         );
+    }
+
+    // Probe REMOVAL contract: deleting a channel's rows makes it vanish from
+    // soil_channels (so the Devices list / pickers stop re-deriving it) while
+    // other channels' history is untouched.
+    #[tokio::test]
+    async fn delete_channel_removes_only_that_channel() {
+        let s = fresh_store().await;
+        for (key, epoch, val) in [
+            ("soilmoisture1", 1000i64, 40.0),
+            ("soilmoisture1", 1100, 42.0),
+            ("soilbatt1", 1100, 90.0),
+            ("soilmoisture2", 1050, 55.0),
+        ] {
+            s.insert(Reading {
+                epoch,
+                source_id: "ecowitt".into(),
+                key: key.into(),
+                value: val,
+            })
+            .await
+            .unwrap();
+        }
+        let dropped = s
+            .delete_channel("ecowitt".into(), "soilmoisture1".into())
+            .await
+            .unwrap();
+        assert_eq!(dropped, 2, "both retained rows for the channel deleted");
+        let rows = s.soil_channels().await.unwrap();
+        assert!(
+            !rows.iter().any(|r| r.key == "soilmoisture1"),
+            "removed channel no longer derivable"
+        );
+        assert!(
+            rows.iter().any(|r| r.key == "soilmoisture2"),
+            "other channels untouched"
+        );
+        // The sibling is the CALLER's job to delete; the store method is
+        // strictly per-(source, key).
+        let batt = s
+            .last_value("ecowitt".into(), "soilbatt1".into())
+            .await
+            .unwrap();
+        assert!(batt.is_some(), "sibling untouched by a single-key delete");
     }
 
     #[tokio::test]

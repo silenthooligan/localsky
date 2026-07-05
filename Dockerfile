@@ -1,8 +1,17 @@
 # Multi-stage build for the Leptos full-stack weather app.
-# Stage 1 compiles the SSR binary + WASM client via cargo-leptos.
-# Stage 2 ships only the binary, the static `site/` bundle, and CA roots.
+# Stage layout (BuildKit):
+#   toolchain -> src -> gate     (CI quality gate: fmt/clippy/test/hydrate)
+#                    -> builder  (release SSR binary + WASM bundle + docs)
+#   runtime (void-base) ships only the binary, site/, hash.txt, docs.
+#
+# CI runs `docker build --target gate .` BEFORE the release build, so the
+# gate and the image build share the toolchain layers AND the two BuildKit
+# cache mounts below (cargo registry + target). On a warm runner neither
+# job re-downloads a toolchain or recompiles dependencies; only this crate
+# rebuilds. The cache lives in the runner daemon's BuildKit state; the
+# workflow prunes it back to a budget after each build.
 
-FROM rust:slim-trixie@sha256:31ee7fc65186be7e0e0ccb3f2ca305f14e4739e7642a1ae65753aa5d7b874523 AS builder
+FROM rust:slim-trixie@sha256:31ee7fc65186be7e0e0ccb3f2ca305f14e4739e7642a1ae65753aa5d7b874523 AS toolchain
 
 RUN apt-get update && apt-get install -y \
         pkg-config libssl-dev curl wget build-essential \
@@ -36,6 +45,9 @@ RUN cargo binstall cargo-leptos --version "^0.3" -y
 # fetches the prebuilt release binary, no source compile.
 RUN cargo binstall mdbook --version "^0.5" -y
 RUN rustup target add wasm32-unknown-unknown
+# The gate stage runs fmt + clippy; the slim image's minimal profile may not
+# carry them. Idempotent when they are already present.
+RUN rustup component add clippy rustfmt
 
 # Pin the dart-sass version cargo-leptos pulls. 1.86.0's binary
 # bundle ships a broken extracted dart launcher (`dart: not found`)
@@ -44,6 +56,9 @@ RUN rustup target add wasm32-unknown-unknown
 ENV LEPTOS_SASS_VERSION=1.99.0
 
 WORKDIR /build
+
+# ── Sources (shared by gate + builder) ──
+FROM toolchain AS src
 # Copy Cargo.lock so the build is reproducible. Without it, cargo would
 # re-resolve every transitive on every build; a tachys 0.2.x patch with a
 # hydration regression once shipped this way and the WASM panicked on
@@ -53,15 +68,31 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY style ./style
 COPY public ./public
-# Documentation sources for the in-app /docs server. `mdbook build docs`
-# (after the leptos build below) renders docs/src/*.md -> docs/book.
+# Documentation sources for the in-app /docs server (rendered in builder).
 COPY docs ./docs
+
+# ── Quality gate (CI: docker build --target gate) ──
+# fmt + clippy + the ssr test suite + the hydrate/wasm check, all against the
+# same cache mounts the release build uses, so the whole gate runs warm. One
+# RUN so a failure stops the build with that step's output.
+FROM src AS gate
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    cargo fmt --check \
+    && cargo clippy --no-default-features --features ssr --all-targets -- -D warnings \
+    && INSTA_UPDATE=no cargo test --no-default-features --features ssr --lib \
+    && cargo check --no-default-features --features hydrate --target wasm32-unknown-unknown \
+    && echo gate-ok > /gate-ok
+
+# ── Release build ──
+FROM src AS builder
 
 # Commit sha for the service-worker cache namespace. option_env!("GIT_SHA")
 # in src/sw.rs reads this at compile time so every deploy emits a byte-different
 # /sw.js, which is what forces browsers to install the new SW and nuke the old
 # caches (otherwise the SW version is a static "-dev" and clients freeze on
-# stale WASM). Passed as a --build-arg by the CI build workflow.
+# stale WASM). Passed as a --build-arg by the CI build workflow. Lives in this
+# stage only so the sha churn never touches the gate stage's layers.
 ARG GIT_SHA=dev
 ENV GIT_SHA=${GIT_SHA}
 
@@ -71,24 +102,29 @@ ENV GIT_SHA=${GIT_SHA}
 # profile uses thin LTO + 16 codegen units to keep the peak in check. If this
 # step starts OOM-ing again as the crate grows, raise the runner's RAM rather
 # than lowering opt-level (which would balloon the PWA bundle).
-RUN cargo leptos build --release
-
-# hash-files emits content-hashed /pkg names + a hash.txt manifest. leptos reads
-# that manifest at runtime from current_exe().parent()/hash.txt (next to the
-# binary), NOT the site root, so stage it at a known path. Fail loudly if it's
-# missing: shipping hashed files without the manifest makes the HTML emit
-# hashless URLs that 404 the WASM.
-RUN HASHTXT="$(find /build/target -name hash.txt -print -quit)" \
-    && { [ -n "$HASHTXT" ] || HASHTXT="$(find /build -name hash.txt -print -quit)"; } \
+#
+# target/ is a cache mount: artifacts persist across builds (deps stay
+# compiled; only this crate rebuilds), but nothing inside the mount is part
+# of the image, so everything the runtime stage needs is copied OUT to
+# /build/out in the same RUN. target/site is regenerated from scratch each
+# build (cheap assembly) so stale content-hashed pkg files from earlier
+# builds cannot accumulate in the cache and leak into the image.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    rm -rf target/site \
+    && cargo leptos build --release \
+    && mkdir -p /build/out \
+    && cp target/release/localsky /build/out/localsky \
+    && cp -r target/site /build/out/site \
+    && HASHTXT="$(find /build/target -name hash.txt -print -quit)" \
     && test -n "$HASHTXT" \
     && echo "hash.txt found at: $HASHTXT" \
-    && cp "$HASHTXT" /build/hash.txt \
-    && echo "=== hash.txt contents ===" && cat /build/hash.txt
+    && cp "$HASHTXT" /build/out/hash.txt \
+    && echo "=== hash.txt contents ===" && cat /build/out/hash.txt
 
 # Render the bundled docs AFTER the app build so a docs change alone does
-# not invalidate the (slow) cargo build cache layer above. Output lands
-# in /build/docs/book and is copied into the site root in the runtime
-# stage so the server serves it at /docs.
+# not invalidate the (slow) cargo build layer above. Output lands in
+# /build/docs/book and is copied into the site root in the runtime stage.
 # The {{LOCALSKY_VERSION}} token in docs/src is substituted from Cargo.toml
 # first, so the docs banner always tracks the exact version being built
 # (introduction.md used to carry a hand-bumped literal that went stale).

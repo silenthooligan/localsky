@@ -1084,6 +1084,22 @@ async fn get_config(
             redact_secrets(&mut v);
             Json(v).into_response()
         }
+        // A fresh install has no config file yet. Serve the DEFAULT config
+        // (200) instead of a 404: the settings panes are read-modify-write,
+        // so a 404 here locked every pane ("editing disabled until the load
+        // succeeds") and made first-time configuration through Settings
+        // impossible; editing the served defaults and saving materializes
+        // the file, which is exactly what a fresh-install settings edit
+        // should do. "Is this instance set up yet" remains answerable via
+        // /api/wizard/state; nothing should infer it from a 404 here.
+        Err(ConfigStoreError::NotFound) => {
+            let cfg = crate::config::Config::default();
+            match serde_json::to_value(&cfg) {
+                Ok(v) => Json(v).into_response(),
+                Err(e) => store_err(ConfigStoreError::Io(format!("serialize default: {e}")))
+                    .into_response(),
+            }
+        }
         Err(e) => store_err(e).into_response(),
     }
 }

@@ -676,7 +676,18 @@ pub async fn enforce_no_store(
                 .headers()
                 .get("x-forwarded-host")
                 .and_then(|v| v.to_str().ok());
-            if !origin_allowed(origin, host, fwd_host, &policy.trusted_origins) {
+            // HA Supervisor ingress: the browser's Origin is the HOME
+            // ASSISTANT UI origin (hostname/LAN IP/Nabu Casa URL), which the
+            // addon cannot enumerate ahead of time, so the equality check
+            // always fails and every write from the HA sidebar would 403.
+            // The Supervisor validates its ingress session cookie BEFORE
+            // forwarding anything, so authentication and CSRF live at that
+            // boundary. X-Ingress-Path cannot be attached by a hostile page
+            // (custom headers require a CORS preflight we never grant), and
+            // a non-browser client forging it is outside CSRF's threat model
+            // (it can already set any Origin it likes).
+            let via_ingress = req.headers().get("x-ingress-path").is_some();
+            if !via_ingress && !origin_allowed(origin, host, fwd_host, &policy.trusted_origins) {
                 return (
                     StatusCode::FORBIDDEN,
                     axum::Json(serde_json::json!({ "error": "cross-origin write rejected" })),
@@ -799,7 +810,18 @@ pub async fn enforce(
                 .headers()
                 .get("x-forwarded-host")
                 .and_then(|v| v.to_str().ok());
-            if !origin_allowed(origin, host, fwd_host, &policy.trusted_origins) {
+            // HA Supervisor ingress: the browser's Origin is the HOME
+            // ASSISTANT UI origin (hostname/LAN IP/Nabu Casa URL), which the
+            // addon cannot enumerate ahead of time, so the equality check
+            // always fails and every write from the HA sidebar would 403.
+            // The Supervisor validates its ingress session cookie BEFORE
+            // forwarding anything, so authentication and CSRF live at that
+            // boundary. X-Ingress-Path cannot be attached by a hostile page
+            // (custom headers require a CORS preflight we never grant), and
+            // a non-browser client forging it is outside CSRF's threat model
+            // (it can already set any Origin it likes).
+            let via_ingress = req.headers().get("x-ingress-path").is_some();
+            if !via_ingress && !origin_allowed(origin, host, fwd_host, &policy.trusted_origins) {
                 return (
                     StatusCode::FORBIDDEN,
                     axum::Json(serde_json::json!({ "error": "cross-origin write rejected" })),
@@ -1841,6 +1863,31 @@ mod tests {
             resp.status(),
             StatusCode::OK,
             "same-origin write from a vouched LAN caller passes"
+        );
+
+        // HA Supervisor ingress: the Origin is HA's UI origin (unknowable to
+        // the addon) and the Supervisor has already validated its session
+        // cookie, so a write arriving with X-Ingress-Path must NOT be
+        // origin-rejected. This is the fresh-install wizard-save path on
+        // HAOS; regressing it makes every save from the HA sidebar 403.
+        let resp = app
+            .clone()
+            .oneshot(gated_req(
+                Method::PUT,
+                "/api/config",
+                "10.0.0.50",
+                &[
+                    ("origin", "http://homeassistant.local:8123"),
+                    ("host", "10.0.0.60:3000"),
+                    ("x-ingress-path", "/api/hassio_ingress/tok"),
+                ],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "foreign-origin write via Supervisor ingress passes"
         );
     }
 }

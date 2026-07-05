@@ -343,7 +343,11 @@ pub fn SensorsPage(
             match save_config(candidate).await {
                 Ok(()) => {
                     toast.success(format!("Saved {id}. Reloads on the next tick."));
-                    nav_to.run(Sel::Source(id));
+                    // try_run, NOT run: this continuation outlives the page if
+                    // the user navigates away while the save is in flight, and
+                    // Callback::run on the disposed StoredValue panics and
+                    // aborts the whole wasm app. try_run no-ops instead.
+                    nav_to.try_run(Sel::Source(id));
                     load_health(sources, conditions).await;
                 }
                 Err(e) => toast.error(format!("Save failed: {e}")),
@@ -351,6 +355,54 @@ pub fn SensorsPage(
         });
         #[cfg(not(feature = "hydrate"))]
         let _ = candidate;
+    });
+
+    // Remove a soil probe from its detail card: clears the zone binding (and
+    // that zone's offline warning with it) and, when the gateway login is set
+    // on the source, unregisters the sensor on the gateway too. Same endpoint
+    // + semantics as the Devices card and the soil-probe manager.
+    let remove_probe = Callback::new(move |probe_id: String| {
+        #[cfg(feature = "hydrate")]
+        {
+            let confirmed = web_sys::window()
+                .map(|w| {
+                    w.confirm_with_message(
+                        "Remove this soil probe? Its zone binding is cleared, and if the \
+                         gateway login is set on the source it is unregistered from the \
+                         gateway as well.",
+                    )
+                    .unwrap_or(false)
+                })
+                .unwrap_or(false);
+            if !confirmed {
+                return;
+            }
+            leptos::task::spawn_local(async move {
+                match crate::components::settings::sensors::remove_soil_probe(probe_id, true).await
+                {
+                    Ok(r) => {
+                        toast.success(format!(
+                            "Probe removed ({} zone binding{} cleared). {}",
+                            r.zones_unbound,
+                            if r.zones_unbound == 1 { "" } else { "s" },
+                            r.detail
+                        ));
+                        // The removed probe's zone card no longer has a probe
+                        // to inspect; land back on the overview and refresh
+                        // the page's config so bindings re-derive.
+                        load_config(config).await;
+                        // try_run: the gateway unregister can take ~16s against
+                        // an unreachable gateway; if the user left the page in
+                        // the meantime, run() would panic on the disposed
+                        // callback and abort the wasm app.
+                        nav_to.try_run(Sel::Tempest);
+                    }
+                    Err(e) => toast.error(format!("Remove failed: {e}")),
+                }
+            });
+        }
+        #[cfg(not(feature = "hydrate"))]
+        let _ = probe_id;
     });
 
     // Toggle a source's enabled flag (read-modify-write).
@@ -406,6 +458,12 @@ pub fn SensorsPage(
                     // left section rail), not the bare /settings/devices route
                     // that drops the rail and reads as a different app.
                     <Button variant="secondary" icon="controllers" href="/settings?section=devices">"Manage all devices →"</Button>
+                    // The soil-probe manager (bind to zone, remove probe,
+                    // gateway health) lives in the settings shell's sensors
+                    // lens, which has no section row of its own since the
+                    // phase-2a collapse; this is its visible door from the
+                    // sensor-first view.
+                    <Button variant="secondary" icon="gauge" href="/settings?section=sensors">"Manage soil probes →"</Button>
                 </div>
             </header>
 
@@ -579,7 +637,32 @@ pub fn SensorsPage(
                         Sel::Tempest => view! { <TempestDetail s=weather prefs/> }.into_any(),
                         Sel::Soil(slug) => {
                             match snap.get().soil_forecasts.into_iter().find(|z| z.zone_slug == slug) {
-                                Some(z) => view! { <SoilDetail z/> }.into_any(),
+                                Some(z) => {
+                                    // The probe spec this zone is bound to, from the
+                                    // live config: it is what the Remove action
+                                    // addresses (same id the Devices card and the
+                                    // soil-probe manager use).
+                                    // The snapshot slug is underscore-normalized
+                                    // (refresher builds it via replace('-', "_"))
+                                    // while config zone keys may be hyphenated,
+                                    // so match on the normalized form of BOTH
+                                    // sides like every other lookup site does. A
+                                    // direct .get(&slug) misses "back-yard" and
+                                    // the Remove action silently never renders.
+                                    let probe_id = config
+                                        .get()
+                                        .get("zones")
+                                        .and_then(|zs| zs.as_object())
+                                        .and_then(|zones| {
+                                            zones
+                                                .iter()
+                                                .find(|(k, _)| k.replace('-', "_") == slug)
+                                                .and_then(|(_, zc)| zc.get("soil_sensor_id"))
+                                                .and_then(|v| v.as_str())
+                                                .map(str::to_string)
+                                        });
+                                    view! { <SoilDetail z probe_id on_remove=remove_probe/> }.into_any()
+                                }
                                 None => view! { <div class="sensors-empty">"Probe not reporting."</div> }.into_any(),
                             }
                         }
@@ -767,7 +850,16 @@ fn TempestDetail(s: ReadSignal<Snapshot>, prefs: Signal<UnitPrefs>) -> impl Into
 }
 
 #[component]
-fn SoilDetail(z: SoilForecast) -> impl IntoView {
+fn SoilDetail(
+    z: SoilForecast,
+    /// The probe spec bound to this zone (`source:<id>:soilmoisture<N>` or an
+    /// `ha:` entity), from the live config. None when the binding cannot be
+    /// resolved; the Remove action only renders when it can.
+    probe_id: Option<String>,
+    /// Page-level remove handler (confirm + API + toast + nav) so this detail
+    /// card stays a dumb view.
+    on_remove: Callback<String>,
+) -> impl IntoView {
     let name = z.zone_name.clone();
     let (cur, status, color) = match z.current_pct {
         None => ("offline".to_string(), "OFFLINE", "var(--verdict-off)"),
@@ -802,6 +894,27 @@ fn SoilDetail(z: SoilForecast) -> impl IntoView {
                     <h3 class="sensor-group__title">"7-day projection (rain + ET, no watering)"</h3>
                     <Sparkline points=proj accent=color.to_string() height=48/>
                 </section>
+            })}
+            // Manage the probe where it is inspected: removing clears the
+            // zone binding (and the offline warning with it) and, when the
+            // gateway login is set on the source, unregisters the sensor on
+            // the gateway too. Rebinding lives in the soil-probe manager.
+            {probe_id.map(|pid| {
+                let remove_pid = pid;
+                view! {
+                    <div class="sensor-detail-card__actions">
+                        <button
+                            type="button"
+                            class="soil-card__remove"
+                            on:click=move |_| { on_remove.run(remove_pid.clone()); }
+                        >
+                            "Remove probe"
+                        </button>
+                        <a href="/settings?section=sensors" class="sensor-detail-card__manage">
+                            "Rebind or manage all probes \u{2192}"
+                        </a>
+                    </div>
+                }
             })}
         </div>
     }

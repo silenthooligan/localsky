@@ -1,6 +1,6 @@
 [package]
 name = "localsky"
-version = "0.7.3"
+version = "0.7.4"
 edition = "2021"
 license = "Apache-2.0"
 description = "Local-first weather and irrigation control with native FAO-56 ET, multi-source weather merge, multi-controller HAL, optional Home Assistant, and optional local LLM advisor."
@@ -294,6 +294,15 @@ lib-profile-release = "wasm-release"
 # symbol table (roughly 15MB of the binary); stripping it shrinks the binary and
 # the shipped image at zero runtime cost (RAM and CPU are unaffected). The wasm
 # frontend inherits this and is additionally size-tuned below.
+# Dev builds carry line-tables-only debuginfo instead of full DWARF: panics
+# and backtraces stay readable (file + line), but the SSR debug binary drops
+# from ~590MB to a fraction of that, which cuts link + write time on every
+# incremental rebuild (the gate links this binary for check/test/leptos-build
+# on each pass). Full debuginfo is a `debug = 2` flip away if a debugger
+# session ever needs it.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 strip = true
 

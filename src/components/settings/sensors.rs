@@ -145,19 +145,22 @@ async fn save_config(cfg: serde_json::Value) -> Result<(), String> {
 /// Result of POST /sensors/soil/remove (mirror of the server RemoveSoilResp).
 #[cfg(feature = "hydrate")]
 #[derive(Clone, Debug, Deserialize)]
-struct RemoveResult {
+pub(crate) struct RemoveResult {
     #[serde(default)]
-    zones_unbound: usize,
+    pub(crate) zones_unbound: usize,
     #[serde(default)]
-    gateway: String,
+    pub(crate) gateway: String,
     #[serde(default)]
-    detail: String,
+    pub(crate) detail: String,
 }
 
 /// Retire a soil probe: clear its LocalSky binding and (when the gateway has a
 /// login set) unregister it on the gateway too.
 #[cfg(feature = "hydrate")]
-async fn remove_soil_probe(probe_id: String, also_gateway: bool) -> Result<RemoveResult, String> {
+pub(crate) async fn remove_soil_probe(
+    probe_id: String,
+    also_gateway: bool,
+) -> Result<RemoveResult, String> {
     use gloo_net::http::Request;
     let body = serde_json::json!({ "probe_id": probe_id, "also_gateway": also_gateway });
     let resp = Request::post("/api/v1/sensors/soil/remove")
