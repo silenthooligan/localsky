@@ -109,6 +109,14 @@ pub struct Config {
     /// (serde default) and omitted from the TOML until first used.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub seeded_source_ids: Vec<String>,
+    /// Source ids the one-time flat-default priority repair has already
+    /// evaluated (see `region::repair_flat_default_priorities`): a source
+    /// predating the region ranking that still sat at the flat default (50)
+    /// is lifted to its researched region rank ONCE and recorded here, so a
+    /// user who later sets it back keeps their choice. ADDITIVE: empty on
+    /// old configs and omitted from the TOML until first used.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub priority_repaired_ids: Vec<String>,
     #[serde(default)]
     pub controllers: Vec<ControllerEntry>,
     #[serde(default)]
@@ -162,6 +170,7 @@ impl Default for Config {
             field_source_chains: BTreeMap::new(),
             forecast_provider: None,
             seeded_source_ids: Vec::new(),
+            priority_repaired_ids: Vec::new(),
             controllers: Vec::new(),
             zones: BTreeMap::new(),
             llm: None,

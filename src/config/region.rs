@@ -546,6 +546,55 @@ pub fn seed_missing_forecast_authorities(
     (appended, changed)
 }
 
+/// One-time repair for sources that predate the region ranking: a cloud
+/// source added before `default_priority_for` existed (or through an old
+/// flat-seeding path) sits at the schema default (50) even when the
+/// researched region rank says otherwise (e.g. NOAA MRMS at 75 in the US),
+/// so the GLOBAL fallback ranking silently disagrees with what the
+/// per-field chains and the docs promise. The user should never have to
+/// hand-edit a number to match the researched default.
+///
+/// Safety: only a priority still EXACTLY at the flat default (50) is
+/// lifted (any other value is a user choice and is never touched), and
+/// every enabled region-ranked source id present on the first run is
+/// recorded in `cfg.priority_repaired_ids` whether it was lifted or not,
+/// so the pass runs at most once per source: a user who later sets a
+/// repaired source BACK to 50 deliberately keeps their 50. Sources added
+/// after this pass are ranked at add-time by
+/// `normalize_new_cloud_sources` and never reach here unmarked.
+pub fn repair_flat_default_priorities(
+    cfg: &mut crate::config::schema::Config,
+) -> (Vec<String>, bool) {
+    let (lat, lon) = (cfg.deployment.location.lat, cfg.deployment.location.lon);
+    if lat == 0.0 && lon == 0.0 {
+        return (Vec::new(), false);
+    }
+    const FLAT_DEFAULT: i32 = 50;
+    let mut log = Vec::new();
+    let mut changed = false;
+    let repaired: Vec<String> = cfg.priority_repaired_ids.clone();
+    for entry in cfg.sources.iter_mut().filter(|e| e.enabled) {
+        let region_rank = default_priority_for(&entry.source, lat, lon);
+        if region_rank == FLAT_DEFAULT {
+            continue; // no researched rank distinct from the default
+        }
+        if repaired.contains(&entry.id) {
+            continue;
+        }
+        cfg.priority_repaired_ids.push(entry.id.clone());
+        changed = true;
+        if entry.priority == FLAT_DEFAULT {
+            entry.priority = region_rank;
+            log.push(format!(
+                "repaired '{}' priority {FLAT_DEFAULT} -> {region_rank} (researched region rank; \
+                 was the flat pre-ranking default)",
+                entry.id
+            ));
+        }
+    }
+    (log, changed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -673,6 +722,71 @@ mod tests {
             max_age_s: None,
             source: kind,
         }
+    }
+
+    // ---- repair_flat_default_priorities ----
+
+    #[test]
+    fn repair_lifts_flat_default_authority_once_and_respects_later_user_reset() {
+        let (lat, lon) = ORLANDO;
+        // MRMS predating the ranking: flat 50. NWS already at its rank. A
+        // hand-tuned Pirate at 63 must never be touched.
+        let mut cfg = cfg_at(
+            lat,
+            lon,
+            vec![
+                entry("noaa_mrms", mrms(), 50, true),
+                entry("nws", nws(), 70, true),
+                entry("pirate", pirate(), 63, true),
+            ],
+        );
+        let (log, changed) = repair_flat_default_priorities(&mut cfg);
+        assert!(changed);
+        assert_eq!(
+            log.len(),
+            1,
+            "only the flat-default source is lifted: {log:?}"
+        );
+        let prio = |c: &Config, id: &str| c.sources.iter().find(|s| s.id == id).unwrap().priority;
+        assert_eq!(prio(&cfg, "noaa_mrms"), 75, "US region rank");
+        assert_eq!(prio(&cfg, "nws"), 70, "already-ranked source untouched");
+        assert_eq!(prio(&cfg, "pirate"), 63, "user-tuned priority untouched");
+        // Every evaluated id is marked, lifted or not.
+        for id in ["noaa_mrms", "nws", "pirate"] {
+            assert!(
+                cfg.priority_repaired_ids.contains(&id.to_string()),
+                "{id} marked"
+            );
+        }
+        // Second run: no-op.
+        let (log2, changed2) = repair_flat_default_priorities(&mut cfg);
+        assert!(log2.is_empty() && !changed2, "idempotent after marking");
+        // User later sets a repaired source BACK to 50: their choice sticks.
+        cfg.sources
+            .iter_mut()
+            .find(|s| s.id == "noaa_mrms")
+            .unwrap()
+            .priority = 50;
+        let (log3, changed3) = repair_flat_default_priorities(&mut cfg);
+        assert!(
+            log3.is_empty() && !changed3,
+            "deliberate 50 is never re-lifted"
+        );
+        assert_eq!(prio(&cfg, "noaa_mrms"), 50);
+    }
+
+    #[test]
+    fn repair_skips_unlocated_and_disabled() {
+        // No location: unknowable region, untouched.
+        let mut cfg = cfg_at(0.0, 0.0, vec![entry("noaa_mrms", mrms(), 50, true)]);
+        let (_, changed) = repair_flat_default_priorities(&mut cfg);
+        assert!(!changed);
+        // Disabled source: untouched and unmarked (a later enable re-evaluates).
+        let (lat, lon) = ORLANDO;
+        let mut cfg = cfg_at(lat, lon, vec![entry("noaa_mrms", mrms(), 50, false)]);
+        let (_, changed) = repair_flat_default_priorities(&mut cfg);
+        assert!(!changed);
+        assert!(cfg.priority_repaired_ids.is_empty());
     }
 
     #[test]

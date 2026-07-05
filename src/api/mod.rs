@@ -52,6 +52,7 @@ pub mod photos;
 pub mod precip;
 pub mod sensors;
 pub mod sources;
+pub mod system;
 pub mod tropical;
 pub mod weather;
 pub mod windgrid;

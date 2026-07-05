@@ -514,6 +514,24 @@ static F_ECOWITT_GW_POLL: &[FieldSpec] = &[
         "How often to poll the gateway. 30s is plenty for irrigation and easy on the device.",
         30.0,
     ),
+    // Management login, OPTIONAL: polling never needs it (those endpoints are
+    // open on the LAN). Setting it unlocks gateway-side writes: "Remove probe"
+    // can then unregister the sensor on the gateway itself instead of telling
+    // the user to delete it in the Ecowitt UI. Both empty = feature off.
+    FieldSpec::text(
+        "username",
+        "Gateway login (optional)",
+        "The gateway web UI's login name. Only used for management actions (removing a sensor from the gateway); polling never needs it.",
+        false,
+        "admin",
+    ),
+    FieldSpec::secret(
+        "password",
+        "Gateway password (optional)",
+        "With the login set, removing a probe in LocalSky also unregisters it on the gateway. Leave empty to manage the gateway only from its own UI.",
+        false,
+        "gateway web password",
+    ),
 ];
 
 static F_AMBIENT_WEATHER: &[FieldSpec] = &[

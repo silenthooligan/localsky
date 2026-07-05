@@ -278,6 +278,17 @@ async fn main() -> anyhow::Result<()> {
             for line in &appended {
                 tracing::info!("{line}");
             }
+            // One-time repair for sources predating the region ranking: a
+            // region-authority source still at the flat default (50) is
+            // lifted to its researched rank so the global fallback ranking
+            // agrees with the per-field chains and the docs (a user should
+            // never hand-edit a number to reach the documented default).
+            let (repaired, repaired_changed) =
+                localsky::config::region::repair_flat_default_priorities(&mut cfg);
+            for line in &repaired {
+                tracing::info!("{line}");
+            }
+            let changed = changed || repaired_changed;
             if changed {
                 if let Err(e) = cfg_store.save(&cfg).await {
                     tracing::warn!(
@@ -1214,6 +1225,8 @@ async fn main() -> anyhow::Result<()> {
     let app = app
         .nest("/api/location", mk_location())
         .nest("/api/v1/location", mk_location())
+        .nest("/api/system", api::system::router(history_conn.clone()))
+        .nest("/api/v1/system", api::system::router(history_conn.clone()))
         .nest("/api/config", mk_config())
         .nest("/api/wizard", mk_wizard())
         .nest("/api/health", mk_health())

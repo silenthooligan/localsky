@@ -1099,6 +1099,60 @@ where
 /// by owning a `reasons: RwSignal<Vec<String>>` (empty = hidden) plus a
 /// `dismissed: RwSignal<bool>` (reset to false on each save so a fresh
 /// restart-required save re-shows it).
+/// POST the in-app restart. Ok(()) = accepted (the server is going down);
+/// Err((status, body)) for the 409 watering guard and real failures.
+#[cfg(feature = "hydrate")]
+async fn post_restart(force: bool) -> Result<(), (u16, String)> {
+    use gloo_net::http::Request;
+    let resp = Request::post("/api/system/restart")
+        .json(&serde_json::json!({ "force": force }))
+        .map_err(|e| (0u16, e.to_string()))?
+        .send()
+        .await
+        .map_err(|e| (0u16, e.to_string()))?;
+    if resp.ok() {
+        Ok(())
+    } else {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        Err((status, body))
+    }
+}
+
+/// After a restart is accepted: wait for the server to actually go DOWN, then
+/// come back UP, then hard-reload so the client runs the new build's assets.
+/// Bounded so a restart that never completes degrades to a plain reload
+/// attempt instead of an eternal overlay.
+#[cfg(feature = "hydrate")]
+async fn wait_for_restart_and_reload() {
+    use gloo_timers::future::TimeoutFuture;
+    async fn alive() -> bool {
+        gloo_net::http::Request::get("/api/v1/info")
+            .send()
+            .await
+            .map(|r| r.ok())
+            .unwrap_or(false)
+    }
+    // Phase 1: watch it go down (max ~15s; the Supervisor path can take a beat).
+    for _ in 0..15 {
+        TimeoutFuture::new(1_000).await;
+        if !alive().await {
+            break;
+        }
+    }
+    // Phase 2: watch it come back (max ~120s: a plain container restart is
+    // seconds; an add-on restart on a slow box can take a while).
+    for _ in 0..60 {
+        TimeoutFuture::new(2_000).await;
+        if alive().await {
+            break;
+        }
+    }
+    if let Some(win) = web_sys::window() {
+        let _ = win.location().reload();
+    }
+}
+
 #[component]
 pub fn RestartBanner(
     /// The server's restart_reasons. Empty keeps the banner hidden.
@@ -1108,6 +1162,71 @@ pub fn RestartBanner(
     dismissed: RwSignal<bool>,
 ) -> impl IntoView {
     let show = move || !reasons.get().is_empty() && !dismissed.get();
+    // Restart lifecycle: idle -> confirm/POST -> overlay until the server
+    // cycles -> hard reload. Error text renders inline in the banner.
+    let restarting = RwSignal::new(false);
+    let restart_err: RwSignal<String> = RwSignal::new(String::new());
+    #[allow(unused_variables)]
+    let on_restart = Callback::new(move |_: leptos::ev::MouseEvent| {
+        #[cfg(feature = "hydrate")]
+        {
+            let confirmed = web_sys::window()
+                .map(|w| {
+                    w.confirm_with_message(
+                        "Restart LocalSky now? The app is briefly unavailable while it \
+                         comes back (under Docker or the Home Assistant add-on this is \
+                         automatic; a bare process needs its service manager set to \
+                         restart on exit).",
+                    )
+                    .unwrap_or(false)
+                })
+                .unwrap_or(false);
+            if !confirmed {
+                return;
+            }
+            restart_err.set(String::new());
+            leptos::task::spawn_local(async move {
+                match post_restart(false).await {
+                    Ok(()) => {
+                        restarting.set(true);
+                        wait_for_restart_and_reload().await;
+                    }
+                    Err((409, body)) => {
+                        // Watering in progress: name the zones, offer force.
+                        let detail = serde_json::from_str::<serde_json::Value>(&body)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("detail").and_then(|d| d.as_str()).map(String::from)
+                            })
+                            .unwrap_or_else(|| "a zone is currently watering".into());
+                        let force = web_sys::window()
+                            .map(|w| {
+                                w.confirm_with_message(&format!(
+                                    "{detail}\n\nRestart anyway? The shut-off backstop \
+                                     closes valves and boot reconciliation double-checks \
+                                     them."
+                                ))
+                                .unwrap_or(false)
+                            })
+                            .unwrap_or(false);
+                        if !force {
+                            return;
+                        }
+                        match post_restart(true).await {
+                            Ok(()) => {
+                                restarting.set(true);
+                                wait_for_restart_and_reload().await;
+                            }
+                            Err((s, b)) => {
+                                restart_err.set(format!("Restart failed (HTTP {s}): {b}"))
+                            }
+                        }
+                    }
+                    Err((s, b)) => restart_err.set(format!("Restart failed (HTTP {s}): {b}")),
+                }
+            });
+        }
+    });
     view! {
         <Show when=show>
             <div class="health-banner" role="status">
@@ -1116,15 +1235,28 @@ pub fn RestartBanner(
                 </span>
                 <div class="health-banner__text">
                     <strong>"Restart required to apply."</strong>
-                    " Your change is saved, but it needs a container restart to "
-                    "take effect. Everything else applied live."
+                    " Your change is saved, but it needs a restart to take effect. "
+                    "Everything else applied live."
                     // One line per server reason; plain divs keep the banner
                     // tight (no default list margins to fight).
                     {move || reasons.get()
                         .into_iter()
                         .map(|r| view! { <div>{r}</div> })
                         .collect_view()}
+                    {move || {
+                        let e = restart_err.get();
+                        (!e.is_empty())
+                            .then(|| view! { <div class="health-banner__error">{e}</div> })
+                    }}
                 </div>
+                <Button
+                    variant="primary"
+                    size="sm"
+                    aria_label="Restart LocalSky now"
+                    on_click=on_restart
+                >
+                    "Restart now"
+                </Button>
                 <Button
                     variant="ghost"
                     size="sm"
@@ -1133,6 +1265,16 @@ pub fn RestartBanner(
                 >
                     "Dismiss"
                 </Button>
+            </div>
+        </Show>
+        // Full-screen wait state while the process cycles; cleared by the
+        // hard reload when the server answers again.
+        <Show when=move || restarting.get()>
+            <div class="restart-overlay" role="alert" aria-busy="true">
+                <div class="restart-overlay__card">
+                    <strong>"Restarting LocalSky\u{2026}"</strong>
+                    <span>"Hang tight; this page reloads itself when the app is back."</span>
+                </div>
             </div>
         </Show>
     }

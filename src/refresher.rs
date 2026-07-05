@@ -2262,9 +2262,14 @@ async fn compute_soil_forecasts(
     et0_today_mm: f64,
 ) -> Vec<SoilForecast> {
     // Build the working zone list from config. Empty config = unconfigured
-    // install -> no soil forecasts until the wizard writes zones.
+    // install -> no soil forecasts until the wizard writes zones. Zones with
+    // NO bound soil sensor are excluded outright: there is no probe to
+    // project, and emitting an entry made every consumer present a phantom
+    // "probe offline" for a zone whose probe was deliberately removed (the
+    // Sensors rail listed all four removed probes as offline).
     let zones: Vec<ForecastZone> = zone_cfg
         .iter()
+        .filter(|z| z.soil_sensor_id.is_some())
         .map(|z| {
             let (kc, depth) = kc_depth_for(&z.slug);
             ForecastZone {

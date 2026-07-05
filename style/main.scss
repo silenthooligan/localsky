@@ -9257,6 +9257,36 @@ html[data-no-irrigation="true"] {
     flex: 1 1 auto;
   }
 }
+// In-app restart wait state: full-screen scrim while the process cycles;
+// the page hard-reloads itself when the server answers again.
+.restart-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 4000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  backdrop-filter: blur(3px);
+}
+.restart-overlay__card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-5) var(--space-6);
+  background: var(--surface-soft);
+  border: 1px solid var(--elev-line);
+  border-radius: var(--radius-md);
+  color: var(--text-bright);
+  text-align: center;
+
+  span { color: var(--text-dim); font-size: var(--text-meta); }
+}
+.health-banner__error {
+  color: var(--accent-danger, #e66);
+  margin-top: var(--space-1);
+}
+
 .device-soil__bind {
   background: var(--surface-soft);
   color: var(--text);

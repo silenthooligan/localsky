@@ -4,6 +4,20 @@ All notable changes to LocalSky are documented here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-07-05
+
+In-app restart, device-management fixes, and source ranking coherence. No breaking changes.
+
+### Added
+
+- In-app restart: the "Restart required" banner now carries a **Restart now** button, so a config change that needs a restart never sends you off to manage the container. `POST /api/v1/system/restart` (privileged, same bar as config writes): on HAOS it uses the Supervisor's add-on self-restart; on Docker/service deployments it exits cleanly and the restart policy relaunches it. Refuses with 409 while a zone is actively watering (`force: true` overrides; shut-off backstops + boot valve reconciliation cover the interruption). The UI shows a wait overlay and reloads itself when the app is back.
+
+### Fixed
+
+- Removed probes no longer show as "probe offline" on the Sensors page: a zone with no bound soil sensor still emitted a per-zone soil entry (phantom offline rail item + detail card). Unbound zones now produce no soil forecast at all.
+- Sources predating the region ranking that still sat at the flat default priority (50) are lifted once at boot to their researched region rank (e.g. NOAA MRMS to 75 in the US), so the global fallback ranking agrees with the per-field chains without hand-editing a number. Any later manual value, including setting it back to 50, sticks.
+- Ecowitt source editor: gateway login/password fields were missing from the form, so gateway-side probe removal could not be enabled from the UI (the config has supported it since 0.7.3). Both optional; password masked and redacted like every other source secret.
+
 ## [0.7.4] - 2026-07-04
 
 In-place device management, HA ingress write fix, and a major query perf win. No breaking changes.

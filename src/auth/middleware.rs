@@ -412,6 +412,12 @@ fn is_privileged_path(method: &Method, path: &str) -> bool {
         return true;
     }
 
+    // In-app restart: kills and relaunches the process. Same bar as a config
+    // write; an anonymous internet caller must never bounce the service.
+    if path == "/api/system/restart" {
+        return true;
+    }
+
     // Irrigation actuation: POST /api/irrigation/action runs / stops / pauses /
     // skips physical valves. It clears the same anonymous-internet bar as a config
     // write; an unauthenticated caller in disabled mode must never open a valve.

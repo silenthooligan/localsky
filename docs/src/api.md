@@ -528,6 +528,17 @@ Elevation lookup for a coordinate via the Open-Meteo elevation API, returning `{
 
 Prometheus exposition endpoint (`text/plain; version=0.0.4`), served at the origin root (not under `/api/v1`) and always public. Aggregate operational counters only: verdict mix, refresh and degraded counts, controller and cloud error counts, last-fetch latency. No secrets, config, or PII; firewall it at the proxy if you do not want it exposed.
 
+## System
+
+`POST /api/v1/system/restart` restarts LocalSky from inside the app
+(privileged: same authentication bar as a config write). Body is optional:
+`{"force": true}` overrides the active-watering guard, which otherwise
+answers `409 watering_in_progress` naming the running zones. Responds
+`202 {"mode": "supervisor" | "exit"}`: under the Home Assistant add-on the
+Supervisor restarts the add-on; everywhere else the process exits cleanly
+and the container/service restart policy relaunches it (every documented
+install runs `--restart unless-stopped` or equivalent).
+
 ## Backup and restore
 
 | Endpoint | Method | Purpose |
