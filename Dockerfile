@@ -147,11 +147,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && useradd --uid 10001 --user-group --no-create-home --shell /usr/sbin/nologin localsky
 
 WORKDIR /app
-COPY --from=builder --chown=10001:10001 /build/target/release/localsky /app/localsky
-COPY --from=builder --chown=10001:10001 /build/target/site /app/site
+# Artifacts are staged at /build/out by the builder stage: its target dir is a
+# BuildKit cache mount, so nothing under /build/target exists in the image
+# layers at COPY time. These paths MUST track the internal Dockerfile's
+# runtime-stage COPYs.
+COPY --from=builder --chown=10001:10001 /build/out/localsky /app/localsky
+COPY --from=builder --chown=10001:10001 /build/out/site /app/site
 # hash.txt MUST sit next to the binary, leptos reads it from
 # current_exe().parent()/hash.txt to map /pkg names to their hashed forms.
-COPY --from=builder --chown=10001:10001 /build/hash.txt /app/hash.txt
+COPY --from=builder --chown=10001:10001 /build/out/hash.txt /app/hash.txt
 # Bundled documentation, served same-origin at /docs (LEPTOS_SITE_ROOT=
 # "site" -> /app/site, the docs ServeDir roots at <site_root>/docs).
 # Placed after the site COPY so it lands inside the served static root.
