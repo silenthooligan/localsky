@@ -54,6 +54,7 @@ pub fn router(db: Arc<Mutex<Connection>>) -> Router {
         .route("/soil", get(soil))
         .route("/discovered", get(discovered))
         .route("/inventory", get(inventory))
+        .route("/soil/remove", axum::routing::post(remove_soil))
         .with_state(db)
 }
 
@@ -340,6 +341,126 @@ async fn inventory(
     };
     let controllers = INVENTORY.get().map(|h| h.controllers.clone());
     Json(build_inventory(SensorHistoryStore::new(db), cfg, controllers.as_ref()).await)
+}
+
+/// POST /sensors/soil/remove: retire a zone's soil probe. Always clears the
+/// LocalSky binding (Tier 0: drops the soil dependency AND suppresses the
+/// offline fault, since `detect_soil_probe_faults` skips zones with no
+/// `soil_sensor_id`). When `also_gateway` and the probe lives on an Ecowitt
+/// gateway that has management credentials configured, it ALSO unregisters the
+/// sensor on the gateway (Tier 1) so it stops showing there too. The response
+/// reports each side honestly so the UI never claims a gateway removal that
+/// did not happen.
+#[derive(serde::Deserialize)]
+struct RemoveSoilReq {
+    /// The probe spec, e.g. "source:ecowitt_gw:soilmoisture2".
+    probe_id: String,
+    #[serde(default)]
+    also_gateway: bool,
+}
+
+#[derive(Serialize)]
+struct RemoveSoilResp {
+    /// Number of zones whose binding to this probe was cleared (usually 0 or 1).
+    zones_unbound: usize,
+    /// unregistered | not_registered | unavailable | failed | skipped
+    gateway: String,
+    detail: String,
+}
+
+async fn remove_soil(Json(req): Json<RemoveSoilReq>) -> Json<RemoveSoilResp> {
+    use crate::config::schema::SourceKind;
+    use crate::sources::ecowitt_gw_mgmt::{
+        soil_channel_of, unregister_soil_channel, UnregisterOutcome,
+    };
+
+    let resp = |zones_unbound, gw: &str, detail: String| {
+        Json(RemoveSoilResp {
+            zones_unbound,
+            gateway: gw.to_string(),
+            detail,
+        })
+    };
+
+    let Some(h) = INVENTORY.get() else {
+        return resp(0, "unavailable", "config store not ready".into());
+    };
+    let Ok(mut cfg) = h.cfg_store.load().await else {
+        return resp(0, "unavailable", "could not load config".into());
+    };
+    let spec = req.probe_id.clone();
+
+    // Gateway propagation (Tier 1): only for an Ecowitt gateway soil channel
+    // whose source has management creds set. Honest per-case status.
+    let mut gw = "skipped".to_string();
+    let mut detail = String::new();
+    if req.also_gateway {
+        gw = "unavailable".to_string();
+        let src_id = spec
+            .strip_prefix("source:")
+            .and_then(|r| r.split_once(':'))
+            .map(|(id, _)| id);
+        let channel = soil_channel_of(&spec);
+        let ec = src_id.and_then(|id| {
+            cfg.sources
+                .iter()
+                .find(|s| s.id == id)
+                .and_then(|s| match &s.source {
+                    SourceKind::EcowittGwPoll(c) => Some(c.clone()),
+                    _ => None,
+                })
+        });
+        match (ec, channel) {
+            (Some(c), Some(chan)) => match (c.username.as_deref(), c.password.as_deref()) {
+                (Some(u), Some(p)) => match unregister_soil_channel(&c.host, u, p, chan).await {
+                    Ok(UnregisterOutcome::Unregistered) => {
+                        gw = "unregistered".to_string();
+                        detail = format!("disabled soil channel {chan} on the gateway");
+                    }
+                    Ok(UnregisterOutcome::NotRegistered) => {
+                        gw = "not_registered".to_string();
+                        detail = "channel was already gone on the gateway".to_string();
+                    }
+                    Err(e) => {
+                        gw = "failed".to_string();
+                        detail = format!("{e:#}");
+                    }
+                },
+                _ => {
+                    detail =
+                        "add a username/password to the Ecowitt source to enable gateway removal"
+                            .to_string();
+                }
+            },
+            (Some(_), None) => {
+                detail = "not a gateway soil channel; cleared LocalSky only".to_string()
+            }
+            (None, _) => {
+                detail = "probe is not on an Ecowitt gateway; cleared LocalSky only".to_string()
+            }
+        }
+    }
+
+    // Clear the LocalSky binding on every zone pointing at this probe (Tier 0:
+    // drops the soil dependency AND suppresses the offline fault). A probe binds
+    // to one zone, but sweep all for safety.
+    let mut zones_unbound = 0usize;
+    for z in cfg.zones.values_mut() {
+        if z.soil_sensor_id.as_deref() == Some(spec.as_str()) {
+            z.soil_sensor_id = None;
+            zones_unbound += 1;
+        }
+    }
+    if zones_unbound > 0 {
+        if let Err(e) = h.cfg_store.save(&cfg).await {
+            return resp(
+                0,
+                &gw,
+                format!("gateway: {detail}; but config save FAILED: {e}"),
+            );
+        }
+    }
+    resp(zones_unbound, &gw, detail)
 }
 
 /// Core inventory builder, parameterized for testability (the handler
@@ -644,6 +765,8 @@ mod inventory_tests {
                 host: "192.0.2.10".to_string(),
                 poll_interval_s: 30,
                 soil_calibration: Default::default(),
+                username: None,
+                password: None,
             }),
         });
         cfg.controllers.push(ControllerEntry {

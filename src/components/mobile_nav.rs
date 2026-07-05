@@ -82,7 +82,10 @@ fn Tab(
             return;
         }
         ev.prevent_default();
-        navigate(&crate::base::url(href), NavigateOptions::default());
+        // Plain route, not base::url(href): the Router base is applied by
+        // navigate() itself; pre-prefixing double-prefixes under HA ingress
+        // (issue #3). Real browser navs are prefixed by the shell click shim.
+        navigate(href, NavigateOptions::default());
     };
     view! {
         <a
@@ -140,7 +143,9 @@ fn MoreLink(
         }
         ev.prevent_default();
         open.set(false);
-        navigate(&crate::base::url(href), NavigateOptions::default());
+        // Plain route (see Tab above): navigate() adds the Router base, so
+        // base::url() here would double-prefix under HA ingress (issue #3).
+        navigate(href, NavigateOptions::default());
     };
     view! {
         <a href=href class="mobile-more__link" on:click=on_click>

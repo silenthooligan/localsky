@@ -19,6 +19,7 @@
 - [Add your first soil sensor](first-soil-sensor.md)
 - [Weather and soil sensors](sensors.md)
 - [Soil probes and zones](soil-sensors.md)
+- [Removing and disabling devices](removing-devices.md)
 - [Irrigation controllers](controllers.md)
 - [DIY & ESP32 controllers](diy-controllers.md)
 - [Zones](zones.md)

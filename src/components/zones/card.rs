@@ -128,8 +128,11 @@ pub fn ZoneCard(
     let on_select = move |_| {
         let mobile = is_mobile.map(|s| s.get_untracked()).unwrap_or(false);
         if mobile {
+            // Plain route, not base::url(): navigate() resolves against the
+            // Router base itself, so pre-prefixing double-prefixes under HA
+            // ingress (issue #3).
             navigate(
-                &crate::base::url(&format!("/zones/{nav_slug}")),
+                &format!("/zones/{nav_slug}"),
                 leptos_router::NavigateOptions::default(),
             );
         } else {

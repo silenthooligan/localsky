@@ -4,6 +4,18 @@ All notable changes to LocalSky are documented here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-07-04
+
+Single-pane device management and a Home Assistant ingress fix: retire a soil probe (and clear its Ecowitt gateway registration) in one click, and in-app navigation now works when LocalSky is opened from the Home Assistant sidebar. No breaking changes; upgrade in place.
+
+### Added
+
+- Device removal from LocalSky (single-pane management): every soil probe on the Sensors page has a "Remove probe" action that clears its binding and stops the offline warning for that zone. For probes on an Ecowitt gateway, if you set the gateway login on the source, LocalSky also unregisters the sensor on the gateway in the same click (using the gateway's disable state, so it stays removed instead of being auto-re-added). It is honest per device about what it can and cannot remove upstream. See the new "Removing and disabling devices" documentation.
+
+### Fixed
+
+- Home Assistant ingress: opening a page from the sidebar or the mobile nav no longer lands on "404, no such page". When LocalSky is embedded in the Home Assistant sidebar, in-app navigation was applying Home Assistant's ingress path prefix twice, sending the browser to a doubled `/api/hassio_ingress/<token>/api/hassio_ingress/<token>/...` address that cannot resolve. The first page loaded, so the dashboard appeared, but nothing you clicked worked (and the setup wizard dropped you onto that broken navigation at the end). Navigation now resolves correctly whether LocalSky is opened through the Home Assistant sidebar or on its own port.
+
 ## [0.7.2] - 2026-07-03
 
 Forecast resilience and a weather product that adapts to your climate: a default multi-provider failover chain, restart-proof forecasts, the full Open-Meteo variable set, and condition-aware dashboard cards. No breaking changes; upgrade in place.

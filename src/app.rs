@@ -103,6 +103,27 @@ pub struct HouseholdUnits(pub Signal<crate::ha::snapshot::Units>);
 #[derive(Clone, Copy)]
 pub struct HasIrrigation(pub RwSignal<bool>);
 
+/// Target for the legacy `/settings/{sources,data-sources,controllers}`
+/// aliases that redirect into the unified devices hub.
+///
+/// `<Redirect>` takes two code paths and, under HA ingress, they need
+/// different inputs. On the server the redirect is emitted via
+/// `resolve_path("", path, ..)` (base ""), so `path` must already carry the
+/// ingress prefix. On the hydrated client `<Redirect>` calls `navigate(path)`,
+/// which resolves against the Router base, so `path` must be the PLAIN route
+/// or it double-prefixes and 404s (issue #3). cfg selects the right one per
+/// build artifact (server binary = ssr, wasm = hydrate).
+fn devices_redirect() -> String {
+    #[cfg(feature = "ssr")]
+    {
+        crate::base::url("/settings?section=devices")
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        "/settings?section=devices".to_string()
+    }
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     provide_meta_context();
@@ -482,17 +503,17 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/settings/sources")
                         view=|| view! {
                             <leptos_router::components::Redirect
-                                path=crate::base::url("/settings?section=devices")/>
+                                path=devices_redirect()/>
                         }/>
                     <Route path=path!("/settings/data-sources")
                         view=|| view! {
                             <leptos_router::components::Redirect
-                                path=crate::base::url("/settings?section=devices")/>
+                                path=devices_redirect()/>
                         }/>
                     <Route path=path!("/settings/controllers")
                         view=|| view! {
                             <leptos_router::components::Redirect
-                                path=crate::base::url("/settings?section=devices")/>
+                                path=devices_redirect()/>
                         }/>
                     <Route path=path!("/settings/help")
                         view=move || view! {

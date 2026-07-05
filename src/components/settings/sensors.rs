@@ -142,6 +142,37 @@ async fn save_config(cfg: serde_json::Value) -> Result<(), String> {
     Ok(())
 }
 
+/// Result of POST /sensors/soil/remove (mirror of the server RemoveSoilResp).
+#[cfg(feature = "hydrate")]
+#[derive(Clone, Debug, Deserialize)]
+struct RemoveResult {
+    #[serde(default)]
+    zones_unbound: usize,
+    #[serde(default)]
+    gateway: String,
+    #[serde(default)]
+    detail: String,
+}
+
+/// Retire a soil probe: clear its LocalSky binding and (when the gateway has a
+/// login set) unregister it on the gateway too.
+#[cfg(feature = "hydrate")]
+async fn remove_soil_probe(probe_id: String, also_gateway: bool) -> Result<RemoveResult, String> {
+    use gloo_net::http::Request;
+    let body = serde_json::json!({ "probe_id": probe_id, "also_gateway": also_gateway });
+    let resp = Request::post("/api/v1/sensors/soil/remove")
+        .json(&body)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        let b = resp.text().await.unwrap_or_default();
+        return Err(format!("HTTP {}: {b}", resp.status()));
+    }
+    resp.json::<RemoveResult>().await.map_err(|e| e.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Small formatting helpers.
 // ---------------------------------------------------------------------------
@@ -316,6 +347,67 @@ pub fn SettingsSensors() -> impl IntoView {
         }
     });
 
+    // Retire a probe entirely: clear its binding in LocalSky AND, when the
+    // gateway has a login configured, unregister it on the gateway (Tier 1
+    // device management), so a dead/removed sensor stops showing in both
+    // places. Confirmed first because the gateway write is destructive.
+    let remove = Callback::new(move |probe_id: String| {
+        if saving.get() {
+            return;
+        }
+        #[cfg(feature = "hydrate")]
+        {
+            let confirmed = web_sys::window()
+                .and_then(|w| {
+                    w.confirm_with_message(
+                        "Remove this soil probe? This clears its binding in LocalSky and, if the gateway login is set, unregisters it on the gateway (which stops the gateway from re-adding it).",
+                    )
+                    .ok()
+                })
+                .unwrap_or(false);
+            if !confirmed {
+                return;
+            }
+        }
+        saving.set(true);
+        result_msg.set(String::new());
+        #[cfg(feature = "hydrate")]
+        wasm_bindgen_futures::spawn_local(async move {
+            match remove_soil_probe(probe_id, true).await {
+                Ok(r) => {
+                    let gw = match r.gateway.as_str() {
+                        "unregistered" => " and unregistered it on the gateway.",
+                        "not_registered" => "; the gateway channel was already gone.",
+                        "failed" => "; the gateway removal FAILED (check the gateway login / logs).",
+                        "unavailable" => "; gateway removal unavailable (add the gateway login to remove it there too).",
+                        _ => ".",
+                    };
+                    result_ok.set(r.gateway != "failed");
+                    result_msg.set(format!(
+                        "Removed probe: unbound {} zone(s){}",
+                        r.zones_unbound, gw
+                    ));
+                    if let Ok(inv) = fetch_inventory().await {
+                        inventory.set(inv);
+                    }
+                    if let Ok(cfg) = fetch_config().await {
+                        config_json.set(cfg);
+                    }
+                }
+                Err(e) => {
+                    result_ok.set(false);
+                    result_msg.set(e);
+                }
+            }
+            saving.set(false);
+        });
+        #[cfg(not(feature = "hydrate"))]
+        {
+            saving.set(false);
+            let _ = probe_id;
+        }
+    });
+
     // SOIL: one card per gateway/source, its probes nested inside.
     let soil_view = move || {
         let inv = inventory.get();
@@ -331,7 +423,7 @@ pub fn SettingsSensors() -> impl IntoView {
                     .filter(|p| p.source_id == gw.source_id)
                     .cloned()
                     .collect();
-                gateway_card(gw.clone(), children, opts.clone(), bind, p)
+                gateway_card(gw.clone(), children, opts.clone(), bind, remove, p)
             })
             .collect();
         view! { <div class="soil-grid soil-grid--gateways">{cards}</div> }.into_any()
@@ -367,7 +459,7 @@ pub fn SettingsSensors() -> impl IntoView {
         };
         view! {
             <div class="soil-grid soil-grid--gateways">
-                {gateway_card(synth, orphans, opts, bind, p)}
+                {gateway_card(synth, orphans, opts, bind, remove, p)}
             </div>
         }
         .into_any()
@@ -470,6 +562,7 @@ fn gateway_card(
     probes: Vec<SoilProbe>,
     zone_opts: Vec<ZoneOpt>,
     bind: Callback<(String, String)>,
+    remove: Callback<String>,
     prefs: UnitPrefs,
 ) -> impl IntoView {
     let count = probes.len();
@@ -494,7 +587,7 @@ fn gateway_card(
 
     let rows: Vec<_> = probes
         .into_iter()
-        .map(|p| soil_probe_row(p, zone_opts.clone(), bind, prefs))
+        .map(|p| soil_probe_row(p, zone_opts.clone(), bind, remove, prefs))
         .collect();
 
     view! {
@@ -521,9 +614,11 @@ fn soil_probe_row(
     p: SoilProbe,
     zone_opts: Vec<ZoneOpt>,
     bind: Callback<(String, String)>,
+    remove: Callback<String>,
     prefs: UnitPrefs,
 ) -> impl IntoView {
     let probe_id = p.id.clone();
+    let remove_id = probe_id.clone();
     let label = p
         .channel_label
         .clone()
@@ -596,6 +691,13 @@ fn soil_probe_row(
                     })
                     .collect_view()}
             </select>
+            <button
+                class="soil-card__remove"
+                title="Remove this probe: clears its LocalSky binding and, if the gateway login is set, unregisters it on the gateway too."
+                on:click=move |_| { remove.run(remove_id.clone()); }
+            >
+                "Remove probe"
+            </button>
         </div>
     }
 }

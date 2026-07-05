@@ -826,6 +826,18 @@ pub struct EcowittGwPollConfig {
     /// natively instead of leaning on a Home Assistant template sensor.
     #[serde(default)]
     pub soil_calibration: std::collections::HashMap<String, SoilAdCalibration>,
+    /// Gateway web-UI login, used ONLY for management writes (unregistering a
+    /// sensor via `set_sensors_info`). The read/poll endpoints (get_livedata_info,
+    /// get_cli_soilad) are unauthenticated on the LAN and never use these, so a
+    /// config without credentials polls exactly as before. Set them to let
+    /// LocalSky remove a sensor from the gateway (Tier 1 device management)
+    /// instead of the operator doing it by hand in the Ecowitt UI. Absent =
+    /// management writes are unavailable (the remove flow clears the LocalSky
+    /// binding only and tells the operator to delete it on the gateway).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
 }
 
 /// Dry (probe in air) and wet (probe in water/saturated) raw-AD endpoints for
@@ -1452,13 +1464,23 @@ pub struct BlitzortungMqtt {
     /// Broker port (plain MQTT).
     #[serde(default = "default_blitzortung_mqtt_port")]
     pub port: u16,
-    /// Topic to subscribe to. `strikes/core` is the lightweight per-strike
-    /// record (time/lat/lon, ~126 B) and is lossless for LocalSky, which
-    /// reads only those fields; `strikes/lzw_complete` is the LZW-compressed
-    /// full record (byte-identical to the WebSocket feed). Topics containing
-    /// `lzw` are LZW-decoded before parsing.
+    /// Topic base (the strike "kind"). `strikes/core` is the lightweight
+    /// per-strike record (time/lat/lon, ~126 B) and is lossless for
+    /// LocalSky, which reads only those fields; `strikes/lzw_complete` is
+    /// the LZW-compressed full record (byte-identical to the WebSocket
+    /// feed). A base containing `lzw` is LZW-decoded before parsing. When
+    /// `geohash` is true this is the prefix under which the per-tile
+    /// subscriptions are built; when false it is the exact topic.
     #[serde(default = "default_blitzortung_mqtt_topic")]
     pub topic: String,
+    /// Subscribe only to the geohash tiles overlapping the station radius
+    /// instead of the whole firehose. The broker publishes each strike to
+    /// a 10-level geohash topic (`<base>/<b0>/../<b9>`), so with this on
+    /// LocalSky pulls a small slice near the station rather than every
+    /// global strike. Default true (the broker is geohashed); set false
+    /// only for a broker that publishes to the flat `<base>` topic.
+    #[serde(default = "default_true")]
+    pub geohash: bool,
     /// Broker username (issued by Blitzortung). Empty means connect
     /// anonymously (the broker will reject it if it requires auth).
     #[serde(default)]
@@ -1474,6 +1496,7 @@ impl Default for BlitzortungMqtt {
             host: default_blitzortung_mqtt_host(),
             port: default_blitzortung_mqtt_port(),
             topic: default_blitzortung_mqtt_topic(),
+            geohash: true,
             username: String::new(),
             password: String::new(),
         }

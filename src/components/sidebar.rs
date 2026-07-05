@@ -173,7 +173,12 @@ fn NavLink(
             return;
         }
         ev.prevent_default();
-        navigate(&crate::base::url(href), NavigateOptions::default());
+        // Pass the PLAIN route here, never base::url(href): leptos_router
+        // resolves navigate() targets against the Router base itself, so a
+        // pre-prefixed path double-prefixes under HA ingress and 404s
+        // (issue #3). The plain <a href> is prefixed for real browser
+        // navigations by the shell's click shim (see app.rs::shell).
+        navigate(href, NavigateOptions::default());
     };
 
     view! {

@@ -13,9 +13,15 @@
 //     tag, and a small fetch/EventSource shim (see app.rs::shell) that
 //     translates the WASM app's root-relative network calls at the
 //     boundary. The Rust client code keeps thinking it lives at `/`.
-//   - The hydrated client reads the meta tag for the few places that must
-//     emit prefixed URLs themselves: router base, anchor hrefs, navigate()
-//     targets.
+//   - The hydrated client reads the meta tag for two distinct jobs, and the
+//     distinction matters (see issue #3):
+//       * The Router `base` prop, so leptos_router strips the prefix before
+//         matching AND re-applies it inside navigate()/<A>/<Redirect>. Those
+//         router navigations therefore take a PLAIN route and must NOT be
+//         wrapped in `url()` below, or the prefix is applied twice.
+//       * `url()`, for the URLs the client hands straight to the browser with
+//         no router in between: window.location/set_href targets, the plain
+//         <a href> the shell click-shim rewrites, and the shell's asset links.
 //
 // The prefix is sanitized to a conservative charset before use: it is
 // attacker-supplied (any LAN client can send the header) and gets embedded
@@ -93,9 +99,13 @@ pub fn base_path() -> String {
 }
 
 /// Prefix a root-relative path with the active base. Identity when no
-/// prefix is active. Use for anchor hrefs, navigate() targets, and the
-/// shell's asset links; plain fetch/EventSource calls are translated by
-/// the shell shim instead and should stay root-relative.
+/// prefix is active. Use ONLY for URLs handed straight to the browser:
+/// window.location/set_href targets, plain `<a href>` values, and the
+/// shell's asset links. Do NOT use it for leptos_router navigate()/<A>/
+/// <Redirect> targets (the Router base already prefixes those, so url()
+/// would double-prefix under ingress: issue #3), and not for plain
+/// fetch/EventSource calls (the shell shim translates those; they stay
+/// root-relative).
 pub fn url(path: &str) -> String {
     let base = base_path();
     if base.is_empty() {
@@ -148,5 +158,45 @@ mod tests {
         assert_eq!(sanitize("/quote'inject"), "");
         assert_eq!(sanitize("/<script>"), "");
         assert_eq!(sanitize(""), "");
+    }
+
+    // Regression guard for issue #3 (HA ingress double-prefix). leptos_router
+    // resolves a navigate()/<A>/client-side-<Redirect> target against the
+    // Router base itself, so handing any of them a path that base::url() has
+    // already prefixed produces "/api/hassio_ingress/<t>/api/hassio_ingress/
+    // <t>/..." and 404s under ingress. Raw browser sinks (window.location,
+    // set_href, asset links, plain <a href> resolved by the shell click shim)
+    // are the ONLY correct callers of base::url(). This scans the component
+    // tree for a navigate call whose argument is a base::url expression, so
+    // that specific mistake cannot return unnoticed.
+    #[test]
+    fn navigate_targets_are_never_pre_prefixed_with_base_url() {
+        use std::path::Path;
+        // Assembled at runtime so this guard file never matches itself.
+        let needle: String = ["navigate(&crate::base::", "url("].concat();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders = Vec::new();
+        scan_for(&root, &needle, &mut offenders);
+        assert!(
+            offenders.is_empty(),
+            "navigate() targets must be plain routes (the Router base is \
+             applied by navigate itself); base::url() double-prefixes under \
+             HA ingress. Offending files: {offenders:?}"
+        );
+    }
+
+    fn scan_for(dir: &std::path::Path, needle: &str, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).expect("read src dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                scan_for(&path, needle, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                let src = std::fs::read_to_string(&path).expect("read rs file");
+                let squeezed: String = src.chars().filter(|c| !c.is_whitespace()).collect();
+                if squeezed.contains(needle) {
+                    out.push(path.display().to_string());
+                }
+            }
+        }
     }
 }

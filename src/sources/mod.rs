@@ -35,6 +35,7 @@ pub mod bus_recorder;
 pub mod cloud_catalog;
 pub mod davis_wll;
 pub mod demo_replay;
+pub mod ecowitt_gw_mgmt;
 pub mod ecowitt_gw_poll;
 pub mod ecowitt_local;
 pub mod forecast_bridge;

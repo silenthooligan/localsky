@@ -251,6 +251,110 @@ fn parse_leading_i64(s: &str) -> Option<i64> {
     t[..end].parse::<i64>().ok()
 }
 
+// ===== Geohash tile selection (Blitzortung MQTT broker) =====
+//
+// The broker publishes each strike to a 10-level topic
+// `<base>/<b0>/.../<b9>`, a 10-bit geohash: 5 longitude bits and 5
+// latitude bits interleaved starting with longitude (even levels =
+// longitude, odd = latitude). Longitude is linear on [-180, 180];
+// latitude is EQUAL AREA, i.e. uniform in sin(lat) on [-1, 1] (so bands
+// are narrow at the equator and wide toward the poles). LocalSky
+// subscribes only to the tiles overlapping its radius bounding box, so
+// the broker sends a small slice of the global firehose; the existing
+// client-side radius filter still trims within the covering tiles.
+
+/// Bits per axis the broker uses (5 longitude + 5 latitude = 10 levels).
+const GEOHASH_BITS: u32 = 5;
+/// Cap on tile subscriptions. A normal radius needs a handful at full
+/// precision; only a very large radius coarsens to stay under this.
+const GEOHASH_MAX_TOPICS: usize = 16;
+
+fn lon_tile_index(lon: f64, bits: u32) -> u32 {
+    let n = 1u32 << bits;
+    let frac = (lon + 180.0) / 360.0;
+    (frac * n as f64).floor().clamp(0.0, (n - 1) as f64) as u32
+}
+
+fn lat_tile_index(lat: f64, bits: u32) -> u32 {
+    let n = 1u32 << bits;
+    // Equal-area: uniform in sin(lat), not in degrees.
+    let frac = (lat.to_radians().sin() + 1.0) / 2.0;
+    (frac * n as f64).floor().clamp(0.0, (n - 1) as f64) as u32
+}
+
+/// Topic for one tile, coarsened to `bits` per axis, with a trailing `/#`
+/// so it matches the strike's full 10-level publish topic (and any finer
+/// subdivision) regardless of `bits`.
+fn tile_topic(base: &str, lon_idx: u32, lat_idx: u32, bits: u32) -> String {
+    let mut s = String::from(base);
+    for i in (0..bits).rev() {
+        s.push('/');
+        s.push(if (lon_idx >> i) & 1 == 1 { '1' } else { '0' });
+        s.push('/');
+        s.push(if (lat_idx >> i) & 1 == 1 { '1' } else { '0' });
+    }
+    s.push_str("/#");
+    s
+}
+
+/// Longitude tile indices spanning `[lo_deg, hi_deg]`, handling the
+/// +/-180 wrap. Indices are in `[0, 2^bits)`.
+fn lon_index_range(lo_deg: f64, hi_deg: f64, bits: u32) -> Vec<u32> {
+    let n = 1i64 << bits;
+    if hi_deg - lo_deg >= 360.0 {
+        return (0..n as u32).collect();
+    }
+    let idx = |deg: f64| -> i64 {
+        // Wrap into [-180, 180) before indexing.
+        let d = (deg + 180.0).rem_euclid(360.0) - 180.0;
+        lon_tile_index(d, bits) as i64
+    };
+    let (lo_i, hi_i) = (idx(lo_deg), idx(hi_deg));
+    if lo_i <= hi_i {
+        (lo_i..=hi_i).map(|v| v as u32).collect()
+    } else {
+        // Wrapped across the date line.
+        (lo_i..n).chain(0..=hi_i).map(|v| v as u32).collect()
+    }
+}
+
+/// Subscription topics covering the station's radius. Picks the finest
+/// precision whose covering set stays within `GEOHASH_MAX_TOPICS`, so a
+/// normal radius gets the smallest tiles (least firehose) and only a very
+/// large radius coarsens. Near the poles, where a bounded distance spans
+/// all longitudes, it covers the whole longitude circle.
+pub fn covering_topics(base: &str, lat: f64, lon: f64, radius_km: f64) -> Vec<String> {
+    let radius_km = radius_km.max(0.0);
+    let dlat = (radius_km / 111.32).clamp(0.0, 180.0);
+    let lat_min = (lat - dlat).max(-90.0);
+    let lat_max = (lat + dlat).min(90.0);
+    let coslat = lat.to_radians().cos().abs();
+    let full_circle = coslat < 1e-6 || radius_km / (111.32 * coslat.max(1e-9)) >= 180.0;
+    for bits in (1..=GEOHASH_BITS).rev() {
+        let lat_lo = lat_tile_index(lat_min, bits);
+        let lat_hi = lat_tile_index(lat_max, bits);
+        let lat_range: Vec<u32> = (lat_lo..=lat_hi).collect();
+        let lon_range: Vec<u32> = if full_circle {
+            (0..(1u32 << bits)).collect()
+        } else {
+            let dlon = radius_km / (111.32 * coslat);
+            lon_index_range(lon - dlon, lon + dlon, bits)
+        };
+        if lat_range.len().saturating_mul(lon_range.len()) <= GEOHASH_MAX_TOPICS {
+            let mut topics = Vec::with_capacity(lat_range.len() * lon_range.len());
+            for &la in &lat_range {
+                for &lo in &lon_range {
+                    topics.push(tile_topic(base, lo, la, bits));
+                }
+            }
+            return topics;
+        }
+    }
+    // Unreachable for bits>=1 (at bits=1 the whole globe is 4 tiles), but
+    // keep a safe whole-firehose fallback.
+    vec![format!("{base}/#")]
+}
+
 /// Great-circle distance in km (haversine, R = 6371 km). Plenty
 /// accurate for a keep/drop radius check.
 pub fn haversine_km(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
@@ -597,13 +701,23 @@ async fn connect_and_stream_mqtt(
             Ok(Ok(event)) => event,
         };
         match event {
-            // Subscribe on (re)connect so a reconnect re-subscribes.
+            // Subscribe on (re)connect so a reconnect re-subscribes. With
+            // geohash on, subscribe only to the tiles covering the station
+            // radius; otherwise subscribe to the flat base topic.
             Event::Incoming(Packet::ConnAck(_)) => {
-                client
-                    .subscribe(&cfg.topic, QoS::AtMostOnce)
-                    .await
-                    .context("mqtt subscribe")?;
-                debug!(source_id = %id, topic = %cfg.topic, "blitzortung mqtt connected + subscribing");
+                let topics = if cfg.geohash {
+                    covering_topics(&cfg.topic, station.0, station.1, radius_km)
+                } else {
+                    vec![cfg.topic.clone()]
+                };
+                for topic in &topics {
+                    client
+                        .subscribe(topic, QoS::AtMostOnce)
+                        .await
+                        .context("mqtt subscribe")?;
+                }
+                debug!(source_id = %id, tiles = topics.len(),
+                       "blitzortung mqtt connected + subscribing to geohash tiles");
             }
             Event::Incoming(Packet::Publish(p)) => {
                 *frames += 1;
@@ -774,6 +888,80 @@ mod tests {
             lon: 12.0,
         };
         assert!(to_strike_event(&bad, 40.0, 23.0, 200.0, 1_781_278_900).is_none());
+    }
+
+    #[test]
+    fn geohash_tile_topic_matches_egon_example() {
+        // Egon's worked example: lon in [90,135] (3-bit idx 6 = 110),
+        // lat in [-30,-14.477512] (3-bit idx 2 = 010, equal-area) gives
+        // the interleaved topic 1/0/1/1/0/0.
+        assert_eq!(
+            tile_topic("strikes/core", 6, 2, 3),
+            "strikes/core/1/0/1/1/0/0/#"
+        );
+    }
+
+    #[test]
+    fn geohash_full_precision_matches_live_capture() {
+        // A strike observed live at lat 36.16, lon -99.49 arrived on topic
+        // strikes/core/0/1/0/1/1/0/1/0/1/1 (verified against the broker).
+        let lon_i = lon_tile_index(-99.49, 5);
+        let lat_i = lat_tile_index(36.16, 5);
+        assert_eq!(
+            tile_topic("strikes/core", lon_i, lat_i, 5),
+            "strikes/core/0/1/0/1/1/0/1/0/1/1/#"
+        );
+    }
+
+    #[test]
+    fn latitude_is_equal_area_not_linear() {
+        // Equal-area boundaries: sin(lat) uniform. Index 16 of 32 is the
+        // first band above the equator (Egon's list: 0 to 3.583322).
+        assert_eq!(lat_tile_index(0.0, 5), 16); // equator = band start
+        assert_eq!(lat_tile_index(-89.9, 5), 0);
+        assert_eq!(lat_tile_index(89.9, 5), 31);
+        // Near the equator a band is ~3.58 deg wide, so 1 and 3 deg share
+        // one band while 4 deg has moved on...
+        assert_eq!(lat_tile_index(1.0, 5), 16);
+        assert_eq!(lat_tile_index(3.0, 5), 16);
+        assert_eq!(lat_tile_index(4.0, 5), 17);
+        // ...but near the pole a band is ~20 deg wide, so 75 and 85 deg
+        // share one band. That width difference is the equal-area point.
+        assert_eq!(lat_tile_index(75.0, 5), 31);
+        assert_eq!(lat_tile_index(85.0, 5), 31);
+    }
+
+    #[test]
+    fn covering_topics_small_and_contains_station_for_normal_radius() {
+        // ~100 mi around an Orlando-ish station: a handful of full
+        // precision tiles, and the station's own tile must be covered.
+        let (lat, lon) = (28.5, -81.4);
+        let topics = covering_topics("strikes/core", lat, lon, 160.0);
+        assert!(!topics.is_empty() && topics.len() <= GEOHASH_MAX_TOPICS);
+        assert!(topics
+            .iter()
+            .all(|t| t.starts_with("strikes/core/") && t.ends_with("/#")));
+        let station_tile = tile_topic(
+            "strikes/core",
+            lon_tile_index(lon, 5),
+            lat_tile_index(lat, 5),
+            5,
+        );
+        assert!(
+            topics.contains(&station_tile),
+            "station tile must be covered"
+        );
+    }
+
+    #[test]
+    fn covering_topics_bounded_for_large_radius() {
+        // A very large radius must coarsen to stay within the cap, never
+        // fan out into an unbounded subscription list.
+        let topics = covering_topics("strikes/lzw_complete", 0.0, 0.0, 5000.0);
+        assert!(topics.len() <= GEOHASH_MAX_TOPICS);
+        assert!(topics
+            .iter()
+            .all(|t| t.starts_with("strikes/lzw_complete/")));
     }
 
     #[test]
