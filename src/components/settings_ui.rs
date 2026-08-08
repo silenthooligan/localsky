@@ -338,6 +338,32 @@ pub fn toast_saved(result_msg: RwSignal<String>, result_ok: RwSignal<bool>, msg:
     crate::components::ui::use_toast().success(msg.to_string());
 }
 
+/// Human-readable message for a failed settings save. The server's JSON
+/// error bodies carry structured fields the raw text hides: `hint` (the
+/// privileged-gate 401s name the auth.trusted_proxies / auth.proxy_auth_header
+/// keys that fix a proxy-shaped refusal) and `detail` (config store errors).
+/// Surface those instead of dumping raw JSON after the status code; anything
+/// unparseable falls back to the old "HTTP <status>: <body>" shape.
+pub fn save_error_message(status: u16, body: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        let err = v
+            .get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if !err.is_empty() {
+            if let Some(hint) = v.get("hint").and_then(|h| h.as_str()) {
+                return format!("{err} (HTTP {status}). {hint}");
+            }
+            if let Some(detail) = v.get("detail").and_then(|d| d.as_str()) {
+                return format!("{err} (HTTP {status}): {detail}");
+            }
+            return format!("{err} (HTTP {status})");
+        }
+    }
+    format!("HTTP {status}: {body}")
+}
+
 /// Error banner + Retry for a failed initial config GET, shared by the
 /// settings editor pages (zones, sources, controllers). Rendered INSTEAD
 /// of the editor body: an empty editor after a failed load reads as data
@@ -368,6 +394,35 @@ pub fn SettingsLoadError(
                 on_click=Callback::new(move |_| retry.update(|n| *n += 1))
             >"Retry"</Button>
         </crate::components::ui::Panel>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::save_error_message;
+
+    #[test]
+    fn save_error_surfaces_server_error_and_hint() {
+        // The privileged-gate 401 shape: error + hint. The hint (which names
+        // auth.trusted_proxies / auth.proxy_auth_header) must reach the user.
+        let body = r#"{"error":"unauthorized","hint":"Set auth.trusted_proxies to your proxy's address."}"#;
+        let msg = save_error_message(401, body);
+        assert!(msg.contains("unauthorized"));
+        assert!(msg.contains("401"));
+        assert!(msg.contains("Set auth.trusted_proxies"));
+
+        // config store errors carry `detail` instead.
+        let msg = save_error_message(
+            422,
+            r#"{"error":"config_store_error","detail":"validation: zone slug"}"#,
+        );
+        assert!(msg.contains("config_store_error") && msg.contains("zone slug"));
+
+        // Non-JSON bodies keep the legacy fallback shape.
+        assert_eq!(
+            save_error_message(500, "boom"),
+            "HTTP 500: boom".to_string()
+        );
     }
 }
 

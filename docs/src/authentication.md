@@ -13,6 +13,8 @@ mode = "required"        # "disabled" (default for upgrades) | "required"
 session_ttl_days = 30    # rolling browser-session lifetime
 trusted_networks = []    # CIDRs that skip login, e.g. ["10.0.0.0/24"]
 trusted_proxies = []     # CIDRs of YOUR reverse proxies, e.g. ["172.18.0.0/16"]
+# proxy_auth_header = "X-Auth-Request-Email"  # identity header an authenticating proxy stamps
+# proxy_auth_allow = ["you@example.com"]      # allowed values; empty = any non-empty value
 ```
 
 - `disabled`: the pre-auth behavior. The right choice when a reverse
@@ -144,6 +146,50 @@ So if you put any reverse proxy in front of LocalSky, do one of:
 Either is sufficient; do not rely on the Disabled-mode private-IP trust alone
 once a proxy is in the path. (A new wizard install that creates an owner
 account turns on `required` automatically, which closes this for you.)
+
+## Running behind an authenticating reverse proxy
+
+If the proxy in front of LocalSky performs its own login (oauth2-proxy,
+Authelia, Authentik, Caddy `forward_auth`, and similar), you can tell
+LocalSky to accept that proxy's identity header as proof of an
+authenticated operator:
+
+```toml
+[auth]
+trusted_proxies = ["172.18.0.0/16"]         # the proxy itself, as above
+proxy_auth_header = "X-Auth-Request-Email"  # the header your proxy stamps
+proxy_auth_allow = ["you@example.com"]      # optional allow-list
+```
+
+- `proxy_auth_header` names the header the proxy stamps on requests it has
+  already authenticated. oauth2-proxy sets `X-Auth-Request-Email` (with
+  `--set-xauthrequest`); other gateways have equivalents (`Remote-User`,
+  `Remote-Email`). Any header name works; the value just has to identify
+  the signed-in user.
+- The header is honored **only when the request's direct peer is inside
+  `trusted_proxies`**. The check runs against the raw socket address,
+  before any `X-Forwarded-For` resolution, so a client that reaches the
+  LocalSky port directly and stamps the header itself gains nothing.
+- A vouched caller is treated as an authenticated operator on the
+  privileged surface (config writes, the raw-config read, backups,
+  restart, and the wizard's config-write routes) in **both** auth modes.
+  In `required` mode the rest of the app still wants a session, an API
+  token, or a `trusted_networks` match; in the common `disabled`-behind-
+  a-guarding-proxy posture the rest of the app is already open.
+- `proxy_auth_allow` restricts which identities qualify, compared
+  case-insensitively. Empty means any non-empty value the trusted proxy
+  stamps is accepted, which is right when the proxy itself already limits
+  who can log in.
+- Minting or revoking API tokens still requires a real signed-in owner;
+  the proxy identity never reaches that surface.
+
+**Your proxy MUST strip or overwrite this header on incoming client
+traffic.** If a client can smuggle its own `X-Auth-Request-Email` through
+the proxy unmodified, that client can impersonate an operator.
+oauth2-proxy and `forward_auth` setups overwrite it by construction;
+verify yours does before setting `proxy_auth_header`. Combined with the
+peer check above, both halves must hold: the request must physically come
+from your proxy, and the header must be the proxy's own assertion.
 
 ## What stays public
 

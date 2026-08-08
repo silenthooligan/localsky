@@ -35,7 +35,7 @@
 //      remaining zone:
 //      split the zone's runtime via engine::cycle_soak so clay-soil
 //      zones get cycle-and-soak treatment, lay the segments out via
-//      engine::interleave (serial by default; with
+//      engine::interleave (interleaved by default: with
 //      engine.interleave_cycles, other zones' cycles run during a
 //      zone's soak window, one valve at a time, soaks treated as
 //      minimums), then dispatch each planned step via
@@ -127,7 +127,12 @@ fn snapshot_is_fresh(last_refresh_epoch: i64, now_epoch: i64) -> bool {
 /// practice main.rs always passes a real lat/lon from the loaded toml.
 pub fn spawn(
     irrigation_store: Arc<IrrigationStore>,
-    _watering_policy: WateringPolicy,
+    // Hot-swappable policy handle (the same one the refresher and the manual
+    // dispatcher load): the per-tick loop reads the LIVE soak_minutes +
+    // interleave_cycles from it, so a settings save reshapes the next tick's
+    // window math and dispatch plan with no restart. The boot cfg Arc below
+    // stays for build_cycle_plan's per-zone lookups only (zone-set bound).
+    watering_policy: Arc<arc_swap::ArcSwap<WateringPolicy>>,
     controllers: ControllerRegistry,
     runs: Option<RunsStore>,
     active_runs: Option<ActiveRunsStore>,
@@ -177,13 +182,15 @@ pub fn spawn(
                 .count();
             // TRUE wall time of the sequence, soak gaps included. The legacy
             // estimate summed only run seconds, so a cycle/soak morning
-            // overshot target_finish by the total soak time.
-            let interleave_cycles = cfg
-                .as_ref()
-                .map(|c| c.engine.interleave_cycles)
-                .unwrap_or(false);
+            // overshot target_finish by the total soak time. The soak/
+            // interleave knobs are read from the hot-swapped policy EACH tick,
+            // so a config apply reshapes today's window with no restart.
+            let policy = watering_policy.load();
+            let soak_minutes = policy.soak_minutes;
+            let interleave_cycles = policy.interleave_cycles;
+            drop(policy);
             let sequence_total_s =
-                sequence_wall_seconds(cfg.as_deref(), &snap.zones, interleave_cycles);
+                sequence_wall_seconds(cfg.as_deref(), &snap.zones, soak_minutes, interleave_cycles);
 
             let sunrise = match sunrise_utc(today, lat, lon) {
                 Some(s) => s,
@@ -366,6 +373,8 @@ pub fn spawn(
                     active_runs.as_ref(),
                     push.as_ref(),
                     cfg.as_ref(),
+                    soak_minutes,
+                    interleave_cycles,
                     today,
                     now_utc,
                     zones_to_run,
@@ -396,6 +405,11 @@ async fn dispatch_today(
     active_runs: Option<&ActiveRunsStore>,
     push: Option<&PushDispatcher>,
     cfg: Option<&Arc<Config>>,
+    // Live cycle/soak knobs, resolved from the hot-swapped watering policy by
+    // the tick loop (not read from the boot cfg, which would pin them until a
+    // restart).
+    soak_minutes: u32,
+    interleave_cycles: bool,
     today: NaiveDate,
     now_utc: chrono::DateTime<Utc>,
     zones_to_run: usize,
@@ -510,9 +524,6 @@ async fn dispatch_today(
     };
     let mut failure_notified = false;
 
-    let soak_minutes = cfg.map(|c| c.engine.soak_minutes).unwrap_or(30);
-    let interleave_cycles = cfg.map(|c| c.engine.interleave_cycles).unwrap_or(false);
-
     // Manual Stop / Stop All / pause requests at or after this instant
     // abandon the remainder of the sequence.
     let cycle_start_epoch = now_utc.timestamp();
@@ -582,7 +593,7 @@ async fn dispatch_today(
 
     // Lay the segments out on the shared valve timeline. Serial reproduces
     // the legacy zone-by-zone order and spacing exactly; Interleaved
-    // (opt-in via engine.interleave_cycles) runs other zones' cycles during
+    // (engine.interleave_cycles, the default) runs other zones' cycles during
     // a zone's soak window, one valve at a time, soaks as minimums.
     let plans: Vec<interleave::ZonePlan> = dispatch
         .iter()
@@ -852,16 +863,17 @@ async fn dispatch_today(
 /// active policy, soak gaps and inter-zone preambles included. The legacy
 /// estimate summed only run seconds, so a cycle/soak morning overshot
 /// target_finish (sunrise - 15min) by the total soak time; the dispatch
-/// window math above uses this instead, for both policies. The refresher's
-/// compute_next_run_epoch is wired to this by a follow-up change, so the
-/// signature stays callable with what the refresher has (its zone list plus
-/// an optional Config).
+/// window math above uses this instead, for both policies. `soak_minutes` +
+/// `interleave_cycles` come from the caller's LIVE watering policy (both the
+/// tick loop here and the refresher's compute_next_run_epoch resolve them per
+/// evaluation); `cfg` is only the per-zone lookup context for
+/// build_cycle_plan.
 pub fn sequence_wall_seconds(
     cfg: Option<&Config>,
     zones: &[crate::ha::snapshot::ZoneState],
+    soak_minutes: u32,
     interleave_cycles: bool,
 ) -> u64 {
-    let soak_minutes = cfg.map(|c| c.engine.soak_minutes).unwrap_or(30);
     let plans: Vec<interleave::ZonePlan> = zones
         .iter()
         .filter(|z| z.planned_run_seconds > 0)
@@ -1299,8 +1311,10 @@ mod tests {
             registry,
             Some(runs),
             Some(active_runs),
-            None, // push
-            None, // cfg -> single segment, no soak
+            None,  // push
+            None,  // cfg -> single segment, no soak
+            30,    // soak_minutes (policy default)
+            false, // interleave_cycles
             chrono::NaiveDate::from_ymd_opt(2026, 6, 25).unwrap(),
             now_utc,
             n,
@@ -1358,6 +1372,8 @@ mod tests {
             Some(&active_runs),
             None, // push
             Some(&cfg),
+            cfg.engine.soak_minutes,
+            cfg.engine.interleave_cycles,
             chrono::NaiveDate::from_ymd_opt(2026, 6, 25).unwrap(),
             at(NO_STOP_EPOCH),
             3,
@@ -1388,9 +1404,12 @@ mod tests {
             zone_secs("off_zone", 0, None),
             zone_secs("side", 300, None),
         ];
-        assert_eq!(sequence_wall_seconds(None, &zones, false), 600 + 300 + 2);
-        assert_eq!(sequence_wall_seconds(None, &zones, true), 600 + 300 + 2);
-        assert_eq!(sequence_wall_seconds(None, &[], false), 0);
+        assert_eq!(
+            sequence_wall_seconds(None, &zones, 30, false),
+            600 + 300 + 2
+        );
+        assert_eq!(sequence_wall_seconds(None, &zones, 30, true), 600 + 300 + 2);
+        assert_eq!(sequence_wall_seconds(None, &[], 30, false), 0);
     }
 
     // (b) a Stop requested at/ before the cycle abandons the sequence: stop_all
@@ -1938,6 +1957,8 @@ mod tests {
             Some(active_runs),
             None, // push
             Some(cfg),
+            cfg.engine.soak_minutes,
+            cfg.engine.interleave_cycles,
             chrono::NaiveDate::from_ymd_opt(2026, 6, 25).unwrap(),
             now_utc,
             n,

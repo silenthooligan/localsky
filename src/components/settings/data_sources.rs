@@ -1558,7 +1558,10 @@ async fn patch_field_chains(
         .map_err(|e| e.to_string())?;
     if !resp.ok() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("HTTP {}: {body}", resp.status()));
+        return Err(crate::components::settings_ui::save_error_message(
+            resp.status(),
+            &body,
+        ));
     }
     // restart_required + restart_reasons: a tunable change (the common case
     // here) hot-reloads and reports restart_required=false; only a change a

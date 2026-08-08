@@ -6,11 +6,11 @@
 //   * Serial: the legacy layout. Zone 1 runs ALL its segments (idling through
 //     every soak) before zone 2 starts; an inter-zone preamble separates
 //     zones. Must reproduce the legacy dispatcher's arithmetic exactly.
-//   * Interleaved (opt-in via engine.interleave_cycles): other zones' cycles
-//     run DURING a zone's soak window (classic OpenSprinkler-style
-//     interleaving), shortening the total wall time. Still strictly one valve
-//     at a time; ControllerCaps.multi_zone_parallel is deliberately not
-//     consulted (parallel valves are out of scope).
+//   * Interleaved (engine.interleave_cycles, the default since 0.7.9):
+//     other zones' cycles run DURING a zone's soak window (classic
+//     OpenSprinkler-style interleaving), shortening the total wall time.
+//     Still strictly one valve at a time; ControllerCaps.multi_zone_parallel
+//     is deliberately not consulted (parallel valves are out of scope).
 //
 // Invariants the interleaved policy guarantees (unit-tested below):
 //   * no two runs overlap; zone switches keep the preamble gap;

@@ -319,7 +319,7 @@ pub fn parse_soilad(
     body: &Value,
     source_id: &str,
     epoch: i64,
-    calibration: &std::collections::HashMap<String, crate::config::schema::SoilAdCalibration>,
+    calibration: &std::collections::BTreeMap<String, crate::config::schema::SoilAdCalibration>,
 ) -> Vec<Reading> {
     let mut out = Vec::new();
     let Some(arr) = body.as_array() else {
@@ -494,7 +494,7 @@ mod tests {
             {"ch": "1", "name": "Back Yard Soil", "soilVal": "19", "nowAd": "724"},
             {"ch": "2", "name": "Front", "nowAd": "913"},
         ]);
-        let mut cal = std::collections::HashMap::new();
+        let mut cal = std::collections::BTreeMap::new();
         cal.insert(
             "1".to_string(),
             SoilAdCalibration {

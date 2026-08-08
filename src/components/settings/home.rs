@@ -15,9 +15,9 @@ use leptos_router::hooks::{use_location, use_navigate};
 use super::help::SettingsHelp;
 use super::{
     SettingsAccount, SettingsAdvanced, SettingsControllers, SettingsDataSources, SettingsDevices,
-    SettingsHomeAssistant, SettingsLlm, SettingsLocation, SettingsNotifications, SettingsRadar,
-    SettingsRestrictions, SettingsSchedules, SettingsSensors, SettingsSkipRules, SettingsTheme,
-    SettingsUnits, SettingsZones,
+    SettingsEngine, SettingsHomeAssistant, SettingsLlm, SettingsLocation, SettingsNotifications,
+    SettingsRadar, SettingsRestrictions, SettingsSchedules, SettingsSensors, SettingsSkipRules,
+    SettingsTheme, SettingsUnits, SettingsZones,
 };
 use crate::components::ui::Icon;
 
@@ -89,6 +89,13 @@ const GROUPS: &[SectionGroup] = &[
                 label: "Skip rules",
                 helptext: "Rain, wind, freeze, heat-advisory thresholds",
                 icon: "rules",
+                entity: None,
+            },
+            SectionLink {
+                key: "engine",
+                label: "Engine",
+                helptext: "Cycle-and-soak pacing and the seasonal water budget",
+                icon: "droplet",
                 entity: None,
             },
             SectionLink {
@@ -183,6 +190,7 @@ fn section_key(s: &str) -> Option<&'static str> {
         "controllers",
         "location",
         "skip-rules",
+        "engine",
         "restrictions",
         "schedules",
         "llm",
@@ -573,6 +581,7 @@ fn section_view(key: &str) -> leptos::prelude::AnyView {
         "controllers" => view! { <SettingsControllers/> }.into_any(),
         "location" => view! { <SettingsLocation/> }.into_any(),
         "skip-rules" => view! { <SettingsSkipRules/> }.into_any(),
+        "engine" => view! { <SettingsEngine/> }.into_any(),
         "restrictions" => view! { <SettingsRestrictions/> }.into_any(),
         "schedules" => view! { <SettingsSchedules/> }.into_any(),
         "llm" => view! { <SettingsLlm/> }.into_any(),

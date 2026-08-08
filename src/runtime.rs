@@ -825,23 +825,10 @@ pub fn apply_runtime_config(
                     .to_string(),
             );
         }
-        // The smart-morning dispatcher and the refresher's next-run estimate
-        // hold the boot Config Arc for the cycle/soak layout, so these knobs
-        // only take effect on the next boot. Without this, the settings
-        // toggle saved "applied" with no restart banner while the running
-        // scheduler kept the old plan.
-        if (prev.engine.soak_minutes, prev.engine.interleave_cycles)
-            != (
-                new_cfg.engine.soak_minutes,
-                new_cfg.engine.interleave_cycles,
-            )
-        {
-            reasons.push(
-                "cycle-and-soak dispatch settings changed (soak_minutes and \
-                 interleave_cycles are read by the scheduler at boot)"
-                    .to_string(),
-            );
-        }
+        // soak_minutes + interleave_cycles are NOT here: they ride the
+        // watering policy swapped above, and both the smart-morning tick and
+        // the refresher's next-run estimate read the live policy each
+        // evaluation, so a change applies at the next scheduler tick.
     }
     ConfigApplyOutcome {
         restart_required: !reasons.is_empty(),
@@ -1885,6 +1872,84 @@ mod tests {
     }
 
     #[test]
+    fn hot_reload_cycle_soak_knobs_reshape_sequence_wall_time_without_restart() {
+        // The scheduler tick + the refresher's next-run estimate resolve
+        // soak_minutes/interleave_cycles from the live watering policy each
+        // evaluation. A config apply that only flips those knobs must (a) not
+        // flag restart_required and (b) change what sequence_wall_seconds
+        // computes from the freshly loaded policy: the "applies on the next
+        // scheduler tick" contract.
+        use crate::config::schema::{GrassSpecies, SoilTexture, SprinklerType, ZoneConfig};
+        let mut cfg0 = Config::default();
+        cfg0.engine.soak_minutes = 30;
+        cfg0.engine.interleave_cycles = false;
+        // A clay spray zone so cycle_soak actually splits the run and the
+        // soak length shows up in the wall time.
+        cfg0.zones.insert(
+            "front".to_string(),
+            ZoneConfig {
+                display_name: "front".into(),
+                area_sqft: 1000.0,
+                species: GrassSpecies::StAugustine,
+                soil_texture: SoilTexture::Clay,
+                slope_pct: 0.0,
+                sun_exposure: Default::default(),
+                sprinkler_type: SprinklerType::Spray,
+                precip_rate_mm_hr: Some(15.0),
+                precip_rate_source: Default::default(),
+                root_depth_mm: None,
+                mad_pct_override: None,
+                controller_id: "os_main".into(),
+                controller_station: "1".into(),
+                soil_sensor_id: None,
+                target_min_pct_soil: 30.0,
+                saturation_pct_soil: 70.0,
+                photo_url: None,
+                weekly_budget_in: None,
+                sessions_per_week: None,
+            },
+        );
+        let h = handles_with(&cfg0);
+        let zones = vec![crate::ha::snapshot::ZoneState {
+            slug: "front".into(),
+            planned_run_seconds: 1800,
+            ..Default::default()
+        }];
+        let wall = |cfg: &Config, p: &crate::refresher::WateringPolicy| {
+            crate::scheduler::smart_morning::sequence_wall_seconds(
+                Some(cfg),
+                &zones,
+                p.soak_minutes,
+                p.interleave_cycles,
+            )
+        };
+        let boot = h.watering_policy.load();
+        assert_eq!(boot.soak_minutes, 30);
+        assert!(!boot.interleave_cycles);
+        let wall0 = wall(&cfg0, &boot);
+        drop(boot);
+
+        // HOT RELOAD: lengthen the soak via the same re-apply the PUT path
+        // calls. Only the knobs change; the zone set is untouched.
+        let mut cfg1 = cfg0.clone();
+        cfg1.engine.soak_minutes = 45;
+        let outcome = apply_runtime_config(&h, Some(&cfg0), &cfg1);
+        assert!(
+            !outcome.restart_required,
+            "soak_minutes/interleave_cycles must hot-reload, not restart: {:?}",
+            outcome.restart_reasons
+        );
+        let live = h.watering_policy.load();
+        assert_eq!(live.soak_minutes, 45, "the next tick reads the new soak");
+        let wall1 = wall(&cfg1, &live);
+        assert!(
+            wall1 > wall0,
+            "a longer live soak must lengthen the planned wall time \
+             ({wall1} vs {wall0}) with no restart"
+        );
+    }
+
+    #[test]
     fn hot_reload_swaps_forecast_priority_for_the_bridge() {
         // The forecast bridge reads the priority handle on every emit; a
         // re-applied forecast_provider pin must re-rank it live.
@@ -2007,6 +2072,117 @@ mod tests {
             !outcome.restart_required,
             "re-ranking + pinning existing sources is a pure hot-reload: {:?}",
             outcome.restart_reasons
+        );
+    }
+
+    #[test]
+    fn source_fingerprint_stable_across_config_serde_round_trip() {
+        // Reproduced on a live install: GET /api/config -> edit an UNRELATED
+        // field (auth.trusted_proxies) -> PUT reported restart_required with
+        // "a weather source was ... changed" despite untouched sources. The
+        // PUT compares the TOML-loaded prev config against the JSON
+        // round-tripped candidate, so the fingerprint's serialized inner
+        // config must be byte-identical for two separately-deserialized
+        // instances of the same source. A HashMap field breaks that (two
+        // instances with equal contents can iterate in different key orders);
+        // EcowittGwPollConfig.soil_calibration was exactly that. Build a
+        // config carrying EVERY offered source kind (the wizard/settings
+        // picker list, with each kind's default config), give the Ecowitt
+        // poller a many-channel calibration map, and prove serialize ->
+        // deserialize -> fingerprint-compare is a fixed point over both wire
+        // formats (JSON = the API round trip, TOML = the on-disk load).
+        let mut cfg = Config::default();
+        for (kind, _label) in crate::components::sources_form::kind_options() {
+            let mut inner: serde_json::Value =
+                serde_json::from_str(&crate::components::sources_form::default_config_text(&kind))
+                    .unwrap_or_else(|e| panic!("default config for {kind} must parse: {e}"));
+            // default_config_text is the form's STARTING text, and a few kinds
+            // deliberately omit required user-supplied fields (tempest_ws has
+            // no station_id). Fill whatever the deserializer names as missing
+            // with a placeholder (string first, then a number when the string
+            // is the wrong type) so the test keeps covering every offered kind
+            // without a hand-maintained per-kind overlay.
+            let entry: SourceEntry = {
+                let mut tries = 0;
+                loop {
+                    match serde_json::from_value(serde_json::json!({
+                        "id": format!("src_{kind}"),
+                        "priority": 50,
+                        "enabled": true,
+                        "kind": kind,
+                        "config": inner.clone(),
+                    })) {
+                        Ok(e) => break e,
+                        Err(err) => {
+                            tries += 1;
+                            assert!(
+                                tries <= 32,
+                                "source entry for {kind} still failing after placeholder \
+                                 fills: {err}"
+                            );
+                            let msg = err.to_string();
+                            if let Some(field) = msg
+                                .split("missing field `")
+                                .nth(1)
+                                .and_then(|s| s.split('`').next())
+                            {
+                                inner[field] = serde_json::json!("placeholder");
+                            } else if let Some(rest) = msg.split("invalid type: string").nth(1) {
+                                // The string placeholder hit a numeric field:
+                                // the error names no field, so swap EVERY
+                                // string placeholder we planted for a number.
+                                let _ = rest;
+                                if let Some(obj) = inner.as_object_mut() {
+                                    for v in obj.values_mut() {
+                                        if v == "placeholder" {
+                                            *v = serde_json::json!(1);
+                                        }
+                                    }
+                                }
+                            } else {
+                                panic!("source entry for {kind} must deserialize: {err}");
+                            }
+                        }
+                    }
+                }
+            };
+            cfg.sources.push(entry);
+        }
+        // The prod repro shape: several calibrated soil channels (a 2+ entry
+        // map is what exposes any key-order instability).
+        for e in cfg.sources.iter_mut() {
+            if let SourceKind::EcowittGwPoll(c) = &mut e.source {
+                for ch in 1..=8 {
+                    c.soil_calibration.insert(
+                        ch.to_string(),
+                        crate::config::schema::SoilAdCalibration {
+                            ad_dry: 100.0 + ch as f64,
+                            ad_wet: 400.0 + ch as f64,
+                        },
+                    );
+                }
+            }
+        }
+
+        let fp0 = source_wiring_fingerprint(&cfg);
+
+        // JSON round trip: the GET /api/config -> PUT /api/config path.
+        let json_round: Config =
+            serde_json::from_value(serde_json::to_value(&cfg).expect("serialize"))
+                .expect("json round trip");
+        assert_eq!(
+            fp0,
+            source_wiring_fingerprint(&json_round),
+            "an untouched-sources JSON round trip must not change the source fingerprint"
+        );
+
+        // TOML round trip: the on-disk shape prev_cfg is loaded from.
+        let toml_round: Config = toml::from_str(&toml::to_string_pretty(&cfg).expect("toml ser"))
+            .expect("toml round trip");
+        assert_eq!(
+            fp0,
+            source_wiring_fingerprint(&toml_round),
+            "a TOML-loaded prev config must fingerprint identically to the JSON candidate"
         );
     }
 

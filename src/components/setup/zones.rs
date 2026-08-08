@@ -66,6 +66,11 @@ pub fn ZonesStep() -> impl IntoView {
     let soil_sensor_opts = RwSignal::new(Vec::<(String, String, Option<f64>, String)>::new());
     let result_msg = RwSignal::new(String::new());
     let result_ok = RwSignal::new(false);
+    // Water-supply answer ("municipal" | "well" | "unsure"; empty =
+    // unanswered). Persisted on the draft like telemetry_choice; "well" also
+    // writes engine.interleave_cycles=false into the draft config so the
+    // soak pauses stay idle for pump recovery.
+    let water_supply = RwSignal::new(String::new());
 
     #[cfg(feature = "hydrate")]
     Effect::new(move |_| {
@@ -97,6 +102,10 @@ pub fn ZonesStep() -> impl IntoView {
                 {
                     new_controller.set(first.to_string());
                 }
+                // Restore a previously-answered water-supply question.
+                if let Some(ws) = d.get("water_supply").and_then(|v| v.as_str()) {
+                    water_supply.set(ws.to_string());
+                }
                 config_json.set(cfg);
                 draft.set(d);
                 loaded.set(true);
@@ -121,6 +130,30 @@ pub fn ZonesStep() -> impl IntoView {
         });
         #[cfg(not(feature = "hydrate"))]
         let _ = candidate;
+    });
+
+    // Record the water-supply answer: the tri-state rides the draft (so a
+    // resumed wizard shows it), and the config consequence is written into
+    // the draft config the same way the zone form's edits are (fold + PUT
+    // via `persist`). Well = keep the soak pauses idle (interleave off);
+    // the other answers keep the default (on).
+    let choose_supply = Callback::new(move |choice: &'static str| {
+        if !loaded.get_untracked() {
+            return;
+        }
+        water_supply.set(choice.to_string());
+        let interleave = choice != "well";
+        config_json.update(|c| {
+            if c.as_object().is_some() {
+                c["engine"]["interleave_cycles"] = serde_json::json!(interleave);
+            }
+        });
+        draft.update(|d| {
+            if let Some(obj) = d.as_object_mut() {
+                obj.insert("water_supply".into(), serde_json::json!(choice));
+            }
+        });
+        persist.run(());
     });
 
     // (slug, display name, species) for the added-zones list.
@@ -255,6 +288,41 @@ pub fn ZonesStep() -> impl IntoView {
                 />
             </Show>
 
+            <Panel title="Water supply".to_string()>
+                <p class="setup-step__body" style="margin-bottom: 0.85rem">
+                    "When a zone needs cycle-and-soak treatment, LocalSky "
+                    "normally waters other zones during the soak pauses so "
+                    "the morning sequence finishes sooner. A well or other "
+                    "low-recovery supply uses those idle pauses to rebuild "
+                    "pressure between runs, so tell LocalSky what feeds your "
+                    "sprinklers."
+                </p>
+                <div class="settings-actions" role="radiogroup" aria-label="Water supply">
+                    {supply_choice("municipal", "Municipal or pressurized", water_supply, choose_supply)}
+                    {supply_choice("well", "Well or low-recovery supply", water_supply, choose_supply)}
+                    {supply_choice("unsure", "Not sure", water_supply, choose_supply)}
+                </div>
+                {move || {
+                    match water_supply.get().as_str() {
+                        "well" => Some(view! {
+                            <p class="setup-step__body" style="margin: 0.6rem 0 0">
+                                "Soak pauses will stay idle so your supply can "
+                                "recover between runs. You can change this later "
+                                "on the Engine settings page."
+                            </p>
+                        }),
+                        "municipal" | "unsure" => Some(view! {
+                            <p class="setup-step__body" style="margin: 0.6rem 0 0">
+                                "Zones will interleave through soak pauses so the "
+                                "morning sequence finishes sooner. You can change "
+                                "this later on the Engine settings page."
+                            </p>
+                        }),
+                        _ => None,
+                    }
+                }}
+            </Panel>
+
             <Panel title="Grass species catalog".to_string()>
                 <p class="setup-step__body" style="margin-bottom: 0.85rem">
                     "Each species has its own seasonal Kc curve, root depth, "
@@ -321,6 +389,31 @@ pub fn ZonesStep() -> impl IntoView {
                 next=next_step_href("zones")
             />
         </div>
+    }
+}
+
+/// One selectable water-supply answer. A free function (not inline view!
+/// nesting) so each choice monomorphizes in its own boundary, keeping
+/// recursion depth flat per the no-deep-nesting guidance.
+fn supply_choice(
+    value: &'static str,
+    label: &'static str,
+    selected: RwSignal<String>,
+    choose: Callback<&'static str>,
+) -> impl IntoView {
+    view! {
+        <button
+            type="button"
+            role="radio"
+            class="ui-list-item ui-list-item--link settings-row"
+            class:is-selected=move || selected.get() == value
+            aria-checked=move || (selected.get() == value).to_string()
+            on:click=move |_| choose.run(value)
+        >
+            <span class="ui-list-item__text">
+                <span class="ui-list-item__title">{label}</span>
+            </span>
+        </button>
     }
 }
 

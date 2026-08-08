@@ -335,6 +335,20 @@ pub struct AuthConfig {
     /// deliberate cross-origin frontends.
     #[serde(default)]
     pub trusted_origins: Vec<String>,
+    /// Identity header an authenticating reverse proxy stamps on requests
+    /// it has already logged in, e.g. "X-Auth-Request-Email" (oauth2-proxy).
+    /// Honored ONLY when the socket peer is inside `trusted_proxies`; a
+    /// non-empty value then vouches the caller as an authenticated operator
+    /// on the privileged config/backup surface, in both auth modes. The
+    /// proxy MUST strip or overwrite this header on client traffic. Unset
+    /// (the default) = the header is never consulted.
+    #[serde(default)]
+    pub proxy_auth_header: Option<String>,
+    /// Allowed values for `proxy_auth_header`, compared case-insensitively
+    /// (header values are typically emails). Empty = any non-empty value
+    /// the trusted proxy stamps is accepted.
+    #[serde(default)]
+    pub proxy_auth_allow: Vec<String>,
 }
 
 impl Default for AuthConfig {
@@ -345,6 +359,8 @@ impl Default for AuthConfig {
             trusted_networks: Vec::new(),
             trusted_proxies: Vec::new(),
             trusted_origins: Vec::new(),
+            proxy_auth_header: None,
+            proxy_auth_allow: Vec::new(),
         }
     }
 }
@@ -833,8 +849,13 @@ pub struct EcowittGwPollConfig {
     /// matching whatever dry/wet endpoints you captured rather than the
     /// gateway's own (often unset) % value. Lets LocalSky own calibrated soil
     /// natively instead of leaning on a Home Assistant template sensor.
+    /// BTreeMap, not HashMap: two HashMap instances with identical contents
+    /// can serialize their keys in different orders (per-instance hasher
+    /// seeds), which made the restart-required source fingerprint compare a
+    /// TOML-loaded config against a JSON round-tripped one and report a
+    /// phantom source change on every untouched-sources config write.
     #[serde(default)]
-    pub soil_calibration: std::collections::HashMap<String, SoilAdCalibration>,
+    pub soil_calibration: std::collections::BTreeMap<String, SoilAdCalibration>,
     /// Gateway web-UI login, used ONLY for management writes (unregistering a
     /// sensor via `set_sensors_info`). The read/poll endpoints (get_livedata_info,
     /// get_cli_soilad) are unauthenticated on the LAN and never use these, so a
@@ -2131,11 +2152,12 @@ pub struct EngineParams {
     /// Interleave cycle-and-soak across zones in the smart-morning sequence:
     /// during one zone's soak gap another zone's cycle may run (still one
     /// valve at a time), shortening the sequence's total wall time. Default
-    /// false: the serial plan's idle soak gaps double as pump/well recovery
-    /// time on some installs, so removing that idle time must be a deliberate
-    /// choice. Soaks are treated as minimums (they may stretch, never
-    /// shrink). Read at boot by the dispatcher, like soak_minutes.
-    #[serde(default)]
+    /// true: most supplies are pressurized and the shorter sequence is
+    /// strictly better there. Turn it off on a well or other low-recovery
+    /// supply, where the serial plan's idle soak gaps double as recovery
+    /// time. Soaks are treated as minimums (they may stretch, never
+    /// shrink). Hot-reloaded via the watering policy, like soak_minutes.
+    #[serde(default = "default_true")]
     pub interleave_cycles: bool,
     /// ET0 method. Auto = prefer Penman-Monteith when sources provide
     /// the inputs; fall back to ASCE simplified, then Hargreaves-Samani.
@@ -2167,7 +2189,7 @@ impl Default for EngineParams {
             capture_efficiency: default_capture_eff(),
             session_rain_defer_in: default_session_rain_defer_in(),
             soak_minutes: default_soak_minutes(),
-            interleave_cycles: false,
+            interleave_cycles: true,
             et0_method: Et0Method::default(),
             watering_restrictions: Vec::new(),
             seasonal_adjust_pct: default_seasonal_adjust_pct(),

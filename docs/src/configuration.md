@@ -263,7 +263,7 @@ Each section is optional. Omit to disable that channel.
 capture_efficiency       = 0.70
 session_rain_defer_in    = 0.10
 soak_minutes             = 30
-interleave_cycles        = false    # water other zones during soak pauses; read at boot
+interleave_cycles        = true     # water other zones during soak pauses; turn off for well/low-recovery supplies
 et0_method               = "auto"   # auto | penman_monteith | asce_simplified | hargreaves_samani | source_native
 
 [engine.skip_rules]
@@ -283,7 +283,7 @@ frost_skip_soil_f           = 35.0   # 1.7 C
 
 All values match v0.1 hardcoded constants. See [skip-rules.md](skip-rules.md) for what each one does.
 
-`interleave_cycles` waters other zones during a zone's cycle-and-soak pauses instead of idling through them, shortening the morning sequence. Default off: the idle soak gaps double as recovery time for a well or low-recovery pump on some installs. One valve still runs at a time and soaks are minimums that may stretch, never shrink; details in [irrigation-engine.md](irrigation-engine.md#cycle-interleaving). Read at boot; a change applies after the next restart.
+`interleave_cycles` waters other zones during a zone's cycle-and-soak pauses instead of idling through them, shortening the morning sequence. Default on; turn it off on installs fed by a well or low-recovery pump, where the idle soak gaps double as supply recovery time (the setup wizard's water-supply question sets this for you). One valve still runs at a time and soaks are minimums that may stretch, never shrink; details in [irrigation-engine.md](irrigation-engine.md#cycle-interleaving). `interleave_cycles` and `soak_minutes` hot-reload with the rest of the watering policy: a change applies on the next scheduler tick (the next morning's plan), no restart needed. Both, plus the seasonal water-budget dial, are editable on the Engine settings page.
 
 ### Watering restrictions
 
@@ -350,9 +350,14 @@ Authentication policy. Identity itself (accounts, sessions, `lsk_` API tokens) l
 mode = "disabled"          # disabled (default) | required
 session_ttl_days = 30      # rolling browser-session lifetime
 trusted_networks = []      # CIDRs that skip auth while mode = "required", e.g. ["10.0.0.0/24"]
+trusted_proxies = []       # CIDRs of YOUR reverse proxies; makes X-Forwarded-For believable
+# proxy_auth_header = "X-Auth-Request-Email"  # identity header an authenticating proxy stamps
+# proxy_auth_allow = ["you@example.com"]      # allowed values (case-insensitive); empty = any non-empty value
 ```
 
 Configs without an `[auth]` block behave exactly as before (no login). With `mode = "required"`, static assets, `/api/v1/info`, and the `/ingest/*` receivers stay public; everything else needs a session or a Bearer token.
+
+`proxy_auth_header` names the identity header an authenticating reverse proxy (for example oauth2-proxy's `X-Auth-Request-Email`) stamps on requests it has already logged in. It is honored only when the request's direct peer is inside `trusted_proxies`, and it vouches the caller as an authenticated operator on the privileged config/backup routes in both auth modes. `proxy_auth_allow` optionally restricts which header values qualify. The proxy must strip or overwrite the header on client traffic. Full walkthrough: [Authentication](authentication.md#running-behind-an-authenticating-reverse-proxy).
 
 ## `[network]`
 

@@ -545,6 +545,11 @@ pub fn App() -> impl IntoView {
                             <Title text="LocalSky · Skip rules"/>
                             <crate::components::settings::SettingsSkipRules/>
                         }/>
+                    <Route path=path!("/settings/engine")
+                        view=|| view! {
+                            <Title text="LocalSky · Engine"/>
+                            <crate::components::settings::SettingsEngine/>
+                        }/>
                     <Route path=path!("/settings/restrictions")
                         view=|| view! {
                             <Title text="LocalSky · Watering restrictions"/>

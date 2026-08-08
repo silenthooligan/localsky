@@ -655,7 +655,10 @@ async fn main() -> anyhow::Result<()> {
             let dry_run = std::env::var("LOCALSKY_SMART_DRY_RUN").ok().as_deref() == Some("1");
             localsky::scheduler::smart_morning::spawn(
                 irrigation_store.clone(),
-                watering_policy.clone(),
+                // The SWAPPABLE handle, not a boot clone: the tick reads the
+                // live soak/interleave knobs so a settings save reshapes the
+                // next morning's plan with no restart.
+                watering_policy_handle.clone(),
                 registry,
                 Some(runs_store),
                 active_runs_store.clone(),

@@ -196,6 +196,16 @@ pub struct WateringPolicy {
     /// override) without a separate fetch. Display-plumbing only; never read
     /// by the engine. `Default` is `Units::Imperial`.
     pub units: crate::config::schema::Units,
+    /// Cycle/soak dispatch knobs from `cfg.engine`, carried here so BOTH the
+    /// smart-morning scheduler's per-tick window math and the refresher's
+    /// next-run estimate read the LIVE values on every evaluation (a settings
+    /// save applies at the next tick, no restart). The boot Config Arc those
+    /// paths also hold remains only for build_cycle_plan's per-zone lookups.
+    /// The `Default` derive zeroes/falses these; every real policy comes from
+    /// `from_config`, and the Default-policy paths bail on the unset location
+    /// before either knob is read.
+    pub soak_minutes: u32,
+    pub interleave_cycles: bool,
 }
 
 impl WateringPolicy {
@@ -244,6 +254,8 @@ impl WateringPolicy {
             ha_sprinkler_prefix: cfg.deployment.ha_sprinkler_prefix.clone(),
             seasonal_adjust_pct: cfg.engine.seasonal_adjust_pct,
             units: cfg.deployment.units,
+            soak_minutes: cfg.engine.soak_minutes,
+            interleave_cycles: cfg.engine.interleave_cycles,
         }
     }
 }
@@ -391,9 +403,10 @@ pub fn spawn_refresher(
     // unconfigured install). Resolved once at spawn time; changing it
     // requires a restart, the same contract every deploy-time input has.
     zones: Vec<crate::zones::ZoneIdent>,
-    // Boot-time config for the next-run wall-time estimate (cycle/soak +
-    // interleave policy). Same restart-to-apply contract as the scheduler's
-    // own cfg Arc; the hot-reloadable knobs stay on watering_policy.
+    // Boot-time config for the next-run wall-time estimate's PER-ZONE
+    // cycle/soak lookups (soil texture, sprinkler rate), which are zone-set
+    // bound like the rest of the boot wiring. The soak/interleave knobs
+    // themselves ride watering_policy and hot-reload.
     cfg: Option<Arc<crate::config::schema::Config>>,
 ) {
     tokio::spawn(async move {
@@ -1227,7 +1240,7 @@ async fn build_from_map(
     // LocalSky-native next_run_epoch. Compute target_start for today;
     // if today's window has already passed, advance to tomorrow.
     // sequence_total = sum(planned_run_seconds) + 2s inter-zone preamble.
-    snap.next_run_epoch = compute_next_run_epoch(watering_policy.location, &snap.zones, cfg);
+    snap.next_run_epoch = compute_next_run_epoch(watering_policy, &snap.zones, cfg);
 
     // Forecast block. Aggregates Tempest live + Open-Meteo regional
     // forecast into one struct the UI can render directly.
@@ -1881,7 +1894,7 @@ async fn refresh_once_native(
         .map(|z| z.planned_run_seconds as f64)
         .sum::<f64>()
         / 60.0;
-    snap.next_run_epoch = compute_next_run_epoch(watering_policy.location, &snap.zones, cfg);
+    snap.next_run_epoch = compute_next_run_epoch(watering_policy, &snap.zones, cfg);
 
     // A6: pause / override come from `control` (threaded into build_from_map
     // above); thresholds come from cfg.engine.skip_rules via watering_policy.
@@ -2473,22 +2486,28 @@ fn compute_seven_day_verdicts(
 /// computed (polar latitudes on the date in question), matching the
 /// snapshot's default sentinel.
 fn compute_next_run_epoch(
-    location: (f64, f64),
+    policy: &WateringPolicy,
     zones: &[crate::ha::snapshot::ZoneState],
     cfg: Option<&crate::config::schema::Config>,
 ) -> i64 {
     use crate::engine::sunrise::smart_morning_target_start;
 
-    let (lat, lon) = location;
+    let (lat, lon) = policy.location;
     if lat == 0.0 && lon == 0.0 {
         return 0;
     }
     // True wall time of the sequence (runs + soak gaps + preambles, interleave
     // aware), from the same planner the dispatcher's window math uses, so the
-    // displayed next-run time and the actual dispatch agree.
-    let interleave = cfg.map(|c| c.engine.interleave_cycles).unwrap_or(false);
-    let sequence_total_s =
-        crate::scheduler::smart_morning::sequence_wall_seconds(cfg, zones, interleave);
+    // displayed next-run time and the actual dispatch agree. The soak/
+    // interleave knobs come from the hot-reloaded policy (live on the next
+    // tick after a config apply); cfg is only the zone-lookup context for
+    // build_cycle_plan.
+    let sequence_total_s = crate::scheduler::smart_morning::sequence_wall_seconds(
+        cfg,
+        zones,
+        policy.soak_minutes,
+        policy.interleave_cycles,
+    );
 
     let now = crate::timeutil::now_local();
     let today_local = now.date_naive();

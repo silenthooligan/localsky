@@ -893,6 +893,10 @@ async fn post_seed_current(State(s): State<WizardApiState>) -> impl IntoResponse
         config: cfg,
         license_accepted: true,
         telemetry_choice: Some(false),
+        // Seeded from the LIVE config: the supply question was answered (or
+        // skipped) long ago, so the draft starts unanswered and the config's
+        // own interleave_cycles value carries the earlier decision.
+        water_supply: None,
         last_updated_epoch: chrono::Utc::now().timestamp(),
     };
     let store = s.draft_store.clone();
@@ -1160,6 +1164,7 @@ mod draft_redaction_tests {
             config: cfg,
             license_accepted: true,
             telemetry_choice: Some(false),
+            water_supply: None,
             last_updated_epoch: 0,
         }
     }

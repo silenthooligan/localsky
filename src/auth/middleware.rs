@@ -79,6 +79,13 @@ pub struct AuthPolicy {
     pub trusted_proxies: Vec<ipnet::IpNet>,
     /// Extra Origins allowed to make state-changing calls cross-origin.
     pub trusted_origins: Vec<String>,
+    /// Identity header an authenticating reverse proxy stamps (e.g.
+    /// oauth2-proxy's X-Auth-Request-Email). Consulted ONLY when the socket
+    /// peer is inside trusted_proxies; see proxy_identity_vouched.
+    pub proxy_auth_header: Option<String>,
+    /// Allowed values for proxy_auth_header (case-insensitive). Empty =
+    /// any non-empty value from a trusted proxy.
+    pub proxy_auth_allow: Vec<String>,
 }
 
 pub struct AuthRuntime {
@@ -116,6 +123,12 @@ impl AuthRuntime {
                 .filter_map(|s| s.parse::<ipnet::IpNet>().ok())
                 .collect(),
             trusted_origins: cfg.trusted_origins.clone(),
+            proxy_auth_header: cfg
+                .proxy_auth_header
+                .as_ref()
+                .map(|h| h.trim().to_string())
+                .filter(|h| !h.is_empty()),
+            proxy_auth_allow: cfg.proxy_auth_allow.clone(),
         }
     }
 
@@ -429,6 +442,94 @@ fn proxied_but_unconfigured(headers: &header::HeaderMap, policy: &AuthPolicy) ->
         && (headers.contains_key("x-forwarded-for") || headers.contains_key("forwarded"))
 }
 
+/// Reverse-proxy identity vouching (auth.proxy_auth_header). True only when
+/// ALL of:
+///   - `proxy_auth_header` is configured, AND
+///   - the DIRECT SOCKET PEER is inside `trusted_proxies`, AND
+///   - the request carries that header with a non-empty value, AND
+///   - the allow-list (`proxy_auth_allow`), when non-empty, contains the
+///     value case-insensitively.
+/// The peer test runs against the raw socket address BEFORE any
+/// X-Forwarded-For resolution, so the check is spoof-proof: a direct client
+/// stamping the header itself never matches (its own peer address is not a
+/// trusted proxy), and only a proxy the operator declared can vouch. A
+/// vouched caller is treated as an authenticated operator on the privileged
+/// config/backup gate in BOTH auth modes; token admin (mint/revoke) still
+/// requires a real owner credential (LS-API-06), and the proxy MUST strip or
+/// overwrite the header on client traffic for the scheme to be sound.
+pub(crate) fn proxy_identity_vouched(
+    extensions: &axum::http::Extensions,
+    headers: &header::HeaderMap,
+    policy: &AuthPolicy,
+) -> bool {
+    let Some(name) = policy.proxy_auth_header.as_deref() else {
+        return false;
+    };
+    let Some(peer) = extensions
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip())
+    else {
+        return false;
+    };
+    if !policy.trusted_proxies.iter().any(|net| net.contains(&peer)) {
+        return false;
+    }
+    // Exactly ONE value: a proxy that APPENDS its identity header instead of
+    // stripping the client's leaves two values, and get() would read the
+    // client-controlled first one. Ambiguity fails closed regardless of the
+    // proxy's strip behavior.
+    let mut values = headers.get_all(name).iter();
+    let (Some(raw), None) = (values.next(), values.next()) else {
+        return false;
+    };
+    let Some(value) = raw.to_str().ok().map(str::trim).filter(|v| !v.is_empty()) else {
+        return false;
+    };
+    policy.proxy_auth_allow.is_empty()
+        || policy
+            .proxy_auth_allow
+            .iter()
+            .any(|a| a.trim().eq_ignore_ascii_case(value))
+}
+
+/// Hint attached to a privileged-route 401 when the refusal is specifically
+/// a proxy-path one, so the settings UI can name the config keys that fix it
+/// instead of a bare "unauthorized". Two shapes qualify:
+///   - a forwarding header with NO trusted_proxies configured: the
+///     fail-closed drop of private-IP vouching (the operator's own browser
+///     401s through their unconfigured proxy), or
+///   - the peer IS a declared trusted proxy but the forwarded client did not
+///     clear the gate (external client behind the proxy, or the proxy's
+///     identity header absent/rejected).
+/// None for every other refusal (direct public caller etc.).
+fn proxied_refusal_hint(
+    extensions: &axum::http::Extensions,
+    headers: &header::HeaderMap,
+    policy: &AuthPolicy,
+) -> Option<&'static str> {
+    if proxied_but_unconfigured(headers, policy) {
+        return Some(
+            "This request arrived through a reverse proxy, but auth.trusted_proxies is not \
+             configured, so LocalSky cannot tell your LAN from the internet behind that proxy \
+             and fails closed. Set auth.trusted_proxies to your proxy's address/CIDR (or sign \
+             in). An authenticating proxy can also vouch signed-in callers via \
+             auth.proxy_auth_header.",
+        );
+    }
+    let peer = extensions
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip())?;
+    if policy.trusted_proxies.iter().any(|net| net.contains(&peer)) {
+        return Some(
+            "This request was forwarded by a proxy in auth.trusted_proxies, but the forwarded \
+             client is not vouched for configuration changes. Sign in, add the client's network \
+             to auth.trusted_networks, or set auth.proxy_auth_header so your authenticating \
+             proxy's identity header vouches signed-in callers.",
+        );
+    }
+    None
+}
+
 fn is_privileged_path(method: &Method, path: &str) -> bool {
     // Normalize /api/v1/... -> /api/... so one rule set covers both.
     let path = normalize_api_prefix(path);
@@ -626,6 +727,22 @@ fn unauthorized_api() -> Response {
     resp
 }
 
+/// 401 with an actionable `hint` alongside the machine `error`, for the
+/// proxy-shaped privileged refusals (see proxied_refusal_hint). Same status
+/// + Bearer challenge as unauthorized_api; only the body gains the hint.
+fn unauthorized_api_with_hint(hint: &str) -> Response {
+    let mut resp = (
+        StatusCode::UNAUTHORIZED,
+        axum::Json(serde_json::json!({ "error": "unauthorized", "hint": hint })),
+    )
+        .into_response();
+    resp.headers_mut().insert(
+        header::WWW_AUTHENTICATE,
+        HeaderValue::from_static("Bearer realm=\"localsky\""),
+    );
+    resp
+}
+
 /// One-shot guard for the P4-6 exposure warning (see `enforce`): the
 /// "public IP while auth Disabled" warning fires at most once per process.
 static EXPOSED_WHILE_OPEN_WARNED: std::sync::atomic::AtomicBool =
@@ -760,6 +877,14 @@ pub async fn enforce_no_store(
     // store). This is the fail-closed core: config/backup/push/photo/
     // actuation/wizard-config-write are refused for a non-vouched caller.
     if is_privileged_path(req.method(), &path) {
+        // Reverse-proxy identity first: checked against the raw socket peer
+        // BEFORE any X-Forwarded-For resolution (spoof-proof; see
+        // proxy_identity_vouched). An authenticating proxy the operator
+        // declared vouches the caller as an operator here.
+        if proxy_identity_vouched(req.extensions(), req.headers(), &policy) {
+            req.extensions_mut().insert(RequestIdentity::TrustedNetwork);
+            return next.run(req).await;
+        }
         let client = client_ip(&req, &policy.trusted_proxies);
         let proxied = proxied_but_unconfigured(req.headers(), &policy);
         if client.map(|ip| privileged_caller_vouched_proxied(&ip, &policy, proxied)) == Some(true) {
@@ -769,6 +894,11 @@ pub async fn enforce_no_store(
         if wants_html(&req) {
             let login = format!("{}/login", crate::base::from_headers(req.headers()));
             return Redirect::temporary(&login).into_response();
+        }
+        // Proxy-shaped refusals carry the hint naming the config keys that
+        // fix them (auth.trusted_proxies / auth.proxy_auth_header).
+        if let Some(hint) = proxied_refusal_hint(req.extensions(), req.headers(), &policy) {
+            return unauthorized_api_with_hint(hint);
         }
         return unauthorized_api();
     }
@@ -932,6 +1062,15 @@ pub async fn enforce(
     // demo's "kick the tires" browsing without adding protection. Skip the
     // gate in demo mode; demo_guard remains the demo's mutation boundary.
     if is_privileged_path(req.method(), &path) && !super::demo_guard::is_demo() {
+        // Reverse-proxy identity (auth.proxy_auth_header): an authenticating
+        // proxy inside trusted_proxies has already logged this caller in and
+        // stamps its identity header. Checked against the raw socket peer
+        // BEFORE any X-Forwarded-For resolution (spoof-proof; see
+        // proxy_identity_vouched), and honored in BOTH auth modes.
+        if proxy_identity_vouched(req.extensions(), req.headers(), &policy) {
+            req.extensions_mut().insert(RequestIdentity::TrustedNetwork);
+            return next.run(req).await;
+        }
         // Loopback (same-box owner via same-host proxy, CLI, healthcheck)
         // and a configured trusted_networks client are vouched for without
         // credentials, mirroring the wizard ProbeGuard's allowance.
@@ -965,10 +1104,16 @@ pub async fn enforce(
         }
         // Unauthenticated, untrusted caller on a privileged route: refuse.
         // HTML GET (the raw-config editor opened directly) gets a login
-        // redirect; everything else (API/JSON, writes) gets 401.
+        // redirect; everything else (API/JSON, writes) gets 401. Proxy-shaped
+        // refusals (unconfigured trusted_proxies fail-closed, or a forwarded
+        // external client behind a declared proxy) carry the hint naming the
+        // config keys that fix them.
         if wants_html(&req) {
             let login = format!("{}/login", crate::base::from_headers(req.headers()));
             return Redirect::temporary(&login).into_response();
+        }
+        if let Some(hint) = proxied_refusal_hint(req.extensions(), req.headers(), &policy) {
+            return unauthorized_api_with_hint(hint);
         }
         return unauthorized_api();
     }
@@ -1215,6 +1360,8 @@ mod tests {
             trusted: vec![],
             trusted_proxies: vec![],
             trusted_origins: vec![],
+            proxy_auth_header: None,
+            proxy_auth_allow: vec![],
         };
 
         // The wizard config-write routes a fresh-install owner drives.
@@ -1267,6 +1414,8 @@ mod tests {
             trusted: vec![],
             trusted_proxies: vec![],
             trusted_origins: vec![],
+            proxy_auth_header: None,
+            proxy_auth_allow: vec![],
         };
         let lan: IpAddr = "10.0.0.50".parse().unwrap();
         let loopback: IpAddr = "127.0.0.1".parse().unwrap();
@@ -1291,6 +1440,8 @@ mod tests {
             trusted: vec!["10.0.0.0/24".parse().unwrap()],
             trusted_proxies: vec![],
             trusted_origins: vec![],
+            proxy_auth_header: None,
+            proxy_auth_allow: vec![],
         };
         assert!(privileged_caller_vouched_proxied(
             &lan,
@@ -1312,6 +1463,8 @@ mod tests {
             trusted: vec![],
             trusted_proxies: vec![],
             trusted_origins: vec![],
+            proxy_auth_header: None,
+            proxy_auth_allow: vec![],
         };
         let proxy_peer: IpAddr = "172.18.0.2".parse().unwrap(); // e.g. a docker-network proxy
         let loopback: IpAddr = "127.0.0.1".parse().unwrap();
@@ -1369,6 +1522,8 @@ mod tests {
             trusted: vec![],
             trusted_proxies: vec![],
             trusted_origins: vec![],
+            proxy_auth_header: None,
+            proxy_auth_allow: vec![],
         };
         // No forwarding header: not proxied.
         let mut h = header::HeaderMap::new();
@@ -1495,10 +1650,15 @@ mod tests {
             trusted_networks: vec!["10.1.2.0/24".into(), "garbage".into()],
             trusted_proxies: vec!["172.18.0.0/16".into(), "nonsense".into()],
             trusted_origins: vec!["https://dash.example.com".into()],
+            proxy_auth_header: Some("  X-Auth-Request-Email  ".into()),
+            proxy_auth_allow: vec!["owner@example.com".into()],
         };
         let p = AuthRuntime::policy_from_cfg(&cfg);
         assert!(p.required);
         assert_eq!(p.trusted.len(), 1);
+        // The header name is trimmed; a whitespace-only name would be None.
+        assert_eq!(p.proxy_auth_header.as_deref(), Some("X-Auth-Request-Email"));
+        assert_eq!(p.proxy_auth_allow.len(), 1);
         assert!(p.trusted[0].contains(&"10.1.2.50".parse::<IpAddr>().unwrap()));
         assert!(!p.trusted[0].contains(&"172.16.0.1".parse::<IpAddr>().unwrap()));
         assert_eq!(p.trusted_proxies.len(), 1);
@@ -1635,6 +1795,8 @@ mod tests {
             trusted: vec![],
             trusted_proxies: vec![],
             trusted_origins: vec![],
+            proxy_auth_header: None,
+            proxy_auth_allow: vec![],
         }));
         (rt, db)
     }
@@ -2058,6 +2220,247 @@ mod tests {
             resp.status(),
             StatusCode::OK,
             "foreign-origin write via Supervisor ingress passes"
+        );
+    }
+
+    /// Policy with an authenticating reverse proxy declared: trusted_proxies
+    /// covers the docker bridge and proxy_auth_header names the identity
+    /// header that proxy stamps.
+    fn proxy_auth_policy(required: bool, allow: &[&str]) -> AuthPolicy {
+        AuthPolicy {
+            required,
+            session_ttl_days: 30,
+            trusted: vec![],
+            trusted_proxies: vec!["172.18.0.0/16".parse().unwrap()],
+            trusted_origins: vec![],
+            proxy_auth_header: Some("X-Auth-Request-Email".into()),
+            proxy_auth_allow: allow.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    async fn body_json(resp: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    }
+
+    #[tokio::test]
+    async fn proxy_identity_vouches_privileged_writes_from_trusted_peer_only() {
+        // The oauth2-proxy shape: the proxy (a trusted_proxies peer) forwards a
+        // PUBLIC client it has already authenticated and stamps the identity
+        // header. The XFF-resolved client is public, so without the header the
+        // caller is refused; with it, the write is vouched.
+        let (rt, _db) = auth_runtime(false);
+        rt.policy.store(Arc::new(proxy_auth_policy(false, &[])));
+        let app = gated_app(rt.clone());
+
+        // Header present from the trusted proxy peer: allowed.
+        let resp = app
+            .clone()
+            .oneshot(gated_req(
+                Method::PUT,
+                "/api/config",
+                "172.18.0.2",
+                &[
+                    ("x-forwarded-for", "203.0.113.9"),
+                    ("x-auth-request-email", "user@example.com"),
+                ],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "trusted proxy peer + identity header vouches the privileged write"
+        );
+
+        // Header absent: unchanged current behavior (the forwarded public
+        // client is refused with a credential-or-refuse 401).
+        let resp = app
+            .clone()
+            .oneshot(gated_req(
+                Method::PUT,
+                "/api/config",
+                "172.18.0.2",
+                &[("x-forwarded-for", "203.0.113.9")],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "no identity header: the forwarded public client stays refused"
+        );
+        // The refusal is proxy-shaped, so the body carries the actionable hint.
+        let body = body_json(resp).await;
+        let hint = body["hint"].as_str().unwrap_or_default();
+        assert!(
+            hint.contains("auth.proxy_auth_header") && hint.contains("auth.trusted_networks"),
+            "the forwarded-client 401 hint names the fixing config keys: {hint}"
+        );
+
+        // Header stamped by a DIRECT untrusted peer: never honored (the check
+        // runs on the socket peer before any XFF resolution, so a public
+        // client cannot vouch itself by sending the header).
+        let resp = app
+            .clone()
+            .oneshot(gated_req(
+                Method::PUT,
+                "/api/config",
+                "203.0.113.5",
+                &[("x-auth-request-email", "user@example.com")],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "identity header from an untrusted peer is spoofing and is ignored"
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_identity_allow_list_and_required_mode() {
+        let (rt, _db) = auth_runtime(false);
+        let app = gated_app(rt.clone());
+        let put = |header_val: &str| {
+            gated_req(
+                Method::PUT,
+                "/api/config",
+                "172.18.0.2",
+                &[
+                    ("x-forwarded-for", "203.0.113.9"),
+                    ("x-auth-request-email", header_val),
+                ],
+            )
+        };
+
+        // Allow-list mismatch: refused even from the trusted proxy.
+        rt.policy
+            .store(Arc::new(proxy_auth_policy(false, &["owner@example.com"])));
+        let resp = app.clone().oneshot(put("other@example.com")).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "an identity outside the allow list is refused"
+        );
+
+        // Allow-list match is case-insensitive (header values are emails).
+        let resp = app.clone().oneshot(put("Owner@Example.COM")).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "allow-list match is case-insensitive"
+        );
+
+        // Required mode: the proxy identity vouches the privileged write too
+        // (the privileged gate runs before the mode gate, in both modes).
+        rt.policy.store(Arc::new(proxy_auth_policy(true, &[])));
+        let resp = app.clone().oneshot(put("user@example.com")).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Required mode: trusted proxy + identity header is an operator"
+        );
+
+        // An empty header value never vouches.
+        let resp = app.clone().oneshot(put("   ")).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "a whitespace-only identity value never vouches"
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_identity_multivalued_header_fails_closed() {
+        // A proxy that APPENDS its identity header instead of stripping the
+        // client's leaves two values, and the first one is client-controlled.
+        // The vouch must refuse the ambiguity outright, so a non-stripping
+        // proxy deployment degrades to "sign in" rather than to self-vouching.
+        let (rt, _db) = auth_runtime(false);
+        rt.policy.store(Arc::new(proxy_auth_policy(false, &[])));
+        let app = gated_app(rt.clone());
+        let resp = app
+            .clone()
+            .oneshot(gated_req(
+                Method::PUT,
+                "/api/config",
+                "172.18.0.2",
+                &[
+                    // The forwarded client is PUBLIC so the ordinary
+                    // private-IP vouching cannot mask the identity check
+                    // (a proxy peer with no XFF reads as a LAN caller).
+                    ("x-forwarded-for", "203.0.113.9"),
+                    ("x-auth-request-email", "attacker@evil.example"),
+                    ("x-auth-request-email", "owner@example.com"),
+                ],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "a multi-valued identity header is ambiguous and never vouches"
+        );
+    }
+
+    #[tokio::test]
+    async fn origin_check_precedes_proxy_identity_vouch_on_writes() {
+        // The CSRF origin check must refuse a cross-origin write BEFORE the
+        // proxy identity early-return can vouch it: a hostile page in the
+        // operator's browser rides the proxy (and its stamped header) exactly
+        // like the operator does, so the vouch must never short-circuit the
+        // origin refusal.
+        let (rt, _db) = auth_runtime(false);
+        rt.policy.store(Arc::new(proxy_auth_policy(false, &[])));
+        let app = gated_app(rt.clone());
+        let resp = app
+            .clone()
+            .oneshot(gated_req(
+                Method::PUT,
+                "/api/config",
+                "172.18.0.2",
+                &[
+                    ("x-forwarded-for", "203.0.113.9"),
+                    ("x-auth-request-email", "owner@example.com"),
+                    ("origin", "http://evil.example"),
+                    ("host", "sky.example.com"),
+                ],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-origin write refused before the proxy identity vouch applies"
+        );
+    }
+
+    #[tokio::test]
+    async fn unconfigured_proxy_401_carries_trusted_proxies_hint() {
+        // The fail-closed case: a forwarding header with NO trusted_proxies
+        // configured drops the private-IP vouching, and the 401 must tell the
+        // operator which key fixes it instead of a bare "unauthorized".
+        let (rt, _db) = auth_runtime(false);
+        let app = gated_app(rt);
+        let resp = app
+            .oneshot(gated_req(
+                Method::PUT,
+                "/api/config",
+                "172.18.0.2",
+                &[("x-forwarded-for", "10.0.0.50")],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "unauthorized");
+        let hint = body["hint"].as_str().unwrap_or_default();
+        assert!(
+            hint.contains("auth.trusted_proxies"),
+            "the fail-closed 401 hint names auth.trusted_proxies: {hint}"
         );
     }
 }

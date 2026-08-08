@@ -4,6 +4,26 @@ All notable changes to LocalSky are documented here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.7.9] - 2026-08-08
+
+Cycle interleaving turns on by default, cycle-and-soak settings apply without a restart, sign-in via an authenticating reverse proxy, and a new Engine settings page. One behavior change to review if your water comes from a well; no breaking API changes.
+
+### Changed
+
+- **Cycle interleaving is now on by default.** With `engine.interleave_cycles` unset, zones now water during each other's soak pauses (one valve at a time, soaks never shortened), so cycle-and-soak mornings finish sooner. **If your irrigation is fed by a well or another low-recovery supply, turn this off**: the serial plan's idle soak gaps double as recovery time for your supply, and interleaving fills them with more pumping. Flip the toggle on the new Engine settings page, set `interleave_cycles = false` in `localsky.toml`, or answer "Well or low-recovery supply" to the setup wizard's new water-supply question. Existing installs that never set the key pick up the new default on upgrade; installs that set it explicitly are unchanged.
+- Cycle-and-soak settings (`interleave_cycles` and `soak_minutes`) now apply on the next scheduler tick instead of requiring a restart. Saving them reshapes the next morning's dispatch plan and the "next run" estimate immediately, and the restart-required banner no longer appears for these two settings.
+- New **Engine** settings page (Settings, then Engine): the cycle-and-soak controls (soak time, cycle interleaving) and the seasonal water-budget dial now live there. The Skip rules page keeps only the skip-ladder thresholds. Saved values you do not edit are preserved either way.
+
+### Added
+
+- Sign-in via an authenticating reverse proxy. If oauth2-proxy, Authelia, or a similar gateway fronts LocalSky, set `auth.proxy_auth_header` (for example `X-Auth-Request-Email`) and LocalSky treats requests that arrive from a proxy in `auth.trusted_proxies` carrying that header as an authenticated operator on the privileged routes (config writes, backups, restart), in both auth modes. An optional `auth.proxy_auth_allow` list restricts which identities qualify. The header is only honored from the declared proxy's own address, so clients cannot spoof it, and your proxy must strip or overwrite it on client traffic. See [Authentication](authentication.md).
+- The setup wizard's zones step now asks what feeds your sprinklers (municipal or pressurized, well or low-recovery, or not sure) and sets the cycle-interleaving default to match, so a well-fed install never has to discover the toggle after the fact.
+
+### Fixed
+
+- Saving an unrelated settings change no longer reports "restart required" claiming a weather source changed. A config save re-compared the stored sources against the submitted ones through a map whose key order was not stable, so installs with an Ecowitt gateway poller carrying several calibrated soil channels saw a phantom source change on every save.
+- A configuration save rejected because the request came through a reverse proxy LocalSky is not set up to trust now explains itself: the error names `auth.trusted_proxies` (and `auth.proxy_auth_header`) instead of a bare "unauthorized", and the settings pages show that explanation on a failed save instead of a generic failure.
+
 ## [0.7.8] - 2026-08-08
 
 Cycle interleaving, an ET0 unit fix that was quietly shrinking displayed and projected ET 25x, and timezone-correct day boundaries for containerized deployments. No breaking changes.

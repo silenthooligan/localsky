@@ -10,7 +10,7 @@
 use leptos::prelude::*;
 
 use crate::components::settings_ui::{SettingsLoadError, SettingsResult};
-use crate::components::ui::{Button, FormField, HelpHint, Panel, SkeletonRows, Slider, Toggle};
+use crate::components::ui::{Button, FormField, HelpHint, Panel, SkeletonRows, Slider};
 use crate::components::units_fmt::{temp_unit, wind_unit, UnitPrefs};
 
 #[component]
@@ -28,10 +28,6 @@ pub fn SettingsSkipRules() -> impl IntoView {
     let min_temp_f = RwSignal::new(40.0f64);
     let rain_skip_in = RwSignal::new(0.25f64);
     let frost_skip_soil_f = RwSignal::new(38.0f64);
-    // P2-6: seasonal water-budget dial (percent of computed run depth).
-    let seasonal_adjust_pct = RwSignal::new(100u32);
-    // Cycle/soak interleaving (engine.interleave_cycles, default off).
-    let interleave_cycles = RwSignal::new(false);
 
     let loaded = RwSignal::new(false);
     // Initial-load state: Some(err) when the config GET failed. The editor body is
@@ -62,8 +58,6 @@ pub fn SettingsSkipRules() -> impl IntoView {
                         min_temp_f.set(d.min_temp_f);
                         rain_skip_in.set(d.rain_skip_in);
                         frost_skip_soil_f.set(d.frost_skip_soil_f);
-                        seasonal_adjust_pct.set(d.seasonal_adjust_pct);
-                        interleave_cycles.set(d.interleave_cycles);
                         loaded.set(true);
                         load_error.set(None);
                     }
@@ -92,8 +86,6 @@ pub fn SettingsSkipRules() -> impl IntoView {
             min_temp_f: min_temp_f.get(),
             rain_skip_in: rain_skip_in.get(),
             frost_skip_soil_f: frost_skip_soil_f.get(),
-            seasonal_adjust_pct: seasonal_adjust_pct.get(),
-            interleave_cycles: interleave_cycles.get(),
         };
         #[cfg(feature = "hydrate")]
         {
@@ -147,7 +139,11 @@ pub fn SettingsSkipRules() -> impl IntoView {
                     "for tonight and the next 6 days. Defaults shown match the "
                     "values the engine uses with no override. See these rules "
                     "decide a real day, and layer your own on top, in "
-                    <a href="/rules" style="color: var(--accent)">"Rule Lab"</a>"."
+                    <a href="/rules" style="color: var(--accent)">"Rule Lab"</a>
+                    ". Cycle-and-soak pacing and the seasonal water budget "
+                    "moved to the "
+                    <a href="/settings/engine" style="color: var(--accent)">"Engine"</a>
+                    " page."
                 </p>
             </header>
 
@@ -158,70 +154,6 @@ pub fn SettingsSkipRules() -> impl IntoView {
                 when=move || load_error.get().is_none()
                 fallback=move || view! { <SettingsLoadError error=load_error retry=load_retry/> }
             >
-
-            // P2-6: the seasonal trust dial, first because it's the control an
-            // operator reaches for most across the seasons.
-            <Panel title="Water budget".to_string()>
-                <p class="settings-page__subtitle" style="margin: 0 0 0.85rem">
-                    "The trust dial. Scales every zone's run depth up or down without "
-                    "touching the per-zone math, like the seasonal-adjust on a commercial "
-                    "controller. 100% is the engine's computed amount; dial down in a wet, "
-                    "cool stretch and up in a heat wave."
-                </p>
-                <FormField
-                    label="Seasonal adjustment".to_string()
-                    helptext="Percent of the engine-computed run depth, 50-150%. Applied before the per-zone safety cap, so tonight's planned minutes already reflect it.".to_string()
-                    error=Signal::derive(|| None::<String>)
-                >
-                    <div class="seasonal-dial">
-                        <input
-                            type="range"
-                            class="slider-clay"
-                            min="50"
-                            max="150"
-                            step="5"
-                            prop:value=move || seasonal_adjust_pct.get().to_string()
-                            on:input=move |ev| {
-                                if let Ok(v) = event_target_value(&ev).parse::<u32>() {
-                                    seasonal_adjust_pct.set(v);
-                                }
-                            }
-                        />
-                        <span class="seasonal-dial__value">
-                            {move || format!("{}%", seasonal_adjust_pct.get())}
-                        </span>
-                    </div>
-                    <p class="seasonal-dial__effect">
-                        {move || {
-                            let p = seasonal_adjust_pct.get();
-                            if p == 100 {
-                                "Every run waters the engine's computed depth.".to_string()
-                            } else if p < 100 {
-                                format!("Every run waters {p}% of the computed depth (drier).")
-                            } else {
-                                format!("Every run waters {p}% of the computed depth (wetter).")
-                            }
-                        }}
-                    </p>
-                </FormField>
-            </Panel>
-
-            // Cycle/soak interleaving rides this engine-tuning page like the
-            // seasonal dial above (the field lives on `engine`, not
-            // `engine.skip_rules`).
-            <Panel title="Cycle and soak".to_string()>
-                <p class="settings-page__subtitle" style="margin: 0 0 0.85rem">
-                    "When a zone's sprinklers apply water faster than the soil "
-                    "absorbs it, the engine splits the run into short cycles "
-                    "with soak pauses between them so the water sinks in "
-                    "instead of running off."
-                </p>
-                <Toggle
-                    checked=interleave_cycles
-                    label="Interleave cycles across zones".to_string()
-                    helptext="Water other zones during a zone's soak pauses so the morning sequence finishes sooner. One valve still runs at a time, and every soak keeps at least its full length. Leave off if your water source needs recovery time between runs. Applies after the next LocalSky restart.".to_string()
-                />
-            </Panel>
 
             <Panel title="Rain skips".to_string() help_topic="skip-breakdown">
                 <div class="grid settings-field-grid">
@@ -405,11 +337,6 @@ struct SkipRulesDraft {
     min_temp_f: f64,
     rain_skip_in: f64,
     frost_skip_soil_f: f64,
-    /// P2-6 trust dial: lives on `engine` (not `engine.skip_rules`), but rides
-    /// this same draft since this is the engine-tuning page.
-    seasonal_adjust_pct: u32,
-    /// Cycle/soak interleaving: also lives on `engine`, same ride-along.
-    interleave_cycles: bool,
 }
 
 #[cfg(feature = "hydrate")]
@@ -448,19 +375,6 @@ async fn fetch_skip_rules() -> Result<SkipRulesDraft, String> {
         min_temp_f: f64_at("min_temp_f", 40.0),
         rain_skip_in: f64_at("rain_skip_in", 0.25),
         frost_skip_soil_f: f64_at("frost_skip_soil_f", 38.0),
-        // seasonal_adjust_pct lives one level up, on `engine`.
-        seasonal_adjust_pct: val
-            .get("engine")
-            .and_then(|e| e.get("seasonal_adjust_pct"))
-            .and_then(|v| v.as_u64())
-            .map(|n| n as u32)
-            .unwrap_or(100),
-        // interleave_cycles lives on `engine` too; absent = default off.
-        interleave_cycles: val
-            .get("engine")
-            .and_then(|e| e.get("interleave_cycles"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
     })
 }
 
@@ -520,16 +434,9 @@ async fn patch_skip_rules(d: SkipRulesDraft) -> Result<(), String> {
     ] {
         sr.insert(k.into(), v);
     }
-    // P2-6: the seasonal dial sits on `engine`, beside `skip_rules`.
-    engine_obj.insert(
-        "seasonal_adjust_pct".into(),
-        serde_json::json!(d.seasonal_adjust_pct),
-    );
-    // Cycle/soak interleaving sits on `engine` as well.
-    engine_obj.insert(
-        "interleave_cycles".into(),
-        serde_json::json!(d.interleave_cycles),
-    );
+    // The seasonal dial + cycle/soak knobs sit on `engine` beside
+    // `skip_rules` and are owned by the Engine settings page now; this page
+    // merges only skip_rules keys so a save here never touches them.
     let resp = Request::put("/api/config")
         .json(&cfg)
         .map_err(|e| e.to_string())?
@@ -538,7 +445,10 @@ async fn patch_skip_rules(d: SkipRulesDraft) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     if !resp.ok() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("HTTP {}: {body}", resp.status()));
+        return Err(crate::components::settings_ui::save_error_message(
+            resp.status(),
+            &body,
+        ));
     }
     Ok(())
 }

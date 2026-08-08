@@ -58,6 +58,19 @@ impl WizardStep {
     }
 }
 
+/// Water-supply answer from the wizard's zones step. `Well` writes
+/// `engine.interleave_cycles = false` into the draft config (the serial
+/// plan's idle soak gaps double as pump/well recovery time); the other two
+/// keep the default (on). Persisted on the draft, like `telemetry_choice`,
+/// so a resumed wizard shows the selection instead of re-deriving it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WaterSupply {
+    Municipal,
+    Well,
+    Unsure,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WizardDraft {
     pub current_step: WizardStep,
@@ -68,6 +81,10 @@ pub struct WizardDraft {
     /// True after the operator opted in (or explicitly out). Defaults to
     /// `None` so we can require an explicit decision.
     pub telemetry_choice: Option<bool>,
+    /// Water-supply answer from the zones step. `None` = not yet answered
+    /// (older drafts deserialize to this via the serde default).
+    #[serde(default)]
+    pub water_supply: Option<WaterSupply>,
     /// Last update epoch. Used by the UI to show "resumed Xm ago".
     pub last_updated_epoch: i64,
 }
@@ -79,6 +96,7 @@ impl Default for WizardDraft {
             config: Config::default(),
             license_accepted: false,
             telemetry_choice: None,
+            water_supply: None,
             last_updated_epoch: chrono::Utc::now().timestamp(),
         }
     }
@@ -471,6 +489,38 @@ mod tests {
                 "Review sees {key} as enabled"
             );
         }
+    }
+
+    #[test]
+    fn water_supply_round_trips_and_well_disables_interleave() {
+        // The zones step records the answer on the draft AND writes the
+        // consequence (interleave off for a well) into the draft config; both
+        // must survive the save/load round trip, and an older draft without
+        // the field must deserialize as unanswered.
+        let dir = std::env::temp_dir().join(format!("ls-wizard-supply-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = WizardStore::new(dir.join("localsky.toml.draft"));
+
+        let mut d = WizardDraft::default();
+        assert!(
+            d.config.engine.interleave_cycles,
+            "the shipped default is interleave on"
+        );
+        d.water_supply = Some(WaterSupply::Well);
+        d.config.engine.interleave_cycles = false;
+        store.save(&d).unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.water_supply, Some(WaterSupply::Well));
+        assert!(
+            !loaded.config.engine.interleave_cycles,
+            "the well answer's config consequence survives the round trip"
+        );
+
+        // Older drafts predate the field: they parse as unanswered.
+        let mut v = serde_json::to_value(WizardDraft::default()).unwrap();
+        v.as_object_mut().unwrap().remove("water_supply");
+        let parsed: WizardDraft = serde_json::from_value(v).unwrap();
+        assert_eq!(parsed.water_supply, None);
     }
 
     #[test]
