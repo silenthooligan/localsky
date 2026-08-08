@@ -17,8 +17,6 @@
 //   GET  /weather/history            observed-weather series (24h sparklines)
 //   GET  /llm/explanation            LLM advisor verdict-explanation
 //   GET  /llm/anomalies              LLM advisor anomaly summary
-//   GET  /me/prefs                   per-device preferences (theme, units, etc.)
-//   PUT  /me/prefs                   write per-device preferences
 //   GET  /config                     read current localsky.toml (secrets redacted)
 //   PUT  /config                     write localsky.toml
 //   POST /config/rollback?to=<v>     restore a prior config snapshot

@@ -554,6 +554,7 @@ async fn main() -> anyhow::Result<()> {
             shadow_store,
             control_store,
             boot_zones,
+            boot_cfg.clone().map(std::sync::Arc::new),
         );
         // P0-8b: supervise the refresher. If its heartbeat goes stale (panic or
         // hang in the one task that produces all live data + the today verdict),
@@ -803,6 +804,16 @@ async fn main() -> anyhow::Result<()> {
     let config_path = boot_config_path.clone();
     let draft_path = format!("{config_path}.draft");
 
+    // Scheduled local backups (B-1): a no-op unless LOCALSKY_AUTO_BACKUP_HOURS
+    // is set. Writes the same bundle format as GET /api/backup to a local dir on
+    // an interval and prunes old ones, so a self-hoster always has a restorable
+    // artifact without remembering to pull one.
+    localsky::scheduler::backup::spawn(
+        cfg_store.clone(),
+        history_conn.clone(),
+        history_path.clone(),
+    );
+
     // Zone photos directory. Uploaded files land here and are served
     // back at /site/photos/<filename>. Configurable so a deployment
     // can point the static-serve route at e.g. an NFS share.
@@ -1046,11 +1057,52 @@ async fn main() -> anyhow::Result<()> {
             }
             for source in polling {
                 let bus = receiver_bus_tx.clone();
-                let shut = source_shutdown_rx.clone();
+                let mut shut = source_shutdown_rx.clone();
                 tokio::spawn(async move {
+                    use futures::FutureExt;
                     let id = source.id().to_string();
-                    if let Err(e) = source.run(bus, shut).await {
-                        tracing::warn!(source = %id, error = %e, "weather source task exited");
+                    // O-1 supervisor: a source's run() returning Err or PANICKING
+                    // (e.g. a parser bug on a malformed provider payload) must not
+                    // silently drop that source until a container restart -- the
+                    // source would read "offline" in /api/health for days. Restart
+                    // it with capped exponential backoff; a run that stayed healthy
+                    // for a while resets the backoff so a genuinely flaky provider
+                    // recovers quickly after a good stretch. Shutdown ends the loop.
+                    // Mirrors the reaper / push-dispatcher supervisors.
+                    let base = std::time::Duration::from_secs(2);
+                    let max = std::time::Duration::from_secs(300);
+                    let mut backoff = base;
+                    loop {
+                        if *shut.borrow() {
+                            break;
+                        }
+                        let started = tokio::time::Instant::now();
+                        let outcome = std::panic::AssertUnwindSafe(
+                            source.clone().run(bus.clone(), shut.clone()),
+                        )
+                        .catch_unwind()
+                        .await;
+                        match outcome {
+                            // Clean return: the source stopped itself (shutdown).
+                            Ok(Ok(())) => break,
+                            Ok(Err(e)) => tracing::warn!(
+                                source = %id, error = %e,
+                                "weather source task errored; restarting after backoff"
+                            ),
+                            Err(_) => tracing::error!(
+                                source = %id,
+                                "weather source task PANICKED; restarting after backoff"
+                            ),
+                        }
+                        // A run that lasted a while was healthy; reset the backoff.
+                        if started.elapsed() >= std::time::Duration::from_secs(120) {
+                            backoff = base;
+                        }
+                        tokio::select! {
+                            _ = tokio::time::sleep(backoff) => {}
+                            _ = shut.changed() => {}
+                        }
+                        backoff = (backoff * 2).min(max);
                     }
                 });
             }

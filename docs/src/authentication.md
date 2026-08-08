@@ -65,6 +65,17 @@ address**. The consequences:
   one bucket, so one noisy client (or a distributed brute-force funneled
   through the proxy) can trip the limit for everyone, and per-client
   throttling is lost.
+- **The privileged surface does not fall back to trusting the proxy's
+  private IP.** In the shipped default (auth Disabled), a bare private-LAN
+  client is normally vouched for config writes, `GET /config/raw`, backups,
+  and restart without a login. When LocalSky detects a proxy in front but
+  `trusted_proxies` is empty (a forwarding header is present with no
+  declared proxy), it can no longer tell your LAN from the internet behind
+  that proxy, so it **stops** vouching the proxy's private peer on those
+  routes and requires a real credential (loopback and an explicit
+  `trusted_networks` match still pass). This fails closed: it means an
+  exposed-behind-an-unconfigured-proxy instance will 401 those routes for
+  your own browser too until you either set `trusted_proxies` or sign in.
 
 So: **if you run LocalSky behind a proxy, set `trusted_proxies` to that
 proxy's address/CIDR** (for the bundled Docker Compose the proxy is on the

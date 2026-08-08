@@ -276,6 +276,45 @@ impl AuthStore {
         .await
     }
 
+    /// AUTH-3 owner-scoped list: only `user_id`'s non-revoked tokens, so one
+    /// owner cannot enumerate another's once multi-user lands. Identical result
+    /// to `list_api_tokens` under the single-owner model. Pairs with
+    /// `revoke_api_token_for_user`.
+    pub async fn list_api_tokens_for_user(&self, user_id: i64) -> Result<Vec<ApiTokenRow>, String> {
+        self.with_conn(move |c| {
+            let mut stmt = c.prepare(
+                "SELECT id, name, created_at, last_used_at FROM api_tokens
+                 WHERE revoked = 0 AND user_id = ?1 ORDER BY created_at DESC",
+            )?;
+            let rows = stmt
+                .query_map(params![user_id], |r| {
+                    Ok(ApiTokenRow {
+                        id: r.get(0)?,
+                        name: r.get(1)?,
+                        created_at: r.get(2)?,
+                        last_used_at: r.get(3)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+
+    /// AUTH-3 owner-scoped revoke: revokes `id` only if it belongs to
+    /// `user_id`. Returns whether a row was actually revoked, so the caller can
+    /// 404 a cross-owner or unknown id instead of silently succeeding.
+    pub async fn revoke_api_token_for_user(&self, id: i64, user_id: i64) -> Result<bool, String> {
+        self.with_conn(move |c| {
+            let n = c.execute(
+                "UPDATE api_tokens SET revoked = 1 WHERE id = ?1 AND user_id = ?2",
+                params![id, user_id],
+            )?;
+            Ok(n > 0)
+        })
+        .await
+    }
+
     pub async fn get_user(&self, id: i64) -> Result<Option<UserRow>, String> {
         self.with_conn(move |c| {
             c.query_row(

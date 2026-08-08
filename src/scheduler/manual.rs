@@ -181,7 +181,17 @@ async fn run_tick(
         if !s.weekdays.contains(&weekday) {
             continue;
         }
-        if s.start_hour != hour || s.start_minute != minute {
+        // Catch-up grace: a tick that overran its minute (a slow or hung
+        // dispatch on the previous tick pushing wall-clock past the target
+        // minute boundary) must not drop the day's watering. Fire when `now` is
+        // at or just past the scheduled minute, within CATCHUP_GRACE_S; the
+        // (id, time) dedup below still makes it fire exactly once. Scoped to the
+        // same day/minute window, so a cross-midnight catch-up is out of scope.
+        const CATCHUP_GRACE_S: i64 = 180;
+        let now_secs = hour as i64 * 3600 + minute as i64 * 60 + now.second() as i64;
+        let sched_secs = s.start_hour as i64 * 3600 + s.start_minute as i64 * 60;
+        let delta = now_secs - sched_secs;
+        if !(0..=CATCHUP_GRACE_S).contains(&delta) {
             continue;
         }
         // Dedup key includes the schedule's start time (FIX 2): re-timing a

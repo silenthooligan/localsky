@@ -106,7 +106,8 @@ impl InfluxDb {
         } else if let Some(user) = &self.config.username {
             req = req.basic_auth(user, self.config.password.as_deref());
         }
-        let resp: InfluxResp = req.send().await?.error_for_status()?.json().await?;
+        let http = req.send().await?.error_for_status()?;
+        let resp: InfluxResp = crate::net::safe_fetch::read_json_capped(http).await?;
         latest_value(&resp).ok_or_else(|| anyhow::anyhow!("query returned no value: {influxql}"))
     }
 }

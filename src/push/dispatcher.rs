@@ -441,20 +441,21 @@ impl VapidConfig {
 /// PushManager.subscribe() expects and what `web-push`'s own
 /// `PartialVapidSignatureBuilder::get_public_key()` produces for this key.
 ///
-/// Pure RustCrypto (p256 + the elliptic-curve-re-exported rand_core OsRng),
-/// so it adds no new dependency and pulls no C crypto backend. ssr-only;
-/// never runs in the WASM bundle. Called by the wizard apply path when the
+/// Pure RustCrypto (p256 + the rand OsRng already in the ssr tree), so it
+/// adds no new dependency and pulls no C crypto backend. ssr-only; never
+/// runs in the WASM bundle. Called by the wizard apply path when the
 /// operator enables Web Push without supplying keys.
 pub fn generate_vapid_keypair(
     private_path: &std::path::Path,
 ) -> std::result::Result<String, String> {
-    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    use p256::elliptic_curve::sec1::ToSec1Point;
+    use p256::elliptic_curve::Generate;
     use p256::pkcs8::{EncodePrivateKey, LineEnding};
     use p256::SecretKey;
 
-    // OsRng comes from rand_core (re-exported by elliptic_curve), built with
-    // its `getrandom` feature in this tree, so this is OS-seeded CSPRNG.
-    let secret = SecretKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+    // try_generate draws directly from OS entropy (p256 getrandom feature);
+    // fallible by design, so surface the error instead of unwrapping.
+    let secret = SecretKey::try_generate().map_err(|e| format!("generate p256 key: {e}"))?;
 
     // Private key as PKCS#8 PEM (`-----BEGIN PRIVATE KEY-----`); web-push's
     // from_pem accepts exactly this (or SEC1).
@@ -463,7 +464,7 @@ pub fn generate_vapid_keypair(
         .map_err(|e| format!("encode pkcs8 pem: {e}"))?;
 
     // Raw uncompressed public point (0x04 || X || Y), base64url no-pad.
-    let public_point = secret.public_key().to_encoded_point(false);
+    let public_point = secret.public_key().to_sec1_point(false);
     let public_b64u =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public_point.as_bytes());
 

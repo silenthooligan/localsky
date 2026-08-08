@@ -4,6 +4,51 @@ All notable changes to LocalSky are documented here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.7.8] - 2026-08-08
+
+Cycle interleaving, an ET0 unit fix that was quietly shrinking displayed and projected ET 25x, and timezone-correct day boundaries for containerized deployments. No breaking changes.
+
+### Added
+
+- Cycle interleaving (opt-in). With `engine.interleave_cycles` on, other zones water during a zone's soak pauses instead of the sequence idling through them, so the total morning sequence takes roughly the longest zone's cycle chain instead of the sum of every zone's. One valve still runs at a time, soak times are treated as minimums (a soak can stretch, never shrink), and zone order is preserved. Off by default: on installs fed by a well or other low-recovery supply, the idle soak gaps double as source recovery time. Toggle it under Settings alongside the other engine tuning, or set it in `localsky.toml`; applies after a restart. See [Irrigation engine](irrigation-engine.md). ([#5](https://github.com/silenthooligan/localsky/issues/5))
+
+### Fixed
+
+- "ET today" no longer collapses at midnight ([#4](https://github.com/silenthooligan/localsky/issues/4)). The default forecast source reports ET0 in inches and the merge layer read it as millimeters, so the moment a day rolled from "tomorrow" to "today" its ET dropped about 25x (a -0.18 in day showed as -0.01 in). The wrong value also fed the 7-day soil projection (curves barely declined, hiding drying) and the exported "ET0 today" sensor (under-driving any external bucket math built on it). Today, tomorrow, and the 3-day average now resolve through the same full-day ladder in the same units: a directly mapped ET0 source first, then the forecast provider's own daily ET0, then the computed estimate. The mapped-source field is a full-day figure by contract; map a full-day sensor to it, not a since-midnight accumulator.
+- Day boundaries and local-time rules now follow the configured timezone, not the container's. In a UTC container (the common Docker setup): rain-today and ET0-today accumulators reset at the deployment's local midnight instead of mid-evening, forecast-accuracy observations file (and join) under the right date, manual-schedule weekdays flip at local midnight, and watering restrictions (allowed hours, odd/even day parity) evaluate against the deployment's wall clock instead of UTC.
+- A station or mapping that reports ET0 with a declared unit of inches is now converted to millimeters on the way onto the merge bus, closing the same unit-mismatch class for non-default sources.
+- Saving the skip-rules settings page no longer resets engine fields the page does not edit (disabled rules, soil-probe quarantine tuning, the observed-rain window).
+- The pre-sunrise start time now accounts for cycle-and-soak pauses. Sequences with soak splits previously started as if soaks took no time and overshot the finish target (sunrise minus 15 minutes) by the total soak time; the scheduler now works true wall time backwards from the target, under both serial and interleaved dispatch.
+- The "ET0 spent so far today" figure no longer charges the whole day at once right after midnight when the forecast snapshot has not refreshed since the previous evening.
+
+## [0.7.7] - 2026-07-19
+
+Security hardening, reliability fixes, and automatic backups. No breaking changes.
+
+### Added
+
+- Scheduled local backups. Set `LOCALSKY_AUTO_BACKUP_HOURS` and LocalSky writes a full backup bundle on that interval to `LOCALSKY_BACKUP_DIR` (default `/data/backups`, inside your mounted volume), keeping the newest `LOCALSKY_BACKUP_KEEP` (default 7). Same format as the download-backup bundle, so it restores through the same flow. Off by default. See [Backup, restore, and recovery](backup-restore.md).
+
+### Security
+
+- Retiring a zone's soil probe now requires the same authorization as other configuration changes, so it can no longer be triggered anonymously on a LAN-open instance.
+- Behind a reverse proxy with no `trusted_proxies` set, LocalSky no longer treats forwarded requests as trusted local callers on privileged routes (backup download, raw config, restart). It fails closed and requires a login instead. If you run behind a proxy, set `auth.trusted_proxies` (see [Authentication](authentication.md)) so your own access keeps working.
+- API token listing and revocation are now scoped to the signed-in owner, preventing cross-owner token access ahead of any multi-user support.
+
+### Fixed
+
+- A misbehaving or hostile device on a configured source or controller can no longer exhaust memory by returning an oversized response. Every outbound device and API read is now size-capped.
+- Irrigation shutoff: if a controller's settings change its identity while a zone is running, the shutoff backstop now closes the valve through the active controller instead of dropping it, closing a rare stuck-valve window.
+- A weather source whose task crashes now restarts automatically with backoff, instead of going silent until the next container restart.
+- Manual schedules are no longer skipped for the day if a prior dispatch ran long and pushed past the scheduled minute. A short catch-up window still fires them exactly once.
+- A zone with a misconfigured (effectively zero) precipitation rate now waters for its full planned time instead of being silently skipped, and logs the misconfiguration.
+
+## [0.7.6] - 2026-07-05
+
+### Fixed
+
+- Ecowitt gateway poller: a single missed poll no longer logs "unreachable" and flips source health. The poller retries once in-cycle (2s) and only flags after two consecutive failed cycles; the gateway's embedded server has brief busy windows that caused constant flapping pairs in the log.
+
 ## [0.7.5] - 2026-07-05
 
 In-app restart, device-management fixes, and source ranking coherence. No breaking changes.

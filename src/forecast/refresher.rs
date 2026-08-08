@@ -560,8 +560,11 @@ struct RawDaily {
     uv_index_max: Vec<Option<f64>>,
     /// FAO-56 reference evapotranspiration (ET0), inches/day under the requested
     /// precipitation_unit=inch. Open-Meteo computes this from its own model
-    /// fields, so a cloud-only deployment gets a real daily ET0 (the Et0Today
-    /// current scalar reads today's index) without a LAN station owning it.
+    /// fields, so a cloud-only deployment gets a real daily ET0 without a LAN
+    /// station owning it. The array STAYS inches (it feeds DailyEntry.et0_in,
+    /// whose contract is inches); the Et0Today current scalar reads today's
+    /// index and converts to mm at the emit, because that bus field's canonical
+    /// unit is mm (see current_fields).
     #[serde(default)]
     et0_fao_evapotranspiration: Vec<Option<f64>>,
     sunrise: Vec<i64>,
@@ -910,17 +913,21 @@ impl Raw {
         if let Some(uv) = cur.uv_index {
             fields.push((WeatherField::UvIndex, uv));
         }
-        // Et0Today: today's FAO-56 reference ET0 (inches/day) from the daily
-        // rollup at the today index (PAST_DAYS, same shift as RainTodayIn). The
-        // current block has no ET0 scalar, so we read it from daily; a cloud-only
-        // deployment gets a real Et0Today fill without a native ET0 station. The
-        // value is a daily Option (gaps -> the day is skipped, not zero-filled).
-        if let Some(Some(et0)) = self
+        // Et0Today: today's FAO-56 reference ET0 from the daily rollup at the
+        // today index (PAST_DAYS, same shift as RainTodayIn). The current block
+        // has no ET0 scalar, so we read it from daily; a cloud-only deployment
+        // gets a real Et0Today fill without a native ET0 station. The value is a
+        // daily Option (gaps -> the day is skipped, not zero-filled). The daily
+        // array is inches/day (precipitation_unit=inch), but the bus field's
+        // canonical unit is MM (the units layer passes Et0Today through as
+        // already-canonical), so convert HERE: the raw-inches emit made
+        // eto_today_mm read 0.18 "mm" instead of ~4.6 (issue #4).
+        if let Some(Some(et0_in)) = self
             .daily
             .et0_fao_evapotranspiration
             .get(self.today_daily_index())
         {
-            fields.push((WeatherField::Et0Today, *et0));
+            fields.push((WeatherField::Et0Today, *et0_in * 25.4));
         }
         // weather_code / cloud_cover are not scalar merge fields; cloud_cover is
         // requested for parity but has no WeatherField, so it is not emitted.
@@ -1116,15 +1123,18 @@ mod tests {
         assert_eq!(m.get(&F::SolarWm2), Some(&520.0));
         // uv_index -> UvIndex (unitless).
         assert_eq!(m.get(&F::UvIndex), Some(&6.5));
-        // Et0Today: today's daily et0_fao_evapotranspiration at index PAST_DAYS.
-        assert_eq!(m.get(&F::Et0Today), Some(&0.18));
+        // Et0Today: today's daily et0_fao_evapotranspiration at index PAST_DAYS,
+        // converted inches -> mm at the emit (the bus field is canonical mm):
+        // 0.18 in/day = 4.572 mm/day, never the raw 0.18 (issue #4).
+        let et0 = m.get(&F::Et0Today).copied().unwrap();
+        assert!((et0 - 4.572).abs() < 1e-9, "et0 mm = {et0}");
         // Stamped with the observation time, not "now".
         assert_eq!(at, 1_750_000_000);
         // apparent_temperature / cloud_cover / weather_code are not merge fields.
         assert!(!m.contains_key(&F::ForecastDaily));
         // Every emitted field is a member of OPEN_METEO_CURRENT_FIELDS (the
         // list-collapse invariant the picker relies on).
-        for (f, _) in m.iter() {
+        for f in m.keys() {
             assert!(
                 OPEN_METEO_CURRENT_FIELDS.contains(f),
                 "emitted {f:?} not in OPEN_METEO_CURRENT_FIELDS"

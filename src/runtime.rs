@@ -825,6 +825,23 @@ pub fn apply_runtime_config(
                     .to_string(),
             );
         }
+        // The smart-morning dispatcher and the refresher's next-run estimate
+        // hold the boot Config Arc for the cycle/soak layout, so these knobs
+        // only take effect on the next boot. Without this, the settings
+        // toggle saved "applied" with no restart banner while the running
+        // scheduler kept the old plan.
+        if (prev.engine.soak_minutes, prev.engine.interleave_cycles)
+            != (
+                new_cfg.engine.soak_minutes,
+                new_cfg.engine.interleave_cycles,
+            )
+        {
+            reasons.push(
+                "cycle-and-soak dispatch settings changed (soak_minutes and \
+                 interleave_cycles are read by the scheduler at boot)"
+                    .to_string(),
+            );
+        }
     }
     ConfigApplyOutcome {
         restart_required: !reasons.is_empty(),

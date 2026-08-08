@@ -18,6 +18,13 @@
       "groupName": "CI actions"
     },
     {
+      "description": "upload/download-artifact v4+ speak the github.com-only artifact protocol and self-refuse on self-hosted CI; stay on v3 until the self-hosted runner implements the v4 API.",
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["actions/upload-artifact", "actions/download-artifact"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false
+    },
+    {
       "description": "One weekly PR for Rust lockfile-only bumps (a Cargo.lock change rebuilds and redeploys the production image, which is correct but should batch).",
       "matchManagers": ["cargo"],
       "matchUpdateTypes": ["patch", "pin", "digest", "lockFileMaintenance"],

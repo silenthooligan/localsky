@@ -92,7 +92,7 @@ impl HaPassthrough {
         // HA returns the full attribute blob per entity but we only need
         // entity_id + state. Deserialize::deny_unknown_fields is off so
         // the extra fields just get ignored.
-        let arr: Vec<Value> = resp.json().await?;
+        let arr: Vec<Value> = crate::net::safe_fetch::read_json_capped(resp).await?;
         let mut out = Vec::with_capacity(arr.len());
         for v in arr {
             if let (Some(entity_id), Some(state)) = (

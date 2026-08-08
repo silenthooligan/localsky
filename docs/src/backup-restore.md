@@ -72,6 +72,27 @@ docker start localsky
 
 A cold `tar` of the whole directory captures everything, including the wizard draft, instance id, and photos.
 
+## Scheduled backups (automatic)
+
+The best backup is the one you do not have to remember. LocalSky can write a bundle to a local directory on an interval and keep the newest few, off by default and enabled with one environment variable:
+
+```bash
+docker run -d \
+  --name localsky \
+  --restart unless-stopped \
+  -p 8090:8090 \
+  -v /opt/localsky/data:/data \
+  -e LOCALSKY_AUTO_BACKUP_HOURS=24 \    # interval in hours; unset or 0 disables
+  ghcr.io/silenthooligan/localsky:latest
+```
+
+Bundles are written as `localsky-backup-<epoch>.tar.gz` in `LOCALSKY_BACKUP_DIR` (default `/data/backups`, so they live inside your mounted volume), in the exact same format as the API bundle above, so they restore through the same flow. Two more optional knobs:
+
+- `LOCALSKY_BACKUP_DIR`: where bundles are written (default `/data/backups`).
+- `LOCALSKY_BACKUP_KEEP`: how many newest bundles to retain; older ones are pruned (default `7`).
+
+These bundles contain **real secrets** (like every backup), and by default land inside `/data`, so keep the volume protected. For off-box durability, point `LOCALSKY_BACKUP_DIR` at a mounted path that is itself backed up, or copy the directory out on your own schedule. A scheduled backup you have never restored is still only hope: run through [Test your restore](#test-your-restore) once.
+
 ## Restoring
 
 ### From a backup bundle

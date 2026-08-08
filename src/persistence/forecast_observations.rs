@@ -98,8 +98,13 @@ impl ForecastObservationsStore {
         let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
             .map_err(|e| ForecastObservationsError::Date(format!("{date_str}: {e}")))?;
         // Clamp at zero: a (clock-skewed) future-dated row reads as "wet
-        // today" rather than going negative.
-        let days = (chrono::Local::now().date_naive() - date).num_days().max(0);
+        // today" rather than going negative. Configured-timezone date, same
+        // frame the ingest writer stamps rows with; anchoring on the
+        // container's clock read one day ahead every evening in a UTC
+        // container.
+        let days = (crate::timeutil::now_local().date_naive() - date)
+            .num_days()
+            .max(0);
         Ok(Some(days as u32))
     }
 
@@ -158,7 +163,10 @@ impl ForecastObservationsStore {
         window_days: i64,
     ) -> Result<f64, ForecastObservationsError> {
         let c = self.conn.clone();
-        let today_naive = chrono::Local::now().date_naive();
+        // Configured-timezone date: rows are keyed by the ingest writer's
+        // configured-tz day, so the window must anchor on the same frame (the
+        // container clock double-counted "today" every evening under UTC).
+        let today_naive = crate::timeutil::now_local().date_naive();
         let today = today_naive.format("%Y-%m-%d").to_string();
         let start = (today_naive - chrono::Duration::days(window_days.max(0)))
             .format("%Y-%m-%d")

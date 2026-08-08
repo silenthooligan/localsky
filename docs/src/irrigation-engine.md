@@ -168,6 +168,24 @@ Worked example: clay (5 mm/hr infiltration on flat), spray head (15 mm/hr precip
 
 Implementation: [src/engine/cycle_soak.rs](../src/engine/cycle_soak.rs).
 
+### Cycle interleaving
+
+By default the morning sequence is strictly serial: a zone runs every one of its cycles, idling through each soak, before the next zone starts. In the worked example above that is 1h 45min of wall clock to apply 45 minutes of water, and every other zone waits behind it.
+
+`interleave_cycles = true` in the `[engine]` table (or the toggle on the Skip rules settings page) opts in to interleaving: during one zone's soak pause, another zone's cycle runs, the way dedicated irrigation controllers handle cycle-and-soak. The planner lays every zone's cycles on a single valve timeline, dispatching whichever zone can start earliest. The rules it never breaks:
+
+- One valve at a time, always. Interleaving never opens two zones together, regardless of what the controller hardware could do.
+- Every soak is a minimum, not an exact gap. A soak stretches when another zone's cycle is still running as it expires; it never shrinks.
+- Each zone's cycles run in order, and the sequence never takes longer than the serial plan.
+
+Worked example, continued: add a rotor zone that needs one 20-minute pass. Serial, the sequence takes 1h 45min for the clay zone plus 20 minutes for the rotor, about 2h 5min. Interleaved, the rotor pass runs inside the clay zone's first soak and the whole sequence finishes in the clay zone's own 1h 45min.
+
+The default is off, deliberately. On installs fed by a well or a low-recovery pump, the serial plan's idle soak gaps double as recovery time for the water source; interleaving fills that idle time with more pumping, so it has to be an explicit choice. The setting is read at boot, so a change applies after the next restart.
+
+Either way, the scheduler works the sequence's true wall time (runs, soaks, and preambles) backwards from its sunrise finish target, so a cycle-and-soak morning still ends about 15 minutes before sunrise.
+
+Implementation: [src/engine/interleave.rs](../src/engine/interleave.rs).
+
 ## Skip rules
 
 Before any zone fires, the engine runs a deterministic rule ladder. First matching rule wins. Order encodes intent: explicit user overrides > paused > current-conditions safety (raining now, freeze, soil frost, wind) > observed recent rain > soil saturation > forecast skips > heat advisory > dry-run > run.

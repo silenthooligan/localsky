@@ -43,6 +43,38 @@ pub fn now_local() -> DateTime<FixedOffset> {
     }
 }
 
+/// Local calendar date for a UNIX epoch in the CONFIGURED timezone
+/// (system-local fallback, mirroring `now_local`). `None` for an
+/// unrepresentable epoch. Everything that keys rows or buckets by "the
+/// deployment's calendar day" derives it here so writers and readers can
+/// never disagree on the calendar.
+pub fn local_date(epoch: i64) -> Option<NaiveDate> {
+    match configured_tz() {
+        Some(tz) => Utc
+            .timestamp_opt(epoch, 0)
+            .single()
+            .map(|dt| dt.with_timezone(&tz).date_naive()),
+        None => Local
+            .timestamp_opt(epoch, 0)
+            .single()
+            .map(|dt| dt.date_naive()),
+    }
+}
+
+/// Local calendar-day ordinal (num_days_from_ce of the local date) for a UNIX
+/// epoch, in the CONFIGURED timezone (system-local fallback, mirroring
+/// `now_local`). Day-bucketed accumulators (rain-today, ET0-today) key on this
+/// so they roll at the deployment's midnight, not the container's: a UTC
+/// container serving a US deployment would otherwise reset them mid-evening
+/// local time. Falls back to the integer UTC day for an unrepresentable epoch.
+pub fn local_day_ordinal(epoch: i64) -> i32 {
+    use chrono::Datelike;
+    match local_date(epoch) {
+        Some(d) => d.num_days_from_ce(),
+        None => (epoch / 86400) as i32,
+    }
+}
+
 /// The `[start, end)` UTC instants of `day` as a calendar day in the configured
 /// timezone, for day-boundary history queries (e.g. the smart-morning boot
 /// dedupe). Falls back to the system local timezone. `None` if the local

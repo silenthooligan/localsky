@@ -395,10 +395,38 @@ fn is_wizard_config_write(method: &Method, normalized_path: &str) -> bool {
 ///   - when the operator opts into Required mode the bar rises: only an
 ///     explicit trusted_networks / loopback match passes without a
 ///     credential; a bare private IP no longer suffices.
-pub(crate) fn privileged_caller_vouched(ip: &IpAddr, policy: &AuthPolicy) -> bool {
+/// Whether a credential-less caller is vouched on the privileged gate, with the
+/// reverse-proxy caveat folded in.
+///
+/// When `proxied_unconfigured` is true (a forwarding header is present but no
+/// `trusted_proxies` are configured), the socket peer is the proxy's OWN
+/// address, not the client's, so the Disabled-mode "any private IP is vouched"
+/// branch is UNSAFE: a single internet caller behind that proxy looks exactly
+/// like a LAN client, which would hand them the privileged surface (backup =
+/// full secrets + history DB, config writes, restart). In that state we drop
+/// the private-IP allowance and fall back to credential-or-refuse. Loopback and
+/// an explicit `trusted_networks` match still pass (those are real trust the
+/// operator configured or the same box), so a correctly-set-up proxy
+/// (`trusted_proxies` populated → `proxied_unconfigured` is false) and a
+/// direct-LAN owner (no forwarding header → also false) are unaffected.
+pub(crate) fn privileged_caller_vouched_proxied(
+    ip: &IpAddr,
+    policy: &AuthPolicy,
+    proxied_unconfigured: bool,
+) -> bool {
     ip.is_loopback()
         || policy.trusted.iter().any(|net| net.contains(ip))
-        || (!policy.required && is_private_or_loopback(ip))
+        || (!proxied_unconfigured && !policy.required && is_private_or_loopback(ip))
+}
+
+/// A reverse proxy is very likely in front but unconfigured: a forwarding
+/// header is present yet `trusted_proxies` is empty. The peer is then the
+/// proxy's address, so the real client IP (and the private-LAN vouching that
+/// depends on it) cannot be trusted. Cheap header check; shared by the
+/// exposure warning and the privileged gate so both read the same signal.
+fn proxied_but_unconfigured(headers: &header::HeaderMap, policy: &AuthPolicy) -> bool {
+    policy.trusted_proxies.is_empty()
+        && (headers.contains_key("x-forwarded-for") || headers.contains_key("forwarded"))
 }
 
 fn is_privileged_path(method: &Method, path: &str) -> bool {
@@ -432,6 +460,20 @@ fn is_privileged_path(method: &Method, path: &str) -> bool {
     // seed_current) persist or stage the same localsky.toml as /api/config,
     // so they clear the same bar. Probe/test/scan/discover are NOT here.
     if is_wizard_config_write(method, path) {
+        return true;
+    }
+
+    // POST /api/sensors/soil/remove retires a zone's soil probe: it is another
+    // alternate config-write + destructive path. It persists localsky.toml
+    // (clears zone.soil_sensor_id), deletes the probe's recorded history, and
+    // can drive an authenticated unregister call to the configured gateway. It
+    // must clear the same anonymous-internet bar as /api/config, so an
+    // unauthenticated caller in Disabled mode cannot strip soil bindings (which
+    // feed watering-safety skip logic) or wipe sensor history. State-changing
+    // only; the sensor reads it sits beside stay open.
+    if path == "/api/sensors/soil/remove"
+        && !matches!(*method, Method::HEAD | Method::OPTIONS | Method::GET)
+    {
         return true;
     }
 
@@ -719,7 +761,8 @@ pub async fn enforce_no_store(
     // actuation/wizard-config-write are refused for a non-vouched caller.
     if is_privileged_path(req.method(), &path) {
         let client = client_ip(&req, &policy.trusted_proxies);
-        if client.map(|ip| privileged_caller_vouched(&ip, &policy)) == Some(true) {
+        let proxied = proxied_but_unconfigured(req.headers(), &policy);
+        if client.map(|ip| privileged_caller_vouched_proxied(&ip, &policy, proxied)) == Some(true) {
             req.extensions_mut().insert(RequestIdentity::TrustedNetwork);
             return next.run(req).await;
         }
@@ -763,10 +806,7 @@ pub async fn enforce(
         //     (peer = the proxy's own private IP, so the public test never fired).
         let peer = client_ip(&req, &policy.trusted_proxies);
         let direct_public = matches!(peer, Some(ip) if !is_private_or_loopback(&ip));
-        let has_fwd = req.headers().contains_key("x-forwarded-for")
-            || req.headers().contains_key("forwarded");
-        let proxied_unconfigured = policy.trusted_proxies.is_empty()
-            && has_fwd
+        let proxied_unconfigured = proxied_but_unconfigured(req.headers(), &policy)
             && matches!(peer, Some(ip) if is_private_or_loopback(&ip));
         if direct_public || proxied_unconfigured {
             EXPOSED_WHILE_OPEN_WARNED.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -896,7 +936,12 @@ pub async fn enforce(
         // and a configured trusted_networks client are vouched for without
         // credentials, mirroring the wizard ProbeGuard's allowance.
         let client = client_ip(&req, &policy.trusted_proxies);
-        let trusted_ip = client.map(|ip| privileged_caller_vouched(&ip, &policy));
+        // If a reverse proxy is in front but unconfigured, the peer is the
+        // proxy, not the client: drop the Disabled-mode private-IP vouching so
+        // an internet caller forwarded by that proxy cannot reach backup/config.
+        // Loopback / trusted_networks still pass. (LS-REC-05 proxy hardening.)
+        let proxied = proxied_but_unconfigured(req.headers(), &policy);
+        let trusted_ip = client.map(|ip| privileged_caller_vouched_proxied(&ip, &policy, proxied));
         if trusted_ip == Some(true) {
             req.extensions_mut().insert(RequestIdentity::TrustedNetwork);
             return next.run(req).await;
@@ -1051,6 +1096,24 @@ mod tests {
         assert!(is_privileged_path(&Method::POST, "/api/push/unsubscribe"));
         assert!(is_privileged_path(&Method::POST, "/api/zones/photo"));
         assert!(is_privileged_path(&Method::POST, "/api/v1/zones/photo"));
+        // Retiring a soil probe persists config, deletes history, and can
+        // unregister a gateway channel: an alternate config-write, privileged
+        // on the state-changing method across both prefixes.
+        assert!(is_privileged_path(
+            &Method::POST,
+            "/api/sensors/soil/remove"
+        ));
+        assert!(is_privileged_path(
+            &Method::POST,
+            "/api/v1/sensors/soil/remove"
+        ));
+        // But the sensor READ surface it sits beside stays LAN-friendly.
+        assert!(!is_privileged_path(&Method::GET, "/api/sensors/soil"));
+        assert!(!is_privileged_path(&Method::GET, "/api/sensors/discovered"));
+        assert!(!is_privileged_path(
+            &Method::GET,
+            "/api/sensors/soil/remove"
+        ));
         // The vapid-key READ stays public (the frontend needs it before any
         // subscription exists).
         assert!(!is_privileged_path(&Method::GET, "/api/push/vapid-key"));
@@ -1177,15 +1240,15 @@ mod tests {
             // ...and a private-LAN owner IP is vouched without a credential,
             // so the fresh-install LAN wizard still works.
             assert!(
-                privileged_caller_vouched(&lan_owner, &fresh),
+                privileged_caller_vouched_proxied(&lan_owner, &fresh, false),
                 "fresh-install LAN owner must drive {method} {path}"
             );
             // Loopback (same-box proxy / CLI) is vouched too.
-            assert!(privileged_caller_vouched(&loopback, &fresh));
+            assert!(privileged_caller_vouched_proxied(&loopback, &fresh, false));
             // A public anonymous caller is REFUSED by IP: it then falls
             // through to the credential check (which it has none for).
             assert!(
-                !privileged_caller_vouched(&public, &fresh),
+                !privileged_caller_vouched_proxied(&public, &fresh, false),
                 "public anonymous caller must be refused on {method} {path}"
             );
         }
@@ -1208,9 +1271,17 @@ mod tests {
         let lan: IpAddr = "10.0.0.50".parse().unwrap();
         let loopback: IpAddr = "127.0.0.1".parse().unwrap();
         // Bare LAN IP is NOT vouched in Required mode without trusted_networks.
-        assert!(!privileged_caller_vouched(&lan, &required_no_trust));
+        assert!(!privileged_caller_vouched_proxied(
+            &lan,
+            &required_no_trust,
+            false
+        ));
         // Loopback still passes (same-box owner).
-        assert!(privileged_caller_vouched(&loopback, &required_no_trust));
+        assert!(privileged_caller_vouched_proxied(
+            &loopback,
+            &required_no_trust,
+            false
+        ));
 
         // With the LAN explicitly trusted, it is vouched again even in
         // Required mode.
@@ -1221,7 +1292,100 @@ mod tests {
             trusted_proxies: vec![],
             trusted_origins: vec![],
         };
-        assert!(privileged_caller_vouched(&lan, &required_trusted));
+        assert!(privileged_caller_vouched_proxied(
+            &lan,
+            &required_trusted,
+            false
+        ));
+    }
+
+    #[test]
+    fn unconfigured_proxy_drops_private_ip_vouching_on_privileged_gate() {
+        // LS-REC-05 proxy hardening. In the shipped default (Disabled, no
+        // trusted_proxies) a reverse proxy in front makes every forwarded
+        // request arrive with the PROXY's private peer IP. Without the proxy
+        // caveat, that peer would be vouched as a LAN owner and hand an
+        // internet caller the full privileged surface (backup = secrets + DB).
+        let fresh = AuthPolicy {
+            required: false,
+            session_ttl_days: 30,
+            trusted: vec![],
+            trusted_proxies: vec![],
+            trusted_origins: vec![],
+        };
+        let proxy_peer: IpAddr = "172.18.0.2".parse().unwrap(); // e.g. a docker-network proxy
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+
+        // Direct LAN (no proxy detected): still vouched, the fresh-install case.
+        assert!(privileged_caller_vouched_proxied(
+            &proxy_peer,
+            &fresh,
+            false
+        ));
+        // Proxy detected but unconfigured: the private peer is NO LONGER
+        // vouched, so the request falls through to credential-or-refuse.
+        assert!(!privileged_caller_vouched_proxied(
+            &proxy_peer,
+            &fresh,
+            true
+        ));
+        // Loopback still passes even behind a proxy (same-box owner / CLI /
+        // healthcheck): it is genuine trust, not the ambiguous private peer.
+        assert!(privileged_caller_vouched_proxied(&loopback, &fresh, true));
+
+        // Once the operator sets trusted_proxies, the caveat no longer applies
+        // (proxied_but_unconfigured is false), so a real forwarded LAN client
+        // resolved from XFF is vouched again.
+        let configured = AuthPolicy {
+            trusted_proxies: vec!["172.18.0.0/16".parse().unwrap()],
+            ..fresh.clone()
+        };
+        let lan_client: IpAddr = "10.0.0.50".parse().unwrap();
+        // proxied=false here because trusted_proxies is non-empty at the call
+        // site (proxied_but_unconfigured returns false), so vouching holds.
+        assert!(privileged_caller_vouched_proxied(
+            &lan_client,
+            &configured,
+            false
+        ));
+
+        // And an explicit trusted_networks match survives the caveat too.
+        let trusted_net = AuthPolicy {
+            trusted: vec!["10.0.0.0/24".parse().unwrap()],
+            ..fresh.clone()
+        };
+        assert!(privileged_caller_vouched_proxied(
+            &lan_client,
+            &trusted_net,
+            true
+        ));
+    }
+
+    #[test]
+    fn proxied_but_unconfigured_detects_forwarding_headers() {
+        let empty = AuthPolicy {
+            required: false,
+            session_ttl_days: 30,
+            trusted: vec![],
+            trusted_proxies: vec![],
+            trusted_origins: vec![],
+        };
+        // No forwarding header: not proxied.
+        let mut h = header::HeaderMap::new();
+        assert!(!proxied_but_unconfigured(&h, &empty));
+        // X-Forwarded-For present, no trusted_proxies: proxied+unconfigured.
+        h.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.9"));
+        assert!(proxied_but_unconfigured(&h, &empty));
+        // Same header, but trusted_proxies configured: NOT unconfigured.
+        let configured = AuthPolicy {
+            trusted_proxies: vec!["172.18.0.0/16".parse().unwrap()],
+            ..empty.clone()
+        };
+        assert!(!proxied_but_unconfigured(&h, &configured));
+        // The RFC 7239 `Forwarded` header also counts.
+        let mut h2 = header::HeaderMap::new();
+        h2.insert("forwarded", HeaderValue::from_static("for=203.0.113.9"));
+        assert!(proxied_but_unconfigured(&h2, &empty));
     }
 
     #[test]

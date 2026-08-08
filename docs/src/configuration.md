@@ -263,6 +263,7 @@ Each section is optional. Omit to disable that channel.
 capture_efficiency       = 0.70
 session_rain_defer_in    = 0.10
 soak_minutes             = 30
+interleave_cycles        = false    # water other zones during soak pauses; read at boot
 et0_method               = "auto"   # auto | penman_monteith | asce_simplified | hargreaves_samani | source_native
 
 [engine.skip_rules]
@@ -281,6 +282,8 @@ frost_skip_soil_f           = 35.0   # 1.7 C
 ```
 
 All values match v0.1 hardcoded constants. See [skip-rules.md](skip-rules.md) for what each one does.
+
+`interleave_cycles` waters other zones during a zone's cycle-and-soak pauses instead of idling through them, shortening the morning sequence. Default off: the idle soak gaps double as recovery time for a well or low-recovery pump on some installs. One valve still runs at a time and soaks are minimums that may stretch, never shrink; details in [irrigation-engine.md](irrigation-engine.md#cycle-interleaving). Read at boot; a change applies after the next restart.
 
 ### Watering restrictions
 

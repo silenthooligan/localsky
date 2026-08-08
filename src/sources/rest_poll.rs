@@ -64,7 +64,7 @@ impl RestPoll {
             req = req.header(k.as_str(), v.as_str());
         }
         let resp = req.send().await?.error_for_status()?;
-        Ok(resp.bytes().await?.to_vec())
+        Ok(crate::net::safe_fetch::read_body_capped(resp).await?)
     }
 }
 

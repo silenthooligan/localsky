@@ -1,0 +1,15 @@
+{
+  "name": "localsky-e2e",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Playwright UI smoke tests for LocalSky. Runs against a LOCALSKY_DEMO=1 instance (deterministic synthetic data) so the five key pages are proven to RENDER, not just compile.",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "report": "playwright show-report",
+    "install-browsers": "playwright install --with-deps chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0"
+  }
+}

@@ -23,3 +23,12 @@
 # mdBook output (Phase 14)
 /book
 docs/book
+
+# Playwright e2e workspace artifacts. Screenshot baselines are committed
+# ONLY as the CI runner's -linux renders (fonts differ per platform);
+# local-platform renders stay local.
+tests/e2e/node_modules/
+tests/e2e/test-results/
+tests/e2e/playwright-report/
+tests/e2e/smoke.spec.ts-snapshots/*-win32.png
+tests/e2e/smoke.spec.ts-snapshots/*-darwin.png

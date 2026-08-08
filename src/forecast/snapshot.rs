@@ -197,13 +197,22 @@ impl ForecastSnapshot {
         self.daily.get(1).map(|d| d.time_epoch).unwrap_or(i64::MAX)
     }
 
-    /// Model ET0 already SPENT today, mm. The hourly window is
-    /// forward-only (now +47h), so spent is derived by subtraction:
+    /// Model ET0 already SPENT today as of `now_epoch`, mm. The hourly window
+    /// is forward-only (now +47h), so spent is derived by subtraction:
     /// today's full-day ET0 minus the remaining hourly ET0 between now
     /// and local midnight. 0 when the provider sends no hourly ET0 curve
     /// (every remaining hour 0 would otherwise claim the whole day is
     /// already spent).
-    pub fn eto_spent_today_mm(&self) -> f64 {
+    ///
+    /// Stale-anchor guard: between local midnight and the next forecast fetch,
+    /// daily[0] is still YESTERDAY and the evening fetch's hourly window sits
+    /// past that day's midnight, so the subtraction would charge yesterday's
+    /// FULL day as spent at 00:01. When `now_epoch` falls outside daily[0]'s
+    /// own local day ([time_epoch, next local midnight)), spent is 0; the next
+    /// fetch re-anchors daily[0] and the midday math resumes. (A snapshot with
+    /// no tomorrow entry has no upper bound; that conservative edge keeps the
+    /// prior behavior.)
+    pub fn eto_spent_today_mm(&self, now_epoch: i64) -> f64 {
         let Some(today) = self.daily.first() else {
             return 0.0;
         };
@@ -211,6 +220,9 @@ impl ForecastSnapshot {
             return 0.0;
         }
         let midnight = self.next_local_midnight_epoch();
+        if now_epoch < today.time_epoch || now_epoch >= midnight {
+            return 0.0;
+        }
         let remaining_in: f64 = self
             .hourly
             .iter()
@@ -672,6 +684,85 @@ mod tests {
         assert!((fc.past_n_day_precip_in(9) - 1.80).abs() < 1e-9);
         // Empty past window is 0.
         assert!((ForecastSnapshot::default().past_n_day_precip_in(3) - 0.0).abs() < 1e-9);
+    }
+
+    // ---- eto_spent_today_mm (subtraction + stale-anchor guard) ----
+
+    /// Snapshot as fetched midday: daily[0] at local-midnight `day0` carrying a
+    /// 0.18 in full-day ET0, tomorrow's entry supplying the next-midnight
+    /// boundary, and two remaining evening hours of 0.04 in each on the curve.
+    fn et_fc(day0: i64) -> ForecastSnapshot {
+        ForecastSnapshot {
+            daily: vec![
+                DailyEntry {
+                    time_epoch: day0,
+                    et0_in: 0.18,
+                    ..Default::default()
+                },
+                DailyEntry {
+                    time_epoch: day0 + 86_400,
+                    et0_in: 0.17,
+                    ..Default::default()
+                },
+            ],
+            hourly: vec![
+                HourlyEntry {
+                    time_epoch: day0 + 20 * 3600,
+                    et0_in: 0.04,
+                    ..Default::default()
+                },
+                HourlyEntry {
+                    time_epoch: day0 + 21 * 3600,
+                    et0_in: 0.04,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn eto_spent_midday_subtracts_the_remaining_hours() {
+        let day0 = 1_750_000_000;
+        let fc = et_fc(day0);
+        // 18:00: (0.18 - 0.08 remaining) * 25.4 = 2.54 mm spent so far.
+        let spent = fc.eto_spent_today_mm(day0 + 18 * 3600);
+        assert!((spent - 2.54).abs() < 1e-9, "spent = {spent}");
+    }
+
+    #[test]
+    fn eto_spent_is_zero_on_a_stale_pre_rollover_snapshot() {
+        let day0 = 1_750_000_000;
+        let mut fc = et_fc(day0);
+        // Model the last EVENING fetch still cached at 00:30 the next local
+        // day: the forward-only hourly window sits entirely in the new day, so
+        // "remaining before daily[0]'s midnight" sums to 0 and the subtraction
+        // would charge yesterday's FULL 4.572 mm as already spent. The guard
+        // returns 0 until the next fetch re-anchors daily[0].
+        fc.hourly = vec![
+            HourlyEntry {
+                time_epoch: day0 + 86_400 + 3600,
+                et0_in: 0.01,
+                ..Default::default()
+            },
+            HourlyEntry {
+                time_epoch: day0 + 86_400 + 2 * 3600,
+                et0_in: 0.02,
+                ..Default::default()
+            },
+        ];
+        let spent = fc.eto_spent_today_mm(day0 + 86_400 + 1800);
+        assert!((spent - 0.0).abs() < 1e-9, "stale anchor spends 0: {spent}");
+    }
+
+    #[test]
+    fn eto_spent_resumes_on_a_fresh_post_rollover_snapshot() {
+        // The next fetch re-anchors daily[0] to the new day; midday math works
+        // exactly as before the rollover.
+        let day0 = 1_750_000_000 + 86_400;
+        let fc = et_fc(day0);
+        let spent = fc.eto_spent_today_mm(day0 + 18 * 3600);
+        assert!((spent - 2.54).abs() < 1e-9, "spent = {spent}");
     }
 
     // ---- extended-series graft (advisory backfill across providers) ----

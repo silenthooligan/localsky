@@ -29,7 +29,7 @@ pub const WEATHER_FIELD_OPTIONS: &[(&str, &str)] = &[
     ("uv_index", "UV index"),
     ("rain_today_in", "Rain today (in)"),
     ("rain_intensity_in_hr", "Rain rate (in/hr)"),
-    ("et0_today", "ET₀ today (mm)"),
+    ("et0_today", "ET₀ today, full-day total (mm)"),
     ("flow_gpm", "Flow (gpm)"),
     ("flow_total_gal_today", "Flow total today (gal)"),
     ("leaf_wetness_pct", "Leaf wetness (%)"),

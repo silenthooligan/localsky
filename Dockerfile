@@ -11,7 +11,7 @@
 # rebuilds. The cache lives in the runner daemon's BuildKit state; the
 # workflow prunes it back to a budget after each build.
 
-FROM rust:slim-trixie@sha256:31ee7fc65186be7e0e0ccb3f2ca305f14e4739e7642a1ae65753aa5d7b874523 AS toolchain
+FROM rust:slim-trixie@sha256:5c6f46a6e4472ab1ca7ba7d494e6677f2f219ebc02f32025d3986f057635ec9c AS toolchain
 
 RUN apt-get update && apt-get install -y \
         pkg-config libssl-dev curl wget build-essential \

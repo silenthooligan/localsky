@@ -15,7 +15,7 @@ use axum::{
     routing::get,
     Router,
 };
-use chrono::{Datelike, Local};
+use chrono::Datelike;
 use futures::stream::Stream;
 use rusqlite::Connection;
 use serde::Serialize;
@@ -104,7 +104,9 @@ async fn bias(State(state): State<ForecastApiState>) -> impl IntoResponse {
         }
     };
 
-    let today = Local::now().date_naive();
+    // Configured-timezone date, matching the calendar the observation rows
+    // are keyed by (the writer stamps configured-tz days).
+    let today = crate::timeutil::now_local().date_naive();
     let model = BiasModel::from_observations(&observations, today, None);
     let current_month = today.month();
 

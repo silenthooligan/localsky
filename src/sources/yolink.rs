@@ -147,7 +147,7 @@ impl Yolink {
             if !status.is_success() {
                 return Err(anyhow::anyhow!("yolink api {status}"));
             }
-            return Ok(resp.json().await?);
+            return Ok(crate::net::safe_fetch::read_json_capped(resp).await?);
         }
         Err(anyhow::anyhow!("yolink retry exhausted"))
     }

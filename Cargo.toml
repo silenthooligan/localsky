@@ -1,6 +1,6 @@
 [package]
 name = "localsky"
-version = "0.7.5"
+version = "0.7.8"
 edition = "2021"
 license = "Apache-2.0"
 description = "Local-first weather and irrigation control with native FAO-56 ET, multi-source weather merge, multi-controller HAL, optional Home Assistant, and optional local LLM advisor."
@@ -51,7 +51,7 @@ if-addrs = { version = "0.15", optional = true }
 # lightning feed is wss:// on 443, so the rustls-webpki feature is on
 # (same rustls/webpki-roots stack reqwest already pulls, so the runtime
 # image stays OpenSSL-free).
-tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"], optional = true }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"], optional = true }
 
 # Async helpers
 futures = "0.3"
@@ -106,7 +106,7 @@ web-push = { version = "0.11", default-features = false, features = ["isahc-clie
 # (server: read env -> serve via /api/push/vapid-key; hydrate WASM:
 # decode + Uint8Array conversion before pushManager.subscribe). Pure
 # Rust, no_std-compatible, so it's free to link into the WASM bundle.
-base64 = "0.22"
+base64 = "0.23"
 
 # HMAC-SHA256 signing for the Tuya cloud adapter (openapi.tuyaXX.com
 # requires per-request HMAC signatures). Pure Rust, all transitively
@@ -120,7 +120,7 @@ hex = { version = "0.4", optional = true }
 # ES256 (P-256 ECDSA) JWT signing for the Apple WeatherKit source. Pure Rust
 # (RustCrypto), so it won't pull a second C crypto backend alongside rustls.
 # ssr-only: WeatherKit signing never runs in the WASM bundle.
-p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"], optional = true }
+p256 = { version = "0.14", features = ["ecdsa", "pkcs8", "pem", "getrandom"], optional = true }
 
 # Pure-Rust GRIB2 decoder for the NOAA MRMS radar-QPE source. MRMS publishes its
 # 1 km national QPE grids as GRIB2; the adapter decodes the cell over the

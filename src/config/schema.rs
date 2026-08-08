@@ -2128,6 +2128,15 @@ pub struct EngineParams {
     /// available in ZoneConfig (Phase 3+).
     #[serde(default = "default_soak_minutes")]
     pub soak_minutes: u32,
+    /// Interleave cycle-and-soak across zones in the smart-morning sequence:
+    /// during one zone's soak gap another zone's cycle may run (still one
+    /// valve at a time), shortening the sequence's total wall time. Default
+    /// false: the serial plan's idle soak gaps double as pump/well recovery
+    /// time on some installs, so removing that idle time must be a deliberate
+    /// choice. Soaks are treated as minimums (they may stretch, never
+    /// shrink). Read at boot by the dispatcher, like soak_minutes.
+    #[serde(default)]
+    pub interleave_cycles: bool,
     /// ET0 method. Auto = prefer Penman-Monteith when sources provide
     /// the inputs; fall back to ASCE simplified, then Hargreaves-Samani.
     #[serde(default)]
@@ -2158,6 +2167,7 @@ impl Default for EngineParams {
             capture_efficiency: default_capture_eff(),
             session_rain_defer_in: default_session_rain_defer_in(),
             soak_minutes: default_soak_minutes(),
+            interleave_cycles: false,
             et0_method: Et0Method::default(),
             watering_restrictions: Vec::new(),
             seasonal_adjust_pct: default_seasonal_adjust_pct(),

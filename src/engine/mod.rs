@@ -10,6 +10,7 @@ pub mod conditions;
 pub mod cycle_soak;
 pub mod et0;
 pub mod forecast_bias;
+pub mod interleave;
 pub mod restrictions;
 pub mod scripting;
 pub mod skip_rules;

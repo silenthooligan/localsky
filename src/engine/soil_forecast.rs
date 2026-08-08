@@ -123,3 +123,58 @@ pub fn project_zone(
         status: status.to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::forecast::snapshot::DailyEntry;
+
+    fn zone() -> ZoneSoilInputs {
+        ZoneSoilInputs {
+            slug: "back_yard".into(),
+            name: "Back yard".into(),
+            kc: 0.8,
+            soil_depth_mm: 150.0,
+            current_pct: Some(60.0),
+            target_min_pct: 30.0,
+            target_max_pct: 70.0,
+        }
+    }
+
+    /// Rain-free 7-day daily window (only the day count matters here).
+    fn dry_week() -> ForecastSnapshot {
+        ForecastSnapshot {
+            daily: (0..7i64)
+                .map(|i| DailyEntry {
+                    time_epoch: 1_750_000_000 + i * 86_400,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn realistic_summer_et_declines_the_curve_materially() {
+        // Magnitude pin against the mm/inches ET regression (issue #4): a
+        // realistic summer ET0 of 4.6 mm/day loses 4.6 * 0.8 / 150 mm of the
+        // root zone per dry day, ~2.45%/day, ~14.7% over the 6 projected steps.
+        let out = project_zone(&zone(), &dry_week(), 4.6, 0.7, 7);
+        assert_eq!(out.predicted_pct.len(), 7);
+        let start = out.predicted_pct[0];
+        let end = *out.predicted_pct.last().unwrap();
+        assert!((start - 60.0).abs() < 1e-9, "day 0 is the current reading");
+        let decline = start - end;
+        assert!((13.0..17.0).contains(&decline), "7-day decline = {decline}");
+        // The same week at the 25x-too-small regression scale (4.6 / 25.4
+        // "mm"/day, i.e. inches mislabeled as mm) barely moves the curve; a
+        // future unit slip fails the materiality assertion above, and this one
+        // documents what the broken projection looked like.
+        let tiny = project_zone(&zone(), &dry_week(), 4.6 / 25.4, 0.7, 7);
+        let tiny_decline = tiny.predicted_pct[0] - tiny.predicted_pct.last().unwrap();
+        assert!(
+            tiny_decline < 1.0,
+            "regression-scale decline = {tiny_decline}"
+        );
+    }
+}

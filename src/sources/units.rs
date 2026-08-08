@@ -73,9 +73,18 @@ pub fn to_canonical(field: WeatherField, value: f64, unit: Option<&str>) -> f64 
             "l" | "liter" | "liters" | "litre" | "litres" => value * 0.264_172,
             _ => value, // gal / unknown
         },
+        // Et0Today's canonical bus unit is MILLIMETERS (the one metric field:
+        // the engine's ET math is mm-native). A station-class producer that
+        // reports daily ET in inches (Davis WeatherLink's "ET (day)" on a
+        // US-units HA install, mapped via `et0today`) must convert here, or
+        // the mm bus reads 25.4x low (issue #4's missed-conversion half).
+        Et0Today => match u.as_str() {
+            "in" | "inch" | "inches" => value * 25.4,
+            _ => value, // mm / unknown = already-canonical mm
+        },
         // Unitless, already-canonical, or non-scalar fields: pass through.
-        RhPct | SolarWm2 | UvIndex | Illuminance | WindBearingDeg | LightningCount | Et0Today
-        | Pop | LeafWetness | RainTypeStr | ForecastDaily | ForecastHourly => value,
+        RhPct | SolarWm2 | UvIndex | Illuminance | WindBearingDeg | LightningCount | Pop
+        | LeafWetness | RainTypeStr | ForecastDaily | ForecastHourly => value,
     }
 }
 
@@ -86,6 +95,16 @@ mod tests {
 
     fn approx(a: f64, b: f64) {
         assert!((a - b).abs() < 0.01, "{a} != {b}");
+    }
+
+    #[test]
+    fn et0_inches_convert_to_canonical_mm() {
+        // Davis-style "ET (day)" in inches on a US-units install -> mm bus.
+        approx(to_canonical(Et0Today, 0.18, Some("in")), 4.572);
+        approx(to_canonical(Et0Today, 0.18, Some("inches")), 4.572);
+        // Metric or unlabeled values are already canonical mm.
+        approx(to_canonical(Et0Today, 4.6, Some("mm")), 4.6);
+        approx(to_canonical(Et0Today, 4.6, None), 4.6);
     }
 
     #[test]

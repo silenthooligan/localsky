@@ -224,7 +224,8 @@ impl TuyaCloud {
                 token = self.refresh_token().await?;
                 continue;
             }
-            let body: StatusResponse = resp.error_for_status()?.json().await?;
+            let http = resp.error_for_status()?;
+            let body: StatusResponse = crate::net::safe_fetch::read_json_capped(http).await?;
             if !body.success {
                 return Err(anyhow::anyhow!(
                     "tuya status response failed: {}",

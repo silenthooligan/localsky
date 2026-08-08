@@ -227,15 +227,18 @@ impl VerdictHistoryStore {
     /// predicted-vs-observed rain from `forecast_observations`, plus the honest
     /// tally from `assess_day`. Ordered newest-first.
     ///
-    /// The day key is derived here in `chrono::Local` from each verdict's epoch,
-    /// NOT from the stored `date_local` column. `date_local` is written via SQLite
-    /// `strftime(..., 'unixepoch')` (UTC), while `forecast_observations.date` is
-    /// the refresher's `chrono::Local` day. Joining on those two columns directly
-    /// (the prior implementation) keyed a UTC day against a local day, so on any
-    /// deploy west of UTC an evening verdict mis-joined to the next day's rain (or
+    /// The day key is derived here via `timeutil::local_date` (the CONFIGURED
+    /// timezone) from each verdict's epoch, NOT from the stored `date_local`
+    /// column. `date_local` is written via SQLite `strftime(..., 'unixepoch')`
+    /// (UTC), while `forecast_observations.date` is the refresher's
+    /// configured-tz day. Joining on those two columns directly (the prior
+    /// implementation) keyed a UTC day against a local day, so on any deploy
+    /// west of UTC an evening verdict mis-joined to the next day's rain (or
     /// to NULL), and a UTC-day MIN(epoch) preferentially selected the *previous*
     /// local evening's transition rather than the morning one. Re-deriving the
-    /// local day in the same calendar `forecast_observations` uses fixes both.
+    /// day in the same calendar `forecast_observations` now uses (the writer
+    /// moved to the configured tz too) keeps writer and reader agreeing even
+    /// in a UTC container.
     pub async fn accuracy_window(
         &self,
         from_epoch: i64,
@@ -243,7 +246,6 @@ impl VerdictHistoryStore {
         let c = self.conn.clone();
         tokio::task::spawn_blocking(
             move || -> rusqlite::Result<crate::ha::snapshot::AccuracyResult> {
-                use chrono::TimeZone;
                 use std::collections::{BTreeMap, HashMap};
                 let conn = c.blocking_lock();
 
@@ -278,8 +280,8 @@ impl VerdictHistoryStore {
                 // Group by LOCAL day, keep the earliest (morning) verdict per day.
                 let mut by_day: BTreeMap<String, (i64, String, String)> = BTreeMap::new();
                 for (epoch, verdict, reason) in vrows {
-                    let date = match chrono::Local.timestamp_opt(epoch, 0).single() {
-                        Some(dt) => dt.format("%Y-%m-%d").to_string(),
+                    let date = match crate::timeutil::local_date(epoch) {
+                        Some(d) => d.format("%Y-%m-%d").to_string(),
                         None => continue,
                     };
                     by_day
@@ -481,7 +483,6 @@ mod tests {
 
     #[tokio::test]
     async fn accuracy_window_joins_and_tallies_honestly() {
-        use chrono::TimeZone;
         let mut c = Connection::open_in_memory().unwrap();
         runner::run(&mut c).unwrap();
         let conn = Arc::new(Mutex::new(c));
@@ -490,9 +491,7 @@ mod tests {
         // is deterministic regardless of the runner's TZ. Two midday epochs ~24h
         // apart land on different local days.
         let day = |e: i64| {
-            chrono::Local
-                .timestamp_opt(e, 0)
-                .single()
+            crate::timeutil::local_date(e)
                 .unwrap()
                 .format("%Y-%m-%d")
                 .to_string()

@@ -166,10 +166,10 @@ impl HttpGeneric {
             // base_url -> SSRF exfil channel otherwise), matching sibling adapters.
             return Err(ControllerError::Remote(format!("HTTP {status}")));
         }
-        let body = resp.text().await.map_err(|e| {
-            ControllerError::Transport(crate::net::reqwest_error_category(&e).to_string())
-        })?;
-        serde_json::from_str(&body)
+        let body = crate::net::safe_fetch::read_body_capped(resp)
+            .await
+            .map_err(|e| ControllerError::Transport(e.to_string()))?;
+        serde_json::from_slice(&body)
             .map_err(|_| ControllerError::Remote("unexpected response shape".into()))
     }
 

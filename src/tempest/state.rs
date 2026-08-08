@@ -429,21 +429,25 @@ struct RollingBuffers {
     strikes: VecDeque<StrikeEvent>, // last hour of strikes
     rain_today: f64,                // sum of rain_mm_last_min, day-bucket
     rain_today_day: i32,            // current LOCAL calendar-day bucket (num_days_from_ce)
+    // LOCAL calendar day of the last et0_today write (apply_source_fields).
+    // 0 = never written through that path (unknown day, e.g. a demo store()
+    // seed): the carry-forward then leaves the value alone. Any other day
+    // mismatch zeroes the carried accumulator at rollover, mirroring
+    // rain_today_day, so a source quiet across midnight can't pin yesterday's
+    // total into the new day.
+    et0_today_day: i32,
 }
 
-/// Local calendar-day ordinal for a UNIX epoch: num_days_from_ce of the
-/// local date, so the rain-today bucket rolls over at LOCAL midnight.
-/// The previous `(epoch / 86400)` bucket was a UTC day despite its
-/// comment, which zeroed the accumulator mid-evening for any tz west of
-/// UTC and split overnight storms across two "days". Falls back to the
-/// integer UTC day when the timestamp doesn't resolve to a local time.
+/// Local calendar-day ordinal for a UNIX epoch: num_days_from_ce of the local
+/// date in the deployment's CONFIGURED timezone (crate::timeutil), so the
+/// rain-today / et0-today buckets roll over at the DEPLOYMENT's midnight.
+/// The previous chrono::Local frame was the CONTAINER's timezone: in a UTC
+/// container (the common public deployment) it reset the accumulators at UTC
+/// midnight, mid-evening for any US tz, and split overnight storms across two
+/// "days". Falls back to the integer UTC day for an unrepresentable epoch.
 #[cfg(feature = "ssr")]
 fn local_day_ordinal(epoch: i64) -> i32 {
-    use chrono::{Datelike, TimeZone};
-    match chrono::Local.timestamp_opt(epoch, 0).single() {
-        Some(dt) => dt.date_naive().num_days_from_ce(),
-        None => (epoch / 86400) as i32,
-    }
+    crate::timeutil::local_day_ordinal(epoch)
 }
 
 #[cfg(feature = "ssr")]
@@ -937,6 +941,21 @@ impl TempestStore {
         }
     }
 
+    /// True when the ET0-today field is currently owned by a FRESH LIVE source
+    /// (judged by that source's own max_age, as of `at`). Live stations report
+    /// ET0 as an accumulator since local midnight, while a cloud fill (e.g. the
+    /// Open-Meteo current emit) writes the FULL-DAY forecast figure; the
+    /// refresher uses this ownership bit, never a magnitude heuristic, to
+    /// decide whether the bus `et0_today` can honestly serve as
+    /// eto_spent_today_mm. Only reads `field_owners` (live claims); a fill
+    /// never registers there.
+    pub fn et0_today_is_live(&self, at: i64) -> bool {
+        let owners = self.field_owners.lock().unwrap();
+        owners.get("et0_today").is_some_and(|(_, oe, ol)| {
+            !owner_is_stale(self.max_age_for_field(ol, "et0_today"), *oe, at)
+        })
+    }
+
     pub fn snapshot(&self) -> Arc<Snapshot> {
         self.current.load_full()
     }
@@ -1025,6 +1044,9 @@ impl TempestStore {
         }
         let last = roll.strikes.back().cloned();
         let pressure_trend: Vec<_> = roll.pressure.iter().cloned().collect();
+        // ET0 carries forward only within the local day it was written (bucket
+        // 0 = unknown day, leave it alone); see RollingBuffers::et0_today_day.
+        let et0_same_day = roll.et0_today_day == day_bucket || roll.et0_today_day == 0;
         drop(roll);
 
         let air_temp_f = obs.air_temp_c * 9.0 / 5.0 + 32.0;
@@ -1063,8 +1085,11 @@ impl TempestStore {
             rain_intensity_in_hr: obs.rain_mm_last_min * 60.0 / 25.4,
             // ET0 / flow / POP are not in the Tempest packet; carry forward
             // whatever a bus source last contributed so an obs_st doesn't blank
-            // them out (mirrors how rapid_wind / lightning are carried).
-            et0_today: prev.et0_today,
+            // them out (mirrors how rapid_wind / lightning are carried). ET0 is
+            // day-bucketed like rain_in_today: once the local day rolls, the
+            // carried accumulator is yesterday's and zeroes until a source
+            // writes today's value.
+            et0_today: if et0_same_day { prev.et0_today } else { 0.0 },
             flow_gpm: prev.flow_gpm,
             flow_total_gal_today: prev.flow_total_gal_today,
             pop_pct: prev.pop_pct,
@@ -1303,6 +1328,7 @@ impl TempestStore {
         let mut owns_wind = false;
         let mut owns_rh = false;
         let mut owns_rain = false;
+        let mut wrote_et0 = false;
         // Keys this source wrote this call -> recorded as provenance after the
         // owners lock drops (a live claim or a forecast fill both count).
         let mut prov_keys: Vec<&'static str> = Vec::new();
@@ -1398,7 +1424,10 @@ impl TempestStore {
                 }
                 F::LightningCount => snap.lightning_count_last_min = v.max(0.0) as u32,
                 F::LightningDistanceMi => snap.lightning_avg_dist_mi = v,
-                F::Et0Today => snap.et0_today = v,
+                F::Et0Today => {
+                    snap.et0_today = v;
+                    wrote_et0 = true;
+                }
                 F::FlowGpm => snap.flow_gpm = v,
                 F::FlowTotalGalToday => snap.flow_total_gal_today = v,
                 F::Pop => snap.pop_pct = v,
@@ -1412,6 +1441,22 @@ impl TempestStore {
         drop(fills);
         if !touched {
             return;
+        }
+        // Day-bucket the ET0 accumulator like rain_in_today: an Et0Today write
+        // stamps the local day it belongs to; a value carried forward from a
+        // PREVIOUS local day is zeroed, so a source that reported ET0 yesterday
+        // and went quiet across midnight cannot pin yesterday's total into the
+        // new day (issue #4). rolling nests inside write_gate (same order as
+        // apply_obs) and is only taken after owners/fills drop.
+        {
+            let mut roll = self.rolling.lock().unwrap();
+            let day = local_day_ordinal(at_epoch);
+            if wrote_et0 {
+                roll.et0_today_day = day;
+            } else if roll.et0_today_day != 0 && roll.et0_today_day != day && snap.et0_today != 0.0
+            {
+                snap.et0_today = 0.0;
+            }
         }
         // Record display provenance (separate lock, never nested with owners).
         if !source_label.is_empty() {
@@ -1620,6 +1665,58 @@ mod rain_day_tests {
         // already reset hours before local midnight, tz-dependent.
         store.apply_obs("ST", "HB", &obs(local_epoch(2026, 1, 16, 0, 30), 2.54));
         assert!((store.snapshot().rain_in_today - 0.10).abs() < 1e-9);
+    }
+
+    #[test]
+    fn et0_today_resets_at_local_midnight() {
+        use crate::ports::weather_source::WeatherField as F;
+        let store = TempestStore::new();
+        // A live station reports the since-midnight accumulator late in the day.
+        let t1 = local_epoch(2026, 1, 15, 23, 30);
+        store.apply_source_fields(&[(F::Et0Today, 4.2)], t1, true, "davis");
+        assert!((store.snapshot().et0_today - 4.2).abs() < 1e-9);
+        assert!(store.et0_today_is_live(t1), "fresh live owner");
+        // An obs_st on the NEXT local day must not carry yesterday's total
+        // (the pre-fix carry-forward pinned it until the source spoke again).
+        store.apply_obs("ST", "HB", &obs(local_epoch(2026, 1, 16, 0, 30), 0.0));
+        assert!((store.snapshot().et0_today - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn et0_today_zeroes_on_next_day_bus_write_and_carries_within_the_day() {
+        use crate::ports::weather_source::WeatherField as F;
+        let store = TempestStore::new();
+        let t1 = local_epoch(2026, 1, 15, 22, 0);
+        store.apply_source_fields(&[(F::Et0Today, 3.8)], t1, true, "davis");
+        // A same-day write of an unrelated field carries the accumulator.
+        store.apply_source_fields(
+            &[(F::AirTempF, 50.0)],
+            local_epoch(2026, 1, 15, 23, 0),
+            true,
+            "davis",
+        );
+        assert!((store.snapshot().et0_today - 3.8).abs() < 1e-9);
+        // The same unrelated write on the NEXT local day zeroes it: the day
+        // rolled and no source has reported today's ET0 yet.
+        store.apply_source_fields(
+            &[(F::AirTempF, 48.0)],
+            local_epoch(2026, 1, 16, 1, 0),
+            true,
+            "davis",
+        );
+        assert!((store.snapshot().et0_today - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn et0_cloud_fill_is_not_live() {
+        use crate::ports::weather_source::WeatherField as F;
+        let store = TempestStore::new();
+        let t = local_epoch(2026, 1, 15, 12, 0);
+        // A forecast fill (live_current=false) writes the full-day figure but
+        // must never read as a live station accumulator.
+        store.apply_source_fields(&[(F::Et0Today, 4.6)], t, false, "open_meteo");
+        assert!((store.snapshot().et0_today - 4.6).abs() < 1e-9);
+        assert!(!store.et0_today_is_live(t), "cloud fill is not live");
     }
 
     #[test]

@@ -31,15 +31,36 @@ pub async fn reap_once(store: &ActiveRunsStore, registry: &ControllerRegistry, n
     };
     let mut enforced = 0;
     for run in due {
-        let Some(controller) = registry.get(&run.controller_id) else {
-            // Controller no longer registered (config change). Nothing to stop;
-            // drop the stale ledger row so the reaper does not spin on it.
-            tracing::warn!(
-                zone = %run.zone_slug, controller = %run.controller_id,
-                "reaper: controller no longer registered; dropping stale active_run"
-            );
-            let _ = store.disarm(&run.zone_slug).await;
-            continue;
+        // Resolve the controller to stop through. If the run's own controller
+        // id is no longer registered, DO NOT silently disarm: that drops the
+        // shutoff backstop and can strand a valve open. This id-miss happens
+        // when a config hot-reload changes a controller's id while a zone is
+        // armed (same physical hardware, new id) -- the MQTT/DIY path's only
+        // other off is an in-process timer bound to the now-dropped instance,
+        // so the ledger is the last defense. Fall back to the current default
+        // controller (the same hardware in the common rename case; stopping a
+        // zone that isn't running there is an idempotent no-op). With no
+        // controller registered at all, keep the row and retry next tick rather
+        // than abandon the backstop (boot_reconcile closes valves at next start).
+        let controller = match registry.get(&run.controller_id) {
+            Some(c) => c,
+            None => match registry.default() {
+                Some(def) => {
+                    tracing::warn!(
+                        zone = %run.zone_slug, controller = %run.controller_id,
+                        fallback = %def.id(),
+                        "reaper: run's controller no longer registered; enforcing shutoff via default controller"
+                    );
+                    def
+                }
+                None => {
+                    tracing::error!(
+                        zone = %run.zone_slug, controller = %run.controller_id,
+                        "reaper: run's controller gone and no controller registered; keeping row for retry"
+                    );
+                    continue;
+                }
+            },
         };
         match controller.stop_zone(&run.zone_slug).await {
             Ok(()) => {
@@ -258,6 +279,56 @@ mod tests {
         assert_eq!(reap_once(&store, &registry, 200).await, 1);
         assert_eq!(*stopped.lock().unwrap(), vec!["z".to_string()]);
         assert!(store.due(200).await.unwrap().is_empty());
+    }
+
+    // Regression: a config hot-reload changed the controller's id while a zone
+    // was armed. The run's stored controller_id no longer resolves, but the
+    // default controller (the same hardware under a new id) must still enforce
+    // the shutoff -- the reaper must NOT silently disarm and strand the valve.
+    #[tokio::test]
+    async fn reaper_enforces_via_default_when_run_controller_id_is_gone() {
+        let stopped = Arc::new(Mutex::new(Vec::new()));
+        let ctrl: Arc<dyn IrrigationController> = Arc::new(StopRecorder {
+            id: "new_id".into(),
+            stopped: stopped.clone(),
+            stop_alls: Arc::new(AtomicUsize::new(0)),
+            fail: AtomicBool::new(false),
+        });
+        let registry = ControllerRegistry::new();
+        registry.set(vec![(ctrl, true)]); // "new_id" is the default
+
+        let store = mem_store();
+        // Armed under the OLD id, which is no longer in the registry.
+        store
+            .arm("back_yard".into(), "old_id".into(), 0, 100)
+            .await
+            .unwrap();
+
+        let enforced = reap_once(&store, &registry, 200).await;
+        assert_eq!(enforced, 1, "shutoff enforced via the default controller");
+        assert_eq!(*stopped.lock().unwrap(), vec!["back_yard".to_string()]);
+        assert!(
+            store.due(200).await.unwrap().is_empty(),
+            "row disarmed only after a confirmed stop"
+        );
+    }
+
+    // Edge: the run's controller_id is gone AND no controller is registered at
+    // all. There is nothing to stop through, so the row must be KEPT for retry
+    // (not disarmed) -- abandoning it would drop the backstop entirely.
+    #[tokio::test]
+    async fn reaper_keeps_row_when_no_controller_registered() {
+        let registry = ControllerRegistry::new(); // empty
+        let store = mem_store();
+        store.arm("z".into(), "gone".into(), 0, 100).await.unwrap();
+
+        let enforced = reap_once(&store, &registry, 200).await;
+        assert_eq!(enforced, 0, "nothing could be stopped");
+        assert_eq!(
+            store.due(200).await.unwrap().len(),
+            1,
+            "row kept for retry, not silently disarmed"
+        );
     }
 
     // P0-1 end-to-end: a run was in progress when the process was killed (its

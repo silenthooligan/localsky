@@ -10,7 +10,7 @@
 use leptos::prelude::*;
 
 use crate::components::settings_ui::{SettingsLoadError, SettingsResult};
-use crate::components::ui::{Button, FormField, HelpHint, Panel, SkeletonRows, Slider};
+use crate::components::ui::{Button, FormField, HelpHint, Panel, SkeletonRows, Slider, Toggle};
 use crate::components::units_fmt::{temp_unit, wind_unit, UnitPrefs};
 
 #[component]
@@ -30,6 +30,8 @@ pub fn SettingsSkipRules() -> impl IntoView {
     let frost_skip_soil_f = RwSignal::new(38.0f64);
     // P2-6: seasonal water-budget dial (percent of computed run depth).
     let seasonal_adjust_pct = RwSignal::new(100u32);
+    // Cycle/soak interleaving (engine.interleave_cycles, default off).
+    let interleave_cycles = RwSignal::new(false);
 
     let loaded = RwSignal::new(false);
     // Initial-load state: Some(err) when the config GET failed. The editor body is
@@ -61,6 +63,7 @@ pub fn SettingsSkipRules() -> impl IntoView {
                         rain_skip_in.set(d.rain_skip_in);
                         frost_skip_soil_f.set(d.frost_skip_soil_f);
                         seasonal_adjust_pct.set(d.seasonal_adjust_pct);
+                        interleave_cycles.set(d.interleave_cycles);
                         loaded.set(true);
                         load_error.set(None);
                     }
@@ -90,6 +93,7 @@ pub fn SettingsSkipRules() -> impl IntoView {
             rain_skip_in: rain_skip_in.get(),
             frost_skip_soil_f: frost_skip_soil_f.get(),
             seasonal_adjust_pct: seasonal_adjust_pct.get(),
+            interleave_cycles: interleave_cycles.get(),
         };
         #[cfg(feature = "hydrate")]
         {
@@ -200,6 +204,23 @@ pub fn SettingsSkipRules() -> impl IntoView {
                         }}
                     </p>
                 </FormField>
+            </Panel>
+
+            // Cycle/soak interleaving rides this engine-tuning page like the
+            // seasonal dial above (the field lives on `engine`, not
+            // `engine.skip_rules`).
+            <Panel title="Cycle and soak".to_string()>
+                <p class="settings-page__subtitle" style="margin: 0 0 0.85rem">
+                    "When a zone's sprinklers apply water faster than the soil "
+                    "absorbs it, the engine splits the run into short cycles "
+                    "with soak pauses between them so the water sinks in "
+                    "instead of running off."
+                </p>
+                <Toggle
+                    checked=interleave_cycles
+                    label="Interleave cycles across zones".to_string()
+                    helptext="Water other zones during a zone's soak pauses so the morning sequence finishes sooner. One valve still runs at a time, and every soak keeps at least its full length. Leave off if your water source needs recovery time between runs. Applies after the next LocalSky restart.".to_string()
+                />
             </Panel>
 
             <Panel title="Rain skips".to_string() help_topic="skip-breakdown">
@@ -387,6 +408,8 @@ struct SkipRulesDraft {
     /// P2-6 trust dial: lives on `engine` (not `engine.skip_rules`), but rides
     /// this same draft since this is the engine-tuning page.
     seasonal_adjust_pct: u32,
+    /// Cycle/soak interleaving: also lives on `engine`, same ride-along.
+    interleave_cycles: bool,
 }
 
 #[cfg(feature = "hydrate")]
@@ -432,6 +455,12 @@ async fn fetch_skip_rules() -> Result<SkipRulesDraft, String> {
             .and_then(|v| v.as_u64())
             .map(|n| n as u32)
             .unwrap_or(100),
+        // interleave_cycles lives on `engine` too; absent = default off.
+        interleave_cycles: val
+            .get("engine")
+            .and_then(|e| e.get("interleave_cycles"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     })
 }
 
@@ -450,27 +479,56 @@ async fn patch_skip_rules(d: SkipRulesDraft) -> Result<(), String> {
     let engine_obj = engine
         .as_object_mut()
         .ok_or_else(|| "engine is not a table".to_string())?;
-    engine_obj.insert(
-        "skip_rules".into(),
-        serde_json::json!({
-            "already_wet_in": d.already_wet_in,
-            "rain_now_in_hr": d.rain_now_in_hr,
-            "rain_next_4h_skip_in": d.rain_next_4h_skip_in,
-            "rain_3day_factor": d.rain_3day_factor,
-            "heat_advisory_temp_f": d.heat_advisory_temp_f,
-            "heat_advisory_humidity_pct": d.heat_advisory_humidity_pct,
-            "heat_advisory_dry_days": d.heat_advisory_dry_days,
-            "wind_forecast_slack_mph": d.wind_forecast_slack_mph,
-            "max_wind_mph": d.max_wind_mph,
-            "min_temp_f": d.min_temp_f,
-            "rain_skip_in": d.rain_skip_in,
-            "frost_skip_soil_f": d.frost_skip_soil_f,
-        }),
-    );
+    // Merge the edited keys INTO the fetched skip_rules object rather than
+    // replacing it wholesale: fields this page does not edit (disabled_rules,
+    // soil-quarantine tuning, rain_observed_window_days) must survive a save.
+    if !engine_obj.contains_key("skip_rules") {
+        engine_obj.insert("skip_rules".into(), serde_json::json!({}));
+    }
+    let sr = engine_obj
+        .get_mut("skip_rules")
+        .and_then(|v| v.as_object_mut())
+        .ok_or_else(|| "engine.skip_rules is not a table".to_string())?;
+    for (k, v) in [
+        ("already_wet_in", serde_json::json!(d.already_wet_in)),
+        ("rain_now_in_hr", serde_json::json!(d.rain_now_in_hr)),
+        (
+            "rain_next_4h_skip_in",
+            serde_json::json!(d.rain_next_4h_skip_in),
+        ),
+        ("rain_3day_factor", serde_json::json!(d.rain_3day_factor)),
+        (
+            "heat_advisory_temp_f",
+            serde_json::json!(d.heat_advisory_temp_f),
+        ),
+        (
+            "heat_advisory_humidity_pct",
+            serde_json::json!(d.heat_advisory_humidity_pct),
+        ),
+        (
+            "heat_advisory_dry_days",
+            serde_json::json!(d.heat_advisory_dry_days),
+        ),
+        (
+            "wind_forecast_slack_mph",
+            serde_json::json!(d.wind_forecast_slack_mph),
+        ),
+        ("max_wind_mph", serde_json::json!(d.max_wind_mph)),
+        ("min_temp_f", serde_json::json!(d.min_temp_f)),
+        ("rain_skip_in", serde_json::json!(d.rain_skip_in)),
+        ("frost_skip_soil_f", serde_json::json!(d.frost_skip_soil_f)),
+    ] {
+        sr.insert(k.into(), v);
+    }
     // P2-6: the seasonal dial sits on `engine`, beside `skip_rules`.
     engine_obj.insert(
         "seasonal_adjust_pct".into(),
         serde_json::json!(d.seasonal_adjust_pct),
+    );
+    // Cycle/soak interleaving sits on `engine` as well.
+    engine_obj.insert(
+        "interleave_cycles".into(),
+        serde_json::json!(d.interleave_cycles),
     );
     let resp = Request::put("/api/config")
         .json(&cfg)

@@ -6,8 +6,11 @@
 // The smart_morning target follows IU's prior anchoring:
 //   target_finish = sunrise - 15min   (anchor: finish, sun: sunrise, before: 00:15)
 //   target_start  = target_finish - sequence_total_s
-// where sequence_total_s = sum(zone.planned_run_seconds) plus 2s
-// inter-zone preamble per gap.
+// where sequence_total_s is the sequence's TRUE wall time from
+// scheduler::smart_morning::sequence_wall_seconds (cycle/soak plans laid
+// out under the active policy: runs + soak gaps + 2s inter-zone
+// preambles), clamped so the start never crosses into the previous
+// local day.
 
 use chrono::{Datelike, NaiveDate, TimeZone, Utc};
 
@@ -55,6 +58,14 @@ pub fn sunrise_utc(date: NaiveDate, lat_deg: f64, lon_deg: f64) -> Option<chrono
 
 /// UTC epoch of the smart-morning dispatch start for `date`. Returns
 /// None when sunrise doesn't exist on `date` (polar latitudes).
+///
+/// Clamped to `date`'s local midnight: a soak-heavy plan whose wall time
+/// exceeds the midnight-to-finish span would otherwise anchor its start
+/// inside the PREVIOUS local day, where the day-keyed dedupe can never
+/// fire it on time and the first after-midnight tick would mislabel the
+/// whole sequence a catch-up run. Local midnight is the earliest
+/// same-day start; the dispatcher warns when even that cannot finish by
+/// the target.
 pub fn smart_morning_target_start(
     date: NaiveDate,
     lat: f64,
@@ -63,7 +74,11 @@ pub fn smart_morning_target_start(
 ) -> Option<chrono::DateTime<Utc>> {
     let sunrise = sunrise_utc(date, lat, lon)?;
     let target_finish = sunrise - chrono::Duration::minutes(FINISH_BEFORE_SUNRISE_MIN);
-    Some(target_finish - chrono::Duration::seconds(sequence_total_s as i64))
+    let start = target_finish - chrono::Duration::seconds(sequence_total_s as i64);
+    match crate::timeutil::local_day_bounds_utc(date) {
+        Some((day_start, _)) if start < day_start => Some(day_start),
+        _ => Some(start),
+    }
 }
 
 #[cfg(test)]
@@ -94,6 +109,26 @@ mod tests {
         let delta = (sr - target).num_minutes();
         // 15 min finish-before + 25 min sequence = 40 min.
         assert_eq!(delta, 40);
+    }
+
+    #[test]
+    fn target_start_clamps_to_local_midnight() {
+        // A 20h "sequence" is longer than any midnight-to-sunrise span, so the
+        // unclamped start would land deep in the previous local day; the clamp
+        // pins it to the date's own local midnight instead. Asserted via the
+        // same local_day_bounds_utc the clamp uses, so the test holds under
+        // any test-machine timezone (CONFIGURED_TZ is unset here and both
+        // sides share the system-local fallback).
+        let date = NaiveDate::from_ymd_opt(2026, 5, 26).unwrap();
+        let target =
+            smart_morning_target_start(date, 40.7128, -74.006, 20 * 3600).expect("target exists");
+        let (day_start, _) =
+            crate::timeutil::local_day_bounds_utc(date).expect("representable day");
+        assert_eq!(target, day_start);
+        // A plan that fits stays unclamped (the legacy arithmetic).
+        let sr = sunrise_utc(date, 40.7128, -74.006).unwrap();
+        let fits = smart_morning_target_start(date, 40.7128, -74.006, 25 * 60).unwrap();
+        assert_eq!((sr - fits).num_minutes(), 40);
     }
 
     #[test]

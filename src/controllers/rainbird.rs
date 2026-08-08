@@ -123,12 +123,9 @@ impl Rainbird {
         if !status.is_success() {
             return Err(ControllerError::Remote(format!("rainbird login {status}")));
         }
-        let lr: LoginResponse = resp.json().await.map_err(|e| {
-            ControllerError::Transport(format!(
-                "rainbird login decode: {}",
-                crate::net::reqwest_error_category(&e)
-            ))
-        })?;
+        let lr: LoginResponse = crate::net::safe_fetch::read_json_capped(resp)
+            .await
+            .map_err(|e| ControllerError::Transport(format!("rainbird login decode: {e}")))?;
         *self.access_token.lock().await = Some(lr.access_token.clone());
         Ok(lr.access_token)
     }
@@ -177,12 +174,9 @@ impl Rainbird {
             if !status.is_success() {
                 return Err(ControllerError::Remote(format!("rainbird {status}")));
             }
-            return resp.json().await.map_err(|e| {
-                ControllerError::Transport(format!(
-                    "rainbird decode: {}",
-                    crate::net::reqwest_error_category(&e)
-                ))
-            });
+            return crate::net::safe_fetch::read_json_capped(resp)
+                .await
+                .map_err(|e| ControllerError::Transport(format!("rainbird decode: {e}")));
         }
         Err(ControllerError::Remote("rainbird retry exhausted".into()))
     }

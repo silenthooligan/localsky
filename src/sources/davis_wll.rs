@@ -185,7 +185,7 @@ impl DavisWll {
         let (client, safe_url) =
             crate::net::safe_fetch::build_safe_client(&url, WLL_TIMEOUT).await?;
         let resp = client.get(safe_url).send().await?.error_for_status()?;
-        Ok(resp.json().await?)
+        Ok(crate::net::safe_fetch::read_json_capped(resp).await?)
     }
 }
 

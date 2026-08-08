@@ -367,10 +367,25 @@ pub fn spawn(
         let mut tick = tokio::time::interval(interval);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_ok: Option<bool> = None;
+        let mut failed_cycles: u32 = 0;
         loop {
             tick.tick().await;
-            match fetch(&url).await {
+            // The gateway's embedded HTTP server has brief busy windows (its
+            // own periodic cloud uploads), so a single failed attempt usually
+            // succeeds 2s later. Retry once in-cycle, and treat only TWO
+            // consecutive failed cycles as a real outage: a lone blip neither
+            // warns nor flips source health (it used to flap
+            // unreachable/reachable pairs into the log every few minutes).
+            let result = match fetch(&url).await {
+                Ok(body) => Ok(body),
+                Err(_) => {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    fetch(&url).await
+                }
+            };
+            match result {
                 Ok(body) => {
+                    failed_cycles = 0;
                     if last_ok != Some(true) {
                         info!(source_id = %id, "ecowitt_gw_poll reachable");
                         if let Some(bus) = &bus {
@@ -426,8 +441,15 @@ pub fn spawn(
                     }
                 }
                 Err(e) => {
-                    if last_ok != Some(false) {
-                        warn!(source_id = %id, error = %e, "ecowitt_gw_poll unreachable");
+                    failed_cycles = failed_cycles.saturating_add(1);
+                    if failed_cycles == 1 {
+                        // One failed cycle (after the retry): quiet. The next
+                        // poll decides whether this is real.
+                        debug!(source_id = %id, error = %e,
+                               "ecowitt_gw_poll: poll cycle failed once; retrying next tick");
+                    } else if last_ok != Some(false) {
+                        warn!(source_id = %id, error = %e, failed_cycles,
+                              "ecowitt_gw_poll unreachable");
                         if let Some(bus) = &bus {
                             let _ = bus.send(SourceEvent::Reachability {
                                 source_id: id.clone(),
@@ -455,7 +477,7 @@ async fn fetch(url: &str) -> anyhow::Result<Value> {
     let (client, safe_url) =
         crate::net::safe_fetch::build_safe_client(url, Duration::from_secs(8)).await?;
     let resp = client.get(safe_url).send().await?.error_for_status()?;
-    Ok(resp.json::<Value>().await?)
+    Ok(crate::net::safe_fetch::read_json_capped::<Value>(resp).await?)
 }
 
 #[cfg(test)]

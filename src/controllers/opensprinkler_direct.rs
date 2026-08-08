@@ -94,15 +94,15 @@ impl OpenSprinklerDirect {
             ControllerError::Transport(crate::net::reqwest_error_category(&e).to_string())
         })?;
         let status = resp.status();
-        let body = resp.text().await.map_err(|e| {
-            ControllerError::Transport(crate::net::reqwest_error_category(&e).to_string())
-        })?;
+        let body = crate::net::safe_fetch::read_body_capped(resp)
+            .await
+            .map_err(|e| ControllerError::Transport(e.to_string()))?;
         if !status.is_success() {
             // Do NOT reflect the raw upstream body: against a forced SSRF
             // target it would leak that target's response. Status only.
             return Err(ControllerError::Remote(format!("HTTP {status}")));
         }
-        let value: serde_json::Value = serde_json::from_str(&body)
+        let value: serde_json::Value = serde_json::from_slice(&body)
             .map_err(|_| ControllerError::Remote("response was not valid JSON".into()))?;
         // OS replies HTTP 200 even on errors and signals them via a
         // {"result":N} envelope (firmware always uses 200 + result

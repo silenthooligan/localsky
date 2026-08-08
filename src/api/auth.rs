@@ -383,16 +383,18 @@ async fn get_session(State(s): State<AuthApiState>, req: Request<Body>) -> Respo
     }
 }
 
-async fn get_tokens(State(s): State<AuthApiState>) -> Response {
-    // NOT USER-SCOPED: list_api_tokens returns EVERY non-revoked token across
-    // all owners, not just the caller's. This is correct under the current
-    // single-owner model (there is exactly one account, so "all tokens" ==
-    // "the owner's tokens"). TODO(multi-user): before any multi-user / role
-    // work lands, scope this to the authenticated RequestIdentity::User(id) (a
-    // `user_id` filter on the query) so one owner cannot enumerate another's
-    // tokens. The token-admin gate already guarantees a real owner identity
-    // here; it just does not yet partition by which owner.
-    match s.rt.store.list_api_tokens().await {
+async fn get_tokens(State(s): State<AuthApiState>, req: Request<Body>) -> Response {
+    // AUTH-3: owner-scope when a real user identity is present (session / API
+    // token). This GET is NOT behind the token-admin gate, so in the
+    // Disabled-default LAN posture it can arrive as TrustedNetwork / Anonymous,
+    // where listing all tokens is the historical behavior and correct under the
+    // single-owner model. When a user IS authenticated, scope to their tokens so
+    // one owner cannot enumerate another's once multi-user lands.
+    let res = match req.extensions().get::<RequestIdentity>() {
+        Some(RequestIdentity::User(uid)) => s.rt.store.list_api_tokens_for_user(*uid).await,
+        _ => s.rt.store.list_api_tokens().await,
+    };
+    match res {
         Ok(list) => Json(serde_json::json!({ "tokens": list })).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
@@ -441,15 +443,23 @@ async fn post_token(State(s): State<AuthApiState>, req: Request<Body>) -> Respon
     }
 }
 
-async fn delete_token(State(s): State<AuthApiState>, Path(id): Path<i64>) -> Response {
-    // NOT USER-SCOPED: revoke_api_token revokes by token id alone, with no
-    // check that the token belongs to the calling owner. Fine under the
-    // single-owner model (only one owner exists, so any token is the owner's).
-    // TODO(multi-user): before multi-user / role work, require the token's
-    // user_id to match the authenticated RequestIdentity::User(id) (or an admin
-    // role) so one owner cannot revoke another's tokens by guessing ids.
-    match s.rt.store.revoke_api_token(id).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+async fn delete_token(
+    State(s): State<AuthApiState>,
+    Path(id): Path<i64>,
+    req: Request<Body>,
+) -> Response {
+    // AUTH-3: the token-admin gate guarantees a real owner identity here in both
+    // auth modes, so scope the revoke to that owner. A non-matching or unknown
+    // id 404s instead of silently "succeeding", so one owner cannot revoke
+    // another's token by guessing ids once multi-user lands.
+    let user_id = match req.extensions().get::<RequestIdentity>() {
+        Some(RequestIdentity::User(uid)) => *uid,
+        // The gate should never let a non-User through; refuse defensively.
+        _ => return err(StatusCode::UNAUTHORIZED, "not signed in"),
+    };
+    match s.rt.store.revoke_api_token_for_user(id, user_id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => err(StatusCode::NOT_FOUND, "token not found"),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }

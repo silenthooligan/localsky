@@ -100,7 +100,8 @@ impl Prometheus {
         if let Some(user) = &self.config.username {
             req = req.basic_auth(user, self.config.password.as_deref());
         }
-        let resp: PromResp = req.send().await?.error_for_status()?.json().await?;
+        let http = req.send().await?.error_for_status()?;
+        let resp: PromResp = crate::net::safe_fetch::read_json_capped(http).await?;
         scalar_from_response(&resp)
             .ok_or_else(|| anyhow::anyhow!("query returned no scalar sample: {promql}"))
     }

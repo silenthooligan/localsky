@@ -391,6 +391,10 @@ pub fn spawn_refresher(
     // unconfigured install). Resolved once at spawn time; changing it
     // requires a restart, the same contract every deploy-time input has.
     zones: Vec<crate::zones::ZoneIdent>,
+    // Boot-time config for the next-run wall-time estimate (cycle/soak +
+    // interleave policy). Same restart-to-apply contract as the scheduler's
+    // own cfg Arc; the hot-reloadable knobs stay on watering_policy.
+    cfg: Option<Arc<crate::config::schema::Config>>,
 ) {
     tokio::spawn(async move {
         // HA client only when sourcing from Home Assistant. Native builds
@@ -530,6 +534,7 @@ pub fn spawn_refresher(
                         &scripts,
                         sensor_history.as_ref(),
                         forecast_obs_store.as_ref(),
+                        cfg.as_deref(),
                     )
                     .await
                 }
@@ -544,6 +549,7 @@ pub fn spawn_refresher(
                     forecast_obs_store.as_ref(),
                     &controllers,
                     control.as_ref(),
+                    cfg.as_deref(),
                 )
                 .await),
             };
@@ -563,6 +569,7 @@ pub fn spawn_refresher(
                             forecast_obs_store.as_ref(),
                             &controllers,
                             control.as_ref(),
+                            cfg.as_deref(),
                         )
                         .await;
                         ss.store(native);
@@ -577,7 +584,10 @@ pub fn spawn_refresher(
                     // populated from Tempest / HA). UPSERT semantics
                     // preserve the morning prediction across the day.
                     if let Some(obs_store) = forecast_obs_store.as_ref() {
-                        let today = chrono::Local::now().date_naive();
+                        // Configured-timezone date, not the container's: a UTC
+                        // container would otherwise file evening observations
+                        // under tomorrow's row.
+                        let today = crate::timeutil::now_local().date_naive();
                         let predicted_in = forecast_store
                             .snapshot()
                             .daily
@@ -893,6 +903,7 @@ async fn refresh_once(
     scripts: &CompiledScripts,
     sensor_history: Option<&crate::persistence::SensorHistoryStore>,
     forecast_obs: Option<&crate::persistence::ForecastObservationsStore>,
+    cfg: Option<&crate::config::schema::Config>,
 ) -> anyhow::Result<IrrigationSnapshot> {
     let states = client.states().await?;
     let map: HashMap<String, Value> = states
@@ -914,6 +925,7 @@ async fn refresh_once(
         sensor_history,
         forecast_obs,
         None,
+        cfg,
     )
     .await;
     // Custom-rule watering multiplier (AdjustMultiplier condition action) is
@@ -949,6 +961,10 @@ async fn build_from_map(
     // HA-helper-derived pause/override below with locally persisted state;
     // `None` (HA path) reads them from the entity map as before.
     control: Option<&crate::persistence::IrrigationControlState>,
+    // Boot-time config, for the sequence wall-time estimate (cycle/soak plans
+    // + the interleave policy) behind next_run_epoch. `None` keeps the plain
+    // sum-of-runs estimate (unconfigured installs have no cycle plans anyway).
+    cfg: Option<&crate::config::schema::Config>,
 ) -> IrrigationSnapshot {
     let mut snap = IrrigationSnapshot {
         last_refresh_epoch: Utc::now().timestamp(),
@@ -975,8 +991,11 @@ async fn build_from_map(
     // Evaluate watering restrictions once per refresh. The verdict feeds
     // skip-logic via Inputs.watering_restrictions below; the cap (when
     // a rule limits run length) tightens each zone's max_duration_s at
-    // the two compute sites further down.
-    let now_local = chrono::Local::now();
+    // the two compute sites further down. Configured-timezone clock: hour
+    // windows and odd/even parity are regulatory LOCAL rules, and the
+    // container clock (UTC on the common Docker setup) evaluated them
+    // against the wrong wall time.
+    let now_local = crate::timeutil::now_local();
     let restriction_verdict = crate::engine::restrictions::evaluate(
         now_local,
         &watering_policy.restrictions,
@@ -986,10 +1005,14 @@ async fn build_from_map(
         .max_minutes_cap
         .map(|m| m.saturating_mul(60));
     // Today's weekday (Sun=0..Sat=6 per chrono::Weekday::num_days_from_sunday)
-    // for per-zone manual-override gating below.
+    // for per-zone manual-override gating below, in the CONFIGURED timezone: a
+    // UTC container flips the weekday at evening local time, which shifted the
+    // override day for any tz west of UTC.
     let today_weekday: u8 = {
         use chrono::Datelike;
-        now_local.weekday().num_days_from_sunday() as u8
+        crate::timeutil::now_local()
+            .weekday()
+            .num_days_from_sunday() as u8
     };
 
     // next_run_epoch is computed below (after the per-zone planned
@@ -1204,7 +1227,7 @@ async fn build_from_map(
     // LocalSky-native next_run_epoch. Compute target_start for today;
     // if today's window has already passed, advance to tomorrow.
     // sequence_total = sum(planned_run_seconds) + 2s inter-zone preamble.
-    snap.next_run_epoch = compute_next_run_epoch(watering_policy.location, &snap.zones);
+    snap.next_run_epoch = compute_next_run_epoch(watering_policy.location, &snap.zones, cfg);
 
     // Forecast block. Aggregates Tempest live + Open-Meteo regional
     // forecast into one struct the UI can render directly.
@@ -1449,15 +1472,16 @@ async fn build_from_map(
     };
     let heat_mult = et_heat_multiplier(heat_index_3day);
 
-    // Source-agnostic reference ET0 (mm): source-reported > Open-Meteo HA sensor
-    // > native compute from the forecast > fallback. Activates the previously
-    // unwired engine::et0 so ET0 works for any forecast source, not just
-    // Open-Meteo-via-HA. Display + soil-projection only (the live decision bucket
-    // is HA-sourced).
+    // Source-agnostic reference ET0 (mm): provider full-day forecast > Open-Meteo
+    // HA sensor > native compute from the forecast > station accumulator >
+    // fallback (see resolve_et0_today_mm). Display + soil-projection only (the
+    // live decision bucket is HA-sourced).
     let et0_lat = watering_policy.location.0;
     let et0_base_doy = {
         use chrono::Datelike;
-        chrono::Utc::now().ordinal() as u16
+        // Day-of-year in the CONFIGURED timezone: the UTC ordinal is tomorrow's
+        // from evening local time onward, skewing the Hargreaves solar term.
+        crate::timeutil::now_local().ordinal() as u16
     };
     let et0_today_mm = resolve_et0_today_mm(tempest.et0_today, &map, &fc, et0_lat, et0_base_doy);
 
@@ -1505,11 +1529,18 @@ async fn build_from_map(
         eto_3day_avg_mm: state_f64(&map, "sensor.open_meteo_eto_3day_avg")
             .filter(|v| *v > 0.0)
             .unwrap_or_else(|| {
+                // Per-day values follow the same ladder as forecast_day_et0_mm
+                // (provider daily ET0 in mm > native Hargreaves) so the 3-day
+                // average agrees with the today/tomorrow tiles in method + units.
                 let vals: Vec<f64> = (0..3)
                     .filter_map(|i| {
-                        fc.daily
-                            .get(i)
-                            .and_then(|d| native_et0_mm(d, et0_lat, et0_base_doy + i as u16))
+                        fc.daily.get(i).and_then(|d| {
+                            if d.et0_in > 0.0 {
+                                Some(d.et0_in * 25.4)
+                            } else {
+                                native_et0_mm(d, et0_lat, et0_base_doy + i as u16)
+                            }
+                        })
                     })
                     .collect();
                 if vals.is_empty() {
@@ -1539,7 +1570,12 @@ async fn build_from_map(
         heat_multiplier: heat_mult,
         days_since_significant_rain: days_since_rain,
         // Extended model context (all 0 when the provider lacks the series).
-        eto_spent_today_mm: fc.eto_spent_today_mm(),
+        // ET spent stays MODEL-derived (full-day minus the remaining hourly
+        // curve): the bus et0_today field's contract is the FULL-DAY figure
+        // (no adapter or mapping declares accumulator semantics), so treating
+        // a live-owned value as "spent" would charge a mapped full-day sensor
+        // at dawn. A dedicated accumulator field can revisit this.
+        eto_spent_today_mm: fc.eto_spent_today_mm(now_epoch),
         vpd_now_kpa: fc.vpd_now_and_max_today().0,
         vpd_max_today_kpa: fc.vpd_now_and_max_today().1,
         // First hour WITH a value (a non-OM owner's window can start in the
@@ -1741,6 +1777,7 @@ async fn refresh_once_native(
     // persistence DB is mounted, in which case the snapshot falls back to
     // "no pause / auto override" (and the API rejects pause writes).
     control: Option<&crate::persistence::IrrigationControlState>,
+    cfg: Option<&crate::config::schema::Config>,
 ) -> IrrigationSnapshot {
     let map: HashMap<String, Value> = HashMap::new();
     let mut snap = build_from_map(
@@ -1754,6 +1791,7 @@ async fn refresh_once_native(
         sensor_history,
         forecast_obs,
         control,
+        cfg,
     )
     .await;
     // Native builds have no remote dependency; the engine is always reachable.
@@ -1799,7 +1837,10 @@ async fn refresh_once_native(
         .collect();
     let today_weekday: u8 = {
         use chrono::Datelike;
-        chrono::Local::now().weekday().num_days_from_sunday() as u8
+        // Configured timezone, not the container's (same fix as build_from_map).
+        crate::timeutil::now_local()
+            .weekday()
+            .num_days_from_sunday() as u8
     };
     // Read before the mutable zone loop borrows snap.
     let global_ov = snap.global_override.clone();
@@ -1840,7 +1881,7 @@ async fn refresh_once_native(
         .map(|z| z.planned_run_seconds as f64)
         .sum::<f64>()
         / 60.0;
-    snap.next_run_epoch = compute_next_run_epoch(watering_policy.location, &snap.zones);
+    snap.next_run_epoch = compute_next_run_epoch(watering_policy.location, &snap.zones, cfg);
 
     // A6: pause / override come from `control` (threaded into build_from_map
     // above); thresholds come from cfg.engine.skip_rules via watering_policy.
@@ -2431,20 +2472,25 @@ fn compute_seven_day_verdicts(
 /// already passed. Returns 0 when location is unset or sunrise can't be
 /// computed (polar latitudes on the date in question), matching the
 /// snapshot's default sentinel.
-fn compute_next_run_epoch(location: (f64, f64), zones: &[crate::ha::snapshot::ZoneState]) -> i64 {
+fn compute_next_run_epoch(
+    location: (f64, f64),
+    zones: &[crate::ha::snapshot::ZoneState],
+    cfg: Option<&crate::config::schema::Config>,
+) -> i64 {
     use crate::engine::sunrise::smart_morning_target_start;
-    const INTER_ZONE_PREAMBLE_S: u64 = 2;
 
     let (lat, lon) = location;
     if lat == 0.0 && lon == 0.0 {
         return 0;
     }
-    let total_dispatch_s: u64 = zones.iter().map(|z| z.planned_run_seconds as u64).sum();
-    let zones_to_run = zones.iter().filter(|z| z.planned_run_seconds > 0).count();
+    // True wall time of the sequence (runs + soak gaps + preambles, interleave
+    // aware), from the same planner the dispatcher's window math uses, so the
+    // displayed next-run time and the actual dispatch agree.
+    let interleave = cfg.map(|c| c.engine.interleave_cycles).unwrap_or(false);
     let sequence_total_s =
-        total_dispatch_s + INTER_ZONE_PREAMBLE_S * (zones_to_run.saturating_sub(1)) as u64;
+        crate::scheduler::smart_morning::sequence_wall_seconds(cfg, zones, interleave);
 
-    let now = chrono::Local::now();
+    let now = crate::timeutil::now_local();
     let today_local = now.date_naive();
 
     if let Some(today_target) = smart_morning_target_start(today_local, lat, lon, sequence_total_s)
@@ -2507,10 +2553,19 @@ fn native_et0_mm(d: &crate::forecast::snapshot::DailyEntry, lat: f64, doy: u16) 
     (r.et0_mm_day.is_finite() && r.et0_mm_day > 0.0).then_some(r.et0_mm_day)
 }
 
-/// Today's reference ET0 (mm), source-agnostic. Priority: a source that
-/// reports ET0 directly (HA-passthrough `et0today` / MQTT `et0_today` ->
-/// snapshot.et0_today) > Open-Meteo's HA REST sensor > native compute from the
-/// forecast > 5.0 fallback. Generalizes ET0 off the Open-Meteo-only path.
+/// Today's reference ET0 (mm), source-agnostic. The contract is the FULL-DAY
+/// figure (snapshot doc: eto_today_mm):
+///   1. the bus et0_today: a source that reports (or a user mapping that
+///      feeds) the field directly owns it. The field's contract is FULL-DAY
+///      mm; the built-in Open-Meteo fill emits today's converted daily total,
+///      and an explicit HA-passthrough/MQTT mapping is honored as mapped.
+///      (A station accumulator mapped here reads low early in the day; issue
+///      #4's actual 25x collapse was the OM fill emitting inches, fixed at
+///      the emit. Accumulators belong in a dedicated field if one is added.)
+///   2. the forecast provider's own daily[0] ET0 (inches -> mm),
+///   3. Open-Meteo's HA REST sensor (mm, legacy HA installs),
+///   4. native Hargreaves from the forecast temps,
+///   5. the flat 5.0 fallback.
 fn resolve_et0_today_mm(
     snapshot_et0: f64,
     map: &HashMap<String, Value>,
@@ -2521,17 +2576,26 @@ fn resolve_et0_today_mm(
     if snapshot_et0 > 0.0 {
         return snapshot_et0;
     }
+    if let Some(d) = fc.daily.first() {
+        if d.et0_in > 0.0 {
+            return d.et0_in * 25.4;
+        }
+    }
     if let Some(v) = state_f64(map, "sensor.open_meteo_eto_today").filter(|v| *v > 0.0) {
         return v;
     }
-    fc.daily
-        .first()
-        .and_then(|d| native_et0_mm(d, lat, doy))
-        .unwrap_or(5.0)
+    if let Some(v) = fc.daily.first().and_then(|d| native_et0_mm(d, lat, doy)) {
+        return v;
+    }
+    5.0
 }
 
-/// ET0 (mm) for forecast day `idx` (0=today): the matching Open-Meteo HA sensor
-/// when present, else native compute, else `fallback`. For the display tiles.
+/// ET0 (mm) for forecast day `idx` (0=today): the provider's own daily ET0
+/// (inches -> mm) > the matching Open-Meteo HA REST sensor (mm, legacy HA
+/// installs) > native Hargreaves > `fallback`. Mirrors the forecast-side ranks
+/// of resolve_et0_today_mm, so today / tomorrow / 3-day agree in method and
+/// units on every install class (the old native-only tomorrow disagreed with
+/// the provider-fed today, which is what made the pair collapse at rollover).
 fn forecast_day_et0_mm(
     map: &HashMap<String, Value>,
     sensor_key: &str,
@@ -2541,13 +2605,18 @@ fn forecast_day_et0_mm(
     base_doy: u16,
     fallback: f64,
 ) -> f64 {
+    if let Some(d) = fc.daily.get(idx) {
+        if d.et0_in > 0.0 {
+            return d.et0_in * 25.4;
+        }
+    }
     if let Some(v) = state_f64(map, sensor_key).filter(|v| *v > 0.0) {
         return v;
     }
-    fc.daily
-        .get(idx)
-        .and_then(|d| native_et0_mm(d, lat, base_doy + idx as u16))
-        .unwrap_or(fallback)
+    let Some(d) = fc.daily.get(idx) else {
+        return fallback;
+    };
+    native_et0_mm(d, lat, base_doy + idx as u16).unwrap_or(fallback)
 }
 
 /// How fresh the latest Tempest packet must be (seconds) for the station
@@ -3047,30 +3116,80 @@ mod et0_resolution_tests {
     use super::*;
     use crate::forecast::snapshot::{DailyEntry, ForecastSnapshot};
 
-    #[test]
-    fn et0_resolution_priority() {
-        let map = HashMap::new();
-        let fc = ForecastSnapshot {
-            daily: vec![DailyEntry {
-                temp_max_f: 90.0,
-                temp_min_f: 65.0,
-                ..Default::default()
-            }],
+    /// Two-day forecast whose entries carry usable temps plus (optionally) the
+    /// provider's own daily ET0 in inches.
+    fn fc_with(et0_in: f64) -> ForecastSnapshot {
+        let day = |max: f64, min: f64| DailyEntry {
+            temp_max_f: max,
+            temp_min_f: min,
+            et0_in,
             ..Default::default()
         };
-        // 1. A source-reported ET0 wins outright.
-        assert_eq!(resolve_et0_today_mm(4.2, &map, &fc, 40.0, 180), 4.2);
-        // 2. No source + no HA sensor -> native compute (a real value, not 5.0).
-        let native = resolve_et0_today_mm(0.0, &map, &fc, 40.0, 180);
+        ForecastSnapshot {
+            daily: vec![day(90.0, 65.0), day(88.0, 64.0)],
+            ..Default::default()
+        }
+    }
+
+    fn map_with(eid: &str, v: f64) -> HashMap<String, Value> {
+        let mut m = HashMap::new();
+        m.insert(
+            eid.to_string(),
+            serde_json::json!({ "state": v.to_string() }),
+        );
+        m
+    }
+
+    #[test]
+    fn et0_today_honors_the_mapped_bus_value_then_full_day_forecast_ranks() {
+        let map = HashMap::new();
+        // 1. A source-reported/mapped bus value owns the figure outright: the
+        //    field's contract is FULL-DAY mm (the OM fill emits the converted
+        //    daily total; an explicit HA/MQTT mapping is honored as mapped).
+        let got = resolve_et0_today_mm(4.2, &map, &fc_with(0.18), 40.0, 180);
+        assert!((got - 4.2).abs() < 1e-9, "bus value wins: {got}");
+        // 2. No bus value -> the provider's full-day daily[0] ET0
+        //    (0.18 in -> 4.572 mm). This is the rank whose UNITS issue #4
+        //    broke: the OM fill emitted raw inches onto the mm bus.
+        let got = resolve_et0_today_mm(0.0, &map, &fc_with(0.18), 40.0, 180);
+        assert!((got - 4.572).abs() < 1e-9, "provider daily next: {got}");
+        // 3. No provider ET0 -> the Open-Meteo HA REST sensor (mm).
+        let ha = map_with("sensor.open_meteo_eto_today", 4.8);
+        let got = resolve_et0_today_mm(0.0, &ha, &fc_with(0.0), 40.0, 180);
+        assert!((got - 4.8).abs() < 1e-9, "HA sensor next: {got}");
+        // 4. No provider / HA ET0 -> native Hargreaves (a real value, not 5.0).
+        let native = resolve_et0_today_mm(0.0, &map, &fc_with(0.0), 40.0, 180);
         assert!(
             native > 0.0 && (native - 5.0).abs() > 0.01,
             "native = {native}"
         );
-        // 3. No source + no forecast -> 5.0 fallback.
+        // 5. Nothing anywhere -> 5.0 fallback.
         let empty = ForecastSnapshot::default();
         assert_eq!(resolve_et0_today_mm(0.0, &map, &empty, 40.0, 180), 5.0);
         // native_et0_mm returns None on a temps-absent day.
         assert!(native_et0_mm(&DailyEntry::default(), 40.0, 180).is_none());
+    }
+
+    #[test]
+    fn forecast_day_et0_mirrors_todays_forecast_ranks() {
+        let map = HashMap::new();
+        let key = "sensor.open_meteo_eto_tomorrow";
+        // Provider daily[1] ET0 (inches -> mm) ranks first, mirroring the
+        // forecast-side order of resolve_et0_today_mm, so "ET Tomorrow" agrees
+        // with "ET Today" in method and units and the pair can no longer
+        // disagree 25x across midnight.
+        let ha = map_with(key, 4.4);
+        let got = forecast_day_et0_mm(&ha, key, &fc_with(0.18), 1, 40.0, 180, 0.0);
+        assert!((got - 4.572).abs() < 1e-9, "provider daily wins: {got}");
+        // The legacy HA-install sensor fills in when the provider has no ET0.
+        let got = forecast_day_et0_mm(&ha, key, &fc_with(0.0), 1, 40.0, 180, 0.0);
+        assert!((got - 4.4).abs() < 1e-9, "HA sensor next: {got}");
+        // No provider / HA ET0 -> native compute from the day's temps.
+        let native = forecast_day_et0_mm(&map, key, &fc_with(0.0), 1, 40.0, 180, 0.0);
+        assert!(native > 0.0, "native = {native}");
+        // Day outside the forecast window -> the caller's fallback.
+        let fb = forecast_day_et0_mm(&map, key, &ForecastSnapshot::default(), 1, 40.0, 180, 1.5);
+        assert!((fb - 1.5).abs() < 1e-9);
     }
 }
 
@@ -3457,6 +3576,7 @@ mod snapshot_assembly_tests {
             None, // sensor_history
             None, // forecast_obs
             None, // control
+            None, // cfg
         )
         .await
     }
