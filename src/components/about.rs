@@ -6,7 +6,7 @@
 use leptos::prelude::*;
 
 use crate::components::ui::Icon;
-use crate::docs::{doc_url, ISSUES_URL, REPO_URL, SITE_BASE};
+use crate::docs::{doc_url, ISSUES_URL, REPO_URL};
 
 fn uptime_label(s: i64) -> String {
     match s {
@@ -122,10 +122,13 @@ pub fn AboutPage() -> impl IntoView {
                     <strong>"Installation guide"</strong>
                     <span>"Docker, first boot, the wizard"</span>
                 </a>
-                <a class="about-link" href=SITE_BASE target="_blank" rel="noopener">
+                // The manual ships inside the image and is served
+                // same-origin, so this works offline and always matches the
+                // running build. No round trip to the public site.
+                <a class="about-link" href=doc_url("index") target="_blank" rel="noopener">
                     <Icon name="info" size=18/>
                     <strong>"Documentation"</strong>
-                    <span>"The full manual at localsky.io"</span>
+                    <span>"The full manual, bundled with this install"</span>
                 </a>
                 <a class="about-link" href=REPO_URL target="_blank" rel="noopener">
                     <Icon name="external" size=18/>

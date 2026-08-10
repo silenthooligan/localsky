@@ -5,7 +5,7 @@
 use leptos::prelude::*;
 
 use crate::components::ui::Icon;
-use crate::docs::{doc_url, ISSUES_URL, REPO_URL, SITE_BASE};
+use crate::docs::{doc_url, ISSUES_URL, REPO_URL};
 
 #[component]
 pub fn SettingsHelp() -> impl IntoView {
@@ -44,10 +44,12 @@ pub fn SettingsHelp() -> impl IntoView {
                     <strong>"API reference"</strong>
                     <span>"REST + SSE for builders"</span>
                 </a>
-                <a class="about-link" href=SITE_BASE target="_blank" rel="noopener">
+                // Bundled, same-origin manual: offline-safe and matched to
+                // the running build (see docs.rs).
+                <a class="about-link" href=doc_url("index") target="_blank" rel="noopener">
                     <Icon name="external" size=18/>
                     <strong>"All documentation"</strong>
-                    <span>"localsky.io"</span>
+                    <span>"The full manual, bundled with this install"</span>
                 </a>
                 <a class="about-link" href=ISSUES_URL target="_blank" rel="noopener">
                     <Icon name="alert-triangle" size=18/>

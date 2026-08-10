@@ -33,7 +33,7 @@ expression: "TempestSnapshot::default()"
   "lightning_count_last_min": 0,
   "lightning_strikes_last_hour": 0,
   "lightning_recent": [],
-  "lightning_avg_dist_mi": 0.0,
+  "lightning_avg_dist_mi": null,
   "last_strike_distance_mi": null,
   "last_strike_epoch": null,
   "battery_v": 0.0,

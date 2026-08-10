@@ -183,7 +183,7 @@ The API token it was given has been revoked or replaced. The integration starts 
 
 ### No LocalSky entities in HA
 
-- The integration is installed via HACS as a custom repository; if you only installed HACS itself, the LocalSky integration is not there yet. See [Home Assistant integration](hacs.md).
+- The integration is installed from HACS (search for LocalSky in the store); if you only installed HACS itself, the LocalSky integration is not there yet. See [Home Assistant integration](hacs.md).
 - The config flow needs a reachable LocalSky URL and, on auth-enabled instances, an API token (`lsk_...`).
 - Zeroconf discovery (the config flow finding LocalSky by itself) relies on LocalSky's mDNS announce (`_localsky._tcp`), which only reaches the LAN when LocalSky runs with host networking. With bridge networking, just enter the URL manually.
 

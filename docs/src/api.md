@@ -31,6 +31,10 @@ The `/api/v1` namespace is the stable contract. Version semantics:
 
 The shape of each `/api/v1/*` GET response is locked at build time by `insta` snapshot tests in `src/api/snapshot_tests.rs`. Any change that mutates the JSON body fails CI until a maintainer acknowledges the diff, which is the moment `api_version` gets bumped.
 
+### Migration notes
+
+**1.17.0** (lightning). `tempest.lightning_avg_dist_mi` is now **nullable**: it is `null` whenever the reporting interval detected no strikes, where it previously carried the station's bare `0`. On a distance channel that `0` read as a strike directly overhead, so a client filtering on `distance < 10` saw a phantom storm between strikes, and the obvious guard `distance > 0` dropped real readings. The field is still always present, and `null` is the documented unknown value. If you want a distance that persists between strikes, read the new `last_strike_distance_mi` (also exposed as a sensor descriptor in the manifest) instead of the interval average. Separately, `lightning_strikes_last_hour` now decays as strikes age out of the hour rather than holding the last storm's total until the next strike; a trigger of the form "strikes above 0" re-arms on its own once it reaches 0.
+
 ### `GET /api/v1/info`
 
 Returns the running service version, the API contract version, and the mount prefix. Hit it first when probing a LocalSky instance. Always public, even when authentication is required.
@@ -144,7 +148,7 @@ Current Tempest weather snapshot, the merged live observation set:
   "lightning_count_last_min": 0,
   "lightning_strikes_last_hour": 0,
   "lightning_recent": [],
-  "lightning_avg_dist_mi": 0.0,
+  "lightning_avg_dist_mi": null,
   "last_strike_distance_mi": null,
   "last_strike_epoch": null,
   "battery_v": 2.78,

@@ -835,7 +835,7 @@ fn TempestDetail(s: ReadSignal<Snapshot>, prefs: Signal<UnitPrefs>) -> impl Into
                     <FieldGroup title="Lightning">
                         <F k="Last minute" v=d.lightning_count_last_min.to_string()/>
                         <F k="Last hour" v=d.lightning_strikes_last_hour.to_string()/>
-                        <F k="Avg distance" v=fmt_distance_mi(d.lightning_avg_dist_mi, p)/>
+                        <F k="Avg distance" v=d.lightning_avg_dist_mi.map(|m| fmt_distance_mi(m, p)).unwrap_or_else(|| "-".into())/>
                         <F k="Last strike" v=d.last_strike_distance_mi.map(|m| fmt_distance_mi(m, p)).unwrap_or_else(|| "-".into())/>
                     </FieldGroup>
                     <FieldGroup title="Station">

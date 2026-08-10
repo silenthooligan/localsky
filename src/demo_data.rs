@@ -426,7 +426,7 @@ fn synth_tempest(t_sim: f64) -> TempestSnapshot {
         lightning_count_last_min: 0,
         lightning_strikes_last_hour: 0,
         lightning_recent: Vec::new(),
-        lightning_avg_dist_mi: 0.0,
+        lightning_avg_dist_mi: None,
         last_strike_distance_mi: None,
         last_strike_epoch: None,
         battery_v: 2.68,

@@ -141,7 +141,12 @@ pub fn LightningPanel(snap: ReadSignal<Snapshot>) -> impl IntoView {
                     </div>
                     <div class="kv">
                         <span class="k">"avg distance"</span>
-                        <span class="v">{move || fmt_distance_mi(snap.get().lightning_avg_dist_mi, prefs.get())}</span>
+                        <span class="v">
+                            {move || match snap.get().lightning_avg_dist_mi {
+                                Some(mi) => fmt_distance_mi(mi, prefs.get()),
+                                None => "-".to_string(),
+                            }}
+                        </span>
                     </div>
                 </div>
             </div>

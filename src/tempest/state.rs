@@ -56,9 +56,24 @@ pub struct Snapshot {
     pub leaf_wetness_pct: f64,
     pub precip_type: u8, // 0=none 1=rain 2=hail
     pub lightning_count_last_min: u32,
+    /// Strikes in the rolling one-hour buffer. DERIVED from that buffer on
+    /// every write path (see apply_obs / apply_strikes), never carried
+    /// forward: a carried value froze the counter at its last storm total
+    /// once strikes stopped, which left a `numeric_state above: 0` alert
+    /// permanently armed and silent.
     pub lightning_strikes_last_hour: u32,
     pub lightning_recent: Vec<StrikeEvent>,
-    pub lightning_avg_dist_mi: f64,
+    /// Average distance of the strikes detected in the reporting interval,
+    /// miles. `None` when the interval had no strikes: the stations report a
+    /// bare 0 there, and publishing that on a distance channel reads as a
+    /// strike directly overhead (the most alarming value possible) instead of
+    /// "no reading". For a distance that persists between strikes, use
+    /// `last_strike_distance_mi`.
+    #[serde(default)]
+    pub lightning_avg_dist_mi: Option<f64>,
+    /// Distance to the most recent strike still inside the one-hour buffer,
+    /// miles. Sticky across quiet intervals and decays to `None` when the
+    /// last strike ages out.
     pub last_strike_distance_mi: Option<f64>,
     pub last_strike_epoch: Option<i64>,
     pub battery_v: f64,
@@ -1043,6 +1058,11 @@ impl TempestStore {
             roll.strikes.pop_front();
         }
         let last = roll.strikes.back().cloned();
+        // Recount the buffer we just trimmed. Carrying prev's count forward
+        // meant the published counter never decayed once strikes stopped: the
+        // buffer drained toward empty while the number stayed frozen at the
+        // storm's last total until the NEXT strike arrived.
+        let strikes_last_hour = roll.strikes.len() as u32;
         let pressure_trend: Vec<_> = roll.pressure.iter().cloned().collect();
         // ET0 carries forward only within the local day it was written (bucket
         // 0 = unknown day, leave it alone); see RollingBuffers::et0_today_day.
@@ -1096,9 +1116,12 @@ impl TempestStore {
             leaf_wetness_pct: prev.leaf_wetness_pct,
             precip_type: obs.precip_type,
             lightning_count_last_min: obs.lightning_strike_count_last_min,
-            lightning_strikes_last_hour: prev.lightning_strikes_last_hour,
+            lightning_strikes_last_hour: strikes_last_hour,
             lightning_recent: prev.lightning_recent.clone(),
-            lightning_avg_dist_mi: obs.lightning_avg_dist_km * 0.621371,
+            // Only a minute that actually detected strikes carries an average
+            // distance; the packet's 0 in a quiet minute means "no reading".
+            lightning_avg_dist_mi: (obs.lightning_strike_count_last_min > 0)
+                .then_some(obs.lightning_avg_dist_km * 0.621371),
             last_strike_distance_mi: last.as_ref().map(|s| s.distance_km * 0.621371),
             last_strike_epoch: last.as_ref().map(|s| s.time_epoch),
             battery_v: obs.battery_v,
@@ -1423,7 +1446,12 @@ impl TempestStore {
                     owns_rain = true;
                 }
                 F::LightningCount => snap.lightning_count_last_min = v.max(0.0) as u32,
-                F::LightningDistanceMi => snap.lightning_avg_dist_mi = v,
+                // Same no-reading convention as the Tempest packet: every
+                // station kind reports a bare 0 for a quiet interval, and 0
+                // miles on a distance channel means "overhead", not "none".
+                F::LightningDistanceMi => {
+                    snap.lightning_avg_dist_mi = (v > 0.0).then_some(v);
+                }
                 F::Et0Today => {
                     snap.et0_today = v;
                     wrote_et0 = true;
@@ -1762,6 +1790,70 @@ mod strike_buffer_tests {
         assert_eq!(snap.lightning_strikes_last_hour, 1);
         assert_eq!(snap.lightning_recent.len(), 1);
         assert_eq!(snap.last_strike_epoch, Some(t0 + 3700));
+    }
+
+    fn quiet_obs(epoch: i64) -> ObsSt {
+        ObsSt {
+            time_epoch: epoch,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn counter_decays_to_zero_once_strikes_age_out() {
+        // The storm-ended case. apply_obs trims the buffer every minute, so
+        // the published counter must follow it down; carrying the previous
+        // count forward froze it at the storm's total until the next strike,
+        // which left a "strikes above 0" alert armed and silent for weeks.
+        let store = TempestStore::new();
+        let t0 = 1_700_000_000;
+        store.apply_strike(&strike(t0, 5.0));
+        store.apply_strike(&strike(t0 + 60, 8.0));
+        assert_eq!(store.snapshot().lightning_strikes_last_hour, 2);
+
+        // A quiet observation while the strikes are still inside the hour
+        // leaves the count alone.
+        store.apply_obs("ST", "HB", &quiet_obs(t0 + 1800));
+        assert_eq!(store.snapshot().lightning_strikes_last_hour, 2);
+
+        // An observation past the last strike's hour drains the buffer, and
+        // the counter goes with it (no further strikes needed).
+        store.apply_obs("ST", "HB", &quiet_obs(t0 + 3700));
+        let snap = store.snapshot();
+        assert_eq!(snap.lightning_strikes_last_hour, 0, "counter must decay");
+        assert_eq!(snap.last_strike_distance_mi, None);
+        assert_eq!(snap.last_strike_epoch, None);
+    }
+
+    #[test]
+    fn avg_distance_is_none_in_an_interval_with_no_strikes() {
+        // The packet reports a bare 0 for a quiet minute. On a distance
+        // channel that reads as "overhead", so it must publish as no reading.
+        let store = TempestStore::new();
+        let t0 = 1_700_000_000;
+        store.apply_obs("ST", "HB", &quiet_obs(t0));
+        assert_eq!(store.snapshot().lightning_avg_dist_mi, None);
+
+        // A minute WITH strikes carries the real average (10 km = 6.21 mi).
+        store.apply_obs(
+            "ST",
+            "HB",
+            &ObsSt {
+                time_epoch: t0 + 60,
+                lightning_strike_count_last_min: 3,
+                lightning_avg_dist_km: 10.0,
+                ..Default::default()
+            },
+        );
+        let mi = store
+            .snapshot()
+            .lightning_avg_dist_mi
+            .expect("real average");
+        assert!((mi - 6.21371).abs() < 1e-4, "got {mi}");
+
+        // The next quiet minute reverts to no reading rather than 0 miles.
+        store.apply_obs("ST", "HB", &quiet_obs(t0 + 120));
+        assert_eq!(store.snapshot().lightning_avg_dist_mi, None);
     }
 
     #[test]

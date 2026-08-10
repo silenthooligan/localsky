@@ -22,19 +22,17 @@ One HA device per LocalSky instance, populated from LocalSky's live entity manif
 
 ## Install
 
-### 1. Add the custom repository
+### 1. Install from HACS
 
-The integration is not yet in the HACS default catalog, so this step is required first. The button does it in one click:
-
-[![Open your Home Assistant instance and add this repository to HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=silenthooligan&repository=localsky-ha&category=integration)
-
-Or manually:
+LocalSky is in the HACS default store:
 
 1. In Home Assistant, open **HACS**.
-2. Open the three-dot menu (top right) and choose **Custom repositories**.
-3. Add `https://github.com/silenthooligan/localsky-ha` with category **Integration**.
-4. Search for **LocalSky** in HACS and install it.
-5. Restart Home Assistant.
+2. Search for **LocalSky** and install it.
+3. Restart Home Assistant.
+
+Or in one click (opens your own Home Assistant):
+
+[![Open your Home Assistant instance and show LocalSky in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=silenthooligan&repository=localsky-ha&category=integration)
 
 ### 2. Pair with your LocalSky instance
 
@@ -211,7 +209,7 @@ Pause watering for three days when vacation mode turns on, resume on return:
 
 ## Catalog status
 
-Today the integration installs as a HACS **custom repository**. Submission to the HACS default catalog is planned and gated on a soak period for the custom-repo install path, LocalSky's `/api/v1/*` surface being declared stable, and the integration's test suite. Until then, the custom repository step above is required exactly once per HA install.
+The integration is in the **HACS default store** (accepted July 2026), so it installs by searching for LocalSky in HACS directly. Installs that predate the listing and were added as a custom repository keep working and keep receiving updates; there is nothing to migrate. The integration's brand icon ships inside the integration itself and appears on Home Assistant 2026.3.0 or newer.
 
 ## See also
 

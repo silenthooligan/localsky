@@ -342,6 +342,18 @@ fn push_tempest_weather(out: &mut Vec<EntityDescriptor>, has_station: bool) {
             Some("measurement"),
             Some("mdi:flash"),
         ),
+        // The distance that persists between strikes. The average above is
+        // per reporting interval and goes unknown in a quiet minute, so an
+        // automation asking "how far away is the storm" wants this one.
+        (
+            "last_strike_distance_mi",
+            "Lightning last strike distance",
+            "last_strike_distance_mi",
+            Some("mi"),
+            Some("distance"),
+            Some("measurement"),
+            Some("mdi:flash"),
+        ),
     ];
     for (id, name, field, unit, device_class, state_class, icon) in defs {
         out.push(EntityDescriptor {

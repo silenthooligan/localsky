@@ -66,7 +66,18 @@ use serde::{Deserialize, Serialize};
 /// snowfall_in). IrrigationSnapshot.forecast gains eto_spent_today_mm,
 /// vpd_now/max_today_kpa, and the model-soil advisory scalars. Config gains
 /// `seeded_source_ids` (region-authority upgrade seeding tombstones).
-pub const API_VERSION: &str = "1.16.0";
+/// 1.17.0: lightning honesty. `tempest.lightning_avg_dist_mi` is now
+/// NULLABLE and null whenever the reporting interval detected no strikes;
+/// it previously published the station's bare 0, which on a distance
+/// channel reads as a strike directly overhead. The field is still always
+/// present, and null is the documented unknown value, so this is a minor
+/// rather than a break; a client that treated 0 as a real distance was
+/// already reading a defect. Additive alongside it: the
+/// `last_strike_distance_mi` sensor descriptor (the distance that persists
+/// between strikes). Also a correctness fix with no shape change:
+/// `lightning_strikes_last_hour` now decays as strikes age out of the hour
+/// instead of holding the last storm's total until the next strike.
+pub const API_VERSION: &str = "1.17.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {

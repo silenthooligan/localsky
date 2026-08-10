@@ -4,6 +4,23 @@ All notable changes to LocalSky are documented here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.7.10] - 2026-08-08
+
+Lightning data correctness. If you built an automation on the lightning sensors, read the first two entries: one of them was silently breaking alerts.
+
+### Fixed
+
+- **The one-hour lightning strike counter never came back down.** Every observation trimmed strikes older than an hour out of the rolling buffer but then republished the previous count, so once a storm ended the number froze at its last total until the next strike arrived, sometimes days later. It now counts the buffer it just trimmed and decays to 0 on its own. This matters beyond the display: a Home Assistant trigger of the form "strikes above 0" only fires when the value crosses the threshold, so a counter stuck above 0 never re-armed and the alert stayed silent through every storm after the first. Such an automation starts working again on its own once the counter reaches 0.
+- **Lightning average distance published 0 for "no strikes this minute."** Stations report a bare 0 in a quiet reporting interval, and LocalSky passed it through on a channel marked as a distance measurement, where 0 reads as a strike directly overhead rather than as no reading. A consumer checking `distance < 10` saw a phantom storm between strikes, and the natural guard `distance > 0` threw away real readings. The value is now unknown (`null` on the API) whenever the interval detected no strikes.
+
+### Added
+
+- New **Lightning last strike distance** sensor: the distance to the most recent strike still inside the one-hour window. Unlike the interval average, it persists between strikes and clears when the last strike ages out, so "how far away is the storm" is a single sensor read. Available automatically in Home Assistant after the update.
+
+### Changed
+
+- The in-app "Documentation" and "All documentation" links now open the manual bundled with your install instead of the public site, so they work offline and always match the running version. Every other help link already did.
+
 ## [0.7.9] - 2026-08-08
 
 Cycle interleaving turns on by default, cycle-and-soak settings apply without a restart, sign-in via an authenticating reverse proxy, and a new Engine settings page. One behavior change to review if your water comes from a well; no breaking API changes.
