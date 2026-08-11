@@ -4,6 +4,17 @@ All notable changes to LocalSky are documented here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.7.11] - 2026-08-11
+
+Hourly forecasts reach Home Assistant. Nothing changed in the app itself; this release keeps the app, the integration and the add-on on one version.
+
+### Added
+
+- **The Home Assistant weather entity now publishes an hourly forecast**, not only a daily one. Calling `weather.get_forecasts` with `type: hourly` returns up to 48 hours carrying temperature, apparent temperature, precipitation, probability of precipitation, wind, humidity and cloud cover. LocalSky already fetched every one of those; only the daily summary was reaching Home Assistant, so an automation could ask what the weather is doing now but not what it will be doing at a given hour.
+- The gain is largest with a forecast source that models convection. NWS marks thunderstorm hours explicitly and carries a per-hour chance of precipitation, so an automation can act on an afternoon before it arrives instead of reacting once the storm is overhead. Clear hours now read as clear-night after dark rather than sunny, which the daily summary never had to distinguish.
+
+Needs the matching 0.7.11 Home Assistant integration. The app and add-on are unchanged.
+
 ## [0.7.10] - 2026-08-08
 
 Lightning data correctness. If you built an automation on the lightning sensors, read the first two entries: one of them was silently breaking alerts.
