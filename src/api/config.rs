@@ -1003,6 +1003,7 @@ async fn put_raw_toml(
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(serde_json::json!({
                 "error": "config_invalid",
+                "detail": report.error_summary(),
                 "validation": report,
             })),
         )
@@ -1515,6 +1516,7 @@ async fn put_config(
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(serde_json::json!({
                 "error": "config_invalid",
+                "detail": report.error_summary(),
                 "validation": report,
             })),
         )

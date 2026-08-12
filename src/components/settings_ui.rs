@@ -352,6 +352,38 @@ pub fn save_error_message(status: u16, body: &str) -> String {
             .unwrap_or_default()
             .to_string();
         if !err.is_empty() {
+            // A config_invalid 422 carries its substance in
+            // validation.errors[].detail, not in error/hint/detail. Rendering
+            // only the code left the operator with "config_invalid (HTTP 422)"
+            // and no clue WHICH rule refused the save (issue #6: an unset
+            // location blocked enabling a weather source, and the toast never
+            // said the word location). List the rule details; every settings
+            // page saves through this one function, and any pre-existing
+            // config error blocks any page's whole-config save, so the
+            // message must name rules from anywhere in the config.
+            if let Some(errors) = v
+                .pointer("/validation/errors")
+                .and_then(|e| e.as_array())
+                .filter(|a| !a.is_empty())
+            {
+                let details: Vec<&str> = errors
+                    .iter()
+                    .filter_map(|e| e.get("detail").and_then(|d| d.as_str()))
+                    .collect();
+                const SHOWN: usize = 3;
+                let mut msg = details
+                    .iter()
+                    .take(SHOWN)
+                    .map(|d| d.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                if details.len() > SHOWN {
+                    msg.push_str(&format!(" | and {} more", details.len() - SHOWN));
+                }
+                if !msg.is_empty() {
+                    return format!("Not saved: {msg}");
+                }
+            }
             if let Some(hint) = v.get("hint").and_then(|h| h.as_str()) {
                 return format!("{err} (HTTP {status}). {hint}");
             }
@@ -423,6 +455,38 @@ mod tests {
             save_error_message(500, "boom"),
             "HTTP 500: boom".to_string()
         );
+    }
+
+    #[test]
+    fn save_error_names_the_validation_rules_that_refused_the_save() {
+        // The issue #6 shape: a config_invalid 422 whose substance lives in
+        // validation.errors[].detail. Rendering only the code left the
+        // operator with "config_invalid (HTTP 422)" while the real reason
+        // (an unset location) was never shown.
+        let body = r#"{"error":"config_invalid","detail":"location is 0,0 (null island); set your real coordinates","validation":{"errors":[{"severity":"error","code":"location_unset","detail":"location is 0,0 (null island); set your real coordinates"}],"warnings":[]}}"#;
+        let msg = save_error_message(422, body);
+        assert!(msg.starts_with("Not saved:"), "got: {msg}");
+        assert!(msg.contains("location is 0,0"), "got: {msg}");
+        assert!(!msg.contains("config_invalid"), "raw code hidden: {msg}");
+
+        // Many errors: the first three are listed, the rest are counted.
+        let body = r#"{"error":"config_invalid","validation":{"errors":[
+            {"severity":"error","code":"a","detail":"first"},
+            {"severity":"error","code":"b","detail":"second"},
+            {"severity":"error","code":"c","detail":"third"},
+            {"severity":"error","code":"d","detail":"fourth"},
+            {"severity":"error","code":"e","detail":"fifth"}
+        ],"warnings":[]}}"#;
+        let msg = save_error_message(422, body);
+        assert!(msg.contains("first") && msg.contains("third"), "got: {msg}");
+        assert!(!msg.contains("fourth"), "capped: {msg}");
+        assert!(msg.contains("and 2 more"), "got: {msg}");
+
+        // An empty errors array (should not happen on a 422, but a malformed
+        // body must not panic) falls back to the code shape.
+        let body = r#"{"error":"config_invalid","validation":{"errors":[],"warnings":[]}}"#;
+        let msg = save_error_message(422, body);
+        assert!(msg.contains("config_invalid"), "got: {msg}");
     }
 }
 

@@ -13616,6 +13616,18 @@ html[data-kiosk="true"] .beta-fb,
     font-size: var(--text-caption);
     line-height: 1.5;
   }
+  // The location-unset callout: config saves are refused while location is
+  // 0,0, so this must read as a blocking condition, not a footnote.
+  &__sub--warn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    color: var(--verdict-wind);
+    a {
+      color: var(--accent);
+      font-weight: 600;
+    }
+  }
 
   // Tint WALLS removed: the LOCAL (teal 6%) and CLOUD (blue 5%) background fills
   // were two of the big color walls. Both bands now share the plain surface;

@@ -1122,9 +1122,32 @@ pub fn CloudWeatherServices(
             "Turn on a free service to cover your yard now. No station to buy, and \
              the default for your region is already on."
         };
+        // Location gate, surfaced BEFORE the first failed save: every cloud
+        // provider fetches for the configured coordinates, and the config
+        // validator refuses to save while location is 0,0 (issue #6: the
+        // toggle 422'd with an error that never said the word location). The
+        // catalog payload already carries the deployment lat/lon, so an unset
+        // location renders a callout with the path to fix it; the toggles
+        // stay usable and a refused save now names the rule too.
+        let location_unset = {
+            let c = catalog.get();
+            loaded.get() && c.lat == 0.0 && c.lon == 0.0
+        };
+        let location_callout = location_unset.then(|| {
+            view! {
+                <p class="cloud-band__sub cloud-band__sub--warn">
+                    <Icon name="alert-triangle" size=16/>
+                    " Set your location first: cloud services fetch weather for "
+                    "your coordinates, and settings cannot be saved while the "
+                    "location is unset. "
+                    <a href="/settings/location">"Set location"</a>
+                </p>
+            }
+        });
         view! {
             <div class="cloud-band cloud-band--cloud entity-stripe entity-stripe--source">
                 <h3 class="cloud-band__title">"Add weather coverage"</h3>
+                {location_callout}
                 <p class="cloud-band__sub">{framing}</p>
                 {cloud_rows()}
             </div>

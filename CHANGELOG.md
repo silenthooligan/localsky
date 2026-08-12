@@ -4,6 +4,18 @@ All notable changes to LocalSky are documented here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.7.12] - 2026-08-12
+
+A refused settings save now explains itself, and precipitation probability becomes a sensor. No breaking changes.
+
+### Fixed
+
+- A refused settings save now says why ([#6](https://github.com/silenthooligan/localsky/issues/6)). Every settings page saves the whole configuration, so a validation problem anywhere (most commonly an unset location on an install that skipped the wizard) blocked every save with a bare "config_invalid" and no mention of the actual rule. The message now lists the failing rules ("location is 0,0 (null island); set your real coordinates"), the API's 422 body carries a flat one-line summary for scripts, and the cloud weather page points at the location settings up front when the location is unset, since every cloud provider fetches weather for your coordinates.
+
+### Added
+
+- **Precipitation probability is now a sensor.** The merged probability of precipitation was already computed and served on the conditions API, but it was not among the entities the Home Assistant integration creates. It now appears on the Forecast device as `Precipitation probability`, giving a cheap "is rain likely right now" reading without pulling the whole hourly forecast. Distinct from `Rain tomorrow probability`, which is tomorrow's daily figure.
+
 ## [0.7.11] - 2026-08-11
 
 Hourly forecasts reach Home Assistant. Nothing changed in the app itself; this release keeps the app, the integration and the add-on on one version.

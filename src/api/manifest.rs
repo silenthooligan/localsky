@@ -583,6 +583,29 @@ fn push_forecast(out: &mut Vec<EntityDescriptor>) {
         zone_slug: None,
         group: Some("forecast"),
     });
+    // Current probability of precipitation, merged from whichever forecast
+    // source owns WeatherField::Pop (NWS, Pirate Weather, ...). It rides the
+    // CONDITIONS snapshot rather than the forecast block because the merge bus
+    // writes it into `Snapshot.pop_pct` alongside the live readings, but it is
+    // a forecast quantity so it is grouped with the forecast device.
+    //
+    // Distinct from `rain_tomorrow_prob_pct`, which is tomorrow's daily
+    // figure: this is the chance right now. Useful on a dashboard next to the
+    // conditions, and as a cheap gate for automations that only need "is rain
+    // likely" without pulling the whole hourly forecast.
+    out.push(EntityDescriptor {
+        platform: "sensor",
+        id: "pop_pct".into(),
+        name: "Precipitation probability".into(),
+        snapshot: "tempest",
+        path: vec!["pop_pct".into()],
+        unit: Some("%"),
+        device_class: None,
+        state_class: Some("measurement"),
+        icon: Some("mdi:weather-rainy"),
+        zone_slug: None,
+        group: Some("forecast"),
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -974,8 +997,10 @@ mod tests {
         }
 
         // The forecast-block scalars carry the "forecast" sub-device hint so
-        // the integration files them under the Forecast device instead of
-        // Irrigation (they ride snapshot="irrigation" for path reasons).
+        // the integration files them under the Forecast device. Most ride
+        // snapshot="irrigation" for path reasons; pop_pct rides the conditions
+        // snapshot because the merge bus writes it there, which is exactly why
+        // the group hint is what decides the device rather than the snapshot.
         let mut fc = Vec::new();
         push_forecast(&mut fc);
         assert!(!fc.is_empty());

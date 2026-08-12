@@ -32,6 +32,18 @@ impl ValidationReport {
     pub fn ok(&self) -> bool {
         self.errors.is_empty()
     }
+    /// One-line summary of the blocking errors, for flat `detail` fields
+    /// (curl users and any client that does not unpack `validation.errors`).
+    /// The structured report stays the canonical payload.
+    pub fn error_summary(&self) -> String {
+        match self.errors.as_slice() {
+            [] => String::new(),
+            [one] => one.detail.clone(),
+            [first, rest @ ..] => {
+                format!("{} (and {} more)", first.detail, rest.len())
+            }
+        }
+    }
     fn error(&mut self, code: &'static str, detail: String) {
         self.errors.push(Issue {
             severity: Severity::Error,
@@ -1197,5 +1209,37 @@ mod tests {
             .warnings
             .iter()
             .any(|i| i.code == "forecast_provider_not_forecast_capable"));
+    }
+}
+
+#[cfg(test)]
+mod error_summary_tests {
+    use super::*;
+    use crate::config::schema::Config;
+
+    #[test]
+    fn error_summary_flattens_for_flat_detail_consumers() {
+        // Default config fails on the unset location only.
+        let r = validate(&Config::default());
+        assert!(!r.ok());
+        assert!(r.error_summary().contains("location is 0,0"));
+
+        // Multiple errors: first detail + a count, never an empty string.
+        // Both coordinates out of range fires lat_range AND lon_range (a
+        // lat of 200 with lon 0 is NOT location_unset, which needs 0,0).
+        let mut cfg = Config::default();
+        cfg.deployment.location.lat = 200.0;
+        cfg.deployment.location.lon = 200.0;
+        let r = validate(&cfg);
+        assert!(r.errors.len() >= 2, "got {:?}", r.errors);
+        assert!(r.error_summary().contains("and"));
+
+        // A clean report summarizes to nothing.
+        let mut cfg = Config::default();
+        cfg.deployment.location.lat = 28.5;
+        cfg.deployment.location.lon = -81.4;
+        let r = validate(&cfg);
+        assert!(r.ok(), "unexpected errors: {:?}", r.errors);
+        assert_eq!(r.error_summary(), "");
     }
 }
