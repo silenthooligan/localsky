@@ -13,10 +13,12 @@
 // The two sections are co-equal: a LOCAL block (scan the network / add a
 // station via the shared SourceEditorPanel + NetworkScan) and a CLOUD block
 // (the same interactive provider list the Devices hub uses, via
-// CloudWeatherWizardSection). Local station sources land in the wizard draft;
-// the cloud list drives the live config's enable PUTs directly (the region
-// keyless authority is still seeded at finalize for a user who changes nothing).
-// Skipping is fine: sources can be added on the Sensors hub any time.
+// CloudWeatherWizardSection). BOTH land in the wizard draft: local stations
+// through this page's own draft PUTs, and the cloud toggles through the
+// panel's write_draft mode (issue #7; toggling the LIVE config from here
+// 422'd on the still-unset location). The region keyless authority is still
+// seeded at finalize for a user who changes nothing. Skipping is fine:
+// sources can be added on the Sensors hub any time.
 
 use leptos::prelude::*;
 
@@ -55,7 +57,11 @@ async fn save_draft(draft: serde_json::Value) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
     if !resp.ok() {
-        return Err(format!("HTTP {}", resp.status()));
+        let body = resp.text().await.unwrap_or_default();
+        return Err(crate::components::settings_ui::save_error_message(
+            resp.status(),
+            &body,
+        ));
     }
     Ok(())
 }

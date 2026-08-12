@@ -338,62 +338,108 @@ pub fn toast_saved(result_msg: RwSignal<String>, result_ok: RwSignal<bool>, msg:
     crate::components::ui::use_toast().success(msg.to_string());
 }
 
-/// Human-readable message for a failed settings save. The server's JSON
-/// error bodies carry structured fields the raw text hides: `hint` (the
-/// privileged-gate 401s name the auth.trusted_proxies / auth.proxy_auth_header
-/// keys that fix a proxy-shaped refusal) and `detail` (config store errors).
-/// Surface those instead of dumping raw JSON after the status code; anything
-/// unparseable falls back to the old "HTTP <status>: <body>" shape.
-pub fn save_error_message(status: u16, body: &str) -> String {
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
-        let err = v
-            .get("error")
-            .and_then(|e| e.as_str())
-            .unwrap_or_default()
-            .to_string();
-        if !err.is_empty() {
-            // A config_invalid 422 carries its substance in
-            // validation.errors[].detail, not in error/hint/detail. Rendering
-            // only the code left the operator with "config_invalid (HTTP 422)"
-            // and no clue WHICH rule refused the save (issue #6: an unset
-            // location blocked enabling a weather source, and the toast never
-            // said the word location). List the rule details; every settings
-            // page saves through this one function, and any pre-existing
-            // config error blocks any page's whole-config save, so the
-            // message must name rules from anywhere in the config.
-            if let Some(errors) = v
-                .pointer("/validation/errors")
-                .and_then(|e| e.as_array())
-                .filter(|a| !a.is_empty())
-            {
-                let details: Vec<&str> = errors
-                    .iter()
-                    .filter_map(|e| e.get("detail").and_then(|d| d.as_str()))
-                    .collect();
-                const SHOWN: usize = 3;
-                let mut msg = details
-                    .iter()
-                    .take(SHOWN)
-                    .map(|d| d.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" | ");
-                if details.len() > SHOWN {
-                    msg.push_str(&format!(" | and {} more", details.len() - SHOWN));
-                }
-                if !msg.is_empty() {
-                    return format!("Not saved: {msg}");
-                }
-            }
-            if let Some(hint) = v.get("hint").and_then(|h| h.as_str()) {
-                return format!("{err} (HTTP {status}). {hint}");
-            }
-            if let Some(detail) = v.get("detail").and_then(|d| d.as_str()) {
-                return format!("{err} (HTTP {status}): {detail}");
-            }
-            return format!("{err} (HTTP {status})");
+/// The structured reading of a server JSON error body, shared by
+/// `save_error_message` and `load_error_message` so the save toasts and the
+/// load banners surface the same fields and can never drift.
+enum ParsedErrorBody {
+    /// A config_invalid-style body whose substance is the joined
+    /// validation.errors[].detail list (first three rules, then a count).
+    /// Callers add their own framing ("Not saved: " for a refused save,
+    /// nothing for a failed load).
+    ValidationRules(String),
+    /// error code + hint/detail (or the bare code), already formatted with
+    /// the status.
+    Coded(String),
+}
+
+/// Parse a server JSON error body into its most useful human text. The
+/// server's error bodies carry structured fields the raw text hides: `hint`
+/// (the privileged-gate 401s name the auth.trusted_proxies /
+/// auth.proxy_auth_header keys that fix a proxy-shaped refusal), `detail`
+/// (config store errors), and `validation.errors[].detail` (the rules that
+/// refused a config write). Returns `None` when the body is not the server's
+/// error shape (not JSON, or no non-empty `error` code); callers then fall
+/// back to a raw status + body line.
+fn parse_error_body(status: u16, body: &str) -> Option<ParsedErrorBody> {
+    let v = serde_json::from_str::<serde_json::Value>(body).ok()?;
+    let err = v
+        .get("error")
+        .and_then(|e| e.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if err.is_empty() {
+        return None;
+    }
+    // A config_invalid 422 carries its substance in
+    // validation.errors[].detail, not in error/hint/detail. Rendering
+    // only the code left the operator with "config_invalid (HTTP 422)"
+    // and no clue WHICH rule refused the save (issue #6: an unset
+    // location blocked enabling a weather source, and the toast never
+    // said the word location). List the rule details; every settings
+    // page saves through this one function, and any pre-existing
+    // config error blocks any page's whole-config save, so the
+    // message must name rules from anywhere in the config.
+    if let Some(errors) = v
+        .pointer("/validation/errors")
+        .and_then(|e| e.as_array())
+        .filter(|a| !a.is_empty())
+    {
+        let details: Vec<&str> = errors
+            .iter()
+            .filter_map(|e| e.get("detail").and_then(|d| d.as_str()))
+            .collect();
+        const SHOWN: usize = 3;
+        let mut msg = details
+            .iter()
+            .take(SHOWN)
+            .map(|d| d.to_string())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        if details.len() > SHOWN {
+            msg.push_str(&format!(" | and {} more", details.len() - SHOWN));
+        }
+        if !msg.is_empty() {
+            return Some(ParsedErrorBody::ValidationRules(msg));
         }
     }
-    format!("HTTP {status}: {body}")
+    if let Some(hint) = v.get("hint").and_then(|h| h.as_str()) {
+        return Some(ParsedErrorBody::Coded(format!(
+            "{err} (HTTP {status}). {hint}"
+        )));
+    }
+    if let Some(detail) = v.get("detail").and_then(|d| d.as_str()) {
+        return Some(ParsedErrorBody::Coded(format!(
+            "{err} (HTTP {status}): {detail}"
+        )));
+    }
+    Some(ParsedErrorBody::Coded(format!("{err} (HTTP {status})")))
+}
+
+/// Human-readable message for a failed settings save. Shares the body parse
+/// with `load_error_message` (see `parse_error_body`); anything unparseable
+/// falls back to the old "HTTP <status>: <body>" shape.
+pub fn save_error_message(status: u16, body: &str) -> String {
+    match parse_error_body(status, body) {
+        Some(ParsedErrorBody::ValidationRules(rules)) => format!("Not saved: {rules}"),
+        Some(ParsedErrorBody::Coded(msg)) => msg,
+        None => format!("HTTP {status}: {body}"),
+    }
+}
+
+/// Human-readable message for a failed settings/setup LOAD (a config or
+/// inventory GET behind a page). The load paths used to format the bare
+/// status ("HTTP 422") and drop the response body, so the server's
+/// error/detail/hint JSON never reached the user (issue #7). Same parse as
+/// `save_error_message`, minus the "Not saved" framing (a failed load is not
+/// a refused save); an unparseable body keeps the raw status + body, and an
+/// empty body reads as the bare status alone.
+pub fn load_error_message(status: u16, body: &str) -> String {
+    match parse_error_body(status, body) {
+        Some(ParsedErrorBody::ValidationRules(rules)) => rules,
+        Some(ParsedErrorBody::Coded(msg)) => msg,
+        None if body.trim().is_empty() => format!("HTTP {status}"),
+        None => format!("HTTP {status}: {body}"),
+    }
 }
 
 /// Error banner + Retry for a failed initial config GET, shared by the
@@ -431,7 +477,7 @@ pub fn SettingsLoadError(
 
 #[cfg(test)]
 mod tests {
-    use super::save_error_message;
+    use super::{load_error_message, save_error_message};
 
     #[test]
     fn save_error_surfaces_server_error_and_hint() {
@@ -487,6 +533,45 @@ mod tests {
         let body = r#"{"error":"config_invalid","validation":{"errors":[],"warnings":[]}}"#;
         let msg = save_error_message(422, body);
         assert!(msg.contains("config_invalid"), "got: {msg}");
+    }
+
+    #[test]
+    fn load_error_surfaces_server_error_hint_and_detail() {
+        // The load-banner twin of the save test (issue #7): a failed config
+        // GET carries the same JSON error shapes, and the banner used to
+        // show only "HTTP <status>" with the body dropped.
+        let body = r#"{"error":"unauthorized","hint":"Set auth.trusted_proxies to your proxy's address."}"#;
+        let msg = load_error_message(401, body);
+        assert!(msg.contains("unauthorized"));
+        assert!(msg.contains("401"));
+        assert!(msg.contains("Set auth.trusted_proxies"));
+
+        let msg = load_error_message(
+            500,
+            r#"{"error":"config_store_error","detail":"read: permission denied"}"#,
+        );
+        assert!(msg.contains("config_store_error") && msg.contains("permission denied"));
+
+        // Non-JSON bodies keep the raw fallback; an empty body reads as the
+        // bare status (nothing useful to append).
+        assert_eq!(
+            load_error_message(502, "bad gateway"),
+            "HTTP 502: bad gateway".to_string()
+        );
+        assert_eq!(load_error_message(422, ""), "HTTP 422".to_string());
+    }
+
+    #[test]
+    fn load_error_names_validation_rules_without_the_save_framing() {
+        // A validation-shaped body on a load names the rules, but a failed
+        // load is not a refused save, so the "Not saved" framing stays off.
+        let body = r#"{"error":"config_invalid","validation":{"errors":[{"severity":"error","code":"location_unset","detail":"location is 0,0 (null island); set your real coordinates"}],"warnings":[]}}"#;
+        let msg = load_error_message(422, body);
+        assert!(msg.contains("location is 0,0"), "got: {msg}");
+        assert!(!msg.starts_with("Not saved:"), "got: {msg}");
+        // The save shape keeps its framing off the SAME parse, so the two
+        // surfaces cannot drift.
+        assert!(save_error_message(422, body).starts_with("Not saved:"));
     }
 }
 

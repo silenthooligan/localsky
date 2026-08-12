@@ -423,7 +423,11 @@ async fn fetch_config() -> Result<LocationDraft, String> {
         .await
         .map_err(|e| e.to_string())?;
     if !resp.ok() {
-        return Err(format!("HTTP {}", resp.status()));
+        let body = resp.text().await.unwrap_or_default();
+        return Err(crate::components::settings_ui::load_error_message(
+            resp.status(),
+            &body,
+        ));
     }
     let val: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     let loc = val.get("deployment").and_then(|d| d.get("location"));

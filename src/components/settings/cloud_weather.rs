@@ -50,6 +50,17 @@
 //     PUT. WeatherKit (four pieces) routes to the full SourceEditorPanel
 //     instead. We NEVER synthesize an enabled keyed entry with a placeholder key
 //     (it would 401 and trip the degraded banner).
+//
+// WIZARD DRAFT MODE (`write_draft`, issue #7). Embedded in the setup wizard the
+// panel edits the WIZARD DRAFT, not the live config: mid-wizard the live config
+// typically still has NO location, so a live PUT would 422 on the
+// location_unset validation rule before the user ever reaches the final Apply.
+// With `write_draft=true` every enable/disable runs the SAME sources splice
+// against GET/PUT /api/wizard/draft (echoing the draft's last_updated_epoch so
+// a stale write 409s instead of clobbering), the rows' on/off state and the
+// location callout overlay from the draft (see overlay_draft_onto_catalog),
+// the restart banner + host notify are skipped (nothing live consumes a draft
+// change), and the saved choice goes live at the wizard's final Apply.
 
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
@@ -473,9 +484,69 @@ async fn fetch_catalog() -> Result<CloudCatalog, String> {
         .await
         .map_err(|e| e.to_string())?;
     if !resp.ok() {
-        return Err(format!("HTTP {}", resp.status()));
+        let body = resp.text().await.unwrap_or_default();
+        return Err(crate::components::settings_ui::load_error_message(
+            resp.status(),
+            &body,
+        ));
     }
     resp.json::<CloudCatalog>().await.map_err(|e| e.to_string())
+}
+
+/// Fetch the wizard draft as raw JSON for the draft-mode catalog overlay.
+/// Best-effort: any failure reads as "no draft", leaving the catalog exactly
+/// as the server computed it.
+#[cfg(feature = "hydrate")]
+async fn fetch_draft_value() -> Option<serde_json::Value> {
+    use gloo_net::http::Request;
+    let resp = Request::get("/api/wizard/draft").send().await.ok()?;
+    if !resp.ok() {
+        return None;
+    }
+    resp.json::<serde_json::Value>().await.ok()
+}
+
+/// WIZARD DRAFT overlay for the catalog (issue #7). The server computes
+/// `already_configured` / `configured_present` and the deployment lat/lon from
+/// the LIVE config, which mid-wizard is NOT the config the user is building: a
+/// location set on the wizard's location step and a source enabled on this step
+/// both live in the DRAFT until the final Apply. In draft mode the catalog is
+/// overlaid client-side from GET /api/wizard/draft before render (the server
+/// handler is untouched):
+///   * lat/lon read the draft's deployment.location, so a user who set their
+///     location on the wizard step never sees a stale "set your location
+///     first" callout;
+///   * `already_configured` reads "a draft source of this kind exists AND is
+///     enabled" (enabled defaults true, the config schema default), so the
+///     toggles reflect the draft state;
+///   * `configured_present` is cleared: the wizard has no separate device-card
+///     list to hand a configured row to, so a draft-configured kind must STAY
+///     in this list with its toggle on, never vanish under the exactly-once
+///     rule the Devices hub applies.
+#[cfg(any(feature = "hydrate", test))]
+fn overlay_draft_onto_catalog(catalog: &mut CloudCatalog, draft: &serde_json::Value) {
+    if let Some(loc) = draft.pointer("/config/deployment/location") {
+        if let (Some(lat), Some(lon)) = (
+            loc.get("lat").and_then(|v| v.as_f64()),
+            loc.get("lon").and_then(|v| v.as_f64()),
+        ) {
+            catalog.lat = lat;
+            catalog.lon = lon;
+        }
+    }
+    let empty = Vec::new();
+    let sources = draft
+        .pointer("/config/sources")
+        .and_then(|s| s.as_array())
+        .unwrap_or(&empty);
+    for entry in catalog.cloud_sources.iter_mut() {
+        let enabled = sources.iter().any(|s| {
+            s.get("kind").and_then(|k| k.as_str()) == Some(entry.kind.as_str())
+                && s.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true)
+        });
+        entry.already_configured = enabled;
+        entry.configured_present = false;
+    }
 }
 
 /// The live per-field owner map off the irrigation snapshot's `field_sources`
@@ -700,7 +771,11 @@ where
         .await
         .map_err(|e| e.to_string())?;
     if !cur.ok() {
-        return Err(format!("HTTP {}", cur.status()));
+        let body = cur.text().await.unwrap_or_default();
+        return Err(crate::components::settings_ui::load_error_message(
+            cur.status(),
+            &body,
+        ));
     }
     let mut cfg: serde_json::Value = cur.json().await.map_err(|e| e.to_string())?;
     {
@@ -747,6 +822,84 @@ where
         })
         .unwrap_or_default();
     Ok(reasons)
+}
+
+/// GET the WIZARD DRAFT, run the SAME `sources` mutation the live path uses on
+/// draft.config.sources, PUT the whole draft back. The wizard-draft twin of
+/// `patch_sources` (issue #7): mid-wizard the live config is not the config
+/// the user is building, and a live PUT 422s on the unset location. The draft
+/// round-trips VERBATIM except config.sources, so unknown fields survive, the
+/// echoed `last_updated_epoch` satisfies the draft's optimistic-concurrency
+/// check (a stale echo 409s instead of clobbering another writer), and any
+/// secret the GET redacted rides back as the sentinel for the server to
+/// unredact against the stored draft. A NEWLY typed key is the real secret,
+/// never the sentinel, so the draft's unmatched-sentinel guard stays quiet.
+/// NEVER computes priority, same as the live path: the entry rides without one
+/// and the schema default carries it to Apply.
+#[cfg(feature = "hydrate")]
+async fn patch_draft_sources<F>(mutate: F) -> Result<(), String>
+where
+    F: FnOnce(&mut Vec<serde_json::Value>),
+{
+    use gloo_net::http::Request;
+    let cur = Request::get("/api/wizard/draft")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !cur.ok() {
+        let body = cur.text().await.unwrap_or_default();
+        return Err(crate::components::settings_ui::load_error_message(
+            cur.status(),
+            &body,
+        ));
+    }
+    let mut draft: serde_json::Value = cur.json().await.map_err(|e| e.to_string())?;
+    {
+        let obj = draft
+            .as_object_mut()
+            .ok_or_else(|| "draft is not an object".to_string())?;
+        let cfg = obj
+            .entry("config")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .ok_or_else(|| "draft config is not an object".to_string())?;
+        let arr = cfg
+            .entry("sources")
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+            .ok_or_else(|| "draft sources is not an array".to_string())?;
+        mutate(arr);
+    }
+    let resp = Request::put("/api/wizard/draft")
+        .json(&draft)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(crate::components::settings_ui::save_error_message(
+            resp.status(),
+            &body,
+        ));
+    }
+    Ok(())
+}
+
+/// Route a sources splice to the store the panel is editing: the WIZARD DRAFT
+/// when `write_draft` (no restart reasons; a draft change applies at the final
+/// Apply), the live config otherwise. One switch so the three enable/disable
+/// flows each own EXACTLY one splice, never a draft/live copy that can drift.
+#[cfg(feature = "hydrate")]
+async fn patch_sources_via<F>(write_draft: bool, mutate: F) -> Result<Vec<String>, String>
+where
+    F: FnOnce(&mut Vec<serde_json::Value>),
+{
+    if write_draft {
+        patch_draft_sources(mutate).await.map(|()| Vec::new())
+    } else {
+        patch_sources(mutate).await
+    }
 }
 
 /// Build the `config` block for a SINGLE-SECRET keyed kind from the secret the
@@ -821,6 +974,18 @@ pub fn CloudWeatherServices(
     /// is not forked, the wizard just hides one section.
     #[prop(default = true)]
     show_chain: bool,
+    /// True when the panel edits the WIZARD DRAFT instead of the live config
+    /// (the setup wizard's sources step embeds it this way). Mid-wizard the
+    /// live config typically still has NO location, so a live PUT would 422 on
+    /// the location_unset validation rule before the user ever reaches Apply
+    /// (issue #7). In draft mode every enable/disable runs the same sources
+    /// splice against GET/PUT /api/wizard/draft, the rows' on/off state + the
+    /// location callout overlay from the draft, the restart banner + host
+    /// notify are skipped (nothing live consumed the change), and the result
+    /// line says the choice lands at the end of setup. Default false: the
+    /// Settings/Devices posture PUTs the live config exactly as before.
+    #[prop(default = false)]
+    write_draft: bool,
     /// Fired after a successful enable/disable PUT so the host can refresh.
     #[prop(into, optional)]
     on_changed: Option<Callback<()>>,
@@ -880,7 +1045,17 @@ pub fn CloudWeatherServices(
             let _ = reload_trigger.get();
             wasm_bindgen_futures::spawn_local(async move {
                 match fetch_catalog().await {
-                    Ok(c) => {
+                    Ok(mut c) => {
+                        // Draft mode: the catalog's configured/enabled flags +
+                        // lat/lon reflect the LIVE config, which the mid-wizard
+                        // user is not editing; overlay the DRAFT's state so
+                        // the rows and the location callout read what the
+                        // user actually built so far.
+                        if write_draft {
+                            if let Some(d) = fetch_draft_value().await {
+                                overlay_draft_onto_catalog(&mut c, &d);
+                            }
+                        }
                         catalog.set(c);
                         error.set(String::new());
                     }
@@ -913,20 +1088,30 @@ pub fn CloudWeatherServices(
 
     // After any PUT: refresh result, raise/clear the restart banner, bump reload,
     // and notify the host. Shared by every row's enable/disable path. Only the
-    // hydrate build drives a PUT, so the ssr build never calls it.
+    // hydrate build drives a PUT, so the ssr build never calls it. In wizard
+    // draft mode the restart banner + host notify are skipped: nothing live is
+    // consuming a draft change (no engine to hot-reload, no device list to
+    // refresh), and the change applies at the wizard's final Apply.
     #[cfg_attr(not(feature = "hydrate"), allow(unused_variables))]
     let apply_result = move |outcome: Result<Vec<String>, String>| {
         saving.set(false);
         match outcome {
             Ok(reasons) => {
                 result_ok.set(true);
-                result_msg.set("Saved. Applied to the live engine.".to_string());
-                restart_dismissed.set(false);
-                restart_reasons.set(reasons);
-                reload.update(|n| *n += 1);
-                if let Some(cb) = on_changed {
-                    cb.run(());
+                if write_draft {
+                    result_msg.set(
+                        "Saved to your setup draft. It takes effect when you finish setup."
+                            .to_string(),
+                    );
+                } else {
+                    result_msg.set("Saved. Applied to the live engine.".to_string());
+                    restart_dismissed.set(false);
+                    restart_reasons.set(reasons);
+                    if let Some(cb) = on_changed {
+                        cb.run(());
+                    }
                 }
+                reload.update(|n| *n += 1);
             }
             Err(e) => {
                 result_ok.set(false);
@@ -945,7 +1130,7 @@ pub fn CloudWeatherServices(
             result_msg.set(String::new());
             wasm_bindgen_futures::spawn_local(async move {
                 let kind_for_mut = kind.clone();
-                let outcome = patch_sources(move |arr| {
+                let outcome = patch_sources_via(write_draft, move |arr| {
                     if let Some(slot) = arr
                         .iter_mut()
                         .find(|s| s.get("kind").and_then(|v| v.as_str()) == Some(&kind_for_mut))
@@ -982,7 +1167,7 @@ pub fn CloudWeatherServices(
             wasm_bindgen_futures::spawn_local(async move {
                 let kind_for_mut = kind.clone();
                 let secret_for_mut = secret.clone();
-                let outcome = patch_sources(move |arr| {
+                let outcome = patch_sources_via(write_draft, move |arr| {
                     let cfg = keyed_config(&kind_for_mut, &secret_for_mut);
                     if let Some(slot) = arr
                         .iter_mut()
@@ -1017,7 +1202,7 @@ pub fn CloudWeatherServices(
             result_msg.set(String::new());
             wasm_bindgen_futures::spawn_local(async move {
                 let kind_for_mut = kind.clone();
-                let outcome = patch_sources(move |arr| {
+                let outcome = patch_sources_via(write_draft, move |arr| {
                     if let Some(slot) = arr
                         .iter_mut()
                         .find(|s| s.get("kind").and_then(|v| v.as_str()) == Some(&kind_for_mut))
@@ -1126,7 +1311,10 @@ pub fn CloudWeatherServices(
         // provider fetches for the configured coordinates, and the config
         // validator refuses to save while location is 0,0 (issue #6: the
         // toggle 422'd with an error that never said the word location). The
-        // catalog payload already carries the deployment lat/lon, so an unset
+        // catalog payload already carries the deployment lat/lon; in wizard
+        // draft mode the coordinates overlay from the DRAFT (see
+        // overlay_draft_onto_catalog), so a location set on the wizard's
+        // location step clears this callout mid-wizard (issue #7). An unset
         // location renders a callout with the path to fix it; the toggles
         // stay usable and a refused save now names the rule too.
         let location_unset = {
@@ -1134,13 +1322,20 @@ pub fn CloudWeatherServices(
             loaded.get() && c.lat == 0.0 && c.lon == 0.0
         };
         let location_callout = location_unset.then(|| {
+            // In wizard draft mode the fix lives on the wizard's own location
+            // step, not the settings page.
+            let href = if write_draft {
+                "/setup/location"
+            } else {
+                "/settings/location"
+            };
             view! {
                 <p class="cloud-band__sub cloud-band__sub--warn">
                     <Icon name="alert-triangle" size=16/>
                     " Set your location first: cloud services fetch weather for "
                     "your coordinates, and settings cannot be saved while the "
                     "location is unset. "
-                    <a href="/settings/location">"Set location"</a>
+                    <a href=href>"Set location"</a>
                 </p>
             }
         });
@@ -2216,8 +2411,11 @@ fn render_chain(links: &[ChainLink]) -> impl IntoView {
 /// `CloudWeatherServices` panel), so a no-hardware user lands with their region
 /// default already on and a hardware user can turn a cloud provider on as a
 /// complement or backup, both with the full honest data picture. It is NOT a
-/// watered-down preview: it drives the same enable PUTs, so what the user sets
-/// here is exactly what goes live.
+/// watered-down preview: it drives the same sources splice, against the WIZARD
+/// DRAFT (`write_draft=true`, issue #7), so what the user sets here is exactly
+/// what goes live at the final Apply. Toggling the LIVE config from here used
+/// to 422 on every flip: the live config still had location 0,0 mid-wizard,
+/// and the validator makes location_unset an error.
 ///
 /// `for_hardware` only reframes the explainer copy (local sensors outrank cloud,
 /// cloud fills/backs up); the list is identical. The wizard's finalize step
@@ -2235,9 +2433,12 @@ pub fn CloudWeatherWizardSection(
         // there is no running engine with live owners to show, and the hero +
         // matrix + toggles already carry the capability truth. The chain lives
         // only in Settings/Devices (where a live engine has owners to display).
+        // write_draft routes every toggle to the wizard draft, never the live
+        // config, and overlays the rows + location callout from the draft.
         <crate::components::settings::CloudWeatherServices
             for_hardware=for_hardware
             show_chain=false
+            write_draft=true
         />
     }
 }
@@ -2684,5 +2885,95 @@ mod tests {
         assert_eq!(chain.len(), 1);
         assert!(chain[0].is_station);
         assert_eq!(chain_link_suffix(0, chain.len()), "");
+    }
+
+    // ----- The wizard-draft catalog overlay (issue #7) -----
+
+    #[test]
+    fn draft_overlay_drives_rows_and_location_from_the_draft() {
+        // Mid-wizard the catalog reflects the LIVE config (location 0,0,
+        // nothing configured); the overlay must re-read both from the DRAFT
+        // so the toggles and the location callout describe the config the
+        // user is actually building.
+        let mut catalog = CloudCatalog {
+            lat: 0.0,
+            lon: 0.0,
+            cloud_sources: vec![
+                mk("open_meteo", "forecast", true, false),
+                // Live-configured, but ABSENT from the draft: draft truth wins.
+                mk("nws", "observation", true, true),
+                mk("pirate_weather", "forecast", false, false),
+            ],
+        };
+        let draft = serde_json::json!({
+            "current_step": "sources",
+            "license_accepted": true,
+            "last_updated_epoch": 123,
+            "config": {
+                "deployment": { "location": { "lat": 29.9, "lon": -81.3 } },
+                "sources": [
+                    { "id": "open_meteo", "kind": "open_meteo", "enabled": true, "config": {} },
+                    { "id": "pw", "kind": "pirate_weather", "enabled": false,
+                      "config": { "api_key": "k" } },
+                ],
+            },
+        });
+        overlay_draft_onto_catalog(&mut catalog, &draft);
+        assert_eq!(catalog.lat, 29.9, "location overlays from the draft");
+        assert_eq!(catalog.lon, -81.3);
+        let get = |kind: &str| {
+            catalog
+                .cloud_sources
+                .iter()
+                .find(|e| e.kind == kind)
+                .unwrap()
+        };
+        assert!(
+            get("open_meteo").already_configured,
+            "a draft-enabled kind reads ON"
+        );
+        assert!(
+            !get("nws").already_configured,
+            "live-configured but absent from the draft reads OFF"
+        );
+        assert!(
+            !get("pirate_weather").already_configured,
+            "a disabled draft entry reads OFF"
+        );
+        // No row may vanish: the wizard has no device-card list to hand a
+        // configured row to, so the exactly-once filter must never hide one.
+        assert!(catalog.cloud_sources.iter().all(|e| !e.configured_present));
+    }
+
+    #[test]
+    fn draft_overlay_defaults_enabled_true_and_survives_missing_blocks() {
+        // `enabled` absent on a draft entry reads true (the config schema
+        // default), matching how the live station fetch reads it.
+        let mut catalog = CloudCatalog {
+            lat: 1.0,
+            lon: 2.0,
+            cloud_sources: vec![mk("open_meteo", "forecast", true, false)],
+        };
+        let draft = serde_json::json!({
+            "config": {
+                "sources": [ { "id": "open_meteo", "kind": "open_meteo", "config": {} } ],
+            },
+        });
+        overlay_draft_onto_catalog(&mut catalog, &draft);
+        assert!(catalog.cloud_sources[0].already_configured);
+        // No location block in the draft: the catalog's coordinates stand.
+        assert_eq!(catalog.lat, 1.0);
+        assert_eq!(catalog.lon, 2.0);
+
+        // A draft with no config at all (a brand-new default draft) reads as
+        // nothing enabled, and still keeps every row listed.
+        let mut fresh = CloudCatalog {
+            lat: 0.0,
+            lon: 0.0,
+            cloud_sources: vec![mk("nws", "observation", true, true)],
+        };
+        overlay_draft_onto_catalog(&mut fresh, &serde_json::json!({}));
+        assert!(!fresh.cloud_sources[0].already_configured);
+        assert!(!fresh.cloud_sources[0].configured_present);
     }
 }

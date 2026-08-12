@@ -106,7 +106,11 @@ async fn fetch_inventory() -> Result<Inventory, String> {
         .await
         .map_err(|e| e.to_string())?;
     if !resp.ok() {
-        return Err(format!("HTTP {}", resp.status()));
+        let body = resp.text().await.unwrap_or_default();
+        return Err(crate::components::settings_ui::load_error_message(
+            resp.status(),
+            &body,
+        ));
     }
     resp.json::<Inventory>().await.map_err(|e| e.to_string())
 }
@@ -119,7 +123,11 @@ async fn fetch_config() -> Result<serde_json::Value, String> {
         .await
         .map_err(|e| e.to_string())?;
     if !resp.ok() {
-        return Err(format!("HTTP {}", resp.status()));
+        let body = resp.text().await.unwrap_or_default();
+        return Err(crate::components::settings_ui::load_error_message(
+            resp.status(),
+            &body,
+        ));
     }
     resp.json::<serde_json::Value>()
         .await

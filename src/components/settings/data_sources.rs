@@ -1288,7 +1288,11 @@ async fn fetch_field_sources() -> Result<FieldSourcesData, String> {
         .await
         .map_err(|e| e.to_string())?;
     if !resp.ok() {
-        return Err(format!("HTTP {}", resp.status()));
+        let body = resp.text().await.unwrap_or_default();
+        return Err(crate::components::settings_ui::load_error_message(
+            resp.status(),
+            &body,
+        ));
     }
     let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     let user_fields = v

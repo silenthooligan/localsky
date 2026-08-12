@@ -481,7 +481,11 @@ async fn fetch_radar_ui() -> Result<RadarUiDraft, String> {
         .await
         .map_err(|e| e.to_string())?;
     if !resp.ok() {
-        return Err(format!("HTTP {}", resp.status()));
+        let body = resp.text().await.unwrap_or_default();
+        return Err(crate::components::settings_ui::load_error_message(
+            resp.status(),
+            &body,
+        ));
     }
     let val: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     let radar = val.get("ui").and_then(|u| u.get("radar"));

@@ -384,6 +384,19 @@ async fn post_apply(State(s): State<WizardApiState>) -> impl IntoResponse {
     // validation so the validator sees the finalized config (e.g. the
     // now-marked default controller), matching what gets written to disk.
     WizardStore::finalize_for_apply(&mut draft);
+    // The previous on-disk config: consulted by the region normalizer below
+    // (which sources are NEW) and by the hot-reload restart-required diff.
+    // `None` on a true fresh install (no prior config), which the normalizer's
+    // contract handles as "every source is new".
+    let prev_cfg = s.config_store.load().await.ok();
+    // Region-rank the cloud sources this apply INTRODUCES, exactly like the
+    // PUT /api/config path: the wizard's cloud toggles ride the draft (they
+    // cannot PUT the live config mid-wizard, issue #7), so this is where a
+    // draft-added cloud entry gets its researched region priority instead of
+    // shipping at the flat schema default until the next boot's repair pass.
+    // Runs AFTER finalize (the draft's location is in place for region
+    // resolution) and BEFORE validation, matching what gets written to disk.
+    crate::config::region::normalize_new_cloud_sources(prev_cfg.as_ref(), &mut draft.config);
     // Pre-apply checks against the finalized draft.
     if let Err(e) = s.draft_store.validate_for_apply(&draft) {
         return wizard_err(e).into_response();
@@ -395,11 +408,6 @@ async fn post_apply(State(s): State<WizardApiState>) -> impl IntoResponse {
             draft.config.auth.mode = crate::config::schema::AuthMode::Required;
         }
     }
-    // The previous on-disk config, for the hot-reload restart-required diff
-    // (re-entering the wizard as an editor over a configured instance). `None`
-    // on a true fresh install (no prior config), where only the live re-apply
-    // of the tunables runs.
-    let prev_cfg = s.config_store.load().await.ok();
     // Write the config atomically.
     match s.config_store.save(&draft.config).await {
         Ok(v) => {
@@ -1307,6 +1315,112 @@ mod draft_redaction_tests {
             r_ok.status(),
             StatusCode::NO_CONTENT,
             "a matching token must save"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod draft_cloud_apply_tests {
+    use super::*;
+
+    fn state_in(dir: &std::path::Path) -> WizardApiState {
+        WizardApiState {
+            draft_store: Arc::new(WizardStore::new(dir.join("wizard-draft.json"))),
+            config_store: Arc::new(FileConfigStore::new(dir.join("localsky.toml"))),
+            auth_rt: None,
+            tempest_store: None,
+            runtime: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn draft_added_cloud_source_survives_apply_and_reload() {
+        // The wizard sources step's DRAFT-mode cloud toggle (issue #7) writes
+        // the draft exactly like this: location set on the location step, then
+        // an open_meteo entry spliced into config.sources as {id, kind,
+        // enabled, config} (no priority; the schema default carries it), PUT
+        // through the real draft handler. Prove the whole pipeline holds:
+        // PUT /draft -> POST /apply (finalize_for_apply + validate_for_apply
+        // + save) -> the stored config contains the source AND loads back
+        // cleanly.
+        let dir = std::env::temp_dir().join(format!(
+            "localsky-wizard-test-{}-cloudapply",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = state_in(&dir);
+
+        let mut draft = WizardDraft::default();
+        draft.license_accepted = true;
+        draft.telemetry_choice = Some(false);
+        draft.config.deployment.location.lat = 29.9;
+        draft.config.deployment.location.lon = -81.3;
+        let mut candidate = serde_json::to_value(&draft).unwrap();
+        candidate["config"]["sources"] = serde_json::json!([{
+            "id": "open_meteo",
+            "kind": "open_meteo",
+            "enabled": true,
+            "config": {
+                "forecast_days": 7,
+                "forecast_hours": 48,
+                "past_days": 1,
+                "include_radar": true,
+            },
+        }, {
+            // A kind whose researched US region rank (75) differs from the
+            // flat schema default (50): apply must region-rank draft-added
+            // clouds via normalize_new_cloud_sources, not ship them at 50
+            // until the next boot's repair pass.
+            "id": "noaa_mrms",
+            "kind": "noaa_mrms",
+            "enabled": true,
+            "config": {},
+        }]);
+        let put = put_draft(State(s.clone()), Json(candidate))
+            .await
+            .into_response();
+        assert_eq!(
+            put.status(),
+            StatusCode::NO_CONTENT,
+            "a draft carrying a spliced cloud source must save"
+        );
+
+        let apply = post_apply(State(s.clone())).await.into_response();
+        assert_eq!(
+            apply.status(),
+            StatusCode::OK,
+            "apply must accept a draft whose cloud source came from the wizard toggle"
+        );
+
+        // The stored config carries the source and loads back cleanly.
+        let cfg = s
+            .config_store
+            .load()
+            .await
+            .expect("the applied config loads back");
+        let om = cfg
+            .sources
+            .iter()
+            .find(|src| src.id == "open_meteo")
+            .expect("the draft-added cloud source survived finalize + validate + save");
+        assert!(om.enabled, "the enabled flag survives apply");
+        assert!(
+            matches!(om.source, crate::config::schema::SourceKind::OpenMeteo(_)),
+            "the kind + config block deserialized into the typed source"
+        );
+        // Region ranking happened AT APPLY: the draft entries carried no
+        // priority, and NOAA MRMS's researched US rank is 75, not the flat 50.
+        let mrms = cfg
+            .sources
+            .iter()
+            .find(|src| src.id == "noaa_mrms")
+            .expect("the second draft-added cloud source survived apply");
+        assert_eq!(
+            mrms.priority, 75,
+            "apply region-ranks draft-added clouds (normalize_new_cloud_sources)"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

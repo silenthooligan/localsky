@@ -101,7 +101,11 @@ async fn fetch_devices() -> Result<Vec<Device>, String> {
         .await
         .map_err(|e| e.to_string())?;
     if !resp.ok() {
-        return Err(format!("HTTP {}", resp.status()));
+        let body = resp.text().await.unwrap_or_default();
+        return Err(crate::components::settings_ui::load_error_message(
+            resp.status(),
+            &body,
+        ));
     }
     resp.json::<Vec<Device>>().await.map_err(|e| e.to_string())
 }
@@ -114,7 +118,11 @@ async fn fetch_discover() -> Result<Vec<DiscoveredGateway>, String> {
         .await
         .map_err(|e| e.to_string())?;
     if !resp.ok() {
-        return Err(format!("HTTP {}", resp.status()));
+        let body = resp.text().await.unwrap_or_default();
+        return Err(crate::components::settings_ui::load_error_message(
+            resp.status(),
+            &body,
+        ));
     }
     resp.json::<Vec<DiscoveredGateway>>()
         .await
@@ -132,7 +140,11 @@ async fn fetch_config() -> Result<serde_json::Value, String> {
     // without this check it would poison the config signal (the failure-path
     // refetch would then "restore" garbage instead of truth).
     if !resp.ok() {
-        return Err(format!("HTTP {}", resp.status()));
+        let body = resp.text().await.unwrap_or_default();
+        return Err(crate::components::settings_ui::load_error_message(
+            resp.status(),
+            &body,
+        ));
     }
     resp.json::<serde_json::Value>()
         .await
@@ -151,7 +163,11 @@ async fn fetch_catalog() -> Result<CloudCatalog, String> {
         .await
         .map_err(|e| e.to_string())?;
     if !resp.ok() {
-        return Err(format!("HTTP {}", resp.status()));
+        let body = resp.text().await.unwrap_or_default();
+        return Err(crate::components::settings_ui::load_error_message(
+            resp.status(),
+            &body,
+        ));
     }
     resp.json::<CloudCatalog>().await.map_err(|e| e.to_string())
 }

@@ -1117,7 +1117,11 @@ async fn fetch_config() -> Result<serde_json::Value, String> {
         .map_err(|e| e.to_string())?;
     // A JSON error body must not be mistaken for the config.
     if !resp.ok() {
-        return Err(format!("HTTP {}", resp.status()));
+        let body = resp.text().await.unwrap_or_default();
+        return Err(crate::components::settings_ui::load_error_message(
+            resp.status(),
+            &body,
+        ));
     }
     resp.json::<serde_json::Value>()
         .await

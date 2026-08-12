@@ -27,7 +27,10 @@ async fn save_config(cfg: serde_json::Value) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     if !resp.ok() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("HTTP {}: {body}", resp.status()));
+        return Err(crate::components::settings_ui::save_error_message(
+            resp.status(),
+            &body,
+        ));
     }
     Ok(())
 }

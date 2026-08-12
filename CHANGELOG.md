@@ -4,6 +4,15 @@ All notable changes to LocalSky are documented here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.7.13] - 2026-08-12
+
+The setup wizard works before the setup exists. One fix in two places, no breaking changes.
+
+### Fixed
+
+- Cloud weather toggles in the setup wizard now save to your setup draft ([#7](https://github.com/silenthooligan/localsky/issues/7)). The sources step embeds the same cloud weather panel the settings pages use, and its toggles wrote the live configuration directly. On a fresh install the live configuration has no location yet, and a configuration without a location cannot be saved, so every toggle failed with a validation error and the step could not be completed. The toggles now write the wizard draft instead: the on/off state and the "set your location first" callout read the draft you are building (a location entered earlier in the wizard counts), adding a key to a keyed provider works the same way, and everything you turn on goes live when you finish setup.
+- Failed settings loads now show the server's reason ([#7](https://github.com/silenthooligan/localsky/issues/7)). When a settings or setup page could not load its data, the banner showed only the bare status code ("HTTP 422") and dropped the response body, so the explanation the server sent never reached you. Load and save failures now share the same reading of the server's error: the failing validation rules, the hint, or the detail line, with the raw status kept only as a last resort.
+
 ## [0.7.12] - 2026-08-12
 
 A refused settings save now explains itself, and precipitation probability becomes a sensor. No breaking changes.

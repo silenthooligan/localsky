@@ -216,7 +216,11 @@ pub fn SettingsAccount() -> impl IntoView {
                     if resp.ok() {
                         Ok(())
                     } else {
-                        Err(format!("HTTP {}", resp.status()))
+                        let body = resp.text().await.unwrap_or_default();
+                        Err(crate::components::settings_ui::save_error_message(
+                            resp.status(),
+                            &body,
+                        ))
                     }
                 }
                 .await;
