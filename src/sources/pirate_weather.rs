@@ -222,7 +222,8 @@ impl PirateWeather {
                         // valid fallback here; default to 0 when accumulation is
                         // absent rather than conflating a rate with a sum.
                         precip_sum_in: d.precip_accumulation.unwrap_or(0.0),
-                        precip_probability_max: d.precip_probability.map(frac_to_pct).unwrap_or(0),
+                        // Absent probability stays None, not a fabricated 0%.
+                        precip_probability_max: d.precip_probability.map(frac_to_pct),
                         wind_max_mph: d.wind_speed.unwrap_or(0.0),
                         wind_gust_max_mph: d.wind_gust.unwrap_or(0.0),
                         uv_index_max: d.uv_index.unwrap_or(0.0),
@@ -246,7 +247,7 @@ impl PirateWeather {
                         temp_f: h.temperature.unwrap_or(0.0),
                         apparent_temp_f: h.apparent_temperature.unwrap_or(0.0),
                         precip_in: h.precip_intensity.unwrap_or(0.0),
-                        precip_probability: h.precip_probability.map(frac_to_pct).unwrap_or(0),
+                        precip_probability: h.precip_probability.map(frac_to_pct),
                         wind_mph: h.wind_speed.unwrap_or(0.0),
                         wind_dir_deg: h
                             .wind_bearing
@@ -546,7 +547,7 @@ mod tests {
         assert!((d.temp_max_f - 82.4).abs() < 1e-6, "high already in F");
         assert!((d.temp_min_f - 61.2).abs() < 1e-6, "low already in F");
         assert!((d.precip_sum_in - 0.12).abs() < 1e-6);
-        assert_eq!(d.precip_probability_max, 35); // 0.35 -> 35%
+        assert_eq!(d.precip_probability_max, Some(35)); // 0.35 -> 35%
         assert!((d.wind_max_mph - 9.0).abs() < 1e-6);
         assert!((d.wind_gust_max_mph - 21.5).abs() < 1e-6);
         assert!((d.uv_index_max - 7.0).abs() < 1e-6);
@@ -559,7 +560,7 @@ mod tests {
         assert!((h.temp_f - 70.0).abs() < 1e-6, "temp already in F");
         assert!((h.apparent_temp_f - 72.5).abs() < 1e-6);
         assert!((h.precip_in - 0.04).abs() < 1e-6);
-        assert_eq!(h.precip_probability, 50); // 0.5 -> 50%
+        assert_eq!(h.precip_probability, Some(50)); // 0.5 -> 50%
         assert!((h.wind_mph - 6.0).abs() < 1e-6);
         assert_eq!(h.wind_dir_deg, 180);
         assert_eq!(h.humidity_pct, 66); // 0.66 -> 66%

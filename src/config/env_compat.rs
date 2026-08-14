@@ -89,7 +89,7 @@ pub fn synthesize() -> Config {
     // A no-hardware user should boot with the region's KEYLESS authority live,
     // zero clicks: NWS in the US, Met.no in Europe/the Nordics (nothing extra
     // elsewhere, where Open-Meteo is the sole keyless cloud). Both are keyless
-    // (the helper auto-fills the required user_agent) and land at their region
+    // (user_agent seeds empty = auto-derived at request time) and land at their
     // rank (70, above the Open-Meteo backstop at 50) with the slow-cadence
     // freshness window, via the same region helpers Open-Meteo used above. We
     // gate strictly on the pre-Open-Meteo emptiness so a hardware/HA install is

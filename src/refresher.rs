@@ -550,6 +550,21 @@ pub fn spawn_refresher(
                         cfg.as_deref(),
                     )
                     .await
+                    .map(|mut snap| {
+                        // Latch the water-level capability across refreshes on
+                        // the HA path: its only evidence is the per-tick entity
+                        // read, and a transient unavailable (HA restart,
+                        // integration reload) would otherwise retract the
+                        // manifest descriptor and churn the HA entity registry.
+                        // Once seen, the sensor stays advertised and reads
+                        // unavailable (value stays honestly null) through the
+                        // outage. Un-advertising a removed integration takes a
+                        // LocalSky restart. The native path keeps its stable
+                        // ControllerCaps-derived value (refresh_once_native
+                        // overwrites both fields), so the latch is HA-only.
+                        snap.water_level_capable |= store.snapshot().water_level_capable;
+                        snap
+                    })
                 }
                 SnapshotSource::Native => Ok(refresh_once_native(
                     &forecast_store,
@@ -1039,7 +1054,14 @@ async fn build_from_map(
     // in HA (entity prefix configurable; default "opensprinkler").
     let sp = sprinkler_prefix(watering_policy);
     snap.master_enable = state_eq(&map, &format!("switch.{sp}_enabled"), "on");
-    snap.water_level_pct = state_f64(&map, &format!("sensor.{sp}_water_level")).unwrap_or(0.0);
+    // None when the entity is missing/unavailable: the old unwrap_or(0.0)
+    // published "Water level 0%" (reads as watering fully suppressed) for a
+    // sensor that simply does not exist. On this path a present entity IS the
+    // capability signal; the HA refresh loop then LATCHES capability across
+    // ticks (see spawn_refresher) so a transient unavailable read cannot
+    // retract the manifest descriptor.
+    snap.water_level_pct = state_f64(&map, &format!("sensor.{sp}_water_level"));
+    snap.water_level_capable = snap.water_level_pct.is_some();
 
     // Vacation pause + one-day override helpers. Both are user-created
     // HA helpers (input_datetime + input_select). When missing, the snapshot
@@ -1486,9 +1508,9 @@ async fn build_from_map(
     let heat_mult = et_heat_multiplier(heat_index_3day);
 
     // Source-agnostic reference ET0 (mm): provider full-day forecast > Open-Meteo
-    // HA sensor > native compute from the forecast > station accumulator >
-    // fallback (see resolve_et0_today_mm). Display + soil-projection only (the
-    // live decision bucket is HA-sourced).
+    // HA sensor > native compute from the forecast > station accumulator; None
+    // when nothing real resolved (see resolve_et0_today_mm). Display +
+    // soil-projection only (the live decision bucket is HA-sourced).
     let et0_lat = watering_policy.location.0;
     let et0_base_doy = {
         use chrono::Datelike;
@@ -1497,6 +1519,8 @@ async fn build_from_map(
         crate::timeutil::now_local().ordinal() as u16
     };
     let et0_today_mm = resolve_et0_today_mm(tempest.et0_today, &map, &fc, et0_lat, et0_base_doy);
+
+    let (temp_max_today, temp_min_today, humidity_mean_today) = resolve_today_range(&fc, &map);
 
     let forecast = Forecast {
         rain_today_tempest_in: rain_today_station,
@@ -1562,12 +1586,11 @@ async fn build_from_map(
                     vals.iter().sum::<f64>() / vals.len() as f64
                 }
             }),
-        temp_max_today_f: state_f64(&map, "sensor.open_meteo_temp_max_today").unwrap_or(0.0),
-        temp_min_today_f: state_f64(&map, "sensor.open_meteo_temp_min_today").unwrap_or(0.0),
+        temp_max_today_f: temp_max_today,
+        temp_min_today_f: temp_min_today,
         wind_max_today_mph: wind_max_today,
         wind_gust_today_mph: wind_gust_today,
-        humidity_mean_today_pct: state_f64(&map, "sensor.open_meteo_humidity_mean_today")
-            .unwrap_or(0.0),
+        humidity_mean_today_pct: humidity_mean_today,
 
         rain_3day_weighted_in: rain_3day_weighted,
         rain_7day_weighted_in: rain_7day_weighted,
@@ -1752,7 +1775,10 @@ async fn build_from_map(
         &map,
         &watering_policy.soil_zones,
         sensor_history,
-        et0_today_mm,
+        // The advisory projection needs SOME daily ET to draw a curve; when
+        // nothing real resolved it opts into the engine-internal constant.
+        // The published eto_today_mm stays None in that case.
+        et0_today_mm.unwrap_or(ENGINE_ET0_FALLBACK_MM),
     )
     .await;
     snap.water_budgets = compute_water_budgets(
@@ -1827,10 +1853,15 @@ async fn refresh_once_native(
             }
         }
     }
-    // Default to enabled / full when no controller reports, so a missing
-    // readback never silently suppresses watering.
+    // Default to enabled when no controller reports, so a missing readback
+    // never silently suppresses watering (a control fail-safe, not a
+    // displayed measurement). The water level is the opposite case, a
+    // DISPLAYED measurement: every adapter except OpenSprinkler reports
+    // None, and the old unwrap_or(100.0) published a fabricated healthy
+    // "100%" readback for all of them. None stays None.
     snap.master_enable = cs.master.unwrap_or(true);
-    snap.water_level_pct = cs.water.unwrap_or(100.0);
+    snap.water_level_pct = cs.water;
+    snap.water_level_capable = cs.water_level_capable || cs.water.is_some();
     // Flow: capability flag + live GPM straight from the controller. Stays
     // None when no meter so the UI / HA surface nothing for non-flow setups.
     snap.flow_meter = cs.flow_meter;
@@ -1910,15 +1941,20 @@ async fn native_controller_state(controllers: &ControllerRegistry) -> NativeCont
     let mut water: Option<f64> = None;
     let mut flow_gpm: Option<f64> = None;
     let mut flow_meter = false;
+    let mut water_level_capable = false;
     for id in controllers.ids() {
         let Some(c) = controllers.get(&id) else {
             continue;
         };
-        // The capability flag comes from supports(), not status(), so a
+        // The capability flags come from supports(), not status(), so a
         // controller with a meter that momentarily reports flow_gpm=None
-        // still advertises the capability.
-        if c.supports().flow_meter {
+        // (or a water level between reads) still advertises the capability.
+        let caps = c.supports();
+        if caps.flow_meter {
             flow_meter = true;
+        }
+        if caps.water_level {
+            water_level_capable = true;
         }
         match c.status().await {
             Ok(st) => {
@@ -1957,6 +1993,7 @@ async fn native_controller_state(controllers: &ControllerRegistry) -> NativeCont
         water,
         flow_gpm,
         flow_meter,
+        water_level_capable,
     }
 }
 
@@ -1969,6 +2006,8 @@ struct NativeControllerState {
     water: Option<f64>,
     flow_gpm: Option<f64>,
     flow_meter: bool,
+    /// Any configured controller declares `ControllerCaps.water_level`.
+    water_level_capable: bool,
 }
 
 /// Run the decision engine against `inputs` and write the results into the
@@ -2100,7 +2139,8 @@ fn compute_water_budgets(
         .daily
         .iter()
         .take(7)
-        .map(|d| d.precip_sum_in * (d.precip_probability_max as f64) / 100.0)
+        // Probability-less days weight at full value (DailyEntry::precip_weight).
+        .map(|d| d.precip_sum_in * d.precip_weight())
         .sum();
 
     let mut out = Vec::with_capacity(iter_zones.len());
@@ -2387,8 +2427,7 @@ async fn compute_soil_forecasts(
         // day 1 using daily[0]'s rain prediction (the rest of today) and
         // daily[N]'s rain for day N onward.
         for d in fc.daily.iter().take(n_days).skip(1) {
-            let rain_effective_mm =
-                d.precip_sum_in * 25.4 * (d.precip_probability_max as f64) / 100.0;
+            let rain_effective_mm = d.precip_sum_in * 25.4 * d.precip_weight();
             let captured_mm = rain_effective_mm * CAPTURE_EFFICIENCY;
             let et_loss_mm = daily_et_mm * kc;
             let delta_mm = captured_mm - et_loss_mm;
@@ -2572,6 +2611,51 @@ fn native_et0_mm(d: &crate::forecast::snapshot::DailyEntry, lat: f64, doy: u16) 
     (r.et0_mm_day.is_finite() && r.et0_mm_day > 0.0).then_some(r.et0_mm_day)
 }
 
+/// Today's forecast (temp max, temp min, representative humidity) as
+/// Options, forecast-first (the resolve_et0_today_mm ladder shape): the live
+/// forecast snapshot's daily[0], then the legacy Open-Meteo HA REST sensors,
+/// `None` when neither carries the value. The old HA-sensor-only
+/// unwrap_or(0.0) fabricated a 0°F/0°F range and 0% humidity on every
+/// install without those sensors (all native installs), which the Day block
+/// rendered as forecast data and the LLM advisor was prompted with as
+/// ground truth.
+fn resolve_today_range(
+    fc: &ForecastSnapshot,
+    map: &HashMap<String, Value>,
+) -> (Option<f64>, Option<f64>, Option<f64>) {
+    let today = fc.daily.first();
+    // A day whose max AND min are both 0.0 carries no temps (the same
+    // absent-day test native_et0_mm applies).
+    let has_temps = today
+        .map(|d| d.temp_max_f != 0.0 || d.temp_min_f != 0.0)
+        .unwrap_or(false);
+    let temp_max = today
+        .filter(|_| has_temps)
+        .map(|d| d.temp_max_f)
+        .or_else(|| state_f64(map, "sensor.open_meteo_temp_max_today"));
+    let temp_min = today
+        .filter(|_| has_temps)
+        .map(|d| d.temp_min_f)
+        .or_else(|| state_f64(map, "sensor.open_meteo_temp_min_today"));
+    // humidity_pct == 0 means "no hourly coverage for the day" (see
+    // backfill_daily_humidity), so it does not count as a reading.
+    let humidity = today
+        .map(|d| d.humidity_pct)
+        .filter(|h| *h > 0)
+        .map(f64::from)
+        .or_else(|| state_f64(map, "sensor.open_meteo_humidity_mean_today"));
+    (temp_max, temp_min, humidity)
+}
+
+/// Engine-internal working assumption for daily reference ET0 (mm/day) when
+/// no rung of `resolve_et0_today_mm` produced a value (forecast outage or
+/// cold start). Consumed ONLY by the advisory soil projection so its curve
+/// can still be drawn; it is never published. The snapshot's `eto_today_mm`
+/// stays `None` (serialized null) so the HA sensor reads unknown and the
+/// dashboard shows a dash instead of recording a fabricated 5.0 mm/day of
+/// evapotranspiration into long-term statistics.
+const ENGINE_ET0_FALLBACK_MM: f64 = 5.0;
+
 /// Today's reference ET0 (mm), source-agnostic. The contract is the FULL-DAY
 /// figure (snapshot doc: eto_today_mm):
 ///   1. the bus et0_today: a source that reports (or a user mapping that
@@ -2583,30 +2667,29 @@ fn native_et0_mm(d: &crate::forecast::snapshot::DailyEntry, lat: f64, doy: u16) 
 ///      the emit. Accumulators belong in a dedicated field if one is added.)
 ///   2. the forecast provider's own daily[0] ET0 (inches -> mm),
 ///   3. Open-Meteo's HA REST sensor (mm, legacy HA installs),
-///   4. native Hargreaves from the forecast temps,
-///   5. the flat 5.0 fallback.
+///   4. native Hargreaves from the forecast temps.
+/// `None` when every rung comes up empty: the published field carries the
+/// unknown honestly; a consumer that needs a working assumption opts into
+/// `ENGINE_ET0_FALLBACK_MM` explicitly.
 fn resolve_et0_today_mm(
     snapshot_et0: f64,
     map: &HashMap<String, Value>,
     fc: &ForecastSnapshot,
     lat: f64,
     doy: u16,
-) -> f64 {
+) -> Option<f64> {
     if snapshot_et0 > 0.0 {
-        return snapshot_et0;
+        return Some(snapshot_et0);
     }
     if let Some(d) = fc.daily.first() {
         if d.et0_in > 0.0 {
-            return d.et0_in * 25.4;
+            return Some(d.et0_in * 25.4);
         }
     }
     if let Some(v) = state_f64(map, "sensor.open_meteo_eto_today").filter(|v| *v > 0.0) {
-        return v;
+        return Some(v);
     }
-    if let Some(v) = fc.daily.first().and_then(|d| native_et0_mm(d, lat, doy)) {
-        return v;
-    }
-    5.0
+    fc.daily.first().and_then(|d| native_et0_mm(d, lat, doy))
 }
 
 /// ET0 (mm) for forecast day `idx` (0=today): the provider's own daily ET0
@@ -3165,28 +3248,52 @@ mod et0_resolution_tests {
         // 1. A source-reported/mapped bus value owns the figure outright: the
         //    field's contract is FULL-DAY mm (the OM fill emits the converted
         //    daily total; an explicit HA/MQTT mapping is honored as mapped).
-        let got = resolve_et0_today_mm(4.2, &map, &fc_with(0.18), 40.0, 180);
+        let got = resolve_et0_today_mm(4.2, &map, &fc_with(0.18), 40.0, 180).expect("bus rung");
         assert!((got - 4.2).abs() < 1e-9, "bus value wins: {got}");
         // 2. No bus value -> the provider's full-day daily[0] ET0
         //    (0.18 in -> 4.572 mm). This is the rank whose UNITS issue #4
         //    broke: the OM fill emitted raw inches onto the mm bus.
-        let got = resolve_et0_today_mm(0.0, &map, &fc_with(0.18), 40.0, 180);
+        let got =
+            resolve_et0_today_mm(0.0, &map, &fc_with(0.18), 40.0, 180).expect("provider rung");
         assert!((got - 4.572).abs() < 1e-9, "provider daily next: {got}");
         // 3. No provider ET0 -> the Open-Meteo HA REST sensor (mm).
         let ha = map_with("sensor.open_meteo_eto_today", 4.8);
-        let got = resolve_et0_today_mm(0.0, &ha, &fc_with(0.0), 40.0, 180);
+        let got = resolve_et0_today_mm(0.0, &ha, &fc_with(0.0), 40.0, 180).expect("HA rung");
         assert!((got - 4.8).abs() < 1e-9, "HA sensor next: {got}");
-        // 4. No provider / HA ET0 -> native Hargreaves (a real value, not 5.0).
-        let native = resolve_et0_today_mm(0.0, &map, &fc_with(0.0), 40.0, 180);
-        assert!(
-            native > 0.0 && (native - 5.0).abs() > 0.01,
-            "native = {native}"
-        );
-        // 5. Nothing anywhere -> 5.0 fallback.
+        // 4. No provider / HA ET0 -> native Hargreaves (a real value).
+        let native =
+            resolve_et0_today_mm(0.0, &map, &fc_with(0.0), 40.0, 180).expect("native rung");
+        assert!(native > 0.0, "native = {native}");
+        // 5. Nothing anywhere -> None. The published eto_today_mm stays null
+        //    (HA sensor unknown, dashboard dash); only the advisory soil
+        //    projection opts into ENGINE_ET0_FALLBACK_MM, explicitly.
         let empty = ForecastSnapshot::default();
-        assert_eq!(resolve_et0_today_mm(0.0, &map, &empty, 40.0, 180), 5.0);
+        assert_eq!(resolve_et0_today_mm(0.0, &map, &empty, 40.0, 180), None);
         // native_et0_mm returns None on a temps-absent day.
         assert!(native_et0_mm(&DailyEntry::default(), 40.0, 180).is_none());
+    }
+
+    #[test]
+    fn today_range_resolves_forecast_first_then_ha_sensor_then_none() {
+        // Forecast daily[0] carries temps: it wins outright (native installs
+        // have no HA sensors, and the forecast refreshes every ~30 min vs
+        // the REST sensor's 4h).
+        let map = map_with("sensor.open_meteo_temp_max_today", 91.0);
+        let (tmax, tmin, hum) = resolve_today_range(&fc_with(0.0), &map);
+        assert_eq!(tmax, Some(90.0), "forecast beats the legacy sensor");
+        assert_eq!(tmin, Some(65.0));
+        // fc_with's days carry no humidity (humidity_pct 0 = no coverage).
+        assert_eq!(hum, None);
+
+        // No forecast: the legacy HA sensors fill in.
+        let empty = ForecastSnapshot::default();
+        let (tmax, _, _) = resolve_today_range(&empty, &map);
+        assert_eq!(tmax, Some(91.0), "legacy sensor is the fallback");
+
+        // Nothing anywhere: None, never a fabricated 0°F/0°F range or 0%
+        // humidity (the pre-fix behavior on every native install).
+        let (tmax, tmin, hum) = resolve_today_range(&empty, &HashMap::new());
+        assert_eq!((tmax, tmin, hum), (None, None, None));
     }
 
     #[test]
@@ -3617,7 +3724,7 @@ mod snapshot_assembly_tests {
             temp_min_f: 70.0,
             humidity_pct: 45, // the day's OWN afternoon RH
             precip_sum_in: 0.0,
-            precip_probability_max: 0,
+            precip_probability_max: Some(0),
             wind_max_mph: 5.0,
             ..Default::default()
         };

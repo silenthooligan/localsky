@@ -179,7 +179,9 @@ impl Default for ConditionOutcome {
 
 fn metric_value(m: Metric, i: &Inputs, zone: &ZoneSoil) -> Option<f64> {
     Some(match m {
-        Metric::RainProbTomorrow => i.rain_tomorrow_prob_pct as f64,
+        // Unreported probability evaluates as 100 (the engine's full-weight
+        // treatment), so a rain-probability condition errs toward skipping.
+        Metric::RainProbTomorrow => f64::from(i.rain_tomorrow_prob_pct.unwrap_or(100)),
         Metric::RainNext4hIn => i.rain_next_4h_in,
         Metric::RainTodayIn => i.rain_today_in,
         Metric::Rain3dayWeightedIn => i.rain_3day_weighted_in,

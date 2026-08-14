@@ -229,6 +229,7 @@ impl IrrigationController for OpenSprinklerDirect {
             multi_zone_parallel: false,
             history_query: true,
             remote_program_upload: false,
+            water_level: true,
         }
     }
 

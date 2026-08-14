@@ -257,7 +257,8 @@ fn build_snapshot(resp: &WkResponse, timezone: &str, now_epoch: i64) -> Forecast
                         // from hourly by backfill_daily_humidity below.
                         humidity_pct: 0,
                         precip_sum_in: mm_to_in(d.precipitation_amount.unwrap_or(0.0)),
-                        precip_probability_max: frac_to_pct(d.precipitation_chance.unwrap_or(0.0)),
+                        // Absent chance stays None, not a fabricated 0%.
+                        precip_probability_max: d.precipitation_chance.map(frac_to_pct),
                         wind_max_mph: kmh_to_mph(part.and_then(|p| p.wind_speed).unwrap_or(0.0)),
                         wind_gust_max_mph: kmh_to_mph(
                             part.and_then(|p| p.wind_gust_speed_max).unwrap_or(0.0),
@@ -284,7 +285,7 @@ fn build_snapshot(resp: &WkResponse, timezone: &str, now_epoch: i64) -> Forecast
                     temp_f: c_to_f(h.temperature.unwrap_or(0.0)),
                     apparent_temp_f: c_to_f(h.temperature_apparent.unwrap_or(0.0)),
                     precip_in: mm_to_in(h.precipitation_amount.unwrap_or(0.0)),
-                    precip_probability: frac_to_pct(h.precipitation_chance.unwrap_or(0.0)),
+                    precip_probability: h.precipitation_chance.map(frac_to_pct),
                     wind_mph: kmh_to_mph(h.wind_speed.unwrap_or(0.0)),
                     wind_dir_deg: (h.wind_direction.unwrap_or(0.0).round() as i64).rem_euclid(360)
                         as u32,
@@ -609,7 +610,7 @@ mod tests {
         assert!((d.temp_max_f - 86.0).abs() < 0.01, "30C -> 86F");
         assert!((d.temp_min_f - 50.0).abs() < 0.01, "10C -> 50F");
         assert!((d.precip_sum_in - 1.0).abs() < 0.01, "25.4mm -> 1in");
-        assert_eq!(d.precip_probability_max, 40);
+        assert_eq!(d.precip_probability_max, Some(40));
         assert!(
             (d.wind_max_mph - 10.0).abs() < 0.05,
             "16.0934 km/h -> 10 mph"
@@ -620,15 +621,17 @@ mod tests {
         assert!((h.temp_f - 77.0).abs() < 0.01, "25C -> 77F");
         assert_eq!(h.humidity_pct, 60);
         assert_eq!(h.cloud_cover_pct, 75);
-        assert_eq!(h.precip_probability, 20);
+        assert_eq!(h.precip_probability, Some(20));
         assert!((h.precip_in - 0.1).abs() < 0.01, "2.54mm -> 0.1in");
     }
 
     #[test]
     fn absent_precip_reads_as_zero() {
-        // A day/hour with precip fields omitted maps to 0 precip + 0 POP (the
-        // same accepted fallback as the other forecast sources). Pins the
-        // intentional behavior so a future refactor can't silently change it.
+        // A day/hour with precip fields omitted maps to 0 precip and an
+        // ABSENT probability (None, same rule as the other forecast
+        // sources): a missing chance is a provider gap, not a confident
+        // "0% chance". Pins the behavior so a refactor can't regress it to
+        // a fabricated zero.
         let resp: WkResponse = serde_json::from_value(json!({
             "forecastDaily": { "days": [ {
                 "forecastStart": "2026-06-24T00:00:00Z",
@@ -641,9 +644,9 @@ mod tests {
         .unwrap();
         let s = build_snapshot(&resp, "UTC", 1000);
         assert_eq!(s.daily[0].precip_sum_in, 0.0);
-        assert_eq!(s.daily[0].precip_probability_max, 0);
+        assert_eq!(s.daily[0].precip_probability_max, None);
         assert_eq!(s.hourly[0].precip_in, 0.0);
-        assert_eq!(s.hourly[0].precip_probability, 0);
+        assert_eq!(s.hourly[0].precip_probability, None);
     }
 
     #[test]

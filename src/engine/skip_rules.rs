@@ -39,7 +39,13 @@ pub struct Inputs {
 
     // ── Open-Meteo forecast ──
     pub forecast_in: f64,
-    pub rain_tomorrow_prob_pct: u32,
+    /// Tomorrow's max precipitation probability, percent. `None` when the
+    /// forecast provider reports no probability series: the tomorrow-rain
+    /// gate then weights `forecast_in` at FULL value (see
+    /// `tomorrow_prob_weight`) and the reason strings omit the confidence
+    /// claim. The old bare u32 collapsed "not reported" into 0%, which
+    /// zeroed the expected rain and watered ahead of forecast storms.
+    pub rain_tomorrow_prob_pct: Option<u32>,
     pub rain_3day_weighted_in: f64,
     pub rain_7day_weighted_in: f64,
     pub rain_next_4h_in: f64,
@@ -1081,8 +1087,33 @@ fn rain_next_4h_fires(i: &Inputs, p: &SkipRuleParams, disabled: &HashSet<&str>) 
         && !i.forecast_stale
         && i.rain_next_4h_in >= p.rain_next_4h_skip_in
 }
+/// Probability weight for tomorrow's forecast rain, 0.0..=1.0. `None` (the
+/// provider reports no probability) weights the amount at FULL value:
+/// treating forecast rain as certain is the conservative direction for a
+/// skip decision (hold water ahead of a forecast storm), where the old
+/// missing-equals-0 zeroed the expected rain and watered ahead of it. A
+/// reported 0 stays a real "the model says dry" and still zeroes the gate.
+fn tomorrow_prob_weight(i: &Inputs) -> f64 {
+    i.rain_tomorrow_prob_pct
+        .map(|p| f64::from(p) / 100.0)
+        .unwrap_or(1.0)
+}
+
+/// The tomorrow-rain skip reason. Quotes a confidence only when the provider
+/// actually reported one; with no probability the string claims only the
+/// forecast amount (which the gate weighted at full value).
+fn tomorrow_rain_reason(i: &Inputs) -> String {
+    match i.rain_tomorrow_prob_pct {
+        Some(p) => format!(
+            "Tomorrow rain ({:.2}\" \u{d7} {}% confidence)",
+            i.forecast_in, p
+        ),
+        None => format!("Tomorrow rain ({:.2}\" forecast)", i.forecast_in),
+    }
+}
+
 fn tomorrow_rain_fires(i: &Inputs, _p: &SkipRuleParams, disabled: &HashSet<&str>) -> bool {
-    let weighted = i.forecast_in * (i.rain_tomorrow_prob_pct as f64) / 100.0;
+    let weighted = i.forecast_in * tomorrow_prob_weight(i);
     !disabled.contains("tomorrow_rain") && !i.forecast_stale && weighted >= i.rain_skip_in
 }
 fn rain_3day_fires(i: &Inputs, p: &SkipRuleParams, disabled: &HashSet<&str>) -> bool {
@@ -1264,14 +1295,7 @@ fn post_soil(
         );
     }
     if !floor_active && tomorrow_rain_fires(i, p, disabled) {
-        return (
-            "skip",
-            format!(
-                "Tomorrow rain ({:.2}\" × {}% confidence)",
-                i.forecast_in, i.rain_tomorrow_prob_pct
-            ),
-            "tomorrow_rain",
-        );
+        return ("skip", tomorrow_rain_reason(i), "tomorrow_rain");
     }
     if !floor_active && rain_3day_fires(i, p, disabled) {
         return (
@@ -1560,7 +1584,7 @@ fn annotate_margins(rules: &mut [RuleEval], i: &Inputs, p: &SkipRuleParams) {
                 mk(a, t, a >= t, "\"", 2)
             }
             "tomorrow_rain" => {
-                let a = i.forecast_in * (i.rain_tomorrow_prob_pct as f64) / 100.0;
+                let a = i.forecast_in * tomorrow_prob_weight(i);
                 let t = i.rain_skip_in;
                 mk(a, t, a >= t, "\"", 2)
             }
@@ -2183,23 +2207,24 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
 
     // Tomorrow rain (confidence-weighted).
     {
-        let weighted = i.forecast_in * (i.rain_tomorrow_prob_pct as f64) / 100.0;
-        // #4a: when the probability is 0 (Open-Meteo daily lacked tomorrow's PoP,
-        // but an HA forecast sensor still supplied an amount), the old detail read
-        // "0.40" × 0% = 0.00"", a confusing "0% confidence" row that looks like the
-        // forecast is empty. The gate can never fire at 0% (weighted is 0), so
-        // relabel the passed row to state the missing-probability case plainly
-        // instead of multiplying by a phantom 0%.
-        let detail = if i.rain_tomorrow_prob_pct == 0 && i.forecast_in > 0.0 {
-            format!(
-                "{:.2}\" forecast, no probability data (does not skip)",
+        let weighted = i.forecast_in * tomorrow_prob_weight(i);
+        // The detail names the weighting honestly per case: a provider gap
+        // (None) takes the amount at full weight and says so (the #4a
+        // "phantom 0% confidence" row used to render here); a REPORTED 0%
+        // can never fire (weighted is 0) and states that plainly.
+        let detail = match i.rain_tomorrow_prob_pct {
+            Some(0) if i.forecast_in > 0.0 => format!(
+                "{:.2}\" forecast at a reported 0% probability (does not skip)",
                 i.forecast_in
-            )
-        } else {
-            format!(
+            ),
+            Some(prob) => format!(
                 "{:.2}\" × {}% = {:.2}\" vs {:.2}\"",
-                i.forecast_in, i.rain_tomorrow_prob_pct, weighted, i.rain_skip_in
-            )
+                i.forecast_in, prob, weighted, i.rain_skip_in
+            ),
+            None => format!(
+                "{:.2}\" at full weight (no probability reported) vs {:.2}\"",
+                i.forecast_in, i.rain_skip_in
+            ),
         };
         gate(
             &mut rules,
@@ -2212,10 +2237,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
             !demotes && tomorrow_rain_fires(i, p, &disabled),
             detail,
             "skip",
-            format!(
-                "Tomorrow rain ({:.2}\" × {}% confidence)",
-                i.forecast_in, i.rain_tomorrow_prob_pct
-            ),
+            tomorrow_rain_reason(i),
         );
     }
 
@@ -2406,7 +2428,7 @@ mod tests {
             rain_nature: RainNature::Measured,
             humidity_now_pct: 55.0,
             forecast_in: 0.0,
-            rain_tomorrow_prob_pct: 0,
+            rain_tomorrow_prob_pct: None,
             rain_3day_weighted_in: 0.0,
             rain_7day_weighted_in: 0.0,
             rain_next_4h_in: 0.0,
@@ -2560,7 +2582,7 @@ mod tests {
         push(|i| i.rain_next_4h_in = 0.20);
         push(|i| {
             i.forecast_in = 0.40;
-            i.rain_tomorrow_prob_pct = 90;
+            i.rain_tomorrow_prob_pct = Some(90);
         });
         push(|i| i.rain_3day_weighted_in = 1.0);
         push(|i| {
@@ -3103,9 +3125,38 @@ mod tests {
     fn tomorrow_high_confidence_skips() {
         let mut i = base();
         i.forecast_in = 0.30;
-        i.rain_tomorrow_prob_pct = 90;
+        i.rain_tomorrow_prob_pct = Some(90);
         let s = evaluate(&i);
         assert_eq!(s.verdict, "skip");
+    }
+
+    #[test]
+    fn tomorrow_amount_with_no_probability_skips_at_full_weight() {
+        // The deliberate honest-unknowns verdict flip, pinned: an amount with
+        // NO reported probability (legacy HA REST sensor while the daily
+        // window lacks tomorrow, or a probability-less provider) weights at
+        // FULL value and can skip. The pre-1.18 engine multiplied by a
+        // fabricated 0% and watered ahead of every such forecast storm.
+        let mut i = base();
+        i.forecast_in = 0.40; // >= rain_skip_in 0.25 at full weight
+        i.rain_tomorrow_prob_pct = None;
+        let s = evaluate(&i);
+        assert_eq!(s.verdict, "skip");
+        assert!(
+            s.reason.starts_with("Tomorrow rain (0.40"),
+            "reason claims the amount: {}",
+            s.reason
+        );
+        assert!(
+            !s.reason.contains("confidence"),
+            "no fabricated confidence claim: {}",
+            s.reason
+        );
+
+        // A REPORTED 0% is a real "model says dry" and still never fires.
+        i.rain_tomorrow_prob_pct = Some(0);
+        let s = evaluate(&i);
+        assert_eq!(s.verdict, "run");
     }
 
     #[test]
@@ -3981,7 +4032,7 @@ mod tests {
                 "tomorrow_rain",
                 |i| {
                     i.forecast_in = 0.40;
-                    i.rain_tomorrow_prob_pct = 90;
+                    i.rain_tomorrow_prob_pct = Some(90);
                 },
                 "skip",
                 "Tomorrow rain",

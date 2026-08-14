@@ -86,3 +86,101 @@ pub use tempest_ws::TempestWs;
 pub use tuya_cloud::TuyaCloud;
 pub use weatherkit::WeatherKit;
 pub use yolink::Yolink;
+
+// ─────────────────────────────────────────────────────────────────────
+// Outbound User-Agent identity for the keyless authorities (api.weather.gov,
+// api.met.no). Both require an operator-identifying UA in their terms.
+// ─────────────────────────────────────────────────────────────────────
+
+/// The historical placeholder identities the prefills used to ship
+/// ("localsky/0.2 (you@example.com)", "LocalSky (you@example.com)", ...).
+/// Any example.com contact is a template, not an identity; empty means
+/// "auto-derive". Also matched: the OLD auto-fill the v0.7.10-v0.7.12
+/// region seeder / wizard PERSISTED into configs, "localsky/<version>
+/// (+https://github.com/silenthooligan/localsky)": build-frozen, so an
+/// upgraded install would otherwise report a stale version to the agencies
+/// forever. None of these is ever sent verbatim.
+pub fn user_agent_is_placeholder(ua: &str) -> bool {
+    let t = ua.trim();
+    t.is_empty()
+        || t.to_ascii_lowercase().contains("example.com")
+        || (t.starts_with("localsky/")
+            && t.ends_with("(+https://github.com/silenthooligan/localsky)"))
+}
+
+/// The DERIVED User-Agent: package/version plus a per-install identifier,
+/// so the agencies see a real, current identity without LocalSky ever
+/// collecting a contact string. The instance id is the stable per-install
+/// uuid (mDNS/HACS identity); before init (tests, first boot) the UA is
+/// version + project URL only.
+pub fn derived_user_agent() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    match crate::instance::get() {
+        Some(uuid) => {
+            let short = &uuid[..uuid.len().min(8)];
+            format!("localsky/{version} (instance-{short}; +https://localsky.io)")
+        }
+        None => format!("localsky/{version} (+https://localsky.io)"),
+    }
+}
+
+/// The User-Agent to actually SEND for a keyless-authority source: the
+/// operator's own contact string when they set a real one, else the derived
+/// instance identity. The configured value is never rewritten; substitution
+/// happens at request time only, so an operator can still clear or edit the
+/// field later.
+pub fn resolve_outbound_user_agent(configured: &str) -> String {
+    if user_agent_is_placeholder(configured) {
+        derived_user_agent()
+    } else {
+        configured.trim().to_string()
+    }
+}
+
+#[cfg(test)]
+mod user_agent_tests {
+    use super::*;
+
+    #[test]
+    fn placeholders_and_empty_derive_a_real_identity() {
+        // The exact strings historical prefills shipped, plus empty/space.
+        for ua in [
+            "",
+            "   ",
+            "localsky/0.2 (you@example.com)",
+            "LocalSky (you@example.com)",
+            "me@EXAMPLE.COM",
+            // The auto-fill v0.7.10-v0.7.12 persisted into localsky.toml:
+            // build-frozen version, must re-derive after upgrade.
+            "localsky/0.7.10 (+https://github.com/silenthooligan/localsky)",
+            "localsky/0.7.11 (+https://github.com/silenthooligan/localsky)",
+            "localsky/0.7.12 (+https://github.com/silenthooligan/localsky)",
+        ] {
+            assert!(user_agent_is_placeholder(ua), "placeholder missed: {ua:?}");
+            let sent = resolve_outbound_user_agent(ua);
+            assert!(
+                sent.starts_with(&format!("localsky/{}", env!("CARGO_PKG_VERSION"))),
+                "derived UA carries the current version: {sent}"
+            );
+            assert!(
+                !sent.contains("example.com"),
+                "a placeholder never goes on the wire: {sent}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_real_operator_contact_passes_through_verbatim() {
+        let ua = "Jane's Weather Wall (jane@buttondown.dev)";
+        assert!(!user_agent_is_placeholder(ua));
+        assert_eq!(resolve_outbound_user_agent(ua), ua);
+    }
+
+    #[test]
+    fn derived_ua_version_matches_cargo_pkg_version() {
+        let ua = derived_user_agent();
+        let expect_prefix = format!("localsky/{} (", env!("CARGO_PKG_VERSION"));
+        assert!(ua.starts_with(&expect_prefix), "ua = {ua}");
+        assert!(ua.contains("+https://localsky.io"), "ua = {ua}");
+    }
+}

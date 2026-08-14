@@ -139,7 +139,14 @@ fn DailyCard(entry: DailyEntry, is_today: bool, prefs: UnitPrefs, tz: String) ->
             </div>
             <div class="daily-card-rain">
                 <span class="daily-card-rain-amt">{fmt_rain_amount(entry.precip_sum_in, prefs)}</span>
-                <span class="daily-card-rain-pct">{format!("{}%", entry.precip_probability_max)}</span>
+                // Dash when the provider reported no probability; the old
+                // bare 0 rendered a confident "0%".
+                <span class="daily-card-rain-pct">
+                    {match entry.precip_probability_max {
+                        Some(prob) => format!("{prob}%"),
+                        None => "-".to_string(),
+                    }}
+                </span>
             </div>
             {rain_character.map(|(kind, explain)| view! {
                 <span class=format!("daily-card-rainchar daily-card-rainchar--{kind}") title=explain.clone() aria-label=explain>

@@ -77,7 +77,8 @@ pub fn project_zone(
     // derive deltas in the probe's relative units, or calibrate the probe to
     // VWC); until then, treat the 7-day curve as a trend, not a measurement.
     for d in fc.daily.iter().take(n_days).skip(1) {
-        let rain_effective_mm = d.precip_sum_in * 25.4 * (d.precip_probability_max as f64) / 100.0;
+        // Probability-less days weight at full value (DailyEntry::precip_weight).
+        let rain_effective_mm = d.precip_sum_in * 25.4 * d.precip_weight();
         let captured_mm = rain_effective_mm * capture_efficiency;
         let et_loss_mm = daily_et_mm * zone.kc;
         let delta_mm = captured_mm - et_loss_mm;

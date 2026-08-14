@@ -731,6 +731,7 @@ mod inventory_tests {
                 multi_zone_parallel: false,
                 history_query: false,
                 remote_program_upload: false,
+                water_level: true,
             }
         }
         async fn run_zone(&self, _slug: &str, _d: u32) -> ControllerResult<RunHandle> {

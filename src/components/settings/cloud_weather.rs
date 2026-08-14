@@ -925,9 +925,11 @@ fn keyed_config(kind: &str, secret: &str) -> serde_json::Value {
 #[cfg(feature = "hydrate")]
 fn keyless_config(kind: &str) -> serde_json::Value {
     match kind {
-        "nws" | "met_norway" => {
-            serde_json::json!({ "user_agent": "localsky/0.2 (you@example.com)" })
-        }
+        // Empty user_agent = the server-side adapter derives the real
+        // per-install identity at request time. The one-click used to bake a
+        // template contact ("you@example.com") that was sent verbatim to
+        // api.weather.gov / api.met.no, with no form for the user to see it.
+        "nws" | "met_norway" => serde_json::json!({ "user_agent": "" }),
         "open_meteo" => serde_json::json!({
             "forecast_days": 7,
             "forecast_hours": 48,

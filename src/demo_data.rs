@@ -110,8 +110,12 @@ fn stamp_source_provenance(tempest: &TempestStore, snap: &TempestSnapshot, now: 
         true,
         "ecowitt",
     );
+    // The demo snapshot always carries a real Pop (built with Some in
+    // demo_snapshot); the expect documents that invariant rather than
+    // silently re-fabricating a 0%.
+    let pop = snap.pop_pct.expect("demo snapshot always sets pop_pct");
     tempest.apply_source_fields(
-        &[(F::Pop, snap.pop_pct), (F::Et0Today, snap.et0_today)],
+        &[(F::Pop, pop), (F::Et0Today, snap.et0_today)],
         now,
         false,
         "open_meteo",
@@ -420,8 +424,8 @@ fn synth_tempest(t_sim: f64) -> TempestSnapshot {
         et0_today: 3.5 + (day_phase * 0.5).sin() * 1.0,
         flow_gpm: 0.0,
         flow_total_gal_today: 0.0,
-        pop_pct: (20.0 + 30.0 * (day_phase * 0.7).sin()).clamp(0.0, 100.0),
-        leaf_wetness_pct: (35.0 + 35.0 * (day_phase * 0.6 + 1.0).sin()).clamp(0.0, 100.0),
+        pop_pct: Some((20.0 + 30.0 * (day_phase * 0.7).sin()).clamp(0.0, 100.0)),
+        leaf_wetness_pct: Some((35.0 + 35.0 * (day_phase * 0.6 + 1.0).sin()).clamp(0.0, 100.0)),
         precip_type: 0,
         lightning_count_last_min: 0,
         lightning_strikes_last_hour: 0,
@@ -530,7 +534,10 @@ fn synth_irrigation(t_sim: f64) -> IrrigationSnapshot {
     snap.override_helpers_present = true;
     snap.master_enable = true;
     snap.iu_enabled = true;
-    snap.water_level_pct = 100.0;
+    // The demo controller poses as OpenSprinkler-class hardware: it reports a
+    // real water level, so the capability flag and a Some value both ride.
+    snap.water_level_pct = Some(100.0);
+    snap.water_level_capable = true;
     snap.next_run_epoch = now + 6 * 3600;
     snap.next_run_total_minutes = 75.0;
     snap.zones = zones;
@@ -544,7 +551,7 @@ fn synth_irrigation(t_sim: f64) -> IrrigationSnapshot {
         // AND the tomorrow-rain phase reason above, so the hero re-render and
         // the baked string carry the same operands.
         forecast_in: 0.40,
-        rain_tomorrow_prob_pct: 85,
+        rain_tomorrow_prob_pct: Some(85),
         rain_3day_weighted_in: 0.42,
         rain_7day_weighted_in: 0.95,
         rain_next_4h_in,
@@ -599,18 +606,18 @@ fn synth_irrigation(t_sim: f64) -> IrrigationSnapshot {
         rain_nature: RainNature::Measured,
         rain_tomorrow_in: 0.40,
         rain_3day_in: 0.40,
-        eto_today_mm: 3.5 + (day_phase * 0.5).sin() * 1.0,
+        eto_today_mm: Some(3.5 + (day_phase * 0.5).sin() * 1.0),
         eto_tomorrow_mm: 4.4,
         eto_3day_avg_mm: 4.2,
-        temp_max_today_f: 88.0,
-        temp_min_today_f: 71.0,
+        temp_max_today_f: Some(88.0),
+        temp_min_today_f: Some(71.0),
         wind_max_today_mph: 8.0,
         wind_gust_today_mph: 12.0,
-        humidity_mean_today_pct: 65.0,
+        humidity_mean_today_pct: Some(65.0),
         rain_3day_weighted_in: 0.42,
         rain_7day_weighted_in: 0.95,
         rain_next_4h_in,
-        rain_tomorrow_prob_pct: 85,
+        rain_tomorrow_prob_pct: Some(85),
         temp_min_24h_f: 71.0,
         temp_max_3day_f: 97.0,
         humidity_now_pct: 62.0,
@@ -694,7 +701,7 @@ fn synth_seven_day_verdicts(now: i64) -> Vec<DayVerdict> {
             d.temp_max_f = highs[i];
             d.temp_min_f = 71.0 + (i as f64) * 0.2;
             d.precip_in = if v.starts_with("skip") { 0.4 } else { 0.0 };
-            d.precip_probability_max = if v.starts_with("skip") { 85 } else { 15 };
+            d.precip_probability_max = Some(if v.starts_with("skip") { 85 } else { 15 });
             d.verdict = v.to_string();
             d.reason = r.to_string();
             // Same classifier the live strip's codes come from, so the cell
@@ -794,13 +801,13 @@ fn synth_forecast() -> ForecastSnapshot {
             } else {
                 0.0
             };
-            e.precip_probability_max = if d == 1 {
+            e.precip_probability_max = Some(if d == 1 {
                 85
             } else if d == 4 {
                 70
             } else {
                 15
-            };
+            });
             e.wind_max_mph = 8.0;
             e.uv_index_max = 9.0;
             e.sunrise_epoch = now + d * 86400 + 6 * 3600;
@@ -814,7 +821,7 @@ fn synth_forecast() -> ForecastSnapshot {
             e.time_epoch = now + h * 3600;
             e.temp_f = 75.0 + 8.0 * ((h as f64) / 24.0 * std::f64::consts::TAU).sin();
             e.precip_in = if h > 2 && h < 6 { 0.04 } else { 0.0 };
-            e.precip_probability = if h > 2 && h < 6 { 75 } else { 10 };
+            e.precip_probability = Some(if h > 2 && h < 6 { 75 } else { 10 });
             e.wind_mph = 5.0;
             e.humidity_pct = 60;
             e.weather_code = 2;
@@ -1040,10 +1047,13 @@ mod seed_config_tests {
             }
             // The forecast block is populated, not the all-zero default.
             let f = &s.forecast;
-            assert!(f.eto_today_mm > 0.0, "ET0 today must be non-zero");
+            assert!(
+                f.eto_today_mm.expect("demo always carries an ET0") > 0.0,
+                "ET0 today must be non-zero"
+            );
             assert_eq!(f.forecast_source_label, "Open-Meteo (demo)");
             assert!(f.wind_gust_today_mph > 0.0);
-            assert_eq!(f.rain_tomorrow_prob_pct, 85);
+            assert_eq!(f.rain_tomorrow_prob_pct, Some(85));
             assert!(f.days_since_significant_rain > 0);
             assert!(f.heat_multiplier >= 1.0);
         }

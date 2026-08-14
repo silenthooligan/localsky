@@ -6,10 +6,16 @@
 //   1. deployment.location from the live config store (so a wizard
 //      location change applies on the next tick, no restart),
 //   2. the boot-config coordinates passed by main.rs,
-//   3. WEATHER_APP_LAT / WEATHER_APP_LON env vars (legacy v0.1 path),
-//   4. 40.0 / -75.0 as the last-ditch default.
-// (0, 0) config coordinates are treated as "never set" so a blank
-// config cannot point the forecast at Null Island.
+//   3. WEATHER_APP_LAT / WEATHER_APP_LON env vars (legacy v0.1 path,
+//      both must be set and parse).
+// An UNLOCATED install resolves to None and fetches NOTHING: the old
+// last-ditch 40.0/-75.0 default fetched a real Delaware Valley forecast
+// every 30 minutes and presented it as local data (dashboard, HA
+// sensors, and the Eastern wall clock via timezone=auto), the same
+// impersonation the radar map fix removed. The forecast snapshot stays
+// empty and the dashboard shows its no-forecast state until a location
+// is configured. (0, 0) config coordinates are treated as "never set"
+// so a blank config cannot point the forecast at Null Island.
 // Timezone is auto-detected by Open-Meteo from the coordinates so
 // daily windows match the user's local clock.
 
@@ -28,6 +34,11 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(30 * 60);
+/// Poll cadence while UNLOCATED. An unlocated tick makes zero network
+/// calls (it only re-reads the local config file), so a short sleep costs
+/// nothing upstream and bounds the wizard-saves-location -> first-forecast
+/// latency to seconds instead of a full REFRESH_INTERVAL.
+const UNLOCATED_POLL: Duration = Duration::from_secs(15);
 /// Backoff ceiling for upstream failures. 16 doublings of the base
 /// interval would overshoot the refresh cadence; cap at 30 minutes so
 /// the refresher never sleeps longer than the happy-path interval.
@@ -74,9 +85,24 @@ pub fn spawn_forecast_refresher(
         // state transition rather than per failure.
         let mut consecutive_failures: u32 = 0;
         let mut degraded: bool = false;
+        // One log per unlocated stretch, not one per tick.
+        let mut unlocated_logged = false;
 
         loop {
-            let (lat, lon) = resolve_coords(cfg_store.as_deref(), boot_coords).await;
+            let Some((lat, lon)) = resolve_coords(cfg_store.as_deref(), boot_coords).await else {
+                // Unlocated install: fetch nothing, emit nothing. The empty
+                // forecast snapshot keeps the UI in its honest no-forecast
+                // state instead of a real city's weather.
+                if !unlocated_logged {
+                    tracing::info!(
+                        "no location configured; forecast fetching paused until one is set"
+                    );
+                    unlocated_logged = true;
+                }
+                tokio::time::sleep(UNLOCATED_POLL).await;
+                continue;
+            };
+            unlocated_logged = false;
             let model = resolve_model(cfg_store.as_deref()).await;
             let endpoint = resolve_endpoint(cfg_store.as_deref()).await;
             let sleep_for = match refresh_once(&client, lat, lon, &model, endpoint.as_deref()).await
@@ -157,23 +183,24 @@ pub fn spawn_forecast_refresher(
 
 /// Resolve forecast coordinates for one refresh tick. Live config wins
 /// (wizard changes apply without restart), then the boot-config coords,
-/// then the legacy env vars, then the 40/-75 default. (0, 0) means
-/// "location never set" and falls through.
+/// then the legacy env vars. `None` = unlocated install: the caller skips
+/// the upstream fetch entirely rather than impersonating a default city.
+/// (0, 0) means "location never set" and falls through.
 async fn resolve_coords(
     cfg_store: Option<&FileConfigStore>,
     boot_coords: Option<(f64, f64)>,
-) -> (f64, f64) {
+) -> Option<(f64, f64)> {
     if let Some(store) = cfg_store {
         if let Ok(cfg) = store.load().await {
             let (lat, lon) = (cfg.deployment.location.lat, cfg.deployment.location.lon);
             if lat != 0.0 || lon != 0.0 {
-                return (lat, lon);
+                return Some((lat, lon));
             }
         }
     }
     if let Some((lat, lon)) = boot_coords {
         if lat != 0.0 || lon != 0.0 {
-            return (lat, lon);
+            return Some((lat, lon));
         }
     }
     env_coords()
@@ -229,18 +256,24 @@ pub fn configured_open_meteo_model(cfg: &Config) -> String {
         .unwrap_or_else(|| DEFAULT_MODEL.to_string())
 }
 
-/// Legacy v0.1 coordinate source: WEATHER_APP_LAT/LON env vars with the
-/// historical 40.0 / -75.0 fallback.
-fn env_coords() -> (f64, f64) {
-    let lat: f64 = std::env::var("WEATHER_APP_LAT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(40.0);
-    let lon: f64 = std::env::var("WEATHER_APP_LON")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(-75.0);
-    (lat, lon)
+/// Legacy v0.1 coordinate source: WEATHER_APP_LAT/LON env vars. `Some` only
+/// when BOTH are set and parse; there is no baked-in default pair (the
+/// historical 40.0 / -75.0 fallback made an unlocated install fetch and
+/// display a Philadelphia forecast as local data).
+fn env_coords() -> Option<(f64, f64)> {
+    coords_from_strs(
+        std::env::var("WEATHER_APP_LAT").ok().as_deref(),
+        std::env::var("WEATHER_APP_LON").ok().as_deref(),
+    )
+}
+
+/// Pure parse half of [`env_coords`]: both strings present and parseable, or
+/// nothing. Split out so the no-default contract is unit-testable without
+/// process-global env mutation.
+fn coords_from_strs(lat: Option<&str>, lon: Option<&str>) -> Option<(f64, f64)> {
+    let lat: f64 = lat?.parse().ok()?;
+    let lon: f64 = lon?.parse().ok()?;
+    Some((lat, lon))
 }
 
 /// Exponential backoff with jitter, capped at BACKOFF_MAX. base = 30s,
@@ -662,7 +695,9 @@ impl Raw {
                 temp_f: pick(&self.hourly.temperature_2m, i),
                 apparent_temp_f: pick(&self.hourly.apparent_temperature, i),
                 precip_in: pick(&self.hourly.precipitation, i),
-                precip_probability: pick(&self.hourly.precipitation_probability, i).unwrap_or(0),
+                // A null/absent probability stays None (provider gap), never
+                // a fabricated 0% that zeroes the weighted rollups.
+                precip_probability: pick(&self.hourly.precipitation_probability, i),
                 wind_mph: pick(&self.hourly.wind_speed_10m, i),
                 wind_dir_deg: pick(&self.hourly.wind_direction_10m, i),
                 humidity_pct: pick(&self.hourly.relative_humidity_2m, i),
@@ -696,8 +731,8 @@ impl Raw {
                 // (Open-Meteo's daily rollup has no RH field).
                 humidity_pct: 0,
                 precip_sum_in: pick(&self.daily.precipitation_sum, i),
-                precip_probability_max: pick(&self.daily.precipitation_probability_max, i)
-                    .unwrap_or(0),
+                // None (not 0) when the model run carries no probability.
+                precip_probability_max: pick(&self.daily.precipitation_probability_max, i),
                 wind_max_mph: pick(&self.daily.wind_speed_10m_max, i),
                 wind_gust_max_mph: pick(&self.daily.wind_gusts_10m_max, i),
                 uv_index_max: pick(&self.daily.uv_index_max, i).unwrap_or(0.0),
@@ -1014,6 +1049,21 @@ mod tests {
     }
 
     #[test]
+    fn env_coords_have_no_default_city() {
+        // Explicitly-set env vars resolve; anything less is None, so an
+        // unlocated install fetches nothing (the historical 40.0/-75.0
+        // fallback fetched and displayed a Philadelphia forecast as local).
+        assert_eq!(
+            coords_from_strs(Some("28.5"), Some("-81.4")),
+            Some((28.5, -81.4))
+        );
+        assert_eq!(coords_from_strs(None, None), None);
+        assert_eq!(coords_from_strs(Some("28.5"), None), None);
+        assert_eq!(coords_from_strs(None, Some("-81.4")), None);
+        assert_eq!(coords_from_strs(Some("not-a-lat"), Some("-81.4")), None);
+    }
+
+    #[test]
     fn endpoint_ladder_keeps_primary_first_and_only_swaps_host() {
         assert_eq!(FORECAST_BASES[0], "https://api.open-meteo.com");
         let primary = forecast_url(FORECAST_BASES[0], 28.5, -81.4, "best_match");
@@ -1259,8 +1309,10 @@ mod tests {
         cfg.deployment.location.lat = 28.5;
         cfg.deployment.location.lon = -81.4;
         store.save(&cfg).await.unwrap();
-        // Config beats the (Philadelphia-defaulting) boot coords.
-        let got = resolve_coords(Some(&store), Some((40.0, -75.0))).await;
+        // Config beats boot coords.
+        let got = resolve_coords(Some(&store), Some((40.0, -75.0)))
+            .await
+            .expect("configured location resolves");
         assert!((got.0 - 28.5).abs() < 1e-9);
         assert!((got.1 - (-81.4)).abs() < 1e-9);
     }
@@ -1274,7 +1326,9 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let store = FileConfigStore::new(dir.join("missing.toml"));
-        let got = resolve_coords(Some(&store), Some((28.5, -81.4))).await;
+        let got = resolve_coords(Some(&store), Some((28.5, -81.4)))
+            .await
+            .expect("boot coords resolve");
         assert!((got.0 - 28.5).abs() < 1e-9);
     }
 
@@ -1290,11 +1344,16 @@ mod tests {
         let store = FileConfigStore::new(&path);
         let cfg = crate::config::schema::Config::default(); // lat/lon 0.0
         store.save(&cfg).await.unwrap();
-        let got = resolve_coords(Some(&store), Some((28.5, -81.4))).await;
+        let got = resolve_coords(Some(&store), Some((28.5, -81.4)))
+            .await
+            .expect("boot coords resolve past null-island config");
         assert!(
             (got.0 - 28.5).abs() < 1e-9,
             "zero config coords must fall through"
         );
+        // Nothing set anywhere: unlocated, so no fetch. (Test env has no
+        // WEATHER_APP_LAT/LON, same assumption env_compat tests make.)
+        assert_eq!(resolve_coords(Some(&store), None).await, None);
     }
 
     #[test]

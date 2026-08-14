@@ -871,7 +871,16 @@ fn HeroStats(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             .filter(|z| waters_tonight(z))
             .count()
             .to_string();
-        let water = format!("{:.0}", s.water_level_pct);
+        // Water level is None when the controller does not report one
+        // (every adapter except OpenSprinkler-class hardware): render the
+        // same dash treatment as the Soil-deficit stat below, never a
+        // fabricated 0%/100% readback.
+        let water_empty = s.water_level_pct.is_none();
+        let water = match s.water_level_pct {
+            Some(v) => format!("{v:.0}"),
+            None => "-".to_string(),
+        };
+        let water_unit = if water_empty { "" } else { "%" };
         // Soil deficit is the mean of each zone's bucket, in MILLIMETERS.
         let deficit_empty = s.zones.is_empty();
         let deficit = if deficit_empty {
@@ -893,7 +902,7 @@ fn HeroStats(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                     <span class="ir-hero-stat__k">"Zones watering"</span>
                 </div>
                 <div class="ir-hero-stat">
-                    <span class="ir-hero-stat__v">{water}<span class="ir-hero-stat__u">"%"</span></span>
+                    <span class="ir-hero-stat__v">{water}<span class="ir-hero-stat__u">{water_unit}</span></span>
                     <span class="ir-hero-stat__k">"Water level"</span>
                 </div>
                 <div class="ir-hero-stat">
@@ -970,16 +979,27 @@ fn SkipBreakdown(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                     label="Forecast (×prob)"
                     value=Signal::derive(move || {
                         let s = snap.get().skip_check;
-                        format!(
-                            "{} × {}%",
-                            fmt_rain_amount(s.forecast_in, prefs.get()), s.rain_tomorrow_prob_pct
-                        )
+                        // No probability reported: show the bare amount (the
+                        // engine weights it at full value), never a phantom
+                        // "× 0%".
+                        match s.rain_tomorrow_prob_pct {
+                            Some(prob) => format!(
+                                "{} × {prob}%",
+                                fmt_rain_amount(s.forecast_in, prefs.get())
+                            ),
+                            None => fmt_rain_amount(s.forecast_in, prefs.get()),
+                        }
                     })
                     threshold=Signal::derive(move || format!("< {}", fmt_rain_amount(snap.get().skip_check.rain_skip_in, prefs.get())))
                     tripped=Signal::derive(move || {
                         let s = snap.get().skip_check;
-                        s.forecast_in * (s.rain_tomorrow_prob_pct as f64) / 100.0
-                            >= s.rain_skip_in
+                        // Full weight when no probability was reported,
+                        // matching the engine's tomorrow_prob_weight.
+                        let weight = s
+                            .rain_tomorrow_prob_pct
+                            .map(|prob| prob as f64 / 100.0)
+                            .unwrap_or(1.0);
+                        s.forecast_in * weight >= s.rain_skip_in
                     })
                 />
             }.into_any()}

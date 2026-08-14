@@ -884,8 +884,11 @@ fn default_ecowitt_poll_s() -> u32 {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct NwsConfig {
-    /// Required by api.weather.gov. Plain ASCII, identifies the operator
-    /// for support contact. Example: "LocalSky (you@example.com)".
+    /// Identity sent to api.weather.gov (plain ASCII). Empty or omitted =
+    /// LocalSky derives a real per-install identity at request time
+    /// (`sources::resolve_outbound_user_agent`); set it only to hand the
+    /// agency your own contact string.
+    #[serde(default)]
     pub user_agent: String,
 }
 
@@ -901,7 +904,10 @@ pub struct PirateWeatherConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct MetNorwayConfig {
-    /// User-Agent required by api.met.no terms of service.
+    /// Identity sent to api.met.no (their terms require one). Empty or
+    /// omitted = LocalSky derives a real per-install identity at request
+    /// time; set it only to hand the agency your own contact string.
+    #[serde(default)]
     pub user_agent: String,
 }
 

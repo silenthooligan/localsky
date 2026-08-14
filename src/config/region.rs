@@ -18,19 +18,13 @@
 
 use crate::config::schema::SourceKind;
 
-/// The User-Agent string auto-filled on a synthesized keyless authority source
-/// (NWS / Met.no). Both `api.weather.gov` and `api.met.no` require a non-empty,
-/// operator-identifying User-Agent in their terms of service, and the config
-/// validator (`validate.rs`) rejects an empty `user_agent` outright. A
-/// no-hardware user never types one, so the default-on regional stack fills it
-/// the same way the UI's "add source" prefill does: the package name + version
-/// plus the project URL as the contact. An operator can edit it later in the
-/// Sources UI without changing behavior.
-pub const KEYLESS_AUTHORITY_USER_AGENT: &str = concat!(
-    "localsky/",
-    env!("CARGO_PKG_VERSION"),
-    " (+https://github.com/silenthooligan/localsky)"
-);
+// Seeded keyless authority sources (NWS / Met.no) ship an EMPTY user_agent:
+// empty means "auto-derive" and the adapters substitute the real per-install
+// identity at request time (`sources::resolve_outbound_user_agent`, package +
+// version + instance id). Baking a string here froze the version at build
+// time and, in earlier releases, shipped a template contact; the config
+// validator accepts the empty value, and an operator can still type their
+// own contact string in the Sources UI.
 
 /// Coarse home region for the configured station, used only to seed default
 /// source priorities. Anything outside the US and the Europe/Nordic boxes is
@@ -261,14 +255,16 @@ pub fn region_keyless_authority_kinds(lat: f64, lon: f64) -> Vec<SourceKind> {
     match region_for(lat, lon) {
         Region::Us => {
             kinds.push(SourceKind::Nws(NwsConfig {
-                user_agent: KEYLESS_AUTHORITY_USER_AGENT.to_string(),
+                // Empty = auto-derived at request time (see module note).
+                user_agent: String::new(),
             }));
             // NOAA MRMS rides alongside NWS in the US: a keyless radar-QPE
             // authority, the best off-yard rain read short of a local gauge.
             kinds.push(SourceKind::NoaaMrms(NoaaMrmsConfig::default()));
         }
         Region::EuropeNordic => kinds.push(SourceKind::MetNorway(MetNorwayConfig {
-            user_agent: KEYLESS_AUTHORITY_USER_AGENT.to_string(),
+            // Empty = auto-derived at request time (see module note).
+            user_agent: String::new(),
         })),
         Region::Global => {}
     }
@@ -434,9 +430,8 @@ pub fn normalize_new_cloud_sources(
 /// clicks: NWS inside the US bbox, Met.no inside the Europe/Nordic bbox, and
 /// nothing extra elsewhere (Global keeps Open-Meteo as the sole keyless cloud,
 /// since no other keyless regional authority covers it). Both NWS and Met.no
-/// are keyless: their one required field is a `user_agent`, which we auto-fill
-/// with `KEYLESS_AUTHORITY_USER_AGENT` exactly as the existing default sources
-/// do (an empty one would fail config validation).
+/// are keyless: their one identity field is a `user_agent`, seeded EMPTY so
+/// the adapters derive the real per-install identity at request time.
 ///
 /// Each entry's rank, freshness window, and enablement are seeded from the same
 /// `default_priority_for` / `default_max_age_for` / `default_enabled_for`
@@ -465,9 +460,8 @@ pub fn region_keyless_authority_entries(
     // Nordics, nothing in Global). This keeps the persistable-entries builder and
     // the recommendation predicate provably in lockstep. A stable id (`nws` /
     // `met_norway`) keeps a later id-keyed `normalize_new_cloud_sources` pass
-    // idempotent. Both ids resolve a keyless source whose one required field is a
-    // `user_agent`, auto-filled with `KEYLESS_AUTHORITY_USER_AGENT` so it passes
-    // the config validator.
+    // idempotent. Both ids resolve a keyless source whose one identity field
+    // is a `user_agent`, seeded empty (= auto-derived at request time).
     region_keyless_authority_kinds(lat, lon)
         .into_iter()
         .filter(|kind| !matches!(kind, SourceKind::OpenMeteo(_)))
@@ -986,9 +980,9 @@ mod tests {
     fn us_keyless_authority_is_nws_at_70_enabled() {
         // A no-hardware US install gets NWS + NOAA MRMS live, zero clicks: NWS at
         // the US station-authority rank (70) with the 2100s slow-cadence window
-        // and a non-empty auto-filled user_agent (an empty one would fail the
-        // config validator), and NOAA MRMS at 75 (above NWS, below a LAN gauge).
-        // Both above the Open-Meteo backstop (50).
+        // and an EMPTY user_agent (empty = the adapter derives the real
+        // per-install identity at request time), and NOAA MRMS at 75 (above
+        // NWS, below a LAN gauge). Both above the Open-Meteo backstop (50).
         for (lat, lon) in [ORLANDO, ANCHORAGE, HONOLULU] {
             let entries = region_keyless_authority_entries(lat, lon);
             assert_eq!(
@@ -1007,8 +1001,8 @@ mod tests {
             );
             match &nws_e.source {
                 SourceKind::Nws(c) => assert!(
-                    !c.user_agent.trim().is_empty(),
-                    "the keyless NWS user_agent must be auto-filled (empty fails validation)"
+                    c.user_agent.is_empty(),
+                    "the seeded NWS user_agent ships empty (auto-derived at request time)"
                 ),
                 other => panic!("expected an NWS source, got {other:?}"),
             }
@@ -1063,8 +1057,8 @@ mod tests {
         assert_eq!(metno_e.max_age_s, Some(MAX_AGE_SLOW_CADENCE_S));
         match &metno_e.source {
             SourceKind::MetNorway(c) => assert!(
-                !c.user_agent.trim().is_empty(),
-                "the keyless Met.no user_agent must be auto-filled"
+                c.user_agent.is_empty(),
+                "the seeded Met.no user_agent ships empty (auto-derived at request time)"
             ),
             other => panic!("expected a MetNorway source, got {other:?}"),
         }

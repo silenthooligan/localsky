@@ -308,13 +308,19 @@ pub fn validate(cfg: &Config) -> ValidationReport {
     }
 
     // Required string credentials must be non-empty at config time. Without
-    // this, an empty api_key / user_agent / access_token sails through here
-    // and only surfaces as a runtime 401/400 on the first poll, long after
-    // the wizard said "valid". Catch the single-credential kinds (the ones
-    // whose one required string is the credential) up front. Multi-field
-    // cloud kinds (OAuth client_id/secret pairs, MQTT broker creds, etc.)
-    // are left to their adapters since "which subset is required" is
-    // kind-specific; these are the unambiguous single-secret sources.
+    // this, an empty api_key / access_token sails through here and only
+    // surfaces as a runtime 401/400 on the first poll, long after the wizard
+    // said "valid". Catch the single-credential kinds (the ones whose one
+    // required string is the credential) up front. Multi-field cloud kinds
+    // (OAuth client_id/secret pairs, MQTT broker creds, etc.) are left to
+    // their adapters since "which subset is required" is kind-specific;
+    // these are the unambiguous single-secret sources.
+    //
+    // NWS / Met.no user_agent is deliberately NOT here: it is an identity,
+    // not a credential, and an empty value is VALID (the adapters derive a
+    // real per-install UA at request time; see
+    // sources::resolve_outbound_user_agent). Requiring it non-empty is what
+    // shipped the "you@example.com" template to both agencies.
     for s in &cfg.sources {
         if !s.enabled {
             continue;
@@ -323,8 +329,6 @@ pub fn validate(cfg: &Config) -> ValidationReport {
             SourceKind::TempestWs(c) if c.access_token.trim().is_empty() => Some("access_token"),
             SourceKind::OpenWeather(c) if c.api_key.trim().is_empty() => Some("api_key"),
             SourceKind::PirateWeather(c) if c.api_key.trim().is_empty() => Some("api_key"),
-            SourceKind::Nws(c) if c.user_agent.trim().is_empty() => Some("user_agent"),
-            SourceKind::MetNorway(c) if c.user_agent.trim().is_empty() => Some("user_agent"),
             SourceKind::Synoptic(c) if c.token.trim().is_empty() => Some("token"),
             SourceKind::HaPassthrough(c) if c.bearer_token.trim().is_empty() => {
                 Some("bearer_token")
@@ -947,6 +951,32 @@ mod tests {
         );
         let r = validate(&cfg);
         assert!(r.errors.iter().any(|i| i.code == "source_credential_empty"));
+    }
+
+    #[test]
+    fn empty_keyless_authority_user_agent_is_valid() {
+        // NWS / Met.no user_agent is an identity, not a credential: empty is
+        // now VALID and means "auto-derive the instance UA at request time".
+        // The old non-empty requirement is what pushed the you@example.com
+        // template into configs and onto both agencies' wires.
+        let mut cfg = base();
+        for (id, kind) in [("nws", "nws"), ("metno", "met_norway")] {
+            cfg.sources.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": id,
+                    "kind": kind,
+                    "enabled": true,
+                    "config": { "user_agent": "" },
+                }))
+                .unwrap(),
+            );
+        }
+        let r = validate(&cfg);
+        assert!(
+            !r.errors.iter().any(|i| i.code == "source_credential_empty"),
+            "empty user_agent must not error: {:?}",
+            r.errors
+        );
     }
 
     #[test]

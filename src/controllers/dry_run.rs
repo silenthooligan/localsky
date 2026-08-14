@@ -53,6 +53,11 @@ impl IrrigationController for DryRunController {
             multi_zone_parallel: true,
             history_query: false,
             remote_program_upload: false,
+            // A dry run measures nothing: advertising a level would publish
+            // a fabricated 100% "reading" to HA, the exact defect class the
+            // capability bit exists to gate. (Demo mode sets its own
+            // snapshot fields directly; it does not ride this adapter.)
+            water_level: false,
         }
     }
 
@@ -122,7 +127,8 @@ impl IrrigationController for DryRunController {
         Ok(ControllerStatus {
             reachable: true,
             master_enabled: Some(true),
-            water_level_pct: Some(100.0),
+            // No fabricated readback; see supports().
+            water_level_pct: None,
             rain_sensor_tripped: Some(false),
             current_program: None,
             zone_states: running

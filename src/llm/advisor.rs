@@ -211,7 +211,11 @@ fn explain_cache_key(s: &IrrigationSnapshot) -> String {
         rt = sk.rain_today_in,
         n4h = sk.rain_next_4h_in,
         tom = sk.forecast_in,
-        tp = sk.rain_tomorrow_prob_pct,
+        // Unknown probability keys as "na", distinct from any real percent.
+        tp = sk
+            .rain_tomorrow_prob_pct
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "na".into()),
         w3 = sk.rain_3day_weighted_in,
         hi3 = sk.heat_index_max_3day_f,
         days = f.days_since_significant_rain,
@@ -238,6 +242,17 @@ fn anomaly_cache_key(s: &IrrigationSnapshot) -> String {
 fn build_explainer_prompt(s: &IrrigationSnapshot) -> String {
     let sk = &s.skip_check;
     let f = &s.forecast;
+    // No probability reported: no confidence claim (never "at 0%").
+    let tomorrow_line = match sk.rain_tomorrow_prob_pct {
+        Some(prob) => format!(
+            "- rain_tomorrow: {:.2}\" at {prob}% confidence\n",
+            sk.forecast_in
+        ),
+        None => format!(
+            "- rain_tomorrow: {:.2}\" (no confidence reported)\n",
+            sk.forecast_in
+        ),
+    };
     format!(
         "Verdict: {verdict}\n\
          Reason from rule engine: {reason}\n\
@@ -251,7 +266,7 @@ fn build_explainer_prompt(s: &IrrigationSnapshot) -> String {
          \n\
          Forecast (Open-Meteo):\n\
          - rain_next_4h: {n4h:.2}\"\n\
-         - rain_tomorrow: {tom:.2}\" at {tp}% confidence\n\
+         {tomorrow_line}\
          - rain_3day_weighted: {w3:.2}\" (Σ daily × prob/100)\n\
          - rain_7day_weighted: {w7:.2}\"\n\
          - overnight low next 24h: {tlo:.0}°F\n\
@@ -279,8 +294,6 @@ fn build_explainer_prompt(s: &IrrigationSnapshot) -> String {
         rt = sk.rain_today_in,
         ri = sk.rain_intensity_now_in_hr,
         n4h = sk.rain_next_4h_in,
-        tom = sk.forecast_in,
-        tp = sk.rain_tomorrow_prob_pct,
         w3 = sk.rain_3day_weighted_in,
         w7 = sk.rain_7day_weighted_in,
         tlo = sk.temp_min_24h_f,
@@ -299,6 +312,24 @@ fn build_explainer_prompt(s: &IrrigationSnapshot) -> String {
 fn build_anomaly_prompt(s: &IrrigationSnapshot) -> String {
     let sk = &s.skip_check;
     let f = &s.forecast;
+    // Absent forecast values are OMITTED, not printed as 0: prompting the
+    // model with "temp max today: 0°F" as ground truth invited bogus
+    // freeze-anomaly advisories on every install without those values.
+    let tomorrow_line = match sk.rain_tomorrow_prob_pct {
+        Some(prob) => format!("- rain tomorrow: {:.2}\" ({prob}% prob)\n", sk.forecast_in),
+        None => format!(
+            "- rain tomorrow: {:.2}\" (no probability reported)\n",
+            sk.forecast_in
+        ),
+    };
+    let temp_range_lines = match (f.temp_max_today_f, f.temp_min_today_f) {
+        (Some(tmax), Some(tmin)) => {
+            format!("- temp max today: {tmax:.0}°F\n- temp min today: {tmin:.0}°F\n")
+        }
+        (Some(tmax), None) => format!("- temp max today: {tmax:.0}°F\n"),
+        (None, Some(tmin)) => format!("- temp min today: {tmin:.0}°F\n"),
+        (None, None) => String::new(),
+    };
     format!(
         "Snapshot at epoch {epoch} (HA reachable: {reach}, {n_zones} zones tracked):\n\
          \n\
@@ -312,10 +343,9 @@ fn build_anomaly_prompt(s: &IrrigationSnapshot) -> String {
          \n\
          Open-Meteo (regional forecast):\n\
          - rain today: {rom:.2}\"\n\
-         - rain tomorrow: {rtom:.2}\" ({tp}% prob)\n\
+         {tomorrow_line}\
          - rain 3-day weighted: {w3:.2}\"\n\
-         - temp max today: {tmax:.0}°F\n\
-         - temp min today: {tmin:.0}°F\n\
+         {temp_range}\
          - heat index 3d peak: {hi3:.0}°F\n\
          - days since significant rain: {days}\n\
          \n\
@@ -332,11 +362,8 @@ fn build_anomaly_prompt(s: &IrrigationSnapshot) -> String {
         ri = sk.rain_intensity_now_in_hr,
         rtype = f.rain_type,
         rom = f.rain_today_om_in,
-        rtom = sk.forecast_in,
-        tp = sk.rain_tomorrow_prob_pct,
         w3 = sk.rain_3day_weighted_in,
-        tmax = f.temp_max_today_f,
-        tmin = f.temp_min_today_f,
+        temp_range = temp_range_lines,
         hi3 = sk.heat_index_max_3day_f,
         days = f.days_since_significant_rain,
         verdict = sk.verdict,

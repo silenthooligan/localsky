@@ -277,7 +277,13 @@ impl Nws {
     pub fn new(id: impl Into<String>, config: NwsConfig, location: Location) -> Self {
         let client = Client::builder()
             .timeout(Duration::from_secs(15))
-            .user_agent(config.user_agent.clone())
+            // api.weather.gov requires an operator-identifying UA. An empty
+            // or historical-placeholder value ("you@example.com") derives the
+            // real instance identity at request time; the config is never
+            // rewritten (see sources::resolve_outbound_user_agent).
+            .user_agent(crate::sources::resolve_outbound_user_agent(
+                &config.user_agent,
+            ))
             .build()
             .expect("reqwest client construction");
         Self {
@@ -782,8 +788,13 @@ fn parse_daily(periods: &[ForecastPeriod]) -> Vec<DailyEntry> {
                 // Lone night period; backfill_daily_humidity fills from hourly.
                 humidity_pct: 0,
                 precip_sum_in: 0.0,
-                precip_probability_max: p.pop.as_ref().and_then(|o| o.value).unwrap_or(0.0).round()
-                    as u32,
+                // An absent POP stays None (NWS omits it on dry periods AND
+                // on gaps); a reported value, 0 included, is kept.
+                precip_probability_max: p
+                    .pop
+                    .as_ref()
+                    .and_then(|o| o.value)
+                    .map(|v| v.round() as u32),
                 wind_max_mph: parse_wind_max_mph(p.wind_speed.as_deref()),
                 wind_gust_max_mph: 0.0,
                 uv_index_max: 0.0,
@@ -811,8 +822,11 @@ fn parse_daily(periods: &[ForecastPeriod]) -> Vec<DailyEntry> {
                 .map(|v| v.round().clamp(0.0, 100.0) as u32)
                 .unwrap_or(0),
             precip_sum_in: 0.0,
-            precip_probability_max: p.pop.as_ref().and_then(|o| o.value).unwrap_or(0.0).round()
-                as u32,
+            precip_probability_max: p
+                .pop
+                .as_ref()
+                .and_then(|o| o.value)
+                .map(|v| v.round() as u32),
             wind_max_mph: parse_wind_max_mph(p.wind_speed.as_deref()),
             wind_gust_max_mph: 0.0,
             uv_index_max: 0.0,
@@ -825,13 +839,17 @@ fn parse_daily(periods: &[ForecastPeriod]) -> Vec<DailyEntry> {
         if let Some(night) = periods.get(i + 1) {
             if !night.is_daytime {
                 entry.temp_min_f = night.temperature.unwrap_or(0.0);
+                // Max of the day/night POPs; either side absent defers to the
+                // other, both absent stays None.
                 let night_pop = night
                     .pop
                     .as_ref()
                     .and_then(|o| o.value)
-                    .unwrap_or(0.0)
-                    .round() as u32;
-                entry.precip_probability_max = entry.precip_probability_max.max(night_pop);
+                    .map(|v| v.round() as u32);
+                entry.precip_probability_max = match (entry.precip_probability_max, night_pop) {
+                    (Some(d), Some(n)) => Some(d.max(n)),
+                    (a, b) => a.or(b),
+                };
                 let night_wind = parse_wind_max_mph(night.wind_speed.as_deref());
                 if night_wind > entry.wind_max_mph {
                     entry.wind_max_mph = night_wind;
@@ -862,7 +880,11 @@ fn parse_hourly(periods: &[ForecastPeriod]) -> Vec<HourlyEntry> {
             temp_f: p.temperature.unwrap_or(0.0),
             apparent_temp_f: 0.0,
             precip_in: 0.0,
-            precip_probability: p.pop.as_ref().and_then(|o| o.value).unwrap_or(0.0).round() as u32,
+            precip_probability: p
+                .pop
+                .as_ref()
+                .and_then(|o| o.value)
+                .map(|v| v.round() as u32),
             wind_mph: parse_wind_max_mph(p.wind_speed.as_deref()),
             wind_dir_deg: wind_dir_to_deg(p.wind_direction.as_deref()),
             humidity_pct: p
@@ -1303,7 +1325,7 @@ mod tests {
         assert_eq!(d0.temp_max_f, 84.0);
         assert_eq!(d0.temp_min_f, 67.0);
         // Max POP across the pair (day 20, night 40 -> 40).
-        assert_eq!(d0.precip_probability_max, 40);
+        assert_eq!(d0.precip_probability_max, Some(40));
         // Max sustained wind across the pair (day max 10, night max 15).
         assert_eq!(d0.wind_max_mph, 15.0);
         // Code from the daytime shortForecast ("Mostly Sunny" -> 2).
@@ -1327,7 +1349,7 @@ mod tests {
 
         let h0 = &hourly[0];
         assert_eq!(h0.temp_f, 72.0); // already Fahrenheit
-        assert_eq!(h0.precip_probability, 15);
+        assert_eq!(h0.precip_probability, Some(15));
         assert_eq!(h0.wind_mph, 8.0);
         assert_eq!(h0.wind_dir_deg, 248); // WSW
         assert_eq!(h0.humidity_pct, 62);

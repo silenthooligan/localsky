@@ -90,29 +90,81 @@ async fn elevation(
     }
 }
 
+/// The resolved map view: real coordinates when the install has any, an
+/// honest continent-scale default when it has none.
+pub struct MapCenter {
+    pub lat: f64,
+    pub lon: f64,
+    pub zoom: u32,
+    /// False when neither the config nor the legacy env vars carry a
+    /// location: the center below is a PLACEHOLDER view, and the UI must
+    /// say so instead of rendering it as the user's surroundings.
+    pub located: bool,
+}
+
+/// Resolve the map center once for every consumer (the radar panel's SSR
+/// attributes and GET /api/v1/location): config location first, then the
+/// legacy WEATHER_APP_LAT/LON env vars (an explicit operator choice, so it
+/// counts as located), else a continental-US overview.
+///
+/// The old fallback was (40.0, -75.0) at zoom 8: a neighborhood-scale view
+/// of the Delaware Valley, station marker included, on every install with no
+/// location. A beta tester in another state read it as "my location updates
+/// are not being applied" (issue #7 thread). An unlocated install now gets
+/// the CONUS centroid at zoom 4, which reads as a map of the country, and
+/// `located=false` so the client suppresses the marker and says what is
+/// going on.
+pub fn resolve_map_center(cfg_loc: Option<(f64, f64)>) -> MapCenter {
+    let env_loc = || {
+        let lat: f64 = std::env::var("WEATHER_APP_LAT").ok()?.parse().ok()?;
+        let lon: f64 = std::env::var("WEATHER_APP_LON").ok()?.parse().ok()?;
+        Some((lat, lon))
+    };
+    let located = cfg_loc.filter(|(lat, lon)| !(*lat == 0.0 && *lon == 0.0));
+    let (lat, lon, located) = match located.or_else(env_loc) {
+        Some((lat, lon)) => (lat, lon, true),
+        None => (39.8, -98.6, false),
+    };
+    let zoom: u32 = std::env::var("WEATHER_APP_ZOOM")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(if located { 8 } else { 4 });
+    MapCenter {
+        lat,
+        lon,
+        zoom,
+        located,
+    }
+}
+
 async fn location(State(store): State<Arc<FileConfigStore>>) -> Json<serde_json::Value> {
     let from_cfg = store
         .load()
         .await
         .ok()
-        .map(|c| (c.deployment.location.lat, c.deployment.location.lon))
-        .filter(|(lat, lon)| !(*lat == 0.0 && *lon == 0.0));
+        .map(|c| (c.deployment.location.lat, c.deployment.location.lon));
+    let c = resolve_map_center(from_cfg);
+    Json(json!({ "lat": c.lat, "lon": c.lon, "zoom": c.zoom, "located": c.located }))
+}
 
-    let (lat, lon) = from_cfg.unwrap_or_else(|| {
-        let lat = std::env::var("WEATHER_APP_LAT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(40.0);
-        let lon = std::env::var("WEATHER_APP_LON")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(-75.0);
-        (lat, lon)
-    });
-    let zoom: u32 = std::env::var("WEATHER_APP_ZOOM")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8);
+#[cfg(test)]
+mod center_tests {
+    use super::resolve_map_center;
 
-    Json(json!({ "lat": lat, "lon": lon, "zoom": zoom }))
+    #[test]
+    fn unlocated_installs_get_an_honest_continental_view() {
+        // No config location (or the 0,0 sentinel): continent-scale center,
+        // flagged unlocated so the client can say so. (Assumes the test env
+        // does not set the legacy WEATHER_APP_* vars, which nothing in the
+        // suite does.)
+        for loc in [None, Some((0.0, 0.0))] {
+            let c = resolve_map_center(loc);
+            assert!(!c.located);
+            assert_eq!((c.lat, c.lon, c.zoom), (39.8, -98.6, 4));
+        }
+        // A real location is itself, neighborhood zoom, located.
+        let c = resolve_map_center(Some((29.9, -81.3)));
+        assert!(c.located);
+        assert_eq!((c.lat, c.lon, c.zoom), (29.9, -81.3, 8));
+    }
 }

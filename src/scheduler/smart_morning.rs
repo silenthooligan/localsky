@@ -1210,6 +1210,7 @@ mod tests {
                 multi_zone_parallel: false,
                 history_query: false,
                 remote_program_upload: false,
+                water_level: false,
             }
         }
         async fn run_zone(&self, slug: &str, duration_s: u32) -> ControllerResult<RunHandle> {
@@ -1837,6 +1838,7 @@ mod tests {
                 multi_zone_parallel: false,
                 history_query: false,
                 remote_program_upload: false,
+                water_level: false,
             }
         }
         async fn run_zone(&self, slug: &str, duration_s: u32) -> ControllerResult<RunHandle> {

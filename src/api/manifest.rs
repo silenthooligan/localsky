@@ -20,7 +20,15 @@ use crate::ports::config_store::ConfigStore;
 /// changes only; additive fields use the same major.
 /// 1.3 (additive): optional `group` sub-device hint on descriptors, the
 /// force_overrode_guard sensor, and capability-gated flow/leaf publishing.
-pub const MANIFEST_SCHEMA_VERSION: &str = "1.3";
+/// 1.4 (additive): the flow/leaf capability-gate rule extended to every
+/// entity whose install may lack the backing hardware/data: pop_pct (a
+/// configured source must provide Pop), the station-only scalars
+/// wet_bulb_f / wind_lull_mph / rain_in_last_min / illuminance_lx (a live
+/// station must be present, same rule as battery_pct), the per-zone
+/// soil moisture/temperature/EC/battery quartet (the zone must have a
+/// soil probe configured or live-reporting), and water_level_pct (the
+/// controller must report the capability).
+pub const MANIFEST_SCHEMA_VERSION: &str = "1.4";
 
 /// One HA entity descriptor. HACS reads `platform` + `id` + `name` +
 /// `snapshot`/`path` to know where to fetch state from the coordinator,
@@ -114,33 +122,64 @@ async fn manifest(State(state): State<ManifestState>) -> Json<Manifest> {
     let snap = state.irrigation.snapshot();
     let mut entities = Vec::new();
 
-    // Which reading capabilities the CONFIGURED sources provide, for the
-    // flow/leaf publish gates. Fail-OPEN on a config load error (publish as
-    // before) so a transient config problem never silently drops entities an
-    // install genuinely has.
-    let (cfg_provides_flow, cfg_provides_leaf) = match state.cfg.load().await {
-        Ok(cfg) => {
-            let mut flow = false;
-            let mut leaf = false;
-            for entry in cfg.sources.iter().filter(|s| s.enabled) {
-                for f in crate::runtime::source_field_names(&cfg, entry) {
-                    match f {
-                        "flow_gpm" => flow = true,
-                        "leaf_wetness_pct" => leaf = true,
-                        _ => {}
+    // Which reading capabilities the CONFIGURED sources provide (for the
+    // flow/leaf/pop/lux publish gates), plus which zones have a soil probe
+    // configured (for the per-zone soil entity gate; None = config
+    // unreadable, publish per-zone soil as before). Fail-OPEN on a config
+    // load error (publish as before) so a transient config problem never
+    // silently drops entities an install genuinely has.
+    let (cfg_provides_flow, cfg_provides_leaf, cfg_provides_pop, cfg_provides_lux, cfg_soil_zones) =
+        match state.cfg.load().await {
+            Ok(cfg) => {
+                let mut flow = false;
+                let mut leaf = false;
+                let mut pop = false;
+                let mut lux = false;
+                for entry in cfg.sources.iter().filter(|s| s.enabled) {
+                    for f in crate::runtime::source_field_names(&cfg, entry) {
+                        match f {
+                            "flow_gpm" => flow = true,
+                            "leaf_wetness_pct" => leaf = true,
+                            "pop" => pop = true,
+                            "illuminance" => lux = true,
+                            _ => {}
+                        }
+                    }
+                    if flow && leaf && pop && lux {
+                        break;
                     }
                 }
-                if flow && leaf {
-                    break;
-                }
+                // The Open-Meteo forecast refresher is IMPLICIT: main.rs
+                // spawns it even when no OpenMeteo entry exists in sources
+                // (only an explicit disabled entry opts out), and it emits
+                // Pop. Mirror that backstop or the gate drops the pop_pct
+                // sensor while the data plane is still feeding it.
+                pop = pop
+                    || !cfg.sources.iter().any(|s| {
+                        matches!(s.source, crate::config::schema::SourceKind::OpenMeteo(_))
+                    });
+                let soil: std::collections::BTreeSet<String> = cfg
+                    .zones
+                    .iter()
+                    .filter(|(_, z)| z.soil_sensor_id.is_some())
+                    .map(|(slug, _)| slug.clone())
+                    .collect();
+                (flow, leaf, pop, lux, Some(soil))
             }
-            (flow, leaf)
-        }
-        Err(crate::ports::config_store::ConfigStoreError::NotFound) => (false, false),
-        Err(_) => (true, true),
-    };
+            Err(crate::ports::config_store::ConfigStoreError::NotFound) => {
+                // Pre-config the implicit Open-Meteo backstop still runs
+                // (and can fetch, via the legacy env coords), so Pop stays
+                // capable; everything else needs a configured source.
+                (false, false, true, false, Some(Default::default()))
+            }
+            Err(_) => (true, true, true, true, None),
+        };
     let has_flow = snap.flow_meter || cfg_provides_flow;
     let has_leaf = cfg_provides_leaf;
+    // Belt and braces with the nullable Snapshot.pop_pct: the gate drops the
+    // entity when no configured source can ever provide Pop, and the null
+    // keeps a gated-in sensor unavailable until the first real write.
+    let has_pop = cfg_provides_pop;
 
     // A live local station (Tempest serial present) gates the station-only
     // scalars (battery) so a cloud-only / Ecowitt install does not publish a
@@ -151,13 +190,22 @@ async fn manifest(State(state): State<ManifestState>) -> Json<Manifest> {
     // always yields at least one zone, so non-empty zones is the presence test.
     let has_station = !snap.station_serial.is_empty();
     let has_irrigation = !snap.zones.is_empty();
+    // Illuminance is station-only (cloud sources provide irradiance and UV,
+    // never lux), but any lux-capable configured station source counts, not
+    // just one that has stamped a serial yet.
+    let has_lux = has_station || cfg_provides_lux;
 
-    push_tempest_weather(&mut entities, has_station);
-    push_irrigation_meta(&mut entities, has_irrigation);
+    // Water-level capability rides the snapshot (ControllerCaps.water_level
+    // via the refresher, or a live read), mirroring the flow_meter flag.
+    let has_water_level = snap.water_level_capable || snap.water_level_pct.is_some();
+
+    push_tempest_weather(&mut entities, has_station, has_lux);
+    push_irrigation_meta(&mut entities, has_irrigation, has_water_level);
     push_thresholds(&mut entities, has_irrigation);
-    push_forecast(&mut entities);
+    push_forecast(&mut entities, has_pop);
     push_provenance_and_flow(&mut entities, has_flow, has_leaf);
-    push_zone_entities(&mut entities, &snap.zones);
+    let soil_zones = soil_equipped_zones(cfg_soil_zones, &snap);
+    push_zone_entities(&mut entities, &snap.zones, soil_zones.as_ref());
     push_diagnostics(&mut entities, has_irrigation);
 
     Json(Manifest {
@@ -169,7 +217,7 @@ async fn manifest(State(state): State<ManifestState>) -> Json<Manifest> {
 // ─────────────────────────────────────────────────────────────────────
 // Tempest weather scalars (snapshot=tempest)
 // ─────────────────────────────────────────────────────────────────────
-fn push_tempest_weather(out: &mut Vec<EntityDescriptor>, has_station: bool) {
+fn push_tempest_weather(out: &mut Vec<EntityDescriptor>, has_station: bool, has_lux: bool) {
     let defs: &[(
         &str,
         &str,
@@ -202,15 +250,6 @@ fn push_tempest_weather(out: &mut Vec<EntityDescriptor>, has_station: bool) {
             "dew_point_f",
             "Dew point",
             "dew_point_f",
-            Some("°F"),
-            Some("temperature"),
-            Some("measurement"),
-            None,
-        ),
-        (
-            "wet_bulb_f",
-            "Wet bulb",
-            "wet_bulb_f",
             Some("°F"),
             Some("temperature"),
             Some("measurement"),
@@ -253,15 +292,6 @@ fn push_tempest_weather(out: &mut Vec<EntityDescriptor>, has_station: bool) {
             None,
         ),
         (
-            "wind_lull_mph",
-            "Wind lull",
-            "wind_lull_mph",
-            Some("mph"),
-            Some("wind_speed"),
-            Some("measurement"),
-            None,
-        ),
-        (
             "wind_dir_deg",
             "Wind direction",
             "wind_dir_deg",
@@ -289,30 +319,12 @@ fn push_tempest_weather(out: &mut Vec<EntityDescriptor>, has_station: bool) {
             Some("mdi:weather-sunny-alert"),
         ),
         (
-            "illuminance_lx",
-            "Illuminance",
-            "illuminance_lx",
-            Some("lx"),
-            Some("illuminance"),
-            Some("measurement"),
-            None,
-        ),
-        (
             "rain_in_today",
             "Rain today",
             "rain_in_today",
             Some("in"),
             Some("precipitation"),
             Some("total_increasing"),
-            None,
-        ),
-        (
-            "rain_in_last_min",
-            "Rain last minute",
-            "rain_in_last_min",
-            Some("in"),
-            Some("precipitation"),
-            Some("measurement"),
             None,
         ),
         (
@@ -370,6 +382,79 @@ fn push_tempest_weather(out: &mut Vec<EntityDescriptor>, has_station: bool) {
             group: None,
         });
     }
+    // Wet bulb, wind lull, and rain-last-minute are computed ONLY by the
+    // Tempest UDP path (apply_obs); no WeatherField variant exists for them,
+    // so no other station kind and no cloud fill can ever write them.
+    // Ungated they gave every non-Tempest install a frozen 0.0 °F "Wet bulb"
+    // (device_class=temperature feeding long-term statistics) plus dead
+    // "Wind lull" / "Rain last minute" sensors, the same phantom class the
+    // battery gate below exists for. Same gate: a live station present.
+    if has_station {
+        let station_only: &[(
+            &str,
+            &str,
+            Option<&'static str>,
+            Option<&'static str>,
+            Option<&'static str>,
+        )] = &[
+            (
+                "wet_bulb_f",
+                "Wet bulb",
+                Some("°F"),
+                Some("temperature"),
+                Some("measurement"),
+            ),
+            (
+                "wind_lull_mph",
+                "Wind lull",
+                Some("mph"),
+                Some("wind_speed"),
+                Some("measurement"),
+            ),
+            (
+                "rain_in_last_min",
+                "Rain last minute",
+                Some("in"),
+                Some("precipitation"),
+                Some("measurement"),
+            ),
+        ];
+        for (id, name, unit, device_class, state_class) in station_only {
+            out.push(EntityDescriptor {
+                platform: "sensor",
+                id: (*id).to_string(),
+                name: (*name).to_string(),
+                snapshot: "tempest",
+                path: vec![(*id).to_string()],
+                unit: *unit,
+                device_class: *device_class,
+                state_class: *state_class,
+                icon: None,
+                zone_slug: None,
+                group: None,
+            });
+        }
+    }
+    // Illuminance is station-only lux (cloud sources provide irradiance + UV
+    // but never lux; solar.rs hides the panel for cloud-only for the same
+    // reason), yet it published ungated, so cloud-only installs carried a
+    // 0 lx sensor forever. Gated on a live station or a configured
+    // lux-capable source.
+    if has_lux {
+        out.push(EntityDescriptor {
+            platform: "sensor",
+            id: "illuminance_lx".to_string(),
+            name: "Illuminance".to_string(),
+            snapshot: "tempest",
+            path: vec!["illuminance_lx".to_string()],
+            unit: Some("lx"),
+            device_class: Some("illuminance"),
+            state_class: Some("measurement"),
+            icon: None,
+            zone_slug: None,
+            group: None,
+        });
+    }
     // Battery is a Tempest-specific live-station scalar. On a cloud-only or
     // Ecowitt/Davis/MQTT install there is no Tempest battery: publishing it
     // surfaced a phantom device_class=battery sensor reading 0% in HA (a fake
@@ -396,7 +481,11 @@ fn push_tempest_weather(out: &mut Vec<EntityDescriptor>, has_station: bool) {
 // ─────────────────────────────────────────────────────────────────────
 // Irrigation top-level (snapshot=irrigation)
 // ─────────────────────────────────────────────────────────────────────
-fn push_irrigation_meta(out: &mut Vec<EntityDescriptor>, has_irrigation: bool) {
+fn push_irrigation_meta(
+    out: &mut Vec<EntityDescriptor>,
+    has_irrigation: bool,
+    has_water_level: bool,
+) {
     // A weather-only install (no controllers, no zones) has no irrigation to
     // verdict, override, or threshold. Publishing these surfaced phantom
     // verdict/override sensors and number sliders in HA that error on write
@@ -443,19 +532,25 @@ fn push_irrigation_meta(out: &mut Vec<EntityDescriptor>, has_irrigation: bool) {
         zone_slug: None,
         group: None,
     });
-    out.push(EntityDescriptor {
-        platform: "sensor",
-        id: "water_level_pct".into(),
-        name: "Water level".into(),
-        snapshot: "irrigation",
-        path: vec!["water_level_pct".into()],
-        unit: Some("%"),
-        device_class: None,
-        state_class: Some("measurement"),
-        icon: Some("mdi:water-percent"),
-        zone_slug: None,
-        group: None,
-    });
+    // Water level is a controller readback only OpenSprinkler-class hardware
+    // reports; ungated it registered for every irrigation install (the
+    // flow_gpm defect shape). Gate on the capability; the nullable snapshot
+    // field keeps a gated-in sensor unavailable until the first real read.
+    if has_water_level {
+        out.push(EntityDescriptor {
+            platform: "sensor",
+            id: "water_level_pct".into(),
+            name: "Water level".into(),
+            snapshot: "irrigation",
+            path: vec!["water_level_pct".into()],
+            unit: Some("%"),
+            device_class: None,
+            state_class: Some("measurement"),
+            icon: Some("mdi:water-percent"),
+            zone_slug: None,
+            group: None,
+        });
+    }
     // Sticky global override (auto/skip/run), read-only in HA. Set it from the
     // LocalSky UI; exposed here so HA automations can react ("notify when
     // irrigation is force-skipped"). Per-zone overrides stay UI-only.
@@ -527,7 +622,7 @@ fn push_thresholds(out: &mut Vec<EntityDescriptor>, has_irrigation: bool) {
 // ─────────────────────────────────────────────────────────────────────
 // Forecast scalars (snapshot=forecast)
 // ─────────────────────────────────────────────────────────────────────
-fn push_forecast(out: &mut Vec<EntityDescriptor>) {
+fn push_forecast(out: &mut Vec<EntityDescriptor>, has_pop: bool) {
     out.push(EntityDescriptor {
         platform: "sensor",
         id: "eto_today_mm".into(),
@@ -593,19 +688,27 @@ fn push_forecast(out: &mut Vec<EntityDescriptor>) {
     // figure: this is the chance right now. Useful on a dashboard next to the
     // conditions, and as a cheap gate for automations that only need "is rain
     // likely" without pulling the whole hourly forecast.
-    out.push(EntityDescriptor {
-        platform: "sensor",
-        id: "pop_pct".into(),
-        name: "Precipitation probability".into(),
-        snapshot: "tempest",
-        path: vec!["pop_pct".into()],
-        unit: Some("%"),
-        device_class: None,
-        state_class: Some("measurement"),
-        icon: Some("mdi:weather-rainy"),
-        zone_slug: None,
-        group: Some("forecast"),
-    });
+    //
+    // Capability-gated like flow/leaf: only a handful of sources emit Pop
+    // into current conditions (Open-Meteo current, Pirate Weather), so an
+    // install whose sources never provide it must not register a phantom
+    // probability sensor (the nullable snapshot field covers the window
+    // between config and the first real write).
+    if has_pop {
+        out.push(EntityDescriptor {
+            platform: "sensor",
+            id: "pop_pct".into(),
+            name: "Precipitation probability".into(),
+            snapshot: "tempest",
+            path: vec!["pop_pct".into()],
+            unit: Some("%"),
+            device_class: None,
+            state_class: Some("measurement"),
+            icon: Some("mdi:weather-rainy"),
+            zone_slug: None,
+            group: Some("forecast"),
+        });
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -699,7 +802,47 @@ fn push_provenance_and_flow(out: &mut Vec<EntityDescriptor>, has_flow: bool, has
 // ─────────────────────────────────────────────────────────────────────
 // Per-zone entities (one set per zone, dynamic from current snapshot)
 // ─────────────────────────────────────────────────────────────────────
-fn push_zone_entities(out: &mut Vec<EntityDescriptor>, zones: &[crate::ha::snapshot::ZoneState]) {
+
+/// The soil-equipped zone set for the per-zone entity gate. A zone counts
+/// when the config binds a probe to it (`cfg_soil`) OR the live snapshot
+/// carries soil evidence for it: probe extras on the zone, or a NON-NULL
+/// `skip_check.soil_<slug>_pct` reading. The union keeps a
+/// just-unconfigured-but-still-reporting probe visible while the config
+/// settles. The key's PRESENCE alone is NOT evidence: `build_soil_fields`
+/// emits a null-valued `soil_<slug>_pct` for EVERY zone, probe or not, so a
+/// contains_key test would re-admit exactly the probe-less phantoms this
+/// gate exists to drop. `None` in = config unreadable = `None` out (the
+/// caller fails open and publishes soil for every zone).
+fn soil_equipped_zones(
+    cfg_soil: Option<std::collections::BTreeSet<String>>,
+    snap: &crate::ha::snapshot::IrrigationSnapshot,
+) -> Option<std::collections::BTreeSet<String>> {
+    cfg_soil.map(|mut set| {
+        for z in &snap.zones {
+            let evidence = z.soil_temp_f.is_some()
+                || z.soil_ec.is_some()
+                || z.soil_battery_pct.is_some()
+                || snap
+                    .skip_check
+                    .soil_fields
+                    .get(&format!("soil_{}_pct", z.slug))
+                    .is_some_and(|v| v.is_some());
+            if evidence {
+                set.insert(z.slug.clone());
+            }
+        }
+        set
+    })
+}
+
+fn push_zone_entities(
+    out: &mut Vec<EntityDescriptor>,
+    zones: &[crate::ha::snapshot::ZoneState],
+    // Slugs of zones with a soil probe configured (or live soil evidence).
+    // `None` = config unreadable: fail open and publish soil for every zone,
+    // matching the flow/leaf gates' fail-open posture.
+    soil_zones: Option<&std::collections::BTreeSet<String>>,
+) {
     for zone in zones {
         let slug = &zone.slug;
         let pretty = if zone.name.is_empty() {
@@ -707,6 +850,7 @@ fn push_zone_entities(out: &mut Vec<EntityDescriptor>, zones: &[crate::ha::snaps
         } else {
             zone.name.clone()
         };
+        let has_soil = soil_zones.map(|set| set.contains(slug)).unwrap_or(true);
 
         // Per-zone entities use zone_slug + path-relative-to-zone-object.
         // HACS finds zones[].slug == zone_slug, then walks `path` inside
@@ -742,69 +886,78 @@ fn push_zone_entities(out: &mut Vec<EntityDescriptor>, zones: &[crate::ha::snaps
             ..Default::default()
         });
 
-        // Soil moisture %, the live calibrated probe reading the engine
-        // decides on (native Ecowitt poll or HA bridge). Lives in
-        // skip_check.soil_<slug>_pct (top-level path, not zone-relative),
-        // so no zone_slug. `null` when the probe is offline → HA shows the
-        // sensor unavailable, which is correct.
-        out.push(EntityDescriptor {
-            platform: "sensor",
-            id: format!("{slug}_soil_moisture"),
-            name: format!("{pretty} soil moisture"),
-            snapshot: "irrigation",
-            path: vec!["skip_check".into(), format!("soil_{slug}_pct")],
-            unit: Some("%"),
-            device_class: Some("moisture"),
-            state_class: Some("measurement"),
-            ..Default::default()
-        });
+        // The four probe-backed soil entities publish only for zones that
+        // actually have a soil probe (configured or live-reporting). On a
+        // probe-less zone the backing fields are permanently absent, so HA
+        // registered four forever-unavailable phantoms per zone, including a
+        // dead-looking device_class=battery sensor; the zone-detail UI
+        // already gates on is_some() and the manifest now matches it.
+        if has_soil {
+            // Soil moisture %, the live calibrated probe reading the engine
+            // decides on (native Ecowitt poll or HA bridge). Lives in
+            // skip_check.soil_<slug>_pct (top-level path, not zone-relative),
+            // so no zone_slug. `null` when the probe is offline → HA shows the
+            // sensor unavailable, which is correct.
+            out.push(EntityDescriptor {
+                platform: "sensor",
+                id: format!("{slug}_soil_moisture"),
+                name: format!("{pretty} soil moisture"),
+                snapshot: "irrigation",
+                path: vec!["skip_check".into(), format!("soil_{slug}_pct")],
+                unit: Some("%"),
+                device_class: Some("moisture"),
+                state_class: Some("measurement"),
+                ..Default::default()
+            });
 
-        // Native soil temperature (°F), LocalSky polls the gateway directly,
-        // so HA no longer needs the ecowitt2mqtt MQTT entity. zone_slug +
-        // path-into-zone reads zones[].soil_temp_f.
-        out.push(EntityDescriptor {
-            platform: "sensor",
-            id: format!("{slug}_soil_temperature"),
-            name: format!("{pretty} soil temperature"),
-            snapshot: "irrigation",
-            path: vec!["soil_temp_f".into()],
-            unit: Some("°F"),
-            device_class: Some("temperature"),
-            state_class: Some("measurement"),
-            zone_slug: Some(slug.clone()),
-            group: None,
-            ..Default::default()
-        });
+            // Native soil temperature (°F), LocalSky polls the gateway
+            // directly, so HA no longer needs the ecowitt2mqtt MQTT entity.
+            // zone_slug + path-into-zone reads zones[].soil_temp_f.
+            out.push(EntityDescriptor {
+                platform: "sensor",
+                id: format!("{slug}_soil_temperature"),
+                name: format!("{pretty} soil temperature"),
+                snapshot: "irrigation",
+                path: vec!["soil_temp_f".into()],
+                unit: Some("°F"),
+                device_class: Some("temperature"),
+                state_class: Some("measurement"),
+                zone_slug: Some(slug.clone()),
+                group: None,
+                ..Default::default()
+            });
 
-        // Native soil EC (µS/cm), salinity / fertilizer drift. Display-only.
-        out.push(EntityDescriptor {
-            platform: "sensor",
-            id: format!("{slug}_soil_ec"),
-            name: format!("{pretty} soil EC"),
-            snapshot: "irrigation",
-            path: vec!["soil_ec".into()],
-            unit: Some("µS/cm"),
-            state_class: Some("measurement"),
-            icon: Some("mdi:flash-outline"),
-            zone_slug: Some(slug.clone()),
-            group: None,
-            ..Default::default()
-        });
+            // Native soil EC (µS/cm), salinity / fertilizer drift.
+            // Display-only.
+            out.push(EntityDescriptor {
+                platform: "sensor",
+                id: format!("{slug}_soil_ec"),
+                name: format!("{pretty} soil EC"),
+                snapshot: "irrigation",
+                path: vec!["soil_ec".into()],
+                unit: Some("µS/cm"),
+                state_class: Some("measurement"),
+                icon: Some("mdi:flash-outline"),
+                zone_slug: Some(slug.clone()),
+                group: None,
+                ..Default::default()
+            });
 
-        // Probe battery (%, from the Ecowitt 0-5 level scaled ×20).
-        out.push(EntityDescriptor {
-            platform: "sensor",
-            id: format!("{slug}_soil_battery"),
-            name: format!("{pretty} soil battery"),
-            snapshot: "irrigation",
-            path: vec!["soil_battery_pct".into()],
-            unit: Some("%"),
-            device_class: Some("battery"),
-            state_class: Some("measurement"),
-            zone_slug: Some(slug.clone()),
-            group: None,
-            ..Default::default()
-        });
+            // Probe battery (%, from the Ecowitt 0-5 level scaled ×20).
+            out.push(EntityDescriptor {
+                platform: "sensor",
+                id: format!("{slug}_soil_battery"),
+                name: format!("{pretty} soil battery"),
+                snapshot: "irrigation",
+                path: vec!["soil_battery_pct".into()],
+                unit: Some("%"),
+                device_class: Some("battery"),
+                state_class: Some("measurement"),
+                zone_slug: Some(slug.clone()),
+                group: None,
+                ..Default::default()
+            });
+        }
 
         // Planned next run duration
         out.push(EntityDescriptor {
@@ -922,7 +1075,7 @@ mod tests {
     #[test]
     fn weather_entities_present() {
         let mut out = Vec::new();
-        push_tempest_weather(&mut out, true);
+        push_tempest_weather(&mut out, true, true);
         // Minimum set HACS needs to render a weather entity
         let ids: Vec<&str> = out.iter().map(|e| e.id.as_str()).collect();
         for required in ["air_temp_f", "rh_pct", "wind_avg_mph", "pressure_inhg"] {
@@ -936,12 +1089,58 @@ mod tests {
         // published; a cloud-only / Ecowitt install (no Tempest serial) omits
         // it so HA never shows a phantom 0% battery.
         let mut with_station = Vec::new();
-        push_tempest_weather(&mut with_station, true);
+        push_tempest_weather(&mut with_station, true, true);
         assert!(with_station.iter().any(|e| e.id == "battery_pct"));
 
         let mut cloud_only = Vec::new();
-        push_tempest_weather(&mut cloud_only, false);
+        push_tempest_weather(&mut cloud_only, false, false);
         assert!(!cloud_only.iter().any(|e| e.id == "battery_pct"));
+    }
+
+    #[test]
+    fn station_only_scalars_gated_like_battery() {
+        // Wet bulb / wind lull / rain-last-minute exist only in the Tempest
+        // UDP packet; without a station they were frozen 0.0 sensors in HA.
+        // Illuminance is station-only lux with its own (station OR
+        // lux-capable-source) gate.
+        let mut cloud_only = Vec::new();
+        push_tempest_weather(&mut cloud_only, false, false);
+        let ids: Vec<&str> = cloud_only.iter().map(|e| e.id.as_str()).collect();
+        for absent in [
+            "wet_bulb_f",
+            "wind_lull_mph",
+            "rain_in_last_min",
+            "illuminance_lx",
+        ] {
+            assert!(!ids.contains(&absent), "phantom station scalar: {absent}");
+        }
+        // The universal conditions still publish on a cloud-only install.
+        assert!(ids.contains(&"air_temp_f"));
+        assert!(ids.contains(&"solar_w_m2"));
+
+        // With a station present they all return.
+        let mut with_station = Vec::new();
+        push_tempest_weather(&mut with_station, true, true);
+        let ids: Vec<&str> = with_station.iter().map(|e| e.id.as_str()).collect();
+        for required in [
+            "wet_bulb_f",
+            "wind_lull_mph",
+            "rain_in_last_min",
+            "illuminance_lx",
+        ] {
+            assert!(
+                ids.contains(&required),
+                "missing station scalar: {required}"
+            );
+        }
+
+        // A lux-capable configured source (e.g. Ecowitt) publishes
+        // illuminance without a stamped station serial.
+        let mut lux_source = Vec::new();
+        push_tempest_weather(&mut lux_source, false, true);
+        let ids: Vec<&str> = lux_source.iter().map(|e| e.id.as_str()).collect();
+        assert!(ids.contains(&"illuminance_lx"));
+        assert!(!ids.contains(&"wet_bulb_f"), "wet bulb stays Tempest-only");
     }
 
     #[test]
@@ -950,7 +1149,7 @@ mod tests {
         // irrigation verdict/override sensors, threshold sliders, or the
         // IU-suspended problem sensor.
         let mut weather_only = Vec::new();
-        push_irrigation_meta(&mut weather_only, false);
+        push_irrigation_meta(&mut weather_only, false, false);
         push_thresholds(&mut weather_only, false);
         push_diagnostics(&mut weather_only, false);
         let ids: Vec<&str> = weather_only.iter().map(|e| e.id.as_str()).collect();
@@ -963,7 +1162,7 @@ mod tests {
 
         // With irrigation configured they all return.
         let mut with_irrigation = Vec::new();
-        push_irrigation_meta(&mut with_irrigation, true);
+        push_irrigation_meta(&mut with_irrigation, true, true);
         push_thresholds(&mut with_irrigation, true);
         push_diagnostics(&mut with_irrigation, true);
         let ids: Vec<&str> = with_irrigation.iter().map(|e| e.id.as_str()).collect();
@@ -1002,7 +1201,7 @@ mod tests {
         // snapshot because the merge bus writes it there, which is exactly why
         // the group hint is what decides the device rather than the snapshot.
         let mut fc = Vec::new();
-        push_forecast(&mut fc);
+        push_forecast(&mut fc, true);
         assert!(!fc.is_empty());
         for e in &fc {
             assert_eq!(
@@ -1020,6 +1219,136 @@ mod tests {
                 .group,
             Some("forecast")
         );
+    }
+
+    #[test]
+    fn water_level_gated_on_controller_capability() {
+        // A Rachio/B-hyve-class install (controller never reports a water
+        // level) must not register the sensor; an OpenSprinkler-class one
+        // (ControllerCaps.water_level, or a live HA-bridge read) does.
+        let mut without = Vec::new();
+        push_irrigation_meta(&mut without, true, false);
+        let ids: Vec<&str> = without.iter().map(|e| e.id.as_str()).collect();
+        assert!(!ids.contains(&"water_level_pct"));
+        // The rest of the irrigation meta publishes either way.
+        assert!(ids.contains(&"irrigation_verdict"));
+
+        let mut with = Vec::new();
+        push_irrigation_meta(&mut with, true, true);
+        assert!(with.iter().any(|e| e.id == "water_level_pct"));
+    }
+
+    #[test]
+    fn zone_soil_entities_gated_on_a_configured_probe() {
+        use crate::ha::snapshot::ZoneState;
+        let zones = vec![
+            ZoneState {
+                slug: "front".into(),
+                name: "Front".into(),
+                ..Default::default()
+            },
+            ZoneState {
+                slug: "back".into(),
+                name: "Back".into(),
+                ..Default::default()
+            },
+        ];
+        // Only "back" has a soil probe configured.
+        let soil: std::collections::BTreeSet<String> = ["back".to_string()].into_iter().collect();
+        let mut out = Vec::new();
+        push_zone_entities(&mut out, &zones, Some(&soil));
+        let ids: Vec<&str> = out.iter().map(|e| e.id.as_str()).collect();
+        for id in [
+            "front_soil_moisture",
+            "front_soil_temperature",
+            "front_soil_ec",
+            "front_soil_battery",
+        ] {
+            assert!(!ids.contains(&id), "probe-less zone got soil entity {id}");
+        }
+        for id in [
+            "back_soil_moisture",
+            "back_soil_temperature",
+            "back_soil_ec",
+            "back_soil_battery",
+        ] {
+            assert!(ids.contains(&id), "soil zone missing {id}");
+        }
+        // Engine-state and runtime entities publish for every zone either
+        // way (the bucket is engine math, not a probe reading).
+        assert!(ids.contains(&"front_soil_bucket"));
+        assert!(ids.contains(&"front_planned_run"));
+
+        // Config unreadable (None): fail open, soil publishes for every zone.
+        let mut open = Vec::new();
+        push_zone_entities(&mut open, &zones, None);
+        assert!(open.iter().any(|e| e.id == "front_soil_moisture"));
+    }
+
+    #[test]
+    fn null_soil_fields_key_is_not_probe_evidence() {
+        // build_soil_fields emits soil_<slug>_pct for EVERY zone (null when
+        // no probe reports), so the handler's evidence union must test the
+        // VALUE, not key presence: a probe-less zone whose only "evidence"
+        // is the null key stays gated out, a zone with a real live reading
+        // gates in even with no config binding, and a config-bound zone
+        // stays in while its probe reads null (offline probe).
+        use crate::ha::snapshot::{IrrigationSnapshot, ZoneState};
+        let mut snap = IrrigationSnapshot {
+            zones: vec![
+                ZoneState {
+                    slug: "front".into(),
+                    ..Default::default()
+                },
+                ZoneState {
+                    slug: "back".into(),
+                    ..Default::default()
+                },
+                ZoneState {
+                    slug: "side".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        snap.skip_check
+            .soil_fields
+            .insert("soil_front_pct".into(), None);
+        snap.skip_check
+            .soil_fields
+            .insert("soil_back_pct".into(), Some(41.0));
+        snap.skip_check
+            .soil_fields
+            .insert("soil_side_pct".into(), None);
+
+        // Config binds a probe to "side" only.
+        let cfg: std::collections::BTreeSet<String> = ["side".to_string()].into_iter().collect();
+        let got = soil_equipped_zones(Some(cfg), &snap).expect("Some in, Some out");
+        assert!(
+            !got.contains("front"),
+            "null soil_fields key must not admit a probe-less zone"
+        );
+        assert!(got.contains("back"), "live non-null reading is evidence");
+        assert!(got.contains("side"), "config binding survives a null read");
+
+        // Config unreadable: fail open end to end.
+        assert_eq!(soil_equipped_zones(None, &snap), None);
+    }
+
+    #[test]
+    fn pop_pct_is_capability_gated() {
+        // No configured source provides Pop: the probability sensor is not
+        // published, so HA never grows a phantom "0% chance of rain" entity.
+        let mut without = Vec::new();
+        push_forecast(&mut without, false);
+        assert!(!without.iter().any(|e| e.id == "pop_pct"));
+        // The rest of the forecast scalars publish either way.
+        assert!(without.iter().any(|e| e.id == "rain_tomorrow_prob_pct"));
+
+        // A Pop-capable source configured: the sensor returns.
+        let mut with = Vec::new();
+        push_forecast(&mut with, true);
+        assert!(with.iter().any(|e| e.id == "pop_pct"));
     }
 
     #[test]

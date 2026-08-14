@@ -306,6 +306,7 @@ impl IrrigationController for MqttCommand {
             multi_zone_parallel: true,
             history_query: false,
             remote_program_upload: false,
+            water_level: false,
         }
     }
 

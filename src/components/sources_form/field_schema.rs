@@ -703,20 +703,26 @@ static F_OPEN_METEO: &[FieldSpec] = &[
     ),
 ];
 
+// The keyless authorities' user_agent is an IDENTITY, not a credential:
+// leaving it empty is valid and LocalSky derives a real, current one at
+// request time (package/version + instance id). The field stays editable for
+// operators who want api.weather.gov / api.met.no to see their own contact
+// string. Never prefill a template contact; the old required prefill shipped
+// "you@example.com" to both agencies verbatim.
 static F_NWS: &[FieldSpec] = &[FieldSpec::text(
     "user_agent",
     "User-Agent",
-    "Required by api.weather.gov to identify you (plain ASCII), e.g. LocalSky (you@example.com).",
-    true,
-    "LocalSky (you@example.com)",
+    "Sent to api.weather.gov to identify this install (plain ASCII). Leave empty to auto-derive a current LocalSky identity, or supply your own contact string.",
+    false,
+    "auto-derived when left empty",
 )];
 
 static F_MET_NORWAY: &[FieldSpec] = &[FieldSpec::text(
     "user_agent",
     "User-Agent",
-    "Required by api.met.no terms of service to identify you, e.g. LocalSky (you@example.com).",
-    true,
-    "LocalSky (you@example.com)",
+    "Sent to api.met.no to identify this install (their terms require one). Leave empty to auto-derive a current LocalSky identity, or supply your own contact string.",
+    false,
+    "auto-derived when left empty",
 )];
 
 static F_OPENWEATHER: &[FieldSpec] = &[FieldSpec::secret_doc(

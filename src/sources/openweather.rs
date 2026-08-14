@@ -193,8 +193,10 @@ fn build_snapshot(resp: &OneCallResponse, now_epoch: i64) -> ForecastSnapshot {
                 humidity_pct: 0,
                 // OWM rain is mm even under units=imperial.
                 precip_sum_in: d.rain.unwrap_or(0.0) / 25.4,
-                precip_probability_max: ((d.pop.unwrap_or(0.0) * 100.0).round() as i64)
-                    .clamp(0, 100) as u32,
+                // Absent pop stays None (provider gap), not a fabricated 0%.
+                precip_probability_max: d
+                    .pop
+                    .map(|p| ((p * 100.0).round() as i64).clamp(0, 100) as u32),
                 wind_max_mph: d.wind_speed.unwrap_or(0.0),
                 wind_gust_max_mph: d.wind_gust.unwrap_or(0.0),
                 uv_index_max: d.uvi.unwrap_or(0.0),
@@ -215,8 +217,9 @@ fn build_snapshot(resp: &OneCallResponse, now_epoch: i64) -> ForecastSnapshot {
             apparent_temp_f: h.feels_like.unwrap_or(0.0),
             // OWM rain.1h is mm even under units=imperial.
             precip_in: h.rain.as_ref().and_then(|r| r.one_h).unwrap_or(0.0) / 25.4,
-            precip_probability: ((h.pop.unwrap_or(0.0) * 100.0).round() as i64).clamp(0, 100)
-                as u32,
+            precip_probability: h
+                .pop
+                .map(|p| ((p * 100.0).round() as i64).clamp(0, 100) as u32),
             wind_mph: h.wind_speed.unwrap_or(0.0),
             wind_dir_deg: (h.wind_deg.unwrap_or(0.0).round() as i64).rem_euclid(360) as u32,
             humidity_pct: (h.humidity.unwrap_or(0.0).round() as i64).clamp(0, 100) as u32,
@@ -533,7 +536,7 @@ mod tests {
         assert!((d0.temp_max_f - 78.5).abs() < 0.001); // already F
         assert!((d0.temp_min_f - 55.0).abs() < 0.001);
         assert!((d0.precip_sum_in - 1.0).abs() < 0.001); // 25.4 mm -> 1 in
-        assert_eq!(d0.precip_probability_max, 60); // 0.6 -> 60%
+        assert_eq!(d0.precip_probability_max, Some(60)); // 0.6 -> 60%
         assert!((d0.wind_max_mph - 9.0).abs() < 0.001);
         assert!((d0.wind_gust_max_mph - 18.0).abs() < 0.001);
         assert!((d0.uv_index_max - 7.2).abs() < 0.001);
@@ -547,7 +550,7 @@ mod tests {
         assert!((h0.temp_f - 68.0).abs() < 0.001); // already F
         assert!((h0.apparent_temp_f - 66.0).abs() < 0.001);
         assert!((h0.precip_in - 0.1).abs() < 0.001); // 2.54 mm -> 0.1 in
-        assert_eq!(h0.precip_probability, 30); // 0.3 -> 30%
+        assert_eq!(h0.precip_probability, Some(30)); // 0.3 -> 30%
         assert!((h0.wind_mph - 6.0).abs() < 0.001);
         assert_eq!(h0.wind_dir_deg, 10); // 370 wrapped -> 10
         assert_eq!(h0.humidity_pct, 55);

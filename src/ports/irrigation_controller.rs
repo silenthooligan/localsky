@@ -54,6 +54,13 @@ pub struct ControllerCaps {
     pub multi_zone_parallel: bool,
     pub history_query: bool,
     pub remote_program_upload: bool,
+    /// The controller reports a water-level / seasonal-adjust percentage in
+    /// `ControllerStatus.water_level_pct` (OpenSprinkler's `wl`). Defaults
+    /// false: most adapters return `water_level_pct: None`, and publishing a
+    /// fabricated level for them is exactly the defect this bit gates.
+    /// `#[serde(default)]` keeps older serialized caps deserializing.
+    #[serde(default)]
+    pub water_level: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

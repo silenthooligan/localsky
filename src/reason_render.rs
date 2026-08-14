@@ -145,12 +145,17 @@ pub fn render_skip_reason(s: &SkipCheck, p: UnitPrefs) -> String {
             "Rain expected within 4h ({} forecast)",
             depth(s.rain_next_4h_in, p)
         ),
-        // "Tomorrow rain ({:.2}\" × {}% confidence)"
-        "tomorrow_rain" => format!(
-            "Tomorrow rain ({} \u{d7} {}% confidence)",
-            depth(s.forecast_in, p),
-            s.rain_tomorrow_prob_pct
-        ),
+        // "Tomorrow rain ({:.2}\" × {}% confidence)" when a probability was
+        // reported; "Tomorrow rain ({:.2}\" forecast)" when the provider had
+        // none (the engine weighted the amount at full value and made no
+        // confidence claim). Mirrors engine tomorrow_rain_reason exactly.
+        "tomorrow_rain" => match s.rain_tomorrow_prob_pct {
+            Some(prob) => format!(
+                "Tomorrow rain ({} \u{d7} {prob}% confidence)",
+                depth(s.forecast_in, p)
+            ),
+            None => format!("Tomorrow rain ({} forecast)", depth(s.forecast_in, p)),
+        },
         // "Heavy rain in next 3 days ({:.2}\" weighted)"
         "rain_3day" => format!(
             "Heavy rain in next 3 days ({} weighted)",
@@ -419,7 +424,7 @@ mod tests {
             rain_nature: crate::ha::snapshot::RainNature::default(),
             humidity_now_pct: 55.0,
             forecast_in: 0.0,
-            rain_tomorrow_prob_pct: 0,
+            rain_tomorrow_prob_pct: None,
             rain_3day_weighted_in: 0.0,
             rain_7day_weighted_in: 0.0,
             rain_next_4h_in: 0.0,
@@ -514,7 +519,7 @@ mod tests {
         push("rain_next_4h", |i| i.rain_next_4h_in = 0.20);
         push("tomorrow_rain", |i| {
             i.forecast_in = 0.40;
-            i.rain_tomorrow_prob_pct = 90;
+            i.rain_tomorrow_prob_pct = Some(90);
         });
         push("rain_3day", |i| i.rain_3day_weighted_in = 1.0);
         push("heat_advisory", |i| {

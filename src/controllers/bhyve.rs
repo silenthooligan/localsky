@@ -189,6 +189,7 @@ impl IrrigationController for Bhyve {
             multi_zone_parallel: false,
             history_query: false,
             remote_program_upload: false,
+            water_level: false,
         }
     }
 

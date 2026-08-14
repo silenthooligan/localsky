@@ -59,7 +59,9 @@ struct Row {
 /// `zone_soil_pct` is per-zone (no single value) so it's not previewable.
 fn metric_live(m: &str, s: &SkipCheck) -> Option<f64> {
     Some(match m {
-        "rain_prob_tomorrow" => s.rain_tomorrow_prob_pct as f64,
+        // Mirrors engine::conditions: unreported probability reads as 100
+        // (full weight), so the preview agrees with the live evaluation.
+        "rain_prob_tomorrow" => f64::from(s.rain_tomorrow_prob_pct.unwrap_or(100)),
         "rain_next4h_in" => s.rain_next_4h_in,
         "rain_today_in" => s.rain_today_in,
         "rain3day_weighted_in" => s.rain_3day_weighted_in,

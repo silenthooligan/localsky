@@ -142,7 +142,7 @@
   }
 
   // Non-SSR safety net mirroring what the Rust catalog resolves for the
-  // stock config at the 40/-75 CONUS fallback coordinates (RainViewer
+  // stock config at the continental-US fallback view (39.8/-98.6) (RainViewer
   // plus both US reflectivity sources) and the full feature catalog.
   // The Rust component renders identical attribute strings for the
   // default config, so this only fires when the attributes are missing
@@ -279,13 +279,17 @@
     teardownExisting();
     el.dataset.bootstrapped = 'yes';
 
-    var lat = parseFloat(el.dataset.lat || '40.0');
-    var lon = parseFloat(el.dataset.lon || '-75.0');
-    var zoom = parseInt(el.dataset.zoom || '8', 10);
+    // Fallbacks mirror the server's UNLOCATED view (continental scale):
+    // an install with no location must read as "a map of the country",
+    // never as a neighborhood the user does not live in.
+    var lat = parseFloat(el.dataset.lat || '39.8');
+    var lon = parseFloat(el.dataset.lon || '-98.6');
+    var zoom = parseInt(el.dataset.zoom || '4', 10);
+    var located = el.dataset.located !== 'no';
 
     // Effective layer catalog, resolved server-side (config providers list
     // or recommended-by-region) and serialized onto the element. The
-    // fallbacks mirror the stock config at the 40/-75 defaults above so a
+    // fallbacks mirror the stock config at the continental-US default view above so a
     // non-SSR mount stays self-consistent.
     var providers =
       parseDescriptorAttr(el.dataset.radarProviders, normalizeProvider) ||
@@ -380,15 +384,49 @@
       }
     ).addTo(map);
 
-    var stationMarker = L.circleMarker([lat, lon], {
-      radius: 7,
-      color: '#7ed957',
-      fillColor: '#7ed957',
-      fillOpacity: 0.85,
-      weight: 2,
-    })
-      .bindTooltip('Tempest', { permanent: false, direction: 'top' })
-      .addTo(map);
+    // The marker + the unlocated note both follow `located`, which can flip
+    // in either direction when the /api/v1/location fetch below answers
+    // (SPA navigation renders the fallback attrs first, and the user may
+    // set a location in Settings between page loads).
+    var stationMarker = null;
+    var unlocatedNote = null;
+    function syncLocatedUi() {
+      if (located && !stationMarker) {
+        stationMarker = L.circleMarker([lat, lon], {
+          radius: 7,
+          color: '#7ed957',
+          fillColor: '#7ed957',
+          fillOpacity: 0.85,
+          weight: 2,
+        })
+          .bindTooltip('Tempest', { permanent: false, direction: 'top' })
+          .addTo(map);
+      } else if (located && stationMarker) {
+        stationMarker.setLatLng([lat, lon]);
+      } else if (!located && stationMarker) {
+        map.removeLayer(stationMarker);
+        stationMarker = null;
+      }
+      if (!located && !unlocatedNote) {
+        // Lives on the SHELL, not the map div: the map's role="img" makes
+        // descendants presentational, which would hide the link from
+        // assistive tech (same reason the Layers chip sits on the shell).
+        // Plain anchor: the app's ingress click-capture rewrites hrefs, so
+        // the link works under HA ingress too.
+        unlocatedNote = document.createElement('div');
+        unlocatedNote.className = 'radar-unlocated-note';
+        unlocatedNote.innerHTML =
+          'No location set - showing a default view. ' +
+          '<a href="/settings/location">Set location</a>';
+        (el.closest('.radar-map-shell') || el.parentElement || el).appendChild(
+          unlocatedNote
+        );
+      } else if (located && unlocatedNote) {
+        unlocatedNote.remove();
+        unlocatedNote = null;
+      }
+    }
+    syncLocatedUi();
 
     // Authoritative center. The data-* attrs are correct on a server-
     // rendered load but fall back to a default on client-side (SPA)
@@ -403,8 +441,9 @@
           lat = d.lat;
           lon = d.lon;
           if (isFinite(d.zoom)) zoom = d.zoom;
+          if (typeof d.located === 'boolean') located = d.located;
           map.setView([lat, lon], zoom);
-          stationMarker.setLatLng([lat, lon]);
+          syncLocatedUi();
         }
       })
       .catch(function () { /* keep the data-* center on failure */ });

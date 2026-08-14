@@ -77,7 +77,22 @@ use serde::{Deserialize, Serialize};
 /// between strikes). Also a correctness fix with no shape change:
 /// `lightning_strikes_last_hour` now decays as strikes age out of the hour
 /// instead of holding the last storm's total until the next strike.
-pub const API_VERSION: &str = "1.17.0";
+/// 1.18.0: honest unknowns. NULLABLE (null = unknown, never a sentinel
+/// zero): tempest.pop_pct + leaf_wetness_pct (until a source writes them),
+/// irrigation.water_level_pct (controller reports no level; was a
+/// fabricated 100/0), forecast.eto_today_mm (the flat 5.0 fallback no
+/// longer publishes), forecast.temp_max_today_f / temp_min_today_f /
+/// humidity_mean_today_pct (forecast-first resolution, null when absent),
+/// and the precipitation probabilities (skip_check.rain_tomorrow_prob_pct,
+/// forecast.rain_tomorrow_prob_pct, seven_day_verdicts[].
+/// precip_probability_max; probability-less rain now weights at full value
+/// in the rollups instead of zeroing). Additive:
+/// irrigation.water_level_capable. Manifest schema 1.4 capability-gates
+/// pop_pct, the station-only scalars, water_level_pct, and per-zone soil
+/// entities. Minor, not a break: every field is still present and null is
+/// the documented unknown; a client that treated the old 0 as data was
+/// already reading a defect (the 1.17.0 precedent).
+pub const API_VERSION: &str = "1.18.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {

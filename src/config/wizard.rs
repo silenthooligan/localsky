@@ -331,8 +331,8 @@ impl WizardStore {
             // region's KEYLESS authority so a no-hardware user boots with honest,
             // complete cloud current-conditions zero-clicks: NWS in the US, Met.no
             // in Europe/the Nordics, nothing extra elsewhere. Both are keyless
-            // (the helper auto-fills the required user_agent the same way the
-            // Open-Meteo default above is filled) and land at their region rank
+            // (user_agent seeds empty and the adapter derives the identity at
+            // request time) and land at their region rank
             // (70, above the Open-Meteo 50 backstop) with the slow-cadence
             // freshness window. We are still inside the `sources.is_empty()`
             // branch, so a configured install (any source already present) is
@@ -746,8 +746,8 @@ mod tests {
         );
         match &nws.source {
             crate::config::schema::SourceKind::Nws(c) => assert!(
-                !c.user_agent.trim().is_empty(),
-                "the keyless NWS user_agent must be auto-filled"
+                c.user_agent.is_empty(),
+                "the seeded NWS user_agent ships empty (auto-derived at request time)"
             ),
             other => panic!("expected an NWS source, got {other:?}"),
         }

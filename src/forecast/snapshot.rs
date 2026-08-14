@@ -27,7 +27,14 @@ pub struct DailyEntry {
     #[serde(default)]
     pub humidity_pct: u32,
     pub precip_sum_in: f64,
-    pub precip_probability_max: u32,
+    /// Max precipitation probability for the day, percent. `None` when the
+    /// provider reports no probability series (custom HTTP/MQTT forecast
+    /// mappings, provider gaps): the old bare 0 was ambiguous between "dry
+    /// day" and "not reported", which zeroed the probability-weighted rain
+    /// rollups and read as "certainly dry" on the HA sensor. A reported 0
+    /// stays `Some(0)`. `#[serde(default)]` so persisted caches deserialize.
+    #[serde(default)]
+    pub precip_probability_max: Option<u32>,
     pub wind_max_mph: f64,
     /// Daily peak wind GUST, mph (Open-Meteo wind_gusts_10m_max). Higher than
     /// wind_max_mph (sustained); this is what a high-wind alert keys on. This
@@ -74,6 +81,20 @@ pub struct DailyEntry {
     pub et0_in: f64,
 }
 
+impl DailyEntry {
+    /// Weight for probability-weighting this day's rain amount, 0.0..=1.0.
+    /// `None` (the provider reports no probability) weights at FULL value:
+    /// treating forecast rain as certain is the conservative direction for a
+    /// skip decision (hold water ahead of forecast rain), where the old
+    /// missing-equals-0 zeroed the expected rain and watered ahead of
+    /// storms. A reported 0 stays a real "the model says it will not rain".
+    pub fn precip_weight(&self) -> f64 {
+        self.precip_probability_max
+            .map(|p| f64::from(p) / 100.0)
+            .unwrap_or(1.0)
+    }
+}
+
 /// One hour in the 48-hour rolling forecast.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct HourlyEntry {
@@ -82,7 +103,10 @@ pub struct HourlyEntry {
     pub temp_f: f64,
     pub apparent_temp_f: f64,
     pub precip_in: f64,
-    pub precip_probability: u32,
+    /// Precipitation probability for the hour, percent. `None` = provider
+    /// reports no probability (see `DailyEntry::precip_probability_max`).
+    #[serde(default)]
+    pub precip_probability: Option<u32>,
     pub wind_mph: f64,
     pub wind_dir_deg: u32,
     pub humidity_pct: u32,
@@ -401,13 +425,14 @@ impl ForecastSnapshot {
 
     /// Probability-weighted rain forecast over the next `n` future days
     /// (skipping today, starting at daily[1]). Σ precip × prob/100.
-    /// Caps `n` at the available daily window.
+    /// Caps `n` at the available daily window. Days without a probability
+    /// weight at full value (see [`DailyEntry::precip_weight`]).
     pub fn future_n_day_weighted_precip_in(&self, n: usize) -> f64 {
         self.daily
             .iter()
             .skip(1)
             .take(n)
-            .map(|d| d.precip_sum_in * (d.precip_probability_max as f64) / 100.0)
+            .map(|d| d.precip_sum_in * d.precip_weight())
             .sum()
     }
 
@@ -538,13 +563,14 @@ impl ForecastSnapshot {
         self.daily.first().map(|d| d.wind_gust_max_mph)
     }
 
-    /// Tomorrow's forecast precipitation total + probability max.
-    /// Returns (0.0, 0) when daily window doesn't reach tomorrow yet.
-    pub fn tomorrow_precip_with_prob_in(&self) -> (f64, u32) {
+    /// Tomorrow's forecast precipitation total + probability max. The
+    /// probability is `None` when the daily window doesn't reach tomorrow
+    /// yet OR the provider reports no probability series.
+    pub fn tomorrow_precip_with_prob_in(&self) -> (f64, Option<u32>) {
         self.daily
             .get(1)
             .map(|d| (d.precip_sum_in, d.precip_probability_max))
-            .unwrap_or((0.0, 0))
+            .unwrap_or((0.0, None))
     }
 
     /// Days since the last day with significant rain (≥ 0.05"). Walks
@@ -668,6 +694,44 @@ mod tests {
         let two = fc.max_heat_index_n_day(2);
         let three = fc.max_heat_index_n_day(3);
         assert!(three > two, "the 110°F day only counts within n=3");
+    }
+
+    #[test]
+    fn weighted_rollup_takes_probability_less_days_at_full_value() {
+        // daily[0] is today (skipped); daily[1..] carry: a 60%-prob day, a
+        // provider-gap day (no probability), and a reported-0% day.
+        let fc = ForecastSnapshot {
+            daily: vec![
+                DailyEntry::default(),
+                DailyEntry {
+                    precip_sum_in: 1.0,
+                    precip_probability_max: Some(60),
+                    ..Default::default()
+                },
+                DailyEntry {
+                    precip_sum_in: 0.5,
+                    precip_probability_max: None,
+                    ..Default::default()
+                },
+                DailyEntry {
+                    precip_sum_in: 2.0,
+                    precip_probability_max: Some(0),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        // 1.0*0.6 + 0.5*1.0 (unknown = certain, the safe skip direction)
+        // + 2.0*0.0 (a REPORTED zero still zeroes).
+        let got = fc.future_n_day_weighted_precip_in(3);
+        assert!((got - 1.1).abs() < 1e-9, "weighted = {got}");
+
+        // tomorrow_precip_with_prob_in carries the probability as an Option.
+        let (amt, prob) = fc.tomorrow_precip_with_prob_in();
+        assert!((amt - 1.0).abs() < 1e-9);
+        assert_eq!(prob, Some(60));
+        let (_, prob) = ForecastSnapshot::default().tomorrow_precip_with_prob_in();
+        assert_eq!(prob, None, "no tomorrow entry = no probability claim");
     }
 
     #[test]

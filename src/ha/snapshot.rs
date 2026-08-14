@@ -159,8 +159,13 @@ pub struct SkipCheck {
     // ── Open-Meteo forecast inputs ──
     /// Tomorrow's rain (Open-Meteo `precipitation_sum`, today+1).
     pub forecast_in: f64,
-    /// Tomorrow's max precipitation probability (0-100).
-    pub rain_tomorrow_prob_pct: u32,
+    /// Tomorrow's max precipitation probability (0-100). `None` when the
+    /// forecast provider reports no probability: the engine then weights
+    /// tomorrow's rain at full value (see `engine::skip_rules`) and the
+    /// reason strings omit the confidence claim. Serialized null;
+    /// `#[serde(default)]` so older JSON deserializes.
+    #[serde(default)]
+    pub rain_tomorrow_prob_pct: Option<u32>,
     /// Σ daily[1..4] precip × prob/100, probability-weighted 3-day rollup.
     pub rain_3day_weighted_in: f64,
     /// Σ daily[1..7] precip × prob/100, probability-weighted 7-day rollup.
@@ -302,20 +307,41 @@ pub struct Forecast {
     pub rain_tomorrow_in: f64,
     /// Open-Meteo 3-day rolling rain forecast (today + next 2), in.
     pub rain_3day_in: f64,
-    /// Reference evapotranspiration for the day. mm (FAO-56 ET₀).
-    pub eto_today_mm: f64,
+    /// Reference evapotranspiration for the day, mm (FAO-56 ET₀). `None`
+    /// when no source, forecast, legacy HA sensor, or native compute
+    /// produced one (forecast outage / cold start): the old flat 5.0
+    /// fallback published as a real measurement on the HA sensor and the
+    /// water-balance tiles, indistinguishable from computed FAO-56.
+    /// Serialized null; the engine keeps its own clearly named internal
+    /// constant for advisory projections. `#[serde(default)]` so older
+    /// JSON deserializes.
+    #[serde(default)]
+    pub eto_today_mm: Option<f64>,
     /// Same for tomorrow.
     pub eto_tomorrow_mm: f64,
     /// 3-day average ET₀ used by Smart Irrigation's Passthrough module.
     pub eto_3day_avg_mm: f64,
-    pub temp_max_today_f: f64,
-    pub temp_min_today_f: f64,
+    /// Today's forecast temperature range and representative humidity.
+    /// Resolved from the live forecast snapshot first, the legacy Open-Meteo
+    /// HA REST sensors second; `None` when neither has the value. The old
+    /// bare f64s were filled ONLY from the HA sensors with unwrap_or(0.0),
+    /// so every native/standalone install rendered "Temp range 0°F / 0°F"
+    /// and "Mean humidity 0%" as real forecast data (and prompted the LLM
+    /// advisor with them as ground truth). Serialized null;
+    /// `#[serde(default)]` so older JSON deserializes.
+    #[serde(default)]
+    pub temp_max_today_f: Option<f64>,
+    #[serde(default)]
+    pub temp_min_today_f: Option<f64>,
     pub wind_max_today_mph: f64,
     /// Today's forecast peak wind GUST, mph (Open-Meteo). Published as
     /// sensor.localsky_wind_gust_forecast; the high-wind push keys on this
     /// because the Tempest is wind-shadowed and under-reads real gusts.
     pub wind_gust_today_mph: f64,
-    pub humidity_mean_today_pct: f64,
+    /// See `temp_max_today_f`: forecast-first, legacy HA sensor fallback,
+    /// null when absent.
+    #[serde(default)]
+    pub humidity_mean_today_pct: Option<f64>,
 
     // ── Forecast intelligence (Phase A) ──
     /// Probability-weighted 3-day rain (today + next 2), in.
@@ -324,8 +350,11 @@ pub struct Forecast {
     pub rain_7day_weighted_in: f64,
     /// Sum of expected precipitation for the next 4 hours, in.
     pub rain_next_4h_in: f64,
-    /// Tomorrow's max precipitation probability (0-100).
-    pub rain_tomorrow_prob_pct: u32,
+    /// Tomorrow's max precipitation probability (0-100). `None` when the
+    /// provider reports no probability; the HA sensor reads unknown instead
+    /// of a fabricated "0% = certainly dry". `#[serde(default)]`.
+    #[serde(default)]
+    pub rain_tomorrow_prob_pct: Option<u32>,
     /// Min temperature in the next 24 hourly forecast entries, °F.
     pub temp_min_24h_f: f64,
     /// Max daily-high across today + next 2 days, °F.
@@ -389,8 +418,11 @@ pub struct DayVerdict {
     pub temp_min_f: f64,
     /// Forecast daily precipitation total, in.
     pub precip_in: f64,
-    /// Max precipitation probability for the day, 0-100.
-    pub precip_probability_max: u32,
+    /// Max precipitation probability for the day, 0-100. `None` when the
+    /// provider reports no probability series; the strip omits the percent
+    /// instead of claiming 0. `#[serde(default)]`.
+    #[serde(default)]
+    pub precip_probability_max: Option<u32>,
     /// "skip" / "run" / "run_extended".
     pub verdict: String,
     /// Human-readable reason; empty on plain "run".
@@ -547,9 +579,23 @@ pub struct IrrigationSnapshot {
     pub iu_enabled: bool,
     /// IU sequence currently suspended (skip-check fired or manual).
     pub iu_suspended: bool,
-    /// OpenSprinkler controller `water_level` (0-250%, where 100% is
-    /// the SI baseline).
-    pub water_level_pct: f64,
+    /// Controller water level / seasonal adjust (0-250%, where 100% is the
+    /// SI baseline; OpenSprinkler's `wl`). `None` when the active controller
+    /// does not report one (every adapter except OpenSprinkler) or
+    /// the HA bridge entity is absent: the old bare f64 fabricated 100% on
+    /// the native path and 0% on the HA path, and neither was a measurement.
+    /// Serialized null; the hero renders a dash and the HA sensor reads
+    /// unavailable. `#[serde(default)]` so older JSON deserializes.
+    #[serde(default)]
+    pub water_level_pct: Option<f64>,
+    /// True when the active controller declares the water-level capability
+    /// (`ControllerCaps.water_level`) or a level has actually been read this
+    /// refresh (HA bridge entity present). Gates the manifest's
+    /// water_level_pct descriptor the same way `flow_meter` gates flow, so
+    /// an install whose controller can never report one grows no phantom
+    /// sensor. Additive; absent = false.
+    #[serde(default)]
+    pub water_level_capable: bool,
 
     /// True when the active controller reports a flow meter capability
     /// (`ControllerCaps.flow_meter`). Lets the UI / HA decide whether to

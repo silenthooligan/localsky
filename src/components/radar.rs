@@ -30,6 +30,11 @@ struct PanelInputs {
     lat: f64,
     lon: f64,
     zoom: u32,
+    /// False when the install has no location anywhere: the center is a
+    /// placeholder continental view, and radar.js suppresses the station
+    /// marker and shows the "no location set" note instead of presenting
+    /// the default as the user's surroundings.
+    located: bool,
     providers: Vec<String>,
     default_layers: Vec<String>,
 }
@@ -49,27 +54,14 @@ fn panel_inputs() -> PanelInputs {
     // block (provider menu + default layer set).
     let cfg = use_context::<Arc<FileConfigStore>>().and_then(|store| store.load_blocking());
 
-    let from_config: Option<(f64, f64)> = cfg
-        .as_ref()
-        .map(|c| (c.deployment.location.lat, c.deployment.location.lon))
-        .filter(|(lat, lon)| !(*lat == 0.0 && *lon == 0.0));
-
-    let (lat, lon) = from_config.unwrap_or_else(|| {
-        let lat = std::env::var("WEATHER_APP_LAT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(40.0);
-        let lon = std::env::var("WEATHER_APP_LON")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(-75.0);
-        (lat, lon)
-    });
-
-    let zoom = std::env::var("WEATHER_APP_ZOOM")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8);
+    // One resolution shared with GET /api/v1/location, so the SSR attrs and
+    // the SPA recenter fetch can never disagree about where (or whether) the
+    // install is located.
+    let center = crate::api::location::resolve_map_center(
+        cfg.as_ref()
+            .map(|c| (c.deployment.location.lat, c.deployment.location.lon)),
+    );
+    let (lat, lon, zoom, located) = (center.lat, center.lon, center.zoom, center.located);
 
     // ui.radar.providers: empty = Auto (region-recommended menu).
     // ui.radar.default_layers seeds the visible set for browsers with
@@ -83,6 +75,7 @@ fn panel_inputs() -> PanelInputs {
         lat,
         lon,
         zoom,
+        located,
         providers,
         default_layers,
     }
@@ -90,14 +83,16 @@ fn panel_inputs() -> PanelInputs {
 
 #[cfg(not(feature = "ssr"))]
 fn panel_inputs() -> PanelInputs {
-    // Hydrate-side fallback mirrors the stock config at the env-default
-    // coordinates so a non-SSR mount renders byte-identical attributes
-    // to the SSR default: Auto provider menu (empty list) + the catalog
-    // default layer trio.
+    // Hydrate-side fallback mirrors the stock unlocated view so a non-SSR
+    // mount renders byte-identical attributes to the SSR no-config default:
+    // continental center, unlocated, Auto provider menu (empty list) + the
+    // catalog default layer trio. radar.js recenters (and re-flags) from
+    // GET /api/v1/location on init either way.
     PanelInputs {
-        lat: 40.0,
-        lon: -75.0,
-        zoom: 8,
+        lat: 39.8,
+        lon: -98.6,
+        zoom: 4,
+        located: false,
         providers: Vec::new(),
         default_layers: stock_default_layers(),
     }
@@ -167,6 +162,7 @@ pub fn RadarPanel() -> impl IntoView {
                     data-lat=inputs.lat.to_string()
                     data-lon=inputs.lon.to_string()
                     data-zoom=inputs.zoom.to_string()
+                    data-located=if inputs.located { "yes" } else { "no" }
                     data-radar-providers=providers_attr
                     data-radar-features=features_attr
                     data-default-layers=layers_attr>
@@ -189,9 +185,10 @@ mod tests {
         // Mirror of the non-ssr panel_inputs(), reproduced here so the
         // test also guards the ssr no-config defaults against drift.
         PanelInputs {
-            lat: 40.0,
-            lon: -75.0,
-            zoom: 8,
+            lat: 39.8,
+            lon: -98.6,
+            zoom: 4,
+            located: false,
             providers: Vec::new(),
             default_layers: stock_default_layers(),
         }

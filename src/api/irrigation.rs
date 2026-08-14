@@ -302,7 +302,7 @@ async fn simulate(
         hypo.forecast_in = v;
     }
     if let Some(v) = req.rain_tomorrow_prob_pct {
-        hypo.rain_tomorrow_prob_pct = v;
+        hypo.rain_tomorrow_prob_pct = Some(v);
     }
     if let Some(v) = req.rain_next_4h_in {
         hypo.rain_next_4h_in = v;

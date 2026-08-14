@@ -81,6 +81,48 @@ pub fn Hero(
     #[prop(optional)]
     forecast: Option<ReadSignal<ForecastSnapshot>>,
 ) -> impl IntoView {
+    view! {
+        <section class="hero panel is-tier-1" aria-label="Current weather">
+            {move || {
+                // Boot/empty window: before ANY source has written a reading
+                // the snapshot is all Snapshot::default() zeros, and
+                // rendering them presented a confident 0-degree "Calm night"
+                // dashboard for the whole restart window. Show the standard
+                // skeleton treatment instead. SSR and hydrate's first frame
+                // both take this branch (signals start at default), so
+                // hydration stays sound; the SSE push swaps in the real
+                // panel client-side.
+                if !snap.get().has_any_reading() {
+                    return view! {
+                        <div class="hero-focal" aria-hidden="true">
+                            <div class="hero-glyph">
+                                <crate::components::ui::Skeleton variant="tile"/>
+                            </div>
+                            <div class="hero-headline">
+                                <crate::components::ui::Skeleton variant="block" width="9rem"/>
+                                <crate::components::ui::Skeleton variant="line" width="6rem"/>
+                            </div>
+                        </div>
+                        <div class="hero-strip" aria-label="Waiting for the first reading">
+                            <crate::components::ui::Skeleton variant="row"/>
+                        </div>
+                    }
+                    .into_any();
+                }
+                view! { <HeroReadings snap forecast/> }.into_any()
+            }}
+        </section>
+    }
+}
+
+/// The populated hero content (focal row + telemetry strip), rendered only
+/// once the snapshot carries at least one real reading (see the warming-up
+/// guard in [`Hero`]).
+#[component]
+fn HeroReadings(
+    snap: ReadSignal<Snapshot>,
+    forecast: Option<ReadSignal<ForecastSnapshot>>,
+) -> impl IntoView {
     let prefs = use_unit_prefs();
     // Choose the headline glyph + label + accent from the live state.
     // Order matters: lightning > rain > hail > then either the forecast
@@ -177,9 +219,7 @@ pub fn Hero(
             </span>
         }
     };
-
     view! {
-        <section class="hero panel is-tier-1" aria-label="Current weather">
             // Row 1: the focal info, glyph + temp + condition + the
             // two most-asked secondary stats inline.
             <div class="hero-focal">
@@ -262,6 +302,5 @@ pub fn Hero(
                 </span>
                 {pressure_chip}
             </div>
-        </section>
     }
 }

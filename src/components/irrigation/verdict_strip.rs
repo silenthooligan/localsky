@@ -102,12 +102,13 @@ fn VerdictCell(v: DayVerdict, prefs: UnitPrefs, tz: String) -> impl IntoView {
         fmt_temp_short(v.temp_max_f, prefs),
         fmt_temp_short(v.temp_min_f, prefs)
     );
-    // precip_in is INCHES; route through the unit formatter.
-    let rain_str = format!(
-        "{} · {}%",
-        fmt_rain_amount(v.precip_in, prefs),
-        v.precip_probability_max
-    );
+    // precip_in is INCHES; route through the unit formatter. The percent is
+    // omitted when the provider reported no probability (the old bare 0
+    // claimed "0% chance").
+    let rain_str = match v.precip_probability_max {
+        Some(prob) => format!("{} · {prob}%", fmt_rain_amount(v.precip_in, prefs)),
+        None => fmt_rain_amount(v.precip_in, prefs),
+    };
     let tag = verdict_short_label(&v);
     // Full-narration label for screen readers. Color + tag carry the
     // same intent visually; the aria-label folds the temp + rain

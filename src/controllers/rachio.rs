@@ -165,6 +165,7 @@ impl IrrigationController for Rachio {
             // /event accepts arbitrary JSON; no native "upload my schedule"
             // API for community-built programs.
             remote_program_upload: false,
+            water_level: false,
         }
     }
 

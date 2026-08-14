@@ -143,7 +143,13 @@ fn build_scope(i: &Inputs) -> Scope<'static> {
     s.push("rain_intensity_now_in_hr", i.rain_intensity_now_in_hr);
     s.push("humidity_now_pct", i.humidity_now_pct);
     s.push("forecast_in", i.forecast_in);
-    s.push("rain_tomorrow_prob_pct", i.rain_tomorrow_prob_pct as i64);
+    // Scripts see a plain number; an unreported probability scripts as 100
+    // to match the engine's full-weight treatment (a "skip if prob > X"
+    // rule then errs toward holding water, the same safe direction).
+    s.push(
+        "rain_tomorrow_prob_pct",
+        i64::from(i.rain_tomorrow_prob_pct.unwrap_or(100)),
+    );
     s.push("rain_next_4h_in", i.rain_next_4h_in);
     s.push("wind_max_today_mph", i.wind_max_today_mph);
     // Rhai surface keeps the historical scalar shape: 0.0 stands in when

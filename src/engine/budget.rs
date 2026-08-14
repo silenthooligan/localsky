@@ -57,7 +57,8 @@ pub fn compute_zone(
         .daily
         .iter()
         .take(7)
-        .map(|d| d.precip_sum_in * (d.precip_probability_max as f64) / 100.0)
+        // Probability-less days weight at full value (DailyEntry::precip_weight).
+        .map(|d| d.precip_sum_in * d.precip_weight())
         .sum();
 
     // Water-balance math: weekly budget, minus expected captured rain.

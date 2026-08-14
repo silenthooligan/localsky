@@ -49,11 +49,18 @@ pub struct Snapshot {
     pub flow_gpm: f64,
     pub flow_total_gal_today: f64,
     /// Probability of precipitation (%) from a forecast source's current step.
-    pub pop_pct: f64,
-    /// Leaf wetness (%) from a leaf-wetness sensor (Davis WLL soil/leaf,
-    /// Ecowitt WH35). Display + history only; 0.0 = unknown / not reported.
+    /// `None` until a configured source actually provides Pop: a bare 0 here
+    /// read as "certainly no rain" on installs whose sources never report it
+    /// (the lightning_avg_dist_mi shape). Serialized null so HA shows unknown.
     #[serde(default)]
-    pub leaf_wetness_pct: f64,
+    pub pop_pct: Option<f64>,
+    /// Leaf wetness (%) from a leaf-wetness sensor (Davis WLL soil/leaf,
+    /// Ecowitt WH35). Display + history only. `None` = unknown / not reported:
+    /// a bare 0.0 published as a confident bone-dry canopy reading between
+    /// integration setup and the sensor's first report (same defect shape as
+    /// `lightning_avg_dist_mi` above, same resolution).
+    #[serde(default)]
+    pub leaf_wetness_pct: Option<f64>,
     pub precip_type: u8, // 0=none 1=rain 2=hail
     pub lightning_count_last_min: u32,
     /// Strikes in the rolling one-hour buffer. DERIVED from that buffer on
@@ -154,6 +161,18 @@ pub fn station_present(last_packet_epoch: i64, station_serial: &str) -> bool {
 }
 
 impl Snapshot {
+    /// True once ANY source has produced a current-conditions reading: a
+    /// live station packet (`last_packet_epoch`) or a cloud/forecast fill
+    /// that claimed the headline (`source_label`). FALSE only in the
+    /// boot/empty window, where every numeric field still holds
+    /// `Snapshot::default()` zeros; the dashboard renders its warming-up
+    /// skeleton there instead of presenting those zeros as readings.
+    /// Mirrors `station_present`'s shape; available to both features (the
+    /// hydrate-side hero consults it).
+    pub fn has_any_reading(&self) -> bool {
+        self.last_packet_epoch > 0 || !self.source_label.is_empty()
+    }
+
     /// State-of-charge curve for the Tempest's lithium-titanate (LTO)
     /// battery. Piecewise-linear table copied verbatim from
     /// pyweatherflowudp's calc.py so this app's percentage matches what
@@ -1458,8 +1477,8 @@ impl TempestStore {
                 }
                 F::FlowGpm => snap.flow_gpm = v,
                 F::FlowTotalGalToday => snap.flow_total_gal_today = v,
-                F::Pop => snap.pop_pct = v,
-                F::LeafWetness => snap.leaf_wetness_pct = v,
+                F::Pop => snap.pop_pct = Some(v),
+                F::LeafWetness => snap.leaf_wetness_pct = Some(v),
                 F::RainTypeStr | F::ForecastDaily | F::ForecastHourly => continue,
             }
             prov_keys.push(key);
@@ -2064,7 +2083,28 @@ mod bridge_tests {
         assert_eq!(s.et0_today, 4.2);
         assert_eq!(s.flow_gpm, 12.0);
         assert_eq!(s.flow_total_gal_today, 340.0);
-        assert_eq!(s.pop_pct, 65.0);
+        assert_eq!(s.pop_pct, Some(65.0));
+    }
+
+    #[test]
+    fn pop_and_leaf_stay_null_until_a_source_writes_them() {
+        // Unknown means unknown: a snapshot no source has fed Pop or leaf
+        // wetness serializes both null, never a fabricated 0% ("certainly no
+        // rain" / "bone-dry canopy"). Same day-bucket-era contract as
+        // lightning_avg_dist_mi.
+        let store = TempestStore::new();
+        store.apply_source_fields(&[(F::AirTempF, 70.0)], 1_000, true, "test");
+        let s = store.snapshot();
+        assert_eq!(s.pop_pct, None);
+        assert_eq!(s.leaf_wetness_pct, None);
+
+        store.apply_source_fields(&[(F::LeafWetness, 0.0)], 1_100, true, "test");
+        let s = store.snapshot();
+        assert_eq!(
+            s.leaf_wetness_pct,
+            Some(0.0),
+            "a REPORTED 0% is a real dry-canopy reading, distinct from unknown"
+        );
     }
 
     #[test]

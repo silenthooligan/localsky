@@ -27,22 +27,25 @@ pub fn compute(fc: &ForecastSnapshot, today: &Inputs, params: &SkipRuleParams) -
         let d = &fc.daily[day_idx];
         let next = fc.daily.get(day_idx + 1);
 
-        let prob_tomorrow = next.map(|n| n.precip_probability_max).unwrap_or(0);
+        // None (no window / provider gap) stays None: the engine weights the
+        // amount at full value and the cell omits the confidence claim.
+        let prob_tomorrow = next.and_then(|n| n.precip_probability_max);
         let precip_tomorrow = next.map(|n| n.precip_sum_in).unwrap_or(0.0);
 
+        // Probability-less days weight at full value (DailyEntry::precip_weight).
         let rain_3day_weighted: f64 = fc
             .daily
             .iter()
             .skip(day_idx + 1)
             .take(3)
-            .map(|x| x.precip_sum_in * (x.precip_probability_max as f64) / 100.0)
+            .map(|x| x.precip_sum_in * x.precip_weight())
             .sum();
         let rain_7day_weighted: f64 = fc
             .daily
             .iter()
             .skip(day_idx + 1)
             .take(7)
-            .map(|x| x.precip_sum_in * (x.precip_probability_max as f64) / 100.0)
+            .map(|x| x.precip_sum_in * x.precip_weight())
             .sum();
 
         let temp_max_3day = fc
@@ -254,7 +257,7 @@ mod tests {
             temp_max_f: 72.0,
             temp_min_f: 55.0,
             precip_sum_in: 0.0,
-            precip_probability_max: 0,
+            precip_probability_max: Some(0),
             ..Default::default()
         }
     }
@@ -285,7 +288,7 @@ mod tests {
             temp_max_f: 72.0,
             temp_min_f: 55.0,
             precip_sum_in: 0.0,
-            precip_probability_max: 0,
+            precip_probability_max: Some(0),
             ..Default::default()
         };
         let fc = ForecastSnapshot {
@@ -597,7 +600,7 @@ mod tests {
         let live = evaluate_with(
             &Inputs {
                 forecast_in: 0.6,
-                rain_tomorrow_prob_pct: 100,
+                rain_tomorrow_prob_pct: Some(100),
                 soil_zones: vec![dry_zone.clone()],
                 ..base_inputs()
             },
@@ -614,7 +617,7 @@ mod tests {
         // as "tomorrow rain". Today's Inputs carry the SAME dry zone.
         let wet_day3 = DailyEntry {
             precip_sum_in: 0.6,
-            precip_probability_max: 100,
+            precip_probability_max: Some(100),
             ..mild_day()
         };
         let fc = ForecastSnapshot {

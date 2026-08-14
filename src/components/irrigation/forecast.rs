@@ -53,14 +53,22 @@ fn BalanceHeadline(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         f.rain_today_tempest_in.max(f.rain_today_om_in)
     };
     let rain_mm = move || rain_in() * 25.4;
-    let et_mm = move || snap.get().forecast.eto_today_mm;
+    // None when nothing real resolved today's ET0 (forecast outage / cold
+    // start): the figures show a dash and the status says the balance is
+    // unknown, never a fabricated daily loss presented as measured.
+    let et_mm_opt = move || snap.get().forecast.eto_today_mm;
+    let et_known = move || et_mm_opt().is_some();
+    let et_mm = move || et_mm_opt().unwrap_or(0.0);
     let net = move || rain_mm() - et_mm();
-    let drying = move || net() < -0.05;
+    let drying = move || et_known() && net() < -0.05;
     let rain_pct = move || {
         let total = (rain_mm() + et_mm()).max(0.01);
         (rain_mm() / total * 100.0).clamp(2.0, 98.0)
     };
     let status = move || {
+        if !et_known() {
+            return "Evapotranspiration unknown today, balance not computed".to_string();
+        }
         let n = net();
         if n >= 0.05 {
             "Rain more than covered today's loss".to_string()
@@ -84,8 +92,11 @@ fn BalanceHeadline(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 <div class="balance-fig balance-fig--out">
                     <span class="balance-fig__k">"Lost to sun & heat (ET)"</span>
                     <span class="balance-fig__v">
-                        {move || format!("-{}", depth_value_mm(et_mm(), prefs.get()))}
-                        <span class="balance-fig__u">{move || depth_unit(prefs.get())}</span>
+                        {move || match et_mm_opt() {
+                            Some(v) => format!("-{}", depth_value_mm(v, prefs.get())),
+                            None => "-".to_string(),
+                        }}
+                        <span class="balance-fig__u">{move || if et_known() { depth_unit(prefs.get()) } else { "" }}</span>
                     </span>
                     // Intraday honesty: the figure above is the FULL day's
                     // budget; this notes how much the model says is already
@@ -114,11 +125,14 @@ fn BalanceHeadline(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                     <span class="balance-fig__k">"Net"</span>
                     <span class="balance-fig__v">
                         {move || {
+                            if !et_known() {
+                                return "-".to_string();
+                            }
                             let n = net();
                             let sign = if n >= 0.0 { "+" } else { "-" };
                             format!("{sign}{}", depth_value_mm(n.abs(), prefs.get()))
                         }}
-                        <span class="balance-fig__u">{move || depth_unit(prefs.get())}</span>
+                        <span class="balance-fig__u">{move || if et_known() { depth_unit(prefs.get()) } else { "" }}</span>
                     </span>
                 </div>
             </div>
@@ -532,7 +546,13 @@ fn MultiDayRainBlock(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                     label="Tomorrow × confidence"
                     value=Signal::derive(move || {
                         let f = snap.get().forecast;
-                        f.rain_tomorrow_in * (f.rain_tomorrow_prob_pct as f64) / 100.0
+                        // Full weight when no probability was reported,
+                        // matching the engine's tomorrow_prob_weight.
+                        let weight = f
+                            .rain_tomorrow_prob_pct
+                            .map(|prob| prob as f64 / 100.0)
+                            .unwrap_or(1.0);
+                        f.rain_tomorrow_in * weight
                     })
                     threshold=Signal::derive(move || snap.get().skip_check.rain_skip_in)
                     threshold_label="Rain-skip threshold"
@@ -557,9 +577,14 @@ fn MultiDayRainBlock(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 {move || {
                     let f = snap.get().forecast;
                     // rain_tomorrow_in is INCHES; route through the formatter.
+                    // No probability reported: no confidence claim.
+                    let confidence = match f.rain_tomorrow_prob_pct {
+                        Some(prob) => format!(" at {prob}% confidence"),
+                        None => String::new(),
+                    };
                     format!(
-                        "Tomorrow: {} at {}% confidence · Days since significant rain: {}",
-                        fmt_rain_amount(f.rain_tomorrow_in, prefs.get()), f.rain_tomorrow_prob_pct, f.days_since_significant_rain
+                        "Tomorrow: {}{confidence} · Days since significant rain: {}",
+                        fmt_rain_amount(f.rain_tomorrow_in, prefs.get()), f.days_since_significant_rain
                     )
                 }}
             </div>
@@ -574,7 +599,8 @@ fn MultiDayRainBlock(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
 #[component]
 fn BalanceBlock(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     let prefs = use_unit_prefs();
-    // All four figures here are MILLIMETERS.
+    // All four figures here are MILLIMETERS. ET0 today is None when nothing
+    // real resolved it; the tile and the Net row render a dash for that.
     let eto_today = move || snap.get().forecast.eto_today_mm;
     let eto_tomorrow = move || snap.get().forecast.eto_tomorrow_mm;
     let eto_3day = move || snap.get().forecast.eto_3day_avg_mm;
@@ -582,14 +608,19 @@ fn BalanceBlock(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         let f = snap.get().forecast;
         f.rain_today_tempest_in.max(f.rain_today_om_in) * 25.4
     };
-    let net = move || rain_today_mm() - eto_today();
+    let net = move || eto_today().map(|et| rain_today_mm() - et);
     view! {
         <div class="forecast-block nerd-only">
             <div class="forecast-block-title">"Water budget"</div>
             <div class="kv-grid">
                 <div class="kv">
                     <span class="k">"ET₀ today"</span>
-                    <span class="v">{move || fmt_rain_amount_mm(eto_today(), prefs.get())}</span>
+                    <span class="v">
+                        {move || match eto_today() {
+                            Some(v) => fmt_rain_amount_mm(v, prefs.get()),
+                            None => "-".to_string(),
+                        }}
+                    </span>
                 </div>
                 <div class="kv">
                     <span class="k">"Rain today"</span>
@@ -598,13 +629,21 @@ fn BalanceBlock(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 <div class="kv">
                     <span class="k">"Net (rain−ET₀)"</span>
                     <span class=move || {
-                        if net() >= 0.0 { "v v-pos" } else { "v v-neg" }
+                        match net() {
+                            Some(n) if n < 0.0 => "v v-neg",
+                            Some(_) => "v v-pos",
+                            None => "v",
+                        }
                     }>
                         {move || {
-                            let n = net();
                             let p = prefs.get();
-                            let sign = if n >= 0.0 { "+" } else { "-" };
-                            format!("{sign}{}{}", depth_value_mm(n.abs(), p), depth_unit(p))
+                            match net() {
+                                Some(n) => {
+                                    let sign = if n >= 0.0 { "+" } else { "-" };
+                                    format!("{sign}{}{}", depth_value_mm(n.abs(), p), depth_unit(p))
+                                }
+                                None => "-".to_string(),
+                            }
                         }}
                     </span>
                 </div>
@@ -696,7 +735,14 @@ fn DayBlock(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                         {move || {
                             let f = snap.get().forecast;
                             let p = prefs.get();
-                            format!("{} / {}", fmt_temp_short(f.temp_min_today_f, p), fmt_temp_short(f.temp_max_today_f, p))
+                            // None = no forecast temps resolved: dash, never
+                            // a fabricated 0/0 range.
+                            match (f.temp_min_today_f, f.temp_max_today_f) {
+                                (Some(lo), Some(hi)) => {
+                                    format!("{} / {}", fmt_temp_short(lo, p), fmt_temp_short(hi, p))
+                                }
+                                _ => "-".to_string(),
+                            }
                         }}
                     </span>
                 </div>
@@ -709,7 +755,10 @@ fn DayBlock(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 <div class="kv">
                     <span class="k">"Mean humidity"</span>
                     <span class="v">
-                        {move || format!("{:.0}%", snap.get().forecast.humidity_mean_today_pct)}
+                        {move || match snap.get().forecast.humidity_mean_today_pct {
+                            Some(h) => format!("{h:.0}%"),
+                            None => "-".to_string(),
+                        }}
                     </span>
                 </div>
             </div>

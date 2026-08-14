@@ -148,11 +148,12 @@ fn WeekRow(v: DayVerdict, prefs: UnitPrefs, tz: String) -> impl IntoView {
         fmt_temp_short(v.temp_max_f, prefs),
         fmt_temp_short(v.temp_min_f, prefs)
     );
-    let rain = format!(
-        "{} \u{b7} {}%",
-        fmt_rain_amount(v.precip_in, prefs),
-        v.precip_probability_max
-    );
+    // Omit the percent when the provider reported no probability; the old
+    // bare 0 read as a confident "0% chance".
+    let rain = match v.precip_probability_max {
+        Some(prob) => format!("{} \u{b7} {prob}%", fmt_rain_amount(v.precip_in, prefs)),
+        None => fmt_rain_amount(v.precip_in, prefs),
+    };
     let reason = if v.reason.is_empty() {
         "No skip conditions in the forecast.".to_string()
     } else {
@@ -163,12 +164,15 @@ fn WeekRow(v: DayVerdict, prefs: UnitPrefs, tz: String) -> impl IntoView {
     // twice. Mirrors verdict_strip's aria approach. Spoken units follow the
     // display preference so the narration matches the visible row.
     let rain_word = if prefs.rain_mm { "millimeter" } else { "inch" };
+    let prob_phrase = match v.precip_probability_max {
+        Some(prob) => format!(" at {prob} percent"),
+        None => String::new(),
+    };
     let aria = format!(
-        "{primary} {date}: {label}. {reason} High {} {unit}, low {} {unit}, {} {rain_word} rain at {} percent.",
+        "{primary} {date}: {label}. {reason} High {} {unit}, low {} {unit}, {} {rain_word} rain{prob_phrase}.",
         temp_value(v.temp_max_f, prefs),
         temp_value(v.temp_min_f, prefs),
         depth_value_in(v.precip_in, prefs),
-        v.precip_probability_max,
         unit = temp_unit(prefs),
     );
     view! {
@@ -229,7 +233,7 @@ mod tests {
             temp_max_f: 80.0,
             temp_min_f: 60.0,
             precip_in: 0.0,
-            precip_probability_max: 0,
+            precip_probability_max: Some(0),
             verdict: verdict.to_string(),
             reason: reason.to_string(),
             // P1 additive reason_code defaults to "" for this UI test fixture.

@@ -2,7 +2,23 @@
 
 All notable changes to LocalSky are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.14] - 2026-08-13
+
+Unknown now means unknown. Values LocalSky never measured stop dressing up as data.
+
+### Fixed
+
+- Placeholder and sentinel values stop publishing as data. Readings LocalSky does not have now show as unknown (a dash in the app, `unavailable` in Home Assistant) instead of a fabricated number: precipitation probability and leaf wetness before any source reports them, water level on controllers that never report one (previously a made-up 100%, or 0% on a Home Assistant setup missing the entity), today's ET0 during a forecast outage (previously a flat 5.0 mm presented as measured), and today's temperature range and humidity on standalone installs (previously 0°/0° and 0%). Today's range now also comes from the live forecast first instead of legacy Home Assistant sensors only.
+- A forecast without a probability series no longer zeroes the expected-rain math. Probability-less forecast rain now counts at full value in the weighted 3/7-day outlooks and the tomorrow-rain skip, so the engine holds water ahead of a storm instead of watering into it, and skip reasons only claim a confidence percentage when the provider actually reported one.
+- Home Assistant stops growing dead sensors. Precipitation probability, wet bulb, wind lull, rain-last-minute, illuminance, water level, and per-zone soil sensors are only created when the install actually has the source, station, controller capability, or soil probe behind them.
+- An install without a location no longer shows another city's weather. The forecast pipeline previously fell back to fixed default coordinates and presented that forecast (and its timezone) as local; it now waits, visibly, until a location is set.
+- An install with no location no longer pretends to have one. The radar map used to fall back to a fixed point in the mid-Atlantic at neighborhood zoom, station marker included, so an unlocated install looked confidently located near Philadelphia (one beta tester reasonably read it as their location not applying). With no location set, the map now shows a continent-scale view with no station marker and a note linking to the location settings, and it recenters the moment a location is saved.
+- The weather dashboard shows a loading state after a restart instead of rendering zero-degree readings while the first data arrives.
+- The NWS and Met.no integrations no longer send a placeholder contact (`you@example.com`) as their User-Agent. Left empty, the field now auto-derives a real, current identity for this install; you can still supply your own contact string. Installs whose configuration still carries the old auto-filled identity from 0.7.10 through 0.7.12 are migrated to the derived one automatically at request time.
+
+### Changed
+
+- **A tomorrow-rain forecast with no reported probability now counts at full value.** If your forecast source supplies a rain amount but no probability, LocalSky may now skip a watering it previously ran, because the expected rain is no longer multiplied down to zero. A zone whose soil probe reads below its dry floor still waters through this skip.
 
 ## [0.7.13] - 2026-08-12
 

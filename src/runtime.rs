@@ -399,6 +399,10 @@ pub fn source_field_names(cfg: &Config, entry: &SourceEntry) -> Vec<&'static str
             F::RainIntensityInHr,
             F::SolarWm2,
             F::UvIndex,
+            // The gateway poller parses common_list 0x15 (solarradiation_lux)
+            // and publishes Illuminance; omitting it here made the manifest's
+            // lux gate drop a sensor an Ecowitt-GW-only install really feeds.
+            F::Illuminance,
         ],
         SourceKind::TempestUdp(_) => vec![
             F::AirTempF,

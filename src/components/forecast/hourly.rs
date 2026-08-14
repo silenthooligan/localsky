@@ -141,26 +141,43 @@ fn HourlyChart(entries: Vec<HourlyEntry>, prefs: UnitPrefs, tz: String) -> impl 
 
     // Rain probability bars.
     let rain_baseline = header_h + temp_h;
-    let rain_bars: Vec<_> = entries.iter().enumerate().map(|(i, e)| {
-        let bar_w = col_w * 0.5;
-        let x = col_w * (i as f64) + (col_w - bar_w) / 2.0;
-        let h = rain_h * (e.precip_probability as f64 / 100.0);
-        let y = rain_baseline + (rain_h - h);
-        let opacity = 0.35 + 0.65 * (e.precip_probability as f64 / 100.0);
-        view! {
-            <rect
-                x={x.to_string()}
-                y={y.to_string()}
-                width={bar_w.to_string()}
-                height={h.to_string()}
-                rx="2"
-                class="hourly-rain-bar"
-                opacity={opacity.to_string()}
-            >
-                <title>{format!("{}% rain at {}", e.precip_probability, format_local_hour(e.time_epoch, &tz))}</title>
-            </rect>
-        }.into_any()
-    }).collect();
+    let rain_bars: Vec<_> = entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let bar_w = col_w * 0.5;
+            let x = col_w * (i as f64) + (col_w - bar_w) / 2.0;
+            // An hour without a reported probability draws no probability bar
+            // (there is nothing measured to draw) and the tooltip drops the
+            // percent claim; a reported 0% stays an honest empty bar.
+            let prob = e.precip_probability;
+            let frac = prob.map(|p| p as f64 / 100.0).unwrap_or(0.0);
+            let h = rain_h * frac;
+            let y = rain_baseline + (rain_h - h);
+            let opacity = 0.35 + 0.65 * frac;
+            let title = match prob {
+                Some(p) => format!("{p}% rain at {}", format_local_hour(e.time_epoch, &tz)),
+                None => format!(
+                    "rain chance unknown at {}",
+                    format_local_hour(e.time_epoch, &tz)
+                ),
+            };
+            view! {
+                <rect
+                    x={x.to_string()}
+                    y={y.to_string()}
+                    width={bar_w.to_string()}
+                    height={h.to_string()}
+                    rx="2"
+                    class="hourly-rain-bar"
+                    opacity={opacity.to_string()}
+                >
+                    <title>{title}</title>
+                </rect>
+            }
+            .into_any()
+        })
+        .collect();
 
     // Now-line: vertical marker at the first hour (typically the
     // current hour since Open-Meteo aligns to top-of-hour).

@@ -2729,6 +2729,27 @@ a { color: var(--accent); }
   position: relative;
 }
 
+// "No location set" note over an unlocated install's placeholder map
+// (radar.js adds/removes it as `located` flips). Sits on the shell for
+// the same assistive-tech reason as the Layers chip.
+.radar-unlocated-note {
+  position: absolute;
+  top: var(--space-2);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 500; // above Leaflet tile/overlay panes (400), below its controls (1000)
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--bg-deep) 82%, transparent);
+  color: var(--text-dim);
+  font-size: var(--text-caption);
+  white-space: nowrap;
+  a {
+    color: var(--accent);
+    font-weight: 600;
+  }
+}
+
 .radar-map {
   width: 100%;
   height: 480px;

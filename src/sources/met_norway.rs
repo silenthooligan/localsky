@@ -272,7 +272,8 @@ fn build_snapshot(resp: &ForecastResponse, lat: f64, lon: f64, now_epoch: i64) -
             apparent_temp_f: 0.0,
             precip_in,
             // Synthesized from precip presence (compact has no real POP).
-            precip_probability: synth_pop(precip_in, symbol),
+            // Synthesized, but a real estimate: Some, never a provider gap.
+            precip_probability: Some(synth_pop(precip_in, symbol)),
             wind_mph: d.wind_speed.map(ms_to_mph).unwrap_or(0.0),
             wind_dir_deg: d.wind_from_direction.map(|x| x.round() as u32).unwrap_or(0),
             humidity_pct: d.relative_humidity.map(|x| x.round() as u32).unwrap_or(0),
@@ -369,7 +370,7 @@ fn build_snapshot(resp: &ForecastResponse, lat: f64, lon: f64, now_epoch: i64) -
             // backfill_daily_humidity below.
             humidity_pct: 0,
             precip_sum_in: agg.precip_sum_in,
-            precip_probability_max: agg.pop_max,
+            precip_probability_max: Some(agg.pop_max),
             wind_max_mph: agg.wind_max_mph,
             // Compact has no gust field.
             wind_gust_max_mph: 0.0,
@@ -411,7 +412,13 @@ impl MetNorway {
     pub fn new(id: impl Into<String>, config: MetNorwayConfig, location: Location) -> Self {
         let client = Client::builder()
             .timeout(Duration::from_secs(15))
-            .user_agent(config.user_agent.clone())
+            // api.met.no's terms require an identifying UA. An empty or
+            // historical-placeholder value derives the real instance identity
+            // at request time; the config is never rewritten (see
+            // sources::resolve_outbound_user_agent).
+            .user_agent(crate::sources::resolve_outbound_user_agent(
+                &config.user_agent,
+            ))
             .build()
             .expect("reqwest client construction");
         Self {
@@ -753,7 +760,7 @@ mod tests {
             h0.precip_in
         );
         assert_eq!(h0.weather_code, 61); // "rain"
-        assert_eq!(h0.precip_probability, 100); // synthesized: precip present
+        assert_eq!(h0.precip_probability, Some(100)); // synthesized: precip present
         assert_eq!(h0.apparent_temp_f, 0.0); // no feels-like in compact
 
         // ----- daily grouping: 2026-06-24 and 2026-06-25 -----
@@ -780,7 +787,7 @@ mod tests {
         // Worst-condition proxy: max(61 rain, 0 clear) = 61
         assert_eq!(d0.weather_code, 61);
         // Synthesized from the wet step: max(100, 0) = 100.
-        assert_eq!(d0.precip_probability_max, 100);
+        assert_eq!(d0.precip_probability_max, Some(100));
         assert_eq!(d0.wind_gust_max_mph, 0.0);
         assert_eq!(d0.uv_index_max, 0.0);
         assert_eq!(d0.sunrise_epoch, 0);
@@ -900,14 +907,14 @@ mod tests {
             "6-hourly day must sum to 1.0 in, got {}",
             d1.precip_sum_in
         );
-        assert_eq!(d1.precip_probability_max, 100); // synth: amount present
+        assert_eq!(d1.precip_probability_max, Some(100)); // synth: amount present
         assert_eq!(d1.weather_code, 61); // "rain" from the 6h summary
 
         // Day 2 (summary-only next_12_hours tail): nothing to sum, but the
         // precip-class symbol still drives the synthesized POP + condition.
         let d2 = &snap.daily[2];
         assert_eq!(d2.precip_sum_in, 0.0);
-        assert_eq!(d2.precip_probability_max, 50);
+        assert_eq!(d2.precip_probability_max, Some(50));
         assert_eq!(d2.weather_code, 61);
 
         // Hourly rows keep the 1h-only read: a 6-hourly step (no

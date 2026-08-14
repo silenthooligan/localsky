@@ -117,7 +117,9 @@ pub fn SimulatorPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         wind.set(s.wind_now_mph);
         rain_today.set(s.rain_today_in);
         rain_tomorrow.set(s.forecast_in);
-        prob_tomorrow.set(s.rain_tomorrow_prob_pct as f64);
+        // Unreported probability seeds the slider at 100: the engine weights
+        // the amount at full value, so the What-If baseline matches it.
+        prob_tomorrow.set(f64::from(s.rain_tomorrow_prob_pct.unwrap_or(100)));
         heat_3day.set(s.temp_max_3day_f);
     };
 
