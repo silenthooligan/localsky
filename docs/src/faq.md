@@ -4,7 +4,7 @@
 
 Only when you ask it to. By default LocalSky makes no calls home, and the app itself runs no analytics. The outbound traffic that can exist:
 
-- Forecast sources you configure (Open-Meteo, NWS, OpenWeather, Pirate Weather, MET Norway): polled requests carrying your coordinates and any API key you supplied.
+- Forecast sources you configure (Open-Meteo, NWS, OpenWeather, Pirate Weather, MET Norway): polled requests carrying your coordinates and any API key you supplied. NWS and MET Norway also require an identifying User-Agent by their terms of service; if you leave that field empty, LocalSky sends `localsky/<version> (instance-<first 8 characters of the install id>; +https://localsky.io)`, and you can set your own contact string instead.
 - Cloud-bridged hardware you add (Tempest WebSocket, Netatmo, Ambient Weather, Tuya, YoLink sources; Rachio, Hydrawise, B-hyve controllers): those vendors' clouds, with the credentials you entered.
 - The optional update check: a plain daily GET to the project's version manifest at `localsky.io/latest.json`, off by default, opt-in via `[updates].check_enabled`. The request carries the running version in its User-Agent (so the maintainer can see which versions are in use); no per-install identifier or config data rides along.
 - Web Push notifications, if you enable them: encrypted payloads to your browser's push service.
@@ -49,7 +49,7 @@ Not for the core loop. A LAN weather station plus a LAN controller (Tempest or E
 
 ### Is there telemetry?
 
-No tracking lives in the app: no usage reporting, no crash reporting, no analytics SDK, no per-install identifier sent anywhere. The only optional phone-home is the update check above, off by default. When you enable it, the daily request to `localsky.io` carries the running version in its User-Agent, and (as with any web request) the server can see your IP; the maintainer reads those access logs only as aggregate version counts. Nothing else is collected, and nothing is stored in the app.
+No tracking lives in the app: no usage reporting, no crash reporting, no analytics SDK, nothing sent to the maintainer beyond the optional update check above, off by default. When you enable it, the daily request to `localsky.io` carries the running version in its User-Agent (no per-install identifier), and (as with any web request) the server can see your IP; the maintainer reads those access logs only as aggregate version counts. One separate case: NWS and MET Norway require an identifying User-Agent by their terms, so requests to those two agencies carry a short per-install tag (the first 8 characters of the install id) unless you set your own contact string in the source's settings. That identity goes to the weather agency you chose, never to the maintainer. Nothing else is collected, and nothing is stored in the app.
 
 ## Glossary
 

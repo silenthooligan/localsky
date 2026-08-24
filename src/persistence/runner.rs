@@ -84,6 +84,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "sensor_history_latest_index",
         sql: include_str!("migrations/M0013_sensor_history_latest_index.sql"),
     },
+    Migration {
+        version: "M0014",
+        name: "tuning_report_state",
+        sql: include_str!("migrations/M0014_tuning_report_state.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]
@@ -248,6 +253,7 @@ mod tests {
                 "M0011".to_string(),
                 "M0012".to_string(),
                 "M0013".to_string(),
+                "M0014".to_string(),
             ]
         );
     }

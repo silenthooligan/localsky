@@ -5,6 +5,7 @@
 
 pub mod card;
 pub mod detail;
+pub mod tuning;
 
 use leptos::prelude::*;
 

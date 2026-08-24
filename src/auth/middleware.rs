@@ -1241,6 +1241,22 @@ mod tests {
         assert!(is_privileged_path(&Method::POST, "/api/push/unsubscribe"));
         assert!(is_privileged_path(&Method::POST, "/api/zones/photo"));
         assert!(is_privileged_path(&Method::POST, "/api/v1/zones/photo"));
+        // The tuning-report Apply persists a ZoneConfig field: a config
+        // write under /api/config, privileged automatically on the
+        // state-changing method, both prefixes. Pinned so a future route
+        // move cannot silently drop the gate.
+        assert!(is_privileged_path(&Method::POST, "/api/config/zones/apply"));
+        assert!(is_privileged_path(
+            &Method::POST,
+            "/api/v1/config/zones/apply"
+        ));
+        assert!(!is_privileged_path(&Method::GET, "/api/config/zones/apply"));
+        // The tuning report itself is a read like the other history GETs.
+        assert!(!is_privileged_path(
+            &Method::GET,
+            "/api/v1/irrigation/tuning"
+        ));
+
         // Retiring a soil probe persists config, deletes history, and can
         // unregister a gateway channel: an alternate config-write, privileged
         // on the state-changing method across both prefixes.

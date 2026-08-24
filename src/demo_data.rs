@@ -851,8 +851,11 @@ fn synth_forecast() -> ForecastSnapshot {
 
 /// Seed ~30 days of plausible runs, skips, and decisions so the demo's
 /// History page (run log, charts, calendar, skip breakdown) tells a
-/// story instead of rendering empty states. Idempotent: only fires
-/// when the runs table is empty.
+/// story instead of rendering empty states, plus the rain observations
+/// and per-zone probe curves the tuning report reads, so the public demo
+/// renders that feature populated too. Idempotent: only fires when the
+/// runs table is empty. Deterministic: every value keys off the day
+/// index (no RNG).
 async fn seed_history(conn: Arc<tokio::sync::Mutex<rusqlite::Connection>>) {
     use crate::history::db::{record_decision, record_run};
     use crate::history::types::{DecisionRecord, RunRecord};
@@ -875,6 +878,11 @@ async fn seed_history(conn: Arc<tokio::sync::Mutex<rusqlite::Connection>>) {
     ];
     let now = chrono::Utc::now().timestamp();
     let day = 86_400i64;
+    // Per-zone completed watering intervals, collected while seeding so
+    // the probe curves below can bracket the SAME events the runs table
+    // records (rises right after each run; steady drying between).
+    let mut watered: std::collections::HashMap<&str, Vec<(i64, i64)>> =
+        std::collections::HashMap::new();
     // Deterministic pseudo-random pattern keyed by day index: roughly
     // every other day waters, with rain and wind skip days mixed in.
     for back in (1..=30).rev() {
@@ -949,16 +957,180 @@ async fn seed_history(conn: Arc<tokio::sync::Mutex<rusqlite::Connection>>) {
                         },
                     )
                     .await;
+                    watered.entry(slug).or_default().push((t, t + d));
                     t += d + 300;
                 }
             }
         }
     }
+    seed_tuning_signals(conn, now, &watered).await;
+}
+
+/// Seed the tuning report's raw material: daily rain observations
+/// (predicted vs observed, keyed by the same configured-tz day the
+/// decisions land on) and per-zone soil-probe curves in sensor_history.
+/// The curves are shaped so the report demos every state: back_yard's
+/// probe rises bracket its runs at a rate well under the configured
+/// spray (the rate-backout recommendation), front_yard dries far slower
+/// than its configured bucket predicts (the texture-drift
+/// recommendation), side_yard reads healthy, and the shrubs' probe is
+/// too sparse to judge (the honest not-enough-data lines).
+async fn seed_tuning_signals(
+    conn: Arc<tokio::sync::Mutex<rusqlite::Connection>>,
+    now: i64,
+    watered: &std::collections::HashMap<&str, Vec<(i64, i64)>>,
+) {
+    use crate::config::schema::GrassSpecies;
+    use crate::persistence::sensor_history::Reading;
+    use crate::sources::bus_recorder::zone_soil_key;
+    use chrono::Datelike;
+
+    let day = 86_400i64;
+    // Daily predicted-vs-observed rain. Rain-skip days (day index % 7 ==
+    // 2) carried a 0.31" forecast; the rain actually arrived on two of
+    // them (backs 30 and 16, chosen OFF the 3-day dry gaps the drift
+    // check needs) and missed on the rest, so the forecast-skip
+    // scorecard scores 5 days with 2 confirmations.
+    let obs_store = crate::persistence::ForecastObservationsStore::new(conn.clone());
+    for back in (1..=30).rev() {
+        let midnight = now - back * day - (now % day);
+        let Some(date) = crate::timeutil::local_date(midnight + 12 * 3600) else {
+            continue;
+        };
+        let (predicted, observed) = if back % 7 == 2 {
+            let observed = match back {
+                30 => 0.35,
+                16 => 0.30,
+                _ => 0.0,
+            };
+            (0.31, observed)
+        } else {
+            (0.0, 0.0)
+        };
+        if let Err(e) = obs_store.upsert(date, predicted, observed).await {
+            tracing::debug!("demo_data: forecast observation seed failed: {e}");
+        }
+    }
+
+    // Model-side rates computed from the SAME seed the live report reads
+    // (seed_config zones + synth_forecast temps), so the seeded slopes
+    // stay in the intended ratio bands in any season.
+    let cfg = seed_config();
+    let fc = synth_forecast();
+    let lat = cfg.deployment.location.lat;
+    let base_doy = crate::timeutil::now_local().date_naive().ordinal() as u16;
+    let mean_daily_etc = |species: GrassSpecies| -> f64 {
+        let mut sum = 0.0;
+        let mut n = 0u32;
+        for (i, d) in fc.daily.iter().take(7).enumerate() {
+            let doy = (base_doy + i as u16 - 1) % 366 + 1;
+            if let Some(et0) = crate::refresher::native_et0_mm(d, lat, doy) {
+                let kc = crate::engine::kc_at_doy_lat(species, doy, lat);
+                sum += crate::engine::etc_mm(et0, kc, 1.0);
+                n += 1;
+            }
+        }
+        if n > 0 {
+            sum / n as f64
+        } else {
+            4.0
+        }
+    };
+    // Modeled drying slope (percent of bucket per day) per zone, from the
+    // seeded species/texture defaults.
+    let taw_back = crate::engine::taw_mm(crate::config::schema::SoilTexture::SandyLoam, 200.0);
+    let taw_front = crate::engine::taw_mm(crate::config::schema::SoilTexture::SandyLoam, 150.0);
+    let slope_back = mean_daily_etc(GrassSpecies::Bermuda) / taw_back * 100.0;
+    let slope_front = 0.3 * mean_daily_etc(GrassSpecies::StAugustine) / taw_front * 100.0;
+
+    let store = crate::persistence::SensorHistoryStore::new(conn);
+    let win_start = now - 30 * day;
+    let empty: Vec<(i64, i64)> = Vec::new();
+    let curves: [(&str, f64, f64, i64); 4] = [
+        // (slug, start value, drying slope %/day, reading cadence seconds)
+        ("back_yard", 78.0, slope_back, 3600),
+        ("front_yard", 62.0, slope_front, 3600),
+        // side_yard reads flat and healthy: no drying signal, no rises,
+        // so both probe checks report their honest insufficiency.
+        ("side_yard", 50.0, 0.0, 3600),
+        // The shrubs' probe reports twice a day: too sparse for any
+        // stretch to qualify, and flat so no event ever reads a rise.
+        ("back_yard_shrubs", 55.0, 0.0, 12 * 3600),
+    ];
+    for (slug, v0, slope, cadence_s) in curves {
+        let events = watered.get(slug).unwrap_or(&empty);
+        let rows: Vec<Reading> = (0..)
+            .map(|i| win_start + i * cadence_s)
+            .take_while(|e| *e <= now)
+            .map(|epoch| Reading {
+                epoch,
+                source_id: "ecowitt".to_string(),
+                key: zone_soil_key(slug),
+                value: sawtooth_pct(epoch, win_start, v0, slope, events),
+            })
+            .collect();
+        if let Err(e) = store.insert_many(rows).await {
+            tracing::debug!("demo_data: probe curve seed failed for {slug}: {e}");
+        }
+    }
+}
+
+/// Deterministic probe curve: linear drying at `slope_pct_day` with a
+/// step rise at each irrigation event's end that refills exactly the
+/// water lost since the previous event (so the curve is bounded and
+/// periodic: no drift over the window, whatever the run cadence). The
+/// stretches between runs are exactly linear, which is what the tuning
+/// report's least-squares slope reads back; the per-event rise divided
+/// by valve-open time is what the rate backout reads back.
+fn sawtooth_pct(
+    epoch: i64,
+    win_start: i64,
+    v0: f64,
+    slope_pct_day: f64,
+    events: &[(i64, i64)],
+) -> f64 {
+    // Last event that has ENDED at `epoch` (events are chronological).
+    let last_end = events
+        .iter()
+        .take_while(|(_, end)| *end <= epoch)
+        .last()
+        .map(|(_, end)| *end)
+        .unwrap_or(win_start);
+    let dried = slope_pct_day * (epoch - last_end) as f64 / 86_400.0;
+    (v0 - dried).clamp(1.0, 99.0)
 }
 
 #[cfg(test)]
 mod seed_config_tests {
     use super::*;
+
+    /// The seeded probe curve must read back through the tuning math the
+    /// way the seed intends: exactly linear drying between events (the
+    /// least-squares slope recovers the seeded rate) and a refill at each
+    /// event end that returns the curve to its start value (bounded, no
+    /// drift, and the rise equals the water dried since the last refill).
+    #[test]
+    fn sawtooth_probe_curve_is_linear_between_events_and_refills() {
+        let day = 86_400i64;
+        let events = vec![(2 * day, 2 * day + 3600), (5 * day, 5 * day + 3600)];
+        // Hourly samples inside the dry stretch AFTER the first event.
+        let readings: Vec<(i64, f64)> = (0..48)
+            .map(|h| {
+                let e = 2 * day + 3600 + 12_600 + h * 3600;
+                (e, sawtooth_pct(e, 0, 78.0, 20.0, &events))
+            })
+            .collect();
+        let slope = crate::engine::tuning::slope_per_day(&readings).unwrap();
+        assert!((slope + 20.0).abs() < 1e-6, "got {slope}");
+        // Refill: right after the second event ends the curve is back at
+        // its start value, however long the preceding gap was.
+        let post = sawtooth_pct(5 * day + 3600 + 3600, 0, 78.0, 20.0, &events);
+        assert!((post - (78.0 - 20.0 / 24.0)).abs() < 0.01, "got {post}");
+        // Pre-event value carries the full inter-event drying.
+        let pre = sawtooth_pct(5 * day - 3600, 0, 78.0, 20.0, &events);
+        let dried_days = (5 * day - 3600 - (2 * day + 3600)) as f64 / 86_400.0;
+        assert!((pre - (78.0 - 20.0 * dried_days)).abs() < 0.01, "got {pre}");
+    }
 
     #[test]
     fn seed_config_shows_irrigation_and_validates() {

@@ -11781,6 +11781,41 @@ button.mobile-tab {
 .zone-detail__math dd { margin: 0; font-family: var(--font-mono); color: var(--text-bright); }
 .zone-detail__math-final { border-top: 1px solid var(--elev-line); padding-top: var(--space-2); dd { color: var(--accent); font-weight: 700; } }
 
+// Tuning panel (results-based tuning report). A supporting tier-3 panel:
+// plain lines first, one recommendation card at most, evidence behind a
+// disclosure. Missing numbers upstream render as the dash-for-unknown
+// idiom in the report lines themselves.
+.zone-tuning__line { margin: 0; color: var(--text-soft); font-size: var(--text-meta); }
+.zone-tuning__line--muted { color: var(--text-faint); }
+.zone-tuning__card {
+  display: flex; flex-direction: column; gap: var(--space-3);
+  border: 1px solid color-mix(in oklab, var(--accent) 35%, transparent);
+  border-radius: var(--radius-md); padding: var(--space-4);
+  background: color-mix(in oklab, var(--accent) 6%, transparent);
+}
+.zone-tuning__headline { margin: 0; color: var(--text-bright); }
+.zone-tuning__evidence summary {
+  cursor: pointer; color: var(--text-dim); font-size: var(--text-meta);
+}
+.zone-tuning__evidence summary:hover { color: var(--text-bright); }
+.zone-tuning__evidence-list {
+  margin: var(--space-2) 0 0; padding-left: var(--space-5);
+  display: flex; flex-direction: column; gap: var(--space-1);
+  color: var(--text-soft); font-size: var(--text-meta);
+}
+.zone-tuning__apply { display: flex; }
+
+// Irrigation-page tuning strip: one slim row, count link + scorecard line.
+.tuning-strip {
+  display: flex; align-items: baseline; gap: var(--space-4); flex-wrap: wrap;
+  background: var(--elev-1); border: 1px solid var(--elev-border);
+  border-radius: var(--radius-lg); padding: var(--space-3) var(--space-4);
+  box-shadow: var(--shadow-1);
+}
+.tuning-strip__link { color: var(--accent); font-weight: 600; text-decoration: none; }
+.tuning-strip__link:hover { text-decoration: underline; }
+.tuning-strip__scorecard { color: var(--text-dim); font-size: var(--text-meta); }
+
 @media (max-width: 700px) {
   .zone-detail__stats { grid-template-columns: repeat(2, 1fr); }
 }

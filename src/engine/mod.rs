@@ -19,6 +19,7 @@ pub mod soil_forecast;
 pub mod species_catalog;
 pub mod sprinkler_catalog;
 pub mod sunrise;
+pub mod tuning;
 pub mod verdict_strip;
 pub mod water_balance;
 

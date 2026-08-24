@@ -21,6 +21,7 @@ pub mod irrigation_control;
 pub mod runner;
 pub mod runs;
 pub mod sensor_history;
+pub mod tuning_report;
 pub mod verdict_history;
 pub mod weather_sampler;
 
@@ -31,5 +32,6 @@ pub use irrigation_control::{IrrigationControlState, IrrigationControlStore};
 pub use runner::{run as run_migrations, Migration, MigrationError, MIGRATIONS};
 pub use runs::{NewRun, RunRow, RunsError, RunsStore};
 pub use sensor_history::{Reading, SensorHistoryError, SensorHistoryStore};
+pub use tuning_report::{TuningReportStateError, TuningReportStateStore};
 pub use verdict_history::{NewVerdict, VerdictHistoryError, VerdictHistoryStore, VerdictRow};
 pub use weather_sampler::spawn_weather_sampler;

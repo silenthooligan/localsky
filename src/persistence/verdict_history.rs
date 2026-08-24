@@ -456,6 +456,18 @@ mod tests {
         );
     }
 
+    /// engine::tuning's scorecard mirrors assess_day's WET/SIG so the
+    /// tuning report and this scoreboard can never disagree on what
+    /// counts as rain. assess_day's consts are function-local; this pins
+    /// both sides to the same literals.
+    #[test]
+    fn assess_day_thresholds_match_engine_tuning() {
+        assert_eq!(crate::engine::tuning::WET_IN, 0.05);
+        assert_eq!(crate::engine::tuning::SIG_IN, 0.10);
+        // Behavior pin: a skip with observed exactly at WET is confirmed.
+        assert_eq!(assess_day("skip", Some(0.0), Some(0.05)).1, Some(true));
+    }
+
     #[test]
     fn assess_day_scores_only_rain_relevant_days() {
         // Skipped and the rain came: a win.

@@ -29,6 +29,7 @@ Examples: Ecowitt WH51 / WH52 (battery), Aqara Zigbee, Sonoff Zigbee, capacitive
 - **Soil-moisture projection**: 7-day forward curve under no-irrigation, color-coded for "stays in healthy band" vs. "will dry out".
 - **Smarter dry-out detection**: catches the case where ET-based math underestimates actual drying (heavy clay holding water visibly longer than expected, or sandy spots draining faster).
 - **Anomaly detection** (new in 0.7.0): a probe that goes offline, or reads as a wild outlier versus its neighbours, is flagged on the irrigation and zones views so you know when to check the hardware.
+- **Tuning calibration checks**: the [tuning report](tuning-report.md) compares the probe's drying rate against the configured soil model and backs the real sprinkler rate out of the probe's rise across waterings. Both need LocalSky's own probe history, so they unlock for source-connected probes (gateway poll, MQTT, webhook), not for live Home Assistant entity bindings.
 
 **Connect via**: the native Ecowitt gateway poll, the Ecowitt LAN push receiver, or any Home Assistant soil entity. Once the readings are flowing, assign each probe to its zone; see [Assigning soil probes to zones](#assigning-soil-probes-to-zones) below.
 

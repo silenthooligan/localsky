@@ -88,6 +88,10 @@ pub fn router(state: ConfigApiState) -> Router {
         .route("/raw", get(get_raw_toml).put(put_raw_toml))
         .route("/field_sources", get(get_field_sources))
         .route("/source_catalog", get(get_source_catalog))
+        // Tuning-report Apply: a single-field ZoneConfig write. Lives under
+        // /api/config so it inherits the privileged gate, the CSRF check,
+        // and the body cap with zero per-handler auth code.
+        .route("/zones/apply", post(post_zones_apply))
         .with_state(state)
         .layer(RequestBodyLimitLayer::new(CONFIG_BODY_LIMIT))
 }
@@ -911,6 +915,9 @@ async fn put_raw_toml(
     State(ConfigApiState { store, runtime }): State<ConfigApiState>,
     body: String,
 ) -> impl IntoResponse {
+    // Same read-modify-write guard as PUT /: the stored-config load below
+    // feeds the unredaction, so a concurrent writer must queue.
+    let _write_guard = store.begin_write().await;
     // Validate by parsing through the same path as the loader. Reuses
     // the Validate step in src/config/loader.rs::validate.
     let parsed: Config = match toml::from_str(&body) {
@@ -1443,6 +1450,12 @@ async fn put_config(
     State(ConfigApiState { store, runtime }): State<ConfigApiState>,
     Json(mut candidate_json): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    // Serialize the whole read-modify-write against every other config
+    // writer (raw PUT, rollback, soil removal, tuning apply): the load
+    // below feeds the redaction round-trip and the restart diff, so a
+    // concurrent writer landing between this load and the save would
+    // otherwise be silently clobbered.
+    let _write_guard = store.begin_write().await;
     // Load the current Config so we can restore any redacted secrets.
     let original = match store.load().await {
         Ok(cfg) => match serde_json::to_value(&cfg) {
@@ -1558,6 +1571,301 @@ async fn put_config(
     }
 }
 
+/// POST /api/config/zones/apply body: one tuning recommendation to write.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ZoneApplyBody {
+    pub zone_slug: String,
+    /// The recommendation id the client is acting on; the server
+    /// regenerates the zone's recommendation and refuses (409) when the
+    /// id no longer derives from current data.
+    pub recommendation_id: String,
+    /// ZoneConfig field the client believes it is applying; must match
+    /// the regenerated recommendation.
+    pub field: String,
+    /// The value the client is applying (JSON; null clears an override).
+    #[serde(default)]
+    pub value: serde_json::Value,
+    /// The report window (days) the recommendation was served at; the
+    /// server re-derives at this window (clamped 7..=30 like the GET).
+    /// Absent = the default window. Window-dependent checks produce
+    /// different suggestions at different windows, so a client viewing a
+    /// non-default window must echo the report's `window_days` or its
+    /// apply can 409 forever.
+    #[serde(default)]
+    pub window_days: Option<u32>,
+}
+
+/// JSON value equality with numeric tolerance: serde_json distinguishes
+/// integer 3 from float 3.0, but a client echoing a suggestion back must
+/// not go stale over the representation.
+fn json_values_match(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.as_f64(), b.as_f64()) {
+        (Some(x), Some(y)) => (x - y).abs() < 1e-9,
+        _ => false,
+    }
+}
+
+/// Find the zone's CURRENT recommendation in a freshly generated report
+/// and check the client's claim (id + field + value) still derives.
+/// Err carries the plain detail for the 409 body.
+pub(crate) fn verify_recommendation(
+    report: &crate::history::types::TuningReport,
+    body: &ZoneApplyBody,
+) -> Result<crate::history::types::TuningRecommendation, String> {
+    let want = body.zone_slug.replace('-', "_");
+    let zone = report
+        .zones
+        .iter()
+        .find(|z| z.slug.replace('-', "_") == want)
+        .ok_or_else(|| {
+            format!(
+                "zone '{}' is not in the current tuning report",
+                body.zone_slug
+            )
+        })?;
+    let rec = zone.recommendation.as_ref().ok_or_else(|| {
+        "this zone no longer has a recommendation; refresh the tuning report".to_string()
+    })?;
+    if rec.id != body.recommendation_id
+        || rec.field != body.field
+        || !json_values_match(&rec.suggested_value, &body.value)
+    {
+        return Err(
+            "the recommendation changed since this page loaded; refresh the tuning report"
+                .to_string(),
+        );
+    }
+    Ok(rec.clone())
+}
+
+/// Write one recommendation field into a ZoneConfig. Returns the field's
+/// previous value as JSON. Only the fields the tuning checks recommend
+/// are writable here; anything else is refused (the full editor is the
+/// PUT /api/config path).
+pub(crate) fn apply_zone_field(
+    zone: &mut crate::config::schema::ZoneConfig,
+    field: &str,
+    value: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use serde_json::json;
+    fn opt_f64(value: &serde_json::Value, field: &str) -> Result<Option<f64>, String> {
+        match value {
+            serde_json::Value::Null => Ok(None),
+            v => v
+                .as_f64()
+                .map(Some)
+                .ok_or_else(|| format!("{field} expects a number or null")),
+        }
+    }
+    match field {
+        "weekly_budget_in" => {
+            let old = json!(zone.weekly_budget_in);
+            zone.weekly_budget_in = opt_f64(value, field)?;
+            Ok(old)
+        }
+        "sessions_per_week" => {
+            let old = json!(zone.sessions_per_week);
+            zone.sessions_per_week = match value {
+                serde_json::Value::Null => None,
+                v => Some(
+                    v.as_u64()
+                        .and_then(|n| u32::try_from(n).ok())
+                        .ok_or_else(|| format!("{field} expects a whole number or null"))?,
+                ),
+            };
+            Ok(old)
+        }
+        "root_depth_mm" => {
+            let old = json!(zone.root_depth_mm);
+            zone.root_depth_mm = opt_f64(value, field)?;
+            Ok(old)
+        }
+        "mad_pct_override" => {
+            let old = json!(zone.mad_pct_override);
+            zone.mad_pct_override = opt_f64(value, field)?;
+            Ok(old)
+        }
+        "precip_rate_mm_hr" => {
+            let old = json!(zone.precip_rate_mm_hr);
+            zone.precip_rate_mm_hr = opt_f64(value, field)?;
+            Ok(old)
+        }
+        "precip_rate_source" => {
+            let old = serde_json::to_value(zone.precip_rate_source).unwrap_or_default();
+            zone.precip_rate_source =
+                serde_json::from_value(value.clone()).map_err(|e| format!("{field}: {e}"))?;
+            Ok(old)
+        }
+        "soil_texture" => {
+            let old = serde_json::to_value(zone.soil_texture).unwrap_or_default();
+            zone.soil_texture =
+                serde_json::from_value(value.clone()).map_err(|e| format!("{field}: {e}"))?;
+            Ok(old)
+        }
+        other => Err(format!(
+            "field '{other}' cannot be applied from the tuning report"
+        )),
+    }
+}
+
+/// POST /api/config/zones/apply: write one tuning recommendation through
+/// the validated config path. The WHOLE sequence runs under the store's
+/// read-modify-write guard with a SINGLE config load: the recommendation
+/// is re-derived against the exact config about to be mutated (409 when
+/// the client's claim no longer derives), then mutate -> validate ->
+/// save -> hot-reload, the same pipeline as PUT / minus the redaction
+/// round-trip (the real config is loaded here, no sentinels involved).
+/// The report window comes from the client (the window it fetched the
+/// recommendation at); window-dependent checks derive different values
+/// at different windows, so regenerating at any other window would 409
+/// forever.
+async fn post_zones_apply(
+    State(ConfigApiState { store, runtime }): State<ConfigApiState>,
+    Json(body): Json<ZoneApplyBody>,
+) -> impl IntoResponse {
+    let Some(handles) = crate::tuning::handles() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "tuning_unavailable",
+                "detail": "tuning report requires the history database",
+            })),
+        )
+            .into_response();
+    };
+    // Serialize against every other config read-modify-write sequence
+    // (PUT /, PUT /raw, rollback, soil removal): held from the single
+    // load through the save, so a concurrent whole-config save can
+    // neither be clobbered by this apply nor invalidate the verification.
+    let _write_guard = store.begin_write().await;
+    let mut cfg = match store.load().await {
+        Ok(c) => c,
+        Err(e) => return store_err(e).into_response(),
+    };
+    let window_days = body
+        .window_days
+        .unwrap_or(crate::engine::tuning::DEFAULT_WINDOW_DAYS);
+    let report = match crate::tuning::generate_report_with(handles, &cfg, window_days).await {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "tuning_generation_failed",
+                    "detail": e.to_string(),
+                })),
+            )
+                .into_response();
+        }
+    };
+    let rec = match verify_recommendation(&report, &body) {
+        Ok(r) => r,
+        Err(detail) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "stale_recommendation",
+                    "detail": detail,
+                })),
+            )
+                .into_response();
+        }
+    };
+    let prev_cfg = cfg.clone();
+    // Config keys may be dashed while runtime slugs are underscored; try
+    // the slug as given, then the dashed variant (build_cycle_plan's dual
+    // lookup, mirrored).
+    let zone_key = if cfg.zones.contains_key(&body.zone_slug) {
+        Some(body.zone_slug.clone())
+    } else {
+        let dashed = body.zone_slug.replace('_', "-");
+        cfg.zones.contains_key(&dashed).then_some(dashed)
+    };
+    let Some(zone_key) = zone_key else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "zone_not_found",
+                "detail": format!("no configured zone matches '{}'", body.zone_slug),
+            })),
+        )
+            .into_response();
+    };
+    let zone = cfg
+        .zones
+        .get_mut(&zone_key)
+        .expect("key existence checked above");
+    let old_value = match apply_zone_field(zone, &rec.field, &rec.suggested_value) {
+        Ok(v) => v,
+        Err(detail) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "error": "config_invalid",
+                    "detail": detail,
+                })),
+            )
+                .into_response();
+        }
+    };
+    // Companion fields ride the same Apply server-side (a measured precip
+    // rate also stamps precip_rate_source), regardless of what the client
+    // sent: the recommendation is the contract.
+    for comp in &rec.companion_fields {
+        if let Err(detail) = apply_zone_field(zone, &comp.field, &comp.value) {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "error": "config_invalid",
+                    "detail": detail,
+                })),
+            )
+                .into_response();
+        }
+    }
+    let validation = crate::config::validate::validate(&cfg);
+    if !validation.ok() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": "config_invalid",
+                "detail": validation.error_summary(),
+                "validation": validation,
+            })),
+        )
+            .into_response();
+    }
+    match store.save(&cfg).await {
+        Ok(saved) => {
+            let outcome = apply_runtime_config_if_live(&runtime, Some(&prev_cfg), &cfg);
+            tracing::info!(
+                zone = %zone_key,
+                field = %rec.field,
+                old = %old_value,
+                new = %rec.suggested_value,
+                recommendation = %rec.id,
+                "tuning recommendation applied"
+            );
+            Json(serde_json::json!({
+                "applied": true,
+                "zone": zone_key,
+                "field": rec.field,
+                "old_value": old_value,
+                "new_value": rec.suggested_value,
+                "saved": saved,
+                "validation": validation,
+                "restart_required": outcome.restart_required,
+                "restart_reasons": outcome.restart_reasons,
+            }))
+            .into_response()
+        }
+        Err(e) => store_err(e).into_response(),
+    }
+}
+
 /// GET /api/v1/config/validate -> the structured report for the config
 /// as currently on disk. The settings overview surfaces warnings.
 async fn get_validate(
@@ -1659,6 +1967,10 @@ async fn post_rollback(
         )
             .into_response();
     };
+    // Same read-modify-write guard as PUT /: the pre-rollback load feeds
+    // the restart diff, and the swap itself must not interleave with a
+    // concurrent writer's load-mutate-save.
+    let _write_guard = store.begin_write().await;
     // Pre-rollback config for the restart-required diff (best-effort; a missing
     // current config simply skips the diff and reloads only the tunables).
     let prev_cfg = store.load().await.ok();
@@ -3170,5 +3482,154 @@ mod tests {
             leftover[0].contains("brand_new"),
             "path names the entry: {leftover:?}"
         );
+    }
+
+    // ---- tuning-report Apply (POST /config/zones/apply) components ----
+
+    fn apply_zone_fixture() -> crate::config::schema::ZoneConfig {
+        use crate::config::schema::*;
+        ZoneConfig {
+            display_name: "Front".into(),
+            area_sqft: 1000.0,
+            species: GrassSpecies::Bermuda,
+            soil_texture: SoilTexture::SandyLoam,
+            slope_pct: 0.0,
+            sun_exposure: Default::default(),
+            sprinkler_type: SprinklerType::Spray,
+            precip_rate_mm_hr: None,
+            precip_rate_source: PrecipRateSource::Catalog,
+            root_depth_mm: Some(120.0),
+            mad_pct_override: None,
+            controller_id: "os_main".into(),
+            controller_station: "1".into(),
+            soil_sensor_id: None,
+            target_min_pct_soil: 30.0,
+            saturation_pct_soil: 70.0,
+            photo_url: None,
+            weekly_budget_in: Some(1.0),
+            sessions_per_week: Some(2),
+        }
+    }
+
+    #[test]
+    fn apply_zone_field_writes_each_recommended_field() {
+        use crate::config::schema::{PrecipRateSource, SoilTexture};
+        let mut z = apply_zone_fixture();
+        // Measured rate + provenance pair (the check D apply).
+        let old = apply_zone_field(&mut z, "precip_rate_mm_hr", &serde_json::json!(18.4)).unwrap();
+        assert_eq!(old, serde_json::Value::Null);
+        assert_eq!(z.precip_rate_mm_hr, Some(18.4));
+        apply_zone_field(&mut z, "precip_rate_source", &serde_json::json!("measured")).unwrap();
+        assert_eq!(z.precip_rate_source, PrecipRateSource::Measured);
+        // Texture step.
+        let old = apply_zone_field(&mut z, "soil_texture", &serde_json::json!("loam")).unwrap();
+        assert_eq!(old, serde_json::json!("sandy_loam"));
+        assert_eq!(z.soil_texture, SoilTexture::Loam);
+        // Null clears an override (the restore-species-default apply).
+        let old = apply_zone_field(&mut z, "root_depth_mm", &serde_json::Value::Null).unwrap();
+        assert_eq!(old, serde_json::json!(120.0));
+        assert_eq!(z.root_depth_mm, None);
+        // Sessions + budget.
+        apply_zone_field(&mut z, "sessions_per_week", &serde_json::json!(3)).unwrap();
+        assert_eq!(z.sessions_per_week, Some(3));
+        apply_zone_field(&mut z, "weekly_budget_in", &serde_json::json!(1.9)).unwrap();
+        assert_eq!(z.weekly_budget_in, Some(1.9));
+    }
+
+    #[test]
+    fn apply_zone_field_refuses_unknown_fields_and_bad_values() {
+        let mut z = apply_zone_fixture();
+        assert!(apply_zone_field(&mut z, "controller_station", &serde_json::json!("9")).is_err());
+        assert!(apply_zone_field(&mut z, "soil_texture", &serde_json::json!("granite")).is_err());
+        assert!(apply_zone_field(&mut z, "sessions_per_week", &serde_json::json!(1.5)).is_err());
+    }
+
+    #[test]
+    fn applied_out_of_range_rate_fails_structural_validation() {
+        // The 422 path: a rate outside 0..200 must be rejected by
+        // validate::validate before any save.
+        let mut cfg = Config::default();
+        cfg.zones.insert("front".into(), apply_zone_fixture());
+        let z = cfg.zones.get_mut("front").unwrap();
+        apply_zone_field(z, "precip_rate_mm_hr", &serde_json::json!(500.0)).unwrap();
+        let report = crate::config::validate::validate(&cfg);
+        assert!(
+            !report.ok(),
+            "precip_rate 500 must fail the zone_precip_rate_range gate"
+        );
+    }
+
+    #[test]
+    fn verify_recommendation_accepts_current_and_refuses_stale() {
+        use crate::history::types::{TuningRecommendation, TuningReport, ZoneTuning};
+        let rec = TuningRecommendation {
+            id: "abc123".into(),
+            field: "soil_texture".into(),
+            current_value: serde_json::json!("sandy_loam"),
+            suggested_value: serde_json::json!("loam"),
+            companion_fields: vec![],
+            headline: "try loam".into(),
+            evidence: vec![],
+            confidence: "medium".into(),
+        };
+        let report = TuningReport {
+            generated_epoch: 0,
+            window_days: 14,
+            zones: vec![ZoneTuning {
+                slug: "front_yard".into(),
+                display_name: "Front".into(),
+                status: "recommendation".into(),
+                lines: vec![],
+                recommendation: Some(rec.clone()),
+            }],
+            scorecard: Default::default(),
+        };
+        let ok_body = ZoneApplyBody {
+            zone_slug: "front-yard".into(), // dashed form must still match
+            recommendation_id: "abc123".into(),
+            field: "soil_texture".into(),
+            value: serde_json::json!("loam"),
+            window_days: None,
+        };
+        assert_eq!(verify_recommendation(&report, &ok_body).unwrap().id, rec.id);
+        // Stale id -> refused with a plain detail (the 409 body).
+        let stale = ZoneApplyBody {
+            recommendation_id: "outdated".into(),
+            ..ok_body
+        };
+        let err = verify_recommendation(&report, &stale).unwrap_err();
+        assert!(err.contains("refresh the tuning report"), "{err}");
+        // A zone with no recommendation any more -> refused.
+        let no_rec = ZoneApplyBody {
+            zone_slug: "missing".into(),
+            recommendation_id: "abc123".into(),
+            field: "soil_texture".into(),
+            value: serde_json::json!("loam"),
+            window_days: None,
+        };
+        assert!(verify_recommendation(&report, &no_rec).is_err());
+    }
+
+    /// The apply body accepts the report's window (absent = default), so
+    /// clients viewing a non-default window can echo it.
+    #[test]
+    fn zone_apply_body_window_days_is_optional() {
+        let with: ZoneApplyBody = serde_json::from_value(serde_json::json!({
+            "zone_slug": "front_yard",
+            "recommendation_id": "abc123",
+            "field": "soil_texture",
+            "value": "loam",
+            "window_days": 30,
+        }))
+        .unwrap();
+        assert_eq!(with.window_days, Some(30));
+        let without: ZoneApplyBody = serde_json::from_value(serde_json::json!({
+            "zone_slug": "front_yard",
+            "recommendation_id": "abc123",
+            "field": "soil_texture",
+            "value": "loam",
+        }))
+        .unwrap();
+        assert_eq!(without.window_days, None);
     }
 }

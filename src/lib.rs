@@ -95,6 +95,8 @@ pub mod sw;
 #[cfg(feature = "ssr")]
 pub mod timeutil;
 #[cfg(feature = "ssr")]
+pub mod tuning;
+#[cfg(feature = "ssr")]
 pub mod updates;
 #[cfg(feature = "ssr")]
 pub mod zones;

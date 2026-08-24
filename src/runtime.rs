@@ -1919,9 +1919,9 @@ mod tests {
             planned_run_seconds: 1800,
             ..Default::default()
         }];
-        let wall = |cfg: &Config, p: &crate::refresher::WateringPolicy| {
+        let wall = |p: &crate::refresher::WateringPolicy| {
             crate::scheduler::smart_morning::sequence_wall_seconds(
-                Some(cfg),
+                &p.zone_agronomy,
                 &zones,
                 p.soak_minutes,
                 p.interleave_cycles,
@@ -1930,7 +1930,7 @@ mod tests {
         let boot = h.watering_policy.load();
         assert_eq!(boot.soak_minutes, 30);
         assert!(!boot.interleave_cycles);
-        let wall0 = wall(&cfg0, &boot);
+        let wall0 = wall(&boot);
         drop(boot);
 
         // HOT RELOAD: lengthen the soak via the same re-apply the PUT path
@@ -1945,11 +1945,81 @@ mod tests {
         );
         let live = h.watering_policy.load();
         assert_eq!(live.soak_minutes, 45, "the next tick reads the new soak");
-        let wall1 = wall(&cfg1, &live);
+        let wall1 = wall(&live);
         assert!(
             wall1 > wall0,
             "a longer live soak must lengthen the planned wall time \
              ({wall1} vs {wall0}) with no restart"
+        );
+    }
+
+    #[test]
+    fn hot_reload_zone_agronomy_reshapes_plan_and_run_sizing_without_restart() {
+        // The tuning-report Apply contract: soil_texture / precip_rate /
+        // sprinkler_type / slope now ride the watering policy's
+        // zone_runtime + zone_agronomy maps, so an applied change must (a)
+        // NOT flag restart_required and (b) alter what the freshly loaded
+        // policy computes for run sizing and the cycle plan.
+        use crate::config::schema::{GrassSpecies, SoilTexture, SprinklerType, ZoneConfig};
+        let mut cfg0 = Config::default();
+        cfg0.engine.soak_minutes = 5;
+        cfg0.zones.insert(
+            "front".to_string(),
+            ZoneConfig {
+                display_name: "front".into(),
+                area_sqft: 1000.0,
+                species: GrassSpecies::StAugustine,
+                soil_texture: SoilTexture::Clay,
+                slope_pct: 0.0,
+                sun_exposure: Default::default(),
+                sprinkler_type: SprinklerType::Spray,
+                precip_rate_mm_hr: Some(15.0),
+                precip_rate_source: Default::default(),
+                root_depth_mm: None,
+                mad_pct_override: None,
+                controller_id: "os_main".into(),
+                controller_station: "1".into(),
+                soil_sensor_id: None,
+                target_min_pct_soil: 30.0,
+                saturation_pct_soil: 70.0,
+                photo_url: None,
+                weekly_budget_in: None,
+                sessions_per_week: None,
+            },
+        );
+        let h = handles_with(&cfg0);
+        let boot = h.watering_policy.load();
+        let boot_throughput = boot.zone_runtime.get("front").unwrap().throughput_mm_hr;
+        assert_eq!(boot_throughput, 15.0);
+        assert_eq!(
+            boot.zone_agronomy.get("front").unwrap().soil_texture,
+            SoilTexture::Clay
+        );
+        drop(boot);
+
+        // Apply: measured precip rate 25 mm/hr + texture to sand.
+        let mut cfg1 = cfg0.clone();
+        {
+            let z = cfg1.zones.get_mut("front").unwrap();
+            z.precip_rate_mm_hr = Some(25.0);
+            z.soil_texture = SoilTexture::Sand;
+        }
+        let outcome = apply_runtime_config(&h, Some(&cfg0), &cfg1);
+        assert!(
+            !outcome.restart_required,
+            "zone agronomy must hot-reload, not restart: {:?}",
+            outcome.restart_reasons
+        );
+        let live = h.watering_policy.load();
+        assert_eq!(
+            live.zone_runtime.get("front").unwrap().throughput_mm_hr,
+            25.0,
+            "the refresher's next tick sizes runs with the applied rate"
+        );
+        assert_eq!(
+            live.zone_agronomy.get("front").unwrap().soil_texture,
+            SoilTexture::Sand,
+            "the next cycle plan reads the applied texture"
         );
     }
 

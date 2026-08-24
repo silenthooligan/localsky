@@ -30,7 +30,7 @@ pub use mqtt_publish::{slugify, HaMqttPublisher, MqttPublishError};
 #[cfg(feature = "ssr")]
 pub use crate::refresher::{
     resolve_snapshot_source, spawn_refresher, spawn_refresher_watchdog, SnapshotSource,
-    WateringPolicy, ZoneBudgetCfg, ZoneRuntime, ZoneSoilCfg,
+    WateringPolicy, ZoneAgronomyCfg, ZoneBudgetCfg, ZoneRuntime, ZoneSoilCfg,
 };
 #[cfg(feature = "ssr")]
 pub use store::IrrigationStore;

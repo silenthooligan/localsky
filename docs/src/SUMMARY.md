@@ -33,6 +33,7 @@
 - [7-day verdict strip](verdict-strip.md)
 - [Morning advisory](advisor.md)
 - [Skip rules at a glance](skip-breakdown.md)
+- [Tuning report](tuning-report.md)
 - [Why this duration? (zone math)](zone-math.md)
 - [Weekly water budget](water-budget.md)
 - [History and reporting](history.md)

@@ -20,3 +20,6 @@ pub mod manual;
 
 #[cfg(feature = "ssr")]
 pub mod smart_morning;
+
+#[cfg(feature = "ssr")]
+pub mod tuning_report;

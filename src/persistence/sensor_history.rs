@@ -184,6 +184,48 @@ impl SensorHistoryStore {
         .map_err(|e| SensorHistoryError::Sqlite(e.to_string()))
     }
 
+    /// SOURCE-SCOPED windowed series for one channel, ascending by epoch.
+    /// `series()` above is key-only and collides across gateways sharing a
+    /// channel id (two Ecowitt units both posting `soilmoisture1`); a
+    /// `source:<id>:<key>` zone binding needs exactly this read (the
+    /// store plumbing the TODO(G1 flatline) note in refresher.rs defers).
+    /// Walks the M0013 covering index idx_sh_source_key_epoch.
+    pub async fn series_for_channel(
+        &self,
+        source_id: String,
+        key: String,
+        from_epoch: i64,
+        to_epoch: i64,
+        limit: usize,
+    ) -> Result<Vec<Reading>, SensorHistoryError> {
+        let c = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<Reading>> {
+            let conn = c.blocking_lock();
+            let mut stmt = conn.prepare(
+                "SELECT epoch, source_id, key, value FROM sensor_history
+                 WHERE source_id = ? AND key = ? AND epoch >= ? AND epoch < ?
+                 ORDER BY epoch ASC LIMIT ?",
+            )?;
+            let rows = stmt
+                .query_map(
+                    params![source_id, key, from_epoch, to_epoch, limit as i64],
+                    |r| {
+                        Ok(Reading {
+                            epoch: r.get(0)?,
+                            source_id: r.get(1)?,
+                            key: r.get(2)?,
+                            value: r.get(3)?,
+                        })
+                    },
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .await
+        .map_err(|e| SensorHistoryError::Sqlite(format!("join: {e}")))?
+        .map_err(|e| SensorHistoryError::Sqlite(e.to_string()))
+    }
+
     /// Most-recent observation epoch per source_id. Used by /api/health
     /// to report which configured sources have produced data recently
     /// vs. which are stale. Returns None for source_ids that have never
@@ -429,6 +471,41 @@ mod tests {
         assert_eq!(series.len(), 5);
         // Newest first.
         assert!(series[0].epoch > series[4].epoch);
+    }
+
+    #[tokio::test]
+    async fn series_for_channel_is_source_scoped_and_ascending() {
+        let s = fresh_store().await;
+        // Two gateways share the channel id "soilmoisture1"; the scoped
+        // read must return only the requested source's rows.
+        for (src, base) in [("gw_a", 10.0), ("gw_b", 90.0)] {
+            for i in 0..5i64 {
+                s.insert(Reading {
+                    epoch: 1000 + i * 60,
+                    source_id: src.into(),
+                    key: "soilmoisture1".into(),
+                    value: base + i as f64,
+                })
+                .await
+                .unwrap();
+            }
+        }
+        let series = s
+            .series_for_channel("gw_a".into(), "soilmoisture1".into(), 0, 10_000, 100)
+            .await
+            .unwrap();
+        assert_eq!(series.len(), 5);
+        assert!(series.iter().all(|r| r.source_id == "gw_a"));
+        assert!(series.iter().all(|r| r.value < 50.0));
+        // Ascending by epoch (the tuning reader consumes oldest-first).
+        assert!(series[0].epoch < series[4].epoch);
+        // Window bounds: from inclusive, to exclusive.
+        let bounded = s
+            .series_for_channel("gw_a".into(), "soilmoisture1".into(), 1060, 1180, 100)
+            .await
+            .unwrap();
+        assert_eq!(bounded.len(), 2);
+        assert_eq!(bounded[0].epoch, 1060);
     }
 
     #[tokio::test]

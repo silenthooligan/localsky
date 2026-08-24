@@ -18,6 +18,9 @@ Thresholds are tunable in Settings under Logic (and live-tunable from
 the Irrigation tab's threshold sliders). The History tab's "Why it
 skipped" panel aggregates which rules actually fired over the window,
 so you can see whether a threshold is doing real work or just noise.
+The [tuning report](tuning-report.md) goes one step further for the
+rain rules: its forecast-skip scorecard tells you how often the rain a
+skip was betting on actually arrived.
 
 Not every skip is final. A soft forecast-rain veto can be demoted back
 to a run when the zone is measured dry: the soil floor moat lets a

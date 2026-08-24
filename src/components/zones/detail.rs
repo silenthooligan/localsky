@@ -408,6 +408,8 @@ pub fn ZoneDetailView(
                         }}
                     </section>
 
+                    <crate::components::zones::tuning::ZoneTuningPanel slug=slug/>
+
                     <section class="zone-detail__panel zone-detail__actions">
                         {if running {
                             view! {

@@ -139,6 +139,22 @@ impl ZoneRuntime {
     }
 }
 
+/// Per-zone agronomy the cycle-and-soak planner reads each evaluation
+/// (smart_morning::build_cycle_plan + the refresher's next-run wall-time
+/// estimate). Carried on the hot-swapped WateringPolicy, keyed by the
+/// underscore-normalized slug, so an applied soil_texture / slope /
+/// sprinkler / precip-rate change reshapes the NEXT computed plan with
+/// no restart. These fields were previously read from boot-bound
+/// structures (main.rs zone_runtime + smart_morning's boot cfg Arc) and
+/// silently required a restart.
+#[derive(Debug, Clone, Copy)]
+pub struct ZoneAgronomyCfg {
+    pub sprinkler_type: crate::config::schema::SprinklerType,
+    pub precip_rate_mm_hr: Option<f64>,
+    pub soil_texture: crate::config::schema::SoilTexture,
+    pub slope_pct: f64,
+}
+
 /// Watering policy snapshot resolved at boot from localsky.toml. The
 /// refresher evaluates this against the current wall clock every tick:
 ///   - `restrictions` + `address_parity` feed the skip-rule ladder and
@@ -206,6 +222,18 @@ pub struct WateringPolicy {
     /// before either knob is read.
     pub soak_minutes: u32,
     pub interleave_cycles: bool,
+    /// Per-zone run-duration sizing (throughput + max-duration), keyed by
+    /// underscore-normalized slug. Previously a boot-built HashMap moved
+    /// into spawn_refresher; carried here so a hot-reloaded
+    /// precip_rate_mm_hr / sprinkler_type re-sizes runs on the next tick.
+    /// Empty on the Default policy (unconfigured installs); readers fall
+    /// back to ZoneRuntime::fallback per missing zone, as before.
+    pub zone_runtime: HashMap<String, ZoneRuntime>,
+    /// Per-zone cycle/soak agronomy for build_cycle_plan, keyed by
+    /// underscore-normalized slug. Same hot-reload contract as
+    /// zone_runtime; empty map = every zone falls back to a single
+    /// no-split segment (the pre-config behavior).
+    pub zone_agronomy: HashMap<String, ZoneAgronomyCfg>,
 }
 
 impl WateringPolicy {
@@ -256,6 +284,40 @@ impl WateringPolicy {
             units: cfg.deployment.units,
             soak_minutes: cfg.engine.soak_minutes,
             interleave_cycles: cfg.engine.interleave_cycles,
+            // Per-zone run sizing + cycle/soak agronomy. Underscore-normalized
+            // like soil_zones/budget_zones so runtime slug lookups hit. The
+            // 3600s cap mirrors the historical boot value.
+            zone_runtime: cfg
+                .zones
+                .iter()
+                .map(|(slug, z)| {
+                    (
+                        slug.replace('-', "_"),
+                        ZoneRuntime {
+                            throughput_mm_hr: crate::engine::effective_precip_rate_mm_hr(
+                                z.sprinkler_type,
+                                z.precip_rate_mm_hr,
+                            ),
+                            max_duration_s: 3600,
+                        },
+                    )
+                })
+                .collect(),
+            zone_agronomy: cfg
+                .zones
+                .iter()
+                .map(|(slug, z)| {
+                    (
+                        slug.replace('-', "_"),
+                        ZoneAgronomyCfg {
+                            sprinkler_type: z.sprinkler_type,
+                            precip_rate_mm_hr: z.precip_rate_mm_hr,
+                            soil_texture: z.soil_texture,
+                            slope_pct: z.slope_pct,
+                        },
+                    )
+                })
+                .collect(),
         }
     }
 }
@@ -380,7 +442,6 @@ pub fn spawn_refresher(
     tempest_store: Arc<TempestStore>,
     history_conn: Option<Arc<Mutex<Connection>>>,
     push: crate::push::PushDispatcher,
-    zone_runtime: HashMap<String, ZoneRuntime>,
     // Hot-reloadable engine tunables (skip-rule thresholds, restrictions,
     // seasonal dial, manual schedules, soil/budget zones, units). Read fresh
     // each tick via `load()` so a PUT /api/config (or wizard apply) that swaps
@@ -402,12 +463,10 @@ pub fn spawn_refresher(
     // localsky.toml exists, LOCALSKY_ZONES otherwise, empty on a fresh
     // unconfigured install). Resolved once at spawn time; changing it
     // requires a restart, the same contract every deploy-time input has.
+    // Per-zone run sizing (zone_runtime) and cycle/soak agronomy now ride
+    // the hot-swapped watering_policy instead of boot-bound arguments, so
+    // an applied texture/sprinkler/precip change takes effect next tick.
     zones: Vec<crate::zones::ZoneIdent>,
-    // Boot-time config for the next-run wall-time estimate's PER-ZONE
-    // cycle/soak lookups (soil texture, sprinkler rate), which are zone-set
-    // bound like the rest of the boot wiring. The soak/interleave knobs
-    // themselves ride watering_policy and hot-reload.
-    cfg: Option<Arc<crate::config::schema::Config>>,
 ) {
     tokio::spawn(async move {
         // HA client only when sourcing from Home Assistant. Native builds
@@ -542,12 +601,11 @@ pub fn spawn_refresher(
                         &forecast_store,
                         &tempest_store,
                         &zones,
-                        &zone_runtime,
+                        &watering_policy.zone_runtime,
                         watering_policy,
                         &scripts,
                         sensor_history.as_ref(),
                         forecast_obs_store.as_ref(),
-                        cfg.as_deref(),
                     )
                     .await
                     .map(|mut snap| {
@@ -570,14 +628,13 @@ pub fn spawn_refresher(
                     &forecast_store,
                     &tempest_store,
                     &zones,
-                    &zone_runtime,
+                    &watering_policy.zone_runtime,
                     watering_policy,
                     &scripts,
                     sensor_history.as_ref(),
                     forecast_obs_store.as_ref(),
                     &controllers,
                     control.as_ref(),
-                    cfg.as_deref(),
                 )
                 .await),
             };
@@ -590,14 +647,13 @@ pub fn spawn_refresher(
                             &forecast_store,
                             &tempest_store,
                             &zones,
-                            &zone_runtime,
+                            &watering_policy.zone_runtime,
                             watering_policy,
                             &scripts,
                             sensor_history.as_ref(),
                             forecast_obs_store.as_ref(),
                             &controllers,
                             control.as_ref(),
-                            cfg.as_deref(),
                         )
                         .await;
                         ss.store(native);
@@ -931,7 +987,6 @@ async fn refresh_once(
     scripts: &CompiledScripts,
     sensor_history: Option<&crate::persistence::SensorHistoryStore>,
     forecast_obs: Option<&crate::persistence::ForecastObservationsStore>,
-    cfg: Option<&crate::config::schema::Config>,
 ) -> anyhow::Result<IrrigationSnapshot> {
     let states = client.states().await?;
     let map: HashMap<String, Value> = states
@@ -953,7 +1008,6 @@ async fn refresh_once(
         sensor_history,
         forecast_obs,
         None,
-        cfg,
     )
     .await;
     // Custom-rule watering multiplier (AdjustMultiplier condition action) is
@@ -988,11 +1042,9 @@ async fn build_from_map(
     // Native control surface. `Some` (standalone path) overrides the
     // HA-helper-derived pause/override below with locally persisted state;
     // `None` (HA path) reads them from the entity map as before.
+    // The sequence wall-time estimate's per-zone cycle/soak lookups read
+    // watering_policy.zone_agronomy (hot-reloaded), not a boot config.
     control: Option<&crate::persistence::IrrigationControlState>,
-    // Boot-time config, for the sequence wall-time estimate (cycle/soak plans
-    // + the interleave policy) behind next_run_epoch. `None` keeps the plain
-    // sum-of-runs estimate (unconfigured installs have no cycle plans anyway).
-    cfg: Option<&crate::config::schema::Config>,
 ) -> IrrigationSnapshot {
     let mut snap = IrrigationSnapshot {
         last_refresh_epoch: Utc::now().timestamp(),
@@ -1262,7 +1314,7 @@ async fn build_from_map(
     // LocalSky-native next_run_epoch. Compute target_start for today;
     // if today's window has already passed, advance to tomorrow.
     // sequence_total = sum(planned_run_seconds) + 2s inter-zone preamble.
-    snap.next_run_epoch = compute_next_run_epoch(watering_policy, &snap.zones, cfg);
+    snap.next_run_epoch = compute_next_run_epoch(watering_policy, &snap.zones);
 
     // Forecast block. Aggregates Tempest live + Open-Meteo regional
     // forecast into one struct the UI can render directly.
@@ -1816,7 +1868,6 @@ async fn refresh_once_native(
     // persistence DB is mounted, in which case the snapshot falls back to
     // "no pause / auto override" (and the API rejects pause writes).
     control: Option<&crate::persistence::IrrigationControlState>,
-    cfg: Option<&crate::config::schema::Config>,
 ) -> IrrigationSnapshot {
     let map: HashMap<String, Value> = HashMap::new();
     let mut snap = build_from_map(
@@ -1830,7 +1881,6 @@ async fn refresh_once_native(
         sensor_history,
         forecast_obs,
         control,
-        cfg,
     )
     .await;
     // Native builds have no remote dependency; the engine is always reachable.
@@ -1925,7 +1975,7 @@ async fn refresh_once_native(
         .map(|z| z.planned_run_seconds as f64)
         .sum::<f64>()
         / 60.0;
-    snap.next_run_epoch = compute_next_run_epoch(watering_policy, &snap.zones, cfg);
+    snap.next_run_epoch = compute_next_run_epoch(watering_policy, &snap.zones);
 
     // A6: pause / override come from `control` (threaded into build_from_map
     // above); thresholds come from cfg.engine.skip_rules via watering_policy.
@@ -2527,7 +2577,6 @@ fn compute_seven_day_verdicts(
 fn compute_next_run_epoch(
     policy: &WateringPolicy,
     zones: &[crate::ha::snapshot::ZoneState],
-    cfg: Option<&crate::config::schema::Config>,
 ) -> i64 {
     use crate::engine::sunrise::smart_morning_target_start;
 
@@ -2537,12 +2586,11 @@ fn compute_next_run_epoch(
     }
     // True wall time of the sequence (runs + soak gaps + preambles, interleave
     // aware), from the same planner the dispatcher's window math uses, so the
-    // displayed next-run time and the actual dispatch agree. The soak/
-    // interleave knobs come from the hot-reloaded policy (live on the next
-    // tick after a config apply); cfg is only the zone-lookup context for
-    // build_cycle_plan.
+    // displayed next-run time and the actual dispatch agree. Soak/interleave
+    // knobs AND the per-zone cycle agronomy come from the hot-reloaded policy
+    // (live on the next tick after a config apply).
     let sequence_total_s = crate::scheduler::smart_morning::sequence_wall_seconds(
-        cfg,
+        &policy.zone_agronomy,
         zones,
         policy.soak_minutes,
         policy.interleave_cycles,
@@ -2586,7 +2634,11 @@ fn state_f64(map: &HashMap<String, Value>, eid: &str) -> Option<f64> {
 /// only needs Tmax/Tmin + extraterrestrial radiation (lat + day-of-year), so this
 /// works for ANY forecast source (not just the Open-Meteo HA REST sensor) and
 /// replaces the flat 5.0 fallback. `None` when the day has no usable temps.
-fn native_et0_mm(d: &crate::forecast::snapshot::DailyEntry, lat: f64, doy: u16) -> Option<f64> {
+pub(crate) fn native_et0_mm(
+    d: &crate::forecast::snapshot::DailyEntry,
+    lat: f64,
+    doy: u16,
+) -> Option<f64> {
     use crate::config::schema::Et0Method;
     use crate::engine::et0::{compute, f_to_c, Et0Inputs};
     if d.temp_max_f == 0.0 && d.temp_min_f == 0.0 {
@@ -3702,7 +3754,6 @@ mod snapshot_assembly_tests {
             None, // sensor_history
             None, // forecast_obs
             None, // control
-            None, // cfg
         )
         .await
     }

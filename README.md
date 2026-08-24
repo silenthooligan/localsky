@@ -104,6 +104,7 @@ Most home irrigation systems are either dumb timers or cloud tethered too. The c
 - **7-class soil texture catalog** (USDA texture classes, the standard used internationally) with field capacity, wilting point, available water, and slope-graded infiltration
 - **17-rule skip ladder** with configurable thresholds: rain now, rain next 4 h, probability-weighted 3-day and 7-day rollups, freeze, soil saturation, soil frost, extreme heat (heat-index threshold), high wind
 - **7-day forward verdict strip**, the same engine that decides today, projected forward
+- **Results-based tuning report**: two weeks of recorded outcomes reduced to at most one plain-language suggestion per zone (session caps, soil texture drift, the sprinkler's real precipitation rate backed out of probe rises), each applied in one click through the validated config path, plus a scorecard of how often rain skips paid off
 
 ### Controllers and integrations
 
@@ -220,7 +221,7 @@ components/    Leptos UI primitives plus the irrigation, forecast, weather, and 
 
 ## Roadmap
 
-**Shipped**: the full weather dashboard (Tempest UDP, Ecowitt LAN, Open-Meteo plus regional forecast sources with selectable weather models); a global radar map (worldwide precipitation, national high-resolution reflectivity, tropical-cyclone tracking, wind flow, alerts, and community lightning); the FAO-56 irrigation engine driving OpenSprinkler, ESPHome, and Home Assistant; local LLM advisor; built-in authentication, network discovery, and backup and restore; an installable PWA with push; and a published Home Assistant integration.
+**Shipped**: the full weather dashboard (Tempest UDP, Ecowitt LAN, Open-Meteo plus regional forecast sources with selectable weather models); a global radar map (worldwide precipitation, national high-resolution reflectivity, tropical-cyclone tracking, wind flow, alerts, and community lightning); the FAO-56 irrigation engine driving OpenSprinkler, ESPHome, and Home Assistant; the results-based tuning report with one-click apply; local LLM advisor; built-in authentication, network discovery, and backup and restore; an installable PWA with push; and a published Home Assistant integration.
 
 **Planned**: Rachio cloud controller, ntfy and Slack notification sinks, an in-app forecast-model picker, and broader regional radar coverage. Contributions of new weather sources, radar providers, grass species, and controllers are especially welcome.
 

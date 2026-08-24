@@ -32,6 +32,16 @@ pub struct FileConfigStore {
     /// rename can then commit B's torn bytes over localsky.toml. Readers are
     /// unaffected (the rename stays atomic); this only queues writers.
     save_lock: tokio::sync::Mutex<()>,
+    /// Serializes whole READ-MODIFY-WRITE sequences, one level above
+    /// save_lock (which only queues the final file writes and cannot stop
+    /// two handlers from loading the same base config and silently
+    /// clobbering each other's changes on save). Every handler that loads
+    /// the config, mutates it, and saves it holds this via `begin_write`
+    /// for the full sequence: config PUT, raw PUT, rollback, the soil
+    /// probe removal, and the tuning-report apply. Distinct from
+    /// save_lock so a guarded sequence can still call save() without
+    /// deadlocking (tokio Mutex is not reentrant).
+    write_lock: tokio::sync::Mutex<()>,
 }
 
 impl FileConfigStore {
@@ -39,7 +49,17 @@ impl FileConfigStore {
         Self {
             path: path.into(),
             save_lock: tokio::sync::Mutex::new(()),
+            write_lock: tokio::sync::Mutex::new(()),
         }
+    }
+
+    /// Take the config read-modify-write guard. Hold the returned guard
+    /// across the ENTIRE load-verify-mutate-validate-save sequence so
+    /// concurrent config writers queue instead of clobbering each other's
+    /// loads. save()/save_raw_toml()/rollback() may be called while
+    /// holding it (they use the separate save_lock internally).
+    pub async fn begin_write(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.write_lock.lock().await
     }
 
     pub fn path(&self) -> &Path {
@@ -365,6 +385,26 @@ mod tests {
         let store = FileConfigStore::new(dir.join("localsky.toml"));
         let err = store.rollback(12345).await.unwrap_err();
         assert!(matches!(err, ConfigStoreError::RollbackTargetMissing(_)));
+    }
+
+    /// begin_write serializes whole read-modify-write sequences: while
+    /// one holder has the guard, a second writer queues (try_lock fails),
+    /// and save() still works under the guard (separate save_lock, no
+    /// deadlock).
+    #[tokio::test]
+    async fn begin_write_serializes_read_modify_write() {
+        let dir = tempfile_dir("write-guard");
+        let store = FileConfigStore::new(dir.join("localsky.toml"));
+        let guard = store.begin_write().await;
+        assert!(
+            store.write_lock.try_lock().is_err(),
+            "a concurrent writer must queue while the guard is held"
+        );
+        // save() under the guard must not deadlock.
+        let cfg = Config::default();
+        store.save(&cfg).await.unwrap();
+        drop(guard);
+        assert!(store.write_lock.try_lock().is_ok());
     }
 
     fn tempfile_dir(tag: &str) -> std::path::PathBuf {

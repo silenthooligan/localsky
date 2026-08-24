@@ -66,14 +66,13 @@ use chrono::{NaiveDate, Utc};
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
-use crate::config::schema::Config;
 use crate::controllers::registry::ControllerRegistry;
 use crate::engine::cycle_soak;
 use crate::engine::interleave;
 use crate::engine::sprinkler_catalog::effective_precip_rate_mm_hr;
 use crate::engine::sunrise::sunrise_utc;
 use crate::ha::IrrigationStore;
-use crate::ha::WateringPolicy;
+use crate::ha::{WateringPolicy, ZoneAgronomyCfg};
 use crate::persistence::runs::{NewRun, RunsStore};
 use crate::persistence::ActiveRunsStore;
 use crate::ports::irrigation_controller::IrrigationController;
@@ -129,15 +128,15 @@ pub fn spawn(
     irrigation_store: Arc<IrrigationStore>,
     // Hot-swappable policy handle (the same one the refresher and the manual
     // dispatcher load): the per-tick loop reads the LIVE soak_minutes +
-    // interleave_cycles from it, so a settings save reshapes the next tick's
-    // window math and dispatch plan with no restart. The boot cfg Arc below
-    // stays for build_cycle_plan's per-zone lookups only (zone-set bound).
+    // interleave_cycles AND the per-zone cycle agronomy (zone_agronomy) from
+    // it, so a settings save (or a tuning-report Apply of soil_texture /
+    // precip_rate / sprinkler_type / slope) reshapes the next tick's window
+    // math and dispatch plan with no restart.
     watering_policy: Arc<arc_swap::ArcSwap<WateringPolicy>>,
     controllers: ControllerRegistry,
     runs: Option<RunsStore>,
     active_runs: Option<ActiveRunsStore>,
     location: (f64, f64),
-    cfg: Option<Arc<Config>>,
     push: Option<PushDispatcher>,
     dry_run: bool,
 ) {
@@ -185,12 +184,18 @@ pub fn spawn(
             // overshot target_finish by the total soak time. The soak/
             // interleave knobs are read from the hot-swapped policy EACH tick,
             // so a config apply reshapes today's window with no restart.
-            let policy = watering_policy.load();
+            // load_full (an owned Arc, not the guard): the policy is read
+            // again below across dispatch awaits, and holding an arc-swap
+            // guard that long would push writers into their slow path.
+            let policy = watering_policy.load_full();
             let soak_minutes = policy.soak_minutes;
             let interleave_cycles = policy.interleave_cycles;
-            drop(policy);
-            let sequence_total_s =
-                sequence_wall_seconds(cfg.as_deref(), &snap.zones, soak_minutes, interleave_cycles);
+            let sequence_total_s = sequence_wall_seconds(
+                &policy.zone_agronomy,
+                &snap.zones,
+                soak_minutes,
+                interleave_cycles,
+            );
 
             let sunrise = match sunrise_utc(today, lat, lon) {
                 Some(s) => s,
@@ -372,7 +377,7 @@ pub fn spawn(
                     runs.as_ref(),
                     active_runs.as_ref(),
                     push.as_ref(),
-                    cfg.as_ref(),
+                    &policy.zone_agronomy,
                     soak_minutes,
                     interleave_cycles,
                     today,
@@ -404,10 +409,10 @@ async fn dispatch_today(
     runs: Option<&RunsStore>,
     active_runs: Option<&ActiveRunsStore>,
     push: Option<&PushDispatcher>,
-    cfg: Option<&Arc<Config>>,
-    // Live cycle/soak knobs, resolved from the hot-swapped watering policy by
-    // the tick loop (not read from the boot cfg, which would pin them until a
-    // restart).
+    // Live per-zone cycle agronomy + cycle/soak knobs, all resolved from the
+    // hot-swapped watering policy by the tick loop (never a boot cfg, which
+    // would pin them until a restart).
+    agronomy: &HashMap<String, ZoneAgronomyCfg>,
     soak_minutes: u32,
     interleave_cycles: bool,
     today: NaiveDate,
@@ -582,12 +587,8 @@ async fn dispatch_today(
             }
             continue;
         }
-        let segments = build_cycle_plan(
-            cfg.map(|c| c.as_ref()),
-            &zone.slug,
-            zone.planned_run_seconds,
-            soak_minutes,
-        );
+        let segments =
+            build_cycle_plan(agronomy, &zone.slug, zone.planned_run_seconds, soak_minutes);
         dispatch.push(DispatchZone { zone, segments });
     }
 
@@ -864,12 +865,12 @@ async fn dispatch_today(
 /// estimate summed only run seconds, so a cycle/soak morning overshot
 /// target_finish (sunrise - 15min) by the total soak time; the dispatch
 /// window math above uses this instead, for both policies. `soak_minutes` +
-/// `interleave_cycles` come from the caller's LIVE watering policy (both the
-/// tick loop here and the refresher's compute_next_run_epoch resolve them per
-/// evaluation); `cfg` is only the per-zone lookup context for
-/// build_cycle_plan.
+/// `interleave_cycles` AND the per-zone `agronomy` map come from the
+/// caller's LIVE watering policy (both the tick loop here and the
+/// refresher's compute_next_run_epoch resolve them per evaluation), so an
+/// applied zone change reshapes the estimate with no restart.
 pub fn sequence_wall_seconds(
-    cfg: Option<&Config>,
+    agronomy: &HashMap<String, ZoneAgronomyCfg>,
     zones: &[crate::ha::snapshot::ZoneState],
     soak_minutes: u32,
     interleave_cycles: bool,
@@ -880,7 +881,7 @@ pub fn sequence_wall_seconds(
         .enumerate()
         .map(|(idx, z)| interleave::ZonePlan {
             zone_idx: idx,
-            segments: build_cycle_plan(cfg, &z.slug, z.planned_run_seconds, soak_minutes),
+            segments: build_cycle_plan(agronomy, &z.slug, z.planned_run_seconds, soak_minutes),
         })
         .collect();
     let policy = if interleave_cycles {
@@ -992,10 +993,13 @@ async fn abandon_cycle(
 }
 
 /// Resolve a per-zone cycle-and-soak plan. Falls back to a single
-/// no-split segment when cfg is unavailable or the zone slug doesn't
-/// resolve to a configured zone (e.g. demo mode, mid-cutover state).
+/// no-split segment when the zone slug doesn't resolve in the policy's
+/// agronomy map (e.g. demo mode, unconfigured install, mid-cutover
+/// state). The map comes from the hot-swapped WateringPolicy, so an
+/// applied texture/sprinkler/precip/slope change re-plans the very next
+/// evaluation with no restart.
 fn build_cycle_plan(
-    cfg: Option<&Config>,
+    agronomy: &HashMap<String, ZoneAgronomyCfg>,
     slug: &str,
     duration_s: u32,
     soak_minutes: u32,
@@ -1004,16 +1008,11 @@ fn build_cycle_plan(
         run_seconds: duration_s,
         soak_seconds: 0,
     }];
-    let Some(cfg) = cfg else {
-        return fallback;
-    };
-    // The refresher underscore-normalizes slugs ("back-yard" ->
-    // "back_yard") before populating the snapshot; the cfg keys may be
-    // in either form. Try the slug as-given, then the dashed variant.
-    let zone_cfg = cfg
-        .zones
+    // Map keys are underscore-normalized by WateringPolicy::from_config;
+    // callers may still hand a dashed slug, so try the normalized form too.
+    let zone_cfg = agronomy
         .get(slug)
-        .or_else(|| cfg.zones.get(&slug.replace('_', "-")));
+        .or_else(|| agronomy.get(&slug.replace('-', "_")));
     let Some(z) = zone_cfg else {
         return fallback;
     };
@@ -1086,14 +1085,53 @@ async fn handled_smart_morning_today(runs: &RunsStore, today: NaiveDate) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::schema::Config;
     use chrono::{Local, TimeZone};
 
     #[test]
-    fn build_cycle_plan_fallback_when_cfg_missing() {
-        let plan = build_cycle_plan(None, "back_yard", 1500, 30);
+    fn build_cycle_plan_fallback_when_zone_unconfigured() {
+        // Empty agronomy map (Default policy / demo mode) -> one no-split
+        // segment, the pre-config behavior.
+        let plan = build_cycle_plan(&HashMap::new(), "back_yard", 1500, 30);
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].run_seconds, 1500);
         assert_eq!(plan[0].soak_seconds, 0);
+    }
+
+    /// The hot-reload contract for the tuning-report Apply: a soil_texture
+    /// change re-derives through WateringPolicy::from_config into the
+    /// agronomy map build_cycle_plan reads, so the NEXT computed plan
+    /// changes with no restart (and no boot cfg involved).
+    #[test]
+    fn build_cycle_plan_reads_swapped_agronomy() {
+        let cfg0 = cycle_soak_cfg(&["front"], 5, false);
+        let policy0 = WateringPolicy::from_config(&cfg0);
+        // Clay under a 15 mm/hr spray splits a 2700s run into 3 cycles.
+        let plan0 = build_cycle_plan(&policy0.zone_agronomy, "front", 2700, 5);
+        assert_eq!(plan0.len(), 3, "clay splits the run");
+        // Apply changes the texture to sand (50 mm/hr infiltration): the
+        // re-derived policy plans a single unsplit segment.
+        let mut cfg1 = (*cfg0).clone();
+        cfg1.zones.get_mut("front").unwrap().soil_texture =
+            crate::config::schema::SoilTexture::Sand;
+        let policy1 = WateringPolicy::from_config(&cfg1);
+        let plan1 = build_cycle_plan(&policy1.zone_agronomy, "front", 2700, 5);
+        assert_eq!(plan1.len(), 1, "sand infiltrates faster than the spray");
+    }
+
+    /// Dashed config keys normalize to underscores in the policy map; a
+    /// runtime slug in either form must resolve the same zone.
+    #[test]
+    fn build_cycle_plan_resolves_dashed_and_underscored_slugs() {
+        let mut cfg = Config::default();
+        cfg.engine.soak_minutes = 5;
+        let zone = cycle_soak_cfg(&["placeholder"], 5, false).zones["placeholder"].clone();
+        cfg.zones.insert("back-yard".to_string(), zone);
+        let policy = WateringPolicy::from_config(&cfg);
+        let via_underscore = build_cycle_plan(&policy.zone_agronomy, "back_yard", 2700, 5);
+        let via_dash = build_cycle_plan(&policy.zone_agronomy, "back-yard", 2700, 5);
+        assert_eq!(via_underscore.len(), 3);
+        assert_eq!(via_underscore, via_dash);
     }
 
     fn verdict(slug: &str, verdict: &str, source: &str) -> crate::ha::snapshot::ZoneVerdict {
@@ -1312,10 +1350,10 @@ mod tests {
             registry,
             Some(runs),
             Some(active_runs),
-            None,  // push
-            None,  // cfg -> single segment, no soak
-            30,    // soak_minutes (policy default)
-            false, // interleave_cycles
+            None,            // push
+            &HashMap::new(), // empty agronomy -> single segment, no soak
+            30,              // soak_minutes (policy default)
+            false,           // interleave_cycles
             chrono::NaiveDate::from_ymd_opt(2026, 6, 25).unwrap(),
             now_utc,
             n,
@@ -1366,13 +1404,14 @@ mod tests {
         let mut cfg = Config::default();
         cfg.engine.interleave_cycles = true;
         let cfg = Arc::new(cfg);
+        let policy = WateringPolicy::from_config(&cfg);
         dispatch_today(
             &snap,
             &registry,
             Some(&runs),
             Some(&active_runs),
             None, // push
-            Some(&cfg),
+            &policy.zone_agronomy,
             cfg.engine.soak_minutes,
             cfg.engine.interleave_cycles,
             chrono::NaiveDate::from_ymd_opt(2026, 6, 25).unwrap(),
@@ -1396,21 +1435,25 @@ mod tests {
     }
 
     #[test]
-    fn sequence_wall_seconds_matches_legacy_without_cfg() {
-        // No cfg -> single no-split segments: the wall time equals the
-        // legacy sum(planned) + preamble * (zones - 1), zero-budget zones
-        // excluded, identically under both policies.
+    fn sequence_wall_seconds_matches_legacy_without_agronomy() {
+        // Empty agronomy map -> single no-split segments: the wall time
+        // equals the legacy sum(planned) + preamble * (zones - 1),
+        // zero-budget zones excluded, identically under both policies.
         let zones = vec![
             zone_secs("front", 600, None),
             zone_secs("off_zone", 0, None),
             zone_secs("side", 300, None),
         ];
+        let empty: HashMap<String, ZoneAgronomyCfg> = HashMap::new();
         assert_eq!(
-            sequence_wall_seconds(None, &zones, 30, false),
+            sequence_wall_seconds(&empty, &zones, 30, false),
             600 + 300 + 2
         );
-        assert_eq!(sequence_wall_seconds(None, &zones, 30, true), 600 + 300 + 2);
-        assert_eq!(sequence_wall_seconds(None, &[], 30, false), 0);
+        assert_eq!(
+            sequence_wall_seconds(&empty, &zones, 30, true),
+            600 + 300 + 2
+        );
+        assert_eq!(sequence_wall_seconds(&empty, &[], 30, false), 0);
     }
 
     // (b) a Stop requested at/ before the cycle abandons the sequence: stop_all
@@ -1952,13 +1995,14 @@ mod tests {
             .iter()
             .map(|z| z.planned_run_seconds as u64)
             .sum();
+        let policy = WateringPolicy::from_config(cfg);
         dispatch_today(
             snap,
             registry,
             Some(runs),
             Some(active_runs),
             None, // push
-            Some(cfg),
+            &policy.zone_agronomy,
             cfg.engine.soak_minutes,
             cfg.engine.interleave_cycles,
             chrono::NaiveDate::from_ymd_opt(2026, 6, 25).unwrap(),
@@ -2046,13 +2090,14 @@ mod tests {
         // seams the dispatcher uses (build_cycle_plan + interleave::plan).
         let slugs = ["front", "back"];
         let secs = [1800u32, 600];
+        let planner_policy = WateringPolicy::from_config(&cfg);
         let plans: Vec<interleave::ZonePlan> = slugs
             .iter()
             .enumerate()
             .map(|(idx, slug)| interleave::ZonePlan {
                 zone_idx: idx,
                 segments: build_cycle_plan(
-                    Some(cfg.as_ref()),
+                    &planner_policy.zone_agronomy,
                     slug,
                     secs[idx],
                     cfg.engine.soak_minutes,

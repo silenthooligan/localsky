@@ -133,11 +133,44 @@ pub fn router(
                 .route("/decisions", get(decisions_window))
                 .route("/export", get(export))
                 .route("/accuracy", get(accuracy))
+                .route("/tuning", get(tuning_report))
                 .with_state(h),
         )
     } else {
         merged
     }
+}
+
+/// GET /api/v1/irrigation/tuning?days=N (clamp 7..=30, default 14): the
+/// per-zone results-based tuning report plus the install-wide
+/// forecast-skip scorecard. Read-only and unprivileged like the other
+/// history GETs; generation reads the boot-registered tuning handles
+/// (config store + live stores), so the route just carries the days knob.
+async fn tuning_report(Query(q): Query<TuningQuery>) -> impl IntoResponse {
+    match crate::tuning::generate_report(q.days).await {
+        Ok(report) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(report).unwrap_or_default()),
+        ),
+        Err(crate::tuning::TuningError::NotConfigured) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "tuning report requires the history database" })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TuningQuery {
+    #[serde(default = "default_tuning_days")]
+    days: u32,
+}
+
+fn default_tuning_days() -> u32 {
+    crate::engine::tuning::DEFAULT_WINDOW_DAYS
 }
 
 /// Advisor endpoints need both the IrrigationStore (for the live

@@ -92,7 +92,17 @@ use serde::{Deserialize, Serialize};
 /// entities. Minor, not a break: every field is still present and null is
 /// the documented unknown; a client that treated the old 0 as data was
 /// already reading a defect (the 1.17.0 precedent).
-pub const API_VERSION: &str = "1.18.0";
+/// 1.19.0 (additive): the per-zone tuning report. GET
+/// /irrigation/tuning?days=N (clamp 7..=30, default 14) returns
+/// TuningReport {generated_epoch, window_days, zones[], scorecard}: at
+/// most one plain-language recommendation per zone with its evidence,
+/// plus the install-wide forecast-skip scorecard. POST
+/// /config/zones/apply writes one recommendation through the validated
+/// config path (privileged like every config write; 409 when the
+/// recommendation no longer derives from current data). Every count that
+/// lacks data is null, never a zero sentinel (the 1.18.0 register). No
+/// existing response shape changes.
+pub const API_VERSION: &str = "1.19.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {

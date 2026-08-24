@@ -318,4 +318,71 @@ mod tests {
             .collect();
         assert_json_snapshot!("source_catalog_meta_v1", metas);
     }
+
+    /// `/api/v1/irrigation/tuning` (1.19.0). A fixed fixture instance so
+    /// every field renders deterministically: one zone carrying a
+    /// recommendation (with a companion field, the measured-rate pair),
+    /// one zone in the ok state with informational lines, and a populated
+    /// scorecard. Null stays the documented unknown value on the
+    /// Option-typed counts, so the honest-unknowns register is part of
+    /// the locked shape.
+    #[test]
+    fn irrigation_tuning_v1_shape() {
+        use crate::history::types::{
+            TuningCompanionField, TuningRecommendation, TuningReport, TuningScorecard, ZoneTuning,
+        };
+        let report = TuningReport {
+            generated_epoch: 0,
+            window_days: 14,
+            zones: vec![
+                ZoneTuning {
+                    slug: "back_yard".into(),
+                    display_name: "Back Yard".into(),
+                    status: "recommendation".into(),
+                    lines: vec!["Watered 5 time(s) in the last 14 days.".into()],
+                    recommendation: Some(TuningRecommendation {
+                        id: "0000000000000000".into(),
+                        field: "precip_rate_mm_hr".into(),
+                        current_value: serde_json::Value::Null,
+                        suggested_value: json!(18.0),
+                        companion_fields: vec![TuningCompanionField {
+                            field: "precip_rate_source".into(),
+                            value: json!("measured"),
+                        }],
+                        headline: "Set this zone's sprinkler rate to the measured 18.0 mm/hr; \
+                                   runs are planned as if it were 38.0 mm/hr."
+                            .into(),
+                        evidence: vec!["Median rate backed out of 3 clean watering events: 18.0 \
+                                        mm/hr vs the configured 38.0 mm/hr (53% apart)."
+                            .into()],
+                        confidence: "medium".into(),
+                    }),
+                },
+                ZoneTuning {
+                    slug: "front_yard".into(),
+                    display_name: "Front Yard".into(),
+                    status: "ok".into(),
+                    lines: vec![
+                        "Watered 4 time(s) in the last 14 days.".into(),
+                        "A soil probe would unlock the drying-rate and sprinkler-rate checks \
+                         for this zone."
+                            .into(),
+                    ],
+                    recommendation: None,
+                },
+            ],
+            scorecard: TuningScorecard {
+                window_days: 30,
+                scored_days: Some(4),
+                confirmed_days: Some(3),
+                min_scored_days: 3,
+                line: "Skipped 4 days for forecast rain in the last 30; rain came 3 of 4.".into(),
+                reactive_days: Some(2),
+                reactive_line: "Skipped 2 day(s) for rain already falling or on the ground in \
+                                the last 30."
+                    .into(),
+            },
+        };
+        assert_json_snapshot!("irrigation_tuning_v1", report);
+    }
 }

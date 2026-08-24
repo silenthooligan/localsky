@@ -149,6 +149,54 @@ impl ForecastObservationsStore {
         Ok(out)
     }
 
+    /// Every observation between `from` and `to` (both inclusive), by
+    /// DATE, ascending. `recent()` windows on `inserted_at_epoch` (the
+    /// last write time), which is fine for rolling bias windows but not
+    /// for a calendar-window read; the tuning report keys its rain-day
+    /// and scorecard math on the row's own configured-tz date, so it
+    /// queries the date column directly (the observed_rain_last_n_days
+    /// pattern). Dates are TEXT 'YYYY-MM-DD', so string comparison is
+    /// date order.
+    pub async fn range(
+        &self,
+        from: NaiveDate,
+        to: NaiveDate,
+    ) -> Result<Vec<BiasObservation>, ForecastObservationsError> {
+        let c = self.conn.clone();
+        let from_str = from.format("%Y-%m-%d").to_string();
+        let to_str = to.format("%Y-%m-%d").to_string();
+        let rows =
+            tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<(String, f64, f64)>> {
+                let conn = c.blocking_lock();
+                let mut stmt = conn.prepare(
+                    "SELECT date, predicted_in, observed_in
+                     FROM forecast_observations
+                     WHERE date >= ?1 AND date <= ?2
+                     ORDER BY date ASC",
+                )?;
+                let mapped = stmt
+                    .query_map(params![from_str, to_str], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, f64>(1)?,
+                            r.get::<_, f64>(2)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(mapped)
+            })
+            .await
+            .map_err(|e| ForecastObservationsError::Sqlite(format!("join: {e}")))?
+            .map_err(|e| ForecastObservationsError::Sqlite(e.to_string()))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for (date_str, predicted_in, observed_in) in rows {
+            let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
+                .map_err(|e| ForecastObservationsError::Date(format!("{date_str}: {e}")))?;
+            out.push(BiasObservation::new(date, predicted_in, observed_in));
+        }
+        Ok(out)
+    }
+
     /// Sum measured (gauge) daily rainfall over the last `window_days`,
     /// EXCLUDING today. The engine's observed-rain backstop already counts
     /// today's measured rain separately (`rain_today_in`), so this covers the
@@ -198,6 +246,27 @@ mod tests {
         let mut c = Connection::open_in_memory().unwrap();
         runner::run(&mut c).unwrap();
         ForecastObservationsStore::new(Arc::new(Mutex::new(c)))
+    }
+
+    #[tokio::test]
+    async fn range_reads_by_date_inclusive() {
+        let s = fresh_store().await;
+        let base = NaiveDate::from_ymd_opt(2026, 6, 10).unwrap();
+        for i in 0..5 {
+            s.upsert(base + chrono::Duration::days(i), 0.1 * i as f64, 0.0)
+                .await
+                .unwrap();
+        }
+        let rows = s
+            .range(
+                base + chrono::Duration::days(1),
+                base + chrono::Duration::days(3),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 3, "both bounds inclusive");
+        assert_eq!(rows[0].date, base + chrono::Duration::days(1));
+        assert_eq!(rows[2].date, base + chrono::Duration::days(3));
     }
 
     #[tokio::test]

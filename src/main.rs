@@ -355,29 +355,10 @@ async fn main() -> anyhow::Result<()> {
         None => localsky::zones::configured(),
     };
 
-    let zone_runtime = match boot_cfg.as_ref() {
-        Some(cfg) => {
-            let mut m = std::collections::HashMap::new();
-            for (slug, z) in cfg.zones.iter() {
-                let throughput = localsky::engine::effective_precip_rate_mm_hr(
-                    z.sprinkler_type,
-                    z.precip_rate_mm_hr,
-                );
-                // zones::from_pairs underscore-normalizes slugs
-                // ("back-yard" -> "back_yard"); mirror that here so the
-                // lookup hits.
-                m.insert(
-                    slug.replace('-', "_"),
-                    localsky::ha::ZoneRuntime {
-                        throughput_mm_hr: throughput,
-                        max_duration_s: 3600,
-                    },
-                );
-            }
-            m
-        }
-        None => std::collections::HashMap::new(),
-    };
+    // Per-zone run sizing (throughput + max-duration) and cycle/soak agronomy
+    // ride the hot-swapped WateringPolicy (zone_runtime + zone_agronomy maps,
+    // built in from_config), not a boot HashMap: an applied precip-rate or
+    // texture change reaches the next tick's math with no restart.
 
     // P1-8c: resolve the deployment timezone once, before the schedulers spawn,
     // so wall-clock firing + day-rollover dedupe key off the configured tz rather
@@ -544,9 +525,9 @@ async fn main() -> anyhow::Result<()> {
             tempest_store.clone(),
             history_conn.clone(),
             push_dispatcher.clone(),
-            zone_runtime,
             // Pass the SWAPPABLE handle (not a boot clone): the refresher loads
-            // it each tick so a hot-reloaded watering policy takes effect live.
+            // it each tick so a hot-reloaded watering policy (including the
+            // per-zone runtime/agronomy maps) takes effect live.
             watering_policy_handle.clone(),
             user_scripts,
             snapshot_source,
@@ -554,7 +535,6 @@ async fn main() -> anyhow::Result<()> {
             shadow_store,
             control_store,
             boot_zones,
-            boot_cfg.clone().map(std::sync::Arc::new),
         );
         // P0-8b: supervise the refresher. If its heartbeat goes stale (panic or
         // hang in the one task that produces all live data + the today verdict),
@@ -652,18 +632,26 @@ async fn main() -> anyhow::Result<()> {
                     });
                 }
             }
+            // Weekly tuning-report notification: hourly tick, 7-local-day
+            // dedupe persisted in M0014 so redeploys never double-notify.
+            if let Some(hc) = history_conn.clone() {
+                localsky::scheduler::tuning_report::spawn(
+                    localsky::persistence::TuningReportStateStore::new(hc),
+                    push_dispatcher.clone(),
+                );
+            }
             let dry_run = std::env::var("LOCALSKY_SMART_DRY_RUN").ok().as_deref() == Some("1");
             localsky::scheduler::smart_morning::spawn(
                 irrigation_store.clone(),
                 // The SWAPPABLE handle, not a boot clone: the tick reads the
-                // live soak/interleave knobs so a settings save reshapes the
-                // next morning's plan with no restart.
+                // live soak/interleave knobs AND the per-zone cycle agronomy
+                // so a settings save (or tuning Apply) reshapes the next
+                // morning's plan with no restart.
                 watering_policy_handle.clone(),
                 registry,
                 Some(runs_store),
                 active_runs_store.clone(),
                 (cfg.deployment.location.lat, cfg.deployment.location.lon),
-                Some(std::sync::Arc::new(cfg.clone())),
                 Some(push_dispatcher.clone()),
                 dry_run,
             );
@@ -1191,6 +1179,22 @@ async fn main() -> anyhow::Result<()> {
         // (a recently-observing source reads its calm status, not offline).
         source_last_seen: Some(source_last_seen.clone()),
     };
+    // Tuning-report generation handles (GET /irrigation/tuning, the apply
+    // endpoint's stale check, and the weekly notification scheduler).
+    // Registered in both live and demo postures whenever a history DB is
+    // mounted; without one the endpoints answer 503.
+    if let Some(hc) = history_conn.clone() {
+        localsky::tuning::set_tuning_handles(localsky::tuning::TuningHandles {
+            history_conn: hc,
+            cfg_store: cfg_store.clone(),
+            irrigation: irrigation_store.clone(),
+            forecast: forecast_store.clone(),
+            location: boot_cfg
+                .as_ref()
+                .map(|c| (c.deployment.location.lat, c.deployment.location.lon))
+                .unwrap_or((0.0, 0.0)),
+        });
+    }
     let mk_config = {
         let cfg_store = cfg_store.clone();
         let runtime_handles = runtime_handles.clone();

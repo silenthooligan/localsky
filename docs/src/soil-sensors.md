@@ -29,3 +29,12 @@ which zones each source feeds.
 The Sensors hub and each zone's detail show the probe's live reading,
 the target band, and a 7-day no-watering projection so you can sanity
 check that the moisture curve actually behaves like your yard.
+
+A probe also unlocks the [tuning report](tuning-report.md)'s two
+calibration checks: the drying-drift check (does your soil dry at the
+rate the configured texture and root depth predict?) and the
+sprinkler-rate backout (what rate do your heads actually deliver, per
+the probe's rise across waterings?). Both need LocalSky's own recorded
+probe history, so they work for probes connected through a source
+(the Ecowitt gateway poll, MQTT, webhooks); a zone bound to a live Home
+Assistant entity has no local history and reports that state honestly.

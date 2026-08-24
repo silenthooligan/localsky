@@ -2,6 +2,15 @@
 
 All notable changes to LocalSky are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.15] - 2026-08-23
+
+### Added
+
+- **A tuning report that grades your zone settings against what actually happened.** Each zone's page now carries a Tuning panel: LocalSky watches two weeks of runs, skips, rain, and soil-probe readings and turns them into at most one plain suggestion per zone, each with the evidence behind it and an Apply button that writes the change through the same validated path as the settings editor. It catches sessions quietly shorted by the duration cap, soil settings whose water bucket cannot be right, a probe that dries faster or slower than the configured soil predicts, and the sprinkler rate your heads actually deliver (backed out of the probe's rise across waterings, the catch-cup test without the cups). When there is not enough data to judge, the report says exactly what is missing instead of guessing. See [Tuning report](tuning-report.md).
+- **A forecast-skip scorecard.** One line on the irrigation page: of the days LocalSky skipped for expected rain, how often the rain actually came, with each skip judged against the window it claimed (same day, next day, or the following three days). It appears once at least three skip days could be scored. Skips for rain already falling or already on the ground confirm themselves, so they are counted on their own line instead of being graded as forecast calls.
+- **A weekly tuning notice.** With notifications enabled, LocalSky sends at most one "tuning report ready" notice per week, and only when a zone has something worth applying. The reminder survives restarts without repeating itself.
+- **Zone soil and sprinkler edits now apply live.** Changing a zone's soil texture, sprinkler type, precipitation rate, or slope (from the settings editor or a tuning Apply) reshapes the next computed run and cycle plan immediately; previously those particular fields quietly waited for a restart without saying so.
+
 ## [0.7.14] - 2026-08-13
 
 Unknown now means unknown. Values LocalSky never measured stop dressing up as data.

@@ -78,6 +78,8 @@ One `weather.*` entity built from the live station snapshot, with a 7 day daily 
 
 Sensors report in the app's configured display units (**Settings > Units**: a household default that any device can override). Home Assistant then converts sensors with supported device classes (temperature, wind speed, precipitation, pressure, distance) to your HA unit system.
 
+Entities come from the server's sensor manifest, and since 0.7.14 the manifest only advertises what your install can actually feed: wet bulb, wind lull, rain last minute, illuminance, and station battery need a station source; precipitation probability needs a source that reports it; water level needs a controller that reports one; per-zone soil sensors need a soil probe on that zone. A sensor your install cannot feed is simply not created, and a created sensor whose value is momentarily missing reads `unavailable` instead of a fabricated number.
+
 | Sensor | Unit |
 |---|---|
 | Air temperature, feels like, dew point, wet bulb | °F |
@@ -101,7 +103,7 @@ Sensors report in the app's configured display units (**Settings > Units**: a ho
 | Days since rain | `sensor` | days since significant rain |
 | Rain tomorrow probability | `sensor` | % |
 | Heat multiplier | `sensor` | engine's heat adjustment factor |
-| Water level | `sensor` | controller water level % |
+| Water level | `sensor` | controller water level %; only for controllers that report one (OpenSprinkler) |
 | Max wind, Min temp, Rain skip | `number` | skip-threshold sliders (0-50 mph, 20-60 °F, 0-1 in; about 0-80 km/h, -7 to 16 °C, 0-25 mm). These sliders do not convert to HA's unit system; set them in imperial | 
 | HA reachable | `binary_sensor` | connectivity diagnostic |
 | Irrigation suspended | `binary_sensor` | on while a pause is active |
@@ -114,7 +116,7 @@ Sensors report in the app's configured display units (**Settings > Units**: a ho
 | `valve.<zone>` | `valve` | the canonical control: open = run (default duration from options), close = stop |
 | `<zone> running` | `binary_sensor` | device class `running` |
 | `<zone> soil bucket` | `sensor` | engine bucket state, mm |
-| `<zone> soil moisture` | `sensor` | live probe %, unavailable when no probe assigned |
+| `<zone> soil moisture` | `sensor` | live probe %; soil sensors are created only for zones with a probe |
 | `<zone> soil temperature` | `sensor` | °F, native Ecowitt probes |
 | `<zone> soil EC` | `sensor` | µS/cm, native Ecowitt probes |
 | `<zone> soil battery` | `sensor` | probe battery % |

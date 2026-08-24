@@ -85,6 +85,10 @@ pub fn IrrigationPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                         // Right column: the wider data surface.
                         <ForecastPanel snap/>
                     </div>
+                    // Results-based tuning: recommendation count + the
+                    // forecast-skip scorecard line. Hidden until the report
+                    // has something worth a row.
+                    <crate::components::zones::tuning::TuningStrip/>
                 </div>
             }
             .into_any()

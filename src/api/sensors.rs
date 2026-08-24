@@ -388,6 +388,11 @@ async fn remove_soil(
     let Some(h) = INVENTORY.get() else {
         return resp(0, "unavailable", "config store not ready".into());
     };
+    // Read-modify-write guard shared with every other config writer
+    // (config PUT/raw/rollback + the tuning apply): held from this load
+    // through the save below so a concurrent writer is queued, not
+    // clobbered.
+    let _write_guard = h.cfg_store.begin_write().await;
     let Ok(mut cfg) = h.cfg_store.load().await else {
         return resp(0, "unavailable", "could not load config".into());
     };

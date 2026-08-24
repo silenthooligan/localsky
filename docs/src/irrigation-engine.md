@@ -235,7 +235,7 @@ Multiplicative not additive: rain bias is the same shape at 0.2 inch and 2.0 inc
 
 - **API:** `GET /api/v1/forecast/bias` returns the current-month multiplier plus the full 12-month table with sample counts.
 - **Pure module:** `engine::forecast_bias::BiasModel::from_observations(observations, today, window)` is callable from anywhere; ideal for backtests and replay against historical verdict logs.
-- **Skip rules:** v0.1 surfaces the model and persists the observations but does not yet multiply the rain inputs going into the skip ladder. A v0.2 release will wire `corrected_rain = raw_rain * multiplier` upstream of `skip_rules::evaluate` so the morning verdict reflects the learned bias automatically.
+- **Skip rules:** the model is surfaced and the observations persist, but the multiplier is not yet folded into the rain inputs going into the skip ladder; wiring `corrected_rain = raw_rain * multiplier` upstream of `skip_rules::evaluate` remains planned. The same observation rows already do decision work elsewhere: the observed-rain backstop reads them live, and the [tuning report](tuning-report.md)'s forecast-skip scorecard judges every rain-family skip against them.
 
 ### Defaults and bounds
 
@@ -248,6 +248,44 @@ Multiplicative not additive: rain bias is the same shape at 0.2 inch and 2.0 inc
 | `NOISE_FLOOR_IN` | 0.02 | Below this in both columns, the day is "dry" and not informative for a multiplicative model. |
 
 Implementation: [src/engine/forecast_bias.rs](../src/engine/forecast_bias.rs) (pure functions + 11 unit tests).
+
+## Results-based tuning
+
+The engine's per-zone parameters (texture, root depth, sprinkler rate, weekly budget) start as informed guesses. The tuning report closes the loop: it reads a window of recorded outcomes and emits at most one deterministic recommendation per zone. The user-facing walkthrough is [Tuning report](tuning-report.md); this section covers the machinery.
+
+### How it works
+
+Four checks run per zone over a 7 to 30 day window (default 14), each a pure function over persisted rows:
+
+| check | reads | flags when |
+|---|---|---|
+| cap clamp | live run-duration math + run days in the window | the duration cap chronically trims the model's desired session |
+| interval plausibility | soil catalog RAW / forward mean daily ETc | one filling of the root zone lasts under 1.5 or over 21 days |
+| drying drift | probe series slope across dry stretches vs `mean_daily_etc / TAW` | the measured drying rate is outside 0.6x to 1.6x the modeled rate |
+| rate backout | probe rise bracketing each watering event | the backed-out precipitation rate differs from the configured one by over 30% |
+
+The install-wide forecast-skip scorecard builds on the existing accuracy scoreboard above (same `forecast_observations` rows, same WET/SIG thresholds as `assess_day`), extended with window-aware confirmation: a tomorrow-rain skip is judged against the NEXT day's observed total and a 3-day-rain skip against the following 3-day sum, where the accuracy scoreboard judges same-day only. Only forecast-driven skips enter the tally (rain expected within 4 hours, tomorrow rain, 3-day rain); reactive skips (rain now, observed rain, already wet) are triggered by rain that already happened, so scoring them against observed rain would be self-confirming, and they are counted on a separate unscored line instead.
+
+### Where it surfaces
+
+- **API:** `GET /api/v1/irrigation/tuning` returns the full report; `POST /api/v1/config/zones/apply` writes one recommendation through the validated config path.
+- **Pure module:** `engine::tuning` holds every rule (slope estimator, event clustering, backout math, scorecard scoring, ranking) with unit tests; the store assembly is a thin layer above it.
+- **UI:** the zone detail's Tuning panel and the irrigation page's strip.
+
+### Defaults and bounds
+
+| Constant | Value | Why |
+|---|---|---|
+| window | 7..=30 days, default 14 | Enough mornings to call a pattern chronic; short enough to track the season. |
+| dry stretch | >= 48h, >= 2 stretches, >= 8 readings each | One quiet weekend is not a drying signal. |
+| drift band | 0.6x to 1.6x | Probe percent is a relative scale; only a large, repeated ratio is trustworthy. |
+| backout events | >= 3 clean events, median rate | A single rise can be rain residue or a probe artifact. |
+| rate tolerance | 30% | Catalog rates are honest to roughly this band anyway. |
+| scorecard minimum | 3 scored days | Below this the tally would be noise; the report says so instead. |
+
+One recommendation per zone at most, ranked cap clamp > drying drift > rate backout > interval plausibility, and the backout check is only consulted when drift did not flag the zone in the same report. Counts with no data behind them are null on the wire, never zero.
+
+Implementation: [src/engine/tuning.rs](../src/engine/tuning.rs) (pure rules + unit tests) and [src/tuning.rs](../src/tuning.rs) (store assembly).
 
 ## Where to read further
 

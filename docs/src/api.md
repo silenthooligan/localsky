@@ -33,6 +33,8 @@ The shape of each `/api/v1/*` GET response is locked at build time by `insta` sn
 
 ### Migration notes
 
+**1.19.0** (tuning report). Additive only; no existing response shape changes. `GET /api/v1/irrigation/tuning?days=N` (clamp 7..=30, default 14) returns the per-zone results-based tuning report: `{ generated_epoch, window_days, zones: [ { slug, display_name, status, lines, recommendation } ], scorecard }`, at most one recommendation per zone, each carrying the target config field, current and suggested values as JSON (`null` clears an override), companion fields the apply writes alongside (a measured precipitation rate also stamps `precip_rate_source`), the plain-language headline, the evidence lines, and a stable `id`. The scorecard's `scored_days` / `confirmed_days` cover forecast rain skips and are **null** until at least 3 such days could be judged; reactive rain skips (rain already falling or on the ground) ride the additive `reactive_days` / `reactive_line` as a plain count (the 1.18.0 honest-unknowns register; never a zero sentinel). `POST /api/v1/config/zones/apply` writes one recommendation through the validated config path; it is privileged like every config write, regenerates the recommendation server-side, and answers `409` when the supplied `id` no longer derives from current data. Like the other history reads, `/irrigation/tuning` mounts only when the history database is available. No HACS integration change is required.
+
 **1.18.0** (honest unknowns). Several fields whose zero doubled as "no data" are now **nullable**, and a handful of manifest entities are capability-gated. Nullable (each still always present; `null` is the documented unknown value, and a client that treated the old `0` as a real reading was already reading a defect): `tempest.pop_pct` and `tempest.leaf_wetness_pct` (null until a configured source writes them), `irrigation.water_level_pct` (null when the controller does not report a level; previously a fabricated `100` on native installs and `0` on HA installs with no entity), `forecast.eto_today_mm` (null when no source/forecast/native compute produced one; the flat `5.0` fallback no longer publishes), `forecast.temp_max_today_f` / `temp_min_today_f` / `humidity_mean_today_pct` (now resolved from the live forecast first, legacy HA sensors second, null when neither exists), and the precipitation probabilities (`skip_check.rain_tomorrow_prob_pct`, `forecast.rain_tomorrow_prob_pct`, `seven_day_verdicts[].precip_probability_max`), which are null when the forecast provider reports no probability series; the probability-weighted rollups now take probability-less rain at full value instead of zeroing it. Additive alongside these: `irrigation.water_level_capable` (whether the active controller reports a water level). Manifest schema is **1.4**: `pop_pct`, `wet_bulb_f`, `wind_lull_mph`, `rain_in_last_min`, `illuminance_lx`, `water_level_pct`, and the per-zone soil moisture/temperature/EC/battery descriptors now publish only when the install actually has the backing source, station, controller capability, or soil probe, so installs without the hardware stop growing dead entities. The HACS integration already renders `null` as unavailable; no integration change is required.
 
 **1.17.0** (lightning). `tempest.lightning_avg_dist_mi` is now **nullable**: it is `null` whenever the reporting interval detected no strikes, where it previously carried the station's bare `0`. On a distance channel that `0` read as a strike directly overhead, so a client filtering on `distance < 10` saw a phantom storm between strikes, and the obvious guard `distance > 0` dropped real readings. The field is still always present, and `null` is the documented unknown value. If you want a distance that persists between strikes, read the new `last_strike_distance_mi` (also exposed as a sensor descriptor in the manifest) instead of the interval average. Separately, `lightning_strikes_last_hour` now decays as strikes age out of the hour rather than holding the last storm's total until the next strike; a trigger of the form "strikes above 0" re-arms on its own once it reaches 0.
@@ -272,6 +274,17 @@ curl -X POST -H 'Authorization: Bearer lsk_...' \
     http://localhost:8090/api/v1/config/rollback
 ```
 
+### `POST /api/v1/config/zones/apply`
+
+Write one [tuning report](#get-apiv1irrigationtuningdays14) recommendation through the validated config path. Body: `{ "zone_slug", "recommendation_id", "field", "value", "window_days" }`, echoing the recommendation as served. `window_days` is the window the report was fetched at (clamped 7..30; absent = the default 14): the server re-derives the zone's recommendation at that window against the exact config it is about to mutate, inside the config write lock, and answers `409 { "error": "stale_recommendation" }` when the claim no longer derives, so a stale page can never write an outdated value. A client viewing a non-default window MUST echo the report's `window_days` or its applies can 409 indefinitely. Companion fields ride server-side (a measured `precip_rate_mm_hr` also stamps `precip_rate_source = "measured"`). The mutation runs the same validation as `PUT /config` (`422` with the structured report on failure), snapshots the previous config, saves, hot-reloads the runtime, and returns `{ "applied", "zone", "field", "old_value", "new_value", "saved", "validation", "restart_required", "restart_reasons" }`. Privileged like every config write.
+
+```bash
+curl -X POST http://localhost:8090/api/v1/config/zones/apply \
+    -H 'Content-Type: application/json' \
+    -H 'Authorization: Bearer lsk_...' \
+    -d '{"zone_slug":"back_yard","recommendation_id":"8f2c41a09b6d13e7","field":"precip_rate_mm_hr","value":18.0,"window_days":14}'
+```
+
 ### `GET /api/v1/config/raw` and `PUT /api/v1/config/raw`
 
 Read and write the raw TOML text instead of the JSON projection, for operators who prefer editing `localsky.toml` directly through the Settings raw editor.
@@ -377,6 +390,49 @@ Portable history export. `format=csv` (the default) streams the run/skip events 
 ### `GET /api/v1/irrigation/accuracy?days=30`
 
 The forecast-accuracy scoreboard: one row per local day pairing that morning's verdict with the rain that actually fell, plus the matched/scored tally. `days` defaults to 30 and clamps to 1..365. Like `/history` and `/decisions`, this mounts only when the history database is available.
+
+### `GET /api/v1/irrigation/tuning?days=14`
+
+The per-zone tuning report: a window of recorded outcomes reduced to at most one plain-language recommendation per zone, plus the install-wide forecast-skip scorecard. `days` defaults to 14 and clamps to 7..30. Like `/history` and `/decisions`, this mounts only when the history database is available. Read-only; the write side is [`POST /api/v1/config/zones/apply`](#post-apiv1configzonesapply).
+
+```json
+{
+  "generated_epoch": 1787500000,
+  "window_days": 14,
+  "zones": [
+    {
+      "slug": "back_yard",
+      "display_name": "Back Yard",
+      "status": "recommendation",
+      "lines": ["Watered 5 time(s) in the last 14 days."],
+      "recommendation": {
+        "id": "8f2c41a09b6d13e7",
+        "field": "precip_rate_mm_hr",
+        "current_value": null,
+        "suggested_value": 18.0,
+        "companion_fields": [{ "field": "precip_rate_source", "value": "measured" }],
+        "headline": "Set this zone's sprinkler rate to the measured 18.0 mm/hr; runs are planned as if it were 38.0 mm/hr.",
+        "evidence": ["Median rate backed out of 3 clean watering events: 18.0 mm/hr vs the configured 38.0 mm/hr (53% apart)."],
+        "confidence": "medium"
+      }
+    }
+  ],
+  "scorecard": {
+    "window_days": 30,
+    "scored_days": 4,
+    "confirmed_days": 3,
+    "min_scored_days": 3,
+    "line": "Skipped 4 days for forecast rain in the last 30; rain came 3 of 4.",
+    "reactive_days": 2,
+    "reactive_line": "Skipped 2 day(s) for rain already falling or on the ground in the last 30."
+  }
+}
+```
+
+- `status` is `recommendation`, `ok`, or `insufficient_data`; `lines` carries the cadence line and each check's specific not-enough-data state.
+- `current_value` / `suggested_value` are JSON values; `null` as a suggestion means "clear the override" (restore the default).
+- `scorecard.scored_days` / `confirmed_days` cover FORECAST rain skips only (rain expected within 4 hours, tomorrow rain, 3-day rain) and are `null` until at least `min_scored_days` such days could be judged. Reactive rain skips (rain already falling or already on the ground) confirm themselves, so they are never scored; they ride `reactive_days` / `reactive_line` as a separate count (`null` / empty until one exists).
+- Applying a recommendation from a non-default window must echo the report's `window_days` (see the apply endpoint below): window-dependent checks derive different suggestions at different windows.
 
 ### `POST /api/v1/irrigation/simulate`
 

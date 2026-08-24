@@ -1,0 +1,54 @@
+---
+source: src/api/snapshot_tests.rs
+expression: report
+---
+{
+  "generated_epoch": 0,
+  "window_days": 14,
+  "zones": [
+    {
+      "slug": "back_yard",
+      "display_name": "Back Yard",
+      "status": "recommendation",
+      "lines": [
+        "Watered 5 time(s) in the last 14 days."
+      ],
+      "recommendation": {
+        "id": "0000000000000000",
+        "field": "precip_rate_mm_hr",
+        "current_value": null,
+        "suggested_value": 18.0,
+        "companion_fields": [
+          {
+            "field": "precip_rate_source",
+            "value": "measured"
+          }
+        ],
+        "headline": "Set this zone's sprinkler rate to the measured 18.0 mm/hr; runs are planned as if it were 38.0 mm/hr.",
+        "evidence": [
+          "Median rate backed out of 3 clean watering events: 18.0 mm/hr vs the configured 38.0 mm/hr (53% apart)."
+        ],
+        "confidence": "medium"
+      }
+    },
+    {
+      "slug": "front_yard",
+      "display_name": "Front Yard",
+      "status": "ok",
+      "lines": [
+        "Watered 4 time(s) in the last 14 days.",
+        "A soil probe would unlock the drying-rate and sprinkler-rate checks for this zone."
+      ],
+      "recommendation": null
+    }
+  ],
+  "scorecard": {
+    "window_days": 30,
+    "scored_days": 4,
+    "confirmed_days": 3,
+    "min_scored_days": 3,
+    "line": "Skipped 4 days for forecast rain in the last 30; rain came 3 of 4.",
+    "reactive_days": 2,
+    "reactive_line": "Skipped 2 day(s) for rain already falling or on the ground in the last 30."
+  }
+}

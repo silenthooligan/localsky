@@ -196,6 +196,8 @@ photo_url = null
 
 `soil_texture` enum: `sand`, `loamy_sand`, `sandy_loam`, `loam`, `silt_loam`, `clay_loam`, `clay`. See [soil-textures.md](soil-textures.md).
 
+The [tuning report](tuning-report.md)'s Apply action writes exactly these fields (`soil_texture`, `precip_rate_mm_hr` plus `precip_rate_source`, `root_depth_mm`, `weekly_budget_in`, `sessions_per_week`) through the same validated save path as the settings editor; `null` restores the documented default.
+
 ## `[llm]`
 
 ```toml

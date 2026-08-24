@@ -67,6 +67,13 @@ pub enum PushEvent {
         raw_pct: Option<f64>,
         yard_pct: f64,
     },
+    /// The weekly tuning report generated with at least one actionable
+    /// recommendation. Emitted by scheduler::tuning_report at most once
+    /// per 7 local days (persisted dedupe, M0014). Deep-links to the
+    /// zones view where the recommendations and their Apply live; the
+    /// service worker supports no action buttons, so the notification
+    /// itself is link-only.
+    TuningReportReady { recommendation_count: usize },
 }
 
 #[derive(Clone, Serialize)]
@@ -284,6 +291,24 @@ fn render_payload(ev: &PushEvent) -> PushPayload {
                 body,
                 tag: format!("probe-suspect-{zone_slug}"),
                 url: "/sensors".to_string(),
+            }
+        }
+        PushEvent::TuningReportReady {
+            recommendation_count,
+        } => {
+            let body = if *recommendation_count == 1 {
+                "1 zone has a tuning suggestion this week. Open it to review and apply.".to_string()
+            } else {
+                format!(
+                    "{recommendation_count} zones have tuning suggestions this week. Open them \
+                     to review and apply."
+                )
+            };
+            PushPayload {
+                title: "Tuning report ready".to_string(),
+                body,
+                tag: "tuning-report".to_string(),
+                url: "/zones".to_string(),
             }
         }
     }

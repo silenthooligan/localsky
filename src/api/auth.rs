@@ -465,6 +465,12 @@ async fn delete_token(
 }
 
 /// Read + JSON-parse the body, consuming the request.
+///
+/// The Err side is the ready-to-return refusal Response on purpose (the
+/// callers `?` it straight out of the handler); a newer stable clippy
+/// (result_large_err) dislikes the by-value size, but boxing here would
+/// complicate every call site for two cold error paths.
+#[allow(clippy::result_large_err)]
 async fn parse_body<T: serde::de::DeserializeOwned>(
     req: Request<Body>,
 ) -> Result<(T, ()), Response> {
@@ -477,6 +483,8 @@ async fn parse_body<T: serde::de::DeserializeOwned>(
 }
 
 /// Same, but hands back a header-only request clone for cookie attrs.
+/// (Same result_large_err rationale as parse_body above.)
+#[allow(clippy::result_large_err)]
 async fn parse_body_keep<T: serde::de::DeserializeOwned>(
     req: Request<Body>,
 ) -> Result<(T, Request<Body>), Response> {
