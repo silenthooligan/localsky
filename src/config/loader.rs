@@ -35,9 +35,32 @@ pub fn load_from_path(path: &Path) -> Result<Config, LoadError> {
         _ => LoadError::Io(path.display().to_string(), e),
     })?;
     let interpolated = interpolate_env(&raw)?;
-    let cfg: Config = toml::from_str(&interpolated)?;
+    let mut cfg: Config = toml::from_str(&interpolated)?;
+    normalize_legacy_values(&mut cfg);
     validate(&cfg)?;
     Ok(cfg)
+}
+
+/// One-time value normalizations for fields whose persisted value was
+/// never operator intent. Applied on every load (the next save persists
+/// the normalized value), so upgrades cannot silently regress behavior.
+///
+/// Open-Meteo `past_days == 1` rewrites to 3: before 1.21.0 the fetch
+/// HARDCODED 3 past days and ignored this field entirely, while the old
+/// serde default and both UI templates stamped an explicit 1 into nearly
+/// every persisted config. Honoring the field as-written would therefore
+/// drop those installs from a 3-day model archive to 1 on upgrade. A
+/// stored 1 was never a value anyone chose against observed behavior;
+/// any other value (2..7, or a clamped-out-of-band one) is left alone.
+pub fn normalize_legacy_values(cfg: &mut Config) {
+    use crate::config::schema::SourceKind;
+    for src in cfg.sources.iter_mut() {
+        if let SourceKind::OpenMeteo(c) = &mut src.source {
+            if c.past_days == 1 {
+                c.past_days = 3;
+            }
+        }
+    }
 }
 
 /// `${VAR}` interpolation. Single pass; nested refs not supported.
@@ -474,5 +497,41 @@ mod tests {
         });
         let err = validate(&cfg).unwrap_err();
         assert!(matches!(err, LoadError::Validation(_)));
+    }
+
+    /// The legacy Open-Meteo past_days: an explicit 1 (the never-honored
+    /// old default every template stamped) normalizes to the 3 the fetch
+    /// always effectively used; any other explicit value is operator
+    /// intent and stays.
+    #[test]
+    fn normalize_rewrites_legacy_open_meteo_past_days() {
+        use crate::config::schema::{OpenMeteoConfig, SourceEntry, SourceKind};
+        let om = |past_days: u32| SourceEntry {
+            id: "open_meteo".into(),
+            priority: 50,
+            max_age_s: None,
+            enabled: true,
+            source: SourceKind::OpenMeteo(OpenMeteoConfig {
+                forecast_days: 7,
+                forecast_hours: 48,
+                past_days,
+                include_radar: true,
+                model: "best_match".into(),
+                endpoint: None,
+            }),
+        };
+        let mut cfg = Config::default();
+        cfg.sources.push(om(1));
+        cfg.sources.push(om(5));
+        normalize_legacy_values(&mut cfg);
+        let days: Vec<u32> = cfg
+            .sources
+            .iter()
+            .map(|s| match &s.source {
+                SourceKind::OpenMeteo(c) => c.past_days,
+                _ => 0,
+            })
+            .collect();
+        assert_eq!(days, vec![3, 5], "1 normalizes to 3; a chosen 5 stays");
     }
 }

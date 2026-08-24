@@ -3613,6 +3613,7 @@ mod tests {
                 status: "recommendation".into(),
                 lines: vec![],
                 recommendation: Some(rec.clone()),
+                ..Default::default()
             }],
             scorecard: Default::default(),
         };

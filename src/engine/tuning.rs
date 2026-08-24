@@ -49,9 +49,14 @@ pub const SCORECARD_WINDOW_DAYS: u32 = 30;
 /// Scored rain-skip days required before the scorecard states a tally.
 pub const SCORECARD_MIN_SCORED: u32 = 3;
 
-/// Same-morning run rows closer than this are one irrigation event
-/// (cycle/soak + interleave produce several short observer rows).
-pub const EVENT_CLUSTER_GAP_S: i64 = 2 * 3600;
+// Same-morning clustering + the watering-evidence filter live in
+// crate::history::rollup (compiled for BOTH server and WASM client so
+// the history surfaces reduce minutes exactly the way the balance
+// credits them); re-exported here so engine callers keep one path.
+pub use crate::history::rollup::{
+    applied_in_window, cluster_events, is_watering_evidence, is_watering_row, IrrigationEvent,
+    RunSegment, WindowedApplied, EVENT_CLUSTER_GAP_S,
+};
 
 /// Drift check gates.
 pub const DRIFT_MIN_STRETCH_S: i64 = 48 * 3600;
@@ -72,25 +77,6 @@ pub const INTERVAL_MAX_DAYS: f64 = 21.0;
 
 /// Cap check: run days in the window required before "chronically" applies.
 pub const CAP_MIN_RUN_DAYS: u32 = 3;
-
-/// One completed watering interval (already filtered to watering evidence
-/// rows: observer + manual completed rows, never skip markers).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct RunSegment {
-    pub start_epoch: i64,
-    pub end_epoch: i64,
-}
-
-/// A same-morning cluster of run segments: one irrigation event.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct IrrigationEvent {
-    /// First segment's start.
-    pub start_epoch: i64,
-    /// Last segment's end.
-    pub end_epoch: i64,
-    /// Sum of valve-open time across the clustered segments (seconds).
-    pub valve_open_s: i64,
-}
 
 /// Outcome of one check for one zone.
 #[derive(Debug, Clone, PartialEq)]
@@ -195,41 +181,6 @@ pub fn slope_per_day(readings: &[(i64, f64)]) -> Option<f64> {
         return None;
     }
     Some(num / den * 86_400.0)
-}
-
-/// Cluster watering segments into same-morning irrigation events.
-/// Segments closer than `EVENT_CLUSTER_GAP_S` (measured from the previous
-/// segment's end to the next segment's start) merge into one event.
-///
-/// valve_open_s is the interval-UNION coverage of the cluster, not a raw
-/// sum: a manual run is persisted twice (the manual completed row plus
-/// the run-edge observer's row for the same physical valve activity),
-/// and summing both would double the minutes and halve every backed-out
-/// rate. Segments are sorted by start, so counting only the portion past
-/// the cluster's current end is exactly the union length; disjoint
-/// cycle/soak observer segments still sum as before.
-pub fn cluster_events(segments: &[RunSegment]) -> Vec<IrrigationEvent> {
-    let mut segs: Vec<RunSegment> = segments
-        .iter()
-        .copied()
-        .filter(|s| s.end_epoch >= s.start_epoch)
-        .collect();
-    segs.sort_by_key(|s| s.start_epoch);
-    let mut events: Vec<IrrigationEvent> = Vec::new();
-    for s in segs {
-        match events.last_mut() {
-            Some(ev) if s.start_epoch - ev.end_epoch <= EVENT_CLUSTER_GAP_S => {
-                ev.valve_open_s += (s.end_epoch - s.start_epoch.max(ev.end_epoch)).max(0);
-                ev.end_epoch = ev.end_epoch.max(s.end_epoch);
-            }
-            _ => events.push(IrrigationEvent {
-                start_epoch: s.start_epoch,
-                end_epoch: s.end_epoch,
-                valve_open_s: s.end_epoch - s.start_epoch,
-            }),
-        }
-    }
-    events
 }
 
 /// Maximal sub-intervals of `[window_start, window_end)` not covered by
@@ -413,12 +364,12 @@ pub struct CapClampInputs {
     /// Raw configured values (null on the wire when unset).
     pub configured_sessions: Option<u32>,
     pub configured_weekly_budget_in: Option<f64>,
-    /// Effective weekly budget (inches) and delivery math inputs, for the
-    /// budget fallback when sessions cannot go higher.
+    /// Effective weekly budget (inches) and the delivery rate, for the
+    /// budget fallback when sessions cannot go higher. Delivery is GROSS
+    /// (no capture or heat factor), in lockstep with the balance's
+    /// session sizing.
     pub weekly_budget_in: f64,
     pub throughput_mm_hr: f64,
-    pub capture_efficiency: f64,
-    pub heat_multiplier: f64,
 }
 
 /// Ceiling on a recommended per-zone run limit (minutes); matches the
@@ -650,10 +601,10 @@ pub fn check_cap_clamped(slug: &str, inp: &CapClampInputs) -> CheckOutcome {
                 .to_string(),
         );
     }
-    let heat = inp.heat_multiplier.max(1.0);
-    let capture = inp.capture_efficiency.clamp(0.05, 1.0);
-    let deliverable_week_mm =
-        7.0 * (max_dur as f64 / 3600.0) * inp.throughput_mm_hr * capture / heat;
+    // GROSS delivery, in lockstep with the balance's session sizing: 7
+    // capped sessions at the zone's throughput, no capture or heat
+    // factor (the weekly target is gross, homeowner semantics).
+    let deliverable_week_mm = 7.0 * (max_dur as f64 / 3600.0) * inp.throughput_mm_hr;
     let deliverable_week_in = round1(deliverable_week_mm / 25.4);
     if deliverable_week_in <= 0.0 || deliverable_week_in >= inp.weekly_budget_in {
         return CheckOutcome::Pass;
@@ -1244,9 +1195,46 @@ pub struct ZoneCheckOutcomes {
     pub backout: Option<CheckOutcome>,
 }
 
+/// One operator silencing for a zone (the persistence layer's dismissal
+/// rows, pre-filtered to this zone and handed to assembly). A permanent
+/// dismissal keys the FIELD (survives value drift); a snooze keys the
+/// exact recommendation id until its expiry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SilencedRec {
+    pub field: String,
+    pub rec_id: Option<String>,
+    /// "snooze" | "permanent".
+    pub kind: String,
+    pub until_epoch: Option<i64>,
+}
+
+impl SilencedRec {
+    /// Whether this silencing applies to a derived recommendation now.
+    pub fn silences(&self, field: &str, rec_id: &str, now_epoch: i64) -> bool {
+        if self.field != field {
+            return false;
+        }
+        match self.kind.as_str() {
+            "permanent" => true,
+            "snooze" => {
+                self.rec_id.as_deref() == Some(rec_id)
+                    && self.until_epoch.map(|u| u > now_epoch).unwrap_or(false)
+            }
+            _ => false,
+        }
+    }
+}
+
 /// Reduce a zone's check outcomes to the final ZoneTuning: at most one
 /// recommendation (priority cap > drift > backout > interval), the
-/// cadence line, the probe framing, and every insufficiency line.
+/// cadence line, the probe framing, every insufficiency line, the
+/// balance provenance lines, and the muted silencing annotation.
+///
+/// Silencing happens INSIDE the ranked pick: a silenced Recommend is
+/// skipped (recorded into the dismissed markers) and the next-ranked
+/// non-silenced suggestion surfaces, so dismissing one field never
+/// hides the other checks' suggestions for the zone.
+#[allow(clippy::too_many_arguments)]
 pub fn assemble_zone(
     slug: &str,
     display_name: &str,
@@ -1255,6 +1243,9 @@ pub fn assemble_zone(
     has_any_window_data: bool,
     binding: SoilBinding,
     outcomes: &ZoneCheckOutcomes,
+    balance_lines: &[String],
+    silenced: &[SilencedRec],
+    now_epoch: i64,
 ) -> ZoneTuning {
     let mut lines: Vec<String> = Vec::new();
     if run_day_count > 0 {
@@ -1276,7 +1267,8 @@ pub fn assemble_zone(
         SoilBinding::SourceChannel => {}
     }
 
-    // Priority pick: cap > drift > backout > interval.
+    // Priority pick: cap > drift > backout > interval, skipping silenced
+    // suggestions so the next-ranked one can surface.
     let ranked: [Option<&CheckOutcome>; 4] = [
         Some(&outcomes.cap),
         outcomes.drift.as_ref(),
@@ -1284,9 +1276,19 @@ pub fn assemble_zone(
         Some(&outcomes.interval),
     ];
     let mut recommendation: Option<TuningRecommendation> = None;
+    let mut silenced_hits: Vec<(String, &SilencedRec)> = Vec::new();
     for outcome in ranked.into_iter().flatten() {
         match outcome {
             CheckOutcome::Recommend(r) => {
+                if let Some(d) = silenced
+                    .iter()
+                    .find(|d| d.silences(&r.field, &r.id, now_epoch))
+                {
+                    if !silenced_hits.iter().any(|(f, _)| f == &r.field) {
+                        silenced_hits.push((r.field.clone(), d));
+                    }
+                    continue;
+                }
                 if recommendation.is_none() {
                     recommendation = Some(r.clone());
                 }
@@ -1302,9 +1304,30 @@ pub fn assemble_zone(
         }
     }
 
+    // Balance provenance lines, then the muted silencing annotation LAST
+    // (the UI renders the final line with its Undo when dismissed).
+    lines.extend(balance_lines.iter().cloned());
+    let dismissed = !silenced_hits.is_empty();
+    let dismissed_fields: Vec<String> = silenced_hits.iter().map(|(f, _)| f.clone()).collect();
+    if dismissed {
+        let line = match silenced_hits.as_slice() {
+            [(_, d)] => match (d.kind.as_str(), d.until_epoch) {
+                ("snooze", Some(until)) => {
+                    let date = crate::timeutil::local_date(until)
+                        .map(|dt| dt.format("%Y-%m-%d").to_string())
+                        .unwrap_or_default();
+                    format!("1 suggestion snoozed until {date}")
+                }
+                _ => "1 suggestion dismissed".to_string(),
+            },
+            hits => format!("{} suggestions dismissed or snoozed", hits.len()),
+        };
+        lines.push(line);
+    }
+
     let status = if recommendation.is_some() {
         "recommendation"
-    } else if run_day_count > 0 || has_any_window_data {
+    } else if run_day_count > 0 || has_any_window_data || dismissed {
         "ok"
     } else {
         "insufficient_data"
@@ -1315,7 +1338,99 @@ pub fn assemble_zone(
         status: status.to_string(),
         lines,
         recommendation,
+        dismissed,
+        dismissed_fields,
     }
+}
+
+// ---------------------------------------------------------------------
+// Water-balance provenance lines (honest-unknowns register)
+// ---------------------------------------------------------------------
+
+/// One line per balance term: value, source rung, window, and the
+/// specific insufficiency when a rung was skipped. Plain fact; the
+/// assembly appends these to the zone's lines. `day_total_upsell` adds
+/// the one informational line for US installs whose observed term has
+/// no gauge or radar day totals.
+pub fn balance_term_lines(
+    b: &crate::ha::snapshot::WaterBudget,
+    day_total_upsell: bool,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    match b.observed_rain_source.as_str() {
+        "gauge" => lines.push(format!(
+            "Observed rain: {:.2} in over the last 7 days (gauge).",
+            b.observed_rain_mm / 25.4
+        )),
+        "radar" => lines.push(format!(
+            "Observed rain: {:.2} in over the last 7 days (radar day totals).",
+            b.observed_rain_mm / 25.4
+        )),
+        "model_archive" => lines.push(format!(
+            "Observed rain: {:.2} in over the last 7 days (model archive; no gauge or radar \
+             day totals on this install).",
+            b.observed_rain_mm / 25.4
+        )),
+        _ => lines.push(
+            "No observed-rain source; the balance runs on the corrected forecast alone."
+                .to_string(),
+        ),
+    }
+    if day_total_upsell {
+        lines.push(
+            "A rain source that reports day totals unlocks the observed-rain credit; NOAA \
+             MRMS day-total products qualify."
+                .to_string(),
+        );
+    }
+    if b.applied_mm > 0.0 {
+        lines.push(format!(
+            "Irrigation applied: {:.2} in over the last 7 days; {} of {} session(s) remain.",
+            b.applied_mm / 25.4,
+            b.remaining_sessions,
+            b.sessions_per_week
+        ));
+    } else {
+        lines.push("No completed watering in the last 7 days.".to_string());
+    }
+    match b.forecast_credit_source.as_str() {
+        "bias_forecast" => {
+            if (b.bias_sample_count as usize) >= crate::engine::forecast_bias::MIN_OBSERVATIONS {
+                lines.push(format!(
+                    "Forecast credit: {:.2} in until the next session (bias {:.2}x from {} \
+                     days).",
+                    b.forecast_credit_mm / 25.4,
+                    b.bias_multiplier,
+                    b.bias_sample_count
+                ));
+            } else {
+                lines.push(format!(
+                    "Forecast credit: {:.2} in until the next session (no bias correction: \
+                     need {} rain days this month, have {}).",
+                    b.forecast_credit_mm / 25.4,
+                    crate::engine::forecast_bias::MIN_OBSERVATIONS,
+                    b.bias_sample_count
+                ));
+            }
+        }
+        _ => lines.push("No forward rain credit; the next session is due now.".to_string()),
+    }
+    lines
+}
+
+/// The numeric balance breakdown, appended to a recommendation's
+/// evidence so the numbers behind a suggestion are auditable in place.
+pub fn balance_breakdown_line(b: &crate::ha::snapshot::WaterBudget) -> String {
+    format!(
+        "Water balance: target {:.2} in; rain {:.2} in; applied {:.2} in; forecast credit \
+         {:.2} in; remainder {:.2} in across {} remaining session(s).",
+        b.weekly_budget_in,
+        b.observed_rain_mm / 25.4,
+        b.applied_mm / 25.4,
+        b.forecast_credit_mm / 25.4,
+        b.needed_mm / 25.4,
+        b.remaining_sessions
+    )
 }
 
 #[cfg(test)]
@@ -1492,8 +1607,6 @@ mod tests {
             configured_weekly_budget_in: Some(1.0),
             weekly_budget_in: 1.0,
             throughput_mm_hr: 10.0,
-            capture_efficiency: 0.70,
-            heat_multiplier: 1.0,
         }
     }
 
@@ -1719,8 +1832,9 @@ mod tests {
             panic!("expected a budget recommendation, got {out:?}");
         };
         assert_eq!(rec.field, "weekly_budget_in");
-        // 7 sessions * 1h cap * 10 mm/hr * 0.7 capture = 49 mm = 1.9 in.
-        assert_eq!(rec.suggested_value, json!(1.9));
+        // GROSS delivery: 7 sessions * 1h cap * 10 mm/hr = 70 mm = 2.8 in
+        // (no capture or heat factor, lockstep with the balance sizing).
+        assert_eq!(rec.suggested_value, json!(2.8));
     }
 
     // ---- check B ----
@@ -2207,6 +2321,9 @@ mod tests {
             true,
             SoilBinding::SourceChannel,
             &outcomes,
+            &[],
+            &[],
+            0,
         );
         assert_eq!(z.status, "recommendation");
         assert_eq!(z.recommendation.unwrap().field, "sessions_per_week");
@@ -2225,6 +2342,9 @@ mod tests {
             true,
             SoilBinding::SourceChannel,
             &outcomes,
+            &[],
+            &[],
+            0,
         );
         assert_eq!(z.recommendation.unwrap().field, "root_depth_mm");
     }
@@ -2245,6 +2365,9 @@ mod tests {
             true,
             SoilBinding::SourceChannel,
             &outcomes,
+            &[],
+            &[],
+            0,
         );
         assert_eq!(z.status, "ok");
         assert!(z.lines.iter().any(|l| l.contains("Watered 3 time(s)")));
@@ -2260,12 +2383,34 @@ mod tests {
             drift: None,
             backout: None,
         };
-        let z = assemble_zone("z", "Zone", 14, 2, true, SoilBinding::None, &outcomes);
+        let z = assemble_zone(
+            "z",
+            "Zone",
+            14,
+            2,
+            true,
+            SoilBinding::None,
+            &outcomes,
+            &[],
+            &[],
+            0,
+        );
         assert!(z
             .lines
             .iter()
             .any(|l| l.contains("soil probe would unlock")));
-        let z = assemble_zone("z", "Zone", 14, 2, true, SoilBinding::HaEntity, &outcomes);
+        let z = assemble_zone(
+            "z",
+            "Zone",
+            14,
+            2,
+            true,
+            SoilBinding::HaEntity,
+            &outcomes,
+            &[],
+            &[],
+            0,
+        );
         assert!(z
             .lines
             .iter()
@@ -2280,7 +2425,202 @@ mod tests {
             drift: None,
             backout: None,
         };
-        let z = assemble_zone("z", "Zone", 14, 0, false, SoilBinding::None, &outcomes);
+        let z = assemble_zone(
+            "z",
+            "Zone",
+            14,
+            0,
+            false,
+            SoilBinding::None,
+            &outcomes,
+            &[],
+            &[],
+            0,
+        );
         assert_eq!(z.status, "insufficient_data");
+    }
+
+    // ---- silencing inside the ranked pick ----
+
+    fn permanent(field: &str) -> SilencedRec {
+        SilencedRec {
+            field: field.into(),
+            rec_id: None,
+            kind: "permanent".into(),
+            until_epoch: None,
+        }
+    }
+
+    /// Silencing the top-ranked suggestion lets the next-ranked one
+    /// surface: dismissal is field-keyed, never zone-wide.
+    #[test]
+    fn silenced_top_pick_falls_through_to_the_next_ranked() {
+        let now = 1_700_000_000;
+        let outcomes = ZoneCheckOutcomes {
+            cap: CheckOutcome::Recommend(rec_for("max_run_minutes")),
+            interval: CheckOutcome::Recommend(rec_for("soil_texture")),
+            drift: None,
+            backout: None,
+        };
+        let silenced = [permanent("max_run_minutes")];
+        let z = assemble_zone(
+            "z",
+            "Zone",
+            14,
+            5,
+            true,
+            SoilBinding::SourceChannel,
+            &outcomes,
+            &[],
+            &silenced,
+            now,
+        );
+        assert_eq!(
+            z.recommendation.as_ref().unwrap().field,
+            "soil_texture",
+            "the lower-ranked suggestion surfaces"
+        );
+        assert_eq!(z.status, "recommendation");
+        assert!(z.dismissed, "the silencing is still marked for Undo");
+        assert_eq!(z.dismissed_fields, vec!["max_run_minutes".to_string()]);
+        assert_eq!(
+            z.lines.last().map(String::as_str),
+            Some("1 suggestion dismissed"),
+            "the muted annotation is the LAST line (the UI renders it with Undo)"
+        );
+    }
+
+    /// A fully silenced zone strips the recommendation from the wire
+    /// (every count-based consumer, including the weekly push trigger,
+    /// reads zero) and reads ok with the muted annotation.
+    #[test]
+    fn fully_silenced_zone_reads_ok_with_no_recommendation() {
+        let now = 1_700_000_000;
+        let outcomes = ZoneCheckOutcomes {
+            cap: CheckOutcome::Recommend(rec_for("max_run_minutes")),
+            interval: CheckOutcome::Pass,
+            drift: None,
+            backout: None,
+        };
+        let z = assemble_zone(
+            "z",
+            "Zone",
+            14,
+            5,
+            true,
+            SoilBinding::SourceChannel,
+            &outcomes,
+            &[],
+            &[permanent("max_run_minutes")],
+            now,
+        );
+        assert!(z.recommendation.is_none(), "total silencing on the wire");
+        assert_eq!(z.status, "ok");
+        assert!(z.dismissed);
+        // The weekly push trigger counts zones with a recommendation.
+        let push_count = [z].iter().filter(|z| z.recommendation.is_some()).count();
+        assert_eq!(push_count, 0, "an all-dismissed report emits no push");
+    }
+
+    /// A snooze silences only the exact recommendation id inside its
+    /// window: a drifted id and an expired snooze both surface again.
+    #[test]
+    fn snooze_keys_the_exact_id_and_expires_in_assembly() {
+        let now = 1_700_000_000;
+        let until = now + 30 * 86_400;
+        let rec = rec_for("max_run_minutes");
+        let snooze = SilencedRec {
+            field: "max_run_minutes".into(),
+            rec_id: Some(rec.id.clone()),
+            kind: "snooze".into(),
+            until_epoch: Some(until),
+        };
+        let outcomes = ZoneCheckOutcomes {
+            cap: CheckOutcome::Recommend(rec),
+            interval: CheckOutcome::Pass,
+            drift: None,
+            backout: None,
+        };
+        let sl = [snooze];
+        let z = assemble_zone(
+            "z",
+            "Zone",
+            14,
+            5,
+            true,
+            SoilBinding::SourceChannel,
+            &outcomes,
+            &[],
+            &sl,
+            now,
+        );
+        assert!(z.recommendation.is_none());
+        assert!(z
+            .lines
+            .last()
+            .unwrap()
+            .starts_with("1 suggestion snoozed until "));
+        // Past expiry the same id surfaces again.
+        let z = assemble_zone(
+            "z",
+            "Zone",
+            14,
+            5,
+            true,
+            SoilBinding::SourceChannel,
+            &outcomes,
+            &[],
+            &sl,
+            until + 1,
+        );
+        assert!(z.recommendation.is_some());
+        assert!(!z.dismissed);
+        // A drifted id (different suggestion) is not silenced by the snooze.
+        let drifted = SilencedRec {
+            rec_id: Some("other-id".into()),
+            ..sl[0].clone()
+        };
+        let z = assemble_zone(
+            "z",
+            "Zone",
+            14,
+            5,
+            true,
+            SoilBinding::SourceChannel,
+            &outcomes,
+            &[],
+            &[drifted],
+            now,
+        );
+        assert!(z.recommendation.is_some());
+    }
+
+    /// Balance lines ride between the check lines and the muted
+    /// annotation, so the annotation stays last for the UI.
+    #[test]
+    fn balance_lines_precede_the_muted_annotation() {
+        let now = 1_700_000_000;
+        let outcomes = ZoneCheckOutcomes {
+            cap: CheckOutcome::Recommend(rec_for("max_run_minutes")),
+            interval: CheckOutcome::Pass,
+            drift: None,
+            backout: None,
+        };
+        let balance = ["Observed rain: 0.00 in over the last 7 days (gauge).".to_string()];
+        let z = assemble_zone(
+            "z",
+            "Zone",
+            14,
+            5,
+            true,
+            SoilBinding::SourceChannel,
+            &outcomes,
+            &balance,
+            &[permanent("max_run_minutes")],
+            now,
+        );
+        let n = z.lines.len();
+        assert!(z.lines[n - 2].starts_with("Observed rain:"));
+        assert_eq!(z.lines[n - 1], "1 suggestion dismissed");
     }
 }

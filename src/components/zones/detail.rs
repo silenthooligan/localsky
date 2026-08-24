@@ -29,6 +29,9 @@ fn now_epoch_secs() -> i64 {
 }
 
 /// Daily watered-minutes buckets for one zone, oldest -> newest.
+/// Minutes are the union-clustered watering evidence (the shared
+/// history::rollup rule, same filter + clustering the water balance
+/// credits), so this chart and the balance can never disagree.
 fn zone_day_buckets(window: &HistoryWindow, slug: &str, days: i64) -> Vec<f64> {
     let now = Local::now();
     let today_mid = now
@@ -39,14 +42,18 @@ fn zone_day_buckets(window: &HistoryWindow, slug: &str, days: i64) -> Vec<f64> {
         .timestamp();
     let n = days.max(1) as usize;
     let mut b = vec![0f64; n];
-    for r in window
+    let zone_rows: Vec<crate::history::types::RunRecord> = window
         .runs
         .iter()
-        .filter(|r| r.skip_reason.is_none() && r.zone == slug)
-    {
-        let back = crate::components::time_bucket::days_back(today_mid, r.start_epoch).max(0);
-        if (back as usize) < n {
-            b[back as usize] += r.duration_s as f64 / 60.0;
+        .filter(|r| r.zone == slug)
+        .cloned()
+        .collect();
+    for events in crate::history::rollup::watering_events_per_zone(&zone_rows).values() {
+        for e in events {
+            let back = crate::components::time_bucket::days_back(today_mid, e.start_epoch).max(0);
+            if (back as usize) < n {
+                b[back as usize] += e.valve_open_s as f64 / 60.0;
+            }
         }
     }
     b.reverse();

@@ -33,6 +33,8 @@ The shape of each `/api/v1/*` GET response is locked at build time by `insta` sn
 
 ### Migration notes
 
+**1.21.0** (weekly water balance). Additive only; no existing response shape changes. Each `water_budgets[]` row in the irrigation snapshot gains the settled balance terms: `observed_rain_mm` + `observed_rain_source` (`gauge` | `radar` | `model_archive` | `none`), `applied_mm` (gross irrigation over the trailing 7 days, union-clustered watering evidence), `forecast_credit_mm` + `forecast_credit_source` (`bias_forecast` | `none`), `bias_multiplier` + `bias_sample_count` (the current month's forecast-bias correction; 1.0 with the sample count when under-trained), and `remaining_sessions`. The existing fields keep their meaning: `today_seconds` is still the actual seconds to water today (the external HA automation contract), `expected_rain_mm` keeps its historical wire scaling (probability-weighted 7-day forward forecast in mm times the 0.7 capture factor; informational, the balance itself subtracts only the bias-corrected credit up to the next session), `needed_mm` is now the balance remainder, and `mm_per_session` is the per-remaining-session gross depth. Session sizing no longer multiplies by the heat multiplier or divides by capture efficiency. `GET /api/v1/irrigation/history` run rows gain `source` and `status`. The tuning report's `zones[]` gain `dismissed` + `dismissed_fields`, and two privileged endpoints manage silencing: `POST /api/v1/irrigation/tuning/dismiss` `{zone_slug, field, recommendation_id, kind: "snooze" | "permanent"}` (a snooze keys the exact recommendation id and expires after 30 days; a permanent dismissal keys the zone + field and survives value drift) and `POST /api/v1/irrigation/tuning/undismiss` `{zone_slug, field}`. A dismissed or snoozed suggestion is stripped inside the report's ranked pick server-side (the zone's next-ranked suggestion, if any, surfaces instead), so counts and the weekly push go quiet with it. The `open_meteo` source's `past_days` config is now honored by the fetch (clamped 1..=7; default 3), and the `forecast_observations` ledger records each day's observed rain as a day-max with an `observed_source` tag.
+
 **1.20.0** (per-zone run limit). Additive only. `ZoneConfig` gains `max_run_minutes` (whole minutes, `5..=360`, `null` = the 60 minute default) in `GET`/`PUT /api/config` and the config schema; the value hot-reloads on save (no restart). The tuning report can now recommend `max_run_minutes` (its `suggested_value` is in minutes), and `POST /api/v1/config/zones/apply` accepts the field alongside the existing set (`soil_texture`, `precip_rate_mm_hr` plus `precip_rate_source`, `root_depth_mm`, `mad_pct_override`, `weekly_budget_in`, `sessions_per_week`); out-of-band values answer `422`. A config write that raises a zone's limit past 60 minutes emits a Web Push notice (tag `cap-raised-<slug>`, deep link `/zones/<slug>`) to subscribed devices after the save. No existing response shape changes.
 
 **1.19.0** (tuning report). Additive only; no existing response shape changes. `GET /api/v1/irrigation/tuning?days=N` (clamp 7..=30, default 14) returns the per-zone results-based tuning report: `{ generated_epoch, window_days, zones: [ { slug, display_name, status, lines, recommendation } ], scorecard }`, at most one recommendation per zone, each carrying the target config field, current and suggested values as JSON (`null` clears an override), companion fields the apply writes alongside (a measured precipitation rate also stamps `precip_rate_source`), the plain-language headline, the evidence lines, and a stable `id`. The scorecard's `scored_days` / `confirmed_days` cover forecast rain skips and are **null** until at least 3 such days could be judged; reactive rain skips (rain already falling or on the ground) ride the additive `reactive_days` / `reactive_line` as a plain count (the 1.18.0 honest-unknowns register; never a zero sentinel). `POST /api/v1/config/zones/apply` writes one recommendation through the validated config path; it is privileged like every config write, regenerates the recommendation server-side, and answers `409` when the supplied `id` no longer derives from current data. Like the other history reads, `/irrigation/tuning` mounts only when the history database is available. No HACS integration change is required.
@@ -374,12 +376,12 @@ Run history window, counted backward from now. `days` defaults to 30 and clamps 
   "from_epoch": 1762808000,
   "to_epoch": 1765400000,
   "runs": [
-    { "zone": "back_yard", "start_epoch": 1765320000, "duration_s": 600, "skip_reason": null }
+    { "zone": "back_yard", "start_epoch": 1765320000, "duration_s": 600, "skip_reason": null, "source": "ha_refresher", "status": "completed" }
   ]
 }
 ```
 
-Rows with a non-null `skip_reason` are skip events rather than completed runs.
+Rows with a non-null `skip_reason` are skip events rather than completed runs. `source` and `status` (1.21.0, additive) carry the row's provenance so clients can reduce watering minutes the way the engine does: watering evidence is `status = "completed"` with source `ha_refresher`, `manual`, or `manual:<id>`; `dry_run` (and `dry_run:<id>`) rows are pretend water and `smart_morning` rows are skip markers. A manually started run appears twice (the request row and the observed hardware activity); minute totals should cluster overlapping rows rather than sum them, which is exactly what the app's own charts do.
 
 ### `GET /api/v1/irrigation/decisions?days=30`
 
@@ -431,10 +433,15 @@ The per-zone tuning report: a window of recorded outcomes reduced to at most one
 }
 ```
 
-- `status` is `recommendation`, `ok`, or `insufficient_data`; `lines` carries the cadence line and each check's specific not-enough-data state.
+- `status` is `recommendation`, `ok`, or `insufficient_data`; `lines` carries the cadence line, the water-balance term lines (observed rain, applied irrigation, forecast credit, each with its source rung), and each check's specific not-enough-data state.
 - `current_value` / `suggested_value` are JSON values; `null` as a suggestion means "clear the override" (restore the default).
 - `scorecard.scored_days` / `confirmed_days` cover FORECAST rain skips only (rain expected within 4 hours, tomorrow rain, 3-day rain) and are `null` until at least `min_scored_days` such days could be judged. Reactive rain skips (rain already falling or already on the ground) confirm themselves, so they are never scored; they ride `reactive_days` / `reactive_line` as a separate count (`null` / empty until one exists).
 - Applying a recommendation from a non-default window must echo the report's `window_days` (see the apply endpoint below): window-dependent checks derive different suggestions at different windows.
+- `dismissed: true` (1.21.0) marks a zone with at least one snoozed or dismissed suggestion. The silenced suggestion is skipped inside the ranked pick, so a lower-ranked suggestion may still occupy `recommendation`; the last entry of `lines` is the muted annotation, and `dismissed_fields` names the silenced config fields for the undismiss call.
+
+### `POST /api/v1/irrigation/tuning/dismiss` and `POST /api/v1/irrigation/tuning/undismiss`
+
+Silence or restore one zone's tuning recommendation (1.21.0). Dismiss body: `{ "zone_slug", "field", "recommendation_id", "kind" }` where `kind` is `"snooze"` (silences the exact `recommendation_id` for 30 days; a suggestion whose value later drifts to a new id returns immediately) or `"permanent"` (keys the zone + field and survives value drift). Undismiss body: `{ "zone_slug", "field" }`; answers `{ "removed": N }`. Both are privileged like `POST /config/zones/apply`. Silencing is per-suggestion and total for that suggestion: the report strips it server-side inside the ranked pick (the zone's next-ranked suggestion, if any, surfaces instead), so every count-based surface and the weekly notification go quiet with it; a report whose every suggestion is silenced sends no weekly push. Mount only when the history database is available.
 
 ### `POST /api/v1/irrigation/simulate`
 

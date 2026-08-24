@@ -141,7 +141,11 @@ FROM debian:trixie-slim
 # fix-perms-then-drop entrypoint (docker-entrypoint.sh chowns /data and /keys
 # as root, then drops to 10001:10001). The uid:10001 app user is created here
 # (the public base has no pre-baked app user).
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# The upgrade pulls Debian security fixes the base tag has not been rebuilt
+# with yet; without it the trivy gate fails on OS packages whose fixed
+# versions already sit in the security repo.
+RUN apt-get update && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
         ca-certificates libssl3 curl tzdata gosu \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --uid 10001 --user-group --no-create-home --shell /usr/sbin/nologin localsky

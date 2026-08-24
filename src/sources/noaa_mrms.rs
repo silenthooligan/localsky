@@ -425,11 +425,17 @@ fn rain_fields(kind: RainKind, value: f64) -> Vec<(WeatherField, f64)> {
                 let in_hr = to_canonical(WeatherField::RainIntensityInHr, value, Some("mm"));
                 vec![(WeatherField::RainIntensityInHr, in_hr)]
             } else {
-                // A genuine multi-hour QPE window (e.g. _QPE_24H_) IS a day-scale
-                // accumulation total, so it maps to RainTodayIn. No in/hr rate: the
-                // window is not one hour, so a rate reading would be meaningless.
-                let inches = to_canonical(WeatherField::RainTodayIn, value, Some("mm"));
-                vec![(WeatherField::RainTodayIn, inches)]
+                // A multi-hour QPE window (e.g. _QPE_24H_) is a TRAILING
+                // total, not a since-local-midnight total: for hours after
+                // midnight it still contains yesterday evening's storm, so
+                // writing it to RainTodayIn would attribute yesterday's rain
+                // to today's calendar day (and the observations ledger's
+                // day-max would lock that in permanently, double-counting
+                // the storm across two days). No canonical field carries
+                // trailing-window semantics, so a non-hourly accumulation
+                // emits nothing; the startup warning below names the
+                // limitation when such a product is configured.
+                Vec::new()
             }
         }
     }
@@ -601,9 +607,14 @@ impl WeatherSource for NoaaMrms {
     fn capabilities(&self) -> SourceCaps {
         let mut fields = HashSet::new();
         // CURRENT rain scalars decoded from the MRMS QPE grid cell over the
-        // deployment lat/lon: a live in/hr rate (RainIntensityInHr) and the
-        // accumulated total today (RainTodayIn). These are the ONLY fields MRMS
-        // emits, so it surfaces in the per-field CURRENT rain picker only.
+        // deployment lat/lon: a live in/hr rate (RainIntensityInHr) and,
+        // declared for a future genuinely day-bucketed product, the daily
+        // total (RainTodayIn). Today NO shipped product emits RainTodayIn:
+        // the 01H default maps to the rate, and a trailing multi-hour
+        // window (e.g. 24H) emits nothing because it carries yesterday's
+        // rain past midnight (see rain_fields). These are the ONLY fields
+        // MRMS can emit, so it surfaces in the per-field CURRENT rain
+        // picker only.
         fields.insert(WeatherField::RainIntensityInHr);
         fields.insert(WeatherField::RainTodayIn);
         SourceCaps {
@@ -642,6 +653,25 @@ impl WeatherSource for NoaaMrms {
             accum_product = %self.accum_product(),
             "NOAA MRMS source started (two products per cycle)"
         );
+        // A non-hourly accumulation product (a trailing multi-hour window,
+        // e.g. _QPE_24H_) carries yesterday's rain for hours after local
+        // midnight, so it cannot drive the daily rain total and emits no
+        // rain fields at all. Name the limitation once at startup instead
+        // of silently producing nothing.
+        if matches!(
+            classify_product(self.accum_product()),
+            RainKind::Accumulation {
+                accum_is_hourly: false
+            }
+        ) {
+            warn!(
+                source_id = %self.id,
+                accum_product = %self.accum_product(),
+                "configured MRMS accumulation product covers a multi-hour trailing window and \
+                 cannot drive the daily rain total; it emits no rain fields. Use the 01H \
+                 product (MultiSensor_QPE_01H_Pass2) for the hourly rate."
+            );
+        }
         let mut tick = interval(POLL_INTERVAL);
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut last_reachable: Option<bool> = None;
@@ -864,18 +894,22 @@ mod tests {
     }
 
     #[test]
-    fn longer_accumulation_emits_only_total() {
-        // A 24 hour QPE emits the accumulation total but NOT an in/hr intensity
-        // (the window is not one hour, so the rate reading is not meaningful).
+    fn longer_accumulation_emits_nothing() {
+        // A 24 hour QPE is a TRAILING total: after local midnight it still
+        // contains yesterday evening's storm, so writing it to RainTodayIn
+        // would attribute yesterday's rain to today (and the observations
+        // ledger's day-max would lock it in, double-counting the storm).
+        // It emits NO rain fields; the startup warning names the limitation.
         let fields = rain_fields(
             RainKind::Accumulation {
                 accum_is_hourly: false,
             },
             25.4,
         );
-        assert_eq!(fields.len(), 1);
-        assert_eq!(fields[0].0, WeatherField::RainTodayIn);
-        assert!((fields[0].1 - 1.0).abs() < 1e-9);
+        assert!(
+            fields.is_empty(),
+            "a trailing multi-hour window never reaches the daily ledger"
+        );
     }
 
     #[test]

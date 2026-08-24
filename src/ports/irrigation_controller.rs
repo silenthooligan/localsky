@@ -118,6 +118,13 @@ pub struct RunRecord {
 pub trait IrrigationController: Send + Sync {
     fn id(&self) -> &str;
     fn supports(&self) -> ControllerCaps;
+    /// True when this controller never actuates hardware (a dry-run
+    /// stand-in): running state it reports is pretend water, and the
+    /// run-edge observer must record it as such (source 'dry_run') so
+    /// it never counts as watering evidence.
+    fn simulated(&self) -> bool {
+        false
+    }
     async fn run_zone(&self, slug: &str, duration_s: u32) -> ControllerResult<RunHandle>;
     async fn stop_zone(&self, slug: &str) -> ControllerResult<()>;
     async fn stop_all(&self) -> ControllerResult<()>;

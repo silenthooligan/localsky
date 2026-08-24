@@ -11869,7 +11869,23 @@ button.mobile-tab {
   display: flex; flex-direction: column; gap: var(--space-1);
   color: var(--text-soft); font-size: var(--text-meta);
 }
-.zone-tuning__apply { display: flex; }
+.zone-tuning__apply { display: flex; gap: var(--space-2); }
+// The do-not-suggest-again action: subtle text control, never a danger
+// treatment (it silences a suggestion; it destroys nothing).
+.zone-tuning__dismiss {
+  align-self: flex-start;
+  background: none; border: none; padding: 0; cursor: pointer;
+  color: var(--text-faint); font-size: var(--text-meta);
+  text-decoration: underline dotted;
+}
+.zone-tuning__dismiss:hover { color: var(--text-dim); }
+// The muted dismissed/snoozed annotation with its inline Undo.
+.zone-tuning__dismissed { display: flex; align-items: baseline; gap: var(--space-2); }
+.zone-tuning__undo {
+  background: none; border: none; padding: 0; cursor: pointer;
+  color: var(--accent); font-size: var(--text-meta); font-weight: 600;
+}
+.zone-tuning__undo:hover { text-decoration: underline; }
 
 // Irrigation-page tuning strip: one slim row, attention dot + count link
 // + scorecard line. Rendered ABOVE the data columns when a suggestion

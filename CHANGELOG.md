@@ -2,6 +2,29 @@
 
 All notable changes to LocalSky are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.17] - 2026-08-24
+
+The weekly budget becomes a true water balance, and tuning suggestions learn to stay quiet when told. No breaking changes.
+
+### Fixed
+
+- **Sessions no longer overshoot the weekly target.** The old sizing multiplied delivery by a heat factor and divided by a capture factor, inflating run length by up to about 1.9x against a target that already means "inches per week including rain"; it also only ever looked at forecast rain, so rain that had already fallen and watering already done never counted, and a soaked week could still schedule full sessions. Sessions now size against the true balance: the weekly target minus observed rain, minus irrigation already applied, minus a forecast credit covering only the days until the zone's next session. A week the sky already covered reads "covered by rain and prior watering" and waters nothing.
+- **The forecast credit is corrected against your own yard's history.** The per-month forecast-bias model (predicted vs observed rain, recorded daily) now feeds the balance: a forecast that chronically under-calls your microclimate credits less future rain, and one that over-calls credits less of its promises. Months without enough rain days apply no correction; the tuning report shows the sample count behind the current multiplier.
+- **Session spacing works.** The minimum interval between sessions (7 days divided by sessions per week) was never armed on live installs because the last-run time was not populated; zones could be sized as eligible every morning. Spacing now reads the run history and actually gates.
+- **A day's recorded rain can no longer be erased by a gauge dropout.** The daily observed-rain ledger keeps the day's maximum: a gauge going quiet mid-storm no longer resets the day's total to zero, and each day is tagged with the kind of source that measured it. Days with no rain-capable source at all record an explicit placeholder that never trains the bias model and never counts as a measured-dry day.
+- **History charts agree with the balance.** Watered-minutes charts, totals, and day headers now count each watering once (a manually started run used to count twice: once as the request, once as observed hardware activity), using the same evidence rule the balance credits. Dry-run controller activity is recorded as such and never counts as water, and a manual run stopped early is recorded at its real length instead of its planned one.
+- Automated security scanning of releases and dependencies now gates the build pipeline (dependency audit and container scan).
+
+### Added
+
+- **Snooze and dismiss for tuning suggestions.** Every suggestion now offers Snooze 30 days and a quieter Do-not-suggest-this-again beside Apply. Snoozing silences that exact suggestion for 30 days; dismissing silences that setting on that zone permanently, even as its numbers drift. Silencing one suggestion never hides the rest: the next check's suggestion takes its place. A silenced suggestion drops out of the zone cards, the counts, the irrigation-page strip, and the weekly notification (a week whose every suggestion is silenced sends nothing). One muted line remains on the zone's panel with an Undo.
+- **An honest observed-rain source for gauge-less installs.** The balance's observed-rain term resolves through a ladder and names its source: your gauge or radar day totals first, then the forecast provider's past-day model archive; installs with neither run on the corrected forecast alone, and the report line names which one applied. A week your own gauge measured is never overridden by a wetter regional model. The Open-Meteo `past_days` setting is now honored (1 to 7 days, default 3). On US installs without gauge or radar day totals, the tuning report notes that a rain source reporting day totals (NOAA MRMS day-total products qualify) unlocks the observed-rain credit.
+- The tuning report states each zone's balance plainly: observed rain, irrigation applied, and forecast credit, each with its source and window, plus the full numeric breakdown behind any suggestion.
+
+### Changed
+
+- **Run times get shorter.** With the inflation gone and real rain and watering credited, most zones will see noticeably shorter sessions than 0.7.16 sized, and wet weeks will drop to zero. What you configured as the weekly target is now delivered as configured, not multiplied.
+
 ## [0.7.16] - 2026-08-24
 
 ### Added

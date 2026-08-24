@@ -68,7 +68,10 @@ fn day_key_in_tz(epoch: i64, _tz: &str) -> String {
 }
 
 /// Daily watered-minutes buckets, oldest -> newest, length `days`.
-/// Skips are excluded (skip_reason is Some). Optional zone filter.
+/// Minutes are the union-clustered watering evidence (the shared
+/// history::rollup rule): a manual run recorded twice (manual row +
+/// observer row) counts once, and dry-run/skip rows never count, so the
+/// chart can never show more minutes than the water balance credits.
 fn day_buckets(runs: &[RunRecord], days: i64, zone: Option<&str>) -> Vec<f64> {
     let now = Local::now();
     let today_mid = now
@@ -79,15 +82,17 @@ fn day_buckets(runs: &[RunRecord], days: i64, zone: Option<&str>) -> Vec<f64> {
         .timestamp();
     let n = days.max(1) as usize;
     let mut b = vec![0f64; n];
-    for r in runs.iter().filter(|r| r.skip_reason.is_none()) {
-        if let Some(z) = zone {
-            if r.zone != z {
-                continue;
+    let filtered: Vec<RunRecord> = runs
+        .iter()
+        .filter(|r| zone.map(|z| r.zone == z).unwrap_or(true))
+        .cloned()
+        .collect();
+    for events in crate::history::rollup::watering_events_per_zone(&filtered).values() {
+        for e in events {
+            let back = crate::components::time_bucket::days_back(today_mid, e.start_epoch).max(0);
+            if (back as usize) < n {
+                b[back as usize] += e.valve_open_s as f64 / 60.0;
             }
-        }
-        let back = crate::components::time_bucket::days_back(today_mid, r.start_epoch).max(0);
-        if (back as usize) < n {
-            b[back as usize] += r.duration_s as f64 / 60.0;
         }
     }
     b.reverse();
@@ -706,9 +711,17 @@ pub fn HistoryPage() -> impl IntoView {
                     .into_any();
                 }
                 let w = window.get();
-                let runs: Vec<&RunRecord> = w.runs.iter().filter(|r| r.skip_reason.is_none()).collect();
-                let total_min: f64 = runs.iter().map(|r| r.duration_s as f64 / 60.0).sum();
-                let run_count = runs.len();
+                // Union-clustered watering evidence (the shared rollup
+                // rule): totals agree with the water balance's applied
+                // credit, and "Runs" counts irrigation events, not the
+                // duplicate rows a manual run persists.
+                let by_zone = crate::history::rollup::watering_events_per_zone(&w.runs);
+                let total_min: f64 = by_zone
+                    .values()
+                    .flatten()
+                    .map(|e| e.valve_open_s as f64 / 60.0)
+                    .sum();
+                let run_count: usize = by_zone.values().map(|v| v.len()).sum();
                 // Skip *days* (from the decision feed), not run records, runs
                 // are only actual waterings, so that count is always ~0.
                 let skip_count: usize = skip_breakdown(&decisions.get(), &tz.get())
@@ -906,7 +919,14 @@ pub fn HistoryPage() -> impl IntoView {
                     }
                     days.into_iter().map(|(rep_epoch, rows)| {
                         let row_tz = tzs.clone();
-                        let watered_s: i64 = rows.iter().filter(|r| r.skip_reason.is_none()).map(|r| r.duration_s).sum();
+                        // Day-total minutes reduce through the same union
+                        // clustering as every other minutes surface; the
+                        // row list below stays the precise record.
+                        let watered_s: i64 = crate::history::rollup::watering_events_per_zone(&rows)
+                            .values()
+                            .flatten()
+                            .map(|e| e.valve_open_s)
+                            .sum();
                         let header = fmt_day_header(rep_epoch, &tzs);
                         view! {
                             <div class="runlog-day">

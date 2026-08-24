@@ -188,8 +188,18 @@ pub fn ZoneTuningPanel(slug: Signal<String>) -> impl IntoView {
                             // Density: the first line (the watering-cadence
                             // line when the zone has runs) leads; the
                             // probe-availability and insufficient-data lines
-                            // collapse into ONE quiet disclosure.
-                            let mut lines = zt.lines.clone().into_iter();
+                            // collapse into ONE quiet disclosure. When the
+                            // zone's suggestion is dismissed/snoozed the
+                            // server appends the muted annotation last; pull
+                            // it out of the notes so it renders in place
+                            // with its Undo.
+                            let mut all_lines = zt.lines.clone();
+                            let dismissed_note = if zt.dismissed {
+                                all_lines.pop()
+                            } else {
+                                None
+                            };
+                            let mut lines = all_lines.into_iter();
                             let lead = lines.next();
                             let notes: Vec<String> = lines.collect();
                             let window_days = rep.window_days;
@@ -197,6 +207,11 @@ pub fn ZoneTuningPanel(slug: Signal<String>) -> impl IntoView {
                                 let zone_slug = zt.slug.clone();
                                 let zone_name = zt.display_name.clone();
                                 view! { <TuningRecommendationCard rec zone_slug zone_name window_days applying refetch/> }
+                            });
+                            let undo = dismissed_note.map(|note| {
+                                let zone_slug = zt.slug.clone();
+                                let fields = zt.dismissed_fields.clone();
+                                view! { <DismissedNote note zone_slug fields refetch/> }
                             });
                             view! {
                                 {lead.map(|l| view! {
@@ -212,6 +227,7 @@ pub fn ZoneTuningPanel(slug: Signal<String>) -> impl IntoView {
                                     </details>
                                 })}
                                 {card}
+                                {undo}
                             }
                             .into_any()
                         }
@@ -222,13 +238,92 @@ pub fn ZoneTuningPanel(slug: Signal<String>) -> impl IntoView {
     }
 }
 
+/// The muted dismissed/snoozed annotation with its Undo. Undo posts
+/// undismiss for every silenced field on the zone and bumps the shared
+/// TuningEpoch so all surfaces update in place.
+#[component]
+fn DismissedNote(
+    note: String,
+    zone_slug: String,
+    fields: Vec<String>,
+    refetch: RwSignal<u32>,
+) -> impl IntoView {
+    let epoch = use_context::<TuningEpoch>();
+    let busy = RwSignal::new(false);
+    let on_undo = move |_: leptos::ev::MouseEvent| {
+        #[cfg(not(feature = "hydrate"))]
+        let _ = (&zone_slug, &fields, busy, refetch, epoch);
+        #[cfg(feature = "hydrate")]
+        {
+            use gloo_net::http::Request;
+            if busy.get_untracked() {
+                return;
+            }
+            busy.set(true);
+            let slug = zone_slug.clone();
+            let fields = fields.clone();
+            leptos::task::spawn_local(async move {
+                let mut failed: Option<(u16, String)> = None;
+                for field in fields {
+                    let body = serde_json::json!({
+                        "zone_slug": slug.clone(),
+                        "field": field,
+                    });
+                    let result: Result<(), (u16, String)> = async {
+                        let resp = Request::post("/api/v1/irrigation/tuning/undismiss")
+                            .json(&body)
+                            .map_err(|e| (0u16, e.to_string()))?
+                            .send()
+                            .await
+                            .map_err(|e| (0u16, e.to_string()))?;
+                        if !resp.ok() {
+                            let status = resp.status();
+                            let text = resp.text().await.unwrap_or_default();
+                            return Err((status, text));
+                        }
+                        Ok(())
+                    }
+                    .await;
+                    if let Err(e) = result {
+                        failed = Some(e);
+                    }
+                }
+                let _ = busy.try_set(false);
+                match failed {
+                    None => {
+                        crate::components::ui::use_toast().success("Suggestion restored.");
+                    }
+                    Some((status, text)) => {
+                        crate::components::ui::use_toast().error(
+                            crate::components::settings_ui::save_error_message(status, &text),
+                        );
+                    }
+                }
+                let _ = refetch.try_update(|n| *n += 1);
+                if let Some(e) = epoch {
+                    let _ = e.0.try_update(|n| *n += 1);
+                }
+            });
+        }
+    };
+    view! {
+        <p class="zone-tuning__line zone-tuning__line--muted zone-tuning__dismissed">
+            {note}
+            " "
+            <button class="zone-tuning__undo is-interactive" on:click=on_undo>"Undo"</button>
+        </p>
+    }
+}
+
 /// One recommendation: attention-striped card with a SUGGESTION pill, a
 /// status-chip confidence, the bumped headline, the mono current ->
 /// suggested row, expandable evidence, and Apply. A max_run_minutes
 /// suggestion above 60 gates the Apply behind the shared ConfirmSheet
 /// (the same override-style confirm the zone editor uses). `window_days`
 /// is the window the report was fetched at; the apply body echoes it so
-/// the server re-derives at the same window.
+/// the server re-derives at the same window. Beside Apply: Snooze
+/// (30 days, id-keyed) and a subtle do-not-suggest-again action
+/// (field-keyed, survives value drift).
 #[component]
 fn TuningRecommendationCard(
     rec: TuningRecommendation,
@@ -359,6 +454,79 @@ fn TuningRecommendationCard(
         }
         do_apply.run(());
     };
+
+    // Snooze / permanent dismissal. Both post the same endpoint and bump
+    // the shared TuningEpoch so every surface (cards, KPI, strip,
+    // auto-select) updates in place.
+    let dismiss_busy = RwSignal::new(false);
+    let rec_for_dismiss = rec.clone();
+    let slug_for_dismiss = zone_slug.clone();
+    let do_dismiss = Callback::new(move |kind: &'static str| {
+        #[cfg(not(feature = "hydrate"))]
+        let _ = (
+            &rec_for_dismiss,
+            &slug_for_dismiss,
+            dismiss_busy,
+            refetch,
+            epoch,
+            kind,
+        );
+        #[cfg(feature = "hydrate")]
+        {
+            use gloo_net::http::Request;
+            if dismiss_busy.get_untracked() {
+                return;
+            }
+            dismiss_busy.set(true);
+            let body = serde_json::json!({
+                "zone_slug": slug_for_dismiss.clone(),
+                "field": rec_for_dismiss.field.clone(),
+                "recommendation_id": rec_for_dismiss.id.clone(),
+                "kind": kind,
+            });
+            leptos::task::spawn_local(async move {
+                let outcome: Result<(), (u16, String)> = async {
+                    let resp = Request::post("/api/v1/irrigation/tuning/dismiss")
+                        .json(&body)
+                        .map_err(|e| (0u16, e.to_string()))?
+                        .send()
+                        .await
+                        .map_err(|e| (0u16, e.to_string()))?;
+                    if !resp.ok() {
+                        let status = resp.status();
+                        let text = resp.text().await.unwrap_or_default();
+                        return Err((status, text));
+                    }
+                    Ok(())
+                }
+                .await;
+                let _ = dismiss_busy.try_set(false);
+                match outcome {
+                    Ok(()) => {
+                        if kind == "snooze" {
+                            crate::components::ui::use_toast().success("Snoozed for 30 days.");
+                        } else {
+                            crate::components::ui::use_toast()
+                                .success("Dismissed. This suggestion will not return.");
+                        }
+                    }
+                    Err((status, text)) => {
+                        crate::components::ui::use_toast().error(
+                            crate::components::settings_ui::save_error_message(status, &text),
+                        );
+                    }
+                }
+                let _ = refetch.try_update(|n| *n += 1);
+                if let Some(e) = epoch {
+                    let _ = e.0.try_update(|n| *n += 1);
+                }
+            });
+        }
+    });
+    let on_snooze = move |_: leptos::ev::MouseEvent| do_dismiss.run("snooze");
+    let dismiss_cb = do_dismiss;
+    let on_dismiss_forever = move |_: leptos::ev::MouseEvent| dismiss_cb.run("permanent");
+
     view! {
         <div class="zone-tuning__card is-control">
             <div class="zone-tuning__card-head">
@@ -385,7 +553,16 @@ fn TuningRecommendationCard(
                     loading=Signal::derive(move || applying.get())
                     on_click=Callback::new(on_apply)
                 >"Apply"</Button>
+                <Button
+                    variant="secondary"
+                    loading=Signal::derive(move || dismiss_busy.get())
+                    on_click=Callback::new(on_snooze)
+                >"Snooze 30 days"</Button>
             </div>
+            <button
+                class="zone-tuning__dismiss is-interactive"
+                on:click=on_dismiss_forever
+            >"Do not suggest this again"</button>
             <ConfirmSheet
                 visible=confirm_open
                 title="Raise run limit?"
@@ -489,6 +666,7 @@ mod tests {
                     status: "ok".into(),
                     lines: vec![],
                     recommendation: has_rec.then(|| rec("sessions_per_week", json!(2), json!(3))),
+                    ..Default::default()
                 })
                 .collect(),
             scorecard: TuningScorecard {

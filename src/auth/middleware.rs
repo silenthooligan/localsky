@@ -557,6 +557,15 @@ fn is_privileged_path(method: &Method, path: &str) -> bool {
         return true;
     }
 
+    // Tuning dismiss/undismiss mutate persisted operator preferences
+    // (which recommendations stay silenced, including the weekly push
+    // trigger): same privileged posture as the zones/apply config write.
+    if (path == "/api/irrigation/tuning/dismiss" || path == "/api/irrigation/tuning/undismiss")
+        && !matches!(*method, Method::HEAD | Method::OPTIONS | Method::GET)
+    {
+        return true;
+    }
+
     // The wizard's alternate config-write paths (apply / draft PUT+DELETE /
     // seed_current) persist or stage the same localsky.toml as /api/config,
     // so they clear the same bar. Probe/test/scan/discover are NOT here.
@@ -1255,6 +1264,25 @@ mod tests {
         assert!(!is_privileged_path(
             &Method::GET,
             "/api/v1/irrigation/tuning"
+        ));
+        // Dismiss/undismiss mutate persisted operator preferences (incl.
+        // the weekly push trigger): privileged like zones/apply, both
+        // prefixes, state-changing methods only.
+        assert!(is_privileged_path(
+            &Method::POST,
+            "/api/irrigation/tuning/dismiss"
+        ));
+        assert!(is_privileged_path(
+            &Method::POST,
+            "/api/v1/irrigation/tuning/dismiss"
+        ));
+        assert!(is_privileged_path(
+            &Method::POST,
+            "/api/v1/irrigation/tuning/undismiss"
+        ));
+        assert!(!is_privileged_path(
+            &Method::GET,
+            "/api/v1/irrigation/tuning/dismiss"
         ));
 
         // Retiring a soil probe persists config, deletes history, and can

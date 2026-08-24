@@ -102,6 +102,12 @@ Two kinds deserve a callout because they accept data from anything:
 
 Every located install automatically carries its region's keyless forecast authority alongside Open-Meteo: **NWS + NOAA MRMS** in the US, **MET Norway** in Europe and the Nordics. They are seeded once, at their region rank (above the Open-Meteo 50 backstop), including on existing installs at upgrade, so a single provider outage cannot blank the forecast, the 7-day verdicts, or the rain-skip inputs. Deleting a seeded source is permanent; LocalSky records the id in `seeded_source_ids` and never re-adds it. When a lower-ranked provider is serving because the primary has gone quiet, the forecast header shows an amber "via [provider] · backup" link into the source status page. Open-Meteo itself also retries against two verified Open-Meteo mirror hosts before giving up, and data served that way is labeled "Open-Meteo (mirror)".
 
+### Open-Meteo past days
+
+The `open_meteo` source's `past_days` (default 3, clamped 1..=7) sets how many past days of daily model data ride along with the forecast. Those archived days are the model-archive rung of the observed-rain ladder: on installs without a gauge or radar day totals they are what the weekly water balance and the days-since-rain backstop read. The value is honored live since 0.7.17 (earlier builds always fetched 3 regardless of the setting); a config save applies on the next forecast refresh, no restart. A persisted `past_days = 1` is rewritten to 3 on load: 1 was the old never-honored template default, not an operator choice, and honoring it as written would shrink the archive on upgrade.
+
+Related: the observed-rain ledger (`forecast_observations`) tags each day's total with its source (`gauge` | `radar` | `none`). A day whose rain owner is a model fill, stale, or absent records a `none` placeholder that never trains the bias model and never counts as a measured-dry day (a model's "rain today" is a whole-day forecast, not an observation); rows from before 0.7.17 read `legacy` and are treated as gauge-quality only on installs with a station source.
+
 ### Self-hosting Open-Meteo
 
 Open-Meteo's engine is open source, and LocalSky can point at your own instance: set `endpoint` on the `open_meteo` source to its base URL. Your instance becomes the FIRST rung of the endpoint ladder; the hosted api.open-meteo.com and its mirrors stay behind it as automatic fallback, so a down self-hosted box degrades gracefully instead of blanking the forecast. Data served this way is labeled "Open-Meteo (self-hosted)".

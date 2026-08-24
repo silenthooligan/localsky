@@ -15,6 +15,7 @@ pub mod db;
 #[cfg(feature = "ssr")]
 pub mod ingest;
 
+pub mod rollup;
 pub mod types;
 
 #[cfg(feature = "ssr")]

@@ -150,6 +150,30 @@ seconds = (gross_mm_needed / precip_rate_mm_hr) * 3600
 
 Runtime is capped at the zone's run limit (`max_run_minutes`, 60 minutes when unset) so a misconfigured precip rate can't run a zone for hours; an active watering restriction's per-zone cap tightens it further via min().
 
+## Weekly water balance
+
+The weekly allocator sizes each zone's sessions against a true water balance in gross homeowner terms: the target is "inches per week including rain," and the week's ledger settles before any session is sized.
+
+```
+weekly_target_gross_mm = weekly_budget_in * 25.4
+remainder = max(0, weekly_target_gross_mm
+                   - observed_rain_trailing_mm
+                   - irrigation_applied_trailing_mm
+                   - bias_corrected_forecast_credit_mm)
+session_gross_mm    = remainder / remaining_sessions
+seconds_per_session = session_gross_mm / throughput_mm_hr * 3600   (capped at the run limit)
+```
+
+- The trailing window is a rolling 7 local days ending now; there is no calendar-week anchor.
+- Observed rain resolves through a ladder with per-rung provenance and COVERAGE precedence: when the observations ledger holds any gauge or radar day rows for the window, the measured total wins outright, even at 0.00 in (a yard that measured a dry week is ground truth a wetter regional model must not override). Only when measured coverage is entirely absent does the forecast provider's past-day model archive supply the term, and an install with neither runs on the corrected forecast alone; the tuning report line names which rung applied.
+- Applied irrigation is the union of completed watering evidence in the window (cycle-soak segments and duplicate manual/observer rows cluster into single events) times the zone's precipitation rate. Gross in against a gross target: no capture factor on either side.
+- The forecast credit covers only the days between tomorrow and the zone's next expected session, corrected by the per-month bias multiplier (below). Rain past the next session is never credited now; it will be observed rain by the time it matters. Imminent rain is handled by the 24-hour defer gate, not the credit.
+- `remaining_sessions` is `sessions_per_week` minus the completed events in the window, floor 1. Sessions space at `floor(7 / sessions_per_week)` days, measured from the last completed event in the runs history.
+
+Fixed in 0.7.17: the previous formula multiplied delivery by the heat multiplier and divided by capture efficiency (0.70), inflating session length by up to about 1.9x against a target that already reads as gross, and it credited only forward forecast rain: rain that had already fallen and water already applied never counted, so a soaked week could still schedule full sessions. The heat multiplier stays an ETc input and capture efficiency stays a soil-projection input; neither shapes session delivery any more.
+
+Implementation: [src/engine/budget.rs](../src/engine/budget.rs) (the one pure implementation; the refresher assembles its inputs).
+
 ## Cycle-and-soak
 
 If applying the full runtime at the sprinkler's precipitation rate would exceed the soil's infiltration capacity, water runs off instead of soaking in. The splitter divides the total runtime into N cycles separated by soak gaps:
@@ -219,7 +243,8 @@ Every refresh, LocalSky records one row per local calendar day in `forecast_obse
 | column | source |
 |---|---|
 | `predicted_in` | The morning's forecast (`forecast.daily[0].precipitation_sum`). First write of the day wins. |
-| `observed_in` | The day's end-of-period observed rain from the merged snapshot. Updated as the day accumulates. |
+| `observed_in` | The day's observed rain from the merge-contested daily total. Day-max: the recorded value only ever rises within a day, so a gauge going stale mid-storm cannot reset the total. |
+| `observed_source` | Which kind of source supplied the day's max: `gauge` or `radar` for measured day totals, or `none` (a placeholder 0.0, excluded from the bias fit, the dryness counters, and the scorecard). A model-nature rain owner also records the placeholder: its "rain today" is the whole day's forecast, including hours that have not happened, and the day-max semantics would make phantom rain permanent. Rows written before 0.7.17 read `legacy` and count as gauge-quality only on installs with a station source. |
 | `month` | 1..12, denormalized so the bias query indexes by month-of-year. |
 
 The first write of the day plants the prediction; the rest of the day refines the observation. Once `MIN_OBSERVATIONS` (currently 5) days exist in a given month within the rolling 90-day window, the engine computes a per-month bias multiplier:
@@ -235,7 +260,8 @@ Multiplicative not additive: rain bias is the same shape at 0.2 inch and 2.0 inc
 
 - **API:** `GET /api/v1/forecast/bias` returns the current-month multiplier plus the full 12-month table with sample counts.
 - **Pure module:** `engine::forecast_bias::BiasModel::from_observations(observations, today, window)` is callable from anywhere; ideal for backtests and replay against historical verdict logs.
-- **Skip rules:** the model is surfaced and the observations persist, but the multiplier is not yet folded into the rain inputs going into the skip ladder; wiring `corrected_rain = raw_rain * multiplier` upstream of `skip_rules::evaluate` remains planned. The same observation rows already do decision work elsewhere: the observed-rain backstop reads them live, and the [tuning report](tuning-report.md)'s forecast-skip scorecard judges every rain-family skip against them.
+- **The weekly balance:** the balance's forward credit is the multiplier's first engine consumer: `credit = forecast_rain * precip_weight * multiplier_for(month)` over the days until the zone's next session. Under-trained months multiply by 1.0 by design, and the tuning report states the sample count instead of implying a correction. The multiplier applies only to forward forecast, never to observed terms. Rows whose observed side had no rain-capable source (`observed_source = 'none'`) are excluded from the fit, so gauge-less installs cannot train the floor on fabricated dry days.
+- **Skip rules:** the multiplier is not yet folded into the rain inputs going into the skip ladder; wiring `corrected_rain = raw_rain * multiplier` upstream of `skip_rules::evaluate` remains planned. The same observation rows already do decision work elsewhere: the observed-rain backstop reads them live, and the [tuning report](tuning-report.md)'s forecast-skip scorecard judges every rain-family skip against them.
 
 ### Defaults and bounds
 

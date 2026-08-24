@@ -933,7 +933,7 @@ fn keyless_config(kind: &str) -> serde_json::Value {
         "open_meteo" => serde_json::json!({
             "forecast_days": 7,
             "forecast_hours": 48,
-            "past_days": 1,
+            "past_days": 3,
             "include_radar": true,
         }),
         // NOAA MRMS is keyless with no required scalar config; the server stamps

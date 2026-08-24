@@ -63,6 +63,49 @@ configured one by more than 30 percent, the suggestion is to set the
 measured rate, the same correction a catch-cup test would give you
 without the cups.
 
+## The water-balance lines
+
+Each zone's panel states the three terms the weekly
+[water balance](irrigation-engine.md#weekly-water-balance) settled
+against, one plain line per term with its source:
+
+- **Observed rain** over the last 7 days, named by the rung that
+  supplied it: your gauge or radar day totals whenever any exist (a
+  measured dry week reads 0.00 in from the gauge and is never
+  overridden by a wetter regional model), the forecast provider's model
+  archive when no measured day exists, and on installs with neither,
+  the balance runs on the corrected forecast alone. On US installs
+  without gauge or radar day totals, one informational line notes that
+  a rain source reporting day totals unlocks the observed-rain credit
+  (NOAA MRMS day-total products qualify).
+- **Irrigation applied** over the last 7 days, from the run history,
+  with the sessions remaining this week.
+- **Forecast credit** until the zone's next session, with the bias
+  correction applied, or the honest reason there is none (the next
+  session is due now, or the bias model has too few rain days this
+  month to correct anything).
+
+When a suggestion fires, its evidence includes the full numeric
+breakdown (target, rain, applied, credit, remainder) so the numbers
+behind it are auditable in place.
+
+## Snooze and dismiss
+
+Next to Apply, every suggestion offers **Snooze 30 days** and a quieter
+**Do not suggest this again**. Snooze silences this exact suggestion;
+if the evidence later points at a different value, the new suggestion
+appears immediately, and otherwise the original may return after 30
+days. Dismissing is permanent for that setting on that zone: the
+suggestion stays gone even as its numbers drift.
+
+Silencing is complete for that suggestion: it drops out of the zone
+cards, the counts, the irrigation-page strip, and the weekly
+notification (a week whose every suggestion is silenced sends
+nothing). It never hides the rest: when another check has something
+worth suggesting, that suggestion takes the silenced one's place. The
+zone's panel keeps one muted line noting the silencing, with an Undo
+that restores the suggestion on the next report.
+
 ## The forecast-skip scorecard
 
 One line for the whole installation: of the days LocalSky skipped

@@ -134,10 +134,119 @@ pub fn router(
                 .route("/export", get(export))
                 .route("/accuracy", get(accuracy))
                 .route("/tuning", get(tuning_report))
+                // Mutating: privileged + CSRF like zones/apply (the auth
+                // middleware lists both paths).
+                .route("/tuning/dismiss", post(tuning_dismiss))
+                .route("/tuning/undismiss", post(tuning_undismiss))
                 .with_state(h),
         )
     } else {
         merged
+    }
+}
+
+/// Body for POST /tuning/dismiss. `kind` decides the key: a snooze
+/// silences the exact `recommendation_id` for 30 days; a permanent
+/// dismissal silences (zone_slug, field) forever, surviving value
+/// drift.
+#[derive(Debug, Deserialize)]
+struct TuningDismissBody {
+    zone_slug: String,
+    field: String,
+    #[serde(default)]
+    recommendation_id: Option<String>,
+    kind: String,
+}
+
+/// Body for POST /tuning/undismiss: clears every dismissal for the
+/// (zone, field) pair.
+#[derive(Debug, Deserialize)]
+struct TuningUndismissBody {
+    zone_slug: String,
+    field: String,
+}
+
+/// POST /api/v1/irrigation/tuning/dismiss. Privileged (same posture as
+/// zones/apply); records the dismissal and answers with the state the
+/// UI needs to update in place.
+async fn tuning_dismiss(
+    State(h): State<Arc<Mutex<Connection>>>,
+    Json(body): Json<TuningDismissBody>,
+) -> impl IntoResponse {
+    if body.zone_slug.trim().is_empty() || body.field.trim().is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "zone_slug and field are required" })),
+        );
+    }
+    match body.kind.as_str() {
+        "snooze" => {
+            if body.recommendation_id.as_deref().unwrap_or("").is_empty() {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({ "error": "a snooze keys the exact recommendation_id" })),
+                );
+            }
+        }
+        "permanent" => {}
+        other => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": format!("unknown dismissal kind: {other}") })),
+            );
+        }
+    }
+    let store = crate::persistence::TuningDismissalsStore::new(h);
+    let now = chrono::Utc::now().timestamp();
+    match store
+        .dismiss(
+            &body.zone_slug,
+            &body.field,
+            body.recommendation_id.as_deref(),
+            &body.kind,
+            now,
+        )
+        .await
+    {
+        Ok(()) => {
+            let until =
+                (body.kind == "snooze").then(|| now + crate::persistence::SNOOZE_DAYS * 86_400);
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "dismissed": true,
+                    "kind": body.kind,
+                    "until_epoch": until,
+                })),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+/// POST /api/v1/irrigation/tuning/undismiss. Privileged; clears the
+/// (zone, field) silencing so the recommendation may derive again on
+/// the next report.
+async fn tuning_undismiss(
+    State(h): State<Arc<Mutex<Connection>>>,
+    Json(body): Json<TuningUndismissBody>,
+) -> impl IntoResponse {
+    if body.zone_slug.trim().is_empty() || body.field.trim().is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "zone_slug and field are required" })),
+        );
+    }
+    let store = crate::persistence::TuningDismissalsStore::new(h);
+    match store.undismiss(&body.zone_slug, &body.field).await {
+        Ok(removed) => (StatusCode::OK, Json(json!({ "removed": removed }))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        ),
     }
 }
 
@@ -265,9 +374,10 @@ async fn shadow_snapshot() -> Json<Value> {
 
 /// Side-by-side diff of the authoritative (HA) snapshot vs the native
 /// shadow: the aggregate verdict, and per-zone running + planned-seconds.
-/// The planned-seconds delta is expected (native budget vs SI bucket) and
-/// is shown for both so it can be judged; verdict + running mismatches are
-/// the signal that native isn't yet equivalent.
+/// The planned-seconds delta is expected (the native weekly water balance
+/// vs SI's daily bucket size runs on different evidence) and is shown for
+/// both so it can be judged; verdict + running mismatches are the signal
+/// that native isn't yet equivalent.
 async fn shadow_diff(State(live): State<Arc<IrrigationStore>>) -> Json<Value> {
     let Some(shadow) = SHADOW_STORE.get() else {
         return Json(json!({ "shadow": "disabled" }));
@@ -715,7 +825,17 @@ async fn registry_zone_action(body: Action) -> (StatusCode, Json<Value>) {
                         let row = NewRun {
                             zone_slug: zone.clone(),
                             start_epoch: handle.started_epoch,
-                            source: "manual".into(),
+                            // Pretend water from a dry-run controller is
+                            // recorded as such (excluded from watering
+                            // evidence), mirroring the run-edge observer:
+                            // a manual Run against a non-simulating
+                            // DryRunController must never credit the
+                            // balance or show as real watering.
+                            source: if controller.simulated() {
+                                "dry_run".into()
+                            } else {
+                                "manual".into()
+                            },
                             controller_id: handle.controller_id.clone(),
                             planned_duration_s: clamped,
                             skip_reason: None,
@@ -774,6 +894,16 @@ async fn registry_zone_action(body: Action) -> (StatusCode, Json<Value>) {
                 if let Some(ar) = d.active_runs.as_ref() {
                     let _ = ar.disarm(&zone).await;
                 }
+                // The manual dispatch pre-wrote its row for the full
+                // planned duration; an early stop truncates it to the
+                // real span so the balance and history never credit
+                // water that was cut short.
+                if let Some(rs) = d.runs.as_ref() {
+                    let now = chrono::Utc::now().timestamp();
+                    if let Err(e) = rs.truncate_active(&zone, now).await {
+                        tracing::debug!(zone = %zone, error = %e, "manual-row truncate failed");
+                    }
+                }
                 (
                     StatusCode::OK,
                     Json(json!({
@@ -789,6 +919,13 @@ async fn registry_zone_action(body: Action) -> (StatusCode, Json<Value>) {
             Ok(()) => {
                 if let Some(ar) = d.active_runs.as_ref() {
                     let _ = ar.clear_all().await;
+                }
+                // Same truncation as Stop, across every zone.
+                if let Some(rs) = d.runs.as_ref() {
+                    let now = chrono::Utc::now().timestamp();
+                    if let Err(e) = rs.truncate_active_all(now).await {
+                        tracing::debug!(error = %e, "manual-row truncate failed");
+                    }
                 }
                 (
                     StatusCode::OK,

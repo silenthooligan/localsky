@@ -411,6 +411,202 @@ pub struct ZoneBudgetCfg {
     pub sessions_per_week: Option<u32>,
 }
 
+/// Trailing window the water balance settles against: rolling 7 local
+/// days ending now (day-keyed for the rain ledger, epoch-keyed for the
+/// runs evidence). No calendar-week anchor.
+pub const BALANCE_WINDOW_DAYS: i64 = 7;
+
+/// One zone's run-history evidence for the balance, pre-computed once
+/// per tick (never a per-zone SQLite query inside the zone loop).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ZoneRunEvidence {
+    /// Union valve-open seconds across clustered completed watering
+    /// events, clamped to the trailing window.
+    pub applied_open_s: i64,
+    /// Clustered watering events inside the trailing window.
+    pub sessions_done: u32,
+    /// End epoch of the latest completed watering event (0 = none).
+    pub last_run_epoch: i64,
+}
+
+/// Cross-zone balance inputs computed once per refresher tick from the
+/// stores (runs history, rain ledger, bias model) and passed into the
+/// sync snapshot build. `None` (no history DB and no forecast archive)
+/// degrades the balance to target-only sizing, exactly the honest
+/// fallback for an install with no evidence.
+#[derive(Debug, Clone)]
+pub struct BalanceTick {
+    /// Observed rain over the trailing window (mm), ladder-resolved.
+    pub observed_rain_mm: f64,
+    /// "gauge" | "radar" | "model_archive" | "none".
+    pub observed_rain_source: String,
+    /// Forecast bias model (identity when under-trained or absent).
+    pub bias: crate::engine::BiasModel,
+    /// Per-zone run evidence, keyed by underscore-normalized slug.
+    pub per_zone: HashMap<String, ZoneRunEvidence>,
+}
+
+/// Resolve the balance's observed-rain term from the per-source ledger
+/// sums plus the forecast provider's past-day archive. Precedence is by
+/// COVERAGE, never by value: when any measured rows (gauge/radar; legacy
+/// rows count as gauge only on station installs) exist in the window,
+/// the measured rung wins outright, even at 0.00 in; a yard that
+/// measured a dry week is ground truth a wetter regional model must not
+/// override. The model side (the max() of the provider archive and any
+/// model-quality legacy rows, so neither hides rain the other saw)
+/// supplies the term only when measured coverage is entirely absent.
+/// Returns (mm, source rung).
+fn resolve_observed_rain(
+    win: &crate::persistence::ObservedRainWindow,
+    station_present: bool,
+    archive_past_in: f64,
+) -> (f64, String) {
+    let legacy_as_gauge = station_present;
+    let measured_days =
+        win.gauge_days + win.radar_days + if legacy_as_gauge { win.legacy_days } else { 0 };
+    if measured_days > 0 {
+        let gauge_in = win.gauge_in + if legacy_as_gauge { win.legacy_in } else { 0.0 };
+        let radar_in = win.radar_in;
+        let source = if radar_in > gauge_in {
+            "radar"
+        } else {
+            "gauge"
+        };
+        ((gauge_in + radar_in) * 25.4, source.to_string())
+    } else {
+        let model_rows_in = win.model_in + if legacy_as_gauge { 0.0 } else { win.legacy_in };
+        let model_side_in = archive_past_in.max(model_rows_in);
+        if model_side_in > 0.0 {
+            (model_side_in * 25.4, "model_archive".to_string())
+        } else {
+            (0.0, "none".to_string())
+        }
+    }
+}
+
+/// How long a computed BalanceTick may serve before the stores are
+/// re-read (a coarse timer; a run edge also invalidates it). Keeps the
+/// runs/ledger/bias SQLite reads off the 10s refresh path.
+const BALANCE_CACHE_MAX_AGE_S: i64 = 60;
+
+/// Gather the balance's store-backed inputs once per (cached) tick:
+/// per-source ledger rain sums resolved through the observed-rain
+/// ladder, the bias model, and the per-zone clustered run evidence.
+/// Every read degrades independently (no history DB = no applied term
+/// and identity bias; the archive rung still works from the forecast).
+async fn compute_balance_tick(
+    forecast_store: &ForecastStore,
+    tempest_store: &TempestStore,
+    runs_store: Option<&crate::persistence::RunsStore>,
+    obs_store: Option<&crate::persistence::ForecastObservationsStore>,
+) -> BalanceTick {
+    let now = chrono::Utc::now().timestamp();
+    let win = match obs_store {
+        Some(s) => s
+            .observed_rain_window_by_source(BALANCE_WINDOW_DAYS)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::debug!(error = %e, "balance ledger read failed");
+                Default::default()
+            }),
+        None => Default::default(),
+    };
+    let fc = forecast_store.snapshot();
+    // Past days only (today's model total belongs to the forward side).
+    let archive_past_in = fc.past_n_day_precip_in((BALANCE_WINDOW_DAYS - 1) as usize);
+    let t = tempest_store.snapshot();
+    let station_present = t.has_live_station || !t.station_serial.is_empty();
+    let (observed_rain_mm, observed_rain_source) =
+        resolve_observed_rain(&win, station_present, archive_past_in);
+    let bias = match obs_store {
+        Some(s) => match s
+            .recent(crate::engine::forecast_bias::DEFAULT_WINDOW_DAYS)
+            .await
+        {
+            Ok(rows) => crate::engine::BiasModel::from_observations(
+                &rows,
+                crate::timeutil::now_local().date_naive(),
+                None,
+            ),
+            Err(e) => {
+                tracing::debug!(error = %e, "balance bias read failed");
+                crate::engine::BiasModel::identity()
+            }
+        },
+        None => crate::engine::BiasModel::identity(),
+    };
+    let per_zone = match runs_store {
+        Some(rs) => {
+            // One extra day of margin so an event straddling the window
+            // start is fetched and then truncated, never missed.
+            match rs
+                .window(now - (BALANCE_WINDOW_DAYS + 1) * 86400, now + 1)
+                .await
+            {
+                Ok(rows) => build_zone_run_evidence(&rows, now - BALANCE_WINDOW_DAYS * 86400, now),
+                Err(e) => {
+                    tracing::debug!(error = %e, "balance runs window read failed");
+                    HashMap::new()
+                }
+            }
+        }
+        None => HashMap::new(),
+    };
+    BalanceTick {
+        observed_rain_mm,
+        observed_rain_source,
+        bias,
+        per_zone,
+    }
+}
+
+/// Group completed watering evidence per zone: filter rows through the
+/// shared watering-evidence rule, truncate to the trailing window,
+/// cluster (union semantics de-duplicate manual + observer rows), and
+/// reduce to the per-zone evidence the balance reads.
+fn build_zone_run_evidence(
+    rows: &[crate::persistence::RunRow],
+    window_start: i64,
+    window_end: i64,
+) -> HashMap<String, ZoneRunEvidence> {
+    use crate::engine::tuning::{applied_in_window, is_watering_evidence, RunSegment};
+    let mut segments_by_zone: HashMap<String, Vec<RunSegment>> = HashMap::new();
+    let mut last_end_by_zone: HashMap<String, i64> = HashMap::new();
+    for r in rows {
+        if !is_watering_evidence(&r.source, &r.status, r.skip_reason.as_deref()) {
+            continue;
+        }
+        let slug = r.zone_slug.replace('-', "_");
+        let end = r
+            .end_epoch
+            .unwrap_or(r.start_epoch + r.duration_s.unwrap_or(0) as i64);
+        segments_by_zone
+            .entry(slug.clone())
+            .or_default()
+            .push(RunSegment {
+                start_epoch: r.start_epoch,
+                end_epoch: end,
+            });
+        let e = last_end_by_zone.entry(slug).or_insert(0);
+        *e = (*e).max(end);
+    }
+    segments_by_zone
+        .into_iter()
+        .map(|(slug, segs)| {
+            let applied = applied_in_window(&segs, window_start, window_end);
+            let last = last_end_by_zone.get(&slug).copied().unwrap_or(0);
+            (
+                slug,
+                ZoneRunEvidence {
+                    applied_open_s: applied.valve_open_s,
+                    sessions_done: applied.events,
+                    last_run_epoch: last,
+                },
+            )
+        })
+        .collect()
+}
+
 /// One zone's soil configuration resolved at boot from `ZoneConfig`. The
 /// refresher resolves `soil_sensor_id` to a live % each tick and pairs it
 /// with the per-zone thresholds to build the engine's `ZoneSoil`.
@@ -540,6 +736,15 @@ pub fn spawn_refresher(
             .as_ref()
             .map(|c| crate::persistence::SensorHistoryStore::new(c.clone()));
 
+        // Runs handle for the balance's applied-irrigation evidence.
+        let runs_store = history_conn
+            .as_ref()
+            .map(|c| crate::persistence::RunsStore::new(c.clone()));
+        // Balance evidence cache: refreshed on a coarse timer or when a
+        // run edge may have landed, never per 10s tick.
+        let mut balance_tick: Option<BalanceTick> = None;
+        let mut balance_fetched_epoch: i64 = 0;
+
         let mut ingest = IngestState::new();
         // Edge-detection state for push events. Tracks per-zone running
         // and the start_epoch when each zone last transitioned to running
@@ -595,6 +800,24 @@ pub fn spawn_refresher(
                 Some(cs) => Some(cs.get().await),
                 None => None,
             };
+            // Refresh the balance evidence when the cache is stale or a
+            // run-end row landed last tick (the ingest below zeroes
+            // balance_fetched_epoch AFTER persisting the row, so this
+            // re-read always sees the new evidence, never a tick early).
+            let tick_now = chrono::Utc::now().timestamp();
+            if balance_tick.is_none() || tick_now - balance_fetched_epoch >= BALANCE_CACHE_MAX_AGE_S
+            {
+                balance_tick = Some(
+                    compute_balance_tick(
+                        &forecast_store,
+                        &tempest_store,
+                        runs_store.as_ref(),
+                        forecast_obs_store.as_ref(),
+                    )
+                    .await,
+                );
+                balance_fetched_epoch = tick_now;
+            }
             let result = match source {
                 SnapshotSource::HomeAssistant => {
                     refresh_once(
@@ -607,6 +830,7 @@ pub fn spawn_refresher(
                         &scripts,
                         sensor_history.as_ref(),
                         forecast_obs_store.as_ref(),
+                        balance_tick.as_ref(),
                     )
                     .await
                     .map(|mut snap| {
@@ -634,6 +858,7 @@ pub fn spawn_refresher(
                     &scripts,
                     sensor_history.as_ref(),
                     forecast_obs_store.as_ref(),
+                    balance_tick.as_ref(),
                     &controllers,
                     control.as_ref(),
                 )
@@ -653,6 +878,7 @@ pub fn spawn_refresher(
                             &scripts,
                             sensor_history.as_ref(),
                             forecast_obs_store.as_ref(),
+                            balance_tick.as_ref(),
                             &controllers,
                             control.as_ref(),
                         )
@@ -660,14 +886,34 @@ pub fn spawn_refresher(
                         ss.store(native);
                     }
                     if let Some(db) = history_conn.as_ref() {
-                        ingest.observe(db, &snap).await;
+                        // Zones whose running state is a dry-run
+                        // controller's pretend water this tick: the
+                        // observer records those rows as source
+                        // 'dry_run' so they never become watering
+                        // evidence.
+                        let simulated = IngestState::simulated_running_slugs(&controllers).await;
+                        let runs_written = ingest.observe(db, &snap, &simulated).await;
+                        if runs_written > 0 {
+                            // A run-end row just landed: force the next
+                            // tick's balance re-read so applied credit,
+                            // sessions_done, and the spacing anchor see it
+                            // immediately instead of after the coarse timer.
+                            balance_fetched_epoch = 0;
+                        }
                     }
                     // Forecast-bias daily ingest. Today's predicted rain
                     // comes from the forecast store's daily[0]; today's
-                    // observed rain comes from the snapshot's
-                    // forecast.rain_today_in (which the refresher itself
-                    // populated from Tempest / HA). UPSERT semantics
-                    // preserve the morning prediction across the day.
+                    // observed rain is the MERGE-CONTESTED daily total
+                    // (gauge and radar day products contest it with
+                    // writer labels), NOT the station-gated skip_check
+                    // value, tagged with the owning writer's nature. The
+                    // store keeps the DAY MAX so a gauge going stale
+                    // mid-storm can never reset the day's total. A day
+                    // whose owner is a model fill, stale, or absent
+                    // records 0.0 with source 'none' (a placeholder,
+                    // excluded from bias training and the dryness
+                    // counters); see ledger_observation for the midnight
+                    // and plausibility gates.
                     if let Some(obs_store) = forecast_obs_store.as_ref() {
                         // Configured-timezone date, not the container's: a UTC
                         // container would otherwise file evening observations
@@ -679,18 +925,27 @@ pub fn spawn_refresher(
                             .first()
                             .map(|d| d.precip_sum_in)
                             .unwrap_or(0.0);
-                        let observed_in = snap.skip_check.rain_today_in;
-                        let store_handle = obs_store.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) =
-                                store_handle.upsert(today, predicted_in, observed_in).await
-                            {
-                                tracing::debug!(
-                                    error = %e,
-                                    "forecast observation upsert failed"
-                                );
-                            }
-                        });
+                        let now_epoch = chrono::Utc::now().timestamp();
+                        let owner = tempest_store.rain_today_owner(now_epoch);
+                        // None = skip this tick (midnight carry gate, or an
+                        // implausible value); the next same-day observation
+                        // writes normally.
+                        if let Some((observed_in, source)) =
+                            ledger_observation(&tempest_store.snapshot(), owner.as_ref(), now_epoch)
+                        {
+                            let store_handle = obs_store.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = store_handle
+                                    .upsert(today, predicted_in, observed_in, source)
+                                    .await
+                                {
+                                    tracing::debug!(
+                                        error = %e,
+                                        "forecast observation upsert failed"
+                                    );
+                                }
+                            });
+                        }
                     }
                     emit_push_events(
                         &push,
@@ -988,6 +1243,7 @@ async fn refresh_once(
     scripts: &CompiledScripts,
     sensor_history: Option<&crate::persistence::SensorHistoryStore>,
     forecast_obs: Option<&crate::persistence::ForecastObservationsStore>,
+    balance: Option<&BalanceTick>,
 ) -> anyhow::Result<IrrigationSnapshot> {
     let states = client.states().await?;
     let map: HashMap<String, Value> = states
@@ -1008,6 +1264,7 @@ async fn refresh_once(
         scripts,
         sensor_history,
         forecast_obs,
+        balance,
         None,
     )
     .await;
@@ -1040,6 +1297,11 @@ async fn build_from_map(
     // to floor days_since_significant_rain with what the local gauge
     // actually measured; `None` on a v1 schema / no persistence DB.
     forecast_obs: Option<&crate::persistence::ForecastObservationsStore>,
+    // Pre-computed balance evidence (observed rain, bias model, per-zone
+    // run history), gathered once per tick by the async caller so the
+    // sync allocator never touches SQLite. `None` in tests / before the
+    // first tick: the balance degrades to target-only sizing.
+    balance: Option<&BalanceTick>,
     // Native control surface. `Some` (standalone path) overrides the
     // HA-helper-derived pause/override below with locally persisted state;
     // `None` (HA path) reads them from the entity map as before.
@@ -1283,7 +1545,15 @@ async fn build_from_map(
                 today_run_minutes: 0.0, // Populated by SQLite history in Phase 3.
                 bucket_mm,
                 planned_run_seconds: planned,
-                last_run_epoch: 0, // Populated by SQLite history in Phase 3.
+                // The latest completed watering event's end, from the
+                // per-tick runs evidence. This is what makes the
+                // balance's min-interval spacing real on live paths (it
+                // was hardcoded 0 for two releases, so spacing never
+                // fired outside demo).
+                last_run_epoch: balance
+                    .and_then(|b| b.per_zone.get(slug))
+                    .map(|e| e.last_run_epoch)
+                    .unwrap_or(0),
                 math,
                 // photo_url is read by the dashboard from /api/config on
                 // mount and joined to each zone by slug. Kept None here so
@@ -1836,12 +2106,11 @@ async fn build_from_map(
     .await;
     snap.water_budgets = compute_water_budgets(
         &fc,
-        &inputs,
         &map,
-        &snap.zones,
         zone_runtime,
         restriction_cap_seconds,
         &watering_policy.budget_zones,
+        balance,
     );
 
     snap
@@ -1864,6 +2133,7 @@ async fn refresh_once_native(
     scripts: &CompiledScripts,
     sensor_history: Option<&crate::persistence::SensorHistoryStore>,
     forecast_obs: Option<&crate::persistence::ForecastObservationsStore>,
+    balance: Option<&BalanceTick>,
     controllers: &ControllerRegistry,
     // Locally persisted pause + one-day override (A6). `None` only when no
     // persistence DB is mounted, in which case the snapshot falls back to
@@ -1881,6 +2151,7 @@ async fn refresh_once_native(
         scripts,
         sensor_history,
         forecast_obs,
+        balance,
         control,
     )
     .await;
@@ -2146,58 +2417,42 @@ fn apply_engine(
     snap.zone_verdicts = verdicts;
 }
 
-/// Phase H, weekly water-budget plan per zone. Replaces SI's daily-bucket
-/// flex math with a deep-and-infrequent schedule that allocates a weekly
-/// water target across N sessions, defers when rain is forecast, and
-/// spaces sessions by `7 / sessions_per_week` days so each run is a real
-/// soak rather than a daily light sprinkle.
+/// Weekly water-balance assembly. Resolves each zone's target and
+/// runtime inputs (HA helper -> config -> agronomic slug default), joins
+/// the pre-computed per-tick balance evidence, and calls the ONE pure
+/// implementation (`engine::budget::compute_zone`) per zone.
 ///
 /// Outputs `today_seconds` per zone, what the HA budget-override
 /// automation at 23:30:25 calls `IU.adjust_time(actual=...)` with. Zero
-/// means "don't run this zone today" (rain incoming, recently watered,
-/// or mode is off).
+/// means "don't run this zone today"; the reason names what decided.
 fn compute_water_budgets(
     fc: &ForecastSnapshot,
-    today_inputs: &Inputs,
     map: &HashMap<String, Value>,
-    zones: &[ZoneState],
     zone_runtime: &HashMap<String, ZoneRuntime>,
     restriction_cap_seconds: Option<u32>,
     // A5b: per-zone budget config from cfg.zones. Drives which zones the
     // allocator plans for (so any configured zone gets a run-time). Empty =
     // unconfigured install -> nothing to plan until the wizard writes zones.
     budget_zones: &[ZoneBudgetCfg],
+    // Pre-computed store evidence; `None` degrades to target-only sizing.
+    balance: Option<&BalanceTick>,
 ) -> Vec<WaterBudget> {
-    // Iteration list: every configured zone (A5b). Per-zone budget/sessions
-    // are None here and resolved below from HA input_number -> config ->
-    // agronomic slug default.
-    let iter_zones: Vec<ZoneBudgetCfg> = budget_zones.to_vec();
-    const CAPTURE_EFFICIENCY: f64 = 0.7;
-    const SESSION_RAIN_DEFER_IN: f64 = 0.10; // ≥0.10" forecast next 24h → defer
-
-    // The per-day 3-day peak heat index (already corrected on today_inputs by
-    // the refresher) drives the ET bump; NOT heat_index_f(temp_max_3day,
-    // humidity_now), which pairs the 3-day max temp with the current humidity
-    // and overshoots. Falls back to the now value (its serialized default 0.0
-    // maps to no bump) when no forecast humidity was available.
-    let heat_mult_eff = et_heat_multiplier(today_inputs.heat_index_max_3day_f);
-
     let now_epoch = chrono::Utc::now().timestamp();
-    // Forecast: next-24h rain (sum of hourly[0..24] precip).
-    let next_24h_rain_in = fc.next_n_hours_precip_in(24);
-    // 7-day probability-weighted total rain.
-    let week_rain_weighted_in: f64 = fc
-        .daily
-        .iter()
-        .take(7)
-        // Probability-less days weight at full value (DailyEntry::precip_weight).
-        .map(|d| d.precip_sum_in * d.precip_weight())
-        .sum();
+    let globals = crate::engine::BalanceGlobals {
+        now_epoch,
+        session_rain_defer_in: crate::engine::SESSION_RAIN_DEFER_IN,
+        observed_rain_mm: balance.map(|b| b.observed_rain_mm).unwrap_or(0.0),
+        observed_rain_source: balance
+            .map(|b| b.observed_rain_source.clone())
+            .unwrap_or_else(|| "none".to_string()),
+        bias: balance
+            .map(|b| b.bias.clone())
+            .unwrap_or_else(crate::engine::BiasModel::identity),
+    };
 
-    let mut out = Vec::with_capacity(iter_zones.len());
-    for zone_cfg in iter_zones.iter() {
+    let mut out = Vec::with_capacity(budget_zones.len());
+    for zone_cfg in budget_zones.iter() {
         let slug = zone_cfg.slug.as_str();
-        let name = zone_cfg.name.as_str();
         let (default_budget_in, default_sessions) = agronomic_budget_default(slug);
         // Precedence: live HA input_number helper (HA path, unchanged) ->
         // per-zone config value (native + HA fallback, A5b) -> agronomic
@@ -2218,11 +2473,8 @@ fn compute_water_budgets(
         .unwrap_or(default_sessions)
         .max(1);
         // Budget mode used to be a per-zone HA toggle while the SI -> LocalSky
-        // cutover was in progress (off = SI owned the zone's daily flex, on =
-        // LocalSky's weekly budget did). Post-cutover LocalSky is the only
-        // source of truth, so the toggle is force-on regardless of the HA
-        // helper's state. The off-mode branch below is kept as a defensive
-        // fallback only.
+        // cutover was in progress. Post-cutover LocalSky is the only source of
+        // truth, so the toggle is force-on regardless of the HA helper's state.
         let mode_active = true;
         let _ = state_eq(
             map,
@@ -2232,14 +2484,11 @@ fn compute_water_budgets(
 
         // Throughput + max-duration come from LocalSky's zone config
         // (catalog default by sprinkler_type, optional precip_rate_mm_hr
-        // override). SI's `throughput` and `maximum_duration` attrs are
-        // ignored so the budget allocator no longer drifts when SI is
-        // paused or its zone is misconfigured.
+        // override).
         let rt = zone_runtime
             .get(slug)
             .copied()
             .unwrap_or_else(ZoneRuntime::fallback);
-        let throughput_mm_hr = rt.throughput_mm_hr;
         // Active watering restriction cap (if any) tightens the budget-path
         // ceiling too. Same min-of-two rule as the daily-bucket path above.
         let max_dur_s = match restriction_cap_seconds {
@@ -2247,95 +2496,34 @@ fn compute_water_budgets(
             None => rt.max_duration_s,
         };
 
-        // Water-balance math: weekly budget, minus expected captured rain.
-        let weekly_budget_mm = weekly_budget_in * 25.4;
-        let expected_rain_mm = week_rain_weighted_in * 25.4 * CAPTURE_EFFICIENCY;
-        let needed_mm = (weekly_budget_mm - expected_rain_mm).max(0.0);
-        let mm_per_session = needed_mm / sessions_per_week as f64;
-        let seconds_per_session = if throughput_mm_hr > 0.0 {
-            // Multiply by heat_mult to compensate for accelerated ET
-            // (same Kc-style bias SI applies). Divide by CAPTURE_EFFICIENCY
-            // so that the *root-zone* depth matches mm_per_session after
-            // runoff/canopy losses.
-            ((mm_per_session / throughput_mm_hr) * 3600.0 * heat_mult_eff / CAPTURE_EFFICIENCY)
-                as u32
+        // Per-zone run evidence from the tick (empty = no runs on record).
+        let evidence = balance
+            .and_then(|b| b.per_zone.get(slug))
+            .copied()
+            .unwrap_or_default();
+        let applied_trailing_mm = if rt.throughput_mm_hr > 0.0 {
+            evidence.applied_open_s as f64 / 3600.0 * rt.throughput_mm_hr
         } else {
-            0
-        };
-        let session_capped = seconds_per_session > max_dur_s;
-        let session_final = seconds_per_session.min(max_dur_s);
-
-        // Last run epoch for this zone, pulled from ZoneState (which the
-        // history ingest populates) so we don't have to round-trip SQLite.
-        let last_run_epoch = zones
-            .iter()
-            .find(|z| z.slug == slug)
-            .map(|z| z.last_run_epoch)
-            .unwrap_or(0);
-
-        // Today's recommendation.
-        let min_interval_days = (7.0 / sessions_per_week as f64).floor() as i64;
-        let days_since_last_run = if last_run_epoch > 0 {
-            (now_epoch - last_run_epoch) / 86400
-        } else {
-            i64::MAX / 2
-        };
-        let (today_seconds, today_reason) = if !mode_active {
-            // Defensive only, `mode_active` is hard-coded above. Kept for
-            // future re-introduction of a per-zone pause toggle.
-            (0u32, "budget mode off".to_string())
-        } else if next_24h_rain_in >= SESSION_RAIN_DEFER_IN {
-            (
-                0,
-                format!(
-                    "rain expected next 24h ({:.2}\" forecast ≥ {:.2}\")",
-                    next_24h_rain_in, SESSION_RAIN_DEFER_IN
-                ),
-            )
-        } else if days_since_last_run < min_interval_days {
-            (
-                0,
-                format!(
-                    "last run {} day(s) ago, minimum interval is {} days at {} sessions/wk",
-                    days_since_last_run, min_interval_days, sessions_per_week
-                ),
-            )
-        } else if needed_mm <= 0.0 {
-            (
-                0,
-                format!(
-                    "forecast rain {:.2}\" covers the {:.2}\" weekly budget",
-                    week_rain_weighted_in, weekly_budget_in
-                ),
-            )
-        } else {
-            (
-                session_final,
-                format!(
-                    "scheduled session {} of {} this week, {:.2} mm depth = {:.0} min",
-                    1, // session_index, proper allocation logic deferred
-                    sessions_per_week,
-                    mm_per_session,
-                    session_final as f64 / 60.0
-                ),
-            )
+            0.0
         };
 
-        out.push(WaterBudget {
-            zone_slug: slug.to_string(),
-            zone_name: name.to_string(),
-            mode_active,
+        let zone_inputs = crate::engine::ZoneBalanceInputs {
+            slug: slug.to_string(),
+            name: zone_cfg.name.clone(),
             weekly_budget_in,
             sessions_per_week,
-            expected_rain_mm,
-            needed_mm,
-            mm_per_session,
-            seconds_per_session,
-            session_capped,
-            last_run_epoch,
-            today_seconds,
-            today_reason,
-        });
+            mode_active,
+            throughput_mm_hr: rt.throughput_mm_hr,
+            max_dur_s,
+            last_run_epoch: evidence.last_run_epoch,
+            applied_trailing_mm,
+            sessions_done: evidence.sessions_done,
+        };
+        out.push(crate::engine::compute_zone_balance(
+            &zone_inputs,
+            &globals,
+            fc,
+        ));
     }
     out
 }
@@ -2809,6 +2997,81 @@ fn cloud_rain_nature_for_label(label: &str) -> Option<crate::ha::snapshot::RainN
     })
 }
 
+/// The forecast-observations writer's provenance tag for the day's
+/// rain total, from the merge's rain-today owner. A live station owning
+/// the daily total is a gauge; a cloud owner is classified by its
+/// catalog nature (radar QPE day products vs model day totals); no
+/// owner at all means the install has no rain-capable source and the
+/// day records a 'none' placeholder.
+fn classify_rain_today_source(owner: Option<&crate::tempest::state::RainOwner>) -> &'static str {
+    match owner {
+        None => "none",
+        // A stale owner is a writer that went silent; its frozen value must
+        // not keep fabricating wet days (the 3-tier rain gate applies the
+        // same freshness rule to the rain-rate owner). The live tier only
+        // ever returns fresh owners, so this arm covers the fill tier.
+        Some(o) if !o.is_fresh => "none",
+        Some(o) if o.is_live => "gauge",
+        Some(o) => match cloud_rain_nature_for_label(&o.label) {
+            Some(crate::ha::snapshot::RainNature::Measured) => "gauge",
+            Some(crate::ha::snapshot::RainNature::RadarQpe) => "radar",
+            _ => "model",
+        },
+    }
+}
+
+/// Physical ceiling on a plausible daily rain total (inches). Values above
+/// it are garbage frames (a unit misparse, a scale/offset misconfig on an
+/// MQTT or passthrough writer), and the day-max upsert would record them
+/// permanently; mirror of the SOIL_PCT_PHYSICAL_MAX quality-gate pattern.
+const RAIN_TODAY_PHYSICAL_MAX_IN: f64 = 15.0;
+
+/// What the observations-ledger writer records this tick:
+/// `Some((observed_in, source))` to upsert, `None` to skip the tick.
+///
+///   - gauge/radar owner (fresh) with a same-day accumulator and a
+///     plausible value: the measured day total, with its provenance.
+///   - model-nature owner: the 0.0/'none' placeholder. A model
+///     RainTodayIn fill is the WHOLE day's forecast, including hours
+///     that have not happened; recording it as observed would let
+///     phantom rain persist in the day-max ledger for a full trailing
+///     window. Model rain reaches the balance through the archive rung
+///     and the defer gate instead.
+///   - no owner, or a stale one: the 0.0/'none' placeholder.
+///   - accumulator still on the previous local day (the first ticks
+///     after configured-tz midnight, before the next observation resets
+///     it): SKIP: a day-max write now would pin yesterday's total onto
+///     the new day's row permanently.
+///   - implausible value (non-finite, negative, above the physical
+///     cap): SKIP with a warning naming the owner, leaving the day's
+///     ledger untouched rather than pinning garbage.
+fn ledger_observation(
+    snapshot: &crate::tempest::state::Snapshot,
+    owner: Option<&crate::tempest::state::RainOwner>,
+    now_epoch: i64,
+) -> Option<(f64, &'static str)> {
+    let source = classify_rain_today_source(owner);
+    if source != "gauge" && source != "radar" {
+        return Some((0.0, "none"));
+    }
+    if snapshot.rain_today_day_ordinal != crate::timeutil::local_day_ordinal(now_epoch) {
+        // Midnight carry gate: the accumulator has not rolled onto the new
+        // local day yet.
+        return None;
+    }
+    let v = snapshot.rain_in_today;
+    if !v.is_finite() || !(0.0..=RAIN_TODAY_PHYSICAL_MAX_IN).contains(&v) {
+        tracing::warn!(
+            owner = owner.map(|o| o.label.as_str()).unwrap_or(""),
+            value = v,
+            cap_in = RAIN_TODAY_PHYSICAL_MAX_IN,
+            "implausible daily rain total; observations-ledger write skipped"
+        );
+        return None;
+    }
+    Some((v, source))
+}
+
 /// How old the Open-Meteo forecast may be before its forward-looking rain inputs
 /// are no longer trusted for a SKIP. The store refreshes every ~30 min, so 6h is
 /// 12 missed polls, well past a transient outage but short enough to catch a real
@@ -3186,7 +3449,7 @@ mod watchdog_tests {
                 "precip_rate_source": "measured",
                 "controller_id": "os_main",
                 "controller_station": "1",
-                "weekly_budget_in": 1.0,
+                "weekly_budget_in": 1.5,
                 "sessions_per_week": 1
             }))
             .unwrap(),
@@ -3214,28 +3477,26 @@ mod watchdog_tests {
             "a configured cap maps minutes to seconds"
         );
 
-        // 1.0 in over 1 session at 25.4 mm/hr measured throughput wants
-        // (25.4 / 25.4) * 3600 / 0.7 = 5142 s per session: between the two
-        // caps, so the clamp state flips with the configured value.
+        // 1.5 in over 1 session at 25.4 mm/hr measured throughput wants
+        // (38.1 / 25.4) * 3600 = 5400 s per session (GROSS sizing, no
+        // capture or heat factor): between the two caps, so the clamp
+        // state flips with the configured value.
         let fc = crate::forecast::snapshot::ForecastSnapshot::default();
-        let inputs = Inputs::default();
         let budget = |policy: &WateringPolicy, restriction: Option<u32>| {
             compute_water_budgets(
                 &fc,
-                &inputs,
                 &HashMap::new(),
-                &[],
                 &policy.zone_runtime,
                 restriction,
                 &policy.budget_zones,
+                None,
             )
             .remove(0)
         };
         let b0 = budget(&policy_default, None);
-        assert!(
-            b0.seconds_per_session > 3600 && b0.seconds_per_session < 7200,
-            "fixture: the desired session must land between the two caps, got {}",
-            b0.seconds_per_session
+        assert_eq!(
+            b0.seconds_per_session, 5400,
+            "gross sizing: 38.1 mm / 25.4 mm/hr, nothing else"
         );
         assert!(
             b0.session_capped,
@@ -3251,6 +3512,287 @@ mod watchdog_tests {
             b2.session_capped,
             "an active restriction cap still wins min() over the raised zone cap"
         );
+    }
+
+    fn one_zone_balance_policy(weekly_in: f64, sessions: u32) -> WateringPolicy {
+        let mut cfg = crate::config::schema::Config::default();
+        cfg.zones.insert(
+            "front".into(),
+            serde_json::from_value(serde_json::json!({
+                "display_name": "Front",
+                "area_sqft": 1000.0,
+                "species": "bermuda",
+                "soil_texture": "sandy_loam",
+                "sprinkler_type": "spray",
+                "precip_rate_mm_hr": 25.4,
+                "precip_rate_source": "measured",
+                "controller_id": "os_main",
+                "controller_station": "1",
+                "weekly_budget_in": weekly_in,
+                "sessions_per_week": sessions
+            }))
+            .unwrap(),
+        );
+        WateringPolicy::from_config(&cfg)
+    }
+
+    /// The pacing gate finally fires on live evidence: with the last
+    /// completed watering event 1 day back and a 3-day interval (2
+    /// sessions/week), today is spaced to zero. For two releases
+    /// last_run_epoch was hardcoded 0 on live paths, so this gate never
+    /// fired outside demo.
+    #[test]
+    fn spacing_gate_fires_from_run_history_evidence() {
+        let policy = one_zone_balance_policy(1.5, 2);
+        let fc = crate::forecast::snapshot::ForecastSnapshot::default();
+        let now = chrono::Utc::now().timestamp();
+        let mut per_zone = HashMap::new();
+        per_zone.insert(
+            "front".to_string(),
+            ZoneRunEvidence {
+                applied_open_s: 1800,
+                sessions_done: 1,
+                last_run_epoch: now - 86_400,
+            },
+        );
+        let tick = BalanceTick {
+            observed_rain_mm: 0.0,
+            observed_rain_source: "none".into(),
+            bias: crate::engine::BiasModel::identity(),
+            per_zone,
+        };
+        let b = compute_water_budgets(
+            &fc,
+            &HashMap::new(),
+            &policy.zone_runtime,
+            None,
+            &policy.budget_zones,
+            Some(&tick),
+        )
+        .remove(0);
+        assert_eq!(b.today_seconds, 0, "spacing must gate today");
+        assert!(
+            b.today_reason.contains("spaced"),
+            "reason names the spacing gate: {}",
+            b.today_reason
+        );
+        assert_eq!(b.last_run_epoch, now - 86_400, "evidence rides the wire");
+        assert_eq!(b.remaining_sessions, 1, "one of two sessions already done");
+        // The applied credit shrank the remainder: 1.5 in target minus
+        // 1800 s x 25.4 mm/hr = 12.7 mm applied leaves 25.4 mm for the
+        // one remaining session.
+        assert!(
+            (b.needed_mm - 25.4).abs() < 1e-6,
+            "got needed {}",
+            b.needed_mm
+        );
+        assert!((b.applied_mm - 12.7).abs() < 1e-6, "got {}", b.applied_mm);
+    }
+
+    /// Observed rain plus prior watering covering the target sizes the
+    /// week to zero with the covered reason (the owner's acceptance
+    /// case: a soaked week must read covered, not schedule sessions).
+    #[test]
+    fn observed_rain_and_applied_water_cover_the_week() {
+        let policy = one_zone_balance_policy(1.0, 2);
+        let fc = crate::forecast::snapshot::ForecastSnapshot::default();
+        let now = chrono::Utc::now().timestamp();
+        let mut per_zone = HashMap::new();
+        per_zone.insert(
+            "front".to_string(),
+            ZoneRunEvidence {
+                applied_open_s: 900,
+                sessions_done: 1,
+                last_run_epoch: now - 5 * 86_400,
+            },
+        );
+        let tick = BalanceTick {
+            // 3.24" of rain on the ledger (the live acceptance figure).
+            observed_rain_mm: 3.24 * 25.4,
+            observed_rain_source: "gauge".into(),
+            bias: crate::engine::BiasModel::identity(),
+            per_zone,
+        };
+        let b = compute_water_budgets(
+            &fc,
+            &HashMap::new(),
+            &policy.zone_runtime,
+            None,
+            &policy.budget_zones,
+            Some(&tick),
+        )
+        .remove(0);
+        assert_eq!(b.today_seconds, 0);
+        assert_eq!(b.seconds_per_session, 0, "the remainder is zero");
+        assert!(
+            b.today_reason.contains("covered"),
+            "reason names the balance coverage: {}",
+            b.today_reason
+        );
+        assert_eq!(b.observed_rain_source, "gauge");
+        assert!((b.observed_rain_mm - 3.24 * 25.4).abs() < 1e-9);
+    }
+
+    /// Run-history evidence building: watering rows cluster (manual +
+    /// observer overlap counts once), dry-run rows and skip markers are
+    /// excluded, and the window clamp holds.
+    #[test]
+    fn zone_run_evidence_filters_clusters_and_clamps() {
+        let now = 1_700_000_000i64;
+        let w_start = now - 7 * 86_400;
+        let row = |slug: &str, start: i64, dur: u32, source: &str, status: &str| {
+            crate::persistence::RunRow {
+                id: 0,
+                zone_slug: slug.into(),
+                start_epoch: start,
+                end_epoch: Some(start + dur as i64),
+                duration_s: Some(dur),
+                source: source.into(),
+                controller_id: "c".into(),
+                status: status.into(),
+                skip_reason: None,
+                et0_mm: None,
+                etc_mm: None,
+                applied_mm: None,
+                cycle_index: None,
+                cycle_count: None,
+            }
+        };
+        let rows = vec![
+            // Two mornings for front: one manual+observer overlap pair,
+            // one plain observer row.
+            row("front", w_start + 10_000, 1200, "manual", "completed"),
+            row("front", w_start + 10_010, 1200, "ha_refresher", "completed"),
+            row("front", w_start + 300_000, 600, "ha_refresher", "completed"),
+            // Pretend water and a skip marker: never evidence.
+            row("front", w_start + 400_000, 900, "dry_run", "completed"),
+            row("front", w_start + 500_000, 0, "smart_morning", "skipped"),
+            // An event straddling the window start: only the inside part.
+            row("side", w_start - 600, 1200, "ha_refresher", "completed"),
+        ];
+        let ev = build_zone_run_evidence(&rows, w_start, now);
+        let front = ev.get("front").copied().unwrap();
+        assert_eq!(front.sessions_done, 2, "two clustered events");
+        assert_eq!(front.applied_open_s, 1210 + 600, "union, not the raw sum");
+        assert_eq!(front.last_run_epoch, w_start + 300_600);
+        let side = ev.get("side").copied().unwrap();
+        assert_eq!(side.applied_open_s, 600, "window clamp");
+    }
+
+    /// The observed-rain ladder per install class: measured COVERAGE
+    /// wins outright (never a value contest), legacy rows classify by
+    /// install class, the model side is the max() of archive and
+    /// model-quality legacy rows, and no evidence at all reads 'none'.
+    #[test]
+    fn observed_rain_ladder_resolves_per_install_class() {
+        use crate::persistence::ObservedRainWindow;
+        let win = |g: f64, r: f64, l: f64, gd: u32, rd: u32, ld: u32| ObservedRainWindow {
+            gauge_in: g,
+            radar_in: r,
+            model_in: 0.0,
+            legacy_in: l,
+            gauge_days: gd,
+            radar_days: rd,
+            legacy_days: ld,
+        };
+        // Gauge install: measured rows win and read 'gauge'.
+        let (mm, src) = resolve_observed_rain(&win(1.0, 0.0, 0.0, 5, 0, 0), true, 0.3);
+        assert_eq!(src, "gauge");
+        assert!((mm - 25.4).abs() < 1e-9);
+        // A gauge that measured LESS than the regional archive still wins:
+        // coverage precedence, the yard's own record is the truth.
+        let (mm, src) = resolve_observed_rain(&win(0.1, 0.0, 0.0, 6, 0, 0), true, 1.0);
+        assert_eq!(src, "gauge", "an out-valued gauge is never overridden");
+        assert!((mm - 0.1 * 25.4).abs() < 1e-9);
+        // A measured DRY week (rows present, total 0) also wins: 0.00 in
+        // gauge, never the model's wetter claim.
+        let (mm, src) = resolve_observed_rain(&win(0.0, 0.0, 0.0, 7, 0, 0), true, 0.8);
+        assert_eq!(src, "gauge");
+        assert_eq!(mm, 0.0);
+        // Radar day totals dominate the measured side: 'radar'.
+        let (mm, src) = resolve_observed_rain(&win(0.1, 0.9, 0.0, 1, 4, 0), false, 0.0);
+        assert_eq!(src, "radar");
+        assert!((mm - 25.4).abs() < 1e-9);
+        // No measured coverage at all: the archive supplies the term.
+        let (mm, src) = resolve_observed_rain(&win(0.0, 0.0, 0.0, 0, 0, 0), false, 0.5);
+        assert_eq!(src, "model_archive");
+        assert!((mm - 0.5 * 25.4).abs() < 1e-9);
+        // Legacy rows: gauge-quality coverage on a station install...
+        let (mm, src) = resolve_observed_rain(&win(0.0, 0.0, 0.4, 0, 0, 3), true, 0.9);
+        assert_eq!(src, "gauge");
+        assert!((mm - 0.4 * 25.4).abs() < 1e-9);
+        // ...model-quality (no coverage) on a station-less one.
+        let (mm, src) = resolve_observed_rain(&win(0.0, 0.0, 0.4, 0, 0, 3), false, 0.1);
+        assert_eq!(src, "model_archive");
+        assert!((mm - 0.4 * 25.4).abs() < 1e-9, "max(archive, legacy rows)");
+        // Nothing anywhere: 'none' with a zero term (never fabricated).
+        let (mm, src) = resolve_observed_rain(&win(0.0, 0.0, 0.0, 0, 0, 0), false, 0.0);
+        assert_eq!(src, "none");
+        assert_eq!(mm, 0.0);
+    }
+
+    /// The ledger writer's per-tick decision: measured owners record the
+    /// accumulator (same-day, plausible values only); model-nature,
+    /// stale, or absent owners record the 'none' placeholder; the
+    /// midnight-carry and garbage cases skip the write entirely.
+    #[test]
+    fn ledger_observation_gates_midnight_model_stale_and_garbage() {
+        use crate::tempest::state::{RainOwner, Snapshot};
+        let now = chrono::Utc::now().timestamp();
+        let today = crate::timeutil::local_day_ordinal(now);
+        let gauge = RainOwner {
+            label: "Tempest".into(),
+            is_live: true,
+            is_fresh: true,
+        };
+        let mut snap = Snapshot {
+            rain_in_today: 1.2,
+            rain_today_day_ordinal: today,
+            ..Default::default()
+        };
+        // Same-day gauge total records with provenance.
+        assert_eq!(
+            ledger_observation(&snap, Some(&gauge), now),
+            Some((1.2, "gauge"))
+        );
+        // 23:59 rain, 00:00:10 tick: the accumulator still carries
+        // YESTERDAY'S day bucket, so the write is skipped; the day-max
+        // upsert can never pin yesterday's total onto the new row.
+        snap.rain_today_day_ordinal = today - 1;
+        assert_eq!(ledger_observation(&snap, Some(&gauge), now), None);
+        snap.rain_today_day_ordinal = today;
+        // A model-nature owner records the placeholder, never the
+        // whole-day forecast.
+        let model = RainOwner {
+            label: "open_meteo".into(),
+            is_live: false,
+            is_fresh: true,
+        };
+        assert_eq!(
+            ledger_observation(&snap, Some(&model), now),
+            Some((0.0, "none"))
+        );
+        // A stale owner (writer went silent) is no owner: placeholder,
+        // so a frozen value cannot fabricate wet days forever.
+        let stale = RainOwner {
+            label: "noaa_mrms".into(),
+            is_live: false,
+            is_fresh: false,
+        };
+        assert_eq!(
+            ledger_observation(&snap, Some(&stale), now),
+            Some((0.0, "none"))
+        );
+        // No owner at all: placeholder.
+        assert_eq!(ledger_observation(&snap, None, now), Some((0.0, "none")));
+        // Garbage frames are rejected, not clamped: the day's ledger
+        // stays untouched.
+        snap.rain_in_today = 30.0; // a 25.4x unit misparse class value
+        assert_eq!(ledger_observation(&snap, Some(&gauge), now), None);
+        snap.rain_in_today = -0.5;
+        assert_eq!(ledger_observation(&snap, Some(&gauge), now), None);
+        snap.rain_in_today = f64::NAN;
+        assert_eq!(ledger_observation(&snap, Some(&gauge), now), None);
     }
 
     #[test]
@@ -3840,6 +4382,7 @@ mod snapshot_assembly_tests {
             &scripts,
             None, // sensor_history
             None, // forecast_obs
+            None, // balance
             None, // control
         )
         .await
@@ -3885,6 +4428,7 @@ mod snapshot_assembly_tests {
             &policy.zone_runtime,
             &policy,
             &scripts,
+            None,
             None,
             None,
             None,

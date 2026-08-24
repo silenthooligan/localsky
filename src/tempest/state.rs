@@ -138,6 +138,16 @@ pub struct Snapshot {
     /// momentary gap between station packets does not flap it back to cloud-only.
     #[serde(default)]
     pub has_live_station: bool,
+    /// LOCAL calendar-day ordinal (num_days_from_ce) of the day
+    /// `rain_in_today` currently accumulates for, stamped by every
+    /// writer of that field (UDP day bucket, bus fill's own valid
+    /// epoch). 0 = no writer yet. Server-internal bookkeeping: the
+    /// observations-ledger writer gates its day-max upsert on this
+    /// matching the row's date, so the first ticks after local midnight
+    /// (before the accumulator resets) can never pin yesterday's total
+    /// onto the new day's row. Never serialized.
+    #[serde(skip)]
+    pub rain_today_day_ordinal: i32,
 }
 
 /// Whether a live LOCAL weather station is actually PRESENT for this deployment,
@@ -615,6 +625,37 @@ impl TempestStore {
             label: ol.clone(),
             is_live: false,
             is_fresh: !owner_is_stale(self.max_age_for_field(ol, RAIN_KEY), *oe, at),
+        })
+    }
+
+    /// The current owner of the DAILY rain total (`rain_in_today`) in the
+    /// merge, for the forecast-observations day-max writer's provenance
+    /// tag. Same two-tier resolution as [`Self::rain_owner`] but keyed on
+    /// the accumulation field: a live station owning it is a gauge; a
+    /// cloud fill owner is classified by its catalog nature (radar QPE
+    /// day totals vs model day totals). `None` when no source has ever
+    /// written a daily total: the day has no rain-capable source and the
+    /// writer records 0.0 with source 'none'.
+    #[cfg(feature = "ssr")]
+    pub fn rain_today_owner(&self, at: i64) -> Option<RainOwner> {
+        const RAIN_TODAY_KEY: &str = "rain_in_today";
+        {
+            let owners = self.field_owners.lock().unwrap();
+            if let Some((_, oe, ol)) = owners.get(RAIN_TODAY_KEY) {
+                if !owner_is_stale(self.max_age_for(ol), *oe, at) {
+                    return Some(RainOwner {
+                        label: ol.clone(),
+                        is_live: true,
+                        is_fresh: true,
+                    });
+                }
+            }
+        }
+        let fills = self.fill_owners.lock().unwrap();
+        fills.get(RAIN_TODAY_KEY).map(|(_, oe, ol)| RainOwner {
+            label: ol.clone(),
+            is_live: false,
+            is_fresh: !owner_is_stale(self.max_age_for(ol), *oe, at),
         })
     }
 
@@ -1120,6 +1161,9 @@ impl TempestStore {
             solar_w_m2: obs.solar_w_m2,
             rain_in_last_min: obs.rain_mm_last_min / 25.4,
             rain_in_today: rain_today_in,
+            // The day this accumulation belongs to (reverted below with the
+            // value when a higher source owns rain_in_today).
+            rain_today_day_ordinal: day_bucket,
             // 60 * (mm/min) → mm/hr → in/hr.
             rain_intensity_in_hr: obs.rain_mm_last_min * 60.0 / 25.4,
             // ET0 / flow / POP are not in the Tempest packet; carry forward
@@ -1243,7 +1287,14 @@ impl TempestStore {
             contest!("solar_w_m2", solar_w_m2);
             contest!("uv_index", uv_index);
             contest!("illuminance_lx", illuminance_lx);
-            contest!("rain_in_today", rain_in_today);
+            // rain_in_today reverts the day ordinal together with the value
+            // (the ordinal describes whatever total the snapshot carries).
+            if claim!("rain_in_today") {
+                prov_owned.push("rain_in_today");
+            } else {
+                new.rain_in_today = prev.rain_in_today;
+                new.rain_today_day_ordinal = prev.rain_today_day_ordinal;
+            }
             // Rain intensity captures ownership so its per-field LIVE epoch
             // reflects whether Tempest actually owns the current-rain rate (the
             // engine's "currently raining" path keys on rain_live_epoch).
@@ -1459,7 +1510,14 @@ impl TempestStore {
                 F::SolarWm2 => snap.solar_w_m2 = v,
                 F::UvIndex => snap.uv_index = v,
                 F::Illuminance => snap.illuminance_lx = v,
-                F::RainTodayIn => snap.rain_in_today = v,
+                F::RainTodayIn => {
+                    snap.rain_in_today = v;
+                    // The fill's own valid time decides which local day the
+                    // total belongs to: the ledger's midnight gate reads
+                    // this, so a fill valid late yesterday arriving after
+                    // midnight is never recorded on the new day's row.
+                    snap.rain_today_day_ordinal = local_day_ordinal(at_epoch);
+                }
                 F::RainIntensityInHr => {
                     snap.rain_intensity_in_hr = v;
                     owns_rain = true;

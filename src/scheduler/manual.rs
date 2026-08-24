@@ -306,7 +306,17 @@ async fn run_tick(
                     let row = NewRun {
                         zone_slug: s.zone_slug.clone(),
                         start_epoch: handle.started_epoch,
-                        source: format!("manual:{}", s.id),
+                        // Pretend water from a dry-run controller records
+                        // as such, excluded from watering evidence
+                        // (mirrors the API manual path + the observer).
+                        // The schedule id rides along for observability;
+                        // the evidence filter excludes the whole
+                        // dry_run family either way.
+                        source: if controller.simulated() {
+                            format!("dry_run:{}", s.id)
+                        } else {
+                            format!("manual:{}", s.id)
+                        },
                         controller_id: handle.controller_id.clone(),
                         planned_duration_s: duration_s,
                         skip_reason: None,
@@ -516,8 +526,14 @@ mod tests {
     /// inserts a skipped row, so we additionally check status to distinguish.
     async fn dispatched_run_exists(runs: &RunsStore, id: &str) -> bool {
         let rows = runs.window(0, i64::MAX).await.unwrap();
-        rows.iter()
-            .any(|r| r.source == format!("manual:{id}") && r.status != "skipped")
+        // The test registry's controller is a non-simulating DryRun, so a
+        // dispatched run records as pretend water (source dry_run:<id>,
+        // excluded from watering evidence); a real controller records
+        // manual:<id>. Either form proves the valve command was issued.
+        rows.iter().any(|r| {
+            (r.source == format!("manual:{id}") || r.source == format!("dry_run:{id}"))
+                && r.status != "skipped"
+        })
     }
 
     #[test]

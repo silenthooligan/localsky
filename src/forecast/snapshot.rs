@@ -189,9 +189,12 @@ pub struct ForecastSnapshot {
     pub timezone: String,
     /// 7 entries: today plus next 6.
     pub daily: Vec<DailyEntry>,
-    /// Past N days (most recent first reversed → earliest first). Used
-    /// by the heat-advisory rule to compute `days_since_significant_rain`.
-    /// Empty until past_days is added to the Open-Meteo request.
+    /// Past N days (stored earliest first). The model archive: real
+    /// archived daily values from the latest model run, populated only
+    /// by the Open-Meteo fetch (`OpenMeteoConfig.past_days`, clamped
+    /// 1..=7, default 3); every other provider ships this empty. Feeds
+    /// `days_since_significant_rain` and the observed-rain ladder's
+    /// model-archive rung.
     pub past_daily: Vec<DailyEntry>,
     /// 48 entries: now plus next 47 hours, anchored on the top of
     /// the current hour.

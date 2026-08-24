@@ -630,7 +630,7 @@ pub fn default_config_text(kind: &str) -> String {
         "tempest_udp" => "{\n  \"bind_addr\": \"0.0.0.0:50222\"\n}".into(),
         "tempest_ws" => "{\n  \"access_token\": \"YOUR_TEMPEST_TOKEN\"\n}".into(),
         "davis_wll" => "{\n  \"host\": \"weatherlinklive.local\",\n  \"txid\": 1\n}".into(),
-        "open_meteo" => "{\n  \"forecast_days\": 7,\n  \"forecast_hours\": 48,\n  \"past_days\": 1,\n  \"include_radar\": true\n}".into(),
+        "open_meteo" => "{\n  \"forecast_days\": 7,\n  \"forecast_hours\": 48,\n  \"past_days\": 3,\n  \"include_radar\": true\n}".into(),
         // Empty user_agent = auto-derived per-install identity at request
         // time. Saving the form unedited ships no template contact string.
         "nws" => "{\n  \"user_agent\": \"\"\n}".into(),

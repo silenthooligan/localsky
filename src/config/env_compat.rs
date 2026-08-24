@@ -62,7 +62,7 @@ pub fn synthesize() -> Config {
     let om_kind = SourceKind::OpenMeteo(OpenMeteoConfig {
         forecast_days: 7,
         forecast_hours: 48,
-        past_days: 1,
+        past_days: 3,
         // Radar on by default: the synthesized Open-Meteo source powers
         // the Live Radar precipitation overlay out of the box, matching
         // the serde default in schema::default_open_meteo_include_radar.

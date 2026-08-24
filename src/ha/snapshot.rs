@@ -484,50 +484,100 @@ pub struct SoilForecast {
     pub status: String,
 }
 
-/// Phase H, weekly water-budget plan per zone. When the operator flips
-/// `input_boolean.irrigation_<zone>_weekly_budget_mode` to `on`, the HA
-/// budget-override automation at 23:30:25 reads `today_seconds` from
-/// here and calls `irrigation_unlimited.adjust_time(actual=...)` to
-/// replace SI's daily-bucket value. The model targets a healthy moisture
-/// band for warm-season grass (St. Augustine FL) by allocating a weekly
-/// water budget across `sessions_per_week` days, subtracting
-/// probability-weighted forecast rain, and skipping today if rain is
-/// imminent or the last run was recent.
+/// Weekly water balance per zone. The gross weekly target (inches,
+/// homeowner semantics: "an inch a week including rain") is settled
+/// against a trailing window of observed rain, irrigation already
+/// applied, and a bias-corrected forecast credit covering only the days
+/// until the zone's next expected session; the remainder splits across
+/// the sessions still expected this week. Computed by
+/// `engine::budget::compute_zone` (one implementation, live path and
+/// tests alike). Sizing is gross: no capture-efficiency division, no
+/// heat multiplier (both were removed; the old formula inflated
+/// sessions by up to ~1.9x).
+///
+/// The HA budget-override automation at 23:30:25 still reads
+/// `today_seconds` and calls `irrigation_unlimited.adjust_time`
+/// (actual=...) with it: that contract is unchanged ("actual seconds to
+/// water today").
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WaterBudget {
     pub zone_slug: String,
     pub zone_name: String,
-    /// True when this zone is in budget mode (HA helper). False = SI's
-    /// daily flex math owns the schedule and budget data here is
-    /// informational only.
+    /// Always true on live paths (the per-zone budget-mode toggle was
+    /// retired with the cutover); kept for wire compatibility.
     pub mode_active: bool,
-    /// Operator-tunable weekly water target in inches (HA input_number).
+    /// Gross weekly water target in inches (config, HA helper, or the
+    /// agronomic slug default).
     pub weekly_budget_in: f64,
-    /// Operator-tunable session count per week (HA input_number,
-    /// typical 1-3). Determines per-session depth.
+    /// Sessions per week (typical 1-3). Determines spacing and the
+    /// per-session split of the remainder.
     pub sessions_per_week: u32,
-    /// Probability-weighted forecast rain over the next 7 days, mm.
-    /// Net irrigation need is reduced by this × capture efficiency.
+    /// Probability-weighted forecast rain over the next 7 days, mm, at
+    /// its HISTORICAL wire scaling (x 0.7 capture factor, unchanged
+    /// across releases so external consumers that threshold on it keep
+    /// their meaning). Informational only: the balance itself never
+    /// subtracts a whole-week forecast, only the bias-corrected credit
+    /// in `forecast_credit_mm`.
     pub expected_rain_mm: f64,
-    /// Net irrigation depth needed this week (mm), after rain credit.
+    /// The balance remainder (mm): gross weekly target minus observed
+    /// rain, applied irrigation, and the forecast credit, floored at 0.
     pub needed_mm: f64,
-    /// Per-session depth (mm) and run-time (seconds at the zone's
-    /// throughput). seconds_per_session = (mm / throughput) × 3600 ×
-    /// heat_multiplier, scaled up by 1/capture_efficiency to deliver
-    /// the target depth at the root after runoff.
+    /// Per-session gross depth (mm): remainder / remaining_sessions.
+    /// seconds_per_session = mm_per_session / throughput_mm_hr x 3600,
+    /// with no capture or heat factor.
     pub mm_per_session: f64,
     pub seconds_per_session: u32,
-    /// True if seconds_per_session exceeded the zone's maximum_duration
-    ///, single-session can't deliver the target depth. Operator can
-    /// raise sessions_per_week, raise SI's max_duration, or accept it.
+    /// True if seconds_per_session exceeded the zone's effective cap
+    /// (max_run_minutes min any restriction cap): a single session
+    /// cannot deliver its share. The tuning report's cap check keys on
+    /// this.
     pub session_capped: bool,
-    /// Epoch of the most recent run for this zone (from SQLite history),
-    /// or 0 if no run on record.
+    /// End epoch of the most recent completed watering event for this
+    /// zone (clustered run-history evidence), or 0 if none in the
+    /// trailing window. Drives the session-spacing gate.
     pub last_run_epoch: i64,
     /// Today's recommendation. `seconds == 0` means "don't run today";
-    /// reason explains why (rain forecast, last run recent, mode off).
+    /// reason names what decided (covered / deferred for forecast rain /
+    /// spaced after the last session / session M of N).
     pub today_seconds: u32,
     pub today_reason: String,
+
+    // ---- Balance terms (additive, 1.21.0). Absent on older JSON. ----
+    /// Observed rain over the trailing 7 local days including today, mm.
+    #[serde(default)]
+    pub observed_rain_mm: f64,
+    /// Ladder rung that supplied the observed term:
+    /// "gauge" | "radar" | "model_archive" | "none".
+    #[serde(default)]
+    pub observed_rain_source: String,
+    /// Gross irrigation applied over the trailing 7 days, mm
+    /// (union-clustered completed watering evidence x throughput).
+    #[serde(default)]
+    pub applied_mm: f64,
+    /// Bias-corrected forecast rain credited between now and the next
+    /// expected session, mm. Zero when the next session is due now.
+    #[serde(default)]
+    pub forecast_credit_mm: f64,
+    /// "bias_forecast" when a forward window exists, else "none".
+    #[serde(default)]
+    pub forecast_credit_source: String,
+    /// The current month's bias multiplier applied to the credit
+    /// (1.0 = identity, including the under-trained case; see
+    /// `bias_sample_count`).
+    #[serde(default = "default_bias_multiplier")]
+    pub bias_multiplier: f64,
+    /// Observations behind the current month's multiplier. Below the
+    /// training minimum the multiplier is 1.0 by design.
+    #[serde(default)]
+    pub bias_sample_count: u32,
+    /// Sessions still expected this week: sessions_per_week minus
+    /// completed watering events in the trailing window, floor 1.
+    #[serde(default)]
+    pub remaining_sessions: u32,
+}
+
+fn default_bias_multiplier() -> f64 {
+    1.0
 }
 
 /// Top-level snapshot for the irrigation page. Cheap to clone (`Arc`-
@@ -628,11 +678,11 @@ pub struct IrrigationSnapshot {
     #[serde(default)]
     pub soil_forecasts: Vec<SoilForecast>,
 
-    /// Per-zone weekly water budgets (Phase H). One entry per zone with
-    /// the budget plan + today's recommendation. HA's
+    /// Per-zone weekly water balance. One entry per zone with the
+    /// settled balance terms + today's recommendation. HA's
     /// localsky_weekly_budget_override automation reads `today_seconds`
-    /// for zones with `mode_active == true` and overrides SI's value
-    /// via `irrigation_unlimited.adjust_time` at 23:30:25.
+    /// and overrides SI's value via `irrigation_unlimited.adjust_time`
+    /// at 23:30:25 (contract unchanged: actual seconds to water today).
     #[serde(default)]
     pub water_budgets: Vec<WaterBudget>,
 

@@ -23,7 +23,9 @@ pub mod tuning;
 pub mod verdict_strip;
 pub mod water_balance;
 
-pub use budget::{compute_zone as compute_zone_budget, BudgetGlobals, ZoneBudgetInputs};
+pub use budget::{
+    compute_zone as compute_zone_balance, BalanceGlobals, ZoneBalanceInputs, SESSION_RAIN_DEFER_IN,
+};
 pub use cycle_soak::{split as cycle_split, CycleSegment};
 pub use et0::{compute as compute_et0, Et0Diagnostics, Et0Inputs, Et0Result};
 pub use forecast_bias::{BiasModel, Observation as ForecastObservation};

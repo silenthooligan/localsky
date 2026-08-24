@@ -766,6 +766,10 @@ pub struct OpenMeteoConfig {
     pub forecast_days: u32,
     #[serde(default = "default_open_meteo_forecast_hours")]
     pub forecast_hours: u32,
+    /// Past days of daily model data to fetch alongside the forecast
+    /// (the model archive rung of the observed-rain ladder + the
+    /// days-since-rain backstop). Honored by the fetch since 1.21.0
+    /// (earlier builds hardcoded 3), clamped to 1..=7 at use. Default 3.
     #[serde(default = "default_open_meteo_past_days")]
     pub past_days: u32,
     /// Whether this Open-Meteo source advertises itself as a radar-capable
@@ -803,7 +807,7 @@ fn default_open_meteo_forecast_hours() -> u32 {
     48
 }
 fn default_open_meteo_past_days() -> u32 {
-    1
+    3
 }
 fn default_open_meteo_include_radar() -> bool {
     true

@@ -357,6 +357,7 @@ mod tests {
                             .into()],
                         confidence: "medium".into(),
                     }),
+                    ..Default::default()
                 },
                 ZoneTuning {
                     slug: "front_yard".into(),
@@ -369,6 +370,7 @@ mod tests {
                             .into(),
                     ],
                     recommendation: None,
+                    ..Default::default()
                 },
             ],
             scorecard: TuningScorecard {

@@ -20,8 +20,8 @@ use tokio::sync::Mutex;
 use crate::config::schema::{Config, ZoneConfig};
 use crate::config::FileConfigStore;
 use crate::engine::tuning::{
-    self, BackoutInputs, CapClampInputs, CheckOutcome, DriftInputs, IntervalInputs, RunSegment,
-    SkipDayRecord, SoilBinding, ZoneCheckOutcomes,
+    self, is_watering_evidence, BackoutInputs, CapClampInputs, CheckOutcome, DriftInputs,
+    IntervalInputs, RunSegment, SkipDayRecord, SoilBinding, ZoneCheckOutcomes,
 };
 use crate::forecast::ForecastStore;
 use crate::ha::IrrigationStore;
@@ -156,6 +156,30 @@ pub async fn generate_report_with(
         })
         .collect();
 
+    // Operator dismissals (snooze / permanent), loaded once per
+    // generation with zone slugs pre-normalized. Silencing is total: a
+    // stripped recommendation never reaches the wire, so cards, counts,
+    // auto-select, and the weekly push all go quiet together.
+    let dismissals: Vec<crate::persistence::DismissalRow> =
+        crate::persistence::TuningDismissalsStore::new(handles.history_conn.clone())
+            .active(now)
+            .await
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|mut d| {
+                        d.zone_slug = d.zone_slug.replace('-', "_");
+                        d
+                    })
+                    .collect()
+            })
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "tuning dismissals read failed; none applied");
+                Vec::new()
+            });
+    // The day-total upsell line is US-only (MRMS coverage).
+    let is_us_install = crate::config::region::region_for(handles.location.0, handles.location.1)
+        == crate::config::region::Region::Us;
+
     let snap = handles.irrigation.snapshot();
     let capture = cfg.engine.capture_efficiency.clamp(0.05, 1.0);
     // The policy derived from the SAME config under verification (never
@@ -178,7 +202,7 @@ pub async fn generate_report_with(
             .collect();
         let segments: Vec<RunSegment> = zone_rows
             .iter()
-            .filter(|r| is_watering_row(&r.source, &r.status))
+            .filter(|r| is_watering_evidence(&r.source, &r.status, r.skip_reason.as_deref()))
             .map(|r| RunSegment {
                 start_epoch: r.start_epoch,
                 end_epoch: r
@@ -278,8 +302,6 @@ pub async fn generate_report_with(
                 .as_ref()
                 .map(|m| m.throughput_mm_hr)
                 .unwrap_or(effective_rate),
-            capture_efficiency: capture,
-            heat_multiplier: snap.forecast.heat_multiplier.max(1.0),
         };
         let cap = tuning::check_cap_clamped(slug, &cap_inputs);
 
@@ -399,7 +421,29 @@ pub async fn generate_report_with(
             drift,
             backout,
         };
-        zones.push(tuning::assemble_zone(
+        // Balance provenance: one line per term (value + source rung +
+        // window; the specific insufficiency when a rung was skipped).
+        let balance_lines: Vec<String> = budget
+            .map(|b| {
+                let upsell =
+                    is_us_install && !matches!(b.observed_rain_source.as_str(), "gauge" | "radar");
+                tuning::balance_term_lines(b, upsell)
+            })
+            .unwrap_or_default();
+        // Operator silencing for THIS zone, handed into the ranked pick:
+        // a silenced suggestion is skipped (and annotated) while the
+        // next-ranked one still surfaces.
+        let zone_silenced: Vec<tuning::SilencedRec> = dismissals
+            .iter()
+            .filter(|d| d.zone_slug == runtime_slug)
+            .map(|d| tuning::SilencedRec {
+                field: d.field.clone(),
+                rec_id: d.rec_id.clone(),
+                kind: d.kind.clone(),
+                until_epoch: d.until_epoch,
+            })
+            .collect();
+        let mut zt = tuning::assemble_zone(
             slug,
             &z.display_name,
             days,
@@ -411,7 +455,18 @@ pub async fn generate_report_with(
                 BindingKind::Ha => SoilBinding::HaEntity,
             },
             &outcomes,
-        ));
+            &balance_lines,
+            &zone_silenced,
+            now,
+        );
+        // The numeric breakdown rides the surviving recommendation's
+        // evidence so its numbers are auditable in place.
+        if let Some(b) = budget {
+            if let Some(rec) = zt.recommendation.as_mut() {
+                rec.evidence.push(tuning::balance_breakdown_line(b));
+            }
+        }
+        zones.push(zt);
     }
 
     Ok(TuningReport {
@@ -508,13 +563,16 @@ fn raised_sequence_fits_window(
     Some(seq as i64 <= available)
 }
 
-/// Watering evidence per the run-history semantics: run-edge observer
-/// rows (source ha_refresher) plus manual API/scheduler rows. Skip
-/// markers and the unused intended/running states never count.
-fn is_watering_row(source: &str, status: &str) -> bool {
-    status == "completed"
-        && (source == "ha_refresher" || source == "manual" || source.starts_with("manual:"))
-}
+// Operator silencing happens INSIDE engine::tuning::assemble_zone's
+// ranked pick (a silenced suggestion is skipped and the next-ranked one
+// surfaces); this file only converts the persisted DismissalRows into
+// the engine's SilencedRec shape per zone.
+
+// Watering evidence: the ONE shared definition lives in
+// crate::history::rollup (re-exported through engine::tuning as
+// `is_watering_evidence`, imported above), so the report, the balance's
+// applied term, and the history surfaces can never disagree on what
+// counts as watering.
 
 /// Mean daily crop ET over the forward forecast window for one zone.
 fn zone_mean_daily_etc(z: &ZoneConfig, day_terms: &[(f64, f64, u16)], lat: f64) -> Option<f64> {

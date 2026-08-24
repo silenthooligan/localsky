@@ -55,19 +55,28 @@ impl HistoryDb {
 // the connection and the migration runner handles tables.
 
 /// Insert a completed run, ignoring duplicates by (zone_slug,
-/// start_epoch, controller_id). The HA-refresher source always tags
-/// these as `ha_refresher` / `ha_service_call` since they reflect HA's
-/// own status sensors, not a LocalSky-initiated dispatch.
+/// start_epoch, controller_id). The run-edge observer tags rows
+/// `ha_refresher` / `ha_service_call` (they reflect the polled running
+/// state, not a LocalSky-initiated dispatch), EXCEPT when the observed
+/// activity came from a non-simulating dry-run controller: those rows
+/// carry `rec.source = "dry_run"` so pretend water never counts as
+/// watering evidence (the balance's applied term and the tuning report
+/// both filter on source).
 pub async fn record_run(conn: Arc<Mutex<Connection>>, rec: RunRecord) -> Result<()> {
     tokio::task::spawn_blocking(move || -> Result<()> {
         let conn = conn.blocking_lock();
         let end_epoch = rec.start_epoch + rec.duration_s;
+        let source = if rec.source.is_empty() {
+            "ha_refresher".to_string()
+        } else {
+            rec.source
+        };
         conn.execute(
             "INSERT OR IGNORE INTO runs
                 (zone_slug, start_epoch, end_epoch, duration_s,
                  source, controller_id, status, skip_reason)
              VALUES (?1, ?2, ?3, ?4,
-                     'ha_refresher', 'ha_service_call',
+                     ?6, 'ha_service_call',
                      CASE WHEN ?5 IS NULL THEN 'completed' ELSE 'aborted' END,
                      ?5)",
             params![
@@ -76,6 +85,7 @@ pub async fn record_run(conn: Arc<Mutex<Connection>>, rec: RunRecord) -> Result<
                 end_epoch,
                 rec.duration_s,
                 rec.skip_reason,
+                source,
             ],
         )?;
         Ok(())
@@ -163,7 +173,8 @@ pub async fn window(
         // legacy window view treats those as zero-length until they
         // complete and the row is updated.
         let mut stmt = conn.prepare(
-            "SELECT zone_slug, start_epoch, COALESCE(duration_s, 0), skip_reason
+            "SELECT zone_slug, start_epoch, COALESCE(duration_s, 0), skip_reason,
+                    COALESCE(source, ''), COALESCE(status, '')
              FROM runs
              WHERE start_epoch >= ?1 AND start_epoch < ?2
              ORDER BY start_epoch ASC",
@@ -175,6 +186,8 @@ pub async fn window(
                     start_epoch: row.get(1)?,
                     duration_s: row.get(2)?,
                     skip_reason: row.get(3)?,
+                    source: row.get(4)?,
+                    status: row.get(5)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;

@@ -105,77 +105,79 @@ pub fn spawn_forecast_refresher(
             unlocated_logged = false;
             let model = resolve_model(cfg_store.as_deref()).await;
             let endpoint = resolve_endpoint(cfg_store.as_deref()).await;
-            let sleep_for = match refresh_once(&client, lat, lon, &model, endpoint.as_deref()).await
-            {
-                Ok((snap, current)) => {
-                    let at = snap.last_refresh_epoch;
-                    last_good = Some(snap.clone());
-                    let _ = bus.send(SourceEvent::Forecast {
-                        source_id: source_id.clone(),
-                        snapshot: snap,
-                        at_epoch: at,
-                    });
-                    // LIVE current conditions: emit the parsed `current` block as
-                    // an Observation on the SAME bus. The snapshot bridge routes
-                    // it to TempestStore::apply_source_fields; Open-Meteo's id is
-                    // absent from the live_current map, so it fills as a
-                    // forecast-derived (live_current=false) low-priority source
-                    // that a LAN station outranks by default, yet a per-field
-                    // override (e.g. WIND = open_meteo) can pin. Forecast path is
-                    // unchanged whether or not a current block is present.
-                    if let Some((fields, cur_at)) = current {
-                        let _ = bus.send(SourceEvent::Observation {
-                            source_id: source_id.clone(),
-                            fields,
-                            at_epoch: cur_at,
-                        });
-                    }
-                    if degraded {
-                        tracing::info!(consecutive_failures, "forecast source recovered");
-                        let _ = bus.send(SourceEvent::Reachability {
-                            source_id: source_id.clone(),
-                            reachable: true,
-                        });
-                        degraded = false;
-                    }
-                    consecutive_failures = 0;
-                    REFRESH_INTERVAL
-                }
-                Err(e) => {
-                    consecutive_failures = consecutive_failures.saturating_add(1);
-                    // Re-emit the last good forecast flagged unreachable so the UI
-                    // shows the stale forecast + a degraded badge (the bridge
-                    // accepts it as the same owner refreshing itself).
-                    if let Some(prev) = last_good.clone() {
-                        let at = prev.last_refresh_epoch;
-                        let mut prev = prev;
-                        prev.source_reachable = false;
+            let past_days = resolve_past_days(cfg_store.as_deref()).await;
+            let sleep_for =
+                match refresh_once(&client, lat, lon, &model, endpoint.as_deref(), past_days).await
+                {
+                    Ok((snap, current)) => {
+                        let at = snap.last_refresh_epoch;
+                        last_good = Some(snap.clone());
                         let _ = bus.send(SourceEvent::Forecast {
                             source_id: source_id.clone(),
-                            snapshot: prev,
+                            snapshot: snap,
                             at_epoch: at,
                         });
+                        // LIVE current conditions: emit the parsed `current` block as
+                        // an Observation on the SAME bus. The snapshot bridge routes
+                        // it to TempestStore::apply_source_fields; Open-Meteo's id is
+                        // absent from the live_current map, so it fills as a
+                        // forecast-derived (live_current=false) low-priority source
+                        // that a LAN station outranks by default, yet a per-field
+                        // override (e.g. WIND = open_meteo) can pin. Forecast path is
+                        // unchanged whether or not a current block is present.
+                        if let Some((fields, cur_at)) = current {
+                            let _ = bus.send(SourceEvent::Observation {
+                                source_id: source_id.clone(),
+                                fields,
+                                at_epoch: cur_at,
+                            });
+                        }
+                        if degraded {
+                            tracing::info!(consecutive_failures, "forecast source recovered");
+                            let _ = bus.send(SourceEvent::Reachability {
+                                source_id: source_id.clone(),
+                                reachable: true,
+                            });
+                            degraded = false;
+                        }
+                        consecutive_failures = 0;
+                        REFRESH_INTERVAL
                     }
-                    let _ = bus.send(SourceEvent::Reachability {
-                        source_id: source_id.clone(),
-                        reachable: false,
-                    });
-                    if !degraded {
-                        tracing::warn!(
-                            error = %format!("{e:#}"),
-                            "forecast source unreachable; entering degraded mode"
-                        );
-                        degraded = true;
-                    } else {
-                        tracing::debug!(
-                            consecutive_failures,
-                            error = %format!("{e:#}"),
-                            "forecast still unreachable"
-                        );
+                    Err(e) => {
+                        consecutive_failures = consecutive_failures.saturating_add(1);
+                        // Re-emit the last good forecast flagged unreachable so the UI
+                        // shows the stale forecast + a degraded badge (the bridge
+                        // accepts it as the same owner refreshing itself).
+                        if let Some(prev) = last_good.clone() {
+                            let at = prev.last_refresh_epoch;
+                            let mut prev = prev;
+                            prev.source_reachable = false;
+                            let _ = bus.send(SourceEvent::Forecast {
+                                source_id: source_id.clone(),
+                                snapshot: prev,
+                                at_epoch: at,
+                            });
+                        }
+                        let _ = bus.send(SourceEvent::Reachability {
+                            source_id: source_id.clone(),
+                            reachable: false,
+                        });
+                        if !degraded {
+                            tracing::warn!(
+                                error = %format!("{e:#}"),
+                                "forecast source unreachable; entering degraded mode"
+                            );
+                            degraded = true;
+                        } else {
+                            tracing::debug!(
+                                consecutive_failures,
+                                error = %format!("{e:#}"),
+                                "forecast still unreachable"
+                            );
+                        }
+                        backoff(consecutive_failures)
                     }
-                    backoff(consecutive_failures)
-                }
-            };
+                };
             tokio::time::sleep(sleep_for).await;
         }
     });
@@ -293,10 +295,32 @@ fn backoff(n: u32) -> Duration {
     Duration::from_secs(secs.saturating_sub(jitter).saturating_add(off))
 }
 
-/// Number of past days to fetch alongside the 7-day forecast. Used by
-/// the heat-advisory rule to compute "days since significant rain"
-/// without depending on the SQLite history layer.
-const PAST_DAYS: usize = 3;
+/// Default number of past days to fetch alongside the 7-day forecast
+/// (the model-archive rung of the observed-rain ladder + the
+/// days-since-rain backstop). `OpenMeteoConfig.past_days` overrides it
+/// (clamped 1..=7); the date-anchored daily split handles any count.
+const DEFAULT_PAST_DAYS: u32 = 3;
+
+/// Clamp a configured past-day count to the band the ladder supports.
+fn clamp_past_days(v: u32) -> u32 {
+    v.clamp(1, 7)
+}
+
+/// Resolve the configured Open-Meteo past-day count for one refresh
+/// tick, live-config first (same contract as resolve_model).
+async fn resolve_past_days(cfg_store: Option<&FileConfigStore>) -> u32 {
+    if let Some(store) = cfg_store {
+        if let Ok(cfg) = store.load().await {
+            if let Some(v) = cfg.sources.iter().find_map(|s| match &s.source {
+                SourceKind::OpenMeteo(c) => Some(c.past_days),
+                _ => None,
+            }) {
+                return clamp_past_days(v);
+            }
+        }
+    }
+    DEFAULT_PAST_DAYS
+}
 
 /// Open-Meteo endpoint ladder, tried in order per refresh. The primary
 /// is a SINGLE A record (verified 2026-07-03 during a >24h outage of
@@ -319,7 +343,8 @@ const FORECAST_BASES: [&str; 3] = [
 /// appended ONLY for a non-default model so the best_match URL stays
 /// byte-identical to the pre-model-selection one (same upstream
 /// behavior, same cache keys).
-fn forecast_url(base: &str, lat: f64, lon: f64, model: &str) -> String {
+fn forecast_url(base: &str, lat: f64, lon: f64, model: &str, past_days: u32) -> String {
+    let past_days = clamp_past_days(past_days);
     let mut url = format!(
         "{base}/v1/forecast?\
          latitude={lat}&longitude={lon}&\
@@ -329,7 +354,7 @@ fn forecast_url(base: &str, lat: f64, lon: f64, model: &str) -> String {
          temperature_unit=fahrenheit&\
          wind_speed_unit=mph&\
          precipitation_unit=inch&\
-         past_days={PAST_DAYS}&\
+         past_days={past_days}&\
          forecast_days=7&\
          forecast_hours=48&\
          timezone=auto&\
@@ -357,6 +382,7 @@ async fn refresh_once(
     lon: f64,
     model: &str,
     custom_endpoint: Option<&str>,
+    past_days: u32,
 ) -> Result<(ForecastSnapshot, Option<(Vec<(WeatherField, f64)>, i64)>)> {
     let mut last_err: Option<anyhow::Error> = None;
     // A configured self-hosted instance leads the ladder; the hosted service
@@ -392,7 +418,7 @@ async fn refresh_once(
         .collect();
     for (i, (base, tier)) in bases.iter().enumerate() {
         let host = base.as_str();
-        let url = forecast_url(host, lat, lon, model);
+        let url = forecast_url(host, lat, lon, model, past_days);
         match fetch_forecast_raw(client, tier, host, &url).await {
             Ok(resp) => {
                 let current = resp.current_fields();
@@ -1036,15 +1062,33 @@ mod tests {
             "&past_days=3&forecast_days=7&forecast_hours=48&timezone=auto&timeformat=unixtime"
         );
         assert_eq!(
-            forecast_url("https://api.open-meteo.com", 28.5, -81.4, "best_match"),
+            forecast_url("https://api.open-meteo.com", 28.5, -81.4, "best_match", 3),
             expected
         );
     }
 
+    /// The configured past-day count is honored (clamped 1..=7); the
+    /// hardcoded 3 is only the default.
+    #[test]
+    fn past_days_config_is_honored_and_clamped() {
+        let five = forecast_url("https://api.open-meteo.com", 28.5, -81.4, "best_match", 5);
+        assert!(five.contains("&past_days=5&"), "{five}");
+        let low = forecast_url("https://api.open-meteo.com", 28.5, -81.4, "best_match", 0);
+        assert!(low.contains("&past_days=1&"), "clamped up: {low}");
+        let high = forecast_url("https://api.open-meteo.com", 28.5, -81.4, "best_match", 30);
+        assert!(high.contains("&past_days=7&"), "clamped down: {high}");
+    }
+
     #[test]
     fn non_default_model_appends_models_param_only() {
-        let base = forecast_url("https://api.open-meteo.com", 48.14, 11.58, "best_match");
-        let pinned = forecast_url("https://api.open-meteo.com", 48.14, 11.58, "icon_seamless");
+        let base = forecast_url("https://api.open-meteo.com", 48.14, 11.58, "best_match", 3);
+        let pinned = forecast_url(
+            "https://api.open-meteo.com",
+            48.14,
+            11.58,
+            "icon_seamless",
+            3,
+        );
         assert_eq!(pinned, format!("{base}&models=icon_seamless"));
     }
 
@@ -1066,9 +1110,9 @@ mod tests {
     #[test]
     fn endpoint_ladder_keeps_primary_first_and_only_swaps_host() {
         assert_eq!(FORECAST_BASES[0], "https://api.open-meteo.com");
-        let primary = forecast_url(FORECAST_BASES[0], 28.5, -81.4, "best_match");
+        let primary = forecast_url(FORECAST_BASES[0], 28.5, -81.4, "best_match", 3);
         for mirror in &FORECAST_BASES[1..] {
-            let url = forecast_url(mirror, 28.5, -81.4, "best_match");
+            let url = forecast_url(mirror, 28.5, -81.4, "best_match", 3);
             // Identical query on every rung: mirrors were verified to speak
             // the exact production /v1/forecast contract, so ONLY the host
             // may differ.
@@ -1079,7 +1123,7 @@ mod tests {
             );
         }
         // A self-hosted base slots in with its own scheme + port, same query.
-        let selfhosted = forecast_url("http://192.0.2.10:8080", 28.5, -81.4, "best_match");
+        let selfhosted = forecast_url("http://192.0.2.10:8080", 28.5, -81.4, "best_match", 3);
         assert!(selfhosted.starts_with("http://192.0.2.10:8080/v1/forecast?"));
         assert_eq!(
             selfhosted.replace("http://192.0.2.10:8080", FORECAST_BASES[0]),

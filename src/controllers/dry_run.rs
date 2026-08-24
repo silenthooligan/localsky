@@ -45,6 +45,14 @@ impl IrrigationController for DryRunController {
         &self.id
     }
 
+    fn simulated(&self) -> bool {
+        // Either mode is pretend water: with simulate_runs the adapter
+        // writes its own source='dry_run' rows, and without it the
+        // pretend_running readback must not become genuine-looking
+        // observer evidence.
+        true
+    }
+
     fn supports(&self) -> ControllerCaps {
         ControllerCaps {
             flow_meter: false,

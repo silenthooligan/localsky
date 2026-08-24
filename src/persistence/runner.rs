@@ -89,6 +89,16 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "tuning_report_state",
         sql: include_str!("migrations/M0014_tuning_report_state.sql"),
     },
+    Migration {
+        version: "M0015",
+        name: "observed_source",
+        sql: include_str!("migrations/M0015_observed_source.sql"),
+    },
+    Migration {
+        version: "M0016",
+        name: "tuning_dismissals",
+        sql: include_str!("migrations/M0016_tuning_dismissals.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]
@@ -254,6 +264,8 @@ mod tests {
                 "M0012".to_string(),
                 "M0013".to_string(),
                 "M0014".to_string(),
+                "M0015".to_string(),
+                "M0016".to_string(),
             ]
         );
     }

@@ -286,6 +286,55 @@ impl RunsStore {
         .map_err(|e| RunsError::Sqlite(e.to_string()))
     }
 
+    /// Truncate any OPEN manual run row for `zone_slug` at `now_epoch`.
+    /// A manual dispatch pre-writes its row as completed for the full
+    /// planned duration (the controller owns the shutoff timer), so an
+    /// early Stop must shrink the row to the real span; otherwise the
+    /// balance and every history surface credit water that never fell.
+    /// Only rows whose span contains `now_epoch` are touched. Returns
+    /// the number of rows truncated.
+    pub async fn truncate_active(
+        &self,
+        zone_slug: &str,
+        now_epoch: i64,
+    ) -> Result<usize, RunsError> {
+        let c = self.conn.clone();
+        let zone = zone_slug.to_string();
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
+            let conn = c.blocking_lock();
+            conn.execute(
+                "UPDATE runs
+                 SET end_epoch = ?2, duration_s = ?2 - start_epoch
+                 WHERE zone_slug = ?1 AND status = 'completed'
+                   AND (source = 'manual' OR source LIKE 'manual:%')
+                   AND start_epoch <= ?2 AND end_epoch > ?2",
+                params![zone, now_epoch],
+            )
+        })
+        .await
+        .map_err(|e| RunsError::Sqlite(format!("join: {e}")))?
+        .map_err(|e| RunsError::Sqlite(e.to_string()))
+    }
+
+    /// [`Self::truncate_active`] across every zone (the StopAll path).
+    pub async fn truncate_active_all(&self, now_epoch: i64) -> Result<usize, RunsError> {
+        let c = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
+            let conn = c.blocking_lock();
+            conn.execute(
+                "UPDATE runs
+                 SET end_epoch = ?1, duration_s = ?1 - start_epoch
+                 WHERE status = 'completed'
+                   AND (source = 'manual' OR source LIKE 'manual:%')
+                   AND start_epoch <= ?1 AND end_epoch > ?1",
+                params![now_epoch],
+            )
+        })
+        .await
+        .map_err(|e| RunsError::Sqlite(format!("join: {e}")))?
+        .map_err(|e| RunsError::Sqlite(e.to_string()))
+    }
+
     /// All runs in [from_epoch, to_epoch). Used by the Gantt history.
     pub async fn window(&self, from_epoch: i64, to_epoch: i64) -> Result<Vec<RunRow>, RunsError> {
         let c = self.conn.clone();
@@ -401,6 +450,62 @@ mod tests {
         let win = s.window(1500, 2500).await.unwrap();
         assert_eq!(win.len(), 1);
         assert_eq!(win[0].start_epoch, 2000);
+    }
+
+    /// An early Stop truncates the pre-written manual row to the real
+    /// span: only manual-family rows whose span contains the stop
+    /// instant, never other sources or already-ended rows.
+    #[tokio::test]
+    async fn truncate_active_shrinks_the_open_manual_row_only() {
+        let s = fresh_store().await;
+        // Open manual row: dispatched at 1000 for a planned hour.
+        let manual = NewRun {
+            source: "manual".into(),
+            ..new_run("front", 1000)
+        };
+        s.insert_completed(manual, 1000 + 3600, 3600, None)
+            .await
+            .unwrap();
+        // An observer row for another zone, same span: untouched.
+        let observer = NewRun {
+            source: "ha_refresher".into(),
+            ..new_run("side", 1000)
+        };
+        s.insert_completed(observer, 1000 + 3600, 3600, None)
+            .await
+            .unwrap();
+        // A manual row that already ended: untouched.
+        let done = NewRun {
+            source: "manual:sched1".into(),
+            ..new_run("front", 100)
+        };
+        s.insert_completed(done, 400, 300, None).await.unwrap();
+
+        let n = s.truncate_active("front", 1120).await.unwrap();
+        assert_eq!(n, 1, "exactly the open manual row");
+        let rows = s.window(0, 10_000).await.unwrap();
+        let front_open = rows
+            .iter()
+            .find(|r| r.zone_slug == "front" && r.start_epoch == 1000)
+            .unwrap();
+        assert_eq!(front_open.end_epoch, Some(1120));
+        assert_eq!(front_open.duration_s, Some(120));
+        let side = rows.iter().find(|r| r.zone_slug == "side").unwrap();
+        assert_eq!(side.duration_s, Some(3600), "other sources untouched");
+        let done = rows
+            .iter()
+            .find(|r| r.zone_slug == "front" && r.start_epoch == 100)
+            .unwrap();
+        assert_eq!(done.duration_s, Some(300), "ended rows untouched");
+        // StopAll variant truncates across zones.
+        let manual_b = NewRun {
+            source: "manual".into(),
+            ..new_run("side", 5000)
+        };
+        s.insert_completed(manual_b, 5000 + 3600, 3600, None)
+            .await
+            .unwrap();
+        assert_eq!(s.truncate_active_all(5060).await.unwrap(), 1);
     }
 
     #[tokio::test]

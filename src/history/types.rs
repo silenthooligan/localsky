@@ -15,6 +15,16 @@ pub struct RunRecord {
     /// Skip reason if this row represents a skip event rather than a
     /// completed run. None for actual runs.
     pub skip_reason: Option<String>,
+    /// Row source ('ha_refresher' | 'manual' | 'manual:<id>' |
+    /// 'smart_morning' | 'dry_run' | ...). Additive: empty on payloads
+    /// from older builds; `history::rollup::is_watering_record` falls
+    /// back to the skip_reason test then.
+    #[serde(default)]
+    pub source: String,
+    /// Row status ('completed' | 'skipped' | 'aborted' | ...). Additive;
+    /// empty on payloads from older builds.
+    #[serde(default)]
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -89,6 +99,18 @@ pub struct ZoneTuning {
     /// At most one recommendation per zone (priority-ranked server-side).
     #[serde(default)]
     pub recommendation: Option<TuningRecommendation>,
+    /// True when the operator dismissed or snoozed at least one of this
+    /// zone's suggestions. A silenced suggestion is stripped inside the
+    /// ranked pick server-side (no pill, no count, no push for it), so
+    /// the NEXT-ranked non-silenced suggestion may still appear in
+    /// `recommendation`; the last entry of `lines` is the muted
+    /// annotation the UI renders with Undo. Additive (1.21.0).
+    #[serde(default)]
+    pub dismissed: bool,
+    /// The ZoneConfig field names currently silenced for this zone
+    /// (the undismiss endpoint keys on zone_slug + field). Additive.
+    #[serde(default)]
+    pub dismissed_fields: Vec<String>,
 }
 
 /// One actionable recommendation. `field` + `suggested_value` are what the

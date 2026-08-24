@@ -261,7 +261,7 @@ pub fn cloud_kinds() -> Vec<SourceKind> {
         SourceKind::OpenMeteo(OpenMeteoConfig {
             forecast_days: 7,
             forecast_hours: 48,
-            past_days: 1,
+            past_days: 3,
             include_radar: false,
             model: "best_match".to_string(),
             endpoint: None,

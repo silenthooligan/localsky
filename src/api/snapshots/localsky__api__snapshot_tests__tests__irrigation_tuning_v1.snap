@@ -29,7 +29,9 @@ expression: report
           "Median rate backed out of 3 clean watering events: 18.0 mm/hr vs the configured 38.0 mm/hr (53% apart)."
         ],
         "confidence": "medium"
-      }
+      },
+      "dismissed": false,
+      "dismissed_fields": []
     },
     {
       "slug": "front_yard",
@@ -39,7 +41,9 @@ expression: report
         "Watered 4 time(s) in the last 14 days.",
         "A soil probe would unlock the drying-rate and sprinkler-rate checks for this zone."
       ],
-      "recommendation": null
+      "recommendation": null,
+      "dismissed": false,
+      "dismissed_fields": []
     }
   ],
   "scorecard": {

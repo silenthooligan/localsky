@@ -238,7 +238,7 @@ pub fn seed_config() -> crate::config::schema::Config {
             source: SourceKind::OpenMeteo(OpenMeteoConfig {
                 forecast_days: 7,
                 forecast_hours: 48,
-                past_days: 1,
+                past_days: 3,
                 include_radar: true,
                 model: "best_match".to_string(),
                 endpoint: None,
@@ -333,6 +333,10 @@ pub fn seed_config() -> crate::config::schema::Config {
             area_sqft: 2200.0,
             controller_station: "1".to_string(),
             soil_sensor_id: soil("back_yard"),
+            // The balance showcase: a 1.75 in week over 2 sessions wants
+            // more per session than the 60 minute cap can deliver.
+            weekly_budget_in: Some(1.75),
+            sessions_per_week: Some(2),
             ..base.clone()
         },
     );
@@ -355,6 +359,9 @@ pub fn seed_config() -> crate::config::schema::Config {
             sprinkler_type: SprinklerType::Rotor,
             controller_station: "3".to_string(),
             soil_sensor_id: soil("side_yard"),
+            // Matches the synthetic budget row's spaced-session story.
+            weekly_budget_in: Some(1.3),
+            sessions_per_week: Some(2),
             ..base.clone()
         },
     );
@@ -448,6 +455,8 @@ fn synth_tempest(t_sim: f64) -> TempestSnapshot {
         // Demo presents as a real live local station (serial + battery), so the
         // display reads it as a station, not cloud-only.
         has_live_station: true,
+        // The demo accumulator is always today's.
+        rain_today_day_ordinal: crate::timeutil::local_day_ordinal(now),
     }
 }
 
@@ -461,7 +470,10 @@ fn synth_irrigation(t_sim: f64) -> IrrigationSnapshot {
             "Back Yard",
             -12.5 + 4.0 * day_phase.sin(),
             1200,
-            now - 18 * 3600,
+            // Eight days back: the balance showcase has back_yard behind
+            // on its week (capped sessions could not keep up), so its
+            // last completed session predates the trailing window.
+            now - 8 * 86_400,
         ),
         synth_zone(
             "front_yard",
@@ -756,48 +768,75 @@ fn synth_soil_forecasts() -> Vec<SoilForecast> {
 }
 
 fn synth_water_budgets(now: i64) -> Vec<WaterBudget> {
-    // back_yard's 1.15 in weekly target makes its per-session slice outgrow
-    // the 60 minute default run limit (session_capped), so the demo report
-    // shows the cap-raise recommendation end to end: 20.71 mm needed / 2
-    // sessions = 10.355 mm, sized through the allocator's own formula to
-    // 4312 s (72 min), which the cap check rounds up to a 75 minute raise.
-    let zones = [
-        ("back_yard", "Back Yard", true, 1.15, 2u32),
-        ("front_yard", "Front Yard", true, 1.00, 2),
-        ("side_yard", "Side Yard", false, 1.00, 2),
-        ("back_yard_shrubs", "Back Yard Shrubs", false, 0.50, 1),
-    ];
-    // Same constants the demo ZoneMath tiles carry (throughput 14.2 mm/hr,
-    // capture 0.70, heat 1.15), run through the allocator's sizing formula
-    // so the budget rows and the math tiles tell one story.
+    // The demo rows run through the LIVE balance implementation
+    // (engine::budget::compute_zone) with fabricated trailing evidence,
+    // so the wire fields, reasons, and formula can never drift from the
+    // engine. The story showcases every today-reason branch:
+    //   back_yard: behind on its 1.75 in week (no session in the
+    //     trailing window), so its half-week share is 22.2 mm = 5635 s
+    //     at 14.2 mm/hr, over the 60 minute cap (the cap-raise
+    //     recommendation, rounded up to 95 minutes).
+    //   front_yard: a small remainder but spaced (last session 1 day
+    //     back at a 3 day interval).
+    //   side_yard: spaced likewise.
+    //   back_yard_shrubs: covered by prior watering.
+    // Observed rain reads 0.00 in with GAUGE provenance: the demo's
+    // seeded ledger holds gauge rows for the trailing week (a measured
+    // dry spell), and measured coverage always outranks the forecast
+    // archive's regional 0.25 in from three days back.
     const THROUGHPUT_MM_HR: f64 = 14.2;
-    const CAPTURE: f64 = 0.70;
-    const HEAT: f64 = 1.15;
     let cap_s = DEMO_MAX_RUN_MINUTES.unwrap_or(60) * 60;
+    let globals = crate::engine::BalanceGlobals {
+        now_epoch: now,
+        session_rain_defer_in: crate::engine::SESSION_RAIN_DEFER_IN,
+        observed_rain_mm: 0.0,
+        observed_rain_source: "gauge".to_string(),
+        bias: crate::engine::BiasModel::identity(),
+    };
+    // The balance settles against trailing evidence only; the showcase
+    // forecast block is display data (its rain would otherwise trip the
+    // defer gate every synthetic day).
+    let fc = ForecastSnapshot::default();
+    let zones: [(&str, &str, f64, u32, i64, i64, u32); 4] = [
+        // (slug, name, weekly_in, sessions/wk, last_run_epoch,
+        //  trailing valve-open seconds, sessions done in the window)
+        ("back_yard", "Back Yard", 1.75, 2, now - 8 * 86_400, 0, 0),
+        (
+            "front_yard",
+            "Front Yard",
+            1.00,
+            2,
+            now - 24 * 3600,
+            5400,
+            3,
+        ),
+        ("side_yard", "Side Yard", 1.30, 2, now - 36 * 3600, 5400, 3),
+        (
+            "back_yard_shrubs",
+            "Back Yard Shrubs",
+            0.50,
+            1,
+            now - 48 * 3600,
+            3960,
+            3,
+        ),
+    ];
     zones
         .iter()
-        .map(|(slug, name, mode, budget_in, sessions)| {
-            let mut w = WaterBudget::default();
-            w.zone_slug = slug.to_string();
-            w.zone_name = name.to_string();
-            w.mode_active = *mode;
-            w.weekly_budget_in = *budget_in;
-            w.sessions_per_week = *sessions;
-            w.expected_rain_mm = 8.5;
-            w.needed_mm = 25.4 * budget_in - 8.5;
-            w.mm_per_session = w.needed_mm / (*sessions as f64);
-            w.seconds_per_session =
-                ((w.mm_per_session / THROUGHPUT_MM_HR) * 3600.0 * HEAT / CAPTURE) as u32;
-            w.session_capped = w.seconds_per_session > cap_s;
-            let session_final = w.seconds_per_session.min(cap_s);
-            w.last_run_epoch = now - 18 * 3600;
-            w.today_seconds = if *mode { session_final } else { 0 };
-            w.today_reason = if *mode {
-                format!("scheduled session 1 of {sessions} this week")
-            } else {
-                "budget mode off".into()
+        .map(|(slug, name, weekly, sessions, last_run, open_s, done)| {
+            let inputs = crate::engine::ZoneBalanceInputs {
+                slug: slug.to_string(),
+                name: name.to_string(),
+                weekly_budget_in: *weekly,
+                sessions_per_week: *sessions,
+                mode_active: true,
+                throughput_mm_hr: THROUGHPUT_MM_HR,
+                max_dur_s: cap_s,
+                last_run_epoch: *last_run,
+                applied_trailing_mm: *open_s as f64 / 3600.0 * THROUGHPUT_MM_HR,
+                sessions_done: *done,
             };
-            w
+            crate::engine::compute_zone_balance(&inputs, &globals, &fc)
         })
         .collect()
 }
@@ -930,6 +969,8 @@ async fn seed_history(conn: Arc<tokio::sync::Mutex<rusqlite::Connection>>) {
                             start_epoch: start,
                             duration_s: 0,
                             skip_reason: Some("Rain expected within 4h".into()),
+                            source: String::new(),
+                            status: String::new(),
                         },
                     )
                     .await;
@@ -965,6 +1006,15 @@ async fn seed_history(conn: Arc<tokio::sync::Mutex<rusqlite::Connection>>) {
                 .await;
                 let mut t = start;
                 for (slug, dur) in zones {
+                    // back_yard sits out the trailing week: the balance
+                    // showcase has it behind on its target (its capped
+                    // sessions could not keep up), which is exactly the
+                    // state the cap-raise recommendation describes. Its
+                    // earlier weeks still water normally so the 14-day
+                    // report window has run days to evaluate.
+                    if slug == "back_yard" && back <= 7 {
+                        continue;
+                    }
                     let jitter = ((back * 37 + t) % 90) - 45;
                     let d = (dur + jitter).max(300);
                     let _ = record_run(
@@ -974,6 +1024,8 @@ async fn seed_history(conn: Arc<tokio::sync::Mutex<rusqlite::Connection>>) {
                             start_epoch: t,
                             duration_s: d,
                             skip_reason: None,
+                            source: String::new(),
+                            status: String::new(),
                         },
                     )
                     .await;
@@ -1028,7 +1080,9 @@ async fn seed_tuning_signals(
         } else {
             (0.0, 0.0)
         };
-        if let Err(e) = obs_store.upsert(date, predicted, observed).await {
+        // The demo presents a live station, so its observed rows are
+        // gauge-provenance (and train the bias model like a real yard).
+        if let Err(e) = obs_store.upsert(date, predicted, observed, "gauge").await {
             tracing::debug!("demo_data: forecast observation seed failed: {e}");
         }
     }
@@ -1253,22 +1307,60 @@ mod seed_config_tests {
     }
 
     /// The demo's showcase cap state, pinned end to end: back_yard's
-    /// synthetic budget is session-capped at the engine formula's 4312 s
-    /// (72 min), the raised morning still fits the pre-sunrise dispatch
-    /// window at the demo's location, and the cap check turns that state
-    /// into the 75 minute max_run_minutes recommendation.
+    /// balance leaves the full 44.45 mm target (a measured-dry gauge
+    /// week credits nothing) across 2 sessions, sized by the engine
+    /// formula to 5635 s (94 min) per session, the raised morning still
+    /// fits the pre-sunrise dispatch window at the demo's location, and
+    /// the cap check turns that state into the 95 minute
+    /// max_run_minutes recommendation.
     #[test]
-    fn demo_back_yard_shows_the_75_minute_cap_recommendation() {
-        let budgets = synth_water_budgets(0);
+    fn demo_back_yard_shows_the_95_minute_cap_recommendation() {
+        let now = chrono::Utc::now().timestamp();
+        let budgets = synth_water_budgets(now);
         let by = budgets
             .iter()
             .find(|w| w.zone_slug == "back_yard")
             .expect("back_yard budget row");
         assert_eq!(
-            by.seconds_per_session, 4312,
-            "engine-formula sizing at the demo numbers"
+            by.seconds_per_session, 5635,
+            "gross balance sizing at the demo numbers"
         );
-        assert!(by.session_capped, "4312 s outgrows the 3600 s default cap");
+        assert!(by.session_capped, "5635 s outgrows the 3600 s default cap");
+        assert_eq!(
+            by.observed_rain_source, "gauge",
+            "measured coverage outranks the regional archive"
+        );
+        assert_eq!(by.observed_rain_mm, 0.0);
+        assert_eq!(by.remaining_sessions, 2);
+
+        // The reseeded siblings tell the other reason branches.
+        let front = budgets
+            .iter()
+            .find(|w| w.zone_slug == "front_yard")
+            .unwrap();
+        assert_eq!(front.today_seconds, 0);
+        assert!(
+            front.today_reason.contains("spaced"),
+            "{}",
+            front.today_reason
+        );
+        let side = budgets.iter().find(|w| w.zone_slug == "side_yard").unwrap();
+        assert_eq!(side.today_seconds, 0);
+        assert!(
+            side.today_reason.contains("spaced"),
+            "{}",
+            side.today_reason
+        );
+        let shrubs = budgets
+            .iter()
+            .find(|w| w.zone_slug == "back_yard_shrubs")
+            .unwrap();
+        assert_eq!(shrubs.today_seconds, 0);
+        assert!(
+            shrubs.today_reason.contains("covered"),
+            "{}",
+            shrubs.today_reason
+        );
 
         // The raised morning fits the dispatch window: hypothetical zone
         // list with back_yard at the needed session, laid out under the
@@ -1301,7 +1393,7 @@ mod seed_config_tests {
             "raised demo morning must fit: sequence {seq} s vs available {available} s"
         );
 
-        // The check itself: cap-primary, 75 minutes.
+        // The check itself: cap-primary, 95 minutes.
         let inp = crate::engine::tuning::CapClampInputs {
             session_capped: true,
             deficit_cap_binding: false,
@@ -1311,21 +1403,21 @@ mod seed_config_tests {
             configured_max_run_minutes: None,
             raised_fits_window: Some(true),
             restriction_clamped: false,
-            run_days: 4,
+            // Three watering days in the 14-day report window (the
+            // trailing week sits out; earlier weeks watered).
+            run_days: 3,
             sessions_per_week: by.sessions_per_week,
             configured_sessions: None,
             configured_weekly_budget_in: Some(by.weekly_budget_in),
             weekly_budget_in: by.weekly_budget_in,
             throughput_mm_hr: 14.2,
-            capture_efficiency: 0.70,
-            heat_multiplier: 1.15,
         };
         let out = crate::engine::tuning::check_cap_clamped("back_yard", &inp);
         let crate::engine::tuning::CheckOutcome::Recommend(rec) = out else {
             panic!("expected the cap recommendation, got {out:?}");
         };
         assert_eq!(rec.field, "max_run_minutes");
-        assert_eq!(rec.suggested_value, serde_json::json!(75));
+        assert_eq!(rec.suggested_value, serde_json::json!(95));
     }
 
     /// Finding: the baked demo reasons carried operands that contradicted the

@@ -113,7 +113,24 @@ use serde::{Deserialize, Serialize};
 /// and a config write that raises a zone's limit past 60 emits the
 /// run-cap-raised Web Push notice after the save. No existing response
 /// shape changes.
-pub const API_VERSION: &str = "1.20.0";
+/// 1.21.0 (additive): the weekly budget becomes a true water balance.
+/// WaterBudget rows gain observed_rain_mm + observed_rain_source
+/// ('gauge'|'radar'|'model_archive'|'none'), applied_mm,
+/// forecast_credit_mm + forecast_credit_source
+/// ('bias_forecast'|'none'), bias_multiplier, bias_sample_count, and
+/// remaining_sessions; today_seconds keeps its contract (actual
+/// seconds to water today) and expected_rain_mm keeps its historical
+/// capture-adjusted scaling (weighted 7-day forecast x 25.4 x 0.7).
+/// ZoneTuning gains dismissed + dismissed_fields.
+/// New endpoints: POST /irrigation/tuning/dismiss {zone_slug, field,
+/// recommendation_id, kind: snooze|permanent} and POST
+/// /irrigation/tuning/undismiss {zone_slug, field}, privileged like
+/// zones/apply; a dismissed recommendation is stripped from the report
+/// server-side (no pill, no count, no weekly push). GET
+/// /irrigation/history rows gain source + status. Open-Meteo
+/// past_days config is honored (clamp 1..=7, default 3). No existing
+/// response shape changes.
+pub const API_VERSION: &str = "1.21.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {
