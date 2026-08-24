@@ -299,8 +299,19 @@ pub fn spawn(
             // The plan physically cannot finish by the target even from the
             // clamped local-midnight start: tell the operator instead of
             // silently overshooting sunrise. Fires only on dispatch-eligible
-            // ticks, so at most a handful of lines per day.
-            let available_s = (target_finish - target_start).num_seconds();
+            // ticks, so at most a handful of lines per day. Single-sourced
+            // with the tuning report's raised-cap window test via
+            // engine::sunrise::smart_morning_available_s, so the report and
+            // the dispatcher can never disagree about what fits. Sunrise
+            // exists here (the earlier continue guards None), so the
+            // fallback arm is unreachable; it reuses the local values.
+            let available_s = crate::engine::sunrise::smart_morning_available_s(
+                today,
+                lat,
+                lon,
+                sequence_total_s,
+            )
+            .unwrap_or_else(|| (target_finish - target_start).num_seconds());
             if available_s < sequence_total_s as i64 {
                 warn!(
                     sequence_total_s,
@@ -1969,6 +1980,7 @@ mod tests {
                     photo_url: None,
                     weekly_budget_in: None,
                     sessions_per_week: None,
+                    max_run_minutes: None,
                 },
             );
         }

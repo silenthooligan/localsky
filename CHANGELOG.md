@@ -2,6 +2,19 @@
 
 All notable changes to LocalSky are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.16] - 2026-08-24
+
+### Added
+
+- **A per-zone run limit you control.** Each zone's editor gains a Max run time field (whole minutes, 5 to 360; blank keeps the familiar 60). The limit applies live on save, no restart. Raising it past 60 minutes asks for a one-tap confirmation naming the zone and the new limit, and every device with notifications enabled gets a notice once the save lands; the save is never blocked. Long runs are still split by cycle-and-soak, and a watering restriction's own per-zone cap always wins.
+- Deleting a zone now asks for confirmation first; it previously deleted on a single click.
+- The Zones settings page now shows the restart banner when a change needs one (a zone added or removed, a station remapped); it previously saved with no indication a restart was needed.
+
+### Changed
+
+- **The tuning report now suggests raising the run limit first.** When sessions are chronically trimmed, the first suggestion is to raise the zone's run limit so each session delivers its full water; splitting the week across more sessions is now the fallback, used when the raise would pass 360 minutes or the longer morning would no longer finish before sunrise. A soil deficit too large to refill in one run gets the same real suggestion instead of an informational note.
+- The tuning surfaces read at a glance: the recommendation card carries an attention stripe, a suggestion tag, a confidence chip, and a current-to-suggested line; zone cards and the zones page show which zones have suggestions and how many; the irrigation page's strip moves above the data when a suggestion is waiting and now also appears on phones.
+
 ## [0.7.15] - 2026-08-23
 
 ### Added

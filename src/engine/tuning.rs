@@ -362,13 +362,13 @@ fn round1(v: f64) -> f64 {
 /// current snapshot (v1 contract: current config's clamp state plus run
 /// frequency over the window).
 ///
-/// The two clamp signals are deliberately separate because their
-/// remedies differ: `session_capped` (the weekly allocator's per-session
-/// slice exceeds the cap) is fixable by sessions/budget, while
-/// `deficit_cap_binding` (ZoneMath.raw_seconds, a ONE-SHOT soil-deficit
-/// refill, exceeds the cap) is not: neither sessions_per_week nor
-/// weekly_budget_in feeds the deficit chain, so that state only earns an
-/// informational line naming the real knob (the per-run duration cap).
+/// The two clamp signals stay separate because their evidence differs:
+/// `session_capped` is the weekly allocator's per-session slice over the
+/// cap, `deficit_cap_binding` (ZoneMath.raw_seconds) is a ONE-SHOT
+/// soil-deficit refill over it. Since the cap became real per-zone
+/// config (max_run_minutes), raising it is the PRIMARY remedy for both;
+/// the sessions/budget knobs are the session-capped fallback when the
+/// raise is blocked by the ceiling or the dispatch window.
 #[derive(Debug, Clone, Default)]
 pub struct CapClampInputs {
     /// WaterBudget.session_capped: the weekly allocator's per-session
@@ -381,8 +381,31 @@ pub struct CapClampInputs {
     /// (WaterBudget.seconds_per_session). Only meaningful alongside
     /// `session_capped`; never the one-shot deficit refill.
     pub desired_seconds: Option<u32>,
-    /// The cap that clamps it.
+    /// The one-shot refill seconds (ZoneMath.raw_seconds) when
+    /// `deficit_cap_binding`; sizes the deficit-path raise.
+    pub deficit_refill_seconds: Option<u32>,
+    /// The EFFECTIVE cap that clamps it (snapshot math value, already
+    /// restriction-tightened when a restriction is active).
     pub max_duration_s: Option<u32>,
+    /// The RAW configured ZoneConfig.max_run_minutes (null when unset =
+    /// the 60 minute default). Feeds the recommendation's current_value
+    /// and the already-configured guard.
+    pub configured_max_run_minutes: Option<u32>,
+    /// Whether the morning sequence still fits the dispatch window with
+    /// this zone's run raised to the needed length. Computed by the
+    /// assembly from the live snapshot + policy; None when any input is
+    /// missing (the recommendation proceeds and the window line is
+    /// omitted from evidence).
+    pub raised_fits_window: Option<bool>,
+    /// True when the EFFECTIVE cap is tighter than the configured zone
+    /// limit, i.e. an active watering restriction is the clamp (the
+    /// assembly compares math.max_duration_seconds against the
+    /// configured minutes). Raising the zone limit cannot unclamp
+    /// anything then, and reshaping sessions or budget around a
+    /// transient regulatory cap would persist a change sized to a
+    /// temporary limit, so both cap arms pause with an informational
+    /// line instead of recommending.
+    pub restriction_clamped: bool,
     /// Distinct local days with completed watering in the window.
     pub run_days: u32,
     /// Effective sessions per week (config value or agronomic default).
@@ -398,6 +421,88 @@ pub struct CapClampInputs {
     pub heat_multiplier: f64,
 }
 
+/// Ceiling on a recommended per-zone run limit (minutes); matches the
+/// validator's `zone_max_run_minutes_range` band.
+pub const MAX_RUN_MINUTES_CEILING: u32 = 360;
+
+/// The raise the cap check suggests for a needed run: whole minutes,
+/// rounded UP to the next 5-minute step.
+fn suggested_cap_minutes(needed_seconds: u32) -> u32 {
+    needed_seconds.div_ceil(60).div_ceil(5) * 5
+}
+
+/// Outcome of sizing a run-limit raise for a needed run length.
+enum CapRaise {
+    Recommend(Box<TuningRecommendation>),
+    /// The configured limit already covers the needed run: the effective
+    /// clamp is a restriction cap, or a just-applied raise the snapshot
+    /// has not caught up with. Nothing to recommend either way.
+    Covered,
+    /// An active watering restriction is the effective clamp; run-length
+    /// suggestions pause (informational line) while it is in effect.
+    RestrictionPaused,
+    /// The raise cannot be recommended: the suggestion would exceed the
+    /// ceiling, or the longer morning no longer fits the dispatch window.
+    Blocked,
+}
+
+/// The informational line both cap arms emit while a watering
+/// restriction is the effective clamp. A raise would be a no-op until
+/// the restriction lifts (and would then silently go live), and a
+/// sessions/budget reshape would be sized to a temporary regulatory
+/// limit; neither is a recommendation worth persisting.
+fn restriction_paused_line(max_dur_s: u32) -> CheckOutcome {
+    let cap_min = (max_dur_s as f64 / 60.0).round();
+    CheckOutcome::Insufficient(format!(
+        "An active watering restriction caps runs at {cap_min:.0} minutes; run-length \
+         suggestions are paused while it is in effect."
+    ))
+}
+
+/// Size a max_run_minutes raise that fits `needed_seconds`, honoring the
+/// ceiling, the dispatch-window fit, and the already-configured guard.
+fn evaluate_cap_raise(
+    slug: &str,
+    inp: &CapClampInputs,
+    needed_seconds: u32,
+    headline: impl FnOnce(u32) -> String,
+    mut evidence: Vec<String>,
+) -> CapRaise {
+    let suggested_min = suggested_cap_minutes(needed_seconds);
+    // Covered first: a just-applied raise the snapshot has not caught up
+    // with must read Pass, never a restriction line it does not have.
+    if inp.configured_max_run_minutes.unwrap_or(60) >= suggested_min {
+        return CapRaise::Covered;
+    }
+    if inp.restriction_clamped {
+        return CapRaise::RestrictionPaused;
+    }
+    if suggested_min > MAX_RUN_MINUTES_CEILING || inp.raised_fits_window == Some(false) {
+        return CapRaise::Blocked;
+    }
+    if inp.raised_fits_window == Some(true) {
+        evidence.push(
+            "The longer morning still finishes before sunrise inside the dispatch window."
+                .to_string(),
+        );
+    }
+    let suggested = json!(suggested_min);
+    let id = recommendation_id(slug, "max_run_minutes", &suggested);
+    CapRaise::Recommend(Box::new(TuningRecommendation {
+        id,
+        field: "max_run_minutes".to_string(),
+        current_value: inp
+            .configured_max_run_minutes
+            .map(|v| json!(v))
+            .unwrap_or(Value::Null),
+        suggested_value: suggested,
+        companion_fields: Vec::new(),
+        headline: headline(suggested_min),
+        evidence,
+        confidence: "medium".to_string(),
+    }))
+}
+
 pub fn check_cap_clamped(slug: &str, inp: &CapClampInputs) -> CheckOutcome {
     if inp.run_days == 0 {
         return CheckOutcome::Insufficient(
@@ -409,18 +514,55 @@ pub fn check_cap_clamped(slug: &str, inp: &CapClampInputs) -> CheckOutcome {
         return CheckOutcome::Pass;
     }
     if !inp.session_capped {
-        // A one-shot deficit refill over the cap has no sessions/budget
-        // remedy (those knobs never feed the deficit chain), so it earns
-        // an informational line naming the real knob, never a
-        // recommendation.
+        // A one-shot deficit refill over the cap: the run limit is the
+        // only knob that shapes it (sessions/budget never feed the
+        // deficit chain), and since the limit is real config the check
+        // recommends raising it. The ceiling and the dispatch window
+        // still gate the raise; when either blocks it, the informational
+        // line names the situation as before.
         if inp.deficit_cap_binding {
-            return CheckOutcome::Insufficient(
-                "The one-shot soil-deficit refill this zone wants exceeds its per-run \
-                 duration cap, so runs are being trimmed; raising the maximum run duration \
-                 is the change that would fit it. Session count and weekly budget do not \
-                 shape this refill."
-                    .to_string(),
-            );
+            let deficit_line = || {
+                CheckOutcome::Insufficient(
+                    "The one-shot soil-deficit refill this zone wants exceeds its per-run \
+                     duration cap, so runs are being trimmed; raising the maximum run duration \
+                     is the change that would fit it. Session count and weekly budget do not \
+                     shape this refill."
+                        .to_string(),
+                )
+            };
+            let (Some(needed), Some(max_dur)) = (inp.deficit_refill_seconds, inp.max_duration_s)
+            else {
+                return deficit_line();
+            };
+            if max_dur == 0 || needed <= max_dur {
+                return CheckOutcome::Pass;
+            }
+            let needed_min = (needed as f64 / 60.0).round();
+            let cap_min = (max_dur as f64 / 60.0).round();
+            let evidence = vec![
+                format!(
+                    "The soil-deficit refill wants {needed_min:.0} min in one run; the \
+                     {cap_min:.0} min cap trims it."
+                ),
+                format!("Watered on {} day(s) in this window.", inp.run_days),
+            ];
+            return match evaluate_cap_raise(
+                slug,
+                inp,
+                needed,
+                |m| {
+                    format!(
+                        "Raise this zone's run limit to {m} minutes so the soil-deficit \
+                         refill fits in one run."
+                    )
+                },
+                evidence,
+            ) {
+                CapRaise::Recommend(rec) => CheckOutcome::Recommend(*rec),
+                CapRaise::Covered => CheckOutcome::Pass,
+                CapRaise::RestrictionPaused => restriction_paused_line(max_dur),
+                CapRaise::Blocked => deficit_line(),
+            };
         }
         return CheckOutcome::Pass;
     }
@@ -448,6 +590,32 @@ pub fn check_cap_clamped(slug: &str, inp: &CapClampInputs) -> CheckOutcome {
             inp.run_days
         ),
     ];
+    // PRIMARY: raise the run limit so each session delivers in full. The
+    // sessions split below is the fallback when the raise is blocked by
+    // the ceiling or the dispatch window.
+    match evaluate_cap_raise(
+        slug,
+        inp,
+        desired,
+        |m| {
+            format!(
+                "Raise this zone's run limit to {m} minutes so each session delivers its \
+                 full water."
+            )
+        },
+        evidence.clone(),
+    ) {
+        CapRaise::Recommend(rec) => return CheckOutcome::Recommend(*rec),
+        // The configured limit already covers the session: the effective
+        // clamp is a restriction cap or a not-yet-refreshed snapshot, and
+        // neither is a reason to reshape the week.
+        CapRaise::Covered => return CheckOutcome::Pass,
+        // An active restriction is the clamp: the sessions split and the
+        // budget alignment below would BOTH be sized to the transient
+        // regulatory cap, so the whole remedy chain pauses.
+        CapRaise::RestrictionPaused => return restriction_paused_line(max_dur),
+        CapRaise::Blocked => {}
+    }
     if sessions_needed > sessions && sessions_needed <= 7 {
         evidence.push(format!(
             "{sessions_needed} sessions per week would fit the same weekly water under the cap \
@@ -1313,7 +1481,11 @@ mod tests {
             session_capped: true,
             deficit_cap_binding: false,
             desired_seconds: Some(5400),
+            deficit_refill_seconds: None,
             max_duration_s: Some(3600),
+            configured_max_run_minutes: None,
+            raised_fits_window: None,
+            restriction_clamped: false,
             run_days: 4,
             sessions_per_week: 2,
             configured_sessions: Some(2),
@@ -1326,16 +1498,129 @@ mod tests {
     }
 
     #[test]
-    fn cap_check_suggests_more_sessions() {
+    fn suggested_cap_rounds_up_to_the_next_five_minutes() {
+        assert_eq!(suggested_cap_minutes(5400), 90); // exactly 90
+        assert_eq!(suggested_cap_minutes(4312), 75); // 71.9 -> 72 -> 75
+        assert_eq!(suggested_cap_minutes(3601), 65); // 60.02 -> 61 -> 65
+        assert_eq!(suggested_cap_minutes(4500), 75); // exactly 75
+    }
+
+    #[test]
+    fn cap_check_recommends_raising_the_run_limit_first() {
+        // Session-capped, raise unblocked: the PRIMARY remedy is the run
+        // limit itself, sized to the needed session and 5-min rounded.
         let out = check_cap_clamped("back_yard", &cap_inputs());
         let CheckOutcome::Recommend(rec) = out else {
             panic!("expected a recommendation, got {out:?}");
+        };
+        assert_eq!(rec.field, "max_run_minutes");
+        assert_eq!(rec.suggested_value, json!(90));
+        assert_eq!(rec.current_value, Value::Null, "unset cap reads null");
+        assert_eq!(rec.confidence, "medium");
+        assert!(rec.companion_fields.is_empty());
+        assert!(
+            !rec.evidence.iter().any(|e| e.contains("dispatch window")),
+            "no window line when the fit was not computed"
+        );
+
+        // A computed fit adds the window line to the evidence.
+        let mut inp = cap_inputs();
+        inp.raised_fits_window = Some(true);
+        let CheckOutcome::Recommend(rec) = check_cap_clamped("back_yard", &inp) else {
+            panic!("expected a recommendation");
+        };
+        assert!(
+            rec.evidence
+                .iter()
+                .any(|e| e.contains("finishes before sunrise")),
+            "window evidence line present: {:?}",
+            rec.evidence
+        );
+    }
+
+    #[test]
+    fn cap_check_splits_sessions_when_the_raise_cannot_fit_the_window() {
+        // The dispatch window blocks the raise: the split fallback holds.
+        let mut inp = cap_inputs();
+        inp.raised_fits_window = Some(false);
+        let out = check_cap_clamped("back_yard", &inp);
+        let CheckOutcome::Recommend(rec) = out else {
+            panic!("expected the split fallback, got {out:?}");
         };
         assert_eq!(rec.field, "sessions_per_week");
         // 5400 * 2 = 10800 weekly desired; / 3600 cap = 3 sessions.
         assert_eq!(rec.suggested_value, json!(3));
         assert_eq!(rec.confidence, "medium");
-        assert!(rec.companion_fields.is_empty());
+    }
+
+    #[test]
+    fn cap_check_splits_sessions_when_the_raise_would_pass_the_ceiling() {
+        // 24000 s = 400 min per session: past the 360 min ceiling, so the
+        // raise is off the table. Against a 180 min effective cap the same
+        // weekly water still fits 5 capped sessions (2 x 24000 / 10800),
+        // so the split fallback holds.
+        let mut inp = cap_inputs();
+        inp.desired_seconds = Some(24_000);
+        inp.max_duration_s = Some(10_800);
+        let out = check_cap_clamped("back_yard", &inp);
+        let CheckOutcome::Recommend(rec) = out else {
+            panic!("expected the split fallback, got {out:?}");
+        };
+        assert_eq!(rec.field, "sessions_per_week");
+        assert_eq!(rec.suggested_value, json!(5));
+    }
+
+    #[test]
+    fn cap_check_pauses_run_length_suggestions_under_an_active_restriction() {
+        // An active restriction (1800 s effective vs the 60 min configured
+        // default) is the clamp: neither a max_run_minutes raise (a no-op
+        // that would silently go live when the restriction lifts) nor a
+        // sessions_per_week split (sized to the transient cap) may be
+        // recommended; the check states the restriction instead.
+        let mut inp = cap_inputs();
+        inp.max_duration_s = Some(1800);
+        inp.restriction_clamped = true;
+        // desired 5400 > 1800: the session path engages fully.
+        let out = check_cap_clamped("back_yard", &inp);
+        let CheckOutcome::Insufficient(line) = out else {
+            panic!("expected the restriction line, got {out:?}");
+        };
+        assert!(line.contains("watering restriction"), "{line}");
+        assert!(line.contains("30 minutes"), "{line}");
+
+        // The deficit path pauses identically.
+        let mut inp = cap_inputs();
+        inp.session_capped = false;
+        inp.deficit_cap_binding = true;
+        inp.desired_seconds = None;
+        inp.deficit_refill_seconds = Some(5400);
+        inp.max_duration_s = Some(1800);
+        inp.restriction_clamped = true;
+        let out = check_cap_clamped("back_yard", &inp);
+        let CheckOutcome::Insufficient(line) = out else {
+            panic!("expected the restriction line, got {out:?}");
+        };
+        assert!(line.contains("watering restriction"), "{line}");
+
+        // A configured limit that already covers the run still reads Pass
+        // first (the just-applied-raise transitional state must never be
+        // labeled a restriction it does not have).
+        let mut inp = cap_inputs();
+        inp.max_duration_s = Some(1800);
+        inp.restriction_clamped = true;
+        inp.configured_max_run_minutes = Some(120);
+        assert_eq!(check_cap_clamped("back_yard", &inp), CheckOutcome::Pass);
+    }
+
+    #[test]
+    fn cap_check_passes_when_the_configured_limit_already_covers_the_session() {
+        // The configured cap already fits the needed session: the
+        // effective clamp is a restriction cap or a just-applied raise
+        // the snapshot has not caught up with. Neither warrants a
+        // recommendation, and the split fallback must NOT fire.
+        let mut inp = cap_inputs();
+        inp.configured_max_run_minutes = Some(90);
+        assert_eq!(check_cap_clamped("back_yard", &inp), CheckOutcome::Pass);
     }
 
     #[test]
@@ -1353,22 +1638,57 @@ mod tests {
     }
 
     /// A one-shot soil-deficit refill over the cap (ZoneMath.cap_binding
-    /// without a session-capped budget) must never turn into a
-    /// sessions/budget recommendation: neither knob feeds the deficit
-    /// chain. It earns the informational line naming the duration cap.
+    /// without a session-capped budget) now earns a real max_run_minutes
+    /// recommendation sized to the refill; it must never turn into a
+    /// sessions/budget recommendation (neither knob feeds the deficit
+    /// chain). The ceiling and the dispatch window fall back to the
+    /// informational line as before.
     #[test]
-    fn cap_check_deficit_binding_is_informational_only() {
+    fn cap_check_deficit_binding_recommends_the_run_limit() {
         let mut inp = cap_inputs();
         inp.session_capped = false;
         inp.deficit_cap_binding = true;
         inp.desired_seconds = None;
+        inp.deficit_refill_seconds = Some(5400);
         let out = check_cap_clamped("back_yard", &inp);
-        let CheckOutcome::Insufficient(line) = out else {
-            panic!("expected the informational line, got {out:?}");
+        let CheckOutcome::Recommend(rec) = out else {
+            panic!("expected a recommendation, got {out:?}");
+        };
+        assert_eq!(rec.field, "max_run_minutes");
+        assert_eq!(rec.suggested_value, json!(90));
+        assert!(rec.headline.contains("refill"), "{}", rec.headline);
+
+        // Window blocked -> the informational line, never sessions/budget.
+        inp.raised_fits_window = Some(false);
+        let CheckOutcome::Insufficient(line) = check_cap_clamped("back_yard", &inp) else {
+            panic!("expected the informational fallback line");
         };
         assert!(line.contains("maximum run duration"), "{line}");
         assert!(line.contains("do not shape this refill"), "{line}");
+
+        // Ceiling blocked (400 min) -> same informational fallback.
+        inp.raised_fits_window = None;
+        inp.deficit_refill_seconds = Some(24_000);
+        assert!(matches!(
+            check_cap_clamped("back_yard", &inp),
+            CheckOutcome::Insufficient(_)
+        ));
+
+        // Refill seconds unavailable -> the informational line as before.
+        inp.deficit_refill_seconds = None;
+        assert!(matches!(
+            check_cap_clamped("back_yard", &inp),
+            CheckOutcome::Insufficient(_)
+        ));
+
+        // Configured limit already covers the refill -> Pass (a restriction
+        // cap or a not-yet-refreshed snapshot is doing the clamping).
+        inp.deficit_refill_seconds = Some(5400);
+        inp.configured_max_run_minutes = Some(120);
+        assert_eq!(check_cap_clamped("back_yard", &inp), CheckOutcome::Pass);
+
         // Still gated on the chronic run-day floor.
+        inp.configured_max_run_minutes = None;
         inp.run_days = 2;
         assert_eq!(check_cap_clamped("back_yard", &inp), CheckOutcome::Pass);
     }
@@ -1391,6 +1711,9 @@ mod tests {
         inp.desired_seconds = Some(7200);
         inp.weekly_budget_in = 3.0;
         inp.configured_weekly_budget_in = Some(3.0);
+        // The raise is window-blocked, sessions are already daily: the
+        // budget alignment arm is the remaining move.
+        inp.raised_fits_window = Some(false);
         let out = check_cap_clamped("back_yard", &inp);
         let CheckOutcome::Recommend(rec) = out else {
             panic!("expected a budget recommendation, got {out:?}");

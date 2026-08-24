@@ -148,7 +148,7 @@ seconds = (gross_mm_needed / precip_rate_mm_hr) * 3600
 
 `precip_rate_mm_hr` per zone comes from either a measured catch-cup calibration (preferred) or the sprinkler-type default (rotor ~10 mm/hr; spray ~38 mm/hr; MP rotator ~10 mm/hr; drip ~4 mm/hr).
 
-Runtime is capped at `max_duration_s` so a misconfigured precip rate can't run a zone for hours.
+Runtime is capped at the zone's run limit (`max_run_minutes`, 60 minutes when unset) so a misconfigured precip rate can't run a zone for hours; an active watering restriction's per-zone cap tightens it further via min().
 
 ## Cycle-and-soak
 

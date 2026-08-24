@@ -254,6 +254,21 @@ pub fn validate(cfg: &Config) -> ValidationReport {
                 );
             }
         }
+        // Per-zone run limit stays inside a physically sane band; None (the
+        // 60 minute default) is always fine. Values above 60 are allowed
+        // here on purpose: the raise is confirmed in the UI at save time,
+        // and a validator warning would nag on every later save.
+        if let Some(m) = z.max_run_minutes {
+            if !(5..=360).contains(&m) {
+                r.error(
+                    "zone_max_run_minutes_range",
+                    format!(
+                        "zone '{slug}': max run limit {m} min is out of range (5 <= minutes <= \
+                         360)"
+                    ),
+                );
+            }
+        }
     }
 
     // Manual schedules reference real zones.
@@ -684,6 +699,60 @@ mod tests {
         );
         let r = validate(&cfg);
         assert!(r.errors.iter().any(|i| i.code == "zone_controller_missing"));
+    }
+
+    #[test]
+    fn zone_max_run_minutes_gate_rejects_out_of_band_only() {
+        let zone = |cap: serde_json::Value| {
+            serde_json::from_value::<ZoneConfig>(serde_json::json!({
+                "display_name": "Front",
+                "area_sqft": 800.0,
+                "species": "other",
+                "soil_texture": "loam",
+                "sprinkler_type": "rotor",
+                "controller_id": "ghost",
+                "controller_station": "1",
+                "max_run_minutes": cap,
+            }))
+            .unwrap()
+        };
+        let with = |cap: serde_json::Value| {
+            let mut cfg = base();
+            cfg.zones.insert("front".into(), zone(cap));
+            validate(&cfg)
+        };
+        for bad in [serde_json::json!(4), serde_json::json!(400)] {
+            let r = with(bad.clone());
+            assert!(
+                r.errors
+                    .iter()
+                    .any(|i| i.code == "zone_max_run_minutes_range"),
+                "cap {bad} must fail the range gate"
+            );
+        }
+        // In-band values pass, including above 60: the raise is confirmed in
+        // the UI at save time, never blocked or warned about here (a warning
+        // would nag on every later save).
+        for ok in [
+            serde_json::json!(5),
+            serde_json::json!(90),
+            serde_json::json!(360),
+            serde_json::Value::Null,
+        ] {
+            let r = with(ok.clone());
+            assert!(
+                !r.errors
+                    .iter()
+                    .any(|i| i.code == "zone_max_run_minutes_range"),
+                "cap {ok} must pass the range gate"
+            );
+            assert!(
+                !r.warnings
+                    .iter()
+                    .any(|i| i.code == "zone_max_run_minutes_range"),
+                "an in-band cap must not warn either"
+            );
+        }
     }
 
     #[test]

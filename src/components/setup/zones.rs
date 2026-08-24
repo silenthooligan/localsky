@@ -59,6 +59,7 @@ pub fn ZonesStep() -> impl IntoView {
     let new_area = RwSignal::new(1000.0f64);
     let new_sprinkler = RwSignal::new("rotor".to_string());
     let new_precip = RwSignal::new(String::new());
+    let new_max_run = RwSignal::new(String::new());
     let new_controller = RwSignal::new(String::new());
     let new_station = RwSignal::new(String::new());
     let new_photo_url = RwSignal::new(String::new());
@@ -277,6 +278,7 @@ pub fn ZonesStep() -> impl IntoView {
                     new_area=new_area
                     new_sprinkler=new_sprinkler
                     new_precip=new_precip
+                    new_max_run=new_max_run
                     new_controller=new_controller
                     new_station=new_station
                     new_photo_url=new_photo_url

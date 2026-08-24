@@ -130,7 +130,7 @@ pub async fn generate_report_with(
     // Forward daily ETc building blocks from the live forecast: per-day
     // (et0_mm, heat_multiplier, doy). Kc is per-zone (species) below.
     let fc = handles.forecast.snapshot();
-    let (lat, _lon) = handles.location;
+    let (lat, lon) = handles.location;
     let base_doy = today.ordinal() as u16;
     let day_terms: Vec<(f64, f64, u16)> = fc
         .daily
@@ -158,6 +158,12 @@ pub async fn generate_report_with(
 
     let snap = handles.irrigation.snapshot();
     let capture = cfg.engine.capture_efficiency.clamp(0.05, 1.0);
+    // The policy derived from the SAME config under verification (never
+    // the live arc-swap handle): the apply endpoint regenerates against
+    // the exact config it is about to mutate, and reading the live handle
+    // could disagree with it mid-write. Pure and cheap; feeds the
+    // raised-cap dispatch-window fit below.
+    let policy = crate::refresher::WateringPolicy::from_config(cfg);
 
     // Scorecard: morning verdict per configured-tz local day over the
     // scorecard window, reason code preferring the stored DecisionTrace.
@@ -205,6 +211,28 @@ pub async fn generate_report_with(
             .find(|b| b.zone_slug == runtime_slug || b.zone_slug == *slug);
         let effective_rate =
             crate::engine::effective_precip_rate_mm_hr(z.sprinkler_type, z.precip_rate_mm_hr);
+        // The run length a raised cap would have to fit: the allocator's
+        // session when session-capped, else the one-shot deficit refill.
+        // Feeds the dispatch-window fit for the cap check's raise.
+        let needed_raise_s = if budget.map(|b| b.session_capped).unwrap_or(false) {
+            budget.map(|b| b.seconds_per_session)
+        } else {
+            math.as_ref()
+                .filter(|m| m.cap_binding)
+                .map(|m| m.raw_seconds)
+        };
+        let raised_fits_window = needed_raise_s.and_then(|needed| {
+            raised_sequence_fits_window(
+                &policy,
+                &snap.zones,
+                &snap.water_budgets,
+                &runtime_slug,
+                needed,
+                today,
+                lat,
+                lon,
+            )
+        });
         let cap_inputs = CapClampInputs {
             session_capped: budget.map(|b| b.session_capped).unwrap_or(false),
             deficit_cap_binding: math.as_ref().map(|m| m.cap_binding).unwrap_or(false),
@@ -214,7 +242,27 @@ pub async fn generate_report_with(
             desired_seconds: budget
                 .filter(|b| b.session_capped)
                 .map(|b| b.seconds_per_session),
-            max_duration_s: math.as_ref().map(|m| m.max_duration_seconds).or(Some(3600)),
+            deficit_refill_seconds: math
+                .as_ref()
+                .filter(|m| m.cap_binding)
+                .map(|m| m.raw_seconds),
+            configured_max_run_minutes: z.max_run_minutes,
+            raised_fits_window,
+            // An effective cap tighter than the configured limit means an
+            // active watering restriction is the clamp; the check pauses
+            // its run-length suggestions instead of recommending around a
+            // transient regulatory limit.
+            restriction_clamped: math
+                .as_ref()
+                .map(|m| m.max_duration_seconds < z.max_run_minutes.unwrap_or(60) * 60)
+                .unwrap_or(false),
+            // Snapshot math carries the EFFECTIVE cap (restriction-tightened
+            // when one is active); a snapshot without math falls back to the
+            // zone's own configured cap, never a literal.
+            max_duration_s: math
+                .as_ref()
+                .map(|m| m.max_duration_seconds)
+                .or_else(|| Some(z.max_run_minutes.unwrap_or(60) * 60)),
             run_days: run_day_count,
             sessions_per_week: budget
                 .map(|b| b.sessions_per_week)
@@ -374,6 +422,92 @@ pub async fn generate_report_with(
     })
 }
 
+/// The hypothetical SESSION-DAY zone list the raised-cap window test
+/// prices: the raised zone at `needed_seconds`, and every idle sibling
+/// (planned_run_seconds == 0: rain-deferred, interval-spaced, or
+/// budget-covered TODAY) at its own session-day run length, the
+/// allocator's session clamped to that zone's cap. Pricing today's zeros
+/// literally would make the verdict (and the recommendation id) flip
+/// with the day the report is generated, and the "finishes before
+/// sunrise" evidence would describe a quiet morning instead of the
+/// co-run session the raise actually has to fit. A sibling with no
+/// budget row keeps its current planned seconds.
+fn raised_session_day_zones(
+    policy: &crate::refresher::WateringPolicy,
+    zones: &[crate::ha::snapshot::ZoneState],
+    budgets: &[crate::ha::snapshot::WaterBudget],
+    runtime_slug: &str,
+    needed_seconds: u32,
+) -> Vec<crate::ha::snapshot::ZoneState> {
+    let norm = |slug: &str| slug.replace('-', "_");
+    zones
+        .iter()
+        .map(|z| {
+            let mut z = z.clone();
+            if norm(&z.slug) == runtime_slug {
+                z.planned_run_seconds = needed_seconds;
+            } else if z.planned_run_seconds == 0 {
+                if let Some(b) = budgets.iter().find(|b| norm(&b.zone_slug) == norm(&z.slug)) {
+                    // The allocator's session_final: pre-cap session
+                    // seconds clamped to this zone's own effective cap.
+                    let cap = z
+                        .math
+                        .as_ref()
+                        .map(|m| m.max_duration_seconds)
+                        .unwrap_or_else(|| {
+                            policy
+                                .zone_runtime
+                                .get(&norm(&z.slug))
+                                .copied()
+                                .unwrap_or_else(crate::refresher::ZoneRuntime::fallback)
+                                .max_duration_s
+                        });
+                    z.planned_run_seconds = b.seconds_per_session.min(cap);
+                }
+            }
+            z
+        })
+        .collect()
+}
+
+/// Would the smart morning still fit its dispatch window with this
+/// zone's run raised to `needed_seconds`? Rebuilds the hypothetical
+/// session-day zone list (raised_session_day_zones), lays it out with
+/// scheduler::smart_morning::sequence_wall_seconds under the SAME policy
+/// knobs the dispatcher reads (agronomy, soak, interleave), and compares
+/// against engine::sunrise::smart_morning_available_s, the dispatcher's
+/// own overshoot arithmetic. None when an input is missing (zone absent
+/// from the snapshot, polar latitudes): the recommendation proceeds and
+/// the window line is simply omitted from its evidence.
+#[allow(clippy::too_many_arguments)]
+fn raised_sequence_fits_window(
+    policy: &crate::refresher::WateringPolicy,
+    zones: &[crate::ha::snapshot::ZoneState],
+    budgets: &[crate::ha::snapshot::WaterBudget],
+    runtime_slug: &str,
+    needed_seconds: u32,
+    today: NaiveDate,
+    lat: f64,
+    lon: f64,
+) -> Option<bool> {
+    if !zones
+        .iter()
+        .any(|z| z.slug.replace('-', "_") == runtime_slug)
+    {
+        return None;
+    }
+    let hypothetical =
+        raised_session_day_zones(policy, zones, budgets, runtime_slug, needed_seconds);
+    let seq = crate::scheduler::smart_morning::sequence_wall_seconds(
+        &policy.zone_agronomy,
+        &hypothetical,
+        policy.soak_minutes,
+        policy.interleave_cycles,
+    );
+    let available = crate::engine::sunrise::smart_morning_available_s(today, lat, lon, seq)?;
+    Some(seq as i64 <= available)
+}
+
 /// Watering evidence per the run-history semantics: run-edge observer
 /// rows (source ha_refresher) plus manual API/scheduler rows. Skip
 /// markers and the unused intended/running states never count.
@@ -472,4 +606,162 @@ async fn build_scorecard(
         last_complete_day,
         tuning::SCORECARD_WINDOW_DAYS,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ha::snapshot::ZoneState;
+
+    fn one_zone_policy() -> crate::refresher::WateringPolicy {
+        let mut cfg = Config::default();
+        cfg.zones.insert(
+            "front".into(),
+            serde_json::from_value(serde_json::json!({
+                "display_name": "Front",
+                "area_sqft": 1000.0,
+                "species": "bermuda",
+                "soil_texture": "sandy_loam",
+                "sprinkler_type": "spray",
+                "precip_rate_mm_hr": 25.4,
+                "precip_rate_source": "measured",
+                "controller_id": "os_main",
+                "controller_station": "1"
+            }))
+            .unwrap(),
+        );
+        crate::refresher::WateringPolicy::from_config(&cfg)
+    }
+
+    #[test]
+    fn raised_fit_composes_the_dispatcher_window_math() {
+        let policy = one_zone_policy();
+        let zones = vec![ZoneState {
+            slug: "front".into(),
+            planned_run_seconds: 1200,
+            ..Default::default()
+        }];
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 5, 26).unwrap();
+        // A 90 minute run at a mid latitude fits the midnight..sunrise span.
+        let fits =
+            raised_sequence_fits_window(&policy, &zones, &[], "front", 5400, today, 28.5, -81.4);
+        assert_eq!(fits, Some(true), "a 90 min morning fits before sunrise");
+        // A 20 hour run cannot; the same composition reports the overshoot.
+        let no_fit =
+            raised_sequence_fits_window(&policy, &zones, &[], "front", 72_000, today, 28.5, -81.4);
+        assert_eq!(no_fit, Some(false), "a 20 h plan overshoots the window");
+        // A zone missing from the snapshot yields None (line omitted),
+        // never a fabricated verdict.
+        let unknown =
+            raised_sequence_fits_window(&policy, &zones, &[], "ghost", 5400, today, 28.5, -81.4);
+        assert_eq!(unknown, None);
+        // Polar latitudes have no sunrise on this date: also None.
+        let polar = raised_sequence_fits_window(
+            &policy,
+            &zones,
+            &[],
+            "front",
+            5400,
+            chrono::NaiveDate::from_ymd_opt(2026, 6, 21).unwrap(),
+            80.0,
+            0.0,
+        );
+        assert_eq!(polar, None);
+    }
+
+    fn two_zone_policy() -> crate::refresher::WateringPolicy {
+        let mut cfg = Config::default();
+        for slug in ["front", "side"] {
+            cfg.zones.insert(
+                slug.into(),
+                serde_json::from_value(serde_json::json!({
+                    "display_name": slug,
+                    "area_sqft": 1000.0,
+                    "species": "bermuda",
+                    "soil_texture": "sandy_loam",
+                    "sprinkler_type": "spray",
+                    "precip_rate_mm_hr": 25.4,
+                    "precip_rate_source": "measured",
+                    "controller_id": "os_main",
+                    "controller_station": "1"
+                }))
+                .unwrap(),
+            );
+        }
+        crate::refresher::WateringPolicy::from_config(&cfg)
+    }
+
+    #[test]
+    fn raised_fit_prices_idle_siblings_at_their_session_length() {
+        use crate::ha::snapshot::WaterBudget;
+        let policy = two_zone_policy();
+        // Rain-defer day: the sibling's planned seconds are zero, but its
+        // budget row carries the session it runs on a session day.
+        let defer_day = vec![
+            ZoneState {
+                slug: "front".into(),
+                planned_run_seconds: 1200,
+                ..Default::default()
+            },
+            ZoneState {
+                slug: "side".into(),
+                planned_run_seconds: 0,
+                ..Default::default()
+            },
+        ];
+        let budgets = vec![WaterBudget {
+            zone_slug: "side".into(),
+            seconds_per_session: 30_000,
+            ..Default::default()
+        }];
+        let hyp = raised_session_day_zones(&policy, &defer_day, &budgets, "front", 5400);
+        assert_eq!(
+            hyp[0].planned_run_seconds, 5400,
+            "raised zone at the needed run"
+        );
+        assert_eq!(
+            hyp[1].planned_run_seconds, 3600,
+            "idle sibling priced at its session clamped to its own 60 min cap"
+        );
+        // No budget row: the sibling keeps its current planned seconds.
+        let hyp = raised_session_day_zones(&policy, &defer_day, &[], "front", 5400);
+        assert_eq!(hyp[1].planned_run_seconds, 0);
+        // A sibling already planned today is left alone.
+        let session_day = vec![
+            ZoneState {
+                slug: "front".into(),
+                planned_run_seconds: 1200,
+                ..Default::default()
+            },
+            ZoneState {
+                slug: "side".into(),
+                planned_run_seconds: 3600,
+                ..Default::default()
+            },
+        ];
+        let hyp = raised_session_day_zones(&policy, &session_day, &budgets, "front", 5400);
+        assert_eq!(hyp[1].planned_run_seconds, 3600);
+
+        // The composed verdict is day-independent: the deferred sibling
+        // (priced from its budget row) and the session-day sibling yield
+        // the same fit for the same raise.
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 5, 26).unwrap();
+        let on_defer = raised_sequence_fits_window(
+            &policy, &defer_day, &budgets, "front", 5400, today, 28.5, -81.4,
+        );
+        let on_session = raised_sequence_fits_window(
+            &policy,
+            &session_day,
+            &budgets,
+            "front",
+            5400,
+            today,
+            28.5,
+            -81.4,
+        );
+        assert_eq!(
+            on_defer, on_session,
+            "the window verdict must not depend on the day the report is generated"
+        );
+    }
 }

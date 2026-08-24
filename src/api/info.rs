@@ -102,7 +102,18 @@ use serde::{Deserialize, Serialize};
 /// recommendation no longer derives from current data). Every count that
 /// lacks data is null, never a zero sentinel (the 1.18.0 register). No
 /// existing response shape changes.
-pub const API_VERSION: &str = "1.19.0";
+/// 1.20.0 (additive): the per-zone run limit becomes real config.
+/// ZoneConfig.max_run_minutes (whole minutes, 5..=360, null = the 60
+/// minute default) rides GET/PUT /config and the config schema, and
+/// hot-reloads on save. The tuning report gains the max_run_minutes
+/// recommendation kind (suggested_value in MINUTES; the sessions split
+/// is the fallback when the raise would pass 360 or the longer morning
+/// no longer fits the pre-sunrise dispatch window), POST
+/// /config/zones/apply accepts the field with the same 5..=360 band,
+/// and a config write that raises a zone's limit past 60 emits the
+/// run-cap-raised Web Push notice after the save. No existing response
+/// shape changes.
+pub const API_VERSION: &str = "1.20.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {

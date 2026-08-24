@@ -353,6 +353,7 @@ fn seed_legacy_zones(cfg: &mut Config) {
         // matching the historical hardcoded compute_water_budgets defaults.
         weekly_budget_in: None,
         sessions_per_week: None,
+        max_run_minutes: None,
     };
     cfg.zones.insert("back_yard".into(), turf("Back Yard", 1));
     cfg.zones.insert("front_yard".into(), turf("Front Yard", 2));

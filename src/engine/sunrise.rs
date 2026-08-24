@@ -81,6 +81,24 @@ pub fn smart_morning_target_start(
     }
 }
 
+/// Seconds available to the smart-morning sequence on `date`: the span
+/// from the (midnight-clamped) target start to target_finish
+/// (sunrise - 15min). The dispatcher's overshoot check and the tuning
+/// report's raised-cap window test both read this one definition, so the
+/// two can never disagree about what fits. None when sunrise does not
+/// exist on `date` (polar latitudes).
+pub fn smart_morning_available_s(
+    date: NaiveDate,
+    lat: f64,
+    lon: f64,
+    sequence_total_s: u64,
+) -> Option<i64> {
+    let sunrise = sunrise_utc(date, lat, lon)?;
+    let target_finish = sunrise - chrono::Duration::minutes(FINISH_BEFORE_SUNRISE_MIN);
+    let target_start = smart_morning_target_start(date, lat, lon, sequence_total_s)?;
+    Some((target_finish - target_start).num_seconds())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,5 +154,30 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2026, 6, 21).unwrap();
         assert!(sunrise_utc(date, 80.0, 0.0).is_none());
         assert!(smart_morning_target_start(date, 80.0, 0.0, 600).is_none());
+        assert!(smart_morning_available_s(date, 80.0, 0.0, 600).is_none());
+    }
+
+    #[test]
+    fn available_seconds_match_the_dispatch_window_arithmetic() {
+        // A plan that fits: start is unclamped, so the available span equals
+        // the sequence itself (start = finish - sequence).
+        let date = NaiveDate::from_ymd_opt(2026, 5, 26).unwrap();
+        let seq = 25 * 60u64;
+        let avail = smart_morning_available_s(date, 40.7128, -74.006, seq).unwrap();
+        assert_eq!(avail, seq as i64, "unclamped start: available == sequence");
+        // A 20h plan clamps the start to local midnight, so the available
+        // span is midnight..sunrise-15min, strictly less than the sequence:
+        // the overshoot condition the dispatcher warns on.
+        let long = 20 * 3600u64;
+        let avail_long = smart_morning_available_s(date, 40.7128, -74.006, long).unwrap();
+        let sr = sunrise_utc(date, 40.7128, -74.006).unwrap();
+        let finish = sr - chrono::Duration::minutes(FINISH_BEFORE_SUNRISE_MIN);
+        let (day_start, _) =
+            crate::timeutil::local_day_bounds_utc(date).expect("representable day");
+        assert_eq!(avail_long, (finish - day_start).num_seconds());
+        assert!(
+            avail_long < long as i64,
+            "a 20h plan cannot fit the pre-sunrise span"
+        );
     }
 }

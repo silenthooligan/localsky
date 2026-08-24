@@ -23,13 +23,20 @@ apply a suggestion yourself.
 
 ## What it checks
 
-**Sessions shorted by the duration cap.** Every zone has a safety cap on
-a single run. When the engine chronically wants more minutes than the
-cap allows, each session quietly delivers less water than the model
-asked for. The report suggests splitting the week's water across more
-sessions, or, when even daily capped sessions cannot deliver the
-configured weekly target, aligning the target with what the system can
-actually deliver.
+**Sessions shorted by the run limit.** Every zone has a limit on a
+single run (60 minutes unless you set one). When the engine chronically
+wants more minutes than the limit allows, each session quietly delivers
+less water than the model asked for. The first suggestion is to raise
+this zone's run limit so each session delivers in full; the report only
+offers it up to 360 minutes and, when it can compute the morning
+schedule, only when the longer sequence still finishes before sunrise.
+When the raise cannot work, the report falls back to splitting the
+week's water across more sessions, or, when even daily capped sessions
+cannot deliver the configured weekly target, aligning the target with
+what the system can actually deliver. A soil deficit too large to
+refill in one run gets the same run-limit suggestion. While an active
+watering restriction caps runs below the zone's own limit, run-length
+suggestions pause and the report names the restriction's cap instead.
 
 **A water bucket that cannot be right.** From your soil texture, root
 depth, and the week's forecast demand, the engine computes how many days
@@ -92,6 +99,12 @@ Settings and the [backup page](backup-restore.md) can roll it back like
 any other edit. If the report's data has moved since the page loaded,
 Apply refuses with a plain message instead of writing a stale value;
 refresh the report and look again.
+
+Applying a run-limit suggestion above 60 minutes asks for the same
+confirmation the zone editor uses, and once the save lands a notice
+goes to every device with notifications enabled. The save is never
+blocked, and an active watering restriction's own per-zone cap still
+wins over any raised limit.
 
 ## Reading further
 

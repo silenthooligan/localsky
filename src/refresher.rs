@@ -286,7 +286,8 @@ impl WateringPolicy {
             interleave_cycles: cfg.engine.interleave_cycles,
             // Per-zone run sizing + cycle/soak agronomy. Underscore-normalized
             // like soil_zones/budget_zones so runtime slug lookups hit. The
-            // 3600s cap mirrors the historical boot value.
+            // cap comes from the zone's configured max_run_minutes; unset
+            // resolves to the historical 60 minute boot value.
             zone_runtime: cfg
                 .zones
                 .iter()
@@ -298,7 +299,7 @@ impl WateringPolicy {
                                 z.sprinkler_type,
                                 z.precip_rate_mm_hr,
                             ),
-                            max_duration_s: 3600,
+                            max_duration_s: z.max_run_minutes.unwrap_or(60) * 60,
                         },
                     )
                 })
@@ -3167,6 +3168,92 @@ mod watchdog_tests {
     }
 
     #[test]
+    fn from_config_maps_the_zone_run_cap_and_budget_respects_restrictions() {
+        // ZoneConfig.max_run_minutes lands on ZoneRuntime in seconds; unset
+        // resolves to the historical 60 minutes. The budget allocator caps
+        // per-session seconds with min(zone cap, restriction cap), so an
+        // active restriction keeps winning over a raised zone cap.
+        let mut cfg = crate::config::schema::Config::default();
+        cfg.zones.insert(
+            "front".into(),
+            serde_json::from_value(serde_json::json!({
+                "display_name": "Front",
+                "area_sqft": 1000.0,
+                "species": "bermuda",
+                "soil_texture": "sandy_loam",
+                "sprinkler_type": "spray",
+                "precip_rate_mm_hr": 25.4,
+                "precip_rate_source": "measured",
+                "controller_id": "os_main",
+                "controller_station": "1",
+                "weekly_budget_in": 1.0,
+                "sessions_per_week": 1
+            }))
+            .unwrap(),
+        );
+        let policy_default = WateringPolicy::from_config(&cfg);
+        assert_eq!(
+            policy_default
+                .zone_runtime
+                .get("front")
+                .unwrap()
+                .max_duration_s,
+            3600,
+            "unset cap maps to 60 minutes"
+        );
+
+        cfg.zones.get_mut("front").unwrap().max_run_minutes = Some(120);
+        let policy_raised = WateringPolicy::from_config(&cfg);
+        assert_eq!(
+            policy_raised
+                .zone_runtime
+                .get("front")
+                .unwrap()
+                .max_duration_s,
+            7200,
+            "a configured cap maps minutes to seconds"
+        );
+
+        // 1.0 in over 1 session at 25.4 mm/hr measured throughput wants
+        // (25.4 / 25.4) * 3600 / 0.7 = 5142 s per session: between the two
+        // caps, so the clamp state flips with the configured value.
+        let fc = crate::forecast::snapshot::ForecastSnapshot::default();
+        let inputs = Inputs::default();
+        let budget = |policy: &WateringPolicy, restriction: Option<u32>| {
+            compute_water_budgets(
+                &fc,
+                &inputs,
+                &HashMap::new(),
+                &[],
+                &policy.zone_runtime,
+                restriction,
+                &policy.budget_zones,
+            )
+            .remove(0)
+        };
+        let b0 = budget(&policy_default, None);
+        assert!(
+            b0.seconds_per_session > 3600 && b0.seconds_per_session < 7200,
+            "fixture: the desired session must land between the two caps, got {}",
+            b0.seconds_per_session
+        );
+        assert!(
+            b0.session_capped,
+            "the 60 minute default clamps the session"
+        );
+        let b1 = budget(&policy_raised, None);
+        assert!(
+            !b1.session_capped,
+            "the raised cap fits the session on the next build, no restart involved"
+        );
+        let b2 = budget(&policy_raised, Some(3600));
+        assert!(
+            b2.session_capped,
+            "an active restriction cap still wins min() over the raised zone cap"
+        );
+    }
+
+    #[test]
     fn force_run_floor_decouples_verdict_from_duration() {
         // No force + 0 budget stays 0 (a wet yard normally waters nothing).
         assert_eq!(force_run_floor("auto", "auto", 0, 1200), 0);
@@ -3756,6 +3843,61 @@ mod snapshot_assembly_tests {
             None, // control
         )
         .await
+    }
+
+    // The per-zone ZoneMath cap follows the CONFIGURED max_run_minutes through
+    // WateringPolicy::from_config (the same builder boot AND hot reload use),
+    // so an applied cap change lands on the very next snapshot build.
+    #[tokio::test]
+    async fn zone_math_cap_follows_the_configured_run_limit() {
+        let now = Utc::now().timestamp();
+        let fc = ForecastSnapshot {
+            last_refresh_epoch: now,
+            source_reachable: true,
+            hourly: vec![current_hour(72.0, 4.0, 50)],
+            ..Default::default()
+        };
+        let tempest = live_station(now, 72.0, 3.0, 50.0, 0.0);
+        let mut cfg = crate::config::schema::Config::default();
+        cfg.zones.insert(
+            "front".into(),
+            serde_json::from_value(serde_json::json!({
+                "display_name": "Front",
+                "area_sqft": 1000.0,
+                "species": "bermuda",
+                "soil_texture": "sandy_loam",
+                "sprinkler_type": "spray",
+                "controller_id": "os_main",
+                "controller_station": "1",
+                "max_run_minutes": 90
+            }))
+            .unwrap(),
+        );
+        let policy = WateringPolicy::from_config(&cfg);
+        let fs = forecast_store_with(fc);
+        let ts = tempest_store_with(tempest);
+        let scripts = CompiledScripts::compile(&[]);
+        let snap = build_from_map(
+            HashMap::new(),
+            &fs,
+            &ts,
+            &zone_idents(&["front"]),
+            &policy.zone_runtime,
+            &policy,
+            &scripts,
+            None,
+            None,
+            None,
+        )
+        .await;
+        let math = snap.zones[0]
+            .math
+            .clone()
+            .expect("math is always assembled");
+        assert_eq!(
+            math.max_duration_seconds, 5400,
+            "ZoneMath carries the configured 90 minute cap in seconds"
+        );
     }
 
     // ── CLEAR RUN ─────────────────────────────────────────────────────────────

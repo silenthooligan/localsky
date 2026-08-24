@@ -1,6 +1,6 @@
 [package]
 name = "localsky"
-version = "0.7.15"
+version = "0.7.16"
 edition = "2021"
 license = "Apache-2.0"
 description = "Local-first weather and irrigation control with native FAO-56 ET, multi-source weather merge, multi-controller HAL, optional Home Assistant, and optional local LLM advisor."

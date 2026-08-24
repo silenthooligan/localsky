@@ -16,7 +16,9 @@ use crate::components::settings_ui::{
     BadgeTone, EntityKind, SettingsBadge, SettingsCard, SettingsKv, SettingsLoadError,
     SettingsResult,
 };
-use crate::components::ui::{Button, FormField, HelpHint, Panel, PhotoField, SegmentedControl};
+use crate::components::ui::{
+    Button, ConfirmSheet, FormField, HelpHint, Panel, PhotoField, SegmentedControl,
+};
 use crate::components::units_fmt::{
     area_unit, depth_unit, depth_value_mm, fmt_area_sqft, fmt_rain_rate_mm, use_unit_prefs,
     UnitPrefs,
@@ -51,6 +53,12 @@ pub fn SettingsZones() -> impl IntoView {
     let saving = RwSignal::new(false);
     let result_msg = RwSignal::new(String::new());
     let result_ok = RwSignal::new(false);
+    // Persistent, dismissible restart-required banner (the controllers-page
+    // pattern). Zone add/remove and station remaps are boot-wired, so their
+    // saves return restart_reasons; scalar edits (including the run limit)
+    // hot-reload and leave it empty.
+    let restart_reasons: RwSignal<Vec<String>> = RwSignal::new(Vec::new());
+    let restart_dismissed = RwSignal::new(false);
     // Per-device display-unit prefs. Read in the (reactive) zones_view closure
     // and handed to each non-reactive ZoneCard as a plain prop, like VerdictCell.
     let prefs = use_unit_prefs();
@@ -70,12 +78,17 @@ pub fn SettingsZones() -> impl IntoView {
         {
             wasm_bindgen_futures::spawn_local(async move {
                 match save_config(candidate).await {
-                    Ok(()) => {
+                    Ok(reasons) => {
                         crate::components::settings_ui::toast_saved(
                             result_msg,
                             result_ok,
                             "Saved. Engine picks up changes on next tick.",
                         );
+                        // A zone-set or station-binding change is boot-wired:
+                        // surface the server's restart reasons; an empty list
+                        // (hot-reloaded change) clears the banner.
+                        restart_dismissed.set(false);
+                        restart_reasons.set(reasons);
                     }
                     Err(e) => {
                         result_ok.set(false);
@@ -138,6 +151,7 @@ pub fn SettingsZones() -> impl IntoView {
     let new_area = RwSignal::new(1000.0f64);
     let new_sprinkler = RwSignal::new("rotor".to_string());
     let new_precip = RwSignal::new(String::new()); // empty = use catalog default
+    let new_max_run = RwSignal::new(String::new()); // empty = 60 minute default
     let new_controller = RwSignal::new(String::new());
     let new_station = RwSignal::new(String::new());
     let new_photo_url = RwSignal::new(String::new()); // optional zone photo
@@ -181,6 +195,7 @@ pub fn SettingsZones() -> impl IntoView {
                             new_display_name,
                             new_area,
                             new_precip,
+                            new_max_run,
                             new_station,
                             new_photo_url,
                             new_soil_sensor,
@@ -233,6 +248,12 @@ pub fn SettingsZones() -> impl IntoView {
                     new_precip.set(
                         z.get("precip_rate_mm_hr")
                             .and_then(|v| v.as_f64())
+                            .map(|v| v.to_string())
+                            .unwrap_or_default(),
+                    );
+                    new_max_run.set(
+                        z.get("max_run_minutes")
+                            .and_then(|v| v.as_u64())
                             .map(|v| v.to_string())
                             .unwrap_or_default(),
                     );
@@ -392,6 +413,8 @@ pub fn SettingsZones() -> impl IntoView {
                 </p>
             </header>
 
+            <crate::components::settings::RestartBanner reasons=restart_reasons dismissed=restart_dismissed/>
+
             <Show
                 when=move || load_error.get().is_none()
                 fallback=move || view! { <SettingsLoadError error=load_error retry=load_retry/> }
@@ -441,6 +464,7 @@ pub fn SettingsZones() -> impl IntoView {
                     new_area=new_area
                     new_sprinkler=new_sprinkler
                     new_precip=new_precip
+                    new_max_run=new_max_run
                     new_controller=new_controller
                     new_station=new_station
                     new_photo_url=new_photo_url
@@ -482,6 +506,7 @@ pub fn ZoneForm(
     new_area: RwSignal<f64>,
     new_sprinkler: RwSignal<String>,
     new_precip: RwSignal<String>,
+    new_max_run: RwSignal<String>,
     new_controller: RwSignal<String>,
     new_station: RwSignal<String>,
     new_photo_url: RwSignal<String>,
@@ -510,6 +535,44 @@ pub fn ZoneForm(
     let close = move || match on_close {
         Some(cb) => cb.run(()),
         None => add_open.set(false),
+    };
+    // Run-limit confirmation state: on_add stashes the fully built entry
+    // here and opens the sheet when the save raises the limit past 60;
+    // Confirm commits the pending entry, Cancel just closes.
+    let confirm_open = RwSignal::new(false);
+    let pending_cap_min: RwSignal<u32> = RwSignal::new(60);
+    let pending_zone_name: RwSignal<String> = RwSignal::new(String::new());
+    let pending_commit: RwSignal<Option<(String, serde_json::Value)>> = RwSignal::new(None);
+    // Insert the finished entry, reset the draft, close, persist. Shared
+    // by the direct path and the sheet's Confirm.
+    let commit_zone = move |slug: String, entry: serde_json::Value| {
+        config_json.update(|cfg| {
+            let zones = cfg.as_object_mut().and_then(|o| {
+                o.entry("zones")
+                    .or_insert(serde_json::json!({}))
+                    .as_object_mut()
+            });
+            if let Some(zones) = zones {
+                zones.insert(slug, entry);
+            }
+        });
+        reset_zone_draft(
+            editing_slug,
+            new_slug,
+            new_display_name,
+            new_area,
+            new_precip,
+            new_max_run,
+            new_station,
+            new_photo_url,
+            new_soil_sensor,
+            new_soil_min,
+            new_soil_sat,
+        );
+        close();
+        // Commit immediately -- persist this change now instead of staging it
+        // for a separate "Save" the user might never click.
+        persist.run(());
     };
     let on_add = move |_| {
         let slug = new_slug.get().trim().to_lowercase().replace(' ', "_");
@@ -544,6 +607,26 @@ pub fn ZoneForm(
                 }
             }
         };
+        let max_run_value = new_max_run.get();
+        let max_run: Option<u32> = if max_run_value.trim().is_empty() {
+            None
+        } else {
+            match max_run_value.trim().parse::<u32>() {
+                Ok(v) if (5..=360).contains(&v) => Some(v),
+                _ => {
+                    result_ok.set(false);
+                    result_msg.set(
+                        "Max run time must be whole minutes between 5 and 360 (or blank for \
+                         the default 60)"
+                            .into(),
+                    );
+                    return;
+                }
+            }
+        };
+        let max_run_json = max_run
+            .map(|v| serde_json::json!(v))
+            .unwrap_or(serde_json::Value::Null);
         let precip_source = if precip.is_null() {
             "catalog"
         } else {
@@ -554,6 +637,8 @@ pub fn ZoneForm(
         } else {
             new_display_name.get()
         };
+        // For the run-limit confirmation copy, which names the zone.
+        let confirm_name = display_name.clone();
         let photo_url_json = {
             let s = new_photo_url.get();
             if s.is_empty() {
@@ -602,6 +687,7 @@ pub fn ZoneForm(
                         "precip_rate_source".into(),
                         serde_json::json!(precip_source),
                     );
+                    obj.insert("max_run_minutes".into(), max_run_json.clone());
                     obj.insert(
                         "controller_id".into(),
                         serde_json::json!(new_controller.get()),
@@ -629,6 +715,7 @@ pub fn ZoneForm(
                 "precip_rate_source": precip_source,
                 "root_depth_mm": serde_json::Value::Null,
                 "mad_pct_override": serde_json::Value::Null,
+                "max_run_minutes": max_run_json,
                 "controller_id": new_controller.get(),
                 "controller_station": new_station.get(),
                 "soil_sensor_id": soil_sensor_json,
@@ -637,34 +724,26 @@ pub fn ZoneForm(
                 "photo_url": photo_url_json,
             }),
         };
-        config_json.update(|cfg| {
-            let zones = cfg.as_object_mut().and_then(|o| {
-                o.entry("zones")
-                    .or_insert(serde_json::json!({}))
-                    .as_object_mut()
-            });
-            if let Some(zones) = zones {
-                zones.insert(slug.clone(), entry);
-            }
+        // The run limit the zone had BEFORE this save (unset = 60). The
+        // confirmation fires only when this save raises the limit past 60,
+        // so re-saving an already-raised zone stays quiet.
+        let prior_max_run: Option<u32> = editing_now.as_ref().and_then(|existing_slug| {
+            config_json.with_untracked(|cfg| {
+                cfg.get("zones")
+                    .and_then(|z| z.get(existing_slug))
+                    .and_then(|z| z.get("max_run_minutes"))
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok())
+            })
         });
-        let was_edit = editing_now.is_some();
-        reset_zone_draft(
-            editing_slug,
-            new_slug,
-            new_display_name,
-            new_area,
-            new_precip,
-            new_station,
-            new_photo_url,
-            new_soil_sensor,
-            new_soil_min,
-            new_soil_sat,
-        );
-        close();
-        let _ = was_edit;
-        // Commit immediately -- persist this change now instead of staging it
-        // for a separate "Save" the user might never click.
-        persist.run(());
+        if cap_raise_needs_confirm(max_run, prior_max_run) {
+            pending_cap_min.set(max_run.unwrap_or(60));
+            pending_zone_name.set(confirm_name);
+            pending_commit.set(Some((slug, entry)));
+            confirm_open.set(true);
+            return;
+        }
+        commit_zone(slug, entry);
     };
 
     // Pull configured controller ids for the picker.
@@ -691,6 +770,7 @@ pub fn ZoneForm(
             new_display_name,
             new_area,
             new_precip,
+            new_max_run,
             new_station,
             new_photo_url,
             new_soil_sensor,
@@ -920,6 +1000,23 @@ pub fn ZoneForm(
                     precip_estimate().map(|f| view! { <p class="zone-form__facts">{f}</p> })
                 }}
 
+                <FormField
+                    label="Max run time (minutes)".to_string()
+                    helptext="Longest single watering this zone may run. Blank = 60. Values above 60 ask for confirmation when you save; long runs are still cycle-and-soaked against runoff.".to_string()
+                    error=Signal::derive(|| None::<String>)
+                >
+                    <input
+                        type="number"
+                        class="ui-input"
+                        min="5"
+                        max="360"
+                        step="5"
+                        placeholder="(blank for the default 60)"
+                        prop:value=move || new_max_run.get()
+                        on:input=move |ev| new_max_run.set(event_target_value(&ev))
+                    />
+                </FormField>
+
             <FormField
                 label="Photo (optional)".to_string()
                 helptext="Drop or browse for an image to upload; it lands under /site/photos. You can also paste an off-site URL.".to_string()
@@ -1059,6 +1156,30 @@ pub fn ZoneForm(
                     }}
                 </Button>
             </div>
+
+            // Override-style confirmation for a run limit raised past 60:
+            // the save is staged in pending_commit and lands only on
+            // Confirm. Never a hard block; Cancel returns to the form
+            // with the draft intact.
+            <ConfirmSheet
+                visible=confirm_open
+                title="Raise run limit?"
+                body=Signal::derive(move || {
+                    format!(
+                        "This allows {} to run up to {} minutes in a single watering. \
+                         Cycle and soak still splits long runs to limit runoff.",
+                        pending_zone_name.get(),
+                        pending_cap_min.get()
+                    )
+                })
+                confirm_label=Signal::derive(move || format!("Allow {} min", pending_cap_min.get()))
+                on_confirm=Callback::new(move |()| {
+                    if let Some((slug, entry)) = pending_commit.get_untracked() {
+                        pending_commit.set(None);
+                        commit_zone(slug, entry);
+                    }
+                })
+            />
         </Panel></div>
     }
 }
@@ -1090,6 +1211,7 @@ fn reset_zone_draft(
     new_display_name: RwSignal<String>,
     new_area: RwSignal<f64>,
     new_precip: RwSignal<String>,
+    new_max_run: RwSignal<String>,
     new_station: RwSignal<String>,
     new_photo_url: RwSignal<String>,
     new_soil_sensor: RwSignal<String>,
@@ -1101,11 +1223,50 @@ fn reset_zone_draft(
     new_display_name.set(String::new());
     new_area.set(1000.0);
     new_precip.set(String::new());
+    new_max_run.set(String::new());
     new_station.set(String::new());
     new_photo_url.set(String::new());
     new_soil_sensor.set(String::new());
     new_soil_min.set(30.0);
     new_soil_sat.set(70.0);
+}
+
+/// The run-limit confirmation predicate: a save needs the override-style
+/// confirm exactly when the NEW effective limit crosses 60 minutes AND is
+/// an increase over the prior effective limit (unset reads as the 60
+/// default on both sides). Lowering, keeping, or re-saving an
+/// already-raised value stays quiet; only crossing (or raising further
+/// past) the line asks.
+pub(crate) fn cap_raise_needs_confirm(
+    new_minutes: Option<u32>,
+    prior_minutes: Option<u32>,
+) -> bool {
+    let new_eff = new_minutes.unwrap_or(60);
+    let prior_eff = prior_minutes.unwrap_or(60);
+    new_eff > 60 && new_eff > prior_eff
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cap_raise_needs_confirm;
+
+    #[test]
+    fn cap_raise_confirm_predicate_matrix() {
+        // Crossing the 60 minute line asks.
+        assert!(cap_raise_needs_confirm(Some(90), None));
+        assert!(cap_raise_needs_confirm(Some(61), Some(60)));
+        // Raising an already-raised limit further asks again.
+        assert!(cap_raise_needs_confirm(Some(120), Some(90)));
+        // At or under 60 never asks.
+        assert!(!cap_raise_needs_confirm(None, None));
+        assert!(!cap_raise_needs_confirm(Some(60), None));
+        assert!(!cap_raise_needs_confirm(Some(45), Some(90)));
+        // Unchanged or lowered stays quiet, even while still above 60.
+        assert!(!cap_raise_needs_confirm(Some(90), Some(90)));
+        assert!(!cap_raise_needs_confirm(Some(90), Some(120)));
+        // Clearing back to the default stays quiet.
+        assert!(!cap_raise_needs_confirm(None, Some(120)));
+    }
 }
 
 #[cfg(feature = "hydrate")]
@@ -1128,8 +1289,13 @@ async fn fetch_config() -> Result<serde_json::Value, String> {
         .map_err(|e| e.to_string())
 }
 
+/// PUT the candidate config. Returns the restart_reasons the PUT response
+/// carried (empty when the change hot-reloaded), the controllers.rs
+/// pattern: this page previously discarded the response body, so a zone
+/// add/remove never surfaced its restart requirement. A missing/old field
+/// reads as "no restart", the safe default.
 #[cfg(feature = "hydrate")]
-async fn save_config(cfg: serde_json::Value) -> Result<(), String> {
+async fn save_config(cfg: serde_json::Value) -> Result<Vec<String>, String> {
     use gloo_net::http::Request;
     let resp = Request::put("/api/config")
         .json(&cfg)
@@ -1144,7 +1310,26 @@ async fn save_config(cfg: serde_json::Value) -> Result<(), String> {
             &body,
         ));
     }
-    Ok(())
+    let reasons = resp
+        .json::<serde_json::Value>()
+        .await
+        .ok()
+        .filter(|v| {
+            v.get("restart_required")
+                .and_then(|r| r.as_bool())
+                .unwrap_or(false)
+        })
+        .and_then(|v| {
+            v.get("restart_reasons")
+                .and_then(|r| r.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
+        })
+        .unwrap_or_default();
+    Ok(reasons)
 }
 
 /// Lookup table that maps a species slug to its display label.
@@ -1311,7 +1496,13 @@ fn ZoneCard(
     let on_edit = move |_| {
         nav_form.run(FormState::Edit(slug_for_edit.clone()));
     };
-    let on_delete = move |_| {
+    // Delete is destructive and used to fire with no confirmation at all;
+    // it now stages behind the shared ConfirmSheet (danger variant, the
+    // same two-step idiom as the run-limit raise).
+    let delete_open = RwSignal::new(false);
+    let display_for_delete = display.clone();
+    let on_delete = move |_| delete_open.set(true);
+    let do_delete = Callback::new(move |()| {
         let s = slug_for_delete.clone();
         config_json.update(|cfg| {
             if let Some(zones) = cfg.get_mut("zones").and_then(|v| v.as_object_mut()) {
@@ -1320,7 +1511,7 @@ fn ZoneCard(
         });
         // Commit immediately so the deletion can't be silently lost.
         persist.run(());
-    };
+    });
 
     view! {
         <li class="settings-card-list__item">
@@ -1376,6 +1567,19 @@ fn ZoneCard(
                         (!m.is_empty()).then(|| view! { <span class="zone-test-msg">{m}</span> })
                     }}
                 }.into_any())
+            />
+            <ConfirmSheet
+                visible=delete_open
+                title="Delete zone?"
+                body=Signal::derive(move || {
+                    format!(
+                        "This removes {display_for_delete} and its zone settings from the \
+                         configuration. Its run history is kept."
+                    )
+                })
+                confirm_label=Signal::derive(|| "Delete zone".to_string())
+                danger=true
+                on_confirm=do_delete
             />
         </li>
     }

@@ -1178,6 +1178,9 @@ async fn main() -> anyhow::Result<()> {
         // compute_source_status the same observation-liveness proof health does
         // (a recently-observing source reads its calm status, not offline).
         source_last_seen: Some(source_last_seen.clone()),
+        // The push dispatcher, so a config write that raises a zone's run
+        // limit past 60 minutes emits the safety notice after the save.
+        push: Some(push_dispatcher.clone()),
     };
     // Tuning-report generation handles (GET /irrigation/tuning, the apply
     // endpoint's stale check, and the weekly notification scheduler).

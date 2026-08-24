@@ -36,6 +36,11 @@ pub fn ZoneCard(
     /// the snapshot's soil_forecasts by the caller). None = no probe.
     #[prop(optional_no_strip)]
     soil_pct: Option<f64>,
+    /// Whether the tuning report carries a recommendation for this zone
+    /// (joined from the page-level report signal by the caller; the card
+    /// itself never fetches). Renders the attention pill in the head row.
+    #[prop(optional)]
+    has_suggestion: bool,
 ) -> impl IntoView {
     let (status, label, color) = zone_status(&zone);
     // Per-device display-unit preference; read prefs.get() in render
@@ -163,6 +168,9 @@ pub fn ZoneCard(
                     <span class="zone-card__name">{name}</span>
                     <span class="zone-card__pill">{label}</span>
                     {verdict_pill}
+                    {has_suggestion.then(|| view! {
+                        <span class="attention-pill">"Suggestion"</span>
+                    })}
                 </div>
                 {verdict_reason}
                 <div class="zone-card__stats">

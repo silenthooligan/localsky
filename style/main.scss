@@ -103,6 +103,11 @@
   // Text.
   --text: #e6ecf5;
   --text-bright: #ffffff;
+  // Soft: reading text one step quieter than --text but clearly above
+  // --text-dim (report lines, verdict reasons). Was referenced in four
+  // places without ever being defined, so those spots silently inherited
+  // the parent color; defined here (and per-theme below) it resolves.
+  --text-soft: #c3cddf;
   --text-dim: #94a0b6;
   // Faint but still AA: the old #6f7c95 fell to 3.69:1 on elev-3, where
   // it colors real reading text (placeholders, hints, empty states,
@@ -347,6 +352,13 @@
   --verdict-wind:   var(--accent-warn);     // skipped (wind gate)
   --verdict-extend: var(--accent-warm);     // extended run (heat)
   --verdict-off:    var(--text-faint);      // disabled / no zone
+
+  // Attention: a surface carrying an actionable suggestion (the tuning
+  // recommendation card, zone-card pills, the Suggestions KPI, the
+  // irrigation strip). Rides the established warn accent, never a new
+  // hue; var() resolves through the cascade, so the light and
+  // high-contrast --accent-warn overrides carry it per theme.
+  --attention: var(--accent-warn);
 
   // ─────────────────────────────────────────────────────────────────
   // Motion language. Durations + easings as tokens so micro-interactions
@@ -596,6 +608,26 @@
   --status-color: var(--status-unknown);
 }
 
+// Attention pill: entity-badge geometry tinted --attention. Marks a
+// surface that carries an actionable suggestion (the tuning card's
+// SUGGESTION tag, the zone-card pill). Text plus tint, never color
+// alone.
+.attention-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px var(--space-2);
+  border-radius: 999px;
+  font-size: var(--text-micro);
+  font-weight: 700;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--attention);
+  background: color-mix(in oklab, var(--attention) 16%, transparent);
+  border: 1px solid color-mix(in oklab, var(--attention) 40%, transparent);
+  white-space: nowrap;
+}
+
 // Skip-to-content link. Visually hidden until focused, then pops to
 // the upper-left corner. Keyboard users get a one-tab route past nav.
 .skip-link {
@@ -670,6 +702,8 @@
 
   --text: var(--brand-ink-800);
   --text-bright: var(--brand-ink-900);
+  // Soft sits between body text and dim, same role as the dark theme's.
+  --text-soft: color-mix(in oklab, var(--brand-ink-800) 60%, var(--brand-ink-700));
   // Light-mode dim/faint are intentionally deeper than the dark-mode
   // equivalents: at 96 to 98% L backgrounds the mid-gray inks read as
   // washed-out, so anchor body-secondary on ink-700 and eyebrows on
@@ -828,6 +862,7 @@
 
   --text: #ffffff;
   --text-bright: #ffffff;
+  --text-soft: #ffffff;
   --text-dim: #ffffff;
   --text-faint: #cccccc;
 
@@ -11157,7 +11192,10 @@ button.mobile-tab {
   border-bottom: 1px solid var(--elev-line);
 }
 .zone-card__body { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-4); flex: 1; }
-.zone-card__head { display: flex; align-items: center; gap: var(--space-2); }
+// flex-wrap: the optional attention pill (a zone with a tuning
+// suggestion) rides after the verdict pill and must wrap on narrow
+// cards instead of overflowing the head row.
+.zone-card__head { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
 .zone-card__dot { width: 9px; height: 9px; border-radius: 50%; background: var(--zc); flex: 0 0 auto; }
 .zone-card--running .zone-card__dot { animation: zone-pulse 1.6s var(--ease-out) infinite; }
 @keyframes zone-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
@@ -11781,19 +11819,47 @@ button.mobile-tab {
 .zone-detail__math dd { margin: 0; font-family: var(--font-mono); color: var(--text-bright); }
 .zone-detail__math-final { border-top: 1px solid var(--elev-line); padding-top: var(--space-2); dd { color: var(--accent); font-weight: 700; } }
 
-// Tuning panel (results-based tuning report). A supporting tier-3 panel:
-// plain lines first, one recommendation card at most, evidence behind a
-// disclosure. Missing numbers upstream render as the dash-for-unknown
-// idiom in the report lines themselves.
+// Tuning panel (results-based tuning report). Design-language v3: the
+// cadence line leads, secondary data notes collapse into one muted
+// disclosure, and the one recommendation card carries the attention
+// treatment (3px stripe, SUGGESTION pill, bumped headline, status-chip
+// confidence, mono current-to-suggested row). Missing numbers upstream
+// render as the dash-for-unknown idiom in the report lines themselves.
 .zone-tuning__line { margin: 0; color: var(--text-soft); font-size: var(--text-meta); }
+.zone-tuning__line--lead { color: var(--text-dim); font-size: var(--text-body-sm); }
 .zone-tuning__line--muted { color: var(--text-faint); }
-.zone-tuning__card {
-  display: flex; flex-direction: column; gap: var(--space-3);
-  border: 1px solid color-mix(in oklab, var(--accent) 35%, transparent);
-  border-radius: var(--radius-md); padding: var(--space-4);
-  background: color-mix(in oklab, var(--accent) 6%, transparent);
+// The probe-availability and insufficient-data lines fold into ONE quiet
+// group instead of co-equal paragraphs.
+.zone-tuning__notes summary {
+  cursor: pointer; color: var(--text-faint); font-size: var(--text-meta);
 }
-.zone-tuning__headline { margin: 0; color: var(--text-bright); }
+.zone-tuning__notes summary:hover { color: var(--text-dim); }
+.zone-tuning__notes p { margin: var(--space-1) 0 0; color: var(--text-faint); font-size: var(--text-meta); }
+.zone-tuning__card {
+  position: relative;
+  overflow: hidden; // clips the stripe to the card radius
+  display: flex; flex-direction: column; gap: var(--space-3);
+  border: 1px solid color-mix(in oklab, var(--attention) 35%, transparent);
+  border-radius: var(--radius-md); padding: var(--space-4);
+  background: color-mix(in oklab, var(--attention) 6%, transparent);
+  // Entity-stripe geometry, attention-tinted.
+  &::before {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 3px;
+    background: var(--attention);
+  }
+}
+.zone-tuning__card-head { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.zone-tuning__headline {
+  margin: 0; font-size: var(--text-body); font-weight: 600; color: var(--text-bright);
+}
+// Current -> suggested, the ZoneMathPanel dt/dd mono idiom, scannable
+// before any prose.
+.zone-tuning__delta { margin: 0; display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); }
+.zone-tuning__delta dt { margin: 0; color: var(--text-dim); }
+.zone-tuning__delta dd { margin: 0; font-family: var(--font-mono); color: var(--text-bright); }
 .zone-tuning__evidence summary {
   cursor: pointer; color: var(--text-dim); font-size: var(--text-meta);
 }
@@ -11805,14 +11871,28 @@ button.mobile-tab {
 }
 .zone-tuning__apply { display: flex; }
 
-// Irrigation-page tuning strip: one slim row, count link + scorecard line.
+// Irrigation-page tuning strip: one slim row, attention dot + count link
+// + scorecard line. Rendered ABOVE the data columns when a suggestion
+// exists (attention precedes data); scorecard-only renders in the quiet
+// bottom slot.
 .tuning-strip {
   display: flex; align-items: baseline; gap: var(--space-4); flex-wrap: wrap;
   background: var(--elev-1); border: 1px solid var(--elev-border);
   border-radius: var(--radius-lg); padding: var(--space-3) var(--space-4);
   box-shadow: var(--shadow-1);
 }
-.tuning-strip__link { color: var(--accent); font-weight: 600; text-decoration: none; }
+.tuning-strip__count {
+  display: inline-flex; align-items: baseline; gap: var(--space-2);
+  // Status-chip idiom: the dot never carries the meaning alone.
+  &::before {
+    content: "";
+    width: 8px; height: 8px; border-radius: 999px;
+    background: var(--attention);
+    flex: none;
+    align-self: center;
+  }
+}
+.tuning-strip__link { color: var(--attention); font-weight: 600; text-decoration: none; }
 .tuning-strip__link:hover { text-decoration: underline; }
 .tuning-strip__scorecard { color: var(--text-dim); font-size: var(--text-meta); }
 

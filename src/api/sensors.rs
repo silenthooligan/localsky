@@ -793,6 +793,7 @@ mod inventory_tests {
             photo_url: None,
             weekly_budget_in: None,
             sessions_per_week: None,
+            max_run_minutes: None,
         }
     }
 

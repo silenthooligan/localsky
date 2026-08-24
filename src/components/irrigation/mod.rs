@@ -52,6 +52,9 @@ fn NoZonesEmpty() -> impl IntoView {
 #[component]
 pub fn IrrigationPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     let is_mobile = use_context::<RwSignal<bool>>();
+    // ONE tuning-report fetch for the whole page; the desktop and mobile
+    // branches share it, and the strip placement below reads its count.
+    let tuning_report = crate::components::zones::tuning::use_tuning_report();
 
     let body = move || {
         // No controller/zones: every irrigation primitive below acts on nothing,
@@ -60,9 +63,16 @@ pub fn IrrigationPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         if snap.get().zones.is_empty() {
             return view! { <NoZonesEmpty/> }.into_any();
         }
+        // Attention precedes data: with a recommendation pending the strip
+        // renders ABOVE the data columns; a scorecard-only strip keeps the
+        // quiet bottom slot.
+        let has_suggestions = tuning_report
+            .get()
+            .map(|r| crate::components::zones::tuning::recommendation_count(&r) > 0)
+            .unwrap_or(false);
         let mobile = is_mobile.map(|s| s.get()).unwrap_or(false);
         if mobile {
-            view! { <MobileIrrigation snap/> }.into_any()
+            view! { <MobileIrrigation snap report=tuning_report/> }.into_any()
         } else {
             // /irrigation = "Today" summary on the v2 primitives. The 7-day
             // verdict strip leads, then the hero (which now carries the
@@ -72,6 +82,9 @@ pub fn IrrigationPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             view! {
                 <div class="ir-stack">
                     <VerdictStrip snap/>
+                    {has_suggestions.then(|| view! {
+                        <crate::components::zones::tuning::TuningStrip report=tuning_report/>
+                    })}
                     <div class="ir-two-col">
                         // Left column: hero + Stop All pill stacked.
                         // Stop All lives directly under the hero so the
@@ -85,10 +98,9 @@ pub fn IrrigationPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                         // Right column: the wider data surface.
                         <ForecastPanel snap/>
                     </div>
-                    // Results-based tuning: recommendation count + the
-                    // forecast-skip scorecard line. Hidden until the report
-                    // has something worth a row.
-                    <crate::components::zones::tuning::TuningStrip/>
+                    {(!has_suggestions).then(|| view! {
+                        <crate::components::zones::tuning::TuningStrip report=tuning_report/>
+                    })}
                 </div>
             }
             .into_any()

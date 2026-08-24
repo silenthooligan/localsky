@@ -298,6 +298,7 @@ pub fn seed_config() -> crate::config::schema::Config {
     // Four zones keyed to the SAME slugs synth_irrigation() emits, so the
     // config-driven settings/Devices views and the live snapshot line up.
     let base = ZoneConfig {
+        max_run_minutes: DEMO_MAX_RUN_MINUTES,
         display_name: String::new(),
         area_sqft: 1500.0,
         species: GrassSpecies::Bermuda,
@@ -643,6 +644,11 @@ fn synth_irrigation(t_sim: f64) -> IrrigationSnapshot {
     snap
 }
 
+/// The demo zones ship without a per-zone run-limit override, so both the
+/// seeded config ([`seed_config`]) and the synthetic snapshot math
+/// ([`synth_zone`]) resolve the documented 60 minute default from one place.
+const DEMO_MAX_RUN_MINUTES: Option<u32> = None;
+
 fn synth_zone(slug: &str, name: &str, bucket_mm: f64, planned_s: u32, last_run: i64) -> ZoneState {
     let mut z = ZoneState::default();
     z.name = name.into();
@@ -660,7 +666,7 @@ fn synth_zone(slug: &str, name: &str, bucket_mm: f64, planned_s: u32, last_run: 
         heat_mult: 1.15,
         capture_eff: 0.70,
         raw_seconds: planned_s + 200,
-        max_duration_seconds: 3600,
+        max_duration_seconds: DEMO_MAX_RUN_MINUTES.unwrap_or(60) * 60,
         scheduled_seconds: planned_s,
         cap_binding: false,
     });
@@ -750,12 +756,24 @@ fn synth_soil_forecasts() -> Vec<SoilForecast> {
 }
 
 fn synth_water_budgets(now: i64) -> Vec<WaterBudget> {
+    // back_yard's 1.15 in weekly target makes its per-session slice outgrow
+    // the 60 minute default run limit (session_capped), so the demo report
+    // shows the cap-raise recommendation end to end: 20.71 mm needed / 2
+    // sessions = 10.355 mm, sized through the allocator's own formula to
+    // 4312 s (72 min), which the cap check rounds up to a 75 minute raise.
     let zones = [
-        ("back_yard", "Back Yard", true, 1.00, 2u32),
+        ("back_yard", "Back Yard", true, 1.15, 2u32),
         ("front_yard", "Front Yard", true, 1.00, 2),
         ("side_yard", "Side Yard", false, 1.00, 2),
         ("back_yard_shrubs", "Back Yard Shrubs", false, 0.50, 1),
     ];
+    // Same constants the demo ZoneMath tiles carry (throughput 14.2 mm/hr,
+    // capture 0.70, heat 1.15), run through the allocator's sizing formula
+    // so the budget rows and the math tiles tell one story.
+    const THROUGHPUT_MM_HR: f64 = 14.2;
+    const CAPTURE: f64 = 0.70;
+    const HEAT: f64 = 1.15;
+    let cap_s = DEMO_MAX_RUN_MINUTES.unwrap_or(60) * 60;
     zones
         .iter()
         .map(|(slug, name, mode, budget_in, sessions)| {
@@ -767,13 +785,15 @@ fn synth_water_budgets(now: i64) -> Vec<WaterBudget> {
             w.sessions_per_week = *sessions;
             w.expected_rain_mm = 8.5;
             w.needed_mm = 25.4 * budget_in - 8.5;
-            w.mm_per_session = (25.4 * budget_in - 8.5) / (*sessions as f64);
-            w.seconds_per_session = 1200;
-            w.session_capped = false;
+            w.mm_per_session = w.needed_mm / (*sessions as f64);
+            w.seconds_per_session =
+                ((w.mm_per_session / THROUGHPUT_MM_HR) * 3600.0 * HEAT / CAPTURE) as u32;
+            w.session_capped = w.seconds_per_session > cap_s;
+            let session_final = w.seconds_per_session.min(cap_s);
             w.last_run_epoch = now - 18 * 3600;
-            w.today_seconds = if *mode { 1200 } else { 0 };
+            w.today_seconds = if *mode { session_final } else { 0 };
             w.today_reason = if *mode {
-                "scheduled session 1 of 2 this week".into()
+                format!("scheduled session 1 of {sessions} this week")
             } else {
                 "budget mode off".into()
             };
@@ -969,12 +989,13 @@ async fn seed_history(conn: Arc<tokio::sync::Mutex<rusqlite::Connection>>) {
 /// Seed the tuning report's raw material: daily rain observations
 /// (predicted vs observed, keyed by the same configured-tz day the
 /// decisions land on) and per-zone soil-probe curves in sensor_history.
-/// The curves are shaped so the report demos every state: back_yard's
-/// probe rises bracket its runs at a rate well under the configured
-/// spray (the rate-backout recommendation), front_yard dries far slower
-/// than its configured bucket predicts (the texture-drift
-/// recommendation), side_yard reads healthy, and the shrubs' probe is
-/// too sparse to judge (the honest not-enough-data lines).
+/// The curves are shaped so the report demos every state: back_yard is
+/// session-capped (synth_water_budgets), so the top-ranked cap check
+/// recommends raising its run limit (its probe curve still exercises the
+/// backout math underneath), front_yard dries far slower than its
+/// configured bucket predicts (the texture-drift recommendation),
+/// side_yard reads healthy, and the shrubs' probe is too sparse to judge
+/// (the not-enough-data lines).
 async fn seed_tuning_signals(
     conn: Arc<tokio::sync::Mutex<rusqlite::Connection>>,
     now: i64,
@@ -1229,6 +1250,82 @@ mod seed_config_tests {
             assert!(f.days_since_significant_rain > 0);
             assert!(f.heat_multiplier >= 1.0);
         }
+    }
+
+    /// The demo's showcase cap state, pinned end to end: back_yard's
+    /// synthetic budget is session-capped at the engine formula's 4312 s
+    /// (72 min), the raised morning still fits the pre-sunrise dispatch
+    /// window at the demo's location, and the cap check turns that state
+    /// into the 75 minute max_run_minutes recommendation.
+    #[test]
+    fn demo_back_yard_shows_the_75_minute_cap_recommendation() {
+        let budgets = synth_water_budgets(0);
+        let by = budgets
+            .iter()
+            .find(|w| w.zone_slug == "back_yard")
+            .expect("back_yard budget row");
+        assert_eq!(
+            by.seconds_per_session, 4312,
+            "engine-formula sizing at the demo numbers"
+        );
+        assert!(by.session_capped, "4312 s outgrows the 3600 s default cap");
+
+        // The raised morning fits the dispatch window: hypothetical zone
+        // list with back_yard at the needed session, laid out under the
+        // seeded demo policy, against the dispatcher's own window span.
+        let cfg = seed_config();
+        let policy = crate::refresher::WateringPolicy::from_config(&cfg);
+        let snap = synth_irrigation(0.0);
+        let mut zones = snap.zones.clone();
+        for z in &mut zones {
+            if z.slug == "back_yard" {
+                z.planned_run_seconds = by.seconds_per_session;
+            }
+        }
+        let seq = crate::scheduler::smart_morning::sequence_wall_seconds(
+            &policy.zone_agronomy,
+            &zones,
+            policy.soak_minutes,
+            policy.interleave_cycles,
+        );
+        let today = crate::timeutil::now_local().date_naive();
+        let available = crate::engine::sunrise::smart_morning_available_s(
+            today,
+            cfg.deployment.location.lat,
+            cfg.deployment.location.lon,
+            seq,
+        )
+        .expect("sunrise exists at the demo location");
+        assert!(
+            (seq as i64) <= available,
+            "raised demo morning must fit: sequence {seq} s vs available {available} s"
+        );
+
+        // The check itself: cap-primary, 75 minutes.
+        let inp = crate::engine::tuning::CapClampInputs {
+            session_capped: true,
+            deficit_cap_binding: false,
+            desired_seconds: Some(by.seconds_per_session),
+            deficit_refill_seconds: None,
+            max_duration_s: Some(3600),
+            configured_max_run_minutes: None,
+            raised_fits_window: Some(true),
+            restriction_clamped: false,
+            run_days: 4,
+            sessions_per_week: by.sessions_per_week,
+            configured_sessions: None,
+            configured_weekly_budget_in: Some(by.weekly_budget_in),
+            weekly_budget_in: by.weekly_budget_in,
+            throughput_mm_hr: 14.2,
+            capture_efficiency: 0.70,
+            heat_multiplier: 1.15,
+        };
+        let out = crate::engine::tuning::check_cap_clamped("back_yard", &inp);
+        let crate::engine::tuning::CheckOutcome::Recommend(rec) = out else {
+            panic!("expected the cap recommendation, got {out:?}");
+        };
+        assert_eq!(rec.field, "max_run_minutes");
+        assert_eq!(rec.suggested_value, serde_json::json!(75));
     }
 
     /// Finding: the baked demo reasons carried operands that contradicted the

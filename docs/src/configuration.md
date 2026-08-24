@@ -184,6 +184,7 @@ precip_rate_mm_hr = 14.2         # measured via catch-cup; null = catalog defaul
 precip_rate_source = "measured"  # measured | catalog
 root_depth_mm = null             # null = species default
 mad_pct_override = null          # null = species default
+max_run_minutes = null           # null = 60; longest single run (whole minutes, 5..=360)
 controller_id = "os_main"
 controller_station = "1"         # 1-based for OS; entity_id for HA / ESPHome
 soil_sensor_id = null            # optional; engine uses modeled bucket when absent
@@ -196,7 +197,9 @@ photo_url = null
 
 `soil_texture` enum: `sand`, `loamy_sand`, `sandy_loam`, `loam`, `silt_loam`, `clay_loam`, `clay`. See [soil-textures.md](soil-textures.md).
 
-The [tuning report](tuning-report.md)'s Apply action writes exactly these fields (`soil_texture`, `precip_rate_mm_hr` plus `precip_rate_source`, `root_depth_mm`, `weekly_budget_in`, `sessions_per_week`) through the same validated save path as the settings editor; `null` restores the documented default.
+`max_run_minutes` caps a single dispatch for the zone (60 minutes when unset). It applies live on save. Raising it past 60 is confirmed in the UI at save time and sends a notification to subscribed devices; an active watering restriction's per-zone cap still wins via min().
+
+The [tuning report](tuning-report.md)'s Apply action writes exactly these fields (`soil_texture`, `precip_rate_mm_hr` plus `precip_rate_source`, `root_depth_mm`, `weekly_budget_in`, `sessions_per_week`, `max_run_minutes`) through the same validated save path as the settings editor; `null` restores the documented default.
 
 ## `[llm]`
 

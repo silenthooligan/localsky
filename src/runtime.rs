@@ -668,6 +668,11 @@ pub struct RuntimeHandles {
     /// does not wire it, in which case the catalog keeps its prior reachability-only
     /// behavior. Cloneable; all clones see the same state.
     pub source_last_seen: Option<crate::sources::SourceLastSeen>,
+    /// Push dispatcher handle, for the run-cap-raised safety notice the
+    /// config-apply path emits after a successful save. `None` in unit
+    /// tests and postures with no dispatcher (demo/native without push):
+    /// the save proceeds identically, only the notice is skipped.
+    pub push: Option<crate::push::PushDispatcher>,
 }
 
 /// Outcome of a config hot-reload: which tunables were re-applied live, and
@@ -833,11 +838,50 @@ pub fn apply_runtime_config(
         // watering policy swapped above, and both the smart-morning tick and
         // the refresher's next-run estimate read the live policy each
         // evaluation, so a change applies at the next scheduler tick.
+
+        // Safety notice: a zone's per-run limit raised past the 60 minute
+        // default is an override-style act. The UI confirmed it before the
+        // save; every subscribed device is told it happened. Informational
+        // only (the config snapshot trail is the audit), fire-and-forget,
+        // emitted AFTER the successful save on every write path that lands
+        // here (PUT /, PUT /raw, rollback, zones/apply, wizard apply).
+        if let Some(push) = handles.push.as_ref() {
+            for (name, slug, minutes) in run_cap_raises(prev, new_cfg) {
+                push.emit(crate::push::PushEvent::RunCapRaised {
+                    zone_name: name,
+                    zone_slug: slug,
+                    minutes,
+                });
+            }
+        }
     }
     ConfigApplyOutcome {
         restart_required: !reasons.is_empty(),
         restart_reasons: reasons,
     }
+}
+
+/// Zones whose per-run limit this write raised ABOVE the 60 minute
+/// default: (display name, underscore-normalized slug, new minutes).
+/// Fires only on an increase past 60 relative to the previous value
+/// (unset reads as 60): a decrease, an unchanged save, and a first set
+/// at or under 60 all stay silent. A zone new in this write compares
+/// against the 60 minute default, so creating one already past the line
+/// notifies too.
+pub fn run_cap_raises(prev: &Config, new_cfg: &Config) -> Vec<(String, String, u32)> {
+    let mut out = Vec::new();
+    for (slug, z) in new_cfg.zones.iter() {
+        let new_min = z.max_run_minutes.unwrap_or(60);
+        let prev_min = prev
+            .zones
+            .get(slug)
+            .map(|p| p.max_run_minutes.unwrap_or(60))
+            .unwrap_or(60);
+        if new_min > 60 && new_min > prev_min {
+            out.push((z.display_name.clone(), slug.replace('-', "_"), new_min));
+        }
+    }
+    out
 }
 
 /// Identity of the source-connection wiring: (id, kind tag, enabled, inner
@@ -1613,6 +1657,7 @@ mod tests {
             manual_schedules: Arc::new(ArcSwap::from_pointee(Vec::new())),
             source_reachable: crate::sources::SourceReachability::default(),
             source_last_seen: Some(crate::sources::SourceLastSeen::default()),
+            push: None,
         };
         // Seed the boot state, as main.rs does, so the test starts from a
         // realistic "booted" baseline before the hot-reload.
@@ -1911,6 +1956,7 @@ mod tests {
                 photo_url: None,
                 weekly_budget_in: None,
                 sessions_per_week: None,
+                max_run_minutes: None,
             },
         );
         let h = handles_with(&cfg0);
@@ -1985,6 +2031,7 @@ mod tests {
                 photo_url: None,
                 weekly_budget_in: None,
                 sessions_per_week: None,
+                max_run_minutes: None,
             },
         );
         let h = handles_with(&cfg0);
@@ -2021,6 +2068,132 @@ mod tests {
             SoilTexture::Sand,
             "the next cycle plan reads the applied texture"
         );
+    }
+
+    #[test]
+    fn hot_reload_zone_run_cap_resizes_zone_runtime_without_restart() {
+        // The per-zone run cap (ZoneConfig.max_run_minutes) rides the
+        // watering policy's zone_runtime map: an applied change must (a)
+        // NOT flag restart_required and (b) land on the next policy load
+        // in seconds, so both compute sites cap with the new value.
+        use crate::config::schema::{GrassSpecies, SoilTexture, SprinklerType, ZoneConfig};
+        let mut cfg0 = Config::default();
+        cfg0.zones.insert(
+            "front".to_string(),
+            ZoneConfig {
+                display_name: "front".into(),
+                area_sqft: 1000.0,
+                species: GrassSpecies::StAugustine,
+                soil_texture: SoilTexture::SandyLoam,
+                slope_pct: 0.0,
+                sun_exposure: Default::default(),
+                sprinkler_type: SprinklerType::Spray,
+                precip_rate_mm_hr: Some(15.0),
+                precip_rate_source: Default::default(),
+                root_depth_mm: None,
+                mad_pct_override: None,
+                controller_id: "os_main".into(),
+                controller_station: "1".into(),
+                soil_sensor_id: None,
+                target_min_pct_soil: 30.0,
+                saturation_pct_soil: 70.0,
+                photo_url: None,
+                weekly_budget_in: None,
+                sessions_per_week: None,
+                max_run_minutes: None,
+            },
+        );
+        let h = handles_with(&cfg0);
+        assert_eq!(
+            h.watering_policy
+                .load()
+                .zone_runtime
+                .get("front")
+                .unwrap()
+                .max_duration_s,
+            3600,
+            "unset max_run_minutes resolves to the historical 60 minute cap"
+        );
+
+        let mut cfg1 = cfg0.clone();
+        cfg1.zones.get_mut("front").unwrap().max_run_minutes = Some(90);
+        let outcome = apply_runtime_config(&h, Some(&cfg0), &cfg1);
+        assert!(
+            !outcome.restart_required,
+            "a per-zone run-cap change must hot-reload, not restart: {:?}",
+            outcome.restart_reasons
+        );
+        assert_eq!(
+            h.watering_policy
+                .load()
+                .zone_runtime
+                .get("front")
+                .unwrap()
+                .max_duration_s,
+            5400,
+            "the refresher's next tick reads the raised cap from the swapped policy"
+        );
+    }
+
+    #[test]
+    fn run_cap_raise_detection_matrix() {
+        use crate::config::schema::{GrassSpecies, SoilTexture, SprinklerType, ZoneConfig};
+        let zone = |cap: Option<u32>| ZoneConfig {
+            display_name: "Back Yard".into(),
+            area_sqft: 1000.0,
+            species: GrassSpecies::Bermuda,
+            soil_texture: SoilTexture::SandyLoam,
+            slope_pct: 0.0,
+            sun_exposure: Default::default(),
+            sprinkler_type: SprinklerType::Spray,
+            precip_rate_mm_hr: None,
+            precip_rate_source: Default::default(),
+            root_depth_mm: None,
+            mad_pct_override: None,
+            controller_id: "os_main".into(),
+            controller_station: "1".into(),
+            soil_sensor_id: None,
+            target_min_pct_soil: 30.0,
+            saturation_pct_soil: 70.0,
+            photo_url: None,
+            weekly_budget_in: None,
+            sessions_per_week: None,
+            max_run_minutes: cap,
+        };
+        let cfg_with = |cap: Option<u32>| {
+            let mut cfg = Config::default();
+            cfg.zones.insert("back-yard".into(), zone(cap));
+            cfg
+        };
+        let raises =
+            |prev: Option<u32>, new: Option<u32>| run_cap_raises(&cfg_with(prev), &cfg_with(new));
+
+        // Increase above 60 fires, with the display name, the
+        // underscore-normalized slug, and the new minutes.
+        assert_eq!(
+            raises(None, Some(116)),
+            vec![("Back Yard".to_string(), "back_yard".to_string(), 116)]
+        );
+        assert_eq!(
+            raises(Some(90), Some(120)).len(),
+            1,
+            "raising a raise fires"
+        );
+        // Decrease does not, even while still above 60.
+        assert!(raises(Some(120), Some(90)).is_empty());
+        // First set at or under 60 does not.
+        assert!(raises(None, Some(45)).is_empty());
+        assert!(raises(None, Some(60)).is_empty());
+        // Unchanged does not.
+        assert!(raises(Some(90), Some(90)).is_empty());
+        assert!(raises(None, None).is_empty());
+        // Clearing back to the default does not.
+        assert!(raises(Some(90), None).is_empty());
+        // A zone NEW in this write compares against the 60 default:
+        // created past the line notifies, created inside it stays silent.
+        let empty = Config::default();
+        assert_eq!(run_cap_raises(&empty, &cfg_with(Some(90))).len(), 1);
+        assert!(run_cap_raises(&empty, &cfg_with(Some(60))).is_empty());
     }
 
     #[test]

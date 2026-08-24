@@ -1929,6 +1929,13 @@ pub struct ZoneConfig {
     /// precedence as `weekly_budget_in`.
     #[serde(default)]
     pub sessions_per_week: Option<u32>,
+    /// Longest single dispatch the engine will queue for this zone
+    /// (minutes). `None` = the historical 60 minute default. Valid range
+    /// 5..=360; an active watering restriction's per-zone cap still wins
+    /// via min() at both compute sites. Unit-in-name convention follows
+    /// `soak_minutes`; the engine's internal `ZoneRuntime` stays seconds.
+    #[serde(default)]
+    pub max_run_minutes: Option<u32>,
 }
 
 fn default_target_min_pct() -> f64 {

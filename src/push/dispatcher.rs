@@ -74,6 +74,17 @@ pub enum PushEvent {
     /// service worker supports no action buttons, so the notification
     /// itself is link-only.
     TuningReportReady { recommendation_count: usize },
+    /// A zone's per-run limit was raised past the 60 minute default by a
+    /// config write (settings editor save or tuning Apply, both behind
+    /// the UI confirmation). Informational safety notice: every
+    /// subscribed device learns the line was crossed; nothing persists
+    /// here (the config snapshot trail is the audit). Emitted by
+    /// runtime::apply_runtime_config AFTER a successful save only.
+    RunCapRaised {
+        zone_name: String,
+        zone_slug: String,
+        minutes: u32,
+    },
 }
 
 #[derive(Clone, Serialize)]
@@ -311,6 +322,21 @@ fn render_payload(ev: &PushEvent) -> PushPayload {
                 url: "/zones".to_string(),
             }
         }
+        PushEvent::RunCapRaised {
+            zone_name,
+            zone_slug,
+            minutes,
+        } => PushPayload {
+            title: format!("{zone_name} run limit raised to {minutes} minutes"),
+            body: format!(
+                "A single watering can now run up to {minutes} minutes. Cycle and soak \
+                 still splits long runs to limit runoff."
+            ),
+            // One tag per zone: a repeat raise replaces the previous
+            // notification instead of stacking.
+            tag: format!("cap-raised-{zone_slug}"),
+            url: format!("/zones/{zone_slug}"),
+        },
     }
 }
 
@@ -530,6 +556,22 @@ fn mask_endpoint(endpoint: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_cap_raised_payload_names_the_zone_and_deep_links_it() {
+        let p = render_payload(&PushEvent::RunCapRaised {
+            zone_name: "Back Yard".into(),
+            zone_slug: "back_yard".into(),
+            minutes: 116,
+        });
+        assert_eq!(p.title, "Back Yard run limit raised to 116 minutes");
+        assert!(p.body.contains("116 minutes"), "{}", p.body);
+        assert_eq!(
+            p.tag, "cap-raised-back_yard",
+            "per-zone tag so repeats replace, never stack"
+        );
+        assert_eq!(p.url, "/zones/back_yard");
+    }
 
     #[test]
     fn generate_vapid_keypair_writes_loadable_pem_and_browser_public_key() {

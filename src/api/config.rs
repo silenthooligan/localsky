@@ -1705,6 +1705,25 @@ pub(crate) fn apply_zone_field(
                 serde_json::from_value(value.clone()).map_err(|e| format!("{field}: {e}"))?;
             Ok(old)
         }
+        "max_run_minutes" => {
+            let old = json!(zone.max_run_minutes);
+            zone.max_run_minutes = match value {
+                serde_json::Value::Null => None,
+                v => {
+                    let m = v
+                        .as_u64()
+                        .and_then(|n| u32::try_from(n).ok())
+                        .ok_or_else(|| format!("{field} expects a whole number or null"))?;
+                    // Same band the validator enforces; refusing here gives the
+                    // apply caller a field-named message instead of a report.
+                    if !(5..=360).contains(&m) {
+                        return Err(format!("{field} must be between 5 and 360 minutes"));
+                    }
+                    Some(m)
+                }
+            };
+            Ok(old)
+        }
         other => Err(format!(
             "field '{other}' cannot be applied from the tuning report"
         )),
@@ -2978,6 +2997,7 @@ mod tests {
             manual_schedules: Arc::new(ArcSwap::from_pointee(Vec::new())),
             source_reachable: source_reachable.clone(),
             source_last_seen: Some(source_last_seen.clone()),
+            push: None,
         };
         (handles, source_reachable, source_last_seen)
     }
@@ -3508,6 +3528,7 @@ mod tests {
             photo_url: None,
             weekly_budget_in: Some(1.0),
             sessions_per_week: Some(2),
+            max_run_minutes: None,
         }
     }
 
@@ -3534,6 +3555,13 @@ mod tests {
         assert_eq!(z.sessions_per_week, Some(3));
         apply_zone_field(&mut z, "weekly_budget_in", &serde_json::json!(1.9)).unwrap();
         assert_eq!(z.weekly_budget_in, Some(1.9));
+        // Run limit (the check A cap-primary apply); null restores the default.
+        let old = apply_zone_field(&mut z, "max_run_minutes", &serde_json::json!(90)).unwrap();
+        assert_eq!(old, serde_json::Value::Null);
+        assert_eq!(z.max_run_minutes, Some(90));
+        let old = apply_zone_field(&mut z, "max_run_minutes", &serde_json::Value::Null).unwrap();
+        assert_eq!(old, serde_json::json!(90));
+        assert_eq!(z.max_run_minutes, None);
     }
 
     #[test]
@@ -3542,6 +3570,10 @@ mod tests {
         assert!(apply_zone_field(&mut z, "controller_station", &serde_json::json!("9")).is_err());
         assert!(apply_zone_field(&mut z, "soil_texture", &serde_json::json!("granite")).is_err());
         assert!(apply_zone_field(&mut z, "sessions_per_week", &serde_json::json!(1.5)).is_err());
+        // Run limit: the arm enforces the same 5..=360 band the validator does.
+        assert!(apply_zone_field(&mut z, "max_run_minutes", &serde_json::json!(4)).is_err());
+        assert!(apply_zone_field(&mut z, "max_run_minutes", &serde_json::json!(400)).is_err());
+        assert!(apply_zone_field(&mut z, "max_run_minutes", &serde_json::json!(90.5)).is_err());
     }
 
     #[test]

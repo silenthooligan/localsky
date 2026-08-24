@@ -26,6 +26,7 @@
 
 pub mod button;
 pub mod card;
+pub mod confirm_sheet;
 pub mod empty_state;
 pub mod form_field;
 pub mod help_hint;
@@ -47,6 +48,7 @@ pub mod toggle;
 
 pub use button::Button;
 pub use card::Card;
+pub use confirm_sheet::ConfirmSheet;
 pub use empty_state::EmptyState;
 pub use form_field::FormField;
 pub use help_hint::HelpHint;
