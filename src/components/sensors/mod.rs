@@ -528,7 +528,9 @@ pub fn SensorsPage(
 
             <div class="sensors-shell">
                 <aside class="sensors-list" aria-label="Sensors">
-                    // Weather station.
+                    // Weather station. The sub line carries readings, so the
+                    // live/no-packet state gets its own dot+text chip: the
+                    // leading dot's color never carries health alone.
                     <p class="sensors-list__group">"Weather station"</p>
                     <SensorRow
                         active=Signal::derive(move || selected.get() == Sel::Tempest)
@@ -539,6 +541,11 @@ pub fn SensorsPage(
                             let p = prefs.get();
                             let w = weather.get();
                             format!("{} · {:.0}% · {}", fmt_temp_short(w.air_temp_f, p), w.rh_pct, fmt_wind(w.wind_avg_mph, p))
+                        })
+                        status=Signal::derive(move || if weather.get().last_packet_epoch > 0 {
+                            ("status-chip--online", "live")
+                        } else {
+                            ("status-chip--unknown", "no packet yet")
                         })
                     />
 
@@ -617,7 +624,7 @@ pub fn SensorsPage(
                                     dot=Signal::derive(move || dotc)
                                     title=id
                                     sub=Signal::derive(move || kind.clone())
-                                    status=chip
+                                    status=Signal::derive(move || chip)
                                 />
                             }
                         };
@@ -749,21 +756,25 @@ fn SensorRow(
     sub: Signal<String>,
     /// Optional (tone modifier, word) rendered after the sub line as a
     /// `.status-chip` (the dot+text pattern), so health never reads from the
-    /// leading dot's color alone. None keeps the legacy two-line row for rows
-    /// whose sub already carries the state in words (soil "probe offline").
+    /// leading dot's color alone. A Signal so live states (the Tempest row's
+    /// first packet arriving) track without a remount. None keeps the legacy
+    /// two-line row for rows whose sub already carries the state in words
+    /// (soil "probe offline").
     #[prop(optional)]
-    status: Option<(&'static str, &'static str)>,
+    status: Option<Signal<(&'static str, &'static str)>>,
 ) -> impl IntoView {
+    // Affordance grammar: clicking a row selects its detail, so the row is
+    // .is-interactive (hover lift + ring); nothing else in the rail is.
     view! {
-        <button type="button" class="sensor-row" class:is-active=move || active.get() on:click=move |_| on_pick.run(())>
+        <button type="button" class="sensor-row is-interactive" class:is-active=move || active.get() on:click=move |_| on_pick.run(())>
             <span class="sensor-row__dot" style=move || format!("background:{}", dot.get())></span>
             <span class="sensor-row__text">
                 <span class="sensor-row__title">{title}</span>
                 <span class="sensor-row__sub">
                     {move || sub.get()}
-                    {status.map(|(tone, word)| view! {
+                    {status.map(|s| view! {
                         " "
-                        <span class=format!("status-chip {tone}")>{word}</span>
+                        <span class=move || format!("status-chip {}", s.get().0)>{move || s.get().1}</span>
                     })}
                 </span>
             </span>
@@ -797,16 +808,23 @@ fn TempestDetail(s: ReadSignal<Snapshot>, prefs: Signal<UnitPrefs>) -> impl Into
             2 => "hail",
             _ => "none",
         };
-        let fresh = if d.last_packet_epoch > 0 {
-            "live"
+        // Dot + word (status-chip law), never a bare meta word whose state
+        // the reader has to infer.
+        let (fresh_tone, fresh_word) = if d.last_packet_epoch > 0 {
+            ("status-chip--online", "live")
         } else {
-            "no packet yet"
+            ("status-chip--unknown", "no packet yet")
         };
+        // Entity identity (teal sensor stripe + badge) on a read-only data
+        // card: .is-static, nothing here is clickable.
         view! {
-            <div class="sensor-detail-card">
+            <div class="sensor-detail-card entity-stripe entity-stripe--sensor is-static">
                 <div class="sensor-detail-card__head">
-                    <h2>"Tempest weather station"</h2>
-                    <span class="sensor-detail-card__meta">{fresh}</span>
+                    <div class="sensor-detail-card__title-group">
+                        <h2>"Tempest weather station"</h2>
+                        <span class="entity-badge entity-badge--sensor">"Sensor"</span>
+                    </div>
+                    <span class=format!("status-chip {fresh_tone}")>{fresh_word}</span>
                 </div>
                 <div class="sensor-groups">
                     <FieldGroup title="Air">
@@ -878,10 +896,17 @@ fn SoilDetail(
         }
     };
     let proj = z.predicted_pct.clone();
+    // Entity identity + .is-control: the card itself is not clickable but
+    // hosts the Remove/manage actions below. The moisture pill keeps its
+    // word (SATURATED/DRY/HEALTHY/OFFLINE), so state never reads from
+    // color alone.
     view! {
-        <div class="sensor-detail-card" style=format!("--sc:{color}")>
+        <div class="sensor-detail-card entity-stripe entity-stripe--sensor is-control" style=format!("--sc:{color}")>
             <div class="sensor-detail-card__head">
-                <h2>{name}" soil probe"</h2>
+                <div class="sensor-detail-card__title-group">
+                    <h2>{name}" soil probe"</h2>
+                    <span class="entity-badge entity-badge--sensor">"Sensor"</span>
+                </div>
                 <span class="soil-card__pill">{status}</span>
             </div>
             <div class="sensor-detail-card__big">{cur}</div>
@@ -1041,7 +1066,10 @@ fn SourceDetail(
     assigned: Vec<(String, String)>,
     prefs: Signal<UnitPrefs>,
 ) -> impl IntoView {
-    let dot = dot_color(&r.status);
+    // Head chip: the same tone+word mapping the rail row uses, so a
+    // source reads identically in both places (dot + text, never color
+    // alone; a deliberately-disabled source reads a calm "off").
+    let (head_tone, head_word) = status_chip(&r.status, r.enabled);
     let seen = match r.stale_for_s {
         Some(s) => age_phrase(s),
         None => "never".to_string(),
@@ -1094,11 +1122,16 @@ fn SourceDetail(
     }
 
     let kind = r.kind.clone();
+    // Entity identity + .is-control: the card is not clickable itself but
+    // hosts the Edit/Enable controls.
     view! {
-        <div class="sensor-detail-card">
+        <div class="sensor-detail-card entity-stripe entity-stripe--sensor is-control">
             <div class="sensor-detail-card__head">
-                <h2>{r.id.clone()}</h2>
-                <span class="sensor-detail-card__status"><span class="source-health__dot" style=format!("background:{dot}")></span>{r.status.clone()}</span>
+                <div class="sensor-detail-card__title-group">
+                    <h2>{r.id.clone()}</h2>
+                    <span class="entity-badge entity-badge--sensor">"Sensor"</span>
+                </div>
+                <span class=format!("status-chip {head_tone}")>{head_word}</span>
             </div>
             <div class="sensor-detail-card__actions">
                 <Button variant="ghost"

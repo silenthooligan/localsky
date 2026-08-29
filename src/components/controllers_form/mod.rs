@@ -24,7 +24,10 @@ use crate::docs::doc_url;
 mod fields;
 mod merge;
 pub use fields::{controller_fields, ControllerConfigForm};
-pub use merge::{merge_message, merge_scanned_zones, zone_slug, DiscoveredZone, MergeOutcome};
+pub use merge::{
+    merge_message, merge_scanned_zones, scan_opens_advanced, zone_slug, DiscoveredZone,
+    MergeOutcome,
+};
 
 /// Controller kinds offered in the Kind picker. (value, label) pairs.
 ///
@@ -385,20 +388,46 @@ pub fn ControllerEditorPanel(
                         // JSON's zone map (per kind), then report what actually
                         // happened. Re-parse config_text fresh: the user may
                         // have edited it while the scan was in flight.
-                        let mut cfg: serde_json::Value =
-                            match serde_json::from_str(&config_text.get_untracked()) {
-                                Ok(c) => c,
-                                Err(e) => {
-                                    scan_msg.set(format!("Config JSON parse error: {e}"));
-                                    return;
+                        // Detached continuation: reads are try_* with a clean
+                        // bail (the panel can be disposed mid-scan; a bare
+                        // read then panics and wasm-release is panic=abort).
+                        let Some(text_now) = config_text.try_get_untracked() else {
+                            return;
+                        };
+                        let mut cfg: serde_json::Value = match serde_json::from_str(&text_now) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                scan_msg.set(format!("Config JSON parse error: {e}"));
+                                return;
+                            }
+                        };
+                        let Some(kind_now) = kind.try_get_untracked() else {
+                            return;
+                        };
+                        let outcome = merge_scanned_zones(&kind_now, &mut cfg, &found);
+                        if scan_opens_advanced(&outcome) {
+                            config_text.set(serde_json::to_string_pretty(&cfg).unwrap_or(text_now));
+                            // Follow-through (issue #8's other half: results
+                            // landing off-screen): open the Advanced fold and
+                            // bring the filled JSON into view so the user SEES
+                            // the map without hunting. Plain DOM on the live
+                            // document, hydrate-only by construction (this
+                            // whole continuation is hydrate-gated); a later
+                            // manual toggle stays the user's.
+                            if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+                                if let Some(fold) =
+                                    doc.get_element_by_id("controller-advanced-fold")
+                                {
+                                    let _ = fold.set_attribute("open", "");
                                 }
-                            };
-                        let outcome = merge_scanned_zones(&kind.get_untracked(), &mut cfg, &found);
-                        if matches!(outcome, MergeOutcome::Merged { .. }) {
-                            config_text.set(
-                                serde_json::to_string_pretty(&cfg)
-                                    .unwrap_or_else(|_| config_text.get_untracked()),
-                            );
+                                if let Some(area) = doc.get_element_by_id("controller-config-json")
+                                {
+                                    let opts = web_sys::ScrollIntoViewOptions::new();
+                                    opts.set_behavior(web_sys::ScrollBehavior::Smooth);
+                                    opts.set_block(web_sys::ScrollLogicalPosition::Nearest);
+                                    area.scroll_into_view_with_scroll_into_view_options(&opts);
+                                }
+                            }
                         }
                         scan_msg.set(merge_message(found.len(), &outcome));
                     } else {
@@ -519,8 +548,10 @@ pub fn ControllerEditorPanel(
 
             // ADVANCED: the raw config JSON escape hatch, demoted into a fold so
             // the labeled Connection form reads as the primary editor. Still
-            // two-way synced; "Scan zones" populates the zone map in here.
-            <details class="settings-section-fold">
+            // two-way synced; "Scan zones" populates the zone map in here, and a
+            // successful merge auto-opens this fold and scrolls the JSON into
+            // view (the ids below are the scan follow-through's DOM handles).
+            <details class="settings-section-fold" id="controller-advanced-fold">
                 <summary class="settings-section-fold__summary">
                     "Advanced: raw config JSON"
                     <span class="settings-section-fold__hint">"per-zone maps and other keys; for cloud controllers, Scan zones fills the zone map"</span>
@@ -533,6 +564,7 @@ pub fn ControllerEditorPanel(
                     >
                         <textarea
                             class="ui-input"
+                            id="controller-config-json"
                             style="min-height: 180px; font-family: var(--font-mono); font-size: 0.85rem;"
                             prop:value=move || config_text.get()
                             on:input=move |ev| config_text.set(event_target_value(&ev))

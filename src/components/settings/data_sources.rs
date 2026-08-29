@@ -1229,7 +1229,11 @@ pub fn RestartBanner(
     });
     view! {
         <Show when=show>
-            <div class="health-banner" role="status">
+            // Sticky so a save made from the bottom of a long form still
+            // shows the notice; it previously sat at the top of the page
+            // and a bottom-of-form save looked like it silently did not
+            // take (issue #8 follow-up).
+            <div class="health-banner health-banner--sticky" role="status">
                 <span class="health-banner__icon" aria-hidden="true">
                     <Icon name="alert-triangle" size=16/>
                 </span>

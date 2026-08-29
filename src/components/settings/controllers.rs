@@ -21,9 +21,22 @@ use crate::components::settings_ui::{
 use crate::components::ui::{Button, HelpHint, Panel};
 use crate::docs::doc_url;
 
+/// True when the committed in-memory config differs from the last
+/// server-saved snapshot: work exists that only "Save all changes" will
+/// persist. Null current means "not loaded yet" and is never dirty (SSR
+/// and hydrate's first frame both render no pending-save state).
+fn config_dirty(current: &serde_json::Value, saved: &serde_json::Value) -> bool {
+    !current.is_null() && current != saved
+}
+
 #[component]
 pub fn SettingsControllers() -> impl IntoView {
     let config_json = RwSignal::new(serde_json::Value::Null);
+    // The last config known to be on the server (seeded by the GET,
+    // advanced by each successful PUT). `dirty` derives from comparing
+    // the committed in-memory config against it, so the pending-save
+    // state reflects REAL divergence, never merely "a form is open".
+    let saved_snapshot = RwSignal::new(serde_json::Value::Null);
     let saving = RwSignal::new(false);
     let result_msg = RwSignal::new(String::new());
     let result_ok = RwSignal::new(false);
@@ -58,6 +71,16 @@ pub fn SettingsControllers() -> impl IntoView {
     let load_error: RwSignal<Option<String>> = RwSignal::new(None);
     let load_retry = RwSignal::new(0u32);
 
+    // Uncommitted-to-server work exists: an entry commit ("Updated. Click
+    // Save to apply."), a delete, or a default flip changed the in-memory
+    // config and no successful PUT has carried it yet. Drives the
+    // attention state on "Save all changes" (button ring + the Unsaved
+    // changes chip), so the quiet status line is no longer the only
+    // signal that step two is still owed.
+    let dirty = Signal::derive(move || {
+        config_json.with(|cur| saved_snapshot.with(|saved| config_dirty(cur, saved)))
+    });
+
     #[cfg(feature = "hydrate")]
     {
         Effect::new(move |_| {
@@ -65,7 +88,9 @@ pub fn SettingsControllers() -> impl IntoView {
             wasm_bindgen_futures::spawn_local(async move {
                 match fetch_config().await {
                     Ok(cfg) => {
-                        config_json.set(cfg);
+                        config_json.set(cfg.clone());
+                        // Freshly loaded state IS the saved state.
+                        saved_snapshot.set(cfg);
                         load_error.set(None);
                     }
                     Err(e) => load_error.set(Some(e)),
@@ -167,13 +192,18 @@ pub fn SettingsControllers() -> impl IntoView {
         #[cfg(feature = "hydrate")]
         {
             wasm_bindgen_futures::spawn_local(async move {
-                match save_config(candidate).await {
+                match save_config(candidate.clone()).await {
                     Ok(reasons) => {
                         crate::components::settings_ui::toast_saved(
                             result_msg,
                             result_ok,
                             "Saved. Controller registry hot-reloads on next dispatch.",
                         );
+                        // The PUT landed: what we sent is now the saved
+                        // state, which clears the pending-save attention
+                        // state. try_set: detached continuation, the page
+                        // may be gone by the time the PUT returns.
+                        let _ = saved_snapshot.try_set(candidate);
                         // A newly added controller that needs a boot-wired
                         // connection raises the dismissible banner with the
                         // server's reasons; an empty list (hot-reload) clears it.
@@ -275,15 +305,32 @@ pub fn SettingsControllers() -> impl IntoView {
                 }}
             </Show>
 
-            <button
-                type="button"
-                class="setup-apply-btn"
-                style="margin-top: 1.5rem"
-                disabled=move || saving.get()
-                on:click=on_save
-            >
-                {move || if saving.get() { "Saving…" } else { "Save all changes" }}
-            </button>
+            // Step two of the two-step save. With pending work the button
+            // carries an --attention ring and an "Unsaved changes"
+            // status-chip (dot + text, never color alone) appears beside
+            // it; both clear when a save lands. role="status" announces
+            // the pending state to SR users when it appears.
+            <div class="settings-save-row" style="margin-top: 1.5rem">
+                <button
+                    type="button"
+                    class=move || {
+                        if dirty.get() {
+                            "setup-apply-btn setup-apply-btn--attention"
+                        } else {
+                            "setup-apply-btn"
+                        }
+                    }
+                    disabled=move || saving.get()
+                    on:click=on_save
+                >
+                    {move || if saving.get() { "Saving…" } else { "Save all changes" }}
+                </button>
+                <span role="status">
+                    {move || dirty.get().then(|| view! {
+                        <span class="status-chip status-chip--attention">"Unsaved changes"</span>
+                    })}
+                </span>
+            </div>
             </Show>
 
             <SettingsResult result_msg=result_msg result_ok=result_ok/>
@@ -393,6 +440,42 @@ async fn save_config(cfg: serde_json::Value) -> Result<Vec<String>, String> {
 /// instead of compounding through the page's outer view tree. The
 /// page renders a flat `Vec<ControllerCard view>` rather than a
 /// deeply-typed tuple of card internals.
+#[cfg(all(test, feature = "ssr"))]
+mod tests {
+    use super::config_dirty;
+    use serde_json::json;
+
+    // The pending-save state derives from REAL divergence between the
+    // committed in-memory config and the last server-saved snapshot,
+    // never from "a form is open".
+    #[test]
+    fn dirty_tracks_divergence_from_the_saved_snapshot() {
+        let saved = json!({ "controllers": [{ "id": "os_main", "default": true }] });
+        // Loaded and untouched: clean.
+        assert!(!config_dirty(&saved, &saved));
+        // A committed edit diverges: dirty.
+        let edited = json!({ "controllers": [{ "id": "os_main", "default": false }] });
+        assert!(config_dirty(&edited, &saved));
+        // A delete diverges too (the whole-array mutation, not a form).
+        let deleted = json!({ "controllers": [] });
+        assert!(config_dirty(&deleted, &saved));
+        // After a successful PUT the snapshot advances to what was sent:
+        // clean again.
+        assert!(!config_dirty(&edited, &edited));
+    }
+
+    #[test]
+    fn dirty_is_never_true_before_the_config_loads() {
+        // Null in-memory config = not loaded yet (SSR + hydrate's first
+        // frame): no pending-save state, no attention treatment.
+        assert!(!config_dirty(
+            &serde_json::Value::Null,
+            &serde_json::Value::Null
+        ));
+        assert!(!config_dirty(&serde_json::Value::Null, &json!({ "a": 1 })));
+    }
+}
+
 #[component]
 fn ControllerCard(
     controller: serde_json::Value,

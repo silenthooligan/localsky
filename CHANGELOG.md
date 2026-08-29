@@ -2,6 +2,24 @@
 
 All notable changes to LocalSky are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.19] - 2026-08-29
+
+Results, pending work, and waiting suggestions stay where you can see them. No breaking changes.
+
+### Fixed
+
+- The "Restart required" banner now stays on screen while you work anywhere in a long settings form. Saving a controller from the bottom of the form left the notice scrolled out of view at the top of the page, so an applied change looked like it silently did not take ([#8](https://github.com/silenthooligan/localsky/issues/8)).
+- Scan results now show up where you are looking: after a successful zone scan, the controller editor's advanced section opens on its own and the filled-in config JSON scrolls into view, instead of leaving the result behind a closed fold ([#8](https://github.com/silenthooligan/localsky/issues/8)).
+- Unsaved changes on the controllers settings page are flagged on the Save button itself: an attention ring plus an "Unsaved changes" marker that clear once the save lands, so a committed edit waiting on the final Save is no longer easy to miss.
+
+### Added
+
+- The Zones entry in the navigation shows how many zones have an active tuning suggestion, on desktop and on the phone tab bar. The count updates as suggestions are applied, snoozed, or dismissed, and disappears at zero.
+
+### Changed
+
+- The sensors page now reads like the rest of the app: sensor cards carry the teal sensor identity, health shows as a dot plus a word everywhere, and only the rows that actually respond to a click respond to hover.
+
 ## [0.7.18] - 2026-08-28
 
 ### Fixed

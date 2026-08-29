@@ -40,7 +40,15 @@ pub fn MobileNav() -> impl IntoView {
         <nav class="mobile-tab-bar" aria-label="Primary mobile">
             <Tab tab="weather" href="/" icon="weather" label="Weather"/>
             <Tab tab="irrigation" href="/irrigation" icon="droplet" label="Irrigation"/>
-            <Tab tab="zones" href="/zones" icon="zones" label="Zones"/>
+            // Zones mirrors the desktop sidebar's suggestions count, fed
+            // by the same app-level tuning summary (one shared fetch).
+            <Tab
+                tab="zones"
+                href="/zones"
+                icon="zones"
+                label="Zones"
+                badge=crate::components::zones::tuning::use_suggestion_count()
+            />
             <Tab tab="history" href="/history" icon="history" label="History"/>
             <MoreTab more_open=more_open/>
         </nav>
@@ -63,6 +71,11 @@ fn Tab(
     href: &'static str,
     icon: &'static str,
     label: &'static str,
+    /// Optional count badge riding the glyph's corner (--attention tint,
+    /// entity-badge geometry). Renders NOTHING at zero, matching the
+    /// desktop sidebar's rule, so SSR and hydrate's first frame agree.
+    #[prop(optional)]
+    badge: Option<Signal<usize>>,
 ) -> impl IntoView {
     let pathname = use_location().pathname;
     // One shared active predicate feeds both the class and aria-current
@@ -96,6 +109,20 @@ fn Tab(
         >
             <span class="mobile-tab-glyph" aria-hidden="true"><Icon name=icon size=22/></span>
             <span class="mobile-tab-label">{label}</span>
+            // Badge element is conditional (never an empty pill at zero).
+            // The visible number is aria-hidden; the sr-only suffix gives
+            // SR users the same fact in words.
+            {badge.map(|b| move || {
+                let n = b.get();
+                (n > 0).then(|| view! {
+                    <span class="mobile-tab-badge">
+                        <span aria-hidden="true">{n.to_string()}</span>
+                        <span class="sr-only">
+                            {format!("{n} suggestion{}", if n == 1 { "" } else { "s" })}
+                        </span>
+                    </span>
+                })
+            })}
         </a>
     }
 }

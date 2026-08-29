@@ -1,6 +1,6 @@
 [package]
 name = "localsky"
-version = "0.7.18"
+version = "0.7.19"
 edition = "2021"
 license = "Apache-2.0"
 description = "Local-first weather and irrigation control with native FAO-56 ET, multi-source weather merge, multi-controller HAL, optional Home Assistant, and optional local LLM advisor."
@@ -142,6 +142,7 @@ wasm-bindgen-futures = { version = "0.4", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
 gloo-net = { version = "0.7", features = ["http", "eventsource"], optional = true }
 gloo-timers = { version = "0.4", features = ["futures"], optional = true }
+gloo-events = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
 web-sys = { version = "0.3", optional = true, features = [
     "Window",
@@ -227,6 +228,7 @@ hydrate = [
     "dep:wasm-bindgen-futures",
     "dep:gloo-net",
     "dep:gloo-timers",
+    "dep:gloo-events",
     "dep:js-sys",
     "dep:web-sys",
 ]

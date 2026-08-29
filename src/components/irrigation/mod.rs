@@ -52,9 +52,18 @@ fn NoZonesEmpty() -> impl IntoView {
 #[component]
 pub fn IrrigationPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     let is_mobile = use_context::<RwSignal<bool>>();
-    // ONE tuning-report fetch for the whole page; the desktop and mobile
-    // branches share it, and the strip placement below reads its count.
+    // The app-level tuning report (one fetch, provided by App()); the
+    // desktop and mobile branches share it, and the strip placement below
+    // reads its count.
     let tuning_report = crate::components::zones::tuning::use_tuning_report();
+    // Entering the page re-fetches the shared report (the per-mount
+    // freshness the page-local fetch had before the app context), so the
+    // strip reflects server-side changes without a reload. On-mount only:
+    // the closure reads no signals.
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        crate::components::zones::tuning::refresh_tuning_report();
+    });
 
     let body = move || {
         // No controller/zones: every irrigation primitive below acts on nothing,

@@ -230,6 +230,16 @@ pub fn merge_message(found: usize, outcome: &MergeOutcome) -> String {
     }
 }
 
+/// Whether a scan outcome warrants the on-screen follow-through: opening
+/// the Advanced fold and scrolling the config JSON into view so the user
+/// SEES the filled map instead of hunting for it (issue #8's second
+/// half: things happening off-screen). Only a real merge qualifies;
+/// `NoMapKind` leaves the fold alone because the status message already
+/// points at the Zones page.
+pub fn scan_opens_advanced(outcome: &MergeOutcome) -> bool {
+    matches!(outcome, MergeOutcome::Merged { .. })
+}
+
 #[cfg(all(test, feature = "ssr"))]
 mod tests {
     use super::*;
@@ -490,5 +500,21 @@ mod tests {
             }
             other => panic!("expected Merged, got {other:?}"),
         }
+    }
+
+    // The visible follow-through (fold auto-open + scroll) fires ONLY on
+    // a real merge: a NoMapKind scan leaves the fold alone because its
+    // message already points at the Zones page instead.
+    #[test]
+    fn follow_through_opens_the_fold_only_on_a_merge() {
+        let mut cfg = json!({ "zone_uuid_map": {} });
+        let zs = zones(&[("uuid-a", "Front Lawn")]);
+        let merged = merge_scanned_zones("rachio", &mut cfg, &zs);
+        assert!(scan_opens_advanced(&merged));
+
+        let mut cfg = json!({});
+        let untouched = merge_scanned_zones("opensprinkler_direct", &mut cfg, &zs);
+        assert_eq!(untouched, MergeOutcome::NoMapKind);
+        assert!(!scan_opens_advanced(&untouched));
     }
 }

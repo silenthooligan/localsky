@@ -60,12 +60,20 @@ pub fn Sidebar() -> impl IntoView {
             // inside the page.
             // ───────────────────────────────────────────────────────
 
-            // PRIMARY, the live products + the garden map.
+            // PRIMARY, the live products + the garden map. Zones carries
+            // the suggestions count from the app-level tuning summary so a
+            // waiting recommendation is visible from anywhere, not only
+            // after landing on a tuning surface.
             <NavSection title="">
                 <NavLink href="/" icon="weather" label="Weather"/>
                 <NavLink href="/irrigation" icon="droplet" label="Irrigation"/>
                 <NavLink href="/week" icon="calendar" label="Week"/>
-                <NavLink href="/zones" icon="zones" label="Zones"/>
+                <NavLink
+                    href="/zones"
+                    icon="zones"
+                    label="Zones"
+                    badge=crate::components::zones::tuning::use_suggestion_count()
+                />
                 <NavLink href="/sensors" icon="activity" label="Sensors"/>
             </NavSection>
 
@@ -137,6 +145,12 @@ fn NavLink(
     icon: &'static str,
     label: &'static str,
     #[prop(optional)] sub: bool,
+    /// Optional count badge (entity-badge geometry, --attention tint)
+    /// after the label. Renders NOTHING at zero, so SSR and hydrate's
+    /// first frame (count 0 until the shared fetch resolves) agree and a
+    /// quiet install shows no badge at all.
+    #[prop(optional)]
+    badge: Option<Signal<usize>>,
 ) -> impl IntoView {
     let pathname = use_location().pathname;
     // Shared active predicate: feeds the class AND aria-current="page"
@@ -181,6 +195,21 @@ fn NavLink(
         navigate(href, NavigateOptions::default());
     };
 
+    // aria-label mirrors the visible content: label alone, or label plus
+    // the badge count when one is showing, so SR users hear the same
+    // number sighted users see (the label-overriding aria-label would
+    // otherwise swallow the badge text).
+    let aria = move || match badge {
+        Some(b) => {
+            let n = b.get();
+            if n > 0 {
+                format!("{label}, {n} suggestion{}", if n == 1 { "" } else { "s" })
+            } else {
+                label.to_string()
+            }
+        }
+        None => label.to_string(),
+    };
     view! {
         <li>
             // title carries the label for the tablet icon-rail, where the
@@ -192,11 +221,21 @@ fn NavLink(
                 href=href
                 on:click=on_click
                 title=label
-                aria-label=label
+                aria-label=aria
                 aria-current=move || is_active().then_some("page")
             >
                 <span class="sidebar-link-icon"><Icon name=icon/></span>
                 <span class="sidebar-link-label">{label}</span>
+                // The badge element itself is conditional (not just its
+                // text): zero renders NO span, so no empty pill shows.
+                {badge.map(|b| move || {
+                    let n = b.get();
+                    (n > 0).then(|| view! {
+                        <span class="sidebar-link-badge" aria-hidden="true">
+                            {n.to_string()}
+                        </span>
+                    })
+                })}
             </a>
         </li>
     }

@@ -18,15 +18,14 @@ pub use detail::{ZoneDetailPage, ZoneDetailView};
 #[component]
 pub fn ZonesPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     let selected: RwSignal<Option<String>> = RwSignal::new(None);
-    // ONE tuning-report fetch for the whole page: the Suggestions KPI,
-    // the per-card attention pills, and the recommendation-aware
-    // auto-select below all join against this signal. No per-card
-    // fetches; the detail pane's Tuning panel keeps its own fetch for
-    // its Apply-refetch cycle. The epoch context lets that panel's Apply
-    // invalidate THIS page-level report too, so every surface in the
-    // viewport reflects the apply without a reload. Provided BEFORE
-    // use_tuning_report so the hook subscribes to it.
-    provide_context(tuning::TuningEpoch(RwSignal::new(0)));
+    // The page CONSUMES the app-level tuning report (provided by App()
+    // via provide_tuning_summary): the Suggestions KPI, the per-card
+    // attention pills, and the recommendation-aware auto-select below all
+    // join against that one shared signal, never a second page fetch. The
+    // detail pane's Tuning panel keeps its own fetch for its
+    // Apply-refetch cycle; its Apply also bumps the app-wide TuningEpoch,
+    // which re-fetches the shared report so every surface in the viewport
+    // (the nav badge included) reflects the apply without a reload.
     let tuning_report = tuning::use_tuning_report();
     // What auto-select last picked, so a report arriving after the
     // snapshot can upgrade the initial zones[0] pick to the first zone
@@ -43,6 +42,13 @@ pub fn ZonesPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     // user made is never overridden (it differs from auto_pick).
     #[cfg(feature = "hydrate")]
     {
+        // Entering the page re-fetches the shared report (the per-mount
+        // freshness the page-local fetch had before the app context), so
+        // the weekly push's "N zones" lands on numbers read NOW, not at
+        // app hydrate. On-mount only: the closure reads no signals.
+        Effect::new(move |_| {
+            tuning::refresh_tuning_report();
+        });
         Effect::new(move |_| {
             let s = snap.get();
             if s.zones.is_empty() {

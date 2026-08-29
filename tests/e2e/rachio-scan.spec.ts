@@ -75,19 +75,25 @@ test("Rachio scan fills zone_uuid_map, saves, and persists across reload", async
     page.getByText("Found 7 zones and filled zone_uuid_map. Review and save."),
   ).toBeVisible();
 
-  // Open the Advanced fold: the textarea assertion should test what the
-  // reporter looked at, the visible JSON.
-  await page.getByText("Advanced: raw config JSON").click();
+  // Follow-through: a successful merge AUTO-OPENS the Advanced fold (no
+  // manual click) and the filled JSON is visible where the user is
+  // looking. The open attribute is the assertion, not a click.
+  const fold = page.locator("details#controller-advanced-fold");
+  await expect(fold).toHaveAttribute("open", "");
   const textarea = page.locator("textarea");
   await expect(textarea).toBeVisible();
   await expect(textarea).toHaveValue(/zone_uuid_map/);
   await expect(textarea).toHaveValue(/"front_lawn": "1f00aa00-0000-4000-8000-000000000001"/);
   await expect(textarea).toHaveValue(/"front_trees": "1f00aa00-0000-4000-8000-000000000007"/);
 
-  // Two-step save: commit the entry, then save the whole config.
+  // Two-step save: commit the entry, then save the whole config. Between
+  // the steps the pending work is flagged: the Unsaved-changes chip shows
+  // beside Save-all and clears once the save lands.
   await page.getByRole("button", { name: "Add controller", exact: true }).click();
+  await expect(page.getByText("Unsaved changes")).toBeVisible();
   await page.getByRole("button", { name: "Save all changes" }).click();
   await expect(page.getByText(/Saved\./)).toBeVisible();
+  await expect(page.getByText("Unsaved changes")).toHaveCount(0);
 
   // The persisted PUT body carries the full 7-entry map.
   expect(putBody).not.toBeNull();

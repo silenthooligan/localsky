@@ -6,8 +6,10 @@
 // GET /api/v1/irrigation/tuning on demand, exactly like the zone
 // detail's history Effect (hydrate-gated gloo_net into an RwSignal;
 // try_* accessors in detached continuations per the disposed-signal
-// discipline); page-level consumers (ZonesPage, IrrigationPage) share
-// ONE fetch via use_tuning_report instead of per-surface fetches.
+// discipline). App-level consumers (the Zones nav badge, ZonesPage,
+// IrrigationPage) share ONE fetch via the TuningSummary context the App
+// root provides (provide_tuning_summary); use_tuning_report hands every
+// caller that same signal instead of per-surface fetches.
 
 use leptos::prelude::*;
 
@@ -33,39 +35,205 @@ async fn fetch_report() -> Result<TuningReport, String> {
     resp.json::<TuningReport>().await.map_err(|e| e.to_string())
 }
 
-/// Page-scoped invalidation counter for the shared tuning report.
-/// ZonesPage creates one and provide_context's it BEFORE calling
-/// use_tuning_report; the Apply continuation bumps it, so the Suggestions
-/// KPI, the zone-card pills, and the recommendation-aware auto-select all
-/// reflect an Apply without a page reload. Optional everywhere it is
-/// read: the standalone /zones/:slug route and the irrigation page
-/// provide none and keep their single-fetch behavior.
+/// App-scoped invalidation counter for the shared tuning report. The App
+/// root provides it (see `provide_tuning_summary`); the Apply / snooze /
+/// dismiss / undo continuations bump it from wherever they run, so the
+/// nav badge, the Suggestions KPI, the zone-card pills, and the
+/// recommendation-aware auto-select all reflect the change without a
+/// reload. Read as an Option everywhere so a surface mounted outside the
+/// app shell (tests, isolated mounts) degrades to its own fetch.
 #[derive(Clone, Copy)]
 pub struct TuningEpoch(pub RwSignal<u32>);
 
-/// Page-level tuning-report signal: ONE fetch per page, shared by every
-/// consumer on it (the strip, the zone-card pills, the Suggestions KPI)
-/// so no surface fetches per item. Re-fetches when the page's TuningEpoch
-/// context (when provided) bumps. None until loaded; stays None on a
-/// fetch error (every consumer renders its no-report state).
+/// App-level shared tuning-report signal (see `provide_tuning_summary`).
+/// ONE fetch feeds every consumer: the Zones nav badge (desktop +
+/// mobile), ZonesPage, and IrrigationPage. Beside the signal rides a
+/// monotonic fetch generation: every fetch captures a token at spawn and
+/// commits only while that token is still the newest, so an older
+/// response resolving after a newer one can never overwrite it (the
+/// epoch can bump twice within one round-trip: snooze then undo).
+#[derive(Clone, Copy)]
+pub struct TuningSummary {
+    report: RwSignal<Option<TuningReport>>,
+    generation: StoredValue<u32>,
+}
+
+impl TuningSummary {
+    pub fn new() -> Self {
+        Self {
+            report: RwSignal::new(None),
+            generation: StoredValue::new(0),
+        }
+    }
+
+    /// The shared report signal every consumer renders from.
+    pub fn report(&self) -> RwSignal<Option<TuningReport>> {
+        self.report
+    }
+
+    /// Open a new fetch generation and return its token. Any in-flight
+    /// fetch holding an older token is superseded: its `commit` becomes
+    /// a no-op. None when the arena slot is gone (app teardown).
+    pub fn begin_fetch(&self) -> Option<u32> {
+        self.generation.try_update_value(|g| {
+            *g += 1;
+            *g
+        })
+    }
+
+    /// Write a fetched report only while `token` is still the newest
+    /// generation. Detached-continuation safe: try_* throughout.
+    pub fn commit(&self, token: u32, rep: TuningReport) {
+        if self.generation.try_get_value() == Some(token) {
+            let _ = self.report.try_set(Some(rep));
+        }
+    }
+
+    /// Write-through for a surface that fetched fresh on its own (the
+    /// zone panel's per-mount read): opens a new generation AND commits
+    /// in one step, so it supersedes any older in-flight epoch fetch
+    /// and the panel can never disagree with the pills/KPI/badge in the
+    /// same viewport.
+    pub fn write_fresh(&self, rep: TuningReport) {
+        if self
+            .generation
+            .try_update_value(|g| {
+                *g += 1;
+                *g
+            })
+            .is_some()
+        {
+            let _ = self.report.try_set(Some(rep));
+        }
+    }
+}
+
+impl Default for TuningSummary {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Bump the app-wide TuningEpoch so the shared report re-fetches. Called
+/// from the on-mount effects of the tuning surfaces (ZonesPage,
+/// IrrigationPage), restoring the per-mount freshness the page-local
+/// fetches had before the report was lifted into app context: entering a
+/// tuning surface re-reads the report, so the badge/KPI/pills reflect
+/// server-side changes (the nightly recompute, an apply from another
+/// device) without a reload. A quiet no-op without the app context.
+pub fn refresh_tuning_report() {
+    if let Some(e) = use_context::<TuningEpoch>() {
+        let _ = e.0.try_update(|n| *n += 1);
+    }
+}
+
+/// Provide the app-level tuning contexts: the shared report signal and
+/// the epoch that invalidates it. Hydrate fetches once on mount,
+/// re-fetches whenever the epoch bumps (tuning actions, tuning-surface
+/// mounts via `refresh_tuning_report`), and re-fetches when the document
+/// becomes visible again, so a long-lived PWA tab picks up server-side
+/// changes on re-focus. SSR provides the same contexts but never
+/// fetches, so the SSR first frame and hydrate's first frame agree (no
+/// badge, no count) until the client fetch resolves. A fetch error keeps
+/// the last loaded report (or None on the first load), so consumers
+/// render their no-report state, never a spinner. Every fetch runs under
+/// the generation guard: an older response can never overwrite a newer
+/// one.
+pub fn provide_tuning_summary() {
+    let epoch = TuningEpoch(RwSignal::new(0));
+    let summary = TuningSummary::new();
+    provide_context(epoch);
+    provide_context(summary);
+    #[cfg(feature = "hydrate")]
+    {
+        Effect::new(move |_| {
+            let _ = epoch.0.get();
+            let Some(token) = summary.begin_fetch() else {
+                return;
+            };
+            leptos::task::spawn_local(async move {
+                if let Ok(rep) = fetch_report().await {
+                    // Detached continuation: commit is try_* throughout
+                    // and drops the write if a newer fetch superseded it.
+                    summary.commit(token, rep);
+                }
+            });
+        });
+        // Long-lived PWA tabs never re-navigate, so becoming visible
+        // again is their re-entry point: bump the epoch when the tab
+        // comes back so the badge and KPIs catch up with the server.
+        // forget(): the listener lives for the app lifetime, like the
+        // is_mobile media-query listener in app.rs.
+        if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+            let listener = gloo_events::EventListener::new(&doc, "visibilitychange", move |_| {
+                let hidden = web_sys::window()
+                    .and_then(|w| w.document())
+                    .map(|d| d.hidden())
+                    .unwrap_or(true);
+                if !hidden {
+                    let _ = epoch.0.try_update(|n| *n += 1);
+                }
+            });
+            listener.forget();
+        }
+    }
+}
+
+/// The shared tuning-report signal. When the app-level summary context is
+/// provided (the normal case: App() calls `provide_tuning_summary`), every
+/// caller gets the SAME signal fed by the one app-level fetch, so pages
+/// never double-fetch what the nav badge already loaded. Without the
+/// context (isolated mounts) it falls back to a page-local signal with
+/// its own hydrate fetch, re-fetched when a TuningEpoch context bumps and
+/// guarded by its own generation counter against out-of-order responses.
+/// None until loaded; stays None on a fetch error (every consumer
+/// renders its no-report state).
 pub fn use_tuning_report() -> RwSignal<Option<TuningReport>> {
+    if let Some(shared) = use_context::<TuningSummary>() {
+        return shared.report();
+    }
     let report: RwSignal<Option<TuningReport>> = RwSignal::new(None);
     #[cfg(feature = "hydrate")]
     {
         let epoch = use_context::<TuningEpoch>();
+        let generation: StoredValue<u32> = StoredValue::new(0);
         Effect::new(move |_| {
             if let Some(e) = epoch {
                 let _ = e.0.get();
             }
+            let Some(token) = generation.try_update_value(|g| {
+                *g += 1;
+                *g
+            }) else {
+                return;
+            };
             leptos::task::spawn_local(async move {
                 if let Ok(rep) = fetch_report().await {
-                    // Detached continuation: the route may be gone by now.
-                    let _ = report.try_set(Some(rep));
+                    // Detached continuation: the route may be gone by
+                    // now, and a newer fetch may have superseded this one.
+                    if generation.try_get_value() == Some(token) {
+                        let _ = report.try_set(Some(rep));
+                    }
                 }
             });
         });
     }
     report
+}
+
+/// Count of zones with an ACTIVE suggestion (the server strips dismissed
+/// and snoozed ones from `recommendation` before it answers, so
+/// `recommendation_count` already means active-only), for the nav
+/// badges. Zero until the shared report loads and zero when no summary
+/// context exists, so SSR and hydrate's first frame both render no badge.
+pub fn use_suggestion_count() -> Signal<usize> {
+    let shared = use_context::<TuningSummary>();
+    Signal::derive(move || {
+        shared
+            .and_then(|s| s.report().get())
+            .map(|rep| recommendation_count(&rep))
+            .unwrap_or(0)
+    })
 }
 
 /// Zones carrying a recommendation in this report, underscore-normalized
@@ -148,13 +316,36 @@ pub fn ZoneTuningPanel(slug: Signal<String>) -> impl IntoView {
 
     #[cfg(feature = "hydrate")]
     {
+        // The panel's own generation guard: a slug switch or an Apply
+        // refetch can start a second fetch while the first is in
+        // flight, and the older response must not win.
+        let shared = use_context::<TuningSummary>();
+        let generation: StoredValue<u32> = StoredValue::new(0);
         Effect::new(move |_| {
             let _ = slug.get();
             let _ = refetch.get();
             report.set(None);
+            let Some(token) = generation.try_update_value(|g| {
+                *g += 1;
+                *g
+            }) else {
+                return;
+            };
             leptos::task::spawn_local(async move {
                 let result = fetch_report().await;
-                // Detached continuation: the route may be gone by now.
+                // Detached continuation: the route may be gone by now,
+                // and a newer panel fetch may have superseded this one.
+                if generation.try_get_value() != Some(token) {
+                    return;
+                }
+                // Write-through: the panel's fresh read also feeds the
+                // shared summary, so the pills, the Suggestions KPI, the
+                // nav badge, and the auto-select can never disagree with
+                // the panel in the same viewport (it supersedes any
+                // older in-flight epoch fetch via the generation guard).
+                if let (Some(s), Ok(rep)) = (shared, result.as_ref()) {
+                    s.write_fresh(rep.clone());
+                }
                 let _ = report.try_set(Some(result));
             });
         });
@@ -695,6 +886,119 @@ mod tests {
         assert!(set.contains("front_yard"));
         assert!(!set.contains("side_yard"));
         assert_eq!(recommendation_count(&rep), 2);
+    }
+
+    #[test]
+    fn badge_count_is_active_only_a_dismissed_zone_adds_nothing() {
+        // The server strips a dismissed/snoozed suggestion out of
+        // `recommendation` and flags the zone via `dismissed` instead, so
+        // the count the nav badge renders is active-only by construction.
+        let mut rep = report(vec![("active", true), ("silenced", false)], None, None);
+        rep.zones[1].dismissed = true;
+        rep.zones[1].dismissed_fields = vec!["sessions_per_week".into()];
+        assert_eq!(recommendation_count(&rep), 1);
+        assert!(!recommended_slugs(&rep).contains("silenced"));
+    }
+
+    #[test]
+    fn use_tuning_report_consumes_the_shared_summary_signal() {
+        // With the app-level summary provided, every caller gets the SAME
+        // signal: one fetch feeds all surfaces, and ZonesPage can never
+        // double-fetch what the nav badge already loaded.
+        let owner = Owner::new();
+        owner.set();
+        provide_context(TuningSummary::new());
+        let a = use_tuning_report();
+        let b = use_tuning_report();
+        a.set(Some(report(vec![("x", true)], None, None)));
+        assert_eq!(
+            b.get_untracked().map(|r| recommendation_count(&r)),
+            Some(1),
+            "second caller must observe the first caller's write"
+        );
+        let ctx = use_context::<TuningSummary>().expect("summary context");
+        assert!(ctx.report().get_untracked().is_some());
+        assert_eq!(use_suggestion_count().get_untracked(), 1);
+    }
+
+    #[test]
+    fn suggestion_count_is_zero_without_a_loaded_report() {
+        // No summary context (isolated mount) and an unloaded report must
+        // both render NO badge: zero, never a placeholder or spinner.
+        let owner = Owner::new();
+        owner.set();
+        assert_eq!(use_suggestion_count().get_untracked(), 0);
+        provide_context(TuningSummary::new());
+        assert_eq!(use_suggestion_count().get_untracked(), 0);
+    }
+
+    #[test]
+    fn refresh_bumps_the_app_epoch_and_noops_without_it() {
+        // The tuning surfaces call this from their on-mount effects:
+        // entering the page re-fetches the shared report. Without the app
+        // context (isolated mounts) it must be a quiet no-op.
+        let owner = Owner::new();
+        owner.set();
+        refresh_tuning_report();
+        let epoch = TuningEpoch(RwSignal::new(0));
+        provide_context(epoch);
+        refresh_tuning_report();
+        assert_eq!(epoch.0.get_untracked(), 1);
+        refresh_tuning_report();
+        assert_eq!(epoch.0.get_untracked(), 2);
+    }
+
+    #[test]
+    fn an_older_response_cannot_overwrite_a_newer_one() {
+        // Two fetches race (snooze bump then undo bump inside one round
+        // trip): the response for the OLDER generation resolves last and
+        // must be dropped, whichever order the commits arrive in.
+        let owner = Owner::new();
+        owner.set();
+        let summary = TuningSummary::new();
+        let older = summary.begin_fetch().expect("token");
+        let newer = summary.begin_fetch().expect("token");
+        summary.commit(newer, report(vec![("a", true), ("b", true)], None, None));
+        summary.commit(older, report(vec![("stale", true)], None, None));
+        assert_eq!(
+            summary
+                .report()
+                .get_untracked()
+                .map(|r| recommendation_count(&r)),
+            Some(2),
+            "the older response must not overwrite the newer one"
+        );
+    }
+
+    #[test]
+    fn panel_write_through_updates_the_shared_signal_and_supersedes() {
+        // The zone panel's fresh per-mount read feeds the shared summary
+        // (so panel and pills/KPI/badge agree in one viewport), and it
+        // supersedes an older epoch fetch still in flight.
+        let owner = Owner::new();
+        owner.set();
+        let summary = TuningSummary::new();
+        provide_context(summary);
+        let seen = use_tuning_report();
+        let in_flight = summary.begin_fetch().expect("token");
+        summary.write_fresh(report(vec![("fresh", true)], None, None));
+        assert!(
+            seen.get_untracked().is_some(),
+            "consumers must see the panel's write-through"
+        );
+        summary.commit(
+            in_flight,
+            report(vec![("stale", true), ("x", true)], None, None),
+        );
+        assert_eq!(
+            summary
+                .report()
+                .get_untracked()
+                .map(|r| recommendation_count(&r)),
+            Some(1),
+            "the pre-write-through epoch fetch must be discarded"
+        );
+        assert!(recommended_slugs(&summary.report().get_untracked().unwrap()).contains("fresh"));
     }
 
     #[test]

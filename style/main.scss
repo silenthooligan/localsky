@@ -607,6 +607,11 @@
 .status-chip--unknown {
   --status-color: var(--status-unknown);
 }
+// Pending work needing an action (the two-step pages' "Unsaved changes"
+// chip): the shared attention accent on the standard dot+text recipe.
+.status-chip--attention {
+  --status-color: var(--attention);
+}
 
 // Attention pill: entity-badge geometry tinted --attention. Marks a
 // surface that carries an actionable suggestion (the tuning card's
@@ -1270,6 +1275,26 @@ body::after {
 }
 .sidebar-link-label { flex: 1; }
 
+// Suggestions count on a nav entry (the Zones link): entity-badge
+// geometry tinted --attention, fed by the app-level tuning summary.
+// The component renders no element at zero, so this only ever styles a
+// real count; no hiding rules needed here.
+.sidebar-link-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.2rem;
+  padding: 1px var(--space-2);
+  border-radius: 999px;
+  font-size: var(--text-micro);
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--attention);
+  background: color-mix(in oklab, var(--attention) 16%, transparent);
+  border: 1px solid color-mix(in oklab, var(--attention) 40%, transparent);
+  white-space: nowrap;
+}
+
 .sidebar-footer {
   margin-top: auto;
   padding: var(--space-3) var(--space-3) var(--space-1);
@@ -1335,6 +1360,15 @@ body::after {
   }
   .sidebar-link-label { display: none; }
   .sidebar-link-icon { margin: 0; }
+  // Icon-only rail: the count rides the icon's corner instead of sitting
+  // beside a hidden label (.sidebar-link is already position: relative).
+  .sidebar-link-badge {
+    position: absolute;
+    top: 3px;
+    right: 5px;
+    min-width: 0.95rem;
+    padding: 0 4px;
+  }
   .sidebar-link--sub { padding-left: 0; }
   .sidebar-footer { padding: var(--space-3) 0 var(--space-1); align-items: center; }
   .sidebar-footer-link { justify-content: center; padding: 0.45rem 0; }
@@ -1513,6 +1547,16 @@ a { color: var(--accent); }
 }
 .health-banner__icon { display: flex; color: var(--verdict-wind); flex: none; }
 .health-banner__text { flex: 1; min-width: 0; }
+// Sticky variant for notices that must stay visible while the user works
+// further down a long form (the restart-required banner: saving from the
+// bottom of a controller form scrolled the notice out of view, so the
+// change looked like it silently did not take).
+.health-banner--sticky {
+  position: sticky;
+  top: var(--space-2);
+  z-index: 15;
+  box-shadow: var(--shadow-1);
+}
 .health-banner__link { flex: none; color: var(--accent); font-weight: 600; text-decoration: none; }
 .health-banner__link:hover { text-decoration: underline; }
 .health-banner__dismiss { display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; flex: none; border: none; background: none; color: var(--text-faint); border-radius: var(--radius-sm); cursor: pointer; }
@@ -6882,6 +6926,29 @@ html[data-no-irrigation="true"] {
     font-family: var(--font-display);
   }
 
+  // Suggestions count on the Zones tab: the desktop sidebar badge's
+  // geometry and --attention tint, riding the glyph's upper corner. The
+  // component renders no element at zero.
+  .mobile-tab { position: relative; }
+  .mobile-tab-badge {
+    position: absolute;
+    top: 2px;
+    right: calc(50% - 1.6rem);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 0.95rem;
+    padding: 0 4px;
+    border-radius: 999px;
+    font-size: var(--text-micro);
+    font-weight: 700;
+    line-height: 1.3;
+    color: var(--attention);
+    background: color-mix(in oklab, var(--attention) 16%, transparent);
+    border: 1px solid color-mix(in oklab, var(--attention) 40%, transparent);
+    white-space: nowrap;
+  }
+
   // Tactile press feedback. Disabled when the user prefers reduced motion.
   @media (prefers-reduced-motion: no-preference) {
     .mobile-tab:active {
@@ -10383,6 +10450,29 @@ html[data-no-irrigation="true"] {
   box-shadow: var(--specular), var(--shadow-2);
   filter: brightness(1.06);
 }
+// Unsaved-changes state on a two-step page's Save-all button: an
+// --attention ring so pending step two cannot be missed. The adjacent
+// "Unsaved changes" status-chip carries the words; both clear when a
+// save lands.
+.setup-apply-btn--attention {
+  border-color: color-mix(in oklab, var(--attention) 60%, transparent);
+  box-shadow:
+    var(--specular),
+    var(--shadow-1),
+    0 0 0 3px color-mix(in oklab, var(--attention) 30%, transparent);
+}
+.setup-apply-btn--attention:hover:not(:disabled) {
+  box-shadow:
+    var(--specular),
+    var(--shadow-2),
+    0 0 0 3px color-mix(in oklab, var(--attention) 40%, transparent);
+}
+// Row that pairs the Save-all button with its pending-state chip.
+.settings-save-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
 .setup-apply-btn:focus-visible {
   outline: var(--focus-ring);
   outline-offset: 2px;
@@ -11457,6 +11547,9 @@ button.mobile-tab {
   padding: var(--space-5); display: flex; flex-direction: column; gap: var(--space-4);
 }
 .sensor-detail-card__head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+// Title + entity badge cluster on the card head's left, so the badge
+// hugs the name while the status chip keeps the right edge.
+.sensor-detail-card__title-group { display: inline-flex; align-items: center; gap: var(--space-2); min-width: 0; }
 // Probe actions on the soil detail card (remove + manage link).
 .sensor-detail-card__actions {
   display: flex;

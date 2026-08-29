@@ -349,6 +349,15 @@ pub fn App() -> impl IntoView {
         });
     }
 
+    // App-level tuning summary: the one report fetch behind the Zones nav
+    // badge and the page-level tuning surfaces (ZonesPage, IrrigationPage
+    // consume the same signal via use_tuning_report). Also provides the
+    // app-wide TuningEpoch, so an Apply / snooze / dismiss / undo from any
+    // surface re-fetches the shared report and every consumer (badge
+    // included) updates in place. SSR + hydrate's first frame both see no
+    // report, so no badge renders until the client fetch resolves.
+    crate::components::zones::tuning::provide_tuning_summary();
+
     // Shared connection state: every SSE subscription reports into it, the
     // PageHeader pill renders it. Provided unconditionally so use_context
     // resolves on both SSR and hydrate (status only mutates client-side).
