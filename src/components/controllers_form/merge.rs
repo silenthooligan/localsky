@@ -230,6 +230,182 @@ pub fn merge_message(found: usize, outcome: &MergeOutcome) -> String {
     }
 }
 
+/// One row of the bulk-bind table: a zone the controller reported, and the
+/// LocalSky zone the user chose for it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ZoneBind {
+    /// The controller's own id for the zone. Becomes `controller_station`.
+    pub station_id: String,
+    /// The controller's own name for it. Becomes `controller_zone_name`, a
+    /// display label that nothing dispatches on.
+    pub vendor_name: String,
+    /// The LocalSky zone slug to bind, i.e. an EXISTING key of `config.zones`.
+    pub slug: String,
+}
+
+/// What `apply_zone_binds` did, so the caller can say it plainly.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BindOutcome {
+    Applied {
+        bound: usize,
+        /// How many of the bound zones were pointed at a DIFFERENT
+        /// controller zone before this apply. Reported so a user checking
+        /// their work cannot repoint a working install and read only
+        /// "Bound 7 zones."
+        replaced: usize,
+    },
+    /// The controller reported a zone with no id. Writing it would blank a
+    /// working binding and report success, which is the one thing
+    /// `station_to_persist` exists to prevent on the zone-form side.
+    BlankStation { name: String, slug: String },
+    /// Two rows pointed at the same LocalSky zone. Refused whole rather than
+    /// last-wins: the loser would keep firing the wrong valve and nothing
+    /// on screen would say so.
+    DuplicateZone { slug: String, names: Vec<String> },
+    /// A row named a zone that is not in the config. Never create one here:
+    /// a new zone gets a new slug, and a slug is the key run history, HA
+    /// entity ids and retained MQTT topics are stored under. Creating zones
+    /// is the wizard import's job, and it says so.
+    UnknownZone { slug: String },
+}
+
+/// Write each chosen binding onto its LocalSky zone in the config JSON.
+///
+/// Touches exactly two fields per zone, `controller_station` and
+/// `controller_zone_name`, plus `controller_id` when the zone was pointed at
+/// a different controller. It never adds, removes or renames a `zones` key.
+///
+/// All-or-nothing: the config is left untouched unless every row applies, so
+/// a duplicate, a blank station id, or a stale zone list cannot leave half a
+/// bind behind.
+pub fn apply_zone_binds(
+    config_json: &mut serde_json::Value,
+    controller_id: &str,
+    binds: &[ZoneBind],
+) -> BindOutcome {
+    // Reject duplicates before writing anything: two vendor zones on one
+    // LocalSky zone means one of them fires the wrong valve.
+    let mut seen: std::collections::BTreeMap<&str, Vec<String>> = std::collections::BTreeMap::new();
+    for b in binds {
+        seen.entry(b.slug.as_str())
+            .or_default()
+            .push(b.vendor_name.clone());
+    }
+    if let Some((slug, names)) = seen.iter().find(|(_, names)| names.len() > 1) {
+        return BindOutcome::DuplicateZone {
+            slug: (*slug).to_string(),
+            names: names.clone(),
+        };
+    }
+    // A row the controller gave no id for cannot fire anything. Refuse the
+    // whole apply rather than write a blank over a working binding and
+    // report it as bound.
+    if let Some(b) = binds.iter().find(|b| b.station_id.trim().is_empty()) {
+        return BindOutcome::BlankStation {
+            name: b.vendor_name.clone(),
+            slug: b.slug.clone(),
+        };
+    }
+    let existing: std::collections::BTreeSet<String> = config_json
+        .get("zones")
+        .and_then(|z| z.as_object())
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    for b in binds {
+        if !existing.contains(&b.slug) {
+            return BindOutcome::UnknownZone {
+                slug: b.slug.clone(),
+            };
+        }
+    }
+    let Some(zones) = config_json.get_mut("zones").and_then(|z| z.as_object_mut()) else {
+        return BindOutcome::Applied {
+            bound: 0,
+            replaced: 0,
+        };
+    };
+    let mut bound = 0usize;
+    let mut replaced = 0usize;
+    for b in binds {
+        let Some(zone) = zones.get_mut(&b.slug).and_then(|z| z.as_object_mut()) else {
+            continue;
+        };
+        // Count a genuine repoint so the message can say one happened. A
+        // user who opens the editor to CHECK a working install is the
+        // likeliest person to sit in front of this table, and "Bound 7
+        // zones" alone would not tell them anything moved.
+        if zone
+            .get("controller_station")
+            .and_then(|v| v.as_str())
+            .is_some_and(|prev| !prev.trim().is_empty() && prev.trim() != b.station_id.trim())
+        {
+            replaced += 1;
+        }
+        zone.insert(
+            "controller_id".into(),
+            serde_json::Value::String(controller_id.to_string()),
+        );
+        zone.insert(
+            "controller_station".into(),
+            serde_json::Value::String(b.station_id.clone()),
+        );
+        zone.insert(
+            "controller_zone_name".into(),
+            if b.vendor_name.trim().is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(b.vendor_name.clone())
+            },
+        );
+        bound += 1;
+    }
+    BindOutcome::Applied { bound, replaced }
+}
+
+/// The line under the bulk-bind table after Apply.
+pub fn bind_message(outcome: &BindOutcome) -> String {
+    match outcome {
+        BindOutcome::Applied { bound: 0, .. } => {
+            "Nothing to bind. Choose a zone for at least one row first.".to_string()
+        }
+        BindOutcome::Applied { bound, replaced } => {
+            let plural = if *bound == 1 { "" } else { "s" };
+            let mut msg = format!(
+                "Bound {bound} zone{plural}. Save to apply; the engine picks up a new binding \
+                 on its next start."
+            );
+            if *replaced > 0 {
+                let were = if *replaced == 1 { "was" } else { "were" };
+                msg.push_str(&format!(
+                    " {replaced} of them {were} already bound to a different zone on this \
+                     controller and moved."
+                ));
+            }
+            msg
+        }
+        BindOutcome::BlankStation { name, slug } => format!(
+            "{name} reported no zone id, so it cannot fire \"{slug}\". Fix the id on the \
+             controller and scan again. Nothing was changed."
+        ),
+        BindOutcome::DuplicateZone { slug, names } => format!(
+            "{} and {} are both pointed at \"{slug}\". One LocalSky zone fires one valve, so \
+             give each of them its own zone (or leave one unbound). Nothing was changed.",
+            names
+                .iter()
+                .take(names.len() - 1)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", "),
+            names.last().cloned().unwrap_or_default()
+        ),
+        BindOutcome::UnknownZone { slug } => format!(
+            "There is no zone \"{slug}\" to bind. Add it under Settings, then Zones first; \
+             binding never creates a zone, because a zone's slug is permanent and a new one \
+             would start its history over. Nothing was changed."
+        ),
+    }
+}
+
 /// Whether a scan outcome warrants the on-screen follow-through: opening
 /// the Advanced fold and scrolling the config JSON into view so the user
 /// SEES the filled map instead of hunting for it (issue #8's second
@@ -516,5 +692,232 @@ mod tests {
         let untouched = merge_scanned_zones("opensprinkler_direct", &mut cfg, &zs);
         assert_eq!(untouched, MergeOutcome::NoMapKind);
         assert!(!scan_opens_advanced(&untouched));
+    }
+
+    // ---- bulk bind: the step the scan never had ----
+
+    fn cfg_with_zones(slugs: &[&str]) -> serde_json::Value {
+        let mut zones = serde_json::Map::new();
+        for slug in slugs {
+            zones.insert(
+                (*slug).to_string(),
+                serde_json::json!({
+                    "display_name": slug,
+                    "area_sqft": 1000.0,
+                    "species": "other",
+                    "soil_texture": "loam",
+                    "sprinkler_type": "rotor",
+                    "controller_id": "",
+                    "controller_station": "",
+                }),
+            );
+        }
+        serde_json::json!({ "zones": zones })
+    }
+
+    fn bind(station_id: &str, vendor_name: &str, slug: &str) -> ZoneBind {
+        ZoneBind {
+            station_id: station_id.into(),
+            vendor_name: vendor_name.into(),
+            slug: slug.into(),
+        }
+    }
+
+    /// The flow that failed the issue #8 reporter: he scanned seven zones
+    /// and had no way to say which vendor zone was which of his. Binding
+    /// writes the vendor id onto HIS zone, under HIS slug, and leaves the
+    /// slug alone.
+    #[test]
+    fn binding_writes_the_vendor_id_onto_the_chosen_zone_and_never_touches_the_slug() {
+        let mut cfg = cfg_with_zones(&["front_yard", "back_yard"]);
+        let outcome = apply_zone_binds(
+            &mut cfg,
+            "rachio_main",
+            &[
+                bind("uuid-a", "Front Lawn", "front_yard"),
+                bind("uuid-b", "Back Lawn", "back_yard"),
+            ],
+        );
+        assert_eq!(
+            outcome,
+            BindOutcome::Applied {
+                bound: 2,
+                replaced: 0
+            }
+        );
+        assert_eq!(cfg["zones"]["front_yard"]["controller_id"], "rachio_main");
+        assert_eq!(cfg["zones"]["front_yard"]["controller_station"], "uuid-a");
+        assert_eq!(
+            cfg["zones"]["front_yard"]["controller_zone_name"],
+            "Front Lawn"
+        );
+        assert_eq!(cfg["zones"]["back_yard"]["controller_station"], "uuid-b");
+        // The zone key set is untouched: no vendor-named zone appeared.
+        let keys: Vec<&String> = cfg["zones"].as_object().unwrap().keys().collect();
+        assert_eq!(keys, vec!["back_yard", "front_yard"]);
+    }
+
+    #[test]
+    fn a_zone_left_unbound_in_the_table_is_simply_not_written() {
+        let mut cfg = cfg_with_zones(&["front_yard", "back_yard"]);
+        cfg["zones"]["back_yard"]["controller_station"] = serde_json::json!("keep-me");
+        let outcome = apply_zone_binds(
+            &mut cfg,
+            "rachio_main",
+            &[bind("uuid-a", "Front Lawn", "front_yard")],
+        );
+        assert_eq!(
+            outcome,
+            BindOutcome::Applied {
+                bound: 1,
+                replaced: 0
+            }
+        );
+        assert_eq!(cfg["zones"]["back_yard"]["controller_station"], "keep-me");
+    }
+
+    /// Two vendor zones pointed at one LocalSky zone means one of them
+    /// fires the wrong valve. Refused whole, not last-wins.
+    #[test]
+    fn two_vendor_zones_on_one_localsky_zone_is_refused_and_changes_nothing() {
+        let mut cfg = cfg_with_zones(&["front_yard"]);
+        let before = cfg.clone();
+        let outcome = apply_zone_binds(
+            &mut cfg,
+            "rachio_main",
+            &[
+                bind("uuid-a", "Front Lawn", "front_yard"),
+                bind("uuid-b", "Back Lawn", "front_yard"),
+            ],
+        );
+        assert_eq!(
+            outcome,
+            BindOutcome::DuplicateZone {
+                slug: "front_yard".into(),
+                names: vec!["Front Lawn".into(), "Back Lawn".into()],
+            }
+        );
+        assert_eq!(cfg, before, "a refused bind leaves the config untouched");
+        let msg = bind_message(&outcome);
+        assert!(msg.contains("Front Lawn") && msg.contains("Back Lawn"));
+        assert!(msg.contains("Nothing was changed"));
+    }
+
+    /// Binding never CREATES a zone. The wizard's import does that, and it
+    /// slugifies the vendor name, which would fork a user's existing
+    /// front_yard into a second front_lawn with its own history, its own HA
+    /// entity ids, and its own retained MQTT topics.
+    #[test]
+    fn binding_refuses_a_zone_that_does_not_exist_rather_than_creating_one() {
+        let mut cfg = cfg_with_zones(&["front_yard"]);
+        let before = cfg.clone();
+        let outcome = apply_zone_binds(
+            &mut cfg,
+            "rachio_main",
+            &[
+                bind("uuid-a", "Front Lawn", "front_yard"),
+                bind("uuid-b", "Back Lawn", "back_lawn"),
+            ],
+        );
+        assert_eq!(
+            outcome,
+            BindOutcome::UnknownZone {
+                slug: "back_lawn".into()
+            }
+        );
+        assert_eq!(cfg, before, "all or nothing: no half-applied bind");
+        let msg = bind_message(&outcome);
+        assert!(msg.contains("permanent"), "say why, not just no: {msg}");
+    }
+
+    #[test]
+    fn a_bind_with_no_name_stores_no_label_rather_than_an_empty_one() {
+        let mut cfg = cfg_with_zones(&["front_yard"]);
+        apply_zone_binds(&mut cfg, "os_main", &[bind("3", "  ", "front_yard")]);
+        assert_eq!(cfg["zones"]["front_yard"]["controller_station"], "3");
+        assert!(cfg["zones"]["front_yard"]["controller_zone_name"].is_null());
+    }
+
+    #[test]
+    fn bind_message_says_a_restart_is_what_makes_it_live() {
+        let msg = bind_message(&BindOutcome::Applied {
+            bound: 3,
+            replaced: 0,
+        });
+        assert!(msg.contains("Bound 3 zones"));
+        assert!(
+            msg.contains("start"),
+            "the binding is boot-wired; saying so beats a Test run that answers \
+             zone_unknown: {msg}"
+        );
+        assert!(bind_message(&BindOutcome::Applied {
+            bound: 1,
+            replaced: 0
+        })
+        .contains("Bound 1 zone."));
+    }
+
+    /// The failure the bind table could cause on its own. A user who opens
+    /// the editor to CHECK a working install and repoints it must at least
+    /// be told a binding moved; "Bound 7 zones" alone would not say so.
+    #[test]
+    fn repointing_an_already_bound_zone_is_counted_and_reported() {
+        let mut cfg = cfg_with_zones(&["front_yard", "back_yard"]);
+        cfg["zones"]["front_yard"]["controller_station"] = serde_json::json!("uuid-a");
+        cfg["zones"]["back_yard"]["controller_station"] = serde_json::json!("uuid-b");
+        let outcome = apply_zone_binds(
+            &mut cfg,
+            "rachio_main",
+            &[
+                // Same binding as before: not a repoint.
+                bind("uuid-a", "Front Lawn", "front_yard"),
+                // Different vendor zone on a zone that was already bound.
+                bind("uuid-z", "Orchard", "back_yard"),
+            ],
+        );
+        assert_eq!(
+            outcome,
+            BindOutcome::Applied {
+                bound: 2,
+                replaced: 1
+            }
+        );
+        let msg = bind_message(&outcome);
+        assert!(msg.contains("Bound 2 zones"));
+        assert!(
+            msg.contains("1 of them was already bound"),
+            "say that something moved: {msg}"
+        );
+        // A first bind onto blank zones reports no repoint.
+        let mut fresh = cfg_with_zones(&["front_yard"]);
+        let outcome = apply_zone_binds(
+            &mut fresh,
+            "rachio_main",
+            &[bind("uuid-a", "Front Lawn", "front_yard")],
+        );
+        assert!(!bind_message(&outcome).contains("already bound"));
+    }
+
+    /// The only path in the feature that could write an empty station over
+    /// a non-empty one, which is exactly what `station_to_persist` exists to
+    /// prevent on the zone-form side.
+    #[test]
+    fn a_vendor_zone_with_no_id_is_refused_and_never_blanks_a_binding() {
+        let mut cfg = cfg_with_zones(&["front_yard"]);
+        cfg["zones"]["front_yard"]["controller_station"] = serde_json::json!("3");
+        let before = cfg.clone();
+        let outcome = apply_zone_binds(&mut cfg, "diy", &[bind("  ", "Front", "front_yard")]);
+        assert_eq!(
+            outcome,
+            BindOutcome::BlankStation {
+                name: "Front".into(),
+                slug: "front_yard".into()
+            }
+        );
+        assert_eq!(cfg, before, "a refused bind leaves the config untouched");
+        assert_eq!(cfg["zones"]["front_yard"]["controller_station"], "3");
+        let msg = bind_message(&outcome);
+        assert!(msg.contains("no zone id"), "{msg}");
+        assert!(msg.contains("Nothing was changed"), "{msg}");
     }
 }

@@ -788,6 +788,7 @@ mod inventory_tests {
             mad_pct_override: None,
             controller_id: "opensprinkler".to_string(),
             controller_station: "1".to_string(),
+            controller_zone_name: None,
             soil_sensor_id: soil_sensor_id.map(|s| s.to_string()),
             target_min_pct_soil: 30.0,
             saturation_pct_soil: 70.0,

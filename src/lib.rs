@@ -35,6 +35,11 @@ pub mod history;
 pub mod nav_log;
 pub mod radar_catalog;
 pub mod reason_render;
+// The controller-station shapes. Ungated on purpose: dispatch (runtime),
+// the config check (config::validate) and the zone editor all judge the
+// same values, and a validator that disagrees with dispatch is worse than
+// no validator.
+pub mod station_id;
 pub mod tempest;
 pub mod timefmt;
 

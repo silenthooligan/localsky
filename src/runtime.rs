@@ -1049,23 +1049,22 @@ pub fn build_controllers(
                     if zone.controller_id != entry.id {
                         continue;
                     }
-                    if let Ok(s) = zone.controller_station.parse::<u32>() {
-                        // OpenSprinkler stations are 1-based; station "0" is
-                        // not a valid station. Without this guard a `0` would
-                        // pass through to the adapter and alias onto station 1
-                        // (the GET /cm sid is 0-based), silently watering the
-                        // WRONG zone. Reject it here at load and drop the
-                        // mapping so the zone is simply unbound (loud, no
-                        // mis-actuation) rather than firing a sibling valve.
-                        if s == 0 {
-                            warn!(
-                                controller = %entry.id,
-                                zone = %slug,
-                                "opensprinkler controller_station=\"0\" is invalid (stations are \
-                                 1-based); dropping the zone mapping. Set a station >= 1."
-                            );
-                            continue;
-                        }
+                    // `opensprinkler_station` holds BOTH rules: trim (like
+                    // every other kind's station read) and reject 0, which
+                    // is a mis-actuation guard rather than a tidiness one:
+                    // the box's `sid` is 0-based at the wire, so a stored 0
+                    // aliases onto station 1 and waters the WRONG zone.
+                    // Dropping it leaves the zone unbound, which is loud and
+                    // harmless. The config check calls the SAME function, so
+                    // it cannot call a value bindable that this drops.
+                    if station_number(&zone.controller_station) == Some(0) {
+                        warn!(
+                            controller = %entry.id,
+                            zone = %slug,
+                            "opensprinkler controller_station=\"0\" is invalid (stations are                              1-based); dropping the zone mapping. Set a station >= 1."
+                        );
+                    }
+                    if let Some(s) = opensprinkler_station(&zone.controller_station) {
                         // Normalize to underscore slugs so the map matches
                         // zones::configured() + the snapshot + the schedulers
                         // (config keys may be hyphenated, e.g. "back-yard").
@@ -1080,7 +1079,18 @@ pub fn build_controllers(
                 }
             }
             ControllerKind::HaServiceCall(c) => {
-                match HaServiceCall::new(entry.id.clone(), c.clone()) {
+                // Home Assistant addresses a valve by entity_id, and the zone
+                // editor has always told HA users to put one in Controller
+                // station. Until now nothing read it: zone_entity_map was the
+                // only binding, so a zone bound in the editor silently never
+                // watered. Overlay it the way the cloud kinds do, with the
+                // config map as the base and an entity-id-shaped zone entry
+                // winning on conflict. A station value that is not entity-id
+                // shaped (a bare station number, the legacy v0.1 seed) is
+                // warn-skipped rather than sent to HA as a nonsense entity.
+                let mut c = c.clone();
+                overlay_zone_entries(&mut c.zone_entity_map, cfg, &entry.id, ha_entity_id);
+                match HaServiceCall::new(entry.id.clone(), c) {
                     Ok(ctl) => Some(Arc::new(ctl)),
                     Err(e) => skip(&entry.id, "ha_service_call", e),
                 }
@@ -1124,6 +1134,11 @@ pub fn build_controllers(
                 }
             }
             ControllerKind::MqttCommand(c) => {
+                // No controller_station overlay, deliberately: an MQTT zone's
+                // binding is a STRUCT (command topic plus on/off payloads plus
+                // an optional state topic), which a single station string
+                // cannot express. MQTT zones bind in the controller's
+                // zone_command_map and nowhere else; the zone editor says so.
                 Some(Arc::new(MqttCommand::new(entry.id.clone(), c.clone())))
             }
             ControllerKind::HttpGeneric(c) => {
@@ -1150,7 +1165,10 @@ pub fn build_controllers(
             ControllerKind::EsphomeNative(_) => {
                 // Deferred: ESPHome native API uses a custom binary
                 // protocol; needs a dedicated crate or hand-rolled
-                // implementation. Tracked separately.
+                // implementation. Tracked separately. No binding of either
+                // kind dispatches for this controller because the adapter
+                // never gets built; ESPHome hardware runs through
+                // mqtt_command or http_generic today.
                 warn!(controller = %entry.id, "ESPHome native controller not yet built; skipping");
                 None
             }
@@ -1162,57 +1180,13 @@ pub fn build_controllers(
     out
 }
 
-/// Parse a zone entry's `controller_station` as a Rachio zone id.
-///
-/// Rachio addresses zones by UUID and never by station number, and the only
-/// place a correct one comes from is the controller's own zone scan (or the
-/// wizard's import of that scan). This parser used to be an infallible
-/// `Some(station.to_string())`, which left `overlay_zone_entries`' warn-skip
-/// arm unreachable for Rachio alone: ANY non-empty station value overwrote
-/// the scanned uuid, and dispatch then sent that value to the cloud as a
-/// zone id. Because the zone editor's station help text teaches station
-/// NUMBERS, a user could put `1`..`7` there in good faith and every zone
-/// failed to start with an opaque upstream error. Accepting only the uuid
-/// shape puts Rachio on the same footing as the other cloud kinds, whose
-/// numeric parsers already reject junk and leave the scanned mapping alone.
-fn rachio_zone_id(station: &str) -> Option<String> {
-    let s = station.trim();
-    if is_uuid_shaped(s) {
-        Some(s.to_string())
-    } else {
-        None
-    }
-}
-
-/// Parse a zone entry's `controller_station` as a Hydrawise relay id.
-/// Hydrawise addresses zones by a numeric relay id, so unlike Rachio a
-/// bare number IS a valid id here and legitimately overrides the map.
-fn hydrawise_relay_id(station: &str) -> Option<i64> {
-    station.trim().parse::<i64>().ok()
-}
-
-/// Parse a zone entry's `controller_station` as a station number. B-hyve
-/// and Rain Bird both address zones by station index, so as with
-/// Hydrawise a bare number is a valid id and overrides the map.
-fn station_number(station: &str) -> Option<u32> {
-    station.trim().parse::<u32>().ok()
-}
-
-/// Canonical 8-4-4-4-12 hyphenated-hex UUID shape. Shape only: no version
-/// or variant bits are checked, so a legitimate vendor id is never rejected
-/// for being an unusual UUID version.
-fn is_uuid_shaped(s: &str) -> bool {
-    let mut groups = s.split('-');
-    for want in [8usize, 4, 4, 4, 12] {
-        let Some(g) = groups.next() else {
-            return false;
-        };
-        if g.len() != want || !g.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return false;
-        }
-    }
-    groups.next().is_none()
-}
+// The per-kind station parsers moved to `crate::station_id` so dispatch,
+// `config::validate` and the zone editor all judge a station value with
+// the SAME code. Re-exported under the names this module has always used
+// so the overlay call sites and their tests read unchanged.
+use crate::station_id::{
+    ha_entity_id, hydrawise_relay_id, opensprinkler_station, rachio_zone_id, station_number,
+};
 
 /// Overlay `cfg.zones` entries bound to `controller_id` onto a cloud
 /// controller's config-embedded zone map. The config map is the BASE; a zone
@@ -1223,7 +1197,7 @@ fn is_uuid_shaped(s: &str) -> bool {
 /// kind's parser rejects is warn-skipped: whatever the scan put in the base
 /// map survives, and a zone with no base entry stays unbound (loud, no
 /// mis-actuation) rather than aliasing onto a wrong station.
-fn overlay_zone_entries<V>(
+fn overlay_zone_entries<V: PartialEq + std::fmt::Debug>(
     map: &mut std::collections::BTreeMap<String, V>,
     cfg: &Config,
     controller_id: &str,
@@ -1250,6 +1224,29 @@ fn overlay_zone_entries<V>(
         let key = slug.replace('-', "_");
         match parse(station) {
             Some(v) => {
+                // Say so when the zone entry displaces a DIFFERENT value.
+                // The load-time backfill makes the ordinary case an identity
+                // copy, which stays silent, so a line here means the two
+                // bindings genuinely disagree and the zone entry won. That
+                // matters most on ha_service_call, where controller_station
+                // was inert until 1.24.0: an entity id typed years ago,
+                // found to do nothing, and then fixed in zone_entity_map now
+                // takes the valve back, and this is the only place that
+                // would ever say so.
+                if let Some(prev) = map.get(&key) {
+                    if *prev != v {
+                        warn!(
+                            controller = %controller_id,
+                            zone = %slug,
+                            from = ?prev,
+                            to = ?v,
+                            "zone's controller_station replaces a DIFFERENT entry in this \
+                             controller's zone map; the zone entry wins. If this zone was \
+                             watering correctly before, clear its Controller station to fall \
+                             back to the map."
+                        );
+                    }
+                }
                 map.insert(key, v);
             }
             // Name the zone, the controller, and the offending value, and
@@ -2088,6 +2085,7 @@ mod tests {
                 mad_pct_override: None,
                 controller_id: "os_main".into(),
                 controller_station: "1".into(),
+                controller_zone_name: None,
                 soil_sensor_id: None,
                 target_min_pct_soil: 30.0,
                 saturation_pct_soil: 70.0,
@@ -2163,6 +2161,7 @@ mod tests {
                 mad_pct_override: None,
                 controller_id: "os_main".into(),
                 controller_station: "1".into(),
+                controller_zone_name: None,
                 soil_sensor_id: None,
                 target_min_pct_soil: 30.0,
                 saturation_pct_soil: 70.0,
@@ -2232,6 +2231,7 @@ mod tests {
                 mad_pct_override: None,
                 controller_id: "os_main".into(),
                 controller_station: "1".into(),
+                controller_zone_name: None,
                 soil_sensor_id: None,
                 target_min_pct_soil: 30.0,
                 saturation_pct_soil: 70.0,
@@ -2290,6 +2290,7 @@ mod tests {
             mad_pct_override: None,
             controller_id: "os_main".into(),
             controller_station: "1".into(),
+            controller_zone_name: None,
             soil_sensor_id: None,
             target_min_pct_soil: 30.0,
             saturation_pct_soil: 70.0,
@@ -2616,6 +2617,7 @@ mod cloud_zone_overlay_tests {
             mad_pct_override: None,
             controller_id: controller_id.into(),
             controller_station: station.into(),
+            controller_zone_name: None,
             soil_sensor_id: None,
             target_min_pct_soil: 30.0,
             saturation_pct_soil: 70.0,
@@ -2951,5 +2953,229 @@ mod cloud_zone_overlay_tests {
             base.get("front_yard").map(String::as_str),
             Some(UUID_SCANNED)
         );
+    }
+    // ---- issue #8: the reporter's own config shape must keep dispatching ----
+
+    /// THE UPGRADE-SAFETY TEST. The issue #8 reporter got his Rachio zones
+    /// running by renaming them in the Rachio app until the slugified vendor
+    /// names matched his LocalSky zone slugs. That leaves him with a
+    /// populated `zone_uuid_map` keyed by coincidence and an EMPTY
+    /// `controller_station` on every zone. He must keep watering:
+    ///
+    ///   1. with the config exactly as it sits on his disk today (the map is
+    ///      a live fallback, not a compatibility shim), and
+    ///   2. after the load-time backfill moves those uuids onto his zones.
+    ///
+    /// Both paths must send the SAME uuid to the same valve. The mock only
+    /// matches the expected uuid and expects exactly one call, so a wrong or
+    /// missing binding fails rather than passing quietly.
+    #[tokio::test]
+    async fn issue_8_reporter_config_dispatches_before_and_after_backfill() {
+        let reporter_config = |base_url: String| {
+            let mut cfg = cfg_with_zones(&[("front_yard", "rachio_main", "")]);
+            cfg.controllers.push(rachio_entry(serde_json::json!({
+                "api_token": "example-token",
+                "device_id": "device-0001",
+                // Keyed by the slugified VENDOR zone name, which coincides
+                // with the LocalSky slug only because he renamed his zones.
+                "zone_uuid_map": { "front_yard": UUID_SCANNED },
+                "base_url": base_url,
+            })));
+            cfg
+        };
+
+        // 1. Untouched on-disk shape.
+        let server = start_zone_mock(UUID_SCANNED).await;
+        let cfg = reporter_config(server.uri());
+        assert_eq!(
+            cfg.zones["front_yard"].controller_station, "",
+            "the reporter's zones carry no station of their own"
+        );
+        dispatch_front_yard(&cfg).await;
+        server.verify().await;
+
+        // 2. After the load-time backfill.
+        let server = start_zone_mock(UUID_SCANNED).await;
+        let mut cfg = reporter_config(server.uri());
+        crate::config::loader::normalize_legacy_values(&mut cfg);
+        assert_eq!(
+            cfg.zones["front_yard"].controller_station, UUID_SCANNED,
+            "the backfill lifts the binding onto the zone entry"
+        );
+        dispatch_front_yard(&cfg).await;
+        server.verify().await;
+    }
+
+    /// The other half of the same guarantee: once the uuid is on his zone
+    /// entry he can rename his Rachio zones back to their real names and
+    /// rescan. The scan writes new vendor-name keys into the map, the zone
+    /// entry keeps winning, and the valve does not move.
+    #[tokio::test]
+    async fn a_rescan_under_new_vendor_names_cannot_move_a_backfilled_zone() {
+        let server = start_zone_mock(UUID_ZONE_ENTRY).await;
+        let mut cfg = cfg_with_zones(&[("front_yard", "rachio_main", UUID_ZONE_ENTRY)]);
+        cfg.controllers.push(rachio_entry(serde_json::json!({
+            "api_token": "example-token",
+            "device_id": "device-0001",
+            // A rescan after renaming the vendor zone to "Front Lawn": the
+            // old coincidence key is stale and a new one appears. Neither
+            // touches the zone entry's binding.
+            "zone_uuid_map": { "front_yard": UUID_SCANNED, "front_lawn": UUID_EDITOR },
+            "base_url": server.uri(),
+        })));
+        dispatch_front_yard(&cfg).await;
+        server.verify().await;
+    }
+
+    // ---- ha_service_call now reads controller_station ----
+
+    #[test]
+    fn ha_entity_id_accepts_entity_shapes_and_rejects_station_numbers() {
+        assert_eq!(
+            ha_entity_id("switch.back_yard_valve"),
+            Some("switch.back_yard_valve".to_string())
+        );
+        assert_eq!(
+            ha_entity_id("  valve.zone_1  "),
+            Some("valve.zone_1".to_string()),
+            "surrounding whitespace is trimmed like every other station parser"
+        );
+        // The v0.1 upgrade path seeds "1".."4" here. Those are not entity
+        // ids and must never reach Home Assistant as one.
+        assert_eq!(ha_entity_id("1"), None);
+        assert_eq!(ha_entity_id(""), None);
+        assert_eq!(ha_entity_id("switch."), None);
+        assert_eq!(ha_entity_id(".back_yard"), None);
+        assert_eq!(ha_entity_id("switch.back.yard"), None);
+        assert_eq!(ha_entity_id("switch back_yard"), None);
+    }
+
+    #[test]
+    fn ha_zone_entries_overlay_the_entity_map_and_junk_is_skipped() {
+        let cfg = cfg_with_zones(&[
+            // Hyphenated zone key, entity id on the zone entry: wins.
+            ("front-yard", "ha_main", "switch.front_yard_valve"),
+            // Legacy numeric seed with a map entry: the map entry survives.
+            ("back_yard", "ha_main", "2"),
+            // Legacy numeric seed with nothing mapped: stays unbound.
+            ("side_yard", "ha_main", "3"),
+            // Another controller's zone never leaks in.
+            ("patio", "other_controller", "switch.patio_valve"),
+        ]);
+        let mut base: BTreeMap<String, String> = BTreeMap::new();
+        base.insert("front_yard".into(), "switch.stale".into());
+        base.insert("back_yard".into(), "switch.back_yard_valve".into());
+        overlay_zone_entries(&mut base, &cfg, "ha_main", ha_entity_id);
+        assert_eq!(
+            base.get("front_yard").map(String::as_str),
+            Some("switch.front_yard_valve")
+        );
+        assert_eq!(
+            base.get("back_yard").map(String::as_str),
+            Some("switch.back_yard_valve")
+        );
+        assert!(!base.contains_key("side_yard"));
+        assert!(!base.values().any(|v| v == "switch.patio_valve"));
+    }
+
+    /// build_controllers is where the wiring actually lands. A zone bound
+    /// only by the editor's station field must resolve on the built adapter,
+    /// which before this change it never did.
+    #[test]
+    fn build_controllers_binds_an_ha_zone_from_the_station_field_alone() {
+        let mut cfg = cfg_with_zones(&[("front-yard", "ha_main", "switch.front_yard_valve")]);
+        cfg.controllers.push(
+            serde_json::from_value::<ControllerEntry>(serde_json::json!({
+                "id": "ha_main",
+                "default": true,
+                "enabled": true,
+                "kind": "ha_service_call",
+                "config": {
+                    "base_url": "http://homeassistant.example:8123",
+                    "bearer_token": "example-token",
+                    "zone_entity_map": {}
+                }
+            }))
+            .unwrap(),
+        );
+        let built = build_controllers(&cfg, None);
+        assert_eq!(built.len(), 1, "the ha controller builds");
+        assert_eq!(
+            built[0].0.mapped_zone_slugs(),
+            vec!["front_yard".to_string()],
+            "the station field alone binds the zone, with the hyphen normalized"
+        );
+    }
+
+    /// The overlay is the one place a binding can move without anyone
+    /// asking, and until 1.24.0 `controller_station` was INERT for
+    /// ha_service_call. So an entity id typed years ago, found to do
+    /// nothing, and then fixed properly in zone_entity_map now takes the
+    /// valve back on the next boot. The overlay cannot refuse (the zone
+    /// entry winning is the whole contract), but it must not do it in
+    /// silence, and the identity copies the load-time backfill produces
+    /// must stay quiet or a healthy install would log a line per zone.
+    ///
+    /// This pins the DISCRIMINATION, which is what the warning depends on:
+    /// a displaced different value versus an identity copy versus a fresh
+    /// insert. The log line itself is checked by reading the code path;
+    /// tracing output is not captured here.
+    #[test]
+    fn the_overlay_distinguishes_a_displaced_value_from_an_identity_copy() {
+        let cfg = cfg_with_zones(&[
+            // Disagrees with the map: the zone entry wins and the value moves.
+            ("front_yard", "ha_main", "switch.front_yard_typed_long_ago"),
+            // Identical to the map: what the backfill writes. Nothing moves.
+            ("back_yard", "ha_main", "switch.back_yard_valve"),
+            // No map entry at all: a fresh insert, nothing displaced.
+            ("side_yard", "ha_main", "switch.side_yard_valve"),
+        ]);
+        let mut base: BTreeMap<String, String> = BTreeMap::new();
+        base.insert("front_yard".into(), "switch.front_yard_valve".into());
+        base.insert("back_yard".into(), "switch.back_yard_valve".into());
+        let before = base.clone();
+        overlay_zone_entries(&mut base, &cfg, "ha_main", ha_entity_id);
+
+        // A displaced DIFFERENT value: this is the case worth a log line.
+        assert_eq!(
+            before.get("front_yard").map(String::as_str),
+            Some("switch.front_yard_valve")
+        );
+        assert_eq!(
+            base.get("front_yard").map(String::as_str),
+            Some("switch.front_yard_typed_long_ago"),
+            "the zone entry wins, which is the contract"
+        );
+        // The backfill's identity copy changes nothing, so a healthy install
+        // logs nothing.
+        assert_eq!(
+            before.get("back_yard"),
+            base.get("back_yard"),
+            "an identity copy must be indistinguishable from no overlay"
+        );
+        // A fresh insert displaces nothing.
+        assert!(!before.contains_key("side_yard"));
+        assert_eq!(
+            base.get("side_yard").map(String::as_str),
+            Some("switch.side_yard_valve")
+        );
+    }
+
+    /// The numeric kinds go through the same arm, and their leftover-number
+    /// case is the pre-existing precedence this release did not change.
+    #[test]
+    fn a_displaced_numeric_relay_still_wins_and_an_identity_copy_still_does_not_move() {
+        let cfg = cfg_with_zones(&[
+            ("front_yard", "hydrawise_main", "7"),
+            ("back_yard", "hydrawise_main", "9"),
+        ]);
+        let mut base: BTreeMap<String, i64> = BTreeMap::new();
+        base.insert("front_yard".into(), 3);
+        base.insert("back_yard".into(), 9);
+        let before = base.clone();
+        overlay_zone_entries(&mut base, &cfg, "hydrawise_main", hydrawise_relay_id);
+        assert_eq!(base.get("front_yard"), Some(&7), "the zone entry wins");
+        assert_ne!(before.get("front_yard"), base.get("front_yard"));
+        assert_eq!(before.get("back_yard"), base.get("back_yard"));
     }
 }

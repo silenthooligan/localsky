@@ -18,7 +18,9 @@ use leptos::tachys::view::any_view::IntoAny;
 use leptos_router::hooks::use_query_map;
 use serde::Deserialize;
 
-use crate::components::controllers_form::ControllerEditorPanel;
+use crate::components::controllers_form::{
+    apply_zone_binds, bind_message, BindOutcome, ControllerEditorPanel, ZoneBind,
+};
 use crate::components::settings::cloud_weather::{cloud_status_word_for_entry, CloudCatalog};
 use crate::components::settings_ui::{BadgeTone, EntityKind, SettingsBadge, SettingsCard};
 use crate::components::sources_form::SourceEditorPanel;
@@ -495,6 +497,76 @@ pub fn SettingsDevices() -> impl IntoView {
         let _ = put_body;
     });
 
+    // Apply the controller editor's bulk-bind table. This writes the ZONES
+    // half of the config from inside a CONTROLLER editor, so it is threaded
+    // in explicitly rather than routed through persist_entry (which owns
+    // controller/source entries and would misread a zone write as one).
+    // Commit-immediately, matching this page's idiom for every other edit.
+    let bind_zones_for = move |controller_id: String| {
+        Callback::new(move |binds: Vec<ZoneBind>| {
+            let mut cfg = config.get_untracked();
+            let outcome = apply_zone_binds(&mut cfg, &controller_id, &binds);
+            result_ok.set(matches!(outcome, BindOutcome::Applied { .. }));
+            result_msg.set(bind_message(&outcome));
+            if !matches!(outcome, BindOutcome::Applied { bound: 1.., .. }) {
+                return;
+            }
+            config.set(cfg.clone());
+            #[cfg(feature = "hydrate")]
+            wasm_bindgen_futures::spawn_local(async move {
+                match save_config(cfg).await {
+                    Ok(reasons) => {
+                        crate::components::settings_ui::toast_saved(
+                            result_msg,
+                            result_ok,
+                            "Zones bound. The engine wires a new binding at its next start.",
+                        );
+                        restart_dismissed.set(false);
+                        restart_reasons.set(reasons);
+                    }
+                    Err(e) => {
+                        result_ok.set(false);
+                        result_msg.set(e);
+                        // Re-pull the authoritative config so a rejected bind
+                        // does not leave the local signal dirty.
+                        if let Ok(fresh) = fetch_config().await {
+                            config.set(fresh);
+                        }
+                    }
+                }
+            });
+            #[cfg(not(feature = "hydrate"))]
+            let _ = cfg;
+        })
+    };
+
+    /// Existing zones as (slug, display name, current controller_station)
+    /// for the bulk-bind table. The station lets each scanned row pre-select
+    /// the zone it is already bound to, so checking a working install cannot
+    /// read as "nothing here is bound yet".
+    fn zone_options(cfg: &serde_json::Value) -> Vec<(String, String, String)> {
+        cfg.get("zones")
+            .and_then(|z| z.as_object())
+            .map(|m| {
+                m.iter()
+                    .map(|(slug, z)| {
+                        (
+                            slug.clone(),
+                            z.get("display_name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(slug)
+                                .to_string(),
+                            z.get("controller_station")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     let on_cancel = Callback::new(move |()| sel.set(Sel::List));
 
     // Refetch BOTH the device list AND the cloud catalog after a mutation, so a
@@ -964,6 +1036,9 @@ pub fn SettingsDevices() -> impl IntoView {
         }
         .into_any(),
         Sel::AddController => view! {
+            // No bulk-bind table while ADDING: the controller has no id in
+            // the config yet, so there is nothing for a zone to point at.
+            // Save it, then reopen it to bind.
             <ControllerEditorPanel on_commit=persist_entry on_cancel=on_cancel/>
         }
         .into_any(),
@@ -973,9 +1048,22 @@ pub fn SettingsDevices() -> impl IntoView {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
-            let siblings = ids_except(&config.get(), "controllers", &cur_id);
+            // Both lists are mount-time snapshots the editor takes by value.
+            // Read UNTRACKED: a bind writes the zones half of the config from
+            // inside this panel, and a tracked read here would re-run this
+            // arm and remount the editor, throwing away the scan results the
+            // moment they were used.
+            let siblings = ids_except(&config.get_untracked(), "controllers", &cur_id);
+            let zone_opts = zone_options(&config.get_untracked());
             view! {
-                <ControllerEditorPanel existing=Some(entry) sibling_ids=siblings on_commit=persist_entry on_cancel=on_cancel/>
+                <ControllerEditorPanel
+                    existing=Some(entry)
+                    sibling_ids=siblings
+                    on_commit=persist_entry
+                    on_cancel=on_cancel
+                    zone_options=zone_opts
+                    on_bind_zones=bind_zones_for(cur_id)
+                />
             }
             .into_any()
         }

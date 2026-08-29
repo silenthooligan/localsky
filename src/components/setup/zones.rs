@@ -367,14 +367,14 @@ pub fn ZonesStep() -> impl IntoView {
                     </li>
                     <li>
                         <strong>"Controller station"</strong>
-                        " - how your controller addresses this zone, not always a "
-                        "number. For OpenSprinkler: 1-based station index. For a "
-                        "DIY (HTTP) board: the board's zone id. For HA: the "
-                        "entity_id of the switch. For Rachio: the zone UUID, which "
-                        "Scan zones fills in for you, so importing zones from a "
-                        "scan leaves nothing to type here. For Hydrawise: the "
-                        "relay id. For B-hyve and Rain Bird: the station number. "
-                        "Those three cannot scan, so this field is what binds them."
+                        " - which of your controller's own zones this one "
+                        "fires. Where the controller can be asked (OpenSprinkler, "
+                        "Rachio, a DIY HTTP board, simulated hardware) the field "
+                        "lists them by the controller's name for each and stores "
+                        "its id, so the two sides are free to be named "
+                        "differently. Hydrawise, B-hyve, Rain Bird and Home "
+                        "Assistant cannot be listed, so enter the id there: a "
+                        "relay id, a station number, or an entity_id."
                     </li>
                     <li>
                         <strong>"Photo (optional)"</strong>

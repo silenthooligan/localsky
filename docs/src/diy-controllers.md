@@ -63,7 +63,9 @@ poll_interval_s = 10
 ```
 
 Set each zone's `controller_id = "diy"` and its `controller_station` to the
-board's zone id. In the setup wizard, **Test connection** hits `GET /status`
+board's zone id. You do not have to look one up: the zone editor's
+**Controller station** field lists what `GET /zones` reports, by name, and
+stores its id. In the setup wizard, **Test connection** hits `GET /status`
 and **Scan zones** imports `GET /zones`, just like OpenSprinkler.
 
 **Contract notes for firmware authors:**

@@ -9,8 +9,10 @@ next tick.
 
 ## The core fields
 
-- **Name**: what you call the zone (for example "Back Yard"). It
-  auto-derives a stable internal slug used by history and sensor bindings.
+- **Name**: what you call the zone (for example "Back Yard"). Change it
+  whenever you like. It auto-derives an internal slug the first time, and
+  that slug then stays put: see [slugs are
+  permanent](#the-slug-is-permanent) below.
 - **Grass species**: picks the seasonal Kc curve, root depth, and MAD
   (allowed depletion) threshold. See the [grass species
   catalog](grass-species.md).
@@ -20,22 +22,51 @@ next tick.
 - **Area**: approximate square footage. It does not have to be exact; it
   feeds leak detection and flow validation when a flow meter is present.
 - **Controller** and **Controller station**: which configured controller
-  fires this zone, and how that controller addresses it. A value in the
-  station field replaces whatever the controller's own zone map holds for
-  this zone. For OpenSprinkler the station is a 1-based number (1, 2, 3);
-  for a DIY HTTP board it is the board's zone id; for a Home Assistant
-  service call it is the entity id (for example `switch.back_yard_zone`).
-  For Rachio it is the zone UUID, which **Scan zones** on the controller
-  fills into the map for you, so leave the field blank when the scanned map
-  already has an entry under this zone's slug; a station number is not a
-  UUID and is ignored. For Hydrawise it is the relay id, and for B-hyve and
-  Rain Bird the station number: those three cannot scan, so this field is
-  what binds them and a number here is accepted. See
-  [controllers](controllers.md#when-a-zone-will-not-start) when a zone will
-  not start.
+  fires this zone, and which of that controller's own zones it is. This
+  second field is the binding. Where LocalSky can ask the controller for its
+  zone list (OpenSprinkler, Rachio, a DIY HTTP board, the simulated
+  controller) the field lists them by the controller's name for each and
+  stores its id, so you never copy an identifier by hand and the names on
+  the two sides are free to differ. Where it cannot ask (Hydrawise, B-hyve,
+  Rain Bird, Home Assistant) you enter the id: a relay id, a station number,
+  or an entity id such as `switch.back_yard_zone`. MQTT is the one
+  exception: an MQTT zone's binding is a command topic plus its payloads,
+  which lives in the controller's `zone_command_map`, and this field is
+  ignored for it.
 
 A zone needs a controller before it can run; configure one under Settings,
 then Controllers, first.
+
+A zone with no station and no entry in its controller's zone map is
+**Unbound**: nothing will water it. So is a zone whose station holds an id
+this controller cannot use, which is easy to end up with by moving a zone
+from one brand of controller to another: a Rachio zone UUID means nothing to
+a Hydrawise. Either way the zone card marks it and the config check says
+which it is, rather than letting you find out the first night it does not
+run. See [controllers](controllers.md#when-a-zone-will-not-start) when a
+zone will not start.
+
+## The slug is permanent
+
+Every zone has an internal slug, derived once from the name you first gave
+it and shown read-only in Advanced options. It is not decoration. It is the
+key that stores:
+
+- this zone's run history, and the trailing week of water the weekly budget
+  allocator reads from it;
+- its auto / skip / run override, and its in-flight run ledger;
+- its dismissed tuning recommendations;
+- its soil sensor channel, as `soilmoisture_<slug>`;
+- its nine Home Assistant entities, whose ids are built from it;
+- its retained MQTT discovery topics, which have no way to be recalled;
+- its `/zones/<slug>` page, and every notification that ever linked there.
+
+Changing it orphans all of that at once, silently, with no way back. So the
+slug field is read-only in the editor and the raw TOML editor refuses a
+zone-key rename. To change what a zone is CALLED, edit its Name; the slug
+stays as it is. Renaming a zone is also never the fix for a controller that
+will not fire it, whatever older versions of this guide said: bind it in
+**Controller station** instead.
 
 ## Advanced options
 

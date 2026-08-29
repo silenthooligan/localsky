@@ -12,7 +12,9 @@ use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
 use leptos_router::hooks::{use_location, use_navigate};
 
-use crate::components::controllers_form::ControllerEditorPanel;
+use crate::components::controllers_form::{
+    apply_zone_binds, bind_message, BindOutcome, ControllerEditorPanel, ZoneBind,
+};
 use crate::components::settings::{form_state_url, parse_form_state, FormState};
 use crate::components::settings_ui::{
     config_kvs, BadgeTone, EntityKind, SettingsBadge, SettingsCard, SettingsLoadError,
@@ -160,6 +162,58 @@ pub fn SettingsControllers() -> impl IntoView {
         });
     });
 
+    // Apply the bulk-bind table's choices. This writes the ZONES half of the
+    // config from inside the controller editor, so it is threaded in
+    // explicitly rather than folded into persist_entry (which owns
+    // controllers). Staged like every other edit on this page: the user
+    // still clicks Save all changes.
+    let bind_zones = Callback::new(move |binds: Vec<ZoneBind>| {
+        let Some(ctrl_id) = editing_id.get_untracked() else {
+            return;
+        };
+        let mut cfg = config_json.get_untracked();
+        let outcome = apply_zone_binds(&mut cfg, &ctrl_id, &binds);
+        if matches!(outcome, BindOutcome::Applied { .. }) {
+            config_json.set(cfg);
+        }
+        result_ok.set(matches!(outcome, BindOutcome::Applied { .. }));
+        result_msg.set(bind_message(&outcome));
+    });
+
+    // The zones the bulk-bind table offers. Read UNTRACKED: the editor takes
+    // this list by value when it mounts, and tracking it here would make a
+    // bind (which writes the zones half of the config) re-run the mount
+    // closure and yank the scan results off the screen the moment they were
+    // used.
+    let zone_options = move || {
+        config_json.with_untracked(|cfg| {
+            cfg.get("zones")
+                .and_then(|z| z.as_object())
+                .map(|m| {
+                    m.iter()
+                        .map(|(slug, z)| {
+                            (
+                                slug.clone(),
+                                z.get("display_name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(slug)
+                                    .to_string(),
+                                // The zone's CURRENT binding, so the bind
+                                // table can pre-select the row a scan
+                                // already matches instead of showing a
+                                // working zone as unbound.
+                                z.get("controller_station")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+    };
+
     let on_cancel_form = Callback::new(move |()| nav_form.run(FormState::Closed));
 
     let controllers_view = move || {
@@ -295,12 +349,27 @@ pub fn SettingsControllers() -> impl IntoView {
                                     .cloned()
                             })
                     });
-                    view! {
-                        <ControllerEditorPanel
-                            existing=existing
-                            on_commit=persist_entry
-                            on_cancel=on_cancel_form
-                        />
+                    // The bulk-bind table is offered only when EDITING: while
+                    // adding, the controller has no id in the config yet, so
+                    // there is nothing for a zone to point at.
+                    match existing {
+                        Some(entry) => view! {
+                            <ControllerEditorPanel
+                                existing=Some(entry)
+                                on_commit=persist_entry
+                                on_cancel=on_cancel_form
+                                zone_options=zone_options()
+                                on_bind_zones=bind_zones
+                            />
+                        }
+                        .into_any(),
+                        None => view! {
+                            <ControllerEditorPanel
+                                on_commit=persist_entry
+                                on_cancel=on_cancel_form
+                            />
+                        }
+                        .into_any(),
                     }
                 }}
             </Show>

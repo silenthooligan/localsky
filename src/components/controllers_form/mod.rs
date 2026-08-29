@@ -25,8 +25,8 @@ mod fields;
 mod merge;
 pub use fields::{controller_fields, ControllerConfigForm};
 pub use merge::{
-    merge_message, merge_scanned_zones, scan_opens_advanced, zone_slug, DiscoveredZone,
-    MergeOutcome,
+    apply_zone_binds, bind_message, merge_message, merge_scanned_zones, scan_opens_advanced,
+    zone_slug, BindOutcome, DiscoveredZone, MergeOutcome, ZoneBind,
 };
 
 /// Controller kinds offered in the Kind picker. (value, label) pairs.
@@ -49,6 +49,29 @@ pub fn controller_kind_options() -> Vec<(String, String)> {
         ("rainbird".into(), "Rain Bird".into()),
         ("dry_run".into(), "No hardware (simulate)".into()),
     ]
+}
+
+/// Controller kinds that can enumerate their own zones, i.e. the kinds whose
+/// adapter implements `discover_zones` and for which POST
+/// /api/v1/wizard/scan_zones returns a zone list rather than an error.
+///
+/// Client code gates on this BEFORE firing a scan, because the server cannot
+/// tell the caller "this kind cannot scan" by status code alone: Hydrawise,
+/// B-hyve and Rain Bird reach the adapter and answer 502 zone_scan_failed
+/// with the Unsupported detail, while MQTT, Home Assistant and ESPHome are
+/// refused earlier with 422 controller_unsupported. Both look like a
+/// transient failure from the outside, and asking costs a round trip to
+/// learn nothing.
+///
+/// Keep this in lockstep with the adapters: the
+/// `scannable_kinds_are_all_real_controller_kinds` test pins every entry to
+/// `controller_kind_options()`, and an adapter that grows a
+/// `discover_zones` impl belongs here the same day.
+pub fn can_scan_zones(kind: &str) -> bool {
+    matches!(
+        kind,
+        "rachio" | "opensprinkler_direct" | "http_generic" | "dry_run"
+    )
 }
 
 /// Controller kinds grouped by the user's MENTAL MODEL instead of a flat
@@ -219,6 +242,48 @@ fn controller_kind_tile(kind: &'static str, value: RwSignal<String>) -> impl Int
     }
 }
 
+/// Seed the bulk-bind table from a fresh scan, keeping any choice the user
+/// already made for a station id the controller still reports. Returns
+/// `None` when the panel was disposed mid-scan (a bare signal read then
+/// panics, and wasm release is panic=abort).
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
+fn station_bind_rows(
+    scanned: RwSignal<Vec<(String, String, String)>>,
+    found: &[DiscoveredZone],
+    zone_options: &[(String, String, String)],
+) -> Option<()> {
+    let prior = scanned.try_get_untracked()?;
+    let rows: Vec<(String, String, String)> = found
+        .iter()
+        // A vendor zone with no id cannot bind anything, and two of them
+        // would collide in the prior-choice lookup below. Drop them here so
+        // an unbindable row never renders.
+        .filter(|z| !z.station_id.trim().is_empty())
+        .map(|z| {
+            let keep = prior
+                .iter()
+                .find(|(id, _, _)| id == &z.station_id)
+                .map(|(_, _, slug)| slug.clone())
+                // Fall back to the zone ALREADY bound to this vendor id.
+                // Without this the first scan of a session shows every row
+                // as "(leave unbound)" even for correctly bound zones, and
+                // the hint ("a zone you leave blank is not changed") reads
+                // as "nothing here is bound yet" -- which is how this
+                // feature would talk a user into repointing a working
+                // install while he is checking it.
+                .or_else(|| {
+                    zone_options
+                        .iter()
+                        .find(|(_, _, station)| station.trim() == z.station_id.trim())
+                        .map(|(slug, _, _)| slug.clone())
+                })
+                .unwrap_or_default();
+            (z.station_id.clone(), z.name.clone(), keep)
+        })
+        .collect();
+    scanned.try_set(rows).is_none().then_some(())
+}
+
 #[component]
 pub fn ControllerEditorPanel(
     #[prop(default = None)] existing: Option<serde_json::Value>,
@@ -230,6 +295,26 @@ pub fn ControllerEditorPanel(
     /// (parity with SourceEditorPanel).
     #[prop(optional)]
     sibling_ids: Vec<String>,
+    /// Existing LocalSky zones as (slug, display name, current
+    /// controller_station), for the bulk-bind table a scan produces. Empty
+    /// (the default) hides the table entirely.
+    ///
+    /// The station is load-bearing, not decoration: it is what lets each row
+    /// pre-select the zone already bound to that vendor id, so a user who
+    /// opens the editor to CHECK a working install is not shown seven rows
+    /// reading "(leave unbound)" and invited to rebuild bindings that were
+    /// already correct.
+    #[prop(optional)]
+    zone_options: Vec<(String, String, String)>,
+    /// Apply a set of zone bindings the user chose in the bulk-bind table.
+    ///
+    /// This is the one place a CONTROLLER editor writes the ZONES half of the
+    /// config, so it is threaded explicitly rather than folded into
+    /// `on_commit`: the caller owns the config and decides whether its page
+    /// persists immediately (Devices) or stages behind a Save (Controllers).
+    /// Absent means the table renders no Apply and is not offered.
+    #[prop(optional)]
+    on_bind_zones: Option<Callback<Vec<ZoneBind>>>,
 ) -> impl IntoView {
     let editing = existing.is_some();
     let seed_id = existing
@@ -284,6 +369,23 @@ pub fn ControllerEditorPanel(
     let config_text = RwSignal::new(seed_config);
     let error = RwSignal::new(String::new());
     let scan_msg = RwSignal::new(String::new());
+    // The last scan's zones, and the LocalSky zone chosen for each. This is
+    // what issue #8's reporter had no way to express: he scanned seven zones
+    // and the editor gave him nowhere to say which was which.
+    // (station_id, vendor name, chosen slug; empty slug = leave unbound).
+    let scanned: RwSignal<Vec<(String, String, String)>> = RwSignal::new(Vec::new());
+    let bind_msg = RwSignal::new(String::new());
+    // Whether this mount can write bindings at all (a saved controller in a
+    // page that threaded the callback), vs. whether there is anything to
+    // bind TO. The two reasons the table cannot act read differently, so
+    // they are kept apart rather than collapsed into one message.
+    let can_bind_here = on_bind_zones.is_some();
+    let bindable = !zone_options.is_empty() && can_bind_here;
+    // The scan continuation is detached (the panel can be disposed mid-scan),
+    // so it cannot borrow `zone_options` directly. StoredValue is Copy and
+    // reads with try_* like every other signal in that continuation.
+    #[cfg_attr(not(feature = "hydrate"), allow(unused_variables))]
+    let zone_options_for_rows = StoredValue::new(zone_options.clone());
 
     // While adding, swap the JSON template as the kind changes.
     #[cfg(feature = "hydrate")]
@@ -381,6 +483,7 @@ pub fn ControllerEditorPanel(
                             .filter_map(|z| serde_json::from_value(z.clone()).ok())
                             .collect();
                         if found.is_empty() {
+                            let _ = scanned.try_set(Vec::new());
                             scan_msg.set("No zones found on this controller.".into());
                             return;
                         }
@@ -406,29 +509,28 @@ pub fn ControllerEditorPanel(
                         };
                         let outcome = merge_scanned_zones(&kind_now, &mut cfg, &found);
                         if scan_opens_advanced(&outcome) {
+                            // The kind's zone map is still filled, and still
+                            // read at dispatch as the fallback that keeps a
+                            // pre-picker config watering. It is no longer the
+                            // thing the user is sent to read: the bind table
+                            // below is.
                             config_text.set(serde_json::to_string_pretty(&cfg).unwrap_or(text_now));
-                            // Follow-through (issue #8's other half: results
-                            // landing off-screen): open the Advanced fold and
-                            // bring the filled JSON into view so the user SEES
-                            // the map without hunting. Plain DOM on the live
-                            // document, hydrate-only by construction (this
-                            // whole continuation is hydrate-gated); a later
-                            // manual toggle stays the user's.
-                            if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
-                                if let Some(fold) =
-                                    doc.get_element_by_id("controller-advanced-fold")
-                                {
-                                    let _ = fold.set_attribute("open", "");
-                                }
-                                if let Some(area) = doc.get_element_by_id("controller-config-json")
-                                {
-                                    let opts = web_sys::ScrollIntoViewOptions::new();
-                                    opts.set_behavior(web_sys::ScrollBehavior::Smooth);
-                                    opts.set_block(web_sys::ScrollLogicalPosition::Nearest);
-                                    area.scroll_into_view_with_scroll_into_view_options(&opts);
-                                }
-                            }
                         }
+                        // FOLLOW-THROUGH (issue #8's other half). The scan used
+                        // to force the Advanced fold open and scroll a wall of
+                        // JSON into view, which told the user what was found
+                        // but not how to say which vendor zone is which of
+                        // theirs. Put the results on screen as a table of
+                        // choices instead.
+                        let Some(seeded) = zone_options_for_rows
+                            .try_with_value(|opts| station_bind_rows(scanned, &found, opts))
+                        else {
+                            return;
+                        };
+                        if seeded.is_none() {
+                            return;
+                        }
+                        bind_msg.set(String::new());
                         scan_msg.set(merge_message(found.len(), &outcome));
                     } else {
                         let detail = v
@@ -546,6 +648,81 @@ pub fn ControllerEditorPanel(
                 <ControllerConfigForm config_text=config_text kind=Signal::derive(move || kind.get())/>
             </Panel>
 
+            // BULK BIND. Each zone the controller reported, its id, and which
+            // LocalSky zone fires it. This is the step the scan never had:
+            // the results used to land as keys in a JSON blob, named after
+            // the VENDOR's zones, which bound anything only when the two
+            // sides happened to be named the same.
+            {move || {
+                let rows = scanned.get();
+                if rows.is_empty() {
+                    return None;
+                }
+                let opts = zone_options.clone();
+                Some(view! {
+                    <Panel title="Bind these zones".to_string()>
+                        <p class="sensors-section__hint">
+                            {if bindable {
+                                "Choose which of your zones each of the controller's zones fires. \
+                                 A zone you leave blank is not changed."
+                            } else if can_bind_here {
+                                "Add your zones under Settings, then Zones first; then scan again \
+                                 here to say which of them each of these fires."
+                            } else {
+                                "Save this controller first, then reopen it here to say which of \
+                                 your zones each of these fires."
+                            }}
+                        </p>
+                        <ul class="zone-bind-list">
+                            {rows
+                                .into_iter()
+                                .enumerate()
+                                .map(|(i, (station_id, name, chosen))| {
+                                    controller_bind_row(scanned, i, station_id, name, chosen, &opts, bindable)
+                                })
+                                .collect_view()}
+                        </ul>
+                        {bindable.then(|| view! {
+                            <div class="settings-form-actions">
+                                <Button
+                                    variant="primary"
+                                    aria_label="Bind the chosen zones to this controller".to_string()
+                                    on_click=Callback::new(move |_| {
+                                        let binds: Vec<ZoneBind> = scanned
+                                            .get_untracked()
+                                            .into_iter()
+                                            .filter(|(_, _, slug)| !slug.is_empty())
+                                            .map(|(station_id, vendor_name, slug)| ZoneBind {
+                                                station_id,
+                                                vendor_name,
+                                                slug,
+                                            })
+                                            .collect();
+                                        if binds.is_empty() {
+                                            bind_msg.set(bind_message(&BindOutcome::Applied {
+                                                bound: 0,
+                                                replaced: 0,
+                                            }));
+                                            return;
+                                        }
+                                        if let Some(cb) = on_bind_zones {
+                                            cb.run(binds);
+                                            bind_msg.set(String::new());
+                                        }
+                                    })
+                                >
+                                    "Bind zones"
+                                </Button>
+                            </div>
+                        })}
+                        {move || {
+                            let m = bind_msg.get();
+                            (!m.is_empty()).then(|| view! { <p class="sensors-section__hint">{m}</p> })
+                        }}
+                    </Panel>
+                })
+            }}
+
             // ADVANCED: the raw config JSON escape hatch, demoted into a fold so
             // the labeled Connection form reads as the primary editor. Still
             // two-way synced; "Scan zones" populates the zone map in here, and a
@@ -598,6 +775,66 @@ pub fn ControllerEditorPanel(
                 </Button>
             </div>
         </Panel></div>
+    }
+}
+
+/// One row of the bulk-bind table. A free function so each row
+/// monomorphizes in its own boundary, per the no-deep-nesting guidance.
+fn controller_bind_row(
+    scanned: RwSignal<Vec<(String, String, String)>>,
+    index: usize,
+    station_id: String,
+    name: String,
+    chosen: String,
+    zone_options: &[(String, String, String)],
+    bindable: bool,
+) -> impl IntoView {
+    let opts: Vec<(String, String)> = zone_options
+        .iter()
+        .map(|(slug, label, _)| (slug.clone(), label.clone()))
+        .collect();
+    let already_bound = zone_options
+        .iter()
+        .any(|(slug, _, station)| slug == &chosen && station.trim() == station_id.trim());
+    let id_label = station_id.clone();
+    view! {
+        <li class="zone-bind-row">
+            <span class="zone-bind-row__name">{name}</span>
+            <span class="zone-bind-row__id">{id_label}</span>
+            // Say which rows are already wired, so a blank row unambiguously
+            // means unbound rather than unknown.
+            {already_bound.then(|| view! {
+                <span class="zone-bind-row__state">"currently bound"</span>
+            })}
+            {bindable.then(|| view! {
+                <select
+                    class="ui-input"
+                    aria-label=format!("LocalSky zone for controller zone {station_id}")
+                    on:change=move |ev| {
+                        let v = event_target_value(&ev);
+                        scanned.update(|rows| {
+                            if let Some(row) = rows.get_mut(index) {
+                                row.2 = v;
+                            }
+                        });
+                    }
+                >
+                    <option value="" selected=chosen.is_empty()>"(leave unbound)"</option>
+                    {opts
+                        .into_iter()
+                        .map(|(slug, label)| {
+                            let sel = slug == chosen;
+                            let text = if label.is_empty() || label == slug {
+                                slug.clone()
+                            } else {
+                                format!("{label} ({slug})")
+                            };
+                            view! { <option value=slug selected=sel>{text}</option> }
+                        })
+                        .collect_view()}
+                </select>
+            })}
+        </li>
     }
 }
 

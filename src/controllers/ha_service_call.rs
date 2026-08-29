@@ -115,6 +115,15 @@ impl IrrigationController for HaServiceCall {
         }
     }
 
+    /// The zone slugs this controller can dispatch. Since 1.24.0 the map
+    /// this reads is the config map with each zone entry's
+    /// `controller_station` overlaid on top (runtime::build_controllers), so
+    /// it reports the binding a user can actually see and edit, and the
+    /// unknown-zone 400 body lists the same set the editor shows.
+    fn mapped_zone_slugs(&self) -> Vec<String> {
+        self.config.zone_entity_map.keys().cloned().collect()
+    }
+
     async fn run_zone(&self, slug: &str, duration_s: u32) -> ControllerResult<RunHandle> {
         let entity = self.entity_for(slug)?;
         // The dispatch shape follows the most common HA irrigation

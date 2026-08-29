@@ -312,6 +312,7 @@ pub fn seed_config() -> crate::config::schema::Config {
         mad_pct_override: None,
         controller_id: "demo_controller".to_string(),
         controller_station: String::new(),
+        controller_zone_name: None,
         soil_sensor_id: None,
         target_min_pct_soil: 30.0,
         saturation_pct_soil: 70.0,
@@ -332,6 +333,7 @@ pub fn seed_config() -> crate::config::schema::Config {
             display_name: "Back Yard".to_string(),
             area_sqft: 2200.0,
             controller_station: "1".to_string(),
+            controller_zone_name: None,
             soil_sensor_id: soil("back_yard"),
             // The balance showcase: a 1.75 in week over 2 sessions wants
             // more per session than the 60 minute cap can deliver.
@@ -347,6 +349,7 @@ pub fn seed_config() -> crate::config::schema::Config {
             area_sqft: 1800.0,
             species: GrassSpecies::StAugustine,
             controller_station: "2".to_string(),
+            controller_zone_name: None,
             soil_sensor_id: soil("front_yard"),
             ..base.clone()
         },
@@ -358,6 +361,7 @@ pub fn seed_config() -> crate::config::schema::Config {
             area_sqft: 900.0,
             sprinkler_type: SprinklerType::Rotor,
             controller_station: "3".to_string(),
+            controller_zone_name: None,
             soil_sensor_id: soil("side_yard"),
             // Matches the synthetic budget row's spaced-session story.
             weekly_budget_in: Some(1.3),
@@ -373,6 +377,7 @@ pub fn seed_config() -> crate::config::schema::Config {
             species: GrassSpecies::OrnamentalShrubs,
             sprinkler_type: SprinklerType::Drip,
             controller_station: "4".to_string(),
+            controller_zone_name: None,
             soil_sensor_id: soil("back_yard_shrubs"),
             ..base.clone()
         },

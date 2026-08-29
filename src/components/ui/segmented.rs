@@ -21,6 +21,13 @@ pub fn SegmentedControl(
     /// Optional aria-label for the group.
     #[prop(into, optional)]
     aria_label: String,
+    /// Fired when the USER moves the selection (click or arrow key), with
+    /// the newly-selected value. Deliberately not an Effect on `value`: a
+    /// caller that must react to a genuine change needs to distinguish it
+    /// from the form seeding `value` while opening, and an Effect cannot.
+    /// Never fires when the value is set programmatically.
+    #[prop(optional)]
+    on_change: Option<Callback<String>>,
 ) -> impl IntoView {
     let aria = aria_label.clone();
     let group: NodeRef<leptos::html::Div> = NodeRef::new();
@@ -69,7 +76,13 @@ pub fn SegmentedControl(
                         // Radios select on arrow movement (APG): update the
                         // value, then move focus to the newly-checked option.
                         if let Some(next) = values.try_with_value(|v| v.get(j).cloned()).flatten() {
-                            value.set(next);
+                            let moved = value.get_untracked() != next;
+                            value.set(next.clone());
+                            if moved {
+                                if let Some(cb) = on_change {
+                                    cb.run(next);
+                                }
+                            }
                         }
                         #[cfg(feature = "hydrate")]
                         {
@@ -95,7 +108,16 @@ pub fn SegmentedControl(
                             aria-checked=move || (value.get() == val).to_string()
                             tabindex=move || if tab_stop() == val_for_tab { "0" } else { "-1" }
                             type="button"
-                            on:click=move |_| value.set(val_for_click.clone())
+                            on:click=move |_| {
+                                let next = val_for_click.clone();
+                                let moved = value.get_untracked() != next;
+                                value.set(next.clone());
+                                if moved {
+                                    if let Some(cb) = on_change {
+                                        cb.run(next);
+                                    }
+                                }
+                            }
                             on:keydown=on_key
                         >
                             {label}

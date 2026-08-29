@@ -1631,6 +1631,31 @@ pub enum ControllerKind {
     DryRun(DryRunConfig),
 }
 
+impl ControllerKind {
+    /// The serde tag for this variant, i.e. the `kind` string on the wire
+    /// and in TOML.
+    ///
+    /// Lets server-side code hand a kind to the shared, ungated helpers in
+    /// `crate::station_id`, which are keyed by that string because the
+    /// browser only ever sees the JSON form. The
+    /// `kind_str_matches_the_serde_tag` test round-trips every variant so
+    /// the two can never drift.
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Self::OpensprinklerDirect(_) => "opensprinkler_direct",
+            Self::HaServiceCall(_) => "ha_service_call",
+            Self::EsphomeNative(_) => "esphome_native",
+            Self::Rachio(_) => "rachio",
+            Self::Hydrawise(_) => "hydrawise",
+            Self::Bhyve(_) => "bhyve",
+            Self::Rainbird(_) => "rainbird",
+            Self::MqttCommand(_) => "mqtt_command",
+            Self::HttpGeneric(_) => "http_generic",
+            Self::DryRun(_) => "dry_run",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct OpenSprinklerDirectConfig {
     pub host: String,
@@ -1919,9 +1944,27 @@ pub struct ZoneConfig {
     pub mad_pct_override: Option<f64>,
     /// Which controller fires this zone.
     pub controller_id: String,
-    /// Controller-specific station/zone identifier. OpenSprinkler = 1-based
-    /// station number; Rachio = zone UUID; ESPHome = switch entity_id.
+    /// The controller's own id for this zone, and the binding LocalSky
+    /// dispatches on. OpenSprinkler = 1-based station number; DIY HTTP board
+    /// = the board's station string; Rachio = zone UUID; Hydrawise = relay
+    /// id; B-hyve and Rain Bird = station number; Home Assistant = the
+    /// entity_id of the valve. MQTT is the one exception: its per-zone value
+    /// is a command struct (topic plus payloads), so an MQTT zone binds in
+    /// the controller's `zone_command_map` and this field is ignored.
+    ///
+    /// Empty means unbound, unless the controller's own zone map still holds
+    /// an entry under this zone's slug. That map stays a live fallback; the
+    /// loader copies a matching entry in here on load so the binding becomes
+    /// visible and portable (`loader::backfill_zone_stations`).
+    #[serde(default)]
     pub controller_station: String,
+    /// The controller's NAME for the bound zone ("Front Lawn"), captured
+    /// when the binding was made from a controller scan. A display label
+    /// only: nothing dispatches on it, nothing keys on it, and a stale value
+    /// cannot mis-actuate. `None` when the binding was typed by hand or
+    /// predates the picker.
+    #[serde(default)]
+    pub controller_zone_name: Option<String>,
     /// Soil moisture sensor entity (any source). Optional; engine uses
     /// modeled bucket when absent.
     #[serde(default)]
@@ -2579,5 +2622,85 @@ mod tests {
         .unwrap();
         assert_eq!(ui.radar.providers, ["geomet_ca", "rainviewer"]);
         assert_eq!(ui.radar.default_layers, ["rainviewer", "warnings_us"]);
+    }
+    /// `kind_str()` must equal the serde tag for every variant, because
+    /// server code uses it to look up the shared, string-keyed station
+    /// helpers the browser also calls. A variant that fell through to a
+    /// wrong string would silently report a controller as "does not read
+    /// the station field" and the config check would stop judging it.
+    ///
+    /// Both directions, from serde itself rather than a second hand-written
+    /// list: the tag deserializes INTO the variant, and the variant
+    /// serializes back OUT to the tag.
+    #[test]
+    fn kind_str_matches_the_serde_tag() {
+        let cases = [
+            (
+                "opensprinkler_direct",
+                serde_json::json!({ "host": "192.0.2.10", "password_md5": "" }),
+            ),
+            (
+                "ha_service_call",
+                serde_json::json!({ "base_url": "http://ha.example:8123", "bearer_token": "t" }),
+            ),
+            (
+                "esphome_native",
+                serde_json::json!({ "host": "192.0.2.60", "password": null }),
+            ),
+            (
+                "rachio",
+                serde_json::json!({ "api_token": "t", "device_id": "d" }),
+            ),
+            (
+                "hydrawise",
+                serde_json::json!({ "api_key": "k", "controller_id": 7 }),
+            ),
+            (
+                "bhyve",
+                serde_json::json!({ "email": "e@example.com", "password": "p", "device_id": "d" }),
+            ),
+            (
+                "rainbird",
+                serde_json::json!({ "email": "e@example.com", "password": "p", "controller_id": "c" }),
+            ),
+            ("mqtt_command", serde_json::json!({ "broker_host": "b" })),
+            (
+                "http_generic",
+                serde_json::json!({ "base_url": "http://192.0.2.50" }),
+            ),
+            ("dry_run", serde_json::json!({ "simulate_runs": false })),
+        ];
+        for (tag, config) in &cases {
+            let k: ControllerKind =
+                serde_json::from_value(serde_json::json!({ "kind": tag, "config": config }))
+                    .unwrap_or_else(|e| panic!("{tag} must deserialize: {e}"));
+            assert_eq!(k.kind_str(), *tag, "kind_str() disagrees for {tag}");
+            let back = serde_json::to_value(&k).expect("serializes");
+            assert_eq!(
+                back.get("kind").and_then(|t| t.as_str()),
+                Some(*tag),
+                "round trip disagrees for {tag}"
+            );
+        }
+        // Every variant is covered. The match is exhaustive, so adding a
+        // variant fails to compile here until it is added to `cases` too.
+        for (tag, config) in &cases {
+            let k: ControllerKind =
+                serde_json::from_value(serde_json::json!({ "kind": tag, "config": config }))
+                    .unwrap();
+            match k {
+                ControllerKind::OpensprinklerDirect(_)
+                | ControllerKind::HaServiceCall(_)
+                | ControllerKind::EsphomeNative(_)
+                | ControllerKind::Rachio(_)
+                | ControllerKind::Hydrawise(_)
+                | ControllerKind::Bhyve(_)
+                | ControllerKind::Rainbird(_)
+                | ControllerKind::MqttCommand(_)
+                | ControllerKind::HttpGeneric(_)
+                | ControllerKind::DryRun(_) => {}
+            }
+        }
+        assert_eq!(cases.len(), 10, "every ControllerKind variant is covered");
     }
 }

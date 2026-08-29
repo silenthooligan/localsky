@@ -742,6 +742,35 @@ enum RawSaveState {
     Saving,
     Saved,
     Error(String),
+    /// The server refused a save that both drops a zone key and adds one,
+    /// because that is what a zone rename looks like from its side and a
+    /// zone's slug keys its history, its Home Assistant entities and its
+    /// retained MQTT topics. Carries the server's own prose so the operator
+    /// can affirm two genuinely unrelated zones without leaving the editor.
+    /// Before this, the refusal named a query flag this editor had no way to
+    /// send. The retry re-reads the textarea rather than replaying a stored
+    /// body, so an edit made while the message is up is what gets saved.
+    NeedsZoneKeyConfirm(String),
+}
+
+/// Pull the readable half out of an `ApiError` body, falling back to the
+/// raw text when it is not the shape we expect. The status span used to
+/// print the whole JSON object, which buried the explanation inside
+/// escaped braces.
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
+fn api_error_parts(body: &str) -> (Option<String>, String) {
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(v) => {
+            let code = v.get("error").and_then(|e| e.as_str()).map(str::to_string);
+            let detail = v
+                .get("detail")
+                .and_then(|d| d.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| body.to_string());
+            (code, detail)
+        }
+        Err(_) => (None, body.to_string()),
+    }
 }
 
 #[component]
@@ -772,22 +801,30 @@ fn RawTomlEditor() -> impl IntoView {
         });
     }
 
-    let on_save = move |_| {
+    // `allow_zone_key_change` is the operator affirming that a dropped key
+    // and a new one are two unrelated zones, not one renamed. Only the
+    // confirm button below passes true.
+    let run_save = move |allow_zone_key_change: bool| {
         let body = text.get_untracked();
         state.set(RawSaveState::Saving);
         #[cfg(feature = "hydrate")]
         wasm_bindgen_futures::spawn_local(async move {
-            match save_raw_toml(body).await {
+            match save_raw_toml(body, allow_zone_key_change).await {
                 Ok(_) => state.set(RawSaveState::Saved),
-                Err(e) => state.set(RawSaveState::Error(e)),
+                Err(SaveRawError::ZoneKeyRenamed(detail)) => {
+                    state.set(RawSaveState::NeedsZoneKeyConfirm(detail))
+                }
+                Err(SaveRawError::Other(e)) => state.set(RawSaveState::Error(e)),
             }
         });
-        let _ = body;
+        #[cfg(not(feature = "hydrate"))]
+        let _ = (body, allow_zone_key_change);
     };
+    let on_save = move |_| run_save(false);
 
     let status_class = move || match state.get() {
         RawSaveState::Saved => "raw-toml-status is-ok",
-        RawSaveState::Error(_) => "raw-toml-status is-err",
+        RawSaveState::Error(_) | RawSaveState::NeedsZoneKeyConfirm(_) => "raw-toml-status is-err",
         _ => "raw-toml-status",
     };
     let status_text = move || match state.get() {
@@ -798,6 +835,9 @@ fn RawTomlEditor() -> impl IntoView {
             "saved. Container will load the new config on next restart.".to_string()
         }
         RawSaveState::Error(e) => format!("error: {e}"),
+        // The server's own prose, which already explains what a zone slug
+        // holds and why renaming one is not recoverable.
+        RawSaveState::NeedsZoneKeyConfirm(detail) => detail,
     };
 
     view! {
@@ -819,6 +859,21 @@ fn RawTomlEditor() -> impl IntoView {
             >
                 "Save"
             </button>
+            // Only rendered on the one refusal an operator can legitimately
+            // answer. Keeps the guard's friction (they still have to affirm)
+            // while making it answerable from the editor that was refused.
+            {move || {
+                matches!(state.get(), RawSaveState::NeedsZoneKeyConfirm(_)).then(|| {
+                    view! {
+                        <button
+                            class="btn"
+                            on:click=move |_| run_save(true)
+                        >
+                            "These are unrelated zones, save anyway"
+                        </button>
+                    }
+                })
+            }}
             <span class=status_class>{status_text}</span>
         </div>
     }
@@ -839,19 +894,43 @@ async fn fetch_raw_toml() -> Result<String, String> {
     resp.text().await.map_err(|e| e.to_string())
 }
 
+/// A failed raw save, split so the caller can offer a retry for the one
+/// refusal that has one.
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
+enum SaveRawError {
+    /// `422 zone_key_renamed`, carrying the server's explanation.
+    ZoneKeyRenamed(String),
+    Other(String),
+}
+
 #[cfg(feature = "hydrate")]
-async fn save_raw_toml(body: String) -> Result<(), String> {
-    let resp = gloo_net::http::Request::put("/api/v1/config/raw")
+async fn save_raw_toml(body: String, allow_zone_key_change: bool) -> Result<(), SaveRawError> {
+    // The flag is the operator's affirmation, threaded as the query param
+    // the server's own refusal message names.
+    let url = if allow_zone_key_change {
+        "/api/v1/config/raw?allow_zone_key_change=1"
+    } else {
+        "/api/v1/config/raw"
+    };
+    let resp = gloo_net::http::Request::put(url)
         .header("Content-Type", "text/plain; charset=utf-8")
         .body(body)
-        .map_err(|e| e.to_string())?
+        .map_err(|e| SaveRawError::Other(e.to_string()))?
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| SaveRawError::Other(e.to_string()))?;
     if resp.ok() {
-        Ok(())
+        return Ok(());
+    }
+    let status = resp.status();
+    let raw = resp.text().await.unwrap_or_default();
+    // Show the prose, not the JSON envelope: this body's detail is several
+    // sentences of explanation and it used to arrive with escaped braces
+    // around it.
+    let (code, detail) = api_error_parts(&raw);
+    if code.as_deref() == Some("zone_key_renamed") {
+        Err(SaveRawError::ZoneKeyRenamed(detail))
     } else {
-        let detail = resp.text().await.unwrap_or_default();
-        Err(format!("{} {}", resp.status(), detail))
+        Err(SaveRawError::Other(format!("{status} {detail}")))
     }
 }

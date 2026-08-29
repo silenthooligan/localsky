@@ -1,10 +1,20 @@
 import { test, expect } from "@playwright/test";
 
 // Issue #8 regression, end to end in the real UI: add a Rachio controller in
-// Settings, scan its zones, and verify the scan RESULT lands in the Advanced
-// JSON (zone_uuid_map), survives the two-step save, and is still there after
-// a reload. The original defect: the scan reported "Found 7" while the JSON
-// never changed and the save persisted an empty map.
+// Settings, scan its zones, and verify the scan RESULT lands where the user
+// can act on it and survives the two-step save and a reload. The original
+// defect: the scan reported "Found 7" while the JSON never changed and the
+// save persisted an empty map.
+//
+// Two things the scan produces, and this spec checks both:
+//   1. the controller's zone_uuid_map, still filled and still read at
+//      dispatch as the fallback that keeps a pre-picker config watering;
+//   2. the bind table, which is what the user is actually shown now. The
+//      scan no longer forces the Advanced JSON fold open, so the fold is
+//      opened here by clicking it, the way a user would.
+// Binding a zone through that table needs a SAVED controller, so the bind
+// half is covered separately (zone-bind.spec.ts); this spec stays on the
+// add-then-save path the issue described.
 //
 // Interaction-only (no screenshot baselines). All API traffic the flow
 // mutates is stubbed with page.route so the spec runs against the read-only
@@ -75,11 +85,21 @@ test("Rachio scan fills zone_uuid_map, saves, and persists across reload", async
     page.getByText("Found 7 zones and filled zone_uuid_map. Review and save."),
   ).toBeVisible();
 
-  // Follow-through: a successful merge AUTO-OPENS the Advanced fold (no
-  // manual click) and the filled JSON is visible where the user is
-  // looking. The open attribute is the assertion, not a click.
+  // Follow-through: the scan results land on screen as a table of the
+  // controller's own zones with their ids, instead of a wall of JSON. While
+  // ADDING there is nothing to bind to yet, so the table says so rather than
+  // offering a dropdown that could not write anything.
+  await expect(page.getByText("Bind these zones")).toBeVisible();
+  await expect(page.getByText("Front Lawn")).toBeVisible();
+  await expect(
+    page.getByText("1f00aa00-0000-4000-8000-000000000001"),
+  ).toBeVisible();
+  await expect(page.getByText(/Save this controller first/)).toBeVisible();
+
+  // The map is still filled, in the fold, which the user opens themselves.
   const fold = page.locator("details#controller-advanced-fold");
-  await expect(fold).toHaveAttribute("open", "");
+  await expect(fold).not.toHaveAttribute("open", "");
+  await page.getByText("Advanced: raw config JSON").click();
   const textarea = page.locator("textarea");
   await expect(textarea).toBeVisible();
   await expect(textarea).toHaveValue(/zone_uuid_map/);

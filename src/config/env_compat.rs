@@ -345,6 +345,7 @@ fn seed_legacy_zones(cfg: &mut Config) {
         mad_pct_override: None,
         controller_id: "ha_main".into(),
         controller_station: station.to_string(),
+        controller_zone_name: None,
         soil_sensor_id: None,
         target_min_pct_soil: 30.0,
         saturation_pct_soil: 70.0,

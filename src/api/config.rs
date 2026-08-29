@@ -811,9 +811,32 @@ async fn get_source_catalog(
 #[derive(Debug, Deserialize, Default)]
 struct RawQuery {
     /// Opt in to full-fidelity (unredacted) TOML. Honored only for an
-    /// authenticated owner identity; ignored otherwise.
+    /// authenticated owner identity; ignored otherwise. Read as a STRING,
+    /// see [`query_flag`]: a bare `bool` here rejected the documented
+    /// `?reveal=1` outright.
     #[serde(default)]
-    reveal: Option<bool>,
+    reveal: Option<String>,
+}
+
+/// True for the spellings an operator actually types into a URL.
+///
+/// Axum's `Query` deserializes through `serde_urlencoded`, whose `bool`
+/// impl is `str::parse::<bool>()`, and Rust's `FromStr for bool` accepts
+/// ONLY "true"/"false". So a query flag typed as `=1` does not merely read
+/// as false: it fails the whole extraction and answers `400` before the
+/// handler runs. That is fatal for `allow_zone_key_change`, whose own `422`
+/// refusal message tells the user to type `=1`. Taking the value as a
+/// string and deciding truthiness here accepts every spelling the docs, the
+/// changelog, and the error message promise, plus a bare flag with no `=`.
+fn query_flag(v: Option<&String>) -> bool {
+    match v {
+        // `?flag` with no `=` arrives as an empty value: treat it as set.
+        Some(s) => {
+            let s = s.trim().to_ascii_lowercase();
+            s.is_empty() || matches!(s.as_str(), "1" | "true" | "yes" | "on")
+        }
+        None => false,
+    }
 }
 
 /// Return the TOML of /data/localsky.toml as text/plain so the Advanced
@@ -858,7 +881,7 @@ async fn get_raw_toml(
         req.extensions().get::<crate::auth::RequestIdentity>(),
         Some(crate::auth::RequestIdentity::User(_) | crate::auth::RequestIdentity::TrustedNetwork)
     );
-    let reveal = q.reveal.unwrap_or(false) && is_owner;
+    let reveal = query_flag(q.reveal.as_ref()) && is_owner;
     match tokio::fs::read_to_string(store.path()).await {
         Ok(s) => {
             let body = if reveal {
@@ -898,6 +921,74 @@ async fn get_raw_toml(
     }
 }
 
+/// Query flags shared by both whole-config write paths, `PUT /api/config`
+/// and `PUT /api/config/raw`.
+#[derive(Debug, Default, Deserialize)]
+struct ConfigSaveParams {
+    /// Save even though the zone key set changed in a way that looks like a
+    /// rename. The refusal message explains what a rename breaks and names
+    /// this flag; nothing sets it automatically.
+    ///
+    /// A STRING, not a `bool`: see [`query_flag`]. The `422` detail tells
+    /// the user to type `?allow_zone_key_change=1`, and a bare `bool` would
+    /// answer `400` to exactly that.
+    #[serde(default)]
+    allow_zone_key_change: Option<String>,
+}
+
+impl ConfigSaveParams {
+    fn allows_zone_key_change(&self) -> bool {
+        query_flag(self.allow_zone_key_change.as_ref())
+    }
+}
+
+/// Describe a zone-key change that looks like a RENAME, or `None` when the
+/// change is safe to save.
+///
+/// A zone slug is the primary key of everything per-zone: run history, the
+/// sticky auto/skip/run override, the commanded-valve ledger the deadline
+/// reaper disarms against, tuning dismissals, the soil channel id inside
+/// sensor_history, nine Home Assistant entity ids, three RETAINED MQTT
+/// discovery topics with no clear path, and the /zones/<slug> URL every push
+/// notification has ever linked to. The structured editor makes the slug
+/// read-only for that reason, and BOTH whole-config write paths run this
+/// guard: `PUT /api/config`, which any API client or restore script can
+/// reshape, and `PUT /api/config/raw`.
+///
+/// A rename is indistinguishable from "deleted one zone and added another"
+/// by definition, so the guard fires on that shape: at least one key gone
+/// AND at least one key new. Pure deletion and pure addition both pass.
+fn zone_key_rename_detail(
+    stored: &std::collections::BTreeSet<String>,
+    incoming: &std::collections::BTreeSet<String>,
+) -> Option<String> {
+    let removed: Vec<&str> = stored.difference(incoming).map(String::as_str).collect();
+    let added: Vec<&str> = incoming.difference(stored).map(String::as_str).collect();
+    if removed.is_empty() || added.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "this save drops the zone key(s) {} and adds {}. A zone's slug is permanent: it is \
+         the key its run history, its auto/skip/run override, its in-flight run ledger, its \
+         tuning dismissals, its soil sensor channel, its Home Assistant entity ids, its \
+         retained MQTT discovery topics, and its /zones/<slug> links are all stored under. \
+         Renaming it here orphans every one of them with no way back. To change what a zone \
+         is CALLED, edit its display_name and leave the key alone. If these really are two \
+         unrelated zones (one deleted, one added), save the removal and the addition as two \
+         separate saves, or repeat this one with ?allow_zone_key_change=1.",
+        removed
+            .iter()
+            .map(|k| format!("\"{k}\""))
+            .collect::<Vec<_>>()
+            .join(", "),
+        added
+            .iter()
+            .map(|k| format!("\"{k}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
 /// Replace /data/localsky.toml with the supplied TOML body, after parsing
 /// + validating it against the schema invariants.
 ///
@@ -913,6 +1004,7 @@ async fn get_raw_toml(
 /// to restore, so this is a no-op for them.
 async fn put_raw_toml(
     State(ConfigApiState { store, runtime }): State<ConfigApiState>,
+    Query(params): Query<ConfigSaveParams>,
     body: String,
 ) -> impl IntoResponse {
     // Same read-modify-write guard as PUT /: the stored-config load below
@@ -991,6 +1083,32 @@ async fn put_raw_toml(
                 .into_response();
         }
     };
+
+    // A zone slug is a primary key, not a label, and the raw editor is the
+    // one path that can change one. Refuse a save that drops a zone key and
+    // introduces another in the same write, which is what a rename looks
+    // like from here. `?allow_zone_key_change=1` is the deliberate override
+    // for the case where the removal and the addition really are unrelated.
+    if !params.allows_zone_key_change() {
+        let stored_zone_keys: std::collections::BTreeSet<String> = original
+            .as_ref()
+            .and_then(|v| v.get("zones"))
+            .and_then(|z| z.as_object())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        let incoming_zone_keys: std::collections::BTreeSet<String> =
+            parsed.zones.keys().cloned().collect();
+        if let Some(detail) = zone_key_rename_detail(&stored_zone_keys, &incoming_zone_keys) {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ApiError {
+                    error: "zone_key_renamed".into(),
+                    detail: Some(detail),
+                }),
+            )
+                .into_response();
+        }
+    }
 
     if let Err(e) = crate::config::loader::validate(&parsed) {
         return (
@@ -1448,6 +1566,7 @@ pub(crate) fn remaining_sentinels(v: &serde_json::Value, path: &str, out: &mut V
 
 async fn put_config(
     State(ConfigApiState { store, runtime }): State<ConfigApiState>,
+    Query(params): Query<ConfigSaveParams>,
     Json(mut candidate_json): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     // Serialize the whole read-modify-write against every other config
@@ -1519,6 +1638,32 @@ async fn put_config(
     // (the editor just showed it valid) 422s here on the "at least one
     // controller must have default = true" gate. Idempotent: a no-op when a
     // default already exists or there are 0 / 2+ controllers.
+    // The same zone-key guard the raw path runs. This is a documented,
+    // privileged, WHOLE-CONFIG write, so an API client, a restore script, or
+    // a front-end regression that reshapes `zones` renames a key here just as
+    // easily as a hand edit does in the raw editor. `original` was already
+    // loaded above for unredaction; it is Null on a first install, whose
+    // `.get("zones")` yields None and reads correctly as an empty stored set
+    // (a pure addition, which passes).
+    if !params.allows_zone_key_change() {
+        let stored_zone_keys: std::collections::BTreeSet<String> = original
+            .get("zones")
+            .and_then(|z| z.as_object())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        let incoming_zone_keys: std::collections::BTreeSet<String> =
+            cfg.zones.keys().cloned().collect();
+        if let Some(detail) = zone_key_rename_detail(&stored_zone_keys, &incoming_zone_keys) {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ApiError {
+                    error: "zone_key_renamed".into(),
+                    detail: Some(detail),
+                }),
+            )
+                .into_response();
+        }
+    }
     crate::config::loader::auto_default_controller(&mut cfg);
     // Structural validation: errors block the save (the report rides in
     // the 422 body so the UI can show field-level issues); warnings are
@@ -2488,9 +2633,13 @@ mod tests {
         ha.bearer_token = SECRET_REDACTED_SENTINEL.to_string();
         let body = toml::to_string_pretty(&renamed).unwrap();
 
-        let resp = put_raw_toml(State(ConfigApiState::store_only(store)), body)
-            .await
-            .into_response();
+        let resp = put_raw_toml(
+            State(ConfigApiState::store_only(store)),
+            Query(ConfigSaveParams::default()),
+            body,
+        )
+        .await
+        .into_response();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -3522,6 +3671,7 @@ mod tests {
             mad_pct_override: None,
             controller_id: "os_main".into(),
             controller_station: "1".into(),
+            controller_zone_name: None,
             soil_sensor_id: None,
             target_min_pct_soil: 30.0,
             saturation_pct_soil: 70.0,
@@ -3574,6 +3724,136 @@ mod tests {
         assert!(apply_zone_field(&mut z, "max_run_minutes", &serde_json::json!(4)).is_err());
         assert!(apply_zone_field(&mut z, "max_run_minutes", &serde_json::json!(400)).is_err());
         assert!(apply_zone_field(&mut z, "max_run_minutes", &serde_json::json!(90.5)).is_err());
+    }
+
+    // ---- raw-TOML zone rename guard ----
+
+    fn keys(list: &[&str]) -> std::collections::BTreeSet<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_raw_zone_key_rename_is_refused_and_says_why() {
+        let detail = zone_key_rename_detail(
+            &keys(&["front_yard", "back_yard"]),
+            &keys(&["front_lawn", "back_yard"]),
+        )
+        .expect("a dropped key plus a new key reads as a rename");
+        assert!(
+            detail.contains("front_yard"),
+            "names the key that would be lost"
+        );
+        assert!(
+            detail.contains("front_lawn"),
+            "names the key that would appear"
+        );
+        assert!(
+            detail.contains("permanent"),
+            "states the rule instead of just refusing: {detail}"
+        );
+        assert!(
+            detail.contains("display_name"),
+            "points at the field that IS the zone's name: {detail}"
+        );
+        assert!(
+            detail.contains("allow_zone_key_change=1"),
+            "names the override so a genuine delete-plus-add is not a dead end: {detail}"
+        );
+    }
+
+    /// THE ESCAPE THE REFUSAL ITSELF TELLS THE USER TO TYPE. Axum's `Query`
+    /// deserializes through serde_urlencoded, whose bool impl is
+    /// `str::parse::<bool>()`, and Rust's `FromStr for bool` accepts only
+    /// "true"/"false". A bare `bool` field therefore does not read `=1` as
+    /// false: it fails the WHOLE extraction and answers 400 before the
+    /// handler runs, so the documented escape was unreachable. Drive the
+    /// real query layer, not a constructed value, or this regresses silently.
+    #[test]
+    fn the_documented_allow_zone_key_change_1_actually_parses() {
+        use axum::extract::Query;
+        for q in [
+            "?allow_zone_key_change=1",
+            "?allow_zone_key_change=true",
+            "?allow_zone_key_change=TRUE",
+            "?allow_zone_key_change=yes",
+            "?allow_zone_key_change=on",
+            // A bare flag with no value is what a person types by hand.
+            "?allow_zone_key_change",
+        ] {
+            let uri: axum::http::Uri = format!("/api/v1/config/raw{q}").parse().unwrap();
+            let Query(p) = Query::<ConfigSaveParams>::try_from_uri(&uri)
+                .unwrap_or_else(|e| panic!("{q} must parse, got {e:?}"));
+            assert!(p.allows_zone_key_change(), "{q} must read as set");
+        }
+        // Absent, and an explicit off, both leave the guard armed.
+        for q in [
+            "",
+            "?allow_zone_key_change=0",
+            "?allow_zone_key_change=false",
+        ] {
+            let uri: axum::http::Uri = format!("/api/v1/config/raw{q}").parse().unwrap();
+            let Query(p) = Query::<ConfigSaveParams>::try_from_uri(&uri).unwrap();
+            assert!(!p.allows_zone_key_change(), "{q} must leave the guard on");
+        }
+    }
+
+    /// The same defect sat in the pre-existing `?reveal=1`, which is what
+    /// made the bare-bool pattern look safe to copy.
+    #[test]
+    fn the_documented_reveal_1_actually_parses() {
+        use axum::extract::Query;
+        let uri: axum::http::Uri = "/api/v1/config/raw?reveal=1".parse().unwrap();
+        let Query(q) = Query::<RawQuery>::try_from_uri(&uri).expect("?reveal=1 must parse");
+        assert!(query_flag(q.reveal.as_ref()));
+        let uri: axum::http::Uri = "/api/v1/config/raw".parse().unwrap();
+        let Query(q) = Query::<RawQuery>::try_from_uri(&uri).unwrap();
+        assert!(!query_flag(q.reveal.as_ref()), "redacted stays the default");
+    }
+
+    #[test]
+    fn query_flag_reads_the_spellings_people_type() {
+        assert!(query_flag(Some(&"1".to_string())));
+        assert!(query_flag(Some(&" TrUe ".to_string())));
+        assert!(query_flag(Some(&String::new())), "a bare ?flag is set");
+        assert!(!query_flag(None));
+        assert!(!query_flag(Some(&"0".to_string())));
+        assert!(!query_flag(Some(&"maybe".to_string())));
+    }
+
+    #[test]
+    fn adding_or_deleting_a_zone_in_raw_toml_stays_allowed() {
+        // Pure addition: a new zone alongside the existing ones.
+        assert_eq!(
+            zone_key_rename_detail(&keys(&["front_yard"]), &keys(&["front_yard", "orchard"])),
+            None
+        );
+        // Pure deletion: the delete button's own path writes this shape.
+        assert_eq!(
+            zone_key_rename_detail(&keys(&["front_yard", "orchard"]), &keys(&["front_yard"])),
+            None
+        );
+        // No change at all, including the first-ever save with no zones.
+        assert_eq!(
+            zone_key_rename_detail(&keys(&["front_yard"]), &keys(&["front_yard"])),
+            None
+        );
+        assert_eq!(zone_key_rename_detail(&keys(&[]), &keys(&[])), None);
+        assert_eq!(
+            zone_key_rename_detail(&keys(&[]), &keys(&["front_yard"])),
+            None
+        );
+    }
+
+    #[test]
+    fn a_hyphen_to_underscore_zone_key_edit_is_still_a_rename() {
+        // Dispatch normalizes hyphens to underscores, so "back-yard" and
+        // "back_yard" water the same valve. The STORED key does not
+        // normalize: history, entity ids and MQTT topics all carry the
+        // literal config key, so swapping one for the other orphans them.
+        assert!(
+            zone_key_rename_detail(&keys(&["back-yard"]), &keys(&["back_yard"])).is_some(),
+            "a hyphen swap changes the stored key and must be refused too"
+        );
     }
 
     #[test]

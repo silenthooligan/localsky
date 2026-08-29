@@ -192,7 +192,8 @@ root_depth_mm = null             # null = species default
 mad_pct_override = null          # null = species default
 max_run_minutes = null           # null = 60; longest single run (whole minutes, 5..=360)
 controller_id = "os_main"
-controller_station = "1"         # 1-based for OS; entity_id for HA / ESPHome
+controller_station = "1"         # the controller's own id for this zone
+controller_zone_name = null      # the controller's name for it; a label only
 soil_sensor_id = null            # optional; engine uses modeled bucket when absent
 target_min_pct_soil = 30.0
 saturation_pct_soil = 70.0

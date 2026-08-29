@@ -831,24 +831,31 @@ fn controller_error_response(
     let mut body = json!({ "error": message, "code": code });
     match &e {
         ControllerError::ZoneUnknown(zone) => {
-            // The map is keyed by the slugified VENDOR zone name; dispatch
-            // looks it up by the LocalSky zone slug. When a user named a
-            // zone differently from the vendor, the lookup misses and the
-            // old message gave no way to see why. Show the keys and name
-            // both remedies that actually bind. Deliberately no fuzzy
-            // name matching in the lookup itself: guessing which valve the
-            // user meant risks opening the wrong one.
+            // Nothing on this controller is wired to this zone. The one
+            // remedy is to say which of the controller's zones it is;
+            // the editor's station field is where that lives, and it now
+            // lists them for the kinds that can be asked. The old advice to
+            // RENAME the zone until its slug matched a vendor-named map key
+            // is gone: the slug is a permanent key (history, entity ids,
+            // retained MQTT topics), so renaming to fix a binding trades one
+            // broken thing for a worse one. Deliberately no fuzzy name
+            // matching in the lookup itself: guessing which valve the user
+            // meant risks opening the wrong one.
             let hint = if mapped_zone_slugs.is_empty() {
-                "This controller has no zone map yet. Open Settings, then Devices, \
-                 open the controller with Edit, and use Scan zones to fill it."
-                    .to_string()
+                format!(
+                    "Nothing on this controller is bound to \"{zone}\" yet. Open Settings, \
+                     then Zones, edit this zone, and set Controller station to the \
+                     controller's own zone. Where the controller can be asked, that field \
+                     lists its zones by name."
+                )
             } else {
                 format!(
-                    "This controller's zone map has: {}. Your zone's slug is \"{zone}\", \
-                     which is not one of them, and the lookup is exact. The map keys come \
-                     from the controller's own zone names. Either rename the zone (or its \
-                     map key under Settings, then Devices, Advanced) so the two match, or \
-                     put this zone's vendor id in the zone's Controller station field.",
+                    "This controller can currently fire: {}. Your zone's slug is \"{zone}\", \
+                     which is not one of them, and the lookup is exact. Open Settings, then \
+                     Zones, edit this zone, and set Controller station to the controller's \
+                     own zone; where the controller can be asked, that field lists them by \
+                     name. Do not rename the zone to match: a zone's slug is permanent \
+                     because its history and its Home Assistant entities are stored under it.",
                     mapped_zone_slugs.join(", ")
                 )
             };
@@ -1680,12 +1687,13 @@ mod tests {
         }
     }
 
-    /// The reporter's most likely remaining failure. The controller's zone
-    /// map is keyed by the slugified VENDOR zone name while dispatch looks
-    /// up the LocalSky zone slug, so the 400 has to show the keys and name
-    /// both remedies, or the user cannot tell why an exact lookup missed.
+    /// The reporter's most likely remaining failure. The 400 has to show
+    /// what the controller CAN fire, name the slug that missed, and point at
+    /// the one field that binds it. It must NOT suggest renaming the zone:
+    /// that was the old remedy and it trades a binding problem for a
+    /// permanent-key problem.
     #[test]
-    fn zone_unknown_body_shows_the_map_keys_and_both_remedies() {
+    fn zone_unknown_body_shows_what_the_controller_can_fire_and_the_one_remedy() {
         let (s, Json(body)) = controller_error_response(
             ControllerError::ZoneUnknown("front_yard".into()),
             None,
@@ -1709,12 +1717,19 @@ mod tests {
             hint.contains("front_yard"),
             "the hint must name the slug that missed: {hint}"
         );
-        // Both remedies that actually bind, and neither is "leave it blank":
-        // clearing the station field leaves a mismatched zone unbound.
-        assert!(hint.contains("rename"), "remedy 1, rename to match: {hint}");
+        // The remedy that actually binds, and where to do it.
         assert!(
             hint.contains("Controller station"),
-            "remedy 2, paste the vendor id: {hint}"
+            "name the field that binds the zone: {hint}"
+        );
+        assert!(
+            hint.contains("Do not rename the zone"),
+            "the old remedy was to rename until the names matched; say plainly \
+             that it is not the fix: {hint}"
+        );
+        assert!(
+            hint.contains("permanent"),
+            "and say why renaming is not the fix: {hint}"
         );
         assert!(
             !hint.contains("blank"),
@@ -1722,10 +1737,12 @@ mod tests {
         );
     }
 
-    /// An empty map is the one case where "run Scan zones" is the right
-    /// advice, so it keeps that wording and shows no key list.
+    /// With nothing mapped at all there is no key list to show, so the hint
+    /// is just the remedy. It must point at the ZONE editor, not at the
+    /// controller's Scan zones button: six of the ten kinds cannot scan, and
+    /// for the four that can, scanning alone never bound anything.
     #[test]
-    fn zone_unknown_with_no_map_points_at_the_scan() {
+    fn zone_unknown_with_nothing_bound_points_at_the_zone_editor() {
         let (_, Json(body)) = controller_error_response(
             ControllerError::ZoneUnknown("front_yard".into()),
             None,
@@ -1733,8 +1750,10 @@ mod tests {
         );
         assert_eq!(body["mapped_zones"], json!([]));
         let hint = body["hint"].as_str().unwrap();
-        assert!(hint.contains("Scan zones"), "{hint}");
-        assert!(hint.contains("no zone map"), "{hint}");
+        assert!(hint.contains("front_yard"), "{hint}");
+        assert!(hint.contains("Settings"), "{hint}");
+        assert!(hint.contains("Zones"), "{hint}");
+        assert!(hint.contains("Controller station"), "{hint}");
     }
 
     /// The server's error body and the client's reader are two ends of one

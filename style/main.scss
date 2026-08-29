@@ -12075,6 +12075,24 @@ button.mobile-tab {
 .setup-scan__row { display: flex; align-items: center; gap: var(--space-2); min-height: 32px; font-size: var(--text-body-sm); color: var(--text); cursor: pointer; }
 .setup-scan__row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); }
 .setup-scan .setup-footer__btn--primary { align-self: flex-start; margin-top: var(--space-2); }
+
+// BULK BIND table (controller editor, after a Scan zones). Same geometry
+// family as .setup-scan so the two scan surfaces read as one, but a control
+// tray rather than a list of clickable rows: the container holds live
+// controls and is not itself clickable, so no pointer cue and no wizard
+// indent. Per the affordance grammar above, this is .is-control.
+.zone-bind-list { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3); background: var(--surface-control-bg); border: 1px solid var(--elev-border); border-radius: var(--radius-md); list-style: none; margin: 0; cursor: default; }
+.zone-bind-row { display: grid; grid-template-columns: minmax(6rem, 1fr) minmax(0, 1.2fr) auto minmax(8rem, 1fr); align-items: center; gap: var(--space-2); min-height: 40px; font-size: var(--text-body-sm); color: var(--text); }
+.zone-bind-row__name { font-weight: 600; color: var(--text-bright); }
+.zone-bind-row__id { font-family: var(--font-mono); font-size: var(--text-meta); color: var(--text-dim); font-variant-numeric: tabular-nums; word-break: break-all; }
+// Identity fact, not a status: this row is already wired, so a blank row
+// unambiguously means unbound. Dim text, never a colored chip.
+.zone-bind-row__state { font-size: var(--text-meta); color: var(--text-faint); white-space: nowrap; }
+// Narrow screens: stack so a long vendor id never squeezes the picker out.
+@media (max-width: 560px) {
+  .zone-bind-row { grid-template-columns: 1fr; gap: var(--space-1); }
+}
+
 .cond-editor { display: flex; flex-direction: column; gap: var(--space-3); margin-top: var(--space-4); padding: var(--space-4); background: var(--elev-2); border: 1px solid var(--elev-border-strong); border-radius: var(--radius-md); }
 .cond-editor__field { display: flex; flex-direction: column; gap: var(--space-1); }
 .cond-editor__field span { font-size: var(--text-meta); color: var(--text-dim); }

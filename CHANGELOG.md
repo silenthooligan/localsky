@@ -2,6 +2,38 @@
 
 All notable changes to LocalSky are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.21] - 2026-08-29
+
+Pick your controller's zone from a list instead of matching names by hand.
+
+### Changed
+
+- **The zone editor's "Controller station" field now lists your controller's own zones and you pick one.** Where LocalSky can ask the controller (OpenSprinkler, Rachio, a DIY HTTP board, the simulated controller) the field shows its zones by the controller's name for each and stores its id, so a Rachio zone called "Front Lawn" can fire a LocalSky zone called "Front Yard" with nothing typed and nothing renamed. Where the controller cannot be asked (Hydrawise, B-hyve, Rain Bird, Home Assistant) the field is the text box it has always been, and it stays a text box when a controller is offline, out of daily requests, or simply reports nothing, with a line saying which. There is always somewhere to type an id by hand ([#8](https://github.com/silenthooligan/localsky/issues/8)).
+- **A zone's own binding is now the thing that fires it, and your controller's zone map keeps working as before.** On startup, a zone with no station of its own picks up the id the controller's map already held for it, so an existing install waters exactly as it did and its bindings become visible on the zones themselves. Nothing is overwritten, nothing is removed, and a binding you set by hand is never touched.
+- Renaming a zone is no longer offered as a way to make a controller find it. A zone's internal id is permanent, because its run history, its soil sensor, its Home Assistant entities and its links are all stored under it, and the guide, the editor, and the "zone will not start" message now all say so. Editing a zone's Name is free and always was; only the internal id is fixed.
+- API contract 1.24.0: `ZoneConfig` gains `controller_zone_name`, the controller's own name for the bound zone, as a display label that nothing dispatches on. `controller_station` keeps its shape and is now optional in a hand-written config. New validation warnings `zone_unbound`, `zone_station_unparseable` and `zone_controller_not_built`. Both `PUT /api/config` and `PUT /api/config/raw` answer `422 zone_key_renamed` for a save that renames a zone key, with `?allow_zone_key_change=1` to override. The unmapped-zone `400` hint stops suggesting a rename. No Home Assistant integration change is required.
+
+### Added
+
+- **Bind every zone a controller scan found, in one step.** Scanning a controller under Settings, then Devices now ends in a table: each zone the controller reported, its id, and a dropdown of your zones. Choosing there binds them all at once. It binds zones you already have and never creates one, and it refuses to point two of the controller's zones at the same one of yours ([#8](https://github.com/silenthooligan/localsky/issues/8)).
+- The zone card and the zone editor now show which of the controller's zones a zone fires, by the controller's own name for it, so you can check the wiring without opening anything.
+
+### Fixed
+
+- **A zone bound to nothing now says so, instead of quietly never watering.** A zone with no station and no entry in its controller's zone map looked completely healthy: it just never ran. It now carries an "Unbound" mark on its card, a line in its editor, and a warning in the config check, before the first night it fails to water.
+- **A Home Assistant zone bound by the "Controller station" field now actually runs.** The editor has asked HA users for an entity id in that field for some time and nothing read it, so a zone bound that way never watered. It is now used, alongside the controller's own entity map, and a value that is not an entity id is ignored with a log line rather than sent to Home Assistant. The MQTT controller says plainly that its zones bind by command topic instead, and the ESPHome text no longer implies the field does anything there. If a Home Assistant zone carries both a station value and an entry in the controller's entity map, the station value now wins: the log names every zone whose target moved, so check it once after upgrading and clear the station field on any zone that was already watering correctly.
+- A zone on the simulated controller no longer reads as unbound. It accepts any zone whether bound or not, so marking it needed attention was wrong and taught people to ignore the mark.
+- An MQTT zone with something typed in its station field no longer reads as bound. MQTT zones bind by command topic and payloads, which that field cannot carry, so anything in it was never going to water the zone.
+- A zone on an ESPHome native controller now says the adapter is not built yet, which is the real reason it never waters, instead of reporting on bindings that could not fire either way.
+- **A zone holding an id its controller cannot use now says so, instead of looking bound and never watering.** Move a zone from one brand of controller to another and its old id stays in the station field: a Rachio zone UUID means nothing to a Hydrawise, which addresses zones by relay number. The field was not empty, so nothing flagged it, and the only symptom was a zone that quietly never ran. The zone now carries the same Unbound mark as any other, and the config check names the value, the controller, and what that controller expects instead. A zone whose controller still has it in its own zone map keeps watering and is not flagged.
+- Editing an unrelated setting on a zone can no longer clear its binding. The zone form writes the station field on every save, so a save made while the controller could not be reached would have blanked it. A blank now only clears a binding when the controller's zones were actually listed and you chose "(not bound)".
+- Renaming a zone key is no longer possible by accident. Doing so silently orphaned that zone's run history, its overrides, its in-flight run record, its dismissed suggestions, its soil sensor channel, its Home Assistant entities and its retained MQTT topics. The save is now refused with an explanation on both config save paths, and the raw editor offers a confirm button for the case where one zone was genuinely deleted and another added.
+- Adding a zone whose name matches one you already have no longer replaces it. The add form inserts by internal id, so a second "Back Yard" quietly overwrote the first, taking its binding and its settings with it. It now says which zone already uses that id and asks you to edit that one.
+- Binding zones after a controller scan now shows which zones are already bound, pre-selected, instead of showing every row as unbound. Checking a working install could otherwise read as "nothing here is bound yet" and lead to rebuilding bindings that were already right; a bind that moves an existing one now says how many moved.
+- A controller zone that reports no id of its own can no longer be bound, which would have blanked a working zone while reporting success.
+- Switching a zone's controller now clears the station id, which only ever meant something to the controller it came from. Carrying it over left the zone pointed at an id the new controller has never heard of, and because the field was not empty nothing reported it.
+- A controller that cannot be reached is no longer asked again every time you click into the station field. The result is remembered until you press Rescan, so a rate-limited account is not spent by a few clicks.
+
 ## [0.7.20] - 2026-08-29
 
 ### Fixed

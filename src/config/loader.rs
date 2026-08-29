@@ -61,6 +61,113 @@ pub fn normalize_legacy_values(cfg: &mut Config) {
             }
         }
     }
+    let filled = backfill_zone_stations(cfg);
+    if filled > 0 {
+        tracing::info!(
+            zones = filled,
+            "copied the controller's zone-map entry onto unbound zones"
+        );
+    }
+}
+
+/// A controller's zone map flattened to `normalized slug -> station string`,
+/// or `None` for a kind that holds no map a `controller_station` string can
+/// carry.
+///
+/// Values are stringified exactly the way each kind's station parser reads
+/// them back (`station_id::rachio_zone_id` takes the uuid verbatim,
+/// `hydrawise_relay_id` and `station_number` parse a bare number), so a
+/// backfilled value round-trips through the overlay unchanged.
+///
+/// `mqtt_command` is deliberately absent: its per-zone value is a command
+/// struct (topic plus on/off payloads), which a single string cannot
+/// express. MQTT zones bind in the controller's `zone_command_map` only.
+///
+/// Keys are hyphen-normalized to underscores, matching every other slug
+/// comparison in the codebase (`runtime::overlay_zone_entries`,
+/// `validate::validate`, `zones::from_pairs`).
+fn controller_zone_map(
+    kind: &crate::config::schema::ControllerKind,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    use crate::config::schema::ControllerKind as K;
+    fn norm<V: ToString>(
+        m: &std::collections::BTreeMap<String, V>,
+    ) -> std::collections::BTreeMap<String, String> {
+        m.iter()
+            .map(|(k, v)| (k.replace('-', "_"), v.to_string()))
+            .collect()
+    }
+    match kind {
+        K::Rachio(c) => Some(norm(&c.zone_uuid_map)),
+        K::Hydrawise(c) => Some(norm(&c.zone_relay_map)),
+        K::Bhyve(c) => Some(norm(&c.zone_station_map)),
+        K::Rainbird(c) => Some(norm(&c.zone_station_map)),
+        K::HaServiceCall(c) => Some(norm(&c.zone_entity_map)),
+        K::EsphomeNative(c) => Some(norm(&c.zone_entity_map)),
+        K::OpensprinklerDirect(_) | K::HttpGeneric(_) | K::DryRun(_) | K::MqttCommand(_) => None,
+    }
+}
+
+/// Copy a controller's own zone-map entry into a zone whose
+/// `controller_station` is empty, so the zone entry becomes the visible,
+/// portable binding instead of a coincidence between two key spaces.
+///
+/// The controller-side zone maps are keyed by the SLUGIFIED VENDOR ZONE
+/// NAME (that is what a controller scan writes) while dispatch looks them up
+/// by the LocalSky zone slug, so they bind only when the two happen to
+/// match. This copies the value that IS currently binding onto the zone,
+/// where a person can see it, a picker can change it, and it survives the
+/// user renaming their zones on the vendor's side. It never invents a
+/// binding: only an entry already keyed by this zone's slug is copied, which
+/// is exactly the set dispatch already resolves.
+///
+/// NEVER overwrites a non-empty `controller_station` (on the numeric kinds a
+/// leftover station number already wins over the map; reversing that
+/// precedence would silently repoint a valve). Never deletes or rewrites the
+/// controller's map.
+///
+/// PRECEDENCE, PLAINLY. The map keeps binding a zone this pass did not
+/// reach: a hand-written key, a key for a zone that does not exist yet, and
+/// every zone on a config that is only ever read. But for a zone this pass
+/// DID fill, the map is a live fallback only until the next config save.
+/// Once the copied station is persisted, `runtime::overlay_zone_entries`
+/// gives the zone entry priority for that zone forever, so a later edit to
+/// the controller's own map does nothing for it. That is the intended end
+/// state (the binding belongs on the zone, where it is visible and
+/// editable); the overlay logs a line whenever the two disagree so the flip
+/// is never silent. Editing the binding means editing the zone.
+///
+/// Idempotent: a second run finds every station non-empty and does nothing.
+///
+/// Returns how many zones were filled in, so the caller can log once.
+pub fn backfill_zone_stations(cfg: &mut Config) -> usize {
+    let maps: Vec<(String, std::collections::BTreeMap<String, String>)> = cfg
+        .controllers
+        .iter()
+        .filter_map(|c| controller_zone_map(&c.controller).map(|m| (c.id.clone(), m)))
+        .filter(|(_, m)| !m.is_empty())
+        .collect();
+    if maps.is_empty() {
+        return 0;
+    }
+    let mut filled = 0usize;
+    for (slug, zone) in cfg.zones.iter_mut() {
+        if !zone.controller_station.trim().is_empty() {
+            continue;
+        }
+        let Some((_, map)) = maps.iter().find(|(id, _)| id == &zone.controller_id) else {
+            continue;
+        };
+        let Some(station) = map.get(&slug.replace('-', "_")) else {
+            continue;
+        };
+        if station.trim().is_empty() {
+            continue;
+        }
+        zone.controller_station = station.clone();
+        filled += 1;
+    }
+    filled
 }
 
 /// `${VAR}` interpolation. Single pass; nested refs not supported.
@@ -360,6 +467,7 @@ mod tests {
                 mad_pct_override: None,
                 controller_id: "c1".into(),
                 controller_station: "1".into(),
+                controller_zone_name: None,
                 soil_sensor_id: None,
                 target_min_pct_soil: 80.0, // backwards!
                 saturation_pct_soil: 60.0, // less than min
@@ -404,6 +512,7 @@ mod tests {
                 mad_pct_override: None,
                 controller_id: "c1".into(),
                 controller_station: "1".into(),
+                controller_zone_name: None,
                 soil_sensor_id: None,
                 target_min_pct_soil: 30.0,
                 saturation_pct_soil: 70.0,
@@ -447,6 +556,7 @@ mod tests {
                 mad_pct_override: None,
                 controller_id: "c1".into(),
                 controller_station: "1".into(),
+                controller_zone_name: None,
                 soil_sensor_id: None,
                 target_min_pct_soil: 30.0,
                 saturation_pct_soil: 70.0,
@@ -534,4 +644,267 @@ mod tests {
             .collect();
         assert_eq!(days, vec![3, 5], "1 normalizes to 3; a chosen 5 stays");
     }
+    // ---- controller_station backfill (issue #8) ----
+
+    /// A zone whose only distinguishing fields are its controller binding.
+    /// Everything else is a valid default so the fixture stays readable.
+    fn bound_zone(controller_id: &str, station: &str) -> crate::config::schema::ZoneConfig {
+        use crate::config::schema::*;
+        ZoneConfig {
+            display_name: "Zone".into(),
+            area_sqft: 1000.0,
+            species: GrassSpecies::StAugustine,
+            soil_texture: SoilTexture::SandyLoam,
+            slope_pct: 0.0,
+            sun_exposure: SunExposure::Full,
+            sprinkler_type: SprinklerType::Rotor,
+            precip_rate_mm_hr: None,
+            precip_rate_source: PrecipRateSource::Catalog,
+            root_depth_mm: None,
+            mad_pct_override: None,
+            controller_id: controller_id.into(),
+            controller_station: station.into(),
+            controller_zone_name: None,
+            soil_sensor_id: None,
+            target_min_pct_soil: 30.0,
+            saturation_pct_soil: 70.0,
+            photo_url: None,
+            weekly_budget_in: None,
+            sessions_per_week: None,
+            max_run_minutes: None,
+        }
+    }
+
+    fn controller(
+        id: &str,
+        kind: &str,
+        config: serde_json::Value,
+    ) -> crate::config::schema::ControllerEntry {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "default": true,
+            "enabled": true,
+            "kind": kind,
+            "config": config,
+        }))
+        .expect("controller fixture parses")
+    }
+
+    const UUID_A: &str = "1f00aa00-0000-4000-8000-0000000000a1";
+    const UUID_B: &str = "1f00aa00-0000-4000-8000-0000000000a2";
+
+    /// The issue #8 reporter's shape: he got his Rachio zones running by
+    /// renaming them in the Rachio app until the slugified vendor names
+    /// matched his LocalSky slugs, so his zone_uuid_map keys coincide with
+    /// his zone slugs and every controller_station is EMPTY. The backfill
+    /// must move those uuids onto the zones without him touching anything.
+    #[test]
+    fn backfill_rescues_the_coincidence_matched_rachio_config() {
+        let mut cfg = Config::default();
+        cfg.controllers.push(controller(
+            "rachio_main",
+            "rachio",
+            serde_json::json!({
+                "api_token": "example-token",
+                "device_id": "device-0001",
+                "zone_uuid_map": { "front_yard": UUID_A, "back_yard": UUID_B },
+            }),
+        ));
+        cfg.zones
+            .insert("front_yard".into(), bound_zone("rachio_main", ""));
+        cfg.zones
+            .insert("back_yard".into(), bound_zone("rachio_main", ""));
+        assert_eq!(backfill_zone_stations(&mut cfg), 2);
+        assert_eq!(cfg.zones["front_yard"].controller_station, UUID_A);
+        assert_eq!(cfg.zones["back_yard"].controller_station, UUID_B);
+        // The map is a live fallback, not a migration source to be consumed.
+        match &cfg.controllers[0].controller {
+            crate::config::schema::ControllerKind::Rachio(c) => {
+                assert_eq!(c.zone_uuid_map.len(), 2, "the zone map is left in place");
+            }
+            other => panic!("expected rachio, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn backfill_never_overwrites_a_station_that_is_already_set() {
+        let mut cfg = Config::default();
+        cfg.controllers.push(controller(
+            "rachio_main",
+            "rachio",
+            serde_json::json!({
+                "api_token": "example-token",
+                "device_id": "device-0001",
+                "zone_uuid_map": { "front_yard": UUID_A }
+            }),
+        ));
+        // A leftover station number already wins over the map on the numeric
+        // kinds, and on Rachio it is rejected in favor of the map. Either
+        // way the operator's value is theirs; the backfill leaves it alone.
+        cfg.zones
+            .insert("front_yard".into(), bound_zone("rachio_main", "3"));
+        assert_eq!(backfill_zone_stations(&mut cfg), 0);
+        assert_eq!(cfg.zones["front_yard"].controller_station, "3");
+    }
+
+    #[test]
+    fn backfill_stringifies_the_numeric_kinds_and_resolves_hyphenated_slugs() {
+        let mut cfg = Config::default();
+        cfg.controllers.push(controller(
+            "hydrawise_main",
+            "hydrawise",
+            serde_json::json!({
+                "api_key": "example-key",
+                "controller_id": 7,
+                "zone_relay_map": { "front_yard": 42 }
+            }),
+        ));
+        cfg.controllers.push(controller(
+            "bhyve_main",
+            "bhyve",
+            serde_json::json!({
+                "email": "someone@example.com",
+                "password": "example",
+                "device_id": "device-0001",
+                // A hyphenated map key against an underscored zone key.
+                "zone_station_map": { "side-yard": 5 }
+            }),
+        ));
+        // A hyphenated ZONE key against an underscored map key.
+        cfg.zones
+            .insert("front-yard".into(), bound_zone("hydrawise_main", ""));
+        cfg.zones
+            .insert("side_yard".into(), bound_zone("bhyve_main", ""));
+        assert_eq!(backfill_zone_stations(&mut cfg), 2);
+        assert_eq!(cfg.zones["front-yard"].controller_station, "42");
+        assert_eq!(cfg.zones["side_yard"].controller_station, "5");
+    }
+
+    #[test]
+    fn backfill_binds_home_assistant_entities_and_leaves_mqtt_alone() {
+        let mut cfg = Config::default();
+        cfg.controllers.push(controller(
+            "ha_main",
+            "ha_service_call",
+            serde_json::json!({
+                "base_url": "http://homeassistant.example:8123",
+                "bearer_token": "example-token",
+                "zone_entity_map": { "front_yard": "switch.front_yard_valve" }
+            }),
+        ));
+        cfg.controllers.push(controller(
+            "mqtt_main",
+            "mqtt_command",
+            serde_json::json!({
+                "broker_host": "broker.example",
+                "zone_command_map": {
+                    "back_yard": {
+                        "topic": "irrig/zone_1/command",
+                        "on_payload": "ON",
+                        "off_payload": "OFF"
+                    }
+                }
+            }),
+        ));
+        cfg.zones
+            .insert("front_yard".into(), bound_zone("ha_main", ""));
+        cfg.zones
+            .insert("back_yard".into(), bound_zone("mqtt_main", ""));
+        assert_eq!(backfill_zone_stations(&mut cfg), 1);
+        assert_eq!(
+            cfg.zones["front_yard"].controller_station,
+            "switch.front_yard_valve"
+        );
+        // MQTT's map value is a struct a station string cannot carry, so the
+        // zone stays unbound on the zone entry and keeps dispatching through
+        // zone_command_map.
+        assert_eq!(cfg.zones["back_yard"].controller_station, "");
+    }
+
+    #[test]
+    fn backfill_is_idempotent_and_invents_nothing() {
+        let mut cfg = Config::default();
+        cfg.controllers.push(controller(
+            "rachio_main",
+            "rachio",
+            serde_json::json!({
+                "api_token": "example-token",
+                "device_id": "device-0001",
+                "zone_uuid_map": { "front_yard": UUID_A }
+            }),
+        ));
+        cfg.zones
+            .insert("front_yard".into(), bound_zone("rachio_main", ""));
+        // A zone the map does not cover stays empty: the backfill copies only
+        // what already binds, it never guesses.
+        cfg.zones
+            .insert("orchard".into(), bound_zone("rachio_main", ""));
+        // A zone on another controller is never touched.
+        cfg.zones
+            .insert("patio".into(), bound_zone("other_controller", ""));
+        assert_eq!(backfill_zone_stations(&mut cfg), 1);
+        assert_eq!(cfg.zones["orchard"].controller_station, "");
+        assert_eq!(cfg.zones["patio"].controller_station, "");
+        let before = cfg.zones.clone();
+        assert_eq!(backfill_zone_stations(&mut cfg), 0, "second run is a no-op");
+        for (slug, z) in &before {
+            assert_eq!(cfg.zones[slug].controller_station, z.controller_station);
+        }
+    }
+
+    /// A pre-rework localsky.toml with no `controller_zone_name` anywhere and
+    /// no `controller_station` on the zone must keep parsing.
+    /// `load_from_path` is a plain `toml::from_str`, so a required field
+    /// would turn every existing config into a parse error.
+    #[test]
+    fn a_pre_rework_zone_table_still_parses_and_backfills() {
+        let toml_src = PRE_REWORK_TOML;
+        let mut cfg: Config = toml::from_str(toml_src).expect("pre-rework config parses");
+        assert_eq!(cfg.zones["front_yard"].controller_station, "");
+        assert_eq!(cfg.zones["front_yard"].controller_zone_name, None);
+        normalize_legacy_values(&mut cfg);
+        assert_eq!(
+            cfg.zones["front_yard"].controller_station, UUID_A,
+            "load-time normalize backfills the binding"
+        );
+        // And it round-trips back out to TOML the store can write.
+        let round = toml::to_string_pretty(&cfg).expect("serializes");
+        let reparsed: Config = toml::from_str(&round).expect("re-parses");
+        assert_eq!(
+            reparsed.zones["front_yard"].controller_station,
+            cfg.zones["front_yard"].controller_station
+        );
+    }
+
+    const PRE_REWORK_TOML: &str = concat!(
+        "schema_version = 1\n",
+        "\n",
+        "[deployment]\n",
+        "display_name = \"Home\"\n",
+        "\n",
+        "[deployment.location]\n",
+        "lat = 28.5\n",
+        "lon = -81.4\n",
+        "\n",
+        "[[controllers]]\n",
+        "id = \"rachio_main\"\n",
+        "default = true\n",
+        "enabled = true\n",
+        "kind = \"rachio\"\n",
+        "\n",
+        "[controllers.config]\n",
+        "api_token = \"example-token\"\n",
+        "device_id = \"device-0001\"\n",
+        "\n",
+        "[controllers.config.zone_uuid_map]\n",
+        "front_yard = \"1f00aa00-0000-4000-8000-0000000000a1\"\n",
+        "\n",
+        "[zones.front_yard]\n",
+        "display_name = \"Front Yard\"\n",
+        "area_sqft = 1000.0\n",
+        "species = \"st_augustine\"\n",
+        "soil_texture = \"sandy_loam\"\n",
+        "sprinkler_type = \"rotor\"\n",
+        "controller_id = \"rachio_main\"\n",
+    );
 }

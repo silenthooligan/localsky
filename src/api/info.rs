@@ -172,7 +172,41 @@ use serde::{Deserialize, Serialize};
 /// to REPORT the change, in seconds; null when it reads state on demand)
 /// so a client can say a change was accepted and confirmation is still
 /// pending.
-pub const API_VERSION: &str = "1.23.0";
+/// 1.24.0: a zone binds to a controller zone by id. Additive on the
+/// wire: ZoneConfig gains `controller_zone_name`, the controller's own
+/// name for the bound zone (null when typed by hand or predating this
+/// release). It is a LABEL: nothing dispatches on it, nothing keys on
+/// it, and a stale value cannot mis-actuate. `controller_station` keeps
+/// its shape and gains #[serde(default)] so a config omitting it parses.
+/// Behavior: `controller_station` is now the binding a user picks, and a
+/// controller's own zone_*_map is the fallback that keeps a pre-existing
+/// config watering unchanged. loader::backfill_zone_stations copies a
+/// map entry onto any zone of that controller whose station is empty and
+/// whose slug the map covers, never overwriting a set station and never
+/// touching the map. ha_service_call now READS controller_station and
+/// overlays it onto zone_entity_map (entity-id shaped, junk warn-skipped);
+/// mqtt_command is exempt (its per-zone value is a struct) and
+/// esphome_native still builds nothing. The overlay logs a line whenever
+/// a zone entry displaces a DIFFERENT map value, so an HA binding that
+/// moves on upgrade is never silent; an identity copy from the backfill
+/// stays quiet. New validate warning `zone_unbound`, honest per kind:
+/// mqtt_command counts only its zone_command_map (its station field
+/// dispatches nothing), dry_run is never unbound (it accepts any slug),
+/// and esphome_native reports `zone_controller_not_built` instead. Its
+/// companion `zone_station_unparseable` covers a station value the kind
+/// cannot use (a Rachio uuid on a Hydrawise zone, an OpenSprinkler 0),
+/// which dispatch already ignored and which used to read as bound; the
+/// check calls the same per-kind parsers build_controllers binds with, so
+/// validation and dispatch cannot disagree. BOTH
+/// whole-config write paths (PUT /config and PUT /config/raw) answer 422
+/// zone_key_renamed for a save that drops one zone key and adds another,
+/// because the slug keys history, overrides, the run ledger, tuning
+/// dismissals, the soil channel, HA entity ids and retained MQTT topics;
+/// override with ?allow_zone_key_change=1 (also =true/=yes/=on, or the
+/// bare flag). The unknown-zone 400 hint stops advising a rename and
+/// points at Controller station. No HACS integration change: it gates on
+/// the API major and never reads /api/config.
+pub const API_VERSION: &str = "1.24.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {

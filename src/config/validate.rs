@@ -216,6 +216,106 @@ pub fn validate(cfg: &Config) -> ValidationReport {
         }
     }
 
+    // The other direction, and the one that actually costs a user water: a
+    // zone bound to a real controller by NEITHER path. Either its station
+    // field is empty, or it holds a value this controller kind cannot use
+    // (a Rachio UUID left behind on a zone moved to Hydrawise), and the
+    // controller's own zone map has no entry under its slug either. Every
+    // dispatch answers zone_unknown and the zone silently never waters.
+    // Until now such a config validated completely clean.
+    //
+    // Warning, not error, for the same reason the map-key check is one:
+    // validate() is a strict superset of the load/save gate, so an error
+    // here would make a previously-loadable config unloadable and drop the
+    // install to env_compat defaults. The hard refusal already lives where
+    // it belongs, in the 400 zone_unknown body at dispatch time.
+    for (slug, z) in &cfg.zones {
+        use crate::config::schema::ControllerKind as K;
+        if z.controller_id.is_empty() {
+            continue;
+        }
+        let Some(c) = cfg.controllers.iter().find(|c| c.id == z.controller_id) else {
+            continue; // already a zone_controller_missing error
+        };
+        // ESPHome native has no adapter: build_controllers warn-skips the
+        // whole controller, so NEITHER binding fires and testing them says
+        // nothing useful. Name the real problem instead.
+        if matches!(c.controller, K::EsphomeNative(_)) {
+            r.warn(
+                "zone_controller_not_built",
+                format!(
+                    "zone '{slug}' is on controller '{}', whose ESPHome native adapter is \
+                     not built yet, so nothing waters this zone whatever it is bound to. \
+                     Move it to the MQTT or DIY board controller kind.",
+                    c.id
+                ),
+            );
+            continue;
+        }
+        // A non-empty station is evidence of a binding only when the kind
+        // can actually dispatch that SHAPE. `station_is_dispatchable` is the
+        // same code `runtime::build_controllers` binds with, so this check
+        // and dispatch can never disagree; it answers None for the kinds
+        // that do not read the field at all, which is exactly MQTT (its
+        // per-zone value is a command struct) and dry run (any slug runs).
+        //
+        // A value the kind's parser rejects is the issue #8 shape one step
+        // on: it LOOKS like a binding, so nothing flagged it, and it only
+        // failed at dispatch. The clearest live example is a Rachio UUID
+        // left in a zone that was moved to a Hydrawise controller.
+        let station = z.controller_station.trim();
+        let shape = if station.is_empty() {
+            None
+        } else {
+            crate::station_id::station_is_dispatchable(c.controller.kind_str(), station)
+        };
+        if shape == Some(true) {
+            continue;
+        }
+        // The controller's own zone map still binds the zone, whatever is
+        // sitting in the station field: `overlay_zone_entries` warn-skips an
+        // unparseable value and leaves the mapped entry in place, so the
+        // zone waters and there is nothing to report.
+        if controller_zone_map_covers(&c.controller, slug) {
+            continue;
+        }
+        if shape == Some(false) {
+            let expects = crate::station_id::station_expectation(c.controller.kind_str())
+                .unwrap_or("an id of its own");
+            r.warn(
+                "zone_station_unparseable",
+                format!(
+                    "zone '{slug}': Controller station is '{station}', which controller '{}' \
+                     ({}) cannot use. It expects {expects}. The value is ignored at dispatch \
+                     and no zone map entry covers this zone, so nothing waters it. Open the \
+                     zone in Settings, then Zones, and set Controller station to one of that \
+                     controller's own zones.",
+                    c.id,
+                    c.controller.kind_str()
+                ),
+            );
+            continue;
+        }
+        let detail = if matches!(c.controller, K::MqttCommand(_)) {
+            format!(
+                "zone '{slug}' has no entry in controller '{}'s zone_command_map, so nothing \
+                 waters this zone. An MQTT zone binds by command topic and payloads, which \
+                 the Controller station field cannot carry: add it under Settings, then \
+                 Devices, then Advanced.",
+                c.id
+            )
+        } else {
+            format!(
+                "zone '{slug}' has no station on controller '{}' and that controller's zone \
+                 map has no entry for it, so nothing waters this zone. Open the zone in \
+                 Settings, then Zones, and pick the controller's zone in the Controller \
+                 station field.",
+                c.id
+            )
+        };
+        r.warn("zone_unbound", detail);
+    }
+
     // Source ids must be non-empty and free of whitespace/slashes (loader
     // save-gate parity).
     for s in &cfg.sources {
@@ -718,6 +818,46 @@ pub fn validate(cfg: &Config) -> ValidationReport {
     r
 }
 
+/// Whether a controller's own zone map holds an entry for `slug`, the
+/// fallback half of the binding.
+///
+/// Hyphens normalize to underscores on BOTH sides, matching
+/// `runtime::overlay_zone_entries`, `zones::from_pairs`, and the map-key
+/// check above; a config keyed "back-yard" binds the zone dispatched as
+/// "back_yard". `mqtt_command` counts here even though its value is a
+/// command struct rather than a station string, because a mapped MQTT zone
+/// genuinely does dispatch. Kinds with no map of their own (OpenSprinkler,
+/// the DIY HTTP board) answer false: their binding is the zone's station
+/// field and nothing else, which is exactly what the caller is already
+/// testing. `dry_run` answers TRUE because it needs no binding at all, and
+/// `esphome_native` answers false because its adapter is never built.
+pub fn controller_zone_map_covers(
+    kind: &crate::config::schema::ControllerKind,
+    slug: &str,
+) -> bool {
+    use crate::config::schema::ControllerKind as K;
+    let want = slug.replace('-', "_");
+    let has = |keys: Vec<&String>| keys.into_iter().any(|k| k.replace('-', "_") == want);
+    match kind {
+        K::Rachio(c) => has(c.zone_uuid_map.keys().collect()),
+        K::Hydrawise(c) => has(c.zone_relay_map.keys().collect()),
+        K::Bhyve(c) => has(c.zone_station_map.keys().collect()),
+        K::Rainbird(c) => has(c.zone_station_map.keys().collect()),
+        K::HaServiceCall(c) => has(c.zone_entity_map.keys().collect()),
+        K::MqttCommand(c) => has(c.zone_command_map.keys().collect()),
+        // Simulated hardware accepts any slug: DryRunController::run_zone
+        // consults no station and no map and never answers ZoneUnknown, so a
+        // blank station on it is not an unbound zone. Reported as covered so
+        // this function's only caller stays quiet, matching
+        // `station_help("dry_run")`.
+        K::DryRun(_) => true,
+        // ESPHome native is never constructed, so a zone_entity_map entry
+        // proves nothing. Its caller handles the kind before reaching here.
+        K::EsphomeNative(_) => false,
+        K::OpensprinklerDirect(_) | K::HttpGeneric(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1032,6 +1172,507 @@ mod tests {
             "exactly the unmatched key warns: {warned:?}"
         );
         assert!(warned[0].contains("ghost_zone"));
+    }
+
+    // ---- zone_unbound ----
+
+    fn zone_json(controller_id: &str, station: &str) -> crate::config::schema::ZoneConfig {
+        serde_json::from_value(serde_json::json!({
+            "display_name": "Zone",
+            "area_sqft": 1000.0,
+            "species": "other",
+            "soil_texture": "loam",
+            "sprinkler_type": "rotor",
+            "controller_id": controller_id,
+            "controller_station": station,
+        }))
+        .unwrap()
+    }
+
+    fn rachio_entry(map: serde_json::Value) -> ControllerEntry {
+        serde_json::from_value(serde_json::json!({
+            "id": "rachio_main", "default": true, "enabled": true,
+            "kind": "rachio", "config": {
+                "api_token": "example-token",
+                "device_id": "device-0001",
+                "zone_uuid_map": map,
+            },
+        }))
+        .unwrap()
+    }
+
+    /// A zone bound by neither path validated completely clean before this,
+    /// and simply never watered. It now says so.
+    #[test]
+    fn a_zone_bound_by_neither_path_warns_unbound() {
+        let mut cfg = base();
+        cfg.controllers.push(rachio_entry(serde_json::json!({})));
+        cfg.zones
+            .insert("front_yard".into(), zone_json("rachio_main", ""));
+        let r = validate(&cfg);
+        assert!(r.ok(), "unbound is a warning, never an error");
+        let warned: Vec<&String> = r
+            .warnings
+            .iter()
+            .filter(|i| i.code == "zone_unbound")
+            .map(|i| &i.detail)
+            .collect();
+        assert_eq!(warned.len(), 1, "the unbound zone warns once: {warned:?}");
+        assert!(warned[0].contains("front_yard"));
+        assert!(
+            warned[0].contains("nothing waters this zone"),
+            "say the consequence, not just the state: {}",
+            warned[0]
+        );
+    }
+
+    /// The issue #8 reporter's shape must NOT warn: his zone map covers his
+    /// zones, so his zones water even with every station field blank. A
+    /// warning there would tell a working install it is broken.
+    #[test]
+    fn a_zone_covered_only_by_the_controller_zone_map_is_not_unbound() {
+        let mut cfg = base();
+        cfg.controllers.push(rachio_entry(serde_json::json!({
+            "front_yard": "1f00aa00-0000-4000-8000-0000000000a1",
+            // Hyphens normalize on both sides, exactly like dispatch.
+            "back-yard": "1f00aa00-0000-4000-8000-0000000000a2",
+        })));
+        cfg.zones
+            .insert("front_yard".into(), zone_json("rachio_main", ""));
+        cfg.zones
+            .insert("back_yard".into(), zone_json("rachio_main", ""));
+        let r = validate(&cfg);
+        assert!(
+            !r.warnings.iter().any(|i| i.code == "zone_unbound"),
+            "a map-covered zone is bound: {:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn a_zone_with_a_station_is_never_unbound_and_neither_is_a_zone_with_no_controller() {
+        let mut cfg = base();
+        cfg.controllers.push(rachio_entry(serde_json::json!({})));
+        cfg.zones.insert(
+            "front_yard".into(),
+            zone_json("rachio_main", "1f00aa00-0000-4000-8000-0000000000a1"),
+        );
+        // A zone with no controller at all already has its own signal (the
+        // "No controller" badge and the required-controller save gate); a
+        // second warning on top of it is noise.
+        cfg.zones.insert("orphan".into(), zone_json("", ""));
+        // A zone naming a controller that does not exist is already an
+        // error (zone_controller_missing); it must not also warn unbound.
+        cfg.zones.insert("ghost".into(), zone_json("gone", ""));
+        let r = validate(&cfg);
+        assert!(
+            !r.warnings.iter().any(|i| i.code == "zone_unbound"),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    fn controller_of(id: &str, kind: &str, config: serde_json::Value) -> ControllerEntry {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "default": true, "enabled": true,
+            "kind": kind, "config": config,
+        }))
+        .unwrap()
+    }
+
+    /// MQTT is the one kind that never reads the station field, so a topic
+    /// or an entity id typed there (which older builds invited, showing the
+    /// same free-text box for every kind) binds nothing. Treating it as
+    /// evidence certified the exact silent-never-waters state this warning
+    /// exists to surface.
+    #[test]
+    fn an_mqtt_zone_with_a_station_but_no_command_map_still_warns_unbound() {
+        let mut cfg = base();
+        cfg.controllers.push(controller_of(
+            "mqtt_main",
+            "mqtt_command",
+            serde_json::json!({ "broker_host": "broker.example", "zone_command_map": {} }),
+        ));
+        // The v0.1 upgrade path stamps "1".."4" into these.
+        cfg.zones
+            .insert("front_yard".into(), zone_json("mqtt_main", "1"));
+        let r = validate(&cfg);
+        let warned: Vec<&String> = r
+            .warnings
+            .iter()
+            .filter(|i| i.code == "zone_unbound")
+            .map(|i| &i.detail)
+            .collect();
+        assert_eq!(warned.len(), 1, "{:?}", r.warnings);
+        assert!(
+            warned[0].contains("zone_command_map"),
+            "point at the map, not the station field: {}",
+            warned[0]
+        );
+    }
+
+    #[test]
+    fn an_mqtt_zone_with_a_command_map_entry_is_bound() {
+        let mut cfg = base();
+        cfg.controllers.push(controller_of(
+            "mqtt_main",
+            "mqtt_command",
+            serde_json::json!({
+                "broker_host": "broker.example",
+                "zone_command_map": {
+                    "front_yard": { "topic": "t", "on_payload": "ON", "off_payload": "OFF" }
+                }
+            }),
+        ));
+        cfg.zones
+            .insert("front_yard".into(), zone_json("mqtt_main", ""));
+        let r = validate(&cfg);
+        assert!(
+            !r.warnings.iter().any(|i| i.code == "zone_unbound"),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// Simulated hardware accepts any slug and never answers ZoneUnknown, so
+    /// badging every dry_run zone Unbound trained an evaluating user to
+    /// ignore the badge before they ever attached real hardware.
+    #[test]
+    fn a_dry_run_zone_with_no_station_is_never_unbound() {
+        let mut cfg = base();
+        cfg.controllers.push(controller_of(
+            "demo_controller",
+            "dry_run",
+            serde_json::json!({ "simulate_runs": false }),
+        ));
+        cfg.zones
+            .insert("front_yard".into(), zone_json("demo_controller", ""));
+        let r = validate(&cfg);
+        assert!(
+            !r.warnings.iter().any(|i| i.code == "zone_unbound"),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// The ESPHome adapter is never constructed, so testing its bindings
+    /// says nothing. Name the real problem instead.
+    #[test]
+    fn an_esphome_zone_reports_the_missing_adapter_not_a_binding() {
+        let mut cfg = base();
+        cfg.controllers.push(controller_of(
+            "esphome_main",
+            "esphome_native",
+            serde_json::json!({
+                "host": "192.0.2.60",
+                "password": null,
+                // Even WITH a map entry, nothing waters.
+                "zone_entity_map": { "front_yard": "switch.front_yard" }
+            }),
+        ));
+        cfg.zones
+            .insert("front_yard".into(), zone_json("esphome_main", ""));
+        let r = validate(&cfg);
+        assert!(r.ok(), "still a warning, never an error");
+        let warned: Vec<&String> = r
+            .warnings
+            .iter()
+            .filter(|i| i.code == "zone_controller_not_built")
+            .map(|i| &i.detail)
+            .collect();
+        assert_eq!(warned.len(), 1, "{:?}", r.warnings);
+        assert!(warned[0].contains("not built"), "{}", warned[0]);
+        assert!(
+            !r.warnings.iter().any(|i| i.code == "zone_unbound"),
+            "one honest warning, not two: {:?}",
+            r.warnings
+        );
+    }
+
+    const UUID_A: &str = "1f00aa00-0000-4000-8000-0000000000a1";
+
+    /// THE CASE THAT PRODUCED ISSUE #8, one step on. A zone moved from a
+    /// Rachio to a Hydrawise keeps the UUID in its station field. Hydrawise
+    /// addresses zones by relay NUMBER, so dispatch ignores it and the zone
+    /// silently never waters, while the config check called it bound because
+    /// the field was not empty.
+    #[test]
+    fn a_rachio_uuid_left_in_a_hydrawise_zone_warns_instead_of_reading_as_bound() {
+        let mut cfg = base();
+        cfg.controllers.push(controller_of(
+            "hydrawise_main",
+            "hydrawise",
+            serde_json::json!({
+                "api_key": "example-key",
+                "controller_id": 7,
+                "zone_relay_map": {}
+            }),
+        ));
+        cfg.zones
+            .insert("front_yard".into(), zone_json("hydrawise_main", UUID_A));
+        let r = validate(&cfg);
+        assert!(r.ok(), "a warning, never an error");
+        let warned: Vec<&String> = r
+            .warnings
+            .iter()
+            .filter(|i| i.code == "zone_station_unparseable")
+            .map(|i| &i.detail)
+            .collect();
+        assert_eq!(warned.len(), 1, "{:?}", r.warnings);
+        assert!(warned[0].contains("front_yard"), "{}", warned[0]);
+        assert!(warned[0].contains(UUID_A), "name the offending value");
+        assert!(warned[0].contains("hydrawise"), "name the kind");
+        assert!(
+            warned[0].contains("relay id"),
+            "say what the kind expects: {}",
+            warned[0]
+        );
+        assert!(
+            warned[0].contains("nothing waters it"),
+            "say the consequence: {}",
+            warned[0]
+        );
+        // Not ALSO reported as plain unbound: one honest warning.
+        assert!(!r.warnings.iter().any(|i| i.code == "zone_unbound"));
+    }
+
+    /// The reverse, and the original defect: a station NUMBER on a Rachio
+    /// zone. Rachio addresses zones by UUID only.
+    #[test]
+    fn a_station_number_on_a_rachio_zone_warns_unparseable() {
+        let mut cfg = base();
+        cfg.controllers.push(rachio_entry(serde_json::json!({})));
+        cfg.zones
+            .insert("front_yard".into(), zone_json("rachio_main", "3"));
+        let r = validate(&cfg);
+        let warned: Vec<&String> = r
+            .warnings
+            .iter()
+            .filter(|i| i.code == "zone_station_unparseable")
+            .map(|i| &i.detail)
+            .collect();
+        assert_eq!(warned.len(), 1, "{:?}", r.warnings);
+        assert!(warned[0].contains("UUID"), "{}", warned[0]);
+    }
+
+    /// A junk station whose zone IS covered by the controller's own map
+    /// keeps watering: the overlay warn-skips the value and leaves the
+    /// mapped entry in place. Nothing to report.
+    #[test]
+    fn an_unparseable_station_is_silent_when_the_map_still_covers_the_zone() {
+        let mut cfg = base();
+        cfg.controllers.push(rachio_entry(serde_json::json!({
+            "front_yard": UUID_A,
+        })));
+        cfg.zones
+            .insert("front_yard".into(), zone_json("rachio_main", "3"));
+        let r = validate(&cfg);
+        assert!(
+            !r.warnings
+                .iter()
+                .any(|i| i.code == "zone_station_unparseable" || i.code == "zone_unbound"),
+            "the map still binds this zone: {:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn a_valid_station_for_each_kind_never_warns() {
+        for (kind, config, station) in [
+            (
+                "rachio",
+                serde_json::json!({ "api_token": "t", "device_id": "d" }),
+                UUID_A,
+            ),
+            (
+                "hydrawise",
+                serde_json::json!({ "api_key": "k", "controller_id": 7 }),
+                "42",
+            ),
+            (
+                "bhyve",
+                serde_json::json!({ "email": "e@example.com", "password": "p", "device_id": "d" }),
+                "2",
+            ),
+            (
+                "rainbird",
+                serde_json::json!({ "email": "e@example.com", "password": "p", "controller_id": "c" }),
+                "2",
+            ),
+            (
+                "opensprinkler_direct",
+                serde_json::json!({ "host": "192.0.2.10", "password_md5": "" }),
+                "1",
+            ),
+            (
+                "http_generic",
+                serde_json::json!({ "base_url": "http://192.0.2.50" }),
+                "back_yard",
+            ),
+            (
+                "ha_service_call",
+                serde_json::json!({ "base_url": "http://ha.example:8123", "bearer_token": "t" }),
+                "switch.front_yard",
+            ),
+        ] {
+            let mut cfg = base();
+            cfg.controllers.push(controller_of("c1", kind, config));
+            cfg.zones
+                .insert("front_yard".into(), zone_json("c1", station));
+            let r = validate(&cfg);
+            assert!(
+                !r.warnings
+                    .iter()
+                    .any(|i| i.code == "zone_station_unparseable" || i.code == "zone_unbound"),
+                "{kind} with station {station:?} must validate clean: {:?}",
+                r.warnings
+            );
+        }
+    }
+
+    /// OpenSprinkler stations count from 1: a 0 aliases onto station 1 at
+    /// the wire, so build_controllers drops the mapping and the zone is
+    /// unbound. The check must agree rather than call it a valid number.
+    #[test]
+    fn opensprinkler_station_zero_is_not_a_binding() {
+        let mut cfg = base();
+        cfg.controllers.push(controller_of(
+            "os_main",
+            "opensprinkler_direct",
+            serde_json::json!({ "host": "192.0.2.10", "password_md5": "" }),
+        ));
+        cfg.zones
+            .insert("front_yard".into(), zone_json("os_main", "0"));
+        let r = validate(&cfg);
+        assert!(r
+            .warnings
+            .iter()
+            .any(|i| i.code == "zone_station_unparseable"));
+    }
+
+    /// The kinds that ignore the station field keep the semantics built for
+    /// them: MQTT reports its own map, dry run is never unbound at all.
+    #[test]
+    fn mqtt_and_dry_run_keep_their_own_semantics_under_the_shape_check() {
+        // Junk in an MQTT station is not a SHAPE problem, it is a field that
+        // binds nothing: the message must still point at zone_command_map.
+        let mut cfg = base();
+        cfg.controllers.push(controller_of(
+            "mqtt_main",
+            "mqtt_command",
+            serde_json::json!({ "broker_host": "b", "zone_command_map": {} }),
+        ));
+        cfg.zones
+            .insert("front_yard".into(), zone_json("mqtt_main", UUID_A));
+        let r = validate(&cfg);
+        assert!(!r
+            .warnings
+            .iter()
+            .any(|i| i.code == "zone_station_unparseable"));
+        let warned: Vec<&String> = r
+            .warnings
+            .iter()
+            .filter(|i| i.code == "zone_unbound")
+            .map(|i| &i.detail)
+            .collect();
+        assert_eq!(warned.len(), 1, "{:?}", r.warnings);
+        assert!(warned[0].contains("zone_command_map"), "{}", warned[0]);
+
+        // Dry run accepts any slug, so nothing about its station matters.
+        let mut cfg = base();
+        cfg.controllers.push(controller_of(
+            "demo_controller",
+            "dry_run",
+            serde_json::json!({ "simulate_runs": false }),
+        ));
+        cfg.zones
+            .insert("front_yard".into(), zone_json("demo_controller", UUID_A));
+        let r = validate(&cfg);
+        assert!(
+            !r.warnings
+                .iter()
+                .any(|i| i.code == "zone_station_unparseable" || i.code == "zone_unbound"),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn zone_map_coverage_matches_dispatch_for_every_kind() {
+        use crate::config::schema::ControllerKind as K;
+        let of = |kind: &str, config: serde_json::Value| -> K {
+            serde_json::from_value(serde_json::json!({ "kind": kind, "config": config })).unwrap()
+        };
+        let rachio = of(
+            "rachio",
+            serde_json::json!({
+                "api_token": "t", "device_id": "d",
+                "zone_uuid_map": { "back-yard": "1f00aa00-0000-4000-8000-0000000000a1" }
+            }),
+        );
+        // Hyphen/underscore normalizes on BOTH sides.
+        assert!(controller_zone_map_covers(&rachio, "back_yard"));
+        assert!(controller_zone_map_covers(&rachio, "back-yard"));
+        assert!(!controller_zone_map_covers(&rachio, "front_yard"));
+
+        let ha = of(
+            "ha_service_call",
+            serde_json::json!({
+                "base_url": "http://ha.example:8123", "bearer_token": "t",
+                "zone_entity_map": { "front_yard": "switch.front_yard_valve" }
+            }),
+        );
+        assert!(controller_zone_map_covers(&ha, "front_yard"));
+
+        // MQTT counts: its map value is a struct, but a mapped MQTT zone
+        // genuinely dispatches, so it must not read as unbound.
+        let mqtt = of(
+            "mqtt_command",
+            serde_json::json!({
+                "broker_host": "broker.example",
+                "zone_command_map": {
+                    "front_yard": { "topic": "t", "on_payload": "ON", "off_payload": "OFF" }
+                }
+            }),
+        );
+        assert!(controller_zone_map_covers(&mqtt, "front_yard"));
+
+        // The two map-less kinds bind by the station field alone, so the
+        // map never covers anything for them.
+        for (kind, config) in [
+            (
+                "opensprinkler_direct",
+                serde_json::json!({ "host": "192.0.2.10", "password_md5": "" }),
+            ),
+            (
+                "http_generic",
+                serde_json::json!({ "base_url": "http://192.0.2.50" }),
+            ),
+        ] {
+            assert!(
+                !controller_zone_map_covers(&of(kind, config), "front_yard"),
+                "{kind} holds no zone map"
+            );
+        }
+        // Dry run needs no binding at all, so it reports as covered and the
+        // unbound check stays quiet for it.
+        assert!(controller_zone_map_covers(
+            &of("dry_run", serde_json::json!({ "simulate_runs": false })),
+            "front_yard"
+        ));
+        // ESPHome native holds a zone_entity_map but is never constructed,
+        // so an entry in it certifies nothing.
+        assert!(!controller_zone_map_covers(
+            &of(
+                "esphome_native",
+                serde_json::json!({
+                    "host": "192.0.2.60",
+                    "password": null,
+                    "zone_entity_map": { "front_yard": "switch.front_yard" }
+                })
+            ),
+            "front_yard"
+        ));
     }
 
     #[test]

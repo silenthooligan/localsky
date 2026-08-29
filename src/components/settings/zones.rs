@@ -11,6 +11,7 @@ use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
 use leptos_router::hooks::{use_location, use_navigate};
 
+use crate::components::controllers_form::can_scan_zones;
 use crate::components::settings::{form_state_url, FormState};
 use crate::components::settings_ui::{
     BadgeTone, EntityKind, SettingsBadge, SettingsCard, SettingsKv, SettingsLoadError,
@@ -536,6 +537,37 @@ pub fn ZoneForm(
         Some(cb) => cb.run(()),
         None => add_open.set(false),
     };
+    // The station picker's zone list for the CURRENTLY SELECTED controller.
+    // Local to the form on purpose: it is ephemeral UI state, not part of
+    // the zone draft the page seeds, and scoping it to one open of the form
+    // is exactly the "cache for the editing session" the vendor request
+    // budget wants.
+    let station_scan: RwSignal<StationScan> = RwSignal::new(StationScan::default());
+    // The selected controller's kind, tracked REACTIVELY. controller_options()
+    // is called non-reactively at mount, so switching controllers has to be
+    // observed here or the picker would keep showing the previous
+    // controller's zones.
+    let selected_kind = Signal::derive(move || {
+        let id = new_controller.get();
+        config_json.with(|cfg| {
+            cfg.get("controllers")
+                .and_then(|v| v.as_array())
+                .and_then(|arr| {
+                    arr.iter()
+                        .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
+                })
+                .and_then(|c| c.get("kind"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        })
+    });
+    // True when a real zone list is in hand for the selected controller.
+    // Gates the select, and (via station_to_persist) whether a blank draft
+    // is allowed to clear an existing binding.
+    let enumerated =
+        Signal::derive(move || station_scan.with(|s| s.enumerated(&new_controller.get())));
+
     // Run-limit confirmation state: on_add stashes the fully built entry
     // here and opens the sheet when the save raises the limit past 60;
     // Confirm commits the pending entry, Cancel just closes.
@@ -580,6 +612,25 @@ pub fn ZoneForm(
             result_ok.set(false);
             result_msg.set("Zone slug is required".into());
             return;
+        }
+        // An add is a CREATE, and `commit_zone` inserts by key, which
+        // REPLACES. Without this a name that slugifies onto an existing zone
+        // silently overwrites that zone's binding, its vendor label, and
+        // every agronomic field this form does not carry, and the zone-key
+        // rename guard on the server never fires because the key SET did not
+        // change. The station-preserving rule in `station_to_persist` cannot
+        // help either: it keys off the zone being edited, and this path is
+        // not editing anything.
+        if editing_slug.get().is_none() {
+            let existing = config_json.with_untracked(|cfg| zone_key_taken(cfg, &slug));
+            if let Some(taken) = existing {
+                result_ok.set(false);
+                result_msg.set(format!(
+                    "A zone already uses the id \"{taken}\". Edit that zone instead of adding \
+                     a second one with the same name; adding would replace it."
+                ));
+                return;
+            }
         }
         if new_controller.get().is_empty() {
             result_ok.set(false);
@@ -665,6 +716,52 @@ pub fn ZoneForm(
         // slope_pct, sun_exposure) are preserved. For a new zone, build the
         // full struct with sensible defaults like before.
         let editing_now = editing_slug.get();
+        // THE BINDING, and the one field on this form that can take a
+        // working zone dark. Every save writes it, including a save that
+        // only changed the area, so a blank draft is only allowed to clear
+        // an existing station when the picker actually enumerated the
+        // controller's zones and the user chose "(not bound)". See
+        // station_to_persist.
+        let (stored_station, stored_name, stored_ctrl) = editing_now
+            .as_ref()
+            .map(|existing_slug| {
+                config_json.with_untracked(|cfg| {
+                    let z = cfg.get("zones").and_then(|z| z.get(existing_slug));
+                    let gs = |k: &str| {
+                        z.and_then(|z| z.get(k))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string()
+                    };
+                    (
+                        gs("controller_station"),
+                        z.and_then(|z| z.get("controller_zone_name"))
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string),
+                        gs("controller_id"),
+                    )
+                })
+            })
+            .unwrap_or_default();
+        let station = station_to_persist(&new_station.get(), &stored_station, enumerated.get());
+        // The label describes ONE controller's zone. Read the scan cache only
+        // when it belongs to the controller now selected (the same
+        // `enumerated` guard every other consumer uses), and drop a stored
+        // label the moment the controller changes, or a station id that
+        // happens to exist on both (station "1" on two OpenSprinklers) would
+        // carry the old controller's zone name onto the new binding.
+        let discovered = if enumerated.get() {
+            station_scan.with(|s| s.zones.clone())
+        } else {
+            Vec::new()
+        };
+        let stored_name = stored_name.filter(|_| stored_ctrl == new_controller.get());
+        let vendor_name = vendor_name_to_persist(
+            &station,
+            &stored_station,
+            stored_name.as_deref(),
+            &discovered,
+        );
         let entry = match editing_now.as_ref() {
             Some(existing_slug) => {
                 let mut existing = config_json.with_untracked(|cfg| {
@@ -692,9 +789,13 @@ pub fn ZoneForm(
                         "controller_id".into(),
                         serde_json::json!(new_controller.get()),
                     );
+                    obj.insert("controller_station".into(), serde_json::json!(station));
                     obj.insert(
-                        "controller_station".into(),
-                        serde_json::json!(new_station.get()),
+                        "controller_zone_name".into(),
+                        match vendor_name.clone() {
+                            Some(n) => serde_json::Value::String(n),
+                            None => serde_json::Value::Null,
+                        },
                     );
                     obj.insert("photo_url".into(), photo_url_json);
                     obj.insert("soil_sensor_id".into(), soil_sensor_json);
@@ -717,7 +818,11 @@ pub fn ZoneForm(
                 "mad_pct_override": serde_json::Value::Null,
                 "max_run_minutes": max_run_json,
                 "controller_id": new_controller.get(),
-                "controller_station": new_station.get(),
+                "controller_station": station,
+                "controller_zone_name": match vendor_name.clone() {
+                    Some(n) => serde_json::Value::String(n),
+                    None => serde_json::Value::Null,
+                },
                 "soil_sensor_id": soil_sensor_json,
                 "target_min_pct_soil": soil_min,
                 "saturation_pct_soil": soil_sat,
@@ -761,6 +866,135 @@ pub fn ZoneForm(
                     .map(|s| (s.to_string(), s.to_string()))
             })
             .collect::<Vec<_>>()
+    };
+
+    // Ask the selected controller for its own zone list.
+    //
+    // No new endpoint: POST /api/v1/wizard/scan_zones takes a whole
+    // controller entry and restores its redacted secrets server-side BY ENTRY
+    // ID, so the entry is posted exactly as GET /api/config served it,
+    // sentinel and all, and no token ever passes through the zone editor.
+    // Transport fields (base_url/host/port) must go over untouched or the
+    // probe is refused: the server pins them to the stored entry.
+    //
+    // `force` distinguishes the explicit Rescan control from the lazy first
+    // touch, which is a no-op once results are cached for this controller.
+    let run_station_scan = move |force: bool| {
+        let ctrl_id = new_controller.get_untracked();
+        if ctrl_id.is_empty() {
+            return;
+        }
+        let kind = selected_kind.get_untracked();
+        if !can_scan_zones(&kind) {
+            return;
+        }
+        // A FAILED scan counts as cached too. The lazy trigger is focus on
+        // the station field, so without this a rate-limited or offline
+        // controller is probed again every time the user tabs back to copy
+        // an id, which is the one state that most needs backoff: the whole
+        // reason the scan is lazy is that a Rachio account has roughly 1700
+        // requests a day and live polling already spends most of them. The
+        // explicit Rescan button passes force and stays a one-click retry,
+        // and selecting a different controller rescans on its own.
+        let already = station_scan.with_untracked(|sc| {
+            sc.controller_id == ctrl_id
+                && matches!(
+                    sc.state,
+                    StationScanState::Scanning
+                        | StationScanState::Ready
+                        | StationScanState::Unavailable(_)
+                )
+        });
+        if already && !force {
+            return;
+        }
+        let Some(entry) = config_json.with_untracked(|cfg| {
+            cfg.get("controllers")
+                .and_then(|v| v.as_array())
+                .and_then(|arr| {
+                    arr.iter()
+                        .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(ctrl_id.as_str()))
+                })
+                .cloned()
+        }) else {
+            return;
+        };
+        station_scan.set(StationScan {
+            controller_id: ctrl_id.clone(),
+            zones: Vec::new(),
+            state: StationScanState::Scanning,
+        });
+        #[cfg(feature = "hydrate")]
+        wasm_bindgen_futures::spawn_local(async move {
+            let body = serde_json::json!({ "controller": entry });
+            let result = async {
+                let req = gloo_net::http::Request::post("/api/v1/wizard/scan_zones")
+                    .json(&body)
+                    .map_err(|e| e.to_string())?;
+                let resp = req.send().await.map_err(|e| e.to_string())?;
+                let v = resp
+                    .json::<serde_json::Value>()
+                    .await
+                    .unwrap_or(serde_json::Value::Null);
+                match v.get("zones").and_then(|z| z.as_array()) {
+                    Some(arr) => Ok(arr
+                        .iter()
+                        .filter_map(|z| {
+                            Some((
+                                z.get("station_id")?.as_str()?.to_string(),
+                                z.get("name")?.as_str()?.to_string(),
+                            ))
+                        })
+                        .collect::<Vec<_>>()),
+                    // Every failure mode lands here with the server's own
+                    // trimmed category: offline, auth failed, rate limited,
+                    // unsupported, demo instance, sentinel unresolvable.
+                    None => Err(v
+                        .get("detail")
+                        .or_else(|| v.get("error"))
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("the controller did not answer")
+                        .to_string()),
+                }
+            }
+            .await;
+            // Detached continuation: the panel can be disposed mid-scan and a
+            // bare set then panics (wasm release is panic=abort).
+            let next = match result {
+                Ok(zones) if !zones.is_empty() => StationScan {
+                    controller_id: ctrl_id,
+                    zones,
+                    state: StationScanState::Ready,
+                },
+                Ok(_) => StationScan {
+                    controller_id: ctrl_id,
+                    zones: Vec::new(),
+                    state: StationScanState::Unavailable(
+                        "This controller reported no zones. Enter the id by hand below.".into(),
+                    ),
+                },
+                Err(detail) => StationScan {
+                    controller_id: ctrl_id,
+                    zones: Vec::new(),
+                    state: StationScanState::Unavailable(format!(
+                        "Could not list this controller's zones ({detail}). Enter the id by \
+                         hand below."
+                    )),
+                },
+            };
+            // A Some() back means the signal was disposed: the form went away
+            // while the scan was in flight, and there is nothing to update.
+            let _ = station_scan.try_set(next);
+        });
+        #[cfg(not(feature = "hydrate"))]
+        {
+            let _ = entry;
+            station_scan.set(StationScan {
+                controller_id: ctrl_id,
+                zones: Vec::new(),
+                state: StationScanState::Idle,
+            });
+        }
     };
 
     let on_cancel = move |_| {
@@ -926,21 +1160,190 @@ pub fn ZoneForm(
                     value=new_controller
                     options=controller_options()
                     aria_label="Controller id".to_string()
+                    // A station id only means anything to the controller it
+                    // came from. Carried across a switch it persists an id
+                    // the new controller has never heard of, and because the
+                    // string is non-empty both the Unbound badge and the
+                    // zone_unbound warning read it as bound, so the zone goes
+                    // dark with nothing reporting it (or, between two
+                    // numeric-station kinds, fires the wrong valve). Fires
+                    // only on real interaction, so seeding the form and
+                    // reopening it for another zone are unaffected. Dropping
+                    // the cached scan with it keeps `enumerated` from briefly
+                    // gating the picker on the previous controller's list.
+                    on_change=Callback::new(move |_| {
+                        new_station.set(String::new());
+                        station_scan.set(StationScan::default());
+                    })
                 />
             </FormField>
 
             <FormField
                 label="Controller station".to_string()
-                helptext="How the chosen controller addresses this zone. A value here REPLACES whatever the controller's zone map holds for this zone. For OpenSprinkler: 1-based number (e.g. 1, 2, 3). For DIY (HTTP): the board's zone id (e.g. 1 or back_yard). For HA service call: entity_id (e.g. switch.back_yard_zone). For Rachio: the zone UUID, which Scan zones fills into the controller's map; leave this blank only if that map already has an entry under this zone's slug, since a station number is not a UUID and is ignored. For Hydrawise: the relay id. For B-hyve and Rain Bird: the station number. Those three cannot scan, so this field (or the controller's zone map in Advanced JSON) is what binds them, and a number here is accepted and will run whatever it points at.".to_string()
+                helptext="Which of the controller's own zones this one fires. Pick it from the list where the controller can be asked; otherwise enter the id it uses.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
+                // The picker, only once a real list is in hand. It shows the
+                // controller's NAME for each zone and stores the id, so the
+                // names on either side are free to differ.
+                <Show when=move || enumerated.get()>
+                    <select
+                        class="ui-input"
+                        on:change=move |ev| new_station.set(event_target_value(&ev))
+                    >
+                        <option value="" selected=move || new_station.get().trim().is_empty()>
+                            "(not bound)"
+                        </option>
+                        {move || {
+                            let cur = new_station.get();
+                            station_scan.with(|sc| {
+                                sc.zones
+                                    .iter()
+                                    .map(|(id, name)| {
+                                        let sel = cur.trim() == id.trim();
+                                        let label = format!("{name} ({id})");
+                                        view! {
+                                            <option value=id.clone() selected=sel>{label}</option>
+                                        }
+                                    })
+                                    .collect_view()
+                            })
+                        }}
+                        // A stored id the controller did not report (a zone
+                        // that was removed on the vendor's side, or a value
+                        // typed before the picker existed) keeps its own
+                        // option, so opening the form can never silently
+                        // blank a working binding.
+                        {move || {
+                            let cur = new_station.get();
+                            let known = station_scan
+                                .with(|sc| sc.zones.iter().any(|(id, _)| id.trim() == cur.trim()));
+                            (!cur.trim().is_empty() && !known).then(|| {
+                                let label = format!("{cur} (not in this controller's list)");
+                                view! { <option value=cur.clone() selected=true>{label}</option> }
+                            })
+                        }}
+                    </select>
+                </Show>
+                // The free-text field, unchanged and always present. It is the
+                // escape hatch for the six kinds that cannot enumerate, for a
+                // controller that is offline right now, and for an id the scan
+                // did not report. Nothing about the picker gates the save.
                 <input
                     type="text"
                     class="ui-input"
-                    placeholder="1"
+                    style=move || if enumerated.get() { "margin-top: 0.4rem" } else { "" }
+                    placeholder=move || station_placeholder(&selected_kind.get()).to_string()
                     prop:value=move || new_station.get()
                     on:input=move |ev| new_station.set(event_target_value(&ev))
+                    // Lazy first touch: a scan is a live vendor request, so it
+                    // waits for the user to actually reach for this field
+                    // instead of firing on every editor open.
+                    on:focus=move |_| run_station_scan(false)
                 />
+                <p class="ui-form-field__helptext">
+                    {move || station_help(&selected_kind.get())}
+                </p>
+                {move || {
+                    let kind = selected_kind.get();
+                    can_scan_zones(&kind).then(|| {
+                        let scanning = station_scan
+                            .with(|sc| sc.state == StationScanState::Scanning);
+                        view! {
+                            <Button
+                                variant="ghost"
+                                disabled=Signal::derive(move || {
+                                    station_scan
+                                        .with(|sc| sc.state == StationScanState::Scanning)
+                                })
+                                aria_label="List this controller's zones and their ids".to_string()
+                                on_click=Callback::new(move |_| run_station_scan(true))
+                            >
+                                {if scanning {
+                                    "Listing zones\u{2026}"
+                                } else if enumerated.get() {
+                                    "Rescan zones"
+                                } else {
+                                    "List the controller's zones"
+                                }}
+                            </Button>
+                        }
+                    })
+                }}
+                // Why there is no list, in plain words. Never blocks anything.
+                {move || {
+                    station_scan.with(|sc| match &sc.state {
+                        StationScanState::Unavailable(why) if sc.controller_id == new_controller.get() => {
+                            Some(view! { <p class="zone-form__facts">{why.clone()}</p> })
+                        }
+                        _ => None,
+                    })
+                }}
+                // The binding as an identity fact: which of the controller's
+                // zones this one is wired to.
+                {move || {
+                    let ctrl = new_controller.get();
+                    let station = new_station.get();
+                    // Same controller guard as the save path: a cached list
+                    // from a DIFFERENT controller must never name this zone.
+                    let name = enumerated.get().then(|| {
+                        station_scan.with(|sc| {
+                            sc.zones
+                                .iter()
+                                .find(|(id, _)| id.trim() == station.trim())
+                                .map(|(_, n)| n.clone())
+                        })
+                    }).flatten();
+                    (!ctrl.is_empty() && !station.trim().is_empty()).then(|| {
+                        let text = binding_display(&ctrl, &station, name.as_deref());
+                        view! { <p class="zone-form__facts">"Fires " {text}</p> }
+                    })
+                }}
+                // The unbound warning: no station here AND no entry under this
+                // zone's slug in the controller's own zone map, which means
+                // every run answers zone_unknown and the zone never waters.
+                {move || {
+                    let ctrl = new_controller.get();
+                    if ctrl.is_empty() {
+                        return None;
+                    }
+                    let slug = new_slug.get();
+                    let controllers = config_json.with(|cfg| {
+                        cfg.get("controllers")
+                            .and_then(|v| v.as_array())
+                            .cloned()
+                            .unwrap_or_default()
+                    });
+                    let probe = serde_json::json!({
+                        "controller_id": ctrl,
+                        "controller_station": new_station.get(),
+                    });
+                    (!slug.is_empty() && !zone_is_bound(&probe, &slug, &controllers)).then(|| {
+                        // Two reasons a zone reads unbound, and they need
+                        // different words: nothing entered, or something
+                        // entered that this controller cannot use.
+                        let station = new_station.get();
+                        let kind = selected_kind.get();
+                        let bad_shape = !station.trim().is_empty()
+                            && crate::station_id::station_is_dispatchable(&kind, station.trim())
+                                == Some(false);
+                        let text = if bad_shape {
+                            let expects = crate::station_id::station_expectation(&kind)
+                                .unwrap_or("an id of its own");
+                            format!(
+                                "This controller cannot use \"{}\". It expects {expects}, so \
+                                 nothing will water this zone until you change it.",
+                                station.trim()
+                            )
+                        } else {
+                            "This zone is not bound to anything on that controller yet, so \
+                             nothing will water it. Pick or enter the controller's id for it \
+                             above."
+                                .to_string()
+                        };
+                        view! { <p class="zone-form__facts">{text}</p> }
+                    })
+                }}
             </FormField>
 
             // Everything below is fine-tuning with a sensible default; a
@@ -950,7 +1353,7 @@ pub fn ZoneForm(
 
                 <FormField
                     label="Internal id (slug)".to_string()
-                    helptext="Auto-generated from the name; the stable key history + sensor bindings use. To change it, rename the zone.".to_string()
+                    helptext="Auto-generated from the name and permanent. Run history, soil sensor bindings, Home Assistant entity ids and this zone's links are all stored under it, so it never changes. Rename the zone by editing Name above; the slug stays.".to_string()
                     error=Signal::derive(|| None::<String>)
                 >
                     <input
@@ -1184,6 +1587,285 @@ pub fn ZoneForm(
     }
 }
 
+/// The one line under the station field, per controller kind. The picker
+/// carries the explanation now, so this says only what the kind's id LOOKS
+/// like and, where it matters, that this field is not the binding at all.
+pub(crate) fn station_help(kind: &str) -> &'static str {
+    match kind {
+        "opensprinkler_direct" => {
+            "OpenSprinkler numbers its stations from 1. The list above comes \
+             straight off the box."
+        }
+        "http_generic" => {
+            "Your board's own zone id, whatever string it uses. The list above \
+             comes from the board's /zones response."
+        }
+        "rachio" => {
+            "Rachio addresses zones by UUID, never by station number. Pick from \
+             the list rather than typing one; a number here is ignored."
+        }
+        "hydrawise" => {
+            "Hydrawise addresses zones by relay id, a number. This controller \
+             cannot list its zones, so read the relay id off Hydrawise and \
+             enter it."
+        }
+        "bhyve" | "rainbird" => {
+            "This controller addresses zones by station number, counting from \
+             1. It cannot list its zones, so enter the number yourself."
+        }
+        "ha_service_call" => {
+            "The entity_id of the valve in Home Assistant, for example \
+             switch.back_yard_zone. Home Assistant cannot be scanned from \
+             here, so copy it from your HA entity list."
+        }
+        "mqtt_command" => {
+            "MQTT zones do not bind here. Each one needs a command topic and \
+             its payloads, which live in the controller's zone_command_map \
+             under Settings, then Devices, then Advanced."
+        }
+        "esphome_native" => {
+            "The ESPHome native adapter is not built yet, so this controller \
+             fires nothing whatever you put here. ESPHome hardware runs \
+             through the MQTT or DIY board controller kinds today."
+        }
+        "dry_run" => "Simulated hardware accepts any zone, bound or not.",
+        _ => "The id the controller uses for this zone.",
+    }
+}
+
+/// Placeholder for the free-text station input, shaped like the kind's own
+/// ids so an empty field still teaches the format.
+pub(crate) fn station_placeholder(kind: &str) -> &'static str {
+    match kind {
+        "rachio" => "zone UUID",
+        "http_generic" => "board zone id",
+        "ha_service_call" => "switch.back_yard_zone",
+        "mqtt_command" => "(bound in the controller's zone_command_map)",
+        _ => "1",
+    }
+}
+
+/// Where the station picker's zone list stands for the controller currently
+/// selected in the form. Cached per controller id for the editing session:
+/// a scan is a LIVE vendor request (Rachio's daily budget is roughly 1700
+/// and live polling already spends most of it), so it fires lazily on first
+/// interaction with the field and on an explicit rescan, never on open.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct StationScan {
+    /// The controller id these results belong to. A different selection in
+    /// the Controller picker invalidates them.
+    pub controller_id: String,
+    /// (station id, vendor zone name) in the order the controller reported.
+    pub zones: Vec<(String, String)>,
+    pub state: StationScanState,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) enum StationScanState {
+    /// Not asked yet.
+    #[default]
+    Idle,
+    /// A request is in flight.
+    Scanning,
+    /// The controller listed its zones. `zones` is non-empty.
+    Ready,
+    /// No list is available and the plain reason why. The free-text field
+    /// stays exactly as it was; this never blocks the form. Only the
+    /// hydrate build ever runs a scan, so ssr sees this variant read but
+    /// never constructed.
+    #[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
+    Unavailable(String),
+}
+
+impl StationScan {
+    /// True only when a real list is in hand for THIS controller. Every
+    /// "may the picker touch the binding" decision hangs off this.
+    pub(crate) fn enumerated(&self, controller_id: &str) -> bool {
+        self.controller_id == controller_id
+            && self.state == StationScanState::Ready
+            && !self.zones.is_empty()
+    }
+}
+
+/// The existing zone key an ADD would replace, or `None` when the slug is
+/// free.
+///
+/// Hyphens normalize to underscores because that is how dispatch resolves a
+/// slug: "back-yard" and "back_yard" water the same valve, so letting the
+/// two coexist would be its own defect. Returns the REAL stored key so the
+/// refusal can name what the user already has.
+pub(crate) fn zone_key_taken(cfg: &serde_json::Value, slug: &str) -> Option<String> {
+    let want = slug.replace('-', "_");
+    cfg.get("zones")
+        .and_then(|z| z.as_object())
+        .and_then(|m| m.keys().find(|k| k.replace('-', "_") == want).cloned())
+}
+
+/// The `controller_station` value a zone save should persist.
+///
+/// The form writes this field on EVERY save, including a save that only
+/// changed the zone's area. So a blank draft must not be allowed to clear a
+/// working binding just because the picker could not enumerate the
+/// controller's zones (scan failed, rate limited, demo instance, or a kind
+/// that cannot scan at all). When the picker DID enumerate, a blank is a
+/// deliberate "(not bound)" choice and is honored.
+///
+/// A non-empty draft always wins: that is the user typing or picking.
+pub(crate) fn station_to_persist(draft: &str, stored: &str, enumerated: bool) -> String {
+    if !draft.trim().is_empty() {
+        return draft.to_string();
+    }
+    if !enumerated && !stored.trim().is_empty() {
+        return stored.to_string();
+    }
+    String::new()
+}
+
+/// The `controller_zone_name` label a zone save should persist: the
+/// controller's own name for the bound zone, or `None`.
+///
+/// A pure label. Nothing dispatches on it and nothing keys on it, so the
+/// only risk it carries is showing a stale name, which this rules out:
+/// - the station matches something the scan just reported -> that name,
+///   which also refreshes a name the vendor changed since the last bind;
+/// - the station is unchanged from what was stored -> keep the stored label;
+/// - anything else (a hand-typed station, a cleared binding) -> `None`,
+///   because a label that no longer describes the bound zone is worse than
+///   no label.
+pub(crate) fn vendor_name_to_persist(
+    station: &str,
+    stored_station: &str,
+    stored_name: Option<&str>,
+    discovered: &[(String, String)],
+) -> Option<String> {
+    let s = station.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Some((_, name)) = discovered.iter().find(|(id, _)| id.trim() == s) {
+        let name = name.trim();
+        return (!name.is_empty()).then(|| name.to_string());
+    }
+    if s == stored_station.trim() {
+        return stored_name.map(str::to_string).filter(|n| !n.is_empty());
+    }
+    None
+}
+
+/// The controller-config key holding a kind's per-zone map, mirroring
+/// `config::validate::controller_zone_map_covers` on the server. `None` for
+/// the kinds that bind by the zone's station field alone.
+pub(crate) fn controller_zone_map_key(kind: &str) -> Option<&'static str> {
+    match kind {
+        "rachio" => Some("zone_uuid_map"),
+        "hydrawise" => Some("zone_relay_map"),
+        "bhyve" | "rainbird" => Some("zone_station_map"),
+        "ha_service_call" => Some("zone_entity_map"),
+        "mqtt_command" => Some("zone_command_map"),
+        // Deliberately not esphome_native: it has a zone_entity_map in its
+        // config, but the adapter is never built, so an entry in it cannot
+        // certify a binding. `zone_is_bound` handles that kind before it
+        // reaches this lookup.
+        _ => None,
+    }
+}
+
+/// Whether a zone is bound to anything that will actually fire it: a
+/// non-empty station on the zone entry, or an entry under this zone's slug
+/// in the controller's own zone map (the fallback that keeps pre-picker
+/// configs watering). Hyphens normalize to underscores on both sides, the
+/// way dispatch resolves them.
+///
+/// The station only counts when the kind can dispatch its SHAPE, judged by
+/// the shared `crate::station_id` helpers that dispatch itself binds with, so
+/// a value the controller will never accept does not read as a binding.
+///
+/// Three kinds do not follow that rule and are answered before it, matching
+/// `config::validate` on the server: `dry_run` is always bound (it accepts
+/// any slug), `esphome_native` never is (its adapter is not built), and
+/// `mqtt_command` ignores the station field entirely (its per-zone value is
+/// a command struct), so only its map counts.
+///
+/// An unbound zone looks completely healthy today and only reveals itself
+/// when a run answers zone_unknown. This is what the card badge and the
+/// editor line read.
+pub(crate) fn zone_is_bound(
+    zone: &serde_json::Value,
+    slug: &str,
+    controllers: &[serde_json::Value],
+) -> bool {
+    let ctrl_id = zone
+        .get("controller_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if ctrl_id.is_empty() {
+        // No controller at all already has its own badge; do not double up.
+        return true;
+    }
+    let Some(entry) = controllers
+        .iter()
+        .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(ctrl_id))
+    else {
+        // References a controller that does not exist: a validation error in
+        // its own right, not an unbound zone.
+        return true;
+    };
+    let kind = entry.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    // Simulated hardware accepts any zone, bound or not, so there is nothing
+    // to be unbound from. Matches station_help("dry_run") and the server's
+    // controller_zone_map_covers.
+    if kind == "dry_run" {
+        return true;
+    }
+    // ESPHome native is never constructed, so neither binding fires and a
+    // map entry proves nothing. The editor's per-kind line says why.
+    if kind == "esphome_native" {
+        return false;
+    }
+    let station = zone
+        .get("controller_station")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    // A non-empty station is evidence of a binding only when the kind can
+    // dispatch that SHAPE. This is the same `station_id` code the server's
+    // config check and `runtime::build_controllers` use, so the badge, the
+    // warning and the valve can never disagree. It answers None for the
+    // kinds that ignore the field (MQTT, whose per-zone value is a command
+    // struct), which leaves the controller's own map as the only test.
+    //
+    // A value the kind's parser rejects is the issue #8 shape one step on: a
+    // Rachio UUID left on a zone moved to Hydrawise reads as bound, dispatch
+    // ignores it, and the zone silently never waters.
+    if !station.is_empty()
+        && crate::station_id::station_is_dispatchable(kind, station) == Some(true)
+    {
+        return true;
+    }
+    let Some(map_key) = controller_zone_map_key(kind) else {
+        return false;
+    };
+    let want = slug.replace('-', "_");
+    entry
+        .get("config")
+        .and_then(|c| c.get(map_key))
+        .and_then(|m| m.as_object())
+        .is_some_and(|m| m.keys().any(|k| k.replace('-', "_") == want))
+}
+
+/// How a zone's controller binding reads on a card or in the editor: an
+/// identity fact, never a status. The controller id always leads; the
+/// controller's own name for the zone follows when a bind captured it,
+/// falling back to the raw station id and then to the controller alone.
+pub(crate) fn binding_display(ctrl_id: &str, station: &str, vendor_name: Option<&str>) -> String {
+    let station = station.trim();
+    match vendor_name.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(name) => format!("{ctrl_id} \u{00b7} {name}"),
+        None if !station.is_empty() => format!("{ctrl_id} \u{00b7} station {station}"),
+        None => ctrl_id.to_string(),
+    }
+}
+
 /// Turn a human zone name into a stable snake_case slug ("Back Yard" ->
 /// "back_yard") so a beginner never has to type an identifier by hand.
 fn slugify(s: &str) -> String {
@@ -1248,7 +1930,414 @@ pub(crate) fn cap_raise_needs_confirm(
 
 #[cfg(test)]
 mod tests {
-    use super::cap_raise_needs_confirm;
+    use super::*;
+
+    // ---- the picker must never clear a binding it could not enumerate ----
+
+    /// THE UPGRADE-SAFETY TEST for the form. The zone editor writes
+    /// controller_station on EVERY save, so a picker that came up empty
+    /// (scan failed, rate limited, demo instance, or one of the six kinds
+    /// that cannot enumerate) would silently unbind a working zone the
+    /// moment its owner edited its area.
+    #[test]
+    fn a_picker_that_could_not_enumerate_never_clears_a_binding() {
+        // The reporter's zone after the load-time backfill: a uuid on the
+        // entry. He opens it to change the sprinkler type; the scan fails.
+        assert_eq!(
+            station_to_persist("", "1f00aa00-0000-4000-8000-0000000000a1", false),
+            "1f00aa00-0000-4000-8000-0000000000a1"
+        );
+        // Same for a plain station number on a kind that cannot scan.
+        assert_eq!(station_to_persist("", "3", false), "3");
+        assert_eq!(station_to_persist("   ", "3", false), "3");
+    }
+
+    #[test]
+    fn an_enumerated_picker_honors_an_explicit_unbind_and_a_typed_value_always_wins() {
+        // The picker listed the controller's zones and the user chose
+        // "(not bound)". That is a deliberate choice, so it is honored.
+        assert_eq!(station_to_persist("", "3", true), "");
+        // A non-empty draft always wins, enumerated or not: it is the user
+        // typing or picking.
+        assert_eq!(station_to_persist("7", "3", true), "7");
+        assert_eq!(station_to_persist("7", "3", false), "7");
+        // Nothing stored and nothing drafted stays empty either way.
+        assert_eq!(station_to_persist("", "", true), "");
+        assert_eq!(station_to_persist("", "", false), "");
+    }
+
+    // ---- the vendor label ----
+
+    #[test]
+    fn the_vendor_name_follows_the_binding_and_never_goes_stale() {
+        let scan = vec![
+            ("uuid-a".to_string(), "Front Lawn".to_string()),
+            ("uuid-b".to_string(), "Back Lawn".to_string()),
+        ];
+        // Bound to something the scan reported: that name, which also
+        // refreshes a label the vendor renamed since the last bind.
+        assert_eq!(
+            vendor_name_to_persist("uuid-a", "uuid-a", Some("Front Yard"), &scan),
+            Some("Front Lawn".to_string())
+        );
+        // Station unchanged and not in the scan (or no scan at all): keep
+        // the stored label rather than dropping it.
+        assert_eq!(
+            vendor_name_to_persist("uuid-z", "uuid-z", Some("Orchard"), &[]),
+            Some("Orchard".to_string())
+        );
+        // Station hand-typed to something new: the old label no longer
+        // describes it, so it goes rather than misleading.
+        assert_eq!(
+            vendor_name_to_persist("uuid-c", "uuid-a", Some("Front Lawn"), &scan),
+            None
+        );
+        // Unbound carries no label.
+        assert_eq!(
+            vendor_name_to_persist("", "uuid-a", Some("Front Lawn"), &scan),
+            None
+        );
+    }
+
+    #[test]
+    fn the_binding_reads_as_an_identity_fact() {
+        assert_eq!(
+            binding_display("rachio_main", "uuid-a", Some("Front Lawn")),
+            "rachio_main \u{00b7} Front Lawn"
+        );
+        assert_eq!(
+            binding_display("os_main", "3", None),
+            "os_main \u{00b7} station 3"
+        );
+        assert_eq!(binding_display("os_main", "", None), "os_main");
+        // A blank stored label does not produce a trailing separator.
+        assert_eq!(
+            binding_display("os_main", "3", Some("  ")),
+            "os_main \u{00b7} station 3"
+        );
+    }
+
+    // ---- unbound detection ----
+
+    fn rachio(map: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "id": "rachio_main",
+            "kind": "rachio",
+            "config": { "api_token": "t", "device_id": "d", "zone_uuid_map": map },
+        })
+    }
+
+    #[test]
+    fn a_zone_with_a_station_or_a_map_entry_is_bound() {
+        const UUID_A: &str = "1f00aa00-0000-4000-8000-0000000000a1";
+        const UUID_B: &str = "1f00aa00-0000-4000-8000-0000000000a2";
+        let controllers = vec![rachio(serde_json::json!({ "back-yard": UUID_B }))];
+        // Station on the entry. It has to be a shape Rachio can dispatch:
+        // the station only counts when the kind can actually use it.
+        let z = serde_json::json!({ "controller_id": "rachio_main", "controller_station": UUID_A });
+        assert!(zone_is_bound(&z, "front_yard", &controllers));
+        // No station, but the controller's own map covers the slug. This is
+        // the issue #8 reporter's shape and it must NOT read as unbound.
+        let z = serde_json::json!({ "controller_id": "rachio_main", "controller_station": "" });
+        assert!(
+            zone_is_bound(&z, "back_yard", &controllers),
+            "hyphens normalize on both sides, exactly like dispatch"
+        );
+    }
+
+    #[test]
+    fn a_zone_bound_by_neither_path_reads_as_unbound() {
+        let controllers = vec![rachio(serde_json::json!({}))];
+        let z = serde_json::json!({ "controller_id": "rachio_main", "controller_station": "  " });
+        assert!(!zone_is_bound(&z, "front_yard", &controllers));
+        // A map-less kind has only the station field, so an empty one is
+        // unbound with no fallback to check.
+        let os = vec![serde_json::json!({
+            "id": "os_main", "kind": "opensprinkler_direct", "config": { "host": "192.0.2.10" }
+        })];
+        let z = serde_json::json!({ "controller_id": "os_main", "controller_station": "" });
+        assert!(!zone_is_bound(&z, "front_yard", &os));
+    }
+
+    #[test]
+    fn no_controller_and_a_missing_controller_are_not_reported_as_unbound() {
+        let controllers = vec![rachio(serde_json::json!({}))];
+        // No controller at all already has its own badge and its own save
+        // gate; a second warning on top would be noise.
+        let z = serde_json::json!({ "controller_id": "", "controller_station": "" });
+        assert!(zone_is_bound(&z, "front_yard", &controllers));
+        // A controller that does not exist is a validation error in its own
+        // right, not an unbound zone.
+        let z = serde_json::json!({ "controller_id": "gone", "controller_station": "" });
+        assert!(zone_is_bound(&z, "front_yard", &controllers));
+    }
+
+    // ---- adding must never replace ----
+
+    /// `commit_zone` inserts by key, which REPLACES. Without the collision
+    /// check an add whose name slugifies onto an existing zone silently
+    /// wipes that zone's binding, its vendor label, and every agronomic
+    /// field this form does not carry, and the server's zone-key rename
+    /// guard never fires because the key SET did not change.
+    #[test]
+    fn an_add_whose_name_collides_with_an_existing_zone_is_caught() {
+        let cfg = serde_json::json!({
+            "zones": {
+                "back_yard": { "display_name": "Back Yard", "controller_station": "uuid-b" },
+                "side-yard": { "display_name": "Side Yard", "controller_station": "2" }
+            }
+        });
+        // "Back Yard" slugifies to back_yard, which is taken.
+        assert_eq!(
+            zone_key_taken(&cfg, "back_yard"),
+            Some("back_yard".to_string())
+        );
+        // Hyphens normalize the way dispatch resolves them, so a hyphenated
+        // stored key and an underscored new one are the same zone.
+        assert_eq!(
+            zone_key_taken(&cfg, "side_yard"),
+            Some("side-yard".to_string()),
+            "the REAL stored key comes back so the refusal can name it"
+        );
+        // A genuinely new zone is free.
+        assert_eq!(zone_key_taken(&cfg, "orchard"), None);
+        // No zones at all, and a config that never loaded.
+        assert_eq!(zone_key_taken(&serde_json::json!({}), "orchard"), None);
+        assert_eq!(zone_key_taken(&serde_json::Value::Null, "orchard"), None);
+    }
+
+    // ---- per-kind honesty ----
+
+    fn ctrl(id: &str, kind: &str, config: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "id": id, "kind": kind, "config": config })
+    }
+
+    /// MQTT never reads the station field, so whatever is typed there is not
+    /// evidence of a binding. Certifying it hid the exact silent-never-
+    /// waters state the badge exists to surface.
+    #[test]
+    fn an_mqtt_zone_is_bound_only_by_its_command_map() {
+        let empty = vec![ctrl(
+            "mqtt_main",
+            "mqtt_command",
+            serde_json::json!({ "broker_host": "b", "zone_command_map": {} }),
+        )];
+        let z = serde_json::json!({ "controller_id": "mqtt_main", "controller_station": "1" });
+        assert!(
+            !zone_is_bound(&z, "front_yard", &empty),
+            "a station on an MQTT zone binds nothing"
+        );
+        let mapped = vec![ctrl(
+            "mqtt_main",
+            "mqtt_command",
+            serde_json::json!({
+                "broker_host": "b",
+                "zone_command_map": { "front-yard": { "topic": "t" } }
+            }),
+        )];
+        let z = serde_json::json!({ "controller_id": "mqtt_main", "controller_station": "" });
+        assert!(
+            zone_is_bound(&z, "front_yard", &mapped),
+            "the map is the binding, with hyphens normalized"
+        );
+    }
+
+    #[test]
+    fn a_dry_run_zone_is_always_bound_and_an_esphome_zone_never_is() {
+        let dry = vec![ctrl(
+            "demo_controller",
+            "dry_run",
+            serde_json::json!({ "simulate_runs": false }),
+        )];
+        let z = serde_json::json!({ "controller_id": "demo_controller", "controller_station": "" });
+        assert!(
+            zone_is_bound(&z, "front_yard", &dry),
+            "simulated hardware accepts any zone, matching station_help(\"dry_run\")"
+        );
+        // ESPHome's adapter is never built, so even a map entry binds nothing.
+        let esp = vec![ctrl(
+            "esphome_main",
+            "esphome_native",
+            serde_json::json!({
+                "host": "192.0.2.60",
+                "zone_entity_map": { "front_yard": "switch.front_yard" }
+            }),
+        )];
+        let z = serde_json::json!({
+            "controller_id": "esphome_main",
+            "controller_station": "switch.front_yard"
+        });
+        assert!(!zone_is_bound(&z, "front_yard", &esp));
+    }
+
+    // ---- the vendor label follows the controller, not just the station ----
+
+    /// Station ids collide across controllers of the same kind (station "1"
+    /// on two OpenSprinklers), so a label kept on the station string alone
+    /// would state a binding that does not exist.
+    #[test]
+    fn the_vendor_label_is_dropped_when_the_controller_changes() {
+        // The save path filters `stored_name` on the stored controller id
+        // before calling this, so a changed controller arrives as None.
+        assert_eq!(
+            vendor_name_to_persist("1", "1", None, &[]),
+            None,
+            "no label survives a controller change with no scan to re-resolve it"
+        );
+        // And with the controller unchanged the label is kept.
+        assert_eq!(
+            vendor_name_to_persist("1", "1", Some("Front Lawn"), &[]),
+            Some("Front Lawn".to_string())
+        );
+    }
+
+    /// The same guard on the scan cache: `enumerated` is false once the
+    /// selected controller differs from the one that was scanned, and the
+    /// save path passes an empty list in that case rather than matching a
+    /// station id against another controller's zones.
+    #[test]
+    fn a_cached_scan_from_another_controller_cannot_name_this_zone() {
+        let other = StationScan {
+            controller_id: "os_main".into(),
+            zones: vec![("1".into(), "Front Lawn".into())],
+            state: StationScanState::Ready,
+        };
+        assert!(!other.enumerated("os_shed"));
+        // What the save path hands the resolver once the guard says no.
+        assert_eq!(vendor_name_to_persist("1", "1", None, &[]), None);
+        // With the matching controller the same station does resolve.
+        assert!(other.enumerated("os_main"));
+        assert_eq!(
+            vendor_name_to_persist("1", "", None, &other.zones),
+            Some("Front Lawn".to_string())
+        );
+    }
+
+    /// The client twin of `zone_station_unparseable`: the card badge and the
+    /// server's config check must agree, or a user is told two different
+    /// things about the same zone. Both call `station_id`, which is what
+    /// dispatch binds with.
+    #[test]
+    fn a_station_the_kind_cannot_use_does_not_read_as_bound() {
+        const UUID: &str = "1f00aa00-0000-4000-8000-0000000000a1";
+        let hydrawise = vec![ctrl(
+            "hydrawise_main",
+            "hydrawise",
+            serde_json::json!({ "api_key": "k", "controller_id": 7, "zone_relay_map": {} }),
+        )];
+        // A Rachio UUID left behind on a zone moved to Hydrawise.
+        let z = serde_json::json!({
+            "controller_id": "hydrawise_main",
+            "controller_station": UUID
+        });
+        assert!(!zone_is_bound(&z, "front_yard", &hydrawise));
+        // The relay id it should have been.
+        let z = serde_json::json!({
+            "controller_id": "hydrawise_main",
+            "controller_station": "42"
+        });
+        assert!(zone_is_bound(&z, "front_yard", &hydrawise));
+        // A station number on a Rachio zone: the original defect.
+        let rachio_ctrl = vec![ctrl(
+            "rachio_main",
+            "rachio",
+            serde_json::json!({ "api_token": "t", "device_id": "d", "zone_uuid_map": {} }),
+        )];
+        let z = serde_json::json!({
+            "controller_id": "rachio_main",
+            "controller_station": "3"
+        });
+        assert!(!zone_is_bound(&z, "front_yard", &rachio_ctrl));
+    }
+
+    /// The fallback rule is unchanged: whatever is in the station field, a
+    /// zone the controller's own map covers still waters, so it is bound.
+    #[test]
+    fn an_unusable_station_still_reads_as_bound_when_the_map_covers_the_zone() {
+        let mapped = vec![ctrl(
+            "rachio_main",
+            "rachio",
+            serde_json::json!({
+                "api_token": "t", "device_id": "d",
+                "zone_uuid_map": { "front-yard": "1f00aa00-0000-4000-8000-0000000000a1" }
+            }),
+        )];
+        let z = serde_json::json!({
+            "controller_id": "rachio_main",
+            "controller_station": "3"
+        });
+        assert!(zone_is_bound(&z, "front_yard", &mapped));
+    }
+
+    #[test]
+    fn every_map_bearing_kind_has_a_map_key_and_the_rest_have_none() {
+        for kind in [
+            "rachio",
+            "hydrawise",
+            "bhyve",
+            "rainbird",
+            "ha_service_call",
+            "mqtt_command",
+        ] {
+            assert!(
+                controller_zone_map_key(kind).is_some(),
+                "{kind} holds a per-zone map that dispatch reads"
+            );
+        }
+        for kind in ["opensprinkler_direct", "http_generic", "dry_run", ""] {
+            assert_eq!(
+                controller_zone_map_key(kind),
+                None,
+                "{kind} binds by the zone's station field alone"
+            );
+        }
+        // ESPHome native DOES hold a zone_entity_map, but its adapter is
+        // never constructed, so an entry in it must not certify a binding.
+        // zone_is_bound answers that kind before it reaches this lookup.
+        assert_eq!(controller_zone_map_key("esphome_native"), None);
+    }
+
+    #[test]
+    fn every_controller_kind_has_its_own_station_help_and_placeholder() {
+        use crate::components::controllers_form::controller_kind_options;
+        let generic = station_help("");
+        for (kind, _) in controller_kind_options() {
+            assert_ne!(
+                station_help(&kind),
+                generic,
+                "{kind} needs its own line; the generic fallback is for an \
+                 unselected controller"
+            );
+            assert!(!station_placeholder(&kind).is_empty());
+        }
+    }
+
+    #[test]
+    fn a_scan_only_counts_as_enumerated_for_the_controller_it_came_from() {
+        let ready = StationScan {
+            controller_id: "rachio_main".into(),
+            zones: vec![("uuid-a".into(), "Front Lawn".into())],
+            state: StationScanState::Ready,
+        };
+        assert!(ready.enumerated("rachio_main"));
+        // Switching the Controller picker invalidates the list, so a stale
+        // one can never authorize clearing the new controller's binding.
+        assert!(!ready.enumerated("os_main"));
+        // In flight, failed, or empty is never enumerated.
+        assert!(!StationScan {
+            controller_id: "rachio_main".into(),
+            zones: Vec::new(),
+            state: StationScanState::Ready,
+        }
+        .enumerated("rachio_main"));
+        assert!(!StationScan {
+            controller_id: "rachio_main".into(),
+            zones: vec![("uuid-a".into(), "Front Lawn".into())],
+            state: StationScanState::Scanning,
+        }
+        .enumerated("rachio_main"));
+        assert!(!StationScan::default().enumerated(""));
+    }
 
     #[test]
     fn cap_raise_confirm_predicate_matrix() {
@@ -1414,6 +2503,27 @@ fn ZoneCard(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    // The controller's own name for the bound zone, captured when the
+    // binding was made. A label only; nothing dispatches on it.
+    let vendor_name = zone
+        .get("controller_zone_name")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .filter(|n| !n.is_empty());
+    // Bound by neither the zone's station nor the controller's own zone map
+    // means every run answers zone_unknown and the zone silently never
+    // waters. Computed against the config the page already holds, so it
+    // costs no extra request.
+    let bound = zone_is_bound(
+        &zone,
+        &slug,
+        &config_json.with_untracked(|cfg| {
+            cfg.get("controllers")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default()
+        }),
+    );
     let sprinkler = zone
         .get("sprinkler_type")
         .and_then(|v| v.as_str())
@@ -1426,10 +2536,10 @@ fn ZoneCard(
         pretty_soil(&soil_slug),
         fmt_area_sqft(area, prefs)
     );
-    let ctrl_display = if station.is_empty() {
-        ctrl_id.clone()
+    let ctrl_display = if bound {
+        binding_display(&ctrl_id, &station, vendor_name.as_deref())
     } else {
-        format!("{ctrl_id} \u{00b7} station {station}")
+        format!("{ctrl_id} \u{00b7} not bound to a zone on this controller")
     };
     let precip_display = match precip {
         // Stored mm/hr; render in the viewer's rate unit at the display boundary.
@@ -1523,6 +2633,13 @@ fn ZoneCard(
                 badges=Box::new(move || view! {
                     {ctrl_id_for_badges.is_empty().then(|| view! {
                         <SettingsBadge label="No controller".into() tone=BadgeTone::Warm/>
+                    })}
+                    // A zone with a controller but no binding to any of its
+                    // zones. Warm, not Danger: nothing is broken, the wiring
+                    // is simply not finished. Danger stays reserved for
+                    // auth-failed and offline.
+                    {(!bound).then(|| view! {
+                        <SettingsBadge label="Unbound".into() tone=BadgeTone::Warm/>
                     })}
                     {match precip {
                         Some(_) => view! { <SettingsBadge label="Measured PR".into() tone=BadgeTone::Good/> }.into_any(),
