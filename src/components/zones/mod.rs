@@ -18,6 +18,20 @@ pub use detail::{ZoneDetailPage, ZoneDetailView};
 #[component]
 pub fn ZonesPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     let selected: RwSignal<Option<String>> = RwSignal::new(None);
+    // The card list is rebuilt from scratch on every streamed snapshot, so
+    // a Stop callback created inside a card is disposed while its own
+    // response is still in flight and the user sees nothing. Built once
+    // HERE, at page scope, and handed down as a prop, it outlives every
+    // rebuild. Same defect as the zone detail pane's, one file over.
+    let card_toast = crate::components::ui::use_toast();
+    let card_stop_done =
+        Callback::new(move |result: Result<Option<String>, String>| match result {
+            // A controller with no per-zone stop reports the real scope (the
+            // whole device stopped); relay it instead of implying one zone did.
+            Ok(Some(note)) => card_toast.info(note),
+            Ok(None) => {}
+            Err(e) => card_toast.error(format!("Stop failed: {e}")),
+        });
     // The page CONSUMES the app-level tuning report (provided by App()
     // via provide_tuning_summary): the Suggestions KPI, the per-card
     // attention pills, and the recommendation-aware auto-select below all
@@ -207,7 +221,7 @@ pub fn ZonesPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                             .map(|z| {
                                 let soil_pct = soil.get(&z.slug).copied();
                                 let has_suggestion = recs.contains(&z.slug.replace('-', "_"));
-                                view! { <ZoneCard zone=z selected soil_pct=soil_pct has_suggestion/> }
+                                view! { <ZoneCard zone=z selected soil_pct=soil_pct has_suggestion stop_done=card_stop_done/> }
                             })
                             .collect_view()
                             .into_any()

@@ -120,9 +120,34 @@ Two equivalent ways to bind zones, no hand-copying of ids required:
 - **Setup wizard**: add the controller, Test, Scan zones, and import the results. Imported zones carry the controller-native id in their `controller_station`, which the runtime overlays onto the controller's zone map at build time.
 - **Settings editor**: open the controller, click Scan zones, and the discovered zones are merged into the controller's zone map in the Advanced JSON (`zone_uuid_map` / `zone_relay_map` / `zone_station_map`). Review and save.
 
-When both exist for the same zone slug, the zone entry wins. Hand-written map entries for slugs a scan does not report survive a rescan.
+Only Rachio and the DIY HTTP board can actually scan. Hydrawise, B-hyve and Rain Bird have no zone-discovery endpoint, so **Scan zones** answers an error for them and their binding comes from the zone's **Controller station** field or a hand-written `zone_relay_map` / `zone_station_map`.
+
+When both exist for the same zone slug, the zone entry wins, provided its value is an id that controller kind understands. A value the kind's parser rejects is ignored with a log line naming the zone, and whatever the map already held for that zone stays in place. **The parsers differ, and it matters:** Rachio accepts only a zone UUID, so a station number is ignored there and the scanned UUID survives. Hydrawise, B-hyve and Rain Bird address zones by a NUMBER, so a number in that field is accepted and replaces whatever their map held. Since those three cannot scan, that field is usually how you bind them in the first place; the thing to be careful of is a leftover number silently overriding a map entry you wrote by hand. Hand-written map entries for slugs a scan does not report survive a rescan.
+
+A wizard-imported cloud zone legitimately carries the vendor's own id in **Controller station** (the wizard writes the scan's station id there). Do not clear it.
 
 You do **not** need Home Assistant for any of these; the native adapter talks to the vendor cloud directly. (Driving one through HA with `ha_service_call` is still an option if you already do that.)
+
+### When a zone will not start
+
+The error text now names which of these it is. Read it: it is the fastest answer, and it is what to paste into a bug report.
+
+**A station number on a Rachio zone.** Rachio addresses zones by UUID, never by station number, so a number in **Controller station** is not an id it recognizes. It is now ignored and the scanned UUID is what dispatches, where it used to replace the scanned UUID silently and Rachio rejected every start. (On Hydrawise, B-hyve and Rain Bird a number IS the vendor's id and still overrides the scanned map, so clear it there unless it is the vendor's own number.)
+
+**The zone's slug does not match any key in the controller's zone map.** This is the one to expect next, and it is not obvious. **Scan zones** keys the map by the controller's own zone NAMES, slugified: a Rachio zone called "Front Lawn" becomes the key `front_lawn`. Dispatch looks the map up by YOUR zone's slug, which came from the name you gave the zone in LocalSky. If you called it "Front Yard", its slug is `front_yard`, the lookup misses, and the zone will not start. The lookup is exact on purpose: guessing which valve you meant risks opening the wrong one.
+
+The error names your zone's slug and lists the map's actual keys, so you can see the mismatch directly. Two ways to fix it, both self-serve:
+
+- **Make the names match.** Rename the zone in LocalSky to the controller's name for it, or rename the map key in Settings, then Devices, Advanced JSON. A zone's slug is derived from its name and is read-only once created, so renaming the map key is usually the smaller edit.
+- **Bind the zone directly.** Put the vendor's own zone id (for Rachio, the UUID next to the matching name in the map) into that zone's **Controller station** field. This wins over the map and does not care what the zone is called. This is exactly what the setup wizard's zone import writes.
+
+Clearing **Controller station** does not fix a slug mismatch: an empty station is skipped, which leaves the zone exactly as unbound as before.
+
+**The daily API budget is spent.** Cloud controllers cap how many requests an account may make per day, and LocalSky's status polling shares that budget with the vendor's own app and anything else on the same token. A rate-limited controller now says so, with the allowance its last response reported. Raising `poll_interval_s` spends fewer requests.
+
+Whichever it is, the reason appears in three places: in the message on the button you pressed (the Zones page Run, or Test run on the zone card in Settings), in the container log at the moment of the attempt, and in the response body of `POST /api/v1/irrigation/action` if you are looking at the browser's network tab. Include that text in a bug report; it carries the vendor's own status and message.
+
+A separate thing that is **not** a failure: after a run is accepted, the zone can keep reading idle for a while. A cloud controller reports its state on a throttle (Rachio: 60s at the fastest, 120s by default), which is longer than the window the Zones page waits before saying something. When that happens the message says the controller accepted the change and how often it reports state, rather than implying the run failed.
 
 ### Rachio Gen 2/3
 

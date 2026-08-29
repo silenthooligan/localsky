@@ -770,13 +770,114 @@ fn route_via_registry(source: SnapshotSource, has_default_controller: bool) -> b
 }
 
 /// Map a ControllerError to an HTTP response for the action endpoint.
-fn controller_error_response(e: ControllerError) -> (StatusCode, Json<Value>) {
+///
+/// Every failure except an unknown zone and an unsupported operation used
+/// to collapse into one 502, so a revoked vendor credential, an exhausted
+/// daily request budget, and a vendor rejecting the zone id were a single
+/// indistinguishable status with no way to tell them apart from the
+/// client. Each class now carries its own status, and the body carries a
+/// stable `code` so a client never has to key on the status at all.
+///
+/// A vendor credential failure answers 424, NOT 401. 401 on any LocalSky
+/// endpoint is the deploy's OWN auth outcome, and the shipped Home
+/// Assistant integration reacts to one by invalidating its stored LocalSky
+/// token and starting a reauthentication flow. Answering 401 because a
+/// Rachio key was revoked would send that integration into a reauth loop
+/// against a token that was never the problem.
+///
+/// `rate_limit_remaining` is what the controller's LAST RESPONSE reported,
+/// from `IrrigationController::rate_limit_remaining`; null when that
+/// response carried no number (never a zero sentinel). `mapped_zone_slugs`
+/// is the controller's zone map keys, from
+/// `IrrigationController::mapped_zone_slugs`, which the unknown-zone body
+/// carries so a slug mismatch is visible from the error alone.
+fn controller_error_response(
+    e: ControllerError,
+    rate_limit_remaining: Option<String>,
+    mapped_zone_slugs: Vec<String>,
+) -> (StatusCode, Json<Value>) {
     let status = match &e {
         ControllerError::ZoneUnknown(_) => StatusCode::BAD_REQUEST,
         ControllerError::Unsupported(_) => StatusCode::NOT_IMPLEMENTED,
-        _ => StatusCode::BAD_GATEWAY,
+        ControllerError::AuthFailed => StatusCode::FAILED_DEPENDENCY,
+        ControllerError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+        ControllerError::Offline
+        | ControllerError::Remote(_)
+        | ControllerError::Transport(_)
+        | ControllerError::Init(_) => StatusCode::BAD_GATEWAY,
     };
-    (status, Json(json!({ "error": e.to_string() })))
+    // Stable discriminator so a client branches on this rather than on the
+    // status, which is what made the old 502 collapse unreadable and what
+    // makes 401-vs-424 a trap for anyone who guesses.
+    let code = match &e {
+        ControllerError::ZoneUnknown(_) => "zone_unknown",
+        ControllerError::Unsupported(_) => "controller_unsupported",
+        ControllerError::AuthFailed => "controller_auth_failed",
+        ControllerError::RateLimited => "controller_rate_limited",
+        ControllerError::Offline
+        | ControllerError::Remote(_)
+        | ControllerError::Transport(_)
+        | ControllerError::Init(_) => "controller_unreachable",
+    };
+    // "zone unknown: front_yard" named the zone but never said what the
+    // miss MEANS or what fixes it, and it is the next-most-likely failure
+    // once a bad station value stops overwriting a scanned zone map.
+    let message = match &e {
+        ControllerError::ZoneUnknown(zone) => {
+            format!("zone \"{zone}\" is not mapped to a zone on this controller")
+        }
+        other => other.to_string(),
+    };
+    let mut body = json!({ "error": message, "code": code });
+    match &e {
+        ControllerError::ZoneUnknown(zone) => {
+            // The map is keyed by the slugified VENDOR zone name; dispatch
+            // looks it up by the LocalSky zone slug. When a user named a
+            // zone differently from the vendor, the lookup misses and the
+            // old message gave no way to see why. Show the keys and name
+            // both remedies that actually bind. Deliberately no fuzzy
+            // name matching in the lookup itself: guessing which valve the
+            // user meant risks opening the wrong one.
+            let hint = if mapped_zone_slugs.is_empty() {
+                "This controller has no zone map yet. Open Settings, then Devices, \
+                 open the controller with Edit, and use Scan zones to fill it."
+                    .to_string()
+            } else {
+                format!(
+                    "This controller's zone map has: {}. Your zone's slug is \"{zone}\", \
+                     which is not one of them, and the lookup is exact. The map keys come \
+                     from the controller's own zone names. Either rename the zone (or its \
+                     map key under Settings, then Devices, Advanced) so the two match, or \
+                     put this zone's vendor id in the zone's Controller station field.",
+                    mapped_zone_slugs.join(", ")
+                )
+            };
+            body["mapped_zones"] = json!(mapped_zone_slugs);
+            body["hint"] = json!(hint);
+        }
+        ControllerError::RateLimited => {
+            let hint = match rate_limit_remaining.as_deref() {
+                Some(n) => format!(
+                    "The controller's cloud last reported {n} API requests left for today. \
+                     A longer poll interval on the controller spends fewer of them."
+                ),
+                None => "The controller's cloud is refusing further requests for now. \
+                         A longer poll interval on the controller spends fewer of them."
+                    .to_string(),
+            };
+            body["rate_limit_remaining"] = json!(rate_limit_remaining);
+            body["hint"] = json!(hint);
+        }
+        ControllerError::AuthFailed => {
+            body["hint"] = json!(
+                "The controller rejected the credential. This is the controller's own \
+                 credential, not your LocalSky login. Re-enter it under Settings, then \
+                 Devices: open the controller with Edit, and use Scan zones to check it."
+            );
+        }
+        _ => {}
+    }
+    (status, Json(body))
 }
 
 /// Dispatch zone Run/Stop/StopAll through the registry's default
@@ -943,10 +1044,29 @@ async fn registry_zone_action(body: Action) -> (StatusCode, Json<Value>) {
                             "dispatched": format!("controller:{}", handle.controller_id),
                             "zone": zone,
                             "seconds": clamped,
+                            // How long this controller can take to REPORT the
+                            // change (null when it reads state on demand). The
+                            // UI's confirm window is shorter than a throttled
+                            // cloud poll, so without this a perfectly accepted
+                            // run reads as a controller that never answered.
+                            "confirm_within_s": controller.status_poll_interval_s(),
                         })),
                     )
                 }
-                Err(e) => controller_error_response(e),
+                Err(e) => {
+                    // Nothing logged this path, so a failed dispatch left no
+                    // trace on the server at all and the only copy of the
+                    // reason was a response body the client threw away.
+                    tracing::warn!(
+                        controller = %controller.id(), zone = %zone, action = "run", error = %e,
+                        "controller zone action failed"
+                    );
+                    controller_error_response(
+                        e,
+                        controller.rate_limit_remaining(),
+                        controller.mapped_zone_slugs(),
+                    )
+                }
             }
         }
         Action::Stop { zone } => {
@@ -987,6 +1107,9 @@ async fn registry_zone_action(body: Action) -> (StatusCode, Json<Value>) {
                         "dispatched": format!("controller:{}", controller.id()),
                         "stopped": zone,
                         "scope": if device_wide { "device" } else { "zone" },
+                        // Same readback lag as Run: a stop is accepted long
+                        // before a throttled cloud poll reports it.
+                        "confirm_within_s": controller.status_poll_interval_s(),
                     });
                     if device_wide {
                         body["note"] = json!(
@@ -995,7 +1118,17 @@ async fn registry_zone_action(body: Action) -> (StatusCode, Json<Value>) {
                     }
                     (StatusCode::OK, Json(body))
                 }
-                Err(e) => controller_error_response(e),
+                Err(e) => {
+                    tracing::warn!(
+                        controller = %controller.id(), zone = %zone, action = "stop", error = %e,
+                        "controller zone action failed"
+                    );
+                    controller_error_response(
+                        e,
+                        controller.rate_limit_remaining(),
+                        controller.mapped_zone_slugs(),
+                    )
+                }
             }
         }
         Action::StopAll => match controller.stop_all().await {
@@ -1016,10 +1149,21 @@ async fn registry_zone_action(body: Action) -> (StatusCode, Json<Value>) {
                         "ok": true,
                         "dispatched": format!("controller:{}", controller.id()),
                         "stopped": "all",
+                        "confirm_within_s": controller.status_poll_interval_s(),
                     })),
                 )
             }
-            Err(e) => controller_error_response(e),
+            Err(e) => {
+                tracing::warn!(
+                    controller = %controller.id(), action = "stop_all", error = %e,
+                    "controller zone action failed"
+                );
+                controller_error_response(
+                    e,
+                    controller.rate_limit_remaining(),
+                    controller.mapped_zone_slugs(),
+                )
+            }
         },
         // Only the three zone-action variants reach this fn.
         _ => unreachable!("registry_zone_action called with non-zone action"),
@@ -1480,16 +1624,178 @@ mod tests {
         assert!(!route_via_registry(SnapshotSource::HomeAssistant, false));
     }
 
+    /// No zone map, the shape every non-cloud adapter reports.
+    fn no_zones() -> Vec<String> {
+        Vec::new()
+    }
+
     #[test]
     fn controller_errors_map_to_sensible_status() {
-        let (s, _) = controller_error_response(ControllerError::ZoneUnknown("x".into()));
+        let (s, _) =
+            controller_error_response(ControllerError::ZoneUnknown("x".into()), None, no_zones());
         assert_eq!(s, StatusCode::BAD_REQUEST);
-        let (s, _) = controller_error_response(ControllerError::Unsupported("y".into()));
+        let (s, _) =
+            controller_error_response(ControllerError::Unsupported("y".into()), None, no_zones());
         assert_eq!(s, StatusCode::NOT_IMPLEMENTED);
-        let (s, _) = controller_error_response(ControllerError::AuthFailed);
-        assert_eq!(s, StatusCode::BAD_GATEWAY);
-        let (s, _) = controller_error_response(ControllerError::Offline);
-        assert_eq!(s, StatusCode::BAD_GATEWAY);
+        // A VENDOR credential failure must never answer 401: that status is
+        // this deploy's own auth outcome, and the Home Assistant integration
+        // reacts to one by invalidating its LocalSky token and starting a
+        // reauth loop over a token that was never at fault.
+        let (s, Json(body)) =
+            controller_error_response(ControllerError::AuthFailed, None, no_zones());
+        assert_eq!(s, StatusCode::FAILED_DEPENDENCY);
+        assert_ne!(s, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], json!("controller_auth_failed"));
+        let (s, _) = controller_error_response(ControllerError::RateLimited, None, no_zones());
+        assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
+        // 502 stays for the failures that really are upstream or transport.
+        for e in [
+            ControllerError::Offline,
+            ControllerError::Remote("HTTP 500: boom".into()),
+            ControllerError::Transport("connect".into()),
+            ControllerError::Init("tls roots".into()),
+        ] {
+            let (s, Json(body)) = controller_error_response(e, None, no_zones());
+            assert_eq!(s, StatusCode::BAD_GATEWAY);
+            assert_eq!(body["code"], json!("controller_unreachable"));
+        }
+    }
+
+    /// Every error body carries a stable `code`, so a client branches on
+    /// that rather than guessing which status a failure class maps to.
+    #[test]
+    fn every_error_body_carries_a_stable_code() {
+        for (e, want) in [
+            (ControllerError::ZoneUnknown("z".into()), "zone_unknown"),
+            (
+                ControllerError::Unsupported("op".into()),
+                "controller_unsupported",
+            ),
+            (ControllerError::AuthFailed, "controller_auth_failed"),
+            (ControllerError::RateLimited, "controller_rate_limited"),
+            (ControllerError::Offline, "controller_unreachable"),
+        ] {
+            let (_, Json(body)) = controller_error_response(e, None, no_zones());
+            assert_eq!(body["code"], json!(want));
+        }
+    }
+
+    /// The reporter's most likely remaining failure. The controller's zone
+    /// map is keyed by the slugified VENDOR zone name while dispatch looks
+    /// up the LocalSky zone slug, so the 400 has to show the keys and name
+    /// both remedies, or the user cannot tell why an exact lookup missed.
+    #[test]
+    fn zone_unknown_body_shows_the_map_keys_and_both_remedies() {
+        let (s, Json(body)) = controller_error_response(
+            ControllerError::ZoneUnknown("front_yard".into()),
+            None,
+            vec!["front_lawn".to_string(), "back_lawn".to_string()],
+        );
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        let err = body["error"].as_str().unwrap();
+        assert!(err.contains("front_yard"), "must name the zone: {err}");
+        assert!(
+            err.contains("not mapped"),
+            "must say the zone is not mapped to a controller zone: {err}"
+        );
+        // The keys ride the body as data, not only inside the prose.
+        assert_eq!(body["mapped_zones"], json!(["front_lawn", "back_lawn"]));
+        let hint = body["hint"].as_str().unwrap();
+        assert!(
+            hint.contains("front_lawn") && hint.contains("back_lawn"),
+            "the hint must show what the map actually has: {hint}"
+        );
+        assert!(
+            hint.contains("front_yard"),
+            "the hint must name the slug that missed: {hint}"
+        );
+        // Both remedies that actually bind, and neither is "leave it blank":
+        // clearing the station field leaves a mismatched zone unbound.
+        assert!(hint.contains("rename"), "remedy 1, rename to match: {hint}");
+        assert!(
+            hint.contains("Controller station"),
+            "remedy 2, paste the vendor id: {hint}"
+        );
+        assert!(
+            !hint.contains("blank"),
+            "must not tell a mismatched zone to blank the one field that binds it: {hint}"
+        );
+    }
+
+    /// An empty map is the one case where "run Scan zones" is the right
+    /// advice, so it keeps that wording and shows no key list.
+    #[test]
+    fn zone_unknown_with_no_map_points_at_the_scan() {
+        let (_, Json(body)) = controller_error_response(
+            ControllerError::ZoneUnknown("front_yard".into()),
+            None,
+            no_zones(),
+        );
+        assert_eq!(body["mapped_zones"], json!([]));
+        let hint = body["hint"].as_str().unwrap();
+        assert!(hint.contains("Scan zones"), "{hint}");
+        assert!(hint.contains("no zone map"), "{hint}");
+    }
+
+    /// The server's error body and the client's reader are two ends of one
+    /// contract, and the break was on the client end: it printed the bare
+    /// status and discarded the body. Lock them together so whatever
+    /// `controller_error_response` writes still reaches the user through
+    /// `load_error_message`, which is what both action call sites now use.
+    #[test]
+    fn the_client_reader_surfaces_the_controller_reason_from_the_error_body() {
+        use crate::components::settings_ui::load_error_message;
+        // A cloud controller's Remote error carries the vendor's own status
+        // and body. That text is the whole point of reading the body.
+        let (status, Json(body)) = controller_error_response(
+            ControllerError::Remote("HTTP 400: zone id not recognized".into()),
+            None,
+            no_zones(),
+        );
+        let msg = load_error_message(status.as_u16(), &body.to_string());
+        assert!(
+            msg.contains("zone id not recognized"),
+            "the vendor's reason must survive to the user: {msg}"
+        );
+        assert!(msg.contains("502"), "the status stays visible: {msg}");
+
+        let (status, Json(body)) =
+            controller_error_response(ControllerError::RateLimited, Some("0".into()), no_zones());
+        let msg = load_error_message(status.as_u16(), &body.to_string());
+        assert!(msg.contains("rate limited"), "{msg}");
+        assert!(
+            msg.contains('0'),
+            "the remaining allowance must reach the user: {msg}"
+        );
+
+        // An empty body still degrades to the bare status, the old behavior,
+        // rather than to a blank message.
+        assert_eq!(load_error_message(502, ""), "HTTP 502");
+    }
+
+    #[test]
+    fn rate_limited_body_carries_the_remaining_allowance_when_known() {
+        let (s, Json(body)) =
+            controller_error_response(ControllerError::RateLimited, Some("0".into()), no_zones());
+        assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["rate_limit_remaining"], json!("0"));
+        let hint = body["hint"].as_str().unwrap();
+        assert!(hint.contains('0'));
+        // The number is what the controller's LAST RESPONSE reported, which
+        // is not necessarily what it would report now. Say "last reported",
+        // never a present-tense claim about a live allowance.
+        assert!(
+            hint.contains("last reported"),
+            "the hint must not assert a live allowance: {hint}"
+        );
+        // Unknown stays null, never a zero that reads as "exhausted".
+        let (_, Json(body)) =
+            controller_error_response(ControllerError::RateLimited, None, no_zones());
+        assert!(
+            body["rate_limit_remaining"].is_null(),
+            "an unknown allowance must be null, not a sentinel"
+        );
+        assert!(body["hint"].as_str().is_some());
     }
 
     #[test]

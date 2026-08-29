@@ -2,6 +2,23 @@
 
 All notable changes to LocalSky are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.20] - 2026-08-29
+
+### Fixed
+
+- **Zones bound to a Rachio controller could send the wrong zone id and fail to start.** If a zone's "Controller station" field held a station number, that number replaced the zone UUID the controller's own scan had found, and Rachio rejected every attempt to run the zone. Rachio addresses zones by UUID, so a station number there is now ignored, with a log line naming the zone, and the scanned UUID is what gets used. Hydrawise, B-hyve, and Rain Bird do address zones by number, so on those three the field still binds the zone and still overrides the scanned map ([#8](https://github.com/silenthooligan/localsky/issues/8)).
+- **A zone whose name differs from the controller's name for it could not start, and nothing said why.** Scan zones keys the controller's map by the controller's own zone names, while a run looks it up by your zone's slug, so a zone you called "Front Yard" never matched a Rachio zone called "Front Lawn". The failure now lists the keys the controller actually has next to the slug that missed, and names both fixes: rename so the two match, or put the vendor's zone id in the zone's "Controller station" field. Clearing that field does not help, and the message no longer suggests it ([#8](https://github.com/silenthooligan/localsky/issues/8)).
+- **Controller failures now say what actually went wrong instead of a bare status code.** A rejected credential, a spent daily API budget, a vendor rejecting the zone id, and a controller that could not be reached all arrived as the same "HTTP 502", and a zone that is not mapped to a controller zone arrived as a bare "HTTP 400". In every case the server's explanation was discarded before it reached the screen. Each now reports its own reason, carrying the vendor's own message when there is one, and the same reason is written to the log at the moment of the attempt ([#8](https://github.com/silenthooligan/localsky/issues/8)).
+- A zone command that failed could show no error at all: the result arrived after a live update had already replaced the part of the page waiting for it, so on the Zones page the only message left was the timeout warning 25 seconds later. Fixed on the zone detail pane, the zone cards, and the "now running" banner; the result now reaches the page whenever it arrives.
+- Error messages stay on screen until dismissed. They carry the controller's own explanation, which can run several sentences, and the five-second timer they shared with routine notices was not long enough to read one. Routine notices still clear themselves.
+- After a run is accepted, a cloud controller can take up to a full poll interval to report it. The Zones page used to call that a controller that did not confirm, and sent you to the Sensors page, where a Rachio never appears. It now says the controller accepted the change and how often it reports state; when the controller really has not reported, it points at Settings, then Devices, and the controller's Scan zones button. On a Home Assistant deployment with no controller configured, it now points at the sprinkler entities instead.
+- A rate-limited controller no longer reports a stale allowance. If the refusal itself carried no remaining-requests count, LocalSky answered with the number from an earlier successful call, so a spent daily budget could read as hundreds of requests left on the very screen explaining the failure.
+- The zone editor, the setup wizard's zone step, and the manual all described "Controller station" as a valve number. They now say what each controller kind actually addresses zones by, including that Hydrawise, B-hyve, and Rain Bird cannot scan and are bound by that field.
+
+### Changed
+
+- API contract 1.23.0: `POST /api/v1/irrigation/action` no longer answers `502` for every controller failure. A rejected controller credential answers `424`, a rate-limited controller `429` (body carries `rate_limit_remaining`), an unmapped zone `400` (body carries `mapped_zones`), an unsupported operation `501`; `502` is now only a controller error, an incomplete request, an offline controller, or an adapter that failed to start. Every error body carries a stable `code` to branch on instead of the status. A client that pinned `502` as the controller-failure status must widen. Successful `run`, `stop`, and `stop_all` responses gain `confirm_within_s`. No Home Assistant integration change is required.
+
 ## [0.7.19] - 2026-08-29
 
 Results, pending work, and waiting suggestions stay where you can see them. No breaking changes.

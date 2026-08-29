@@ -153,6 +153,40 @@ pub trait IrrigationController: Send + Sync {
     fn simulated(&self) -> bool {
         false
     }
+    /// The remaining request allowance the controller's upstream last
+    /// reported, when the adapter tracks one (a cloud controller with a
+    /// daily budget). `None` for adapters talking to local hardware, and
+    /// `None` before the upstream has reported a number: absent stays
+    /// absent rather than becoming a zero that reads as "exhausted".
+    /// Carried in the action endpoint's rate-limit error body so an
+    /// exhausted budget says so instead of arriving as a bare status.
+    fn rate_limit_remaining(&self) -> Option<String> {
+        None
+    }
+    /// The zone slugs this controller can actually dispatch, i.e. the keys
+    /// of its zone map. Empty for adapters that carry no map of their own
+    /// (they derive a per-zone binding from `controller_station` at build
+    /// time, so an unbound zone is already visible in the config).
+    ///
+    /// The action endpoint puts these in the unknown-zone 400 body. A cloud
+    /// controller's map is keyed by the slugified VENDOR zone name, while
+    /// dispatch looks it up by the LocalSky zone slug, and nothing forces
+    /// the two to agree. Without the keys in the error, a user whose zone
+    /// is named differently from the vendor's has no way to see why the
+    /// lookup missed.
+    fn mapped_zone_slugs(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// How long this controller's live status readback can lag a dispatch,
+    /// in seconds, for an adapter that polls its upstream on a throttle.
+    /// `None` when state is read on demand, so a dispatched change is
+    /// visible on the next refresher tick. The action endpoint returns it
+    /// on a successful zone action so the UI can say a run was accepted
+    /// and confirmation is still pending, rather than implying failure
+    /// when its own confirm window is shorter than this interval.
+    fn status_poll_interval_s(&self) -> Option<u32> {
+        None
+    }
     async fn run_zone(&self, slug: &str, duration_s: u32) -> ControllerResult<RunHandle>;
     async fn stop_zone(&self, slug: &str) -> ControllerResult<()>;
     async fn stop_all(&self) -> ControllerResult<()>;

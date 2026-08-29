@@ -20,8 +20,20 @@ use serde_json::json;
 #[component]
 pub fn RunningBanner(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     // Created at component scope (context lookup), shared by every
-    // render of the inner closure.
+    // render of the inner closure. The note-aware variant has to live out
+    // here too: built inside the closure below it was owned by a render
+    // that the next streamed snapshot disposes, and it resolved the toast
+    // hub from inside its own continuation, where there is no owner to
+    // resolve from.
+    let toast = crate::components::ui::use_toast();
     let stop_done = super::controls::toast_on_err("Stop failed; zone may still be running");
+    let note_done = Callback::new(move |result: Result<Option<String>, String>| match result {
+        // A controller with no per-zone stop reports the real scope (the
+        // whole device stopped); relay it.
+        Ok(Some(note)) => toast.info(note),
+        Ok(None) => {}
+        Err(e) => stop_done.run(Err(e)),
+    });
     move || {
         let s = snap.get();
         let running: Vec<_> = s.zones.iter().filter(|z| z.running).cloned().collect();
@@ -50,11 +62,7 @@ pub fn RunningBanner(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 // real scope (the whole device stopped); relay it.
                 super::controls::post_action_note_then(
                     json!({"kind": "stop", "zone": slug}),
-                    Callback::new(move |result: Result<Option<String>, String>| match result {
-                        Ok(Some(note)) => crate::components::ui::use_toast().info(note),
-                        Ok(None) => {}
-                        Err(e) => stop_done.run(Err(e)),
-                    }),
+                    note_done,
                 );
             }
         };

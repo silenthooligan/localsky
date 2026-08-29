@@ -635,18 +635,55 @@ pub(crate) fn toast_on_err(prefix: &'static str) -> Callback<Result<(), String>>
     })
 }
 
+/// POST the action and read the outcome. On a non-2xx the response BODY is
+/// what carries the reason: the server sends `{"error": ..., "hint": ...}`,
+/// and for a cloud controller that error string is the vendor's own status
+/// and message. This used to answer `format!("HTTP {}", resp.status())` and
+/// throw the body away, which collapsed a rejected zone id, a revoked
+/// token, an exhausted request budget, and a transport failure into one
+/// indistinguishable "HTTP 502" with nothing for the user to report.
+/// `load_error_message` is the same body reader the settings pages use.
+#[cfg(feature = "hydrate")]
+async fn post_action(body: serde_json::Value) -> Result<Option<serde_json::Value>, String> {
+    let payload = body.to_string();
+    let req = gloo_net::http::Request::post("/api/irrigation/action")
+        .header("Content-Type", "application/json")
+        .body(payload);
+    match req {
+        Ok(r) => match r.send().await {
+            Ok(resp) if resp.ok() => Ok(resp.json::<serde_json::Value>().await.ok()),
+            Ok(resp) => {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                Err(crate::components::settings_ui::load_error_message(
+                    status, &text,
+                ))
+            }
+            Err(e) => Err(e.to_string()),
+        },
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// Browser-side helper: POST a JSON body to /api/irrigation/action and
 /// report completion so callers can surface failure (toast) or run
 /// optimistic UI (pending state cleared by the next snapshot, or rolled
 /// back on error). On SSR this is a no-op: the server doesn't fire
 /// actions at itself. There is deliberately no fire-and-forget variant;
 /// every mutating POST must report its outcome.
+///
+/// All three helpers deliver through `try_run`, never `run`. `run` reads
+/// the callback's StoredValue with `with_value`, which PANICS once the
+/// owner that created it is disposed, and wasm-release is panic=abort, so
+/// a response landing after its view went away would take the whole app
+/// down. Callers still hoist their callbacks to a scope that outlives the
+/// request (that is what restores the message); this is the backstop that
+/// keeps the failure mode a silent no-op rather than a dead page.
 #[cfg(feature = "hydrate")]
 pub(crate) fn post_action_then(body: serde_json::Value, done: Callback<Result<(), String>>) {
-    post_action_note_then(
-        body,
-        Callback::new(move |r: Result<Option<String>, String>| done.run(r.map(|_| ()))),
-    );
+    leptos::task::spawn_local(async move {
+        let _ = done.try_run(post_action(body).await.map(|_| ()));
+    });
 }
 
 /// Like `post_action_then`, but a success also hands back the response's
@@ -658,27 +695,25 @@ pub(crate) fn post_action_note_then(
     body: serde_json::Value,
     done: Callback<Result<Option<String>, String>>,
 ) {
-    use leptos::task::spawn_local;
-    spawn_local(async move {
-        let payload = body.to_string();
-        let req = gloo_net::http::Request::post("/api/irrigation/action")
-            .header("Content-Type", "application/json")
-            .body(payload);
-        let result = match req {
-            Ok(r) => match r.send().await {
-                Ok(resp) if resp.ok() => {
-                    let note =
-                        resp.json::<serde_json::Value>().await.ok().and_then(|v| {
-                            v.get("note").and_then(|n| n.as_str()).map(str::to_string)
-                        });
-                    Ok(note)
-                }
-                Ok(resp) => Err(format!("HTTP {}", resp.status())),
-                Err(e) => Err(e.to_string()),
-            },
-            Err(e) => Err(e.to_string()),
-        };
-        done.run(result);
+    leptos::task::spawn_local(async move {
+        let _ =
+            done.try_run(post_action(body).await.map(|v| {
+                v.and_then(|v| v.get("note").and_then(|n| n.as_str()).map(str::to_string))
+            }));
+    });
+}
+
+/// Like `post_action_then`, but a success hands back the whole response
+/// body. Callers that need more than `note` (the zone page reads
+/// `confirm_within_s`, the controller's status-readback lag) use this
+/// rather than growing another single-field variant.
+#[cfg(feature = "hydrate")]
+pub(crate) fn post_action_body_then(
+    body: serde_json::Value,
+    done: Callback<Result<Option<serde_json::Value>, String>>,
+) {
+    leptos::task::spawn_local(async move {
+        let _ = done.try_run(post_action(body).await);
     });
 }
 
@@ -691,6 +726,14 @@ pub(crate) fn post_action_then(_body: serde_json::Value, _done: Callback<Result<
 pub(crate) fn post_action_note_then(
     _body: serde_json::Value,
     _done: Callback<Result<Option<String>, String>>,
+) {
+}
+
+#[cfg(not(feature = "hydrate"))]
+#[allow(dead_code)]
+pub(crate) fn post_action_body_then(
+    _body: serde_json::Value,
+    _done: Callback<Result<Option<serde_json::Value>, String>>,
 ) {
 }
 

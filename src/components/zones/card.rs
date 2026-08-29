@@ -7,7 +7,7 @@ use leptos::prelude::*;
 use serde_json::json;
 
 use crate::components::irrigation::controls::{post_action_note_then, OverrideControl};
-use crate::components::ui::{use_toast, Button, Icon};
+use crate::components::ui::{Button, Icon};
 use crate::components::units_fmt::{depth_unit, depth_value_mm, use_unit_prefs};
 use crate::ha::snapshot::ZoneState;
 
@@ -41,6 +41,11 @@ pub fn ZoneCard(
     /// itself never fetches). Renders the attention pill in the head row.
     #[prop(optional)]
     has_suggestion: bool,
+    /// Where a Stop result is delivered. Owned by the PAGE, because the
+    /// card list is rebuilt on every streamed snapshot and a callback
+    /// created here would be disposed with its own request still in
+    /// flight (see `on_stop`).
+    stop_done: Callback<Result<Option<String>, String>>,
 ) -> impl IntoView {
     let (status, label, color) = zone_status(&zone);
     // Per-device display-unit preference; read prefs.get() in render
@@ -82,19 +87,16 @@ pub fn ZoneCard(
             return;
         }
         stopping.set(true);
+        // `stop_done` is owned by the PAGE, not by this card. Building a
+        // callback here instead put it in the card's owner, which the next
+        // streamed snapshot disposes: a Stop whose response landed after
+        // that either showed nothing or, because the old callback resolved
+        // the toast hub from an owner that no longer existed, aborted the
+        // wasm module. The guard clears on the next snapshot, which
+        // rebuilds this card with the controller's real state.
         post_action_note_then(
             json!({ "kind": "stop", "zone": stop_slug.clone() }),
-            Callback::new(move |result: Result<Option<String>, String>| match result {
-                // A controller with no per-zone stop reports the real scope
-                // (the whole device stopped); relay it instead of implying
-                // one zone stopped.
-                Ok(Some(note)) => use_toast().info(note),
-                Ok(None) => {}
-                Err(e) => {
-                    stopping.set(false);
-                    use_toast().error(format!("Stop failed: {e}"));
-                }
-            }),
+            stop_done,
         );
     };
     let photo = zone.photo_url.clone().filter(|p| !p.is_empty());

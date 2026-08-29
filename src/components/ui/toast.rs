@@ -1,8 +1,10 @@
 // Toast notifications. A `ToastHub` (Copy handle over two signals) is
 // provided once at the shell level via context; any component calls
 // `use_toast().success("Saved")` etc. The `<ToastViewport/>` is rendered
-// once in the app shell and shows the live stack. Toasts auto-dismiss
-// after a few seconds; each is also manually dismissable.
+// once in the app shell and shows the live stack. Routine toasts
+// auto-dismiss after a few seconds; ERROR toasts stay until dismissed,
+// because they carry the server's own reason and are the only copy of
+// it. Every toast is manually dismissable.
 //
 // The stack starts empty on SSR (no toasts exist server-side), so the
 // SSR/hydrate first frame match, toasts only ever appear from
@@ -86,12 +88,21 @@ impl ToastHub {
                 message: message.into(),
             })
         });
-        // Auto-dismiss.
-        let items = self.items;
-        set_timeout(
-            move || items.update(|v| v.retain(|t| t.id != id)),
-            Duration::from_secs(5),
-        );
+        // Auto-dismiss ROUTINE toasts only. An error toast carries the
+        // server's own reason, which on the controller action paths is a
+        // multi-sentence hint naming the zone map's keys and the remedies
+        // (the unknown-zone body alone runs past 250 characters). Five
+        // seconds is well short of reading that, there is no toast
+        // history to re-read it from, and re-triggering it costs another
+        // call against the controller's daily budget. Errors stay until
+        // dismissed; toast_view renders the close button on every kind.
+        if kind != ToastKind::Error {
+            let items = self.items;
+            set_timeout(
+                move || items.update(|v| v.retain(|t| t.id != id)),
+                Duration::from_secs(5),
+            );
+        }
     }
 
     pub fn info(&self, m: impl Into<String>) {

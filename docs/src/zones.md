@@ -20,10 +20,19 @@ next tick.
 - **Area**: approximate square footage. It does not have to be exact; it
   feeds leak detection and flow validation when a flow meter is present.
 - **Controller** and **Controller station**: which configured controller
-  fires this zone, and the station identifier on it. For OpenSprinkler the
-  station is a 1-based number (1, 2, 3); for a DIY HTTP board it is the
-  board's zone id; for a Home Assistant service call it is the entity id
-  (for example `switch.back_yard_zone`).
+  fires this zone, and how that controller addresses it. A value in the
+  station field replaces whatever the controller's own zone map holds for
+  this zone. For OpenSprinkler the station is a 1-based number (1, 2, 3);
+  for a DIY HTTP board it is the board's zone id; for a Home Assistant
+  service call it is the entity id (for example `switch.back_yard_zone`).
+  For Rachio it is the zone UUID, which **Scan zones** on the controller
+  fills into the map for you, so leave the field blank when the scanned map
+  already has an entry under this zone's slug; a station number is not a
+  UUID and is ignored. For Hydrawise it is the relay id, and for B-hyve and
+  Rain Bird the station number: those three cannot scan, so this field is
+  what binds them and a number here is accepted. See
+  [controllers](controllers.md#when-a-zone-will-not-start) when a zone will
+  not start.
 
 A zone needs a controller before it can run; configure one under Settings,
 then Controllers, first.

@@ -239,13 +239,24 @@ impl Rachio {
         })
     }
 
+    /// Base every request path is appended to, as `{base}{path}`.
+    ///
+    /// The trailing-slash guard used to sit INSIDE the map over the
+    /// configured `base_url`, so it structurally could not cover
+    /// `DEFAULT_API_BASE` (harmless only because that literal happens to
+    /// have no trailing slash). Both branches normalize now. A `base_url`
+    /// that is only whitespace or slashes normalizes to empty and falls
+    /// back to the default rather than producing a relative request URL.
     fn api_base(&self) -> &str {
         self.config
             .base_url
             .as_deref()
-            .map(|s| s.trim_end_matches('/'))
+            .map(|s| s.trim().trim_end_matches('/'))
             .filter(|s| !s.is_empty())
             .unwrap_or(DEFAULT_API_BASE)
+            // Applied to the RESULT, so the guard covers the default too.
+            // Idempotent for the configured branch, which trimmed above.
+            .trim_end_matches('/')
     }
 
     /// Effective status-poll throttle: configured value clamped to the
@@ -268,20 +279,27 @@ impl Rachio {
     }
 
     fn note_rate_limit(&self, resp: &reqwest::Response) {
-        if let Some(v) = resp
+        let seen = resp
             .headers()
             .get("x-ratelimit-remaining")
             .and_then(|h| h.to_str().ok())
-        {
-            if let Ok(mut slot) = self.rate_limit_remaining.lock() {
-                *slot = Some(v.to_string());
-            }
+            .map(|v| v.to_string());
+        if let Ok(mut slot) = self.rate_limit_remaining.lock() {
+            // Stamp the slot with the response it came from, absent
+            // included. Keeping the last value ever SEEN let a 429 that
+            // carries no header answer with an earlier call's allowance,
+            // so a spent budget could read as "540 requests left" on the
+            // very screen diagnosing why the zone would not start. Absent
+            // stays absent (never a zero sentinel) and the caller falls
+            // back to its no-number wording.
+            *slot = seen;
         }
     }
 
-    /// The most recent X-RateLimit-Remaining header seen, if any. Read by
-    /// the wizard's controller test so the operator can watch the daily
-    /// budget.
+    /// What the most recent response reported for X-RateLimit-Remaining,
+    /// None when that response reported none. Read by the wizard's
+    /// controller test and by the action endpoint's rate-limit body, so
+    /// the operator can watch the daily budget.
     pub fn last_rate_limit_remaining(&self) -> Option<String> {
         self.rate_limit_remaining
             .lock()
@@ -491,6 +509,21 @@ impl IrrigationController for Rachio {
             // The public API's only stop is device-wide stop_water.
             per_zone_stop: false,
         }
+    }
+
+    fn rate_limit_remaining(&self) -> Option<String> {
+        self.last_rate_limit_remaining()
+    }
+
+    fn mapped_zone_slugs(&self) -> Vec<String> {
+        self.config.zone_uuid_map.keys().cloned().collect()
+    }
+
+    /// Rachio's status is throttled to the poll interval (120s default,
+    /// 60s floor) to stay inside the daily request budget, so a dispatch
+    /// can be accepted and still not read back as running for that long.
+    fn status_poll_interval_s(&self) -> Option<u32> {
+        Some(self.poll_interval().as_secs() as u32)
     }
 
     async fn run_zone(&self, slug: &str, duration_s: u32) -> ControllerResult<RunHandle> {
@@ -770,6 +803,66 @@ mod tests {
         })
     }
 
+    // ---- the endpoint base, which no test used to touch ----
+
+    /// Every wiremock case injects a `base_url`, so `DEFAULT_API_BASE` was
+    /// never exercised: a wrong or dropped `/1/public` prefix would have
+    /// shipped with the whole suite green. Pin the literal and the
+    /// normalization directly.
+    #[test]
+    fn default_api_base_is_the_public_v1_endpoint() {
+        let r = Rachio::new("rachio", cfg()).unwrap();
+        assert_eq!(r.api_base(), "https://api.rach.io/1/public");
+        assert_eq!(DEFAULT_API_BASE, "https://api.rach.io/1/public");
+    }
+
+    #[test]
+    fn api_base_normalizes_both_branches() {
+        // A configured base keeps its own path segment, minus trailing
+        // slashes and surrounding whitespace.
+        let r = Rachio::new("rachio", cfg_at("https://proxy.example/1/public/")).unwrap();
+        assert_eq!(r.api_base(), "https://proxy.example/1/public");
+        let r = Rachio::new("rachio", cfg_at("  https://proxy.example/1/public  ")).unwrap();
+        assert_eq!(r.api_base(), "https://proxy.example/1/public");
+        // A base_url that normalizes to nothing falls back to the default
+        // rather than building a relative request URL.
+        for empty in ["", "   ", "/", "///"] {
+            let r = Rachio::new("rachio", cfg_at(empty)).unwrap();
+            assert_eq!(
+                r.api_base(),
+                DEFAULT_API_BASE,
+                "base_url {empty:?} must fall back to the default"
+            );
+        }
+    }
+
+    /// The joining rule, `format!("{base}{path}")`, was only ever exercised
+    /// with a path-less mock base, so a doubled or dropped prefix was
+    /// untestable. Mount the FULL path behind a base that carries its own
+    /// segment, the shape production actually uses.
+    #[tokio::test]
+    async fn requests_join_onto_a_base_that_carries_a_path_segment() {
+        let server = MockServer::start().await;
+        let base = format!("{}/1/public", server.uri());
+        Mock::given(method("PUT"))
+            .and(path("/1/public/zone/start"))
+            .and(body_partial_json(json!({ "id": UUID_FRONT })))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/1/public/device/{DEVICE}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(device_fixture()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let r = Rachio::new("rachio", cfg_at(&base)).unwrap();
+        r.run_zone("front", 300).await.expect("zone start");
+        r.discover_zones().await.expect("device read");
+        server.verify().await;
+    }
+
     // ---- pure parse tests (fixture-driven) ----
 
     #[test]
@@ -972,6 +1065,41 @@ mod tests {
             Err(ControllerError::RateLimited)
         ));
         assert_eq!(r.last_rate_limit_remaining().as_deref(), Some("0"));
+    }
+
+    /// A refusal that carries no allowance header must not answer with an
+    /// earlier call's number. Keeping the last value ever seen meant a
+    /// spent budget could report "540 requests left" on the same response
+    /// that just refused the request.
+    #[tokio::test]
+    async fn a_headerless_429_does_not_report_an_earlier_allowance() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/device/{DEVICE}")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("x-ratelimit-remaining", "540")
+                    .set_body_json(device_fixture()),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/zone/start"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server)
+            .await;
+        let r = Rachio::new("rachio", cfg_at(&server.uri())).unwrap();
+        r.discover_zones().await.expect("device read");
+        assert_eq!(r.last_rate_limit_remaining().as_deref(), Some("540"));
+        assert!(matches!(
+            r.run_zone("front", 300).await,
+            Err(ControllerError::RateLimited)
+        ));
+        assert_eq!(
+            r.last_rate_limit_remaining(),
+            None,
+            "a refusal with no header must clear the stale allowance, not keep 540"
+        );
     }
 
     #[tokio::test]

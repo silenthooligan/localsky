@@ -162,6 +162,10 @@ impl IrrigationController for Hydrawise {
         &self.id
     }
 
+    fn mapped_zone_slugs(&self) -> Vec<String> {
+        self.config.zone_relay_map.keys().cloned().collect()
+    }
+
     fn supports(&self) -> ControllerCaps {
         ControllerCaps {
             // statusschedule.php exposes flow + master if hardware

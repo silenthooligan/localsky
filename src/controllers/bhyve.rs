@@ -179,6 +179,10 @@ impl IrrigationController for Bhyve {
         &self.id
     }
 
+    fn mapped_zone_slugs(&self) -> Vec<String> {
+        self.config.zone_station_map.keys().cloned().collect()
+    }
+
     fn supports(&self) -> ControllerCaps {
         ControllerCaps {
             flow_meter: false,

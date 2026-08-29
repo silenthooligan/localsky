@@ -10,7 +10,7 @@ use chrono::{Local, TimeZone};
 use leptos::prelude::*;
 use serde_json::json;
 
-use crate::components::irrigation::controls::post_action_then;
+use crate::components::irrigation::controls::post_action_body_then;
 use crate::components::ui::{
     use_toast, Button, Icon, LineChart, Series, Sparkline, StatTile, Stepper,
 };
@@ -22,10 +22,34 @@ use crate::ha::snapshot::{IrrigationSnapshot, ZoneMath, ZoneState};
 use crate::history::types::HistoryWindow;
 use leptos_router::hooks::use_params_map;
 
+/// How long the optimistic pending flag waits for the streamed snapshot to
+/// confirm a dispatched change before it clears and says something. Two
+/// snapshot ticks. Deliberately NOT stretched to cover a cloud controller's
+/// poll throttle: a longer spinner is not more truthful than saying the
+/// controller accepted the change and is not reporting yet.
+// Read only from the hydrate-only deadline timer and the unit tests.
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
+const CONFIRM_DEADLINE_S: u32 = 25;
+
 /// Current UTC epoch in seconds. The instant is timezone-independent; the
 /// deployment-TZ rendering happens later in `timefmt::format_md`.
 fn now_epoch_secs() -> i64 {
     Local::now().timestamp()
+}
+
+/// A controller's status-readback interval in plain words, for the message
+/// shown when a change was accepted but the controller has not reported it
+/// inside the confirm window. Under two minutes stays in seconds, so a 60s
+/// poll floor reads as "60 seconds" rather than being rounded into a
+/// minute count that overstates the wait; from two minutes up it is
+/// rounded minutes, which is always plural.
+// Called only from the hydrate-only deadline timer and the unit tests.
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
+fn poll_interval_phrase(seconds: u32) -> String {
+    if seconds < 120 {
+        return format!("{seconds} seconds");
+    }
+    format!("{} minutes", (seconds + 30) / 60)
 }
 
 /// Daily watered-minutes buckets for one zone, oldest -> newest.
@@ -128,17 +152,68 @@ pub fn ZoneDetailView(
     // request: each pending set bumps the generation, and a timer only
     // acts if its generation is still current.
     let pending_gen = StoredValue::new(0u64);
+
+    // The toast hub, resolved ONCE at component scope. Resolving it inside a
+    // detached continuation is a context lookup with no owner to read from;
+    // the hub itself is shell-owned and outlives every view here.
+    let toast = use_toast();
+
+    // The dispatching controller's status-readback interval, from the action
+    // response (null when it reads state on demand). A cloud controller
+    // polls on a throttle longer than the confirm window, so a run can be
+    // accepted and still not read back as running inside it. Knowing the
+    // number is what lets the deadline message say that plainly instead of
+    // implying the controller never answered.
+    let confirm_within_s: RwSignal<Option<u32>> = RwSignal::new(None);
+
+    // Whether a CONTROLLER took this command. The registry path stamps
+    // `dispatched: "controller:<id>"` on its response; the legacy Home
+    // Assistant service-call path never does. An HA-source deploy with no
+    // controllers configured must not be sent to a controller page it has
+    // nothing on, which is what a single unconditional message did.
+    let via_controller: RwSignal<bool> = RwSignal::new(false);
+
+    // Action results land here. Created at COMPONENT scope on purpose: built
+    // inside the reactive body below it was owned by the render effect, and
+    // the next streamed snapshot disposed it before a slow response arrived,
+    // so a failed dispatch delivered its error to a dead callback and the
+    // only thing the user ever saw was the deadline warning. Every signal
+    // touch uses try_* because this runs from a detached continuation and
+    // wasm-release is panic=abort.
+    let action_done = Callback::new(move |result: Result<Option<serde_json::Value>, String>| {
+        match result {
+            Ok(body) => {
+                let v = body.unwrap_or(serde_json::Value::Null);
+                let _ = confirm_within_s.try_set(
+                    v.get("confirm_within_s")
+                        .and_then(|n| n.as_u64())
+                        .map(|n| n as u32),
+                );
+                let _ = via_controller.try_set(v.get("dispatched").is_some());
+                // A controller with no per-zone stop reports the real scope
+                // (the whole device stopped); relay it verbatim.
+                if let Some(note) = v.get("note").and_then(|n| n.as_str()) {
+                    toast.info(note.to_string());
+                }
+            }
+            Err(e) => {
+                let _ = pending.try_set(None);
+                toast.error(format!("Zone command failed: {e}"));
+            }
+        }
+    });
+
     #[cfg(feature = "hydrate")]
     {
-        // Deadline: clear a pending flag that never confirmed after 25s
-        // (two snapshot ticks) and tell the user.
+        // Deadline: clear a pending flag the snapshot never confirmed and
+        // say what is actually known.
         Effect::new(move |_| {
             if pending.get().is_none() {
                 return;
             }
             let gen = pending_gen.with_value(|g| *g);
             leptos::task::spawn_local(async move {
-                gloo_timers::future::TimeoutFuture::new(25_000).await;
+                gloo_timers::future::TimeoutFuture::new(CONFIRM_DEADLINE_S * 1_000).await;
                 // This continuation is detached, so it can outlive the
                 // route-scoped view: navigating away disposes pending /
                 // pending_gen while the timer is still pending. Read them
@@ -151,9 +226,38 @@ pub fn ZoneDetailView(
                 };
                 let still_current = cur_gen == gen;
                 if still_current && pending.try_get_untracked().flatten().is_some() {
-                    pending.set(None);
-                    use_toast()
-                        .warn("Controller didn't confirm the change; check the Sensors hub.");
+                    let _ = pending.try_set(None);
+                    match confirm_within_s.try_get_untracked().flatten() {
+                        // The controller took the change; its own status poll
+                        // is simply slower than this window. Saying it failed
+                        // would be wrong, so say what happened.
+                        Some(s) if s > CONFIRM_DEADLINE_S => toast.info(format!(
+                            "The controller accepted the change. It reports its state about \
+                             every {}, so this zone can keep showing the old state for up \
+                             to that long.",
+                            poll_interval_phrase(s)
+                        )),
+                        // No readback lag to blame and a CONTROLLER took the
+                        // command: it genuinely has not reported the change.
+                        // Point at the page that lists controllers and at
+                        // Scan zones, which is the live probe that page
+                        // actually has. The Sensors hub cannot help: its
+                        // inventory is sources and flow-capable controllers,
+                        // and a Rachio honestly reports no flow meter, so it
+                        // structurally never appears there.
+                        _ if via_controller.try_get_untracked().unwrap_or(false) => toast.warn(
+                            "The controller has not reported the change. Open Settings, then \
+                             Devices, open the controller with Edit, and use Scan zones to \
+                             check it answers.",
+                        ),
+                        // No controller took it: this is the legacy Home
+                        // Assistant service-call path, where the entity is
+                        // the thing that did not change.
+                        _ => toast.warn(
+                            "Home Assistant accepted the command, but the zone's entity has \
+                             not changed. Check the sprinkler entities in Home Assistant.",
+                        ),
+                    }
                 }
             });
         });
@@ -231,34 +335,27 @@ pub fn ZoneDetailView(
             let zslug = z.slug.clone();
             let stop_slug = zslug.clone();
             let run_slug = zslug.clone();
-            let action_done = Callback::new(move |result: Result<(), String>| {
-                if let Err(e) = result {
-                    pending.set(None);
-                    use_toast().error(format!("Zone command failed: {e}"));
-                }
-            });
+            // Both handlers hand their result to the component-scoped
+            // `action_done` above. Building a fresh Callback here (or inside
+            // the click handler) tied it to the render effect's owner, which
+            // the next snapshot disposes.
             let on_stop = move |_: leptos::ev::MouseEvent| {
                 pending_gen.update_value(|g| *g += 1);
+                confirm_within_s.set(None);
+                via_controller.set(false);
                 pending.set(Some(false));
-                // Note-aware: a controller with no per-zone stop reports the
-                // real scope (the whole device stopped); relay it.
-                crate::components::irrigation::controls::post_action_note_then(
+                post_action_body_then(
                     json!({ "kind": "stop", "zone": stop_slug.clone() }),
-                    Callback::new(move |result: Result<Option<String>, String>| match result {
-                        Ok(Some(note)) => use_toast().info(note),
-                        Ok(None) => {}
-                        Err(e) => {
-                            pending.set(None);
-                            use_toast().error(format!("Zone command failed: {e}"));
-                        }
-                    }),
+                    action_done,
                 );
             };
             let on_run = move |_: leptos::ev::MouseEvent| {
                 let seconds = (run_min.get_untracked() * 60.0).round().max(1.0) as u32;
                 pending_gen.update_value(|g| *g += 1);
+                confirm_within_s.set(None);
+                via_controller.set(false);
                 pending.set(Some(true));
-                post_action_then(
+                post_action_body_then(
                     json!({ "kind": "run", "zone": run_slug.clone(), "seconds": seconds }),
                     action_done,
                 );
@@ -499,4 +596,41 @@ pub fn ZoneDetailPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             .unwrap_or_default()
     });
     view! { <ZoneDetailView snap slug back=true/> }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The confirm window is SHORTER than a cloud controller's poll floor,
+    /// which is why the deadline message has to be able to say "accepted,
+    /// not reported yet" instead of implying a failure: stretching the
+    /// timer past the floor would only hide the wait behind a longer
+    /// spinner. Both Rachio poll values must land on that branch.
+    #[test]
+    fn a_throttled_cloud_poll_outruns_the_confirm_window() {
+        for interval in [60u32, 120] {
+            assert!(
+                interval > CONFIRM_DEADLINE_S,
+                "a {interval}s status poll must take the accepted-but-not-reported branch"
+            );
+        }
+    }
+
+    #[test]
+    fn poll_interval_phrase_reads_plainly() {
+        // The Rachio floor. Rounding this into minutes would say "1 minute"
+        // or "2 minutes" for a 60s wait, both worse than the real number.
+        assert_eq!(poll_interval_phrase(60), "60 seconds");
+        assert_eq!(poll_interval_phrase(90), "90 seconds");
+        assert_eq!(poll_interval_phrase(119), "119 seconds");
+        // The Rachio default, and the configurable band above it.
+        assert_eq!(poll_interval_phrase(120), "2 minutes");
+        assert_eq!(poll_interval_phrase(300), "5 minutes");
+        assert_eq!(poll_interval_phrase(3600), "60 minutes");
+        // Rounds to the nearest minute rather than truncating.
+        assert_eq!(poll_interval_phrase(150), "3 minutes");
+        // The minutes branch starts at 2, so it is never "1 minutes".
+        assert!(!poll_interval_phrase(120).starts_with("1 "));
+    }
 }

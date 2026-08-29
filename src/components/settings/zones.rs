@@ -931,7 +931,7 @@ pub fn ZoneForm(
 
             <FormField
                 label="Controller station".to_string()
-                helptext="Station identifier on the chosen controller. For OpenSprinkler: 1-based number (e.g. 1, 2, 3). For DIY (HTTP): the board's zone id (e.g. 1 or back_yard). For HA service call: entity_id (e.g. switch.back_yard_zone).".to_string()
+                helptext="How the chosen controller addresses this zone. A value here REPLACES whatever the controller's zone map holds for this zone. For OpenSprinkler: 1-based number (e.g. 1, 2, 3). For DIY (HTTP): the board's zone id (e.g. 1 or back_yard). For HA service call: entity_id (e.g. switch.back_yard_zone). For Rachio: the zone UUID, which Scan zones fills into the controller's map; leave this blank only if that map already has an entry under this zone's slug, since a station number is not a UUID and is ignored. For Hydrawise: the relay id. For B-hyve and Rain Bird: the station number. Those three cannot scan, so this field (or the controller's zone map in Advanced JSON) is what binds them, and a number here is accepted and will run whatever it points at.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 <input

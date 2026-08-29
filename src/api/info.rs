@@ -146,7 +146,33 @@ use serde::{Deserialize, Serialize};
 /// for device-wide stops, note. ControllerCaps.per_zone_stop is
 /// internal (caps never ride the wire). No existing response shape
 /// changes.
-pub const API_VERSION: &str = "1.22.0";
+/// 1.23.0: controller failures become distinguishable. POST
+/// /irrigation/action no longer answers 502 for every controller
+/// failure: AuthFailed is 424 FAILED_DEPENDENCY and RateLimited is 429,
+/// while 502 keeps Remote/Transport/Offline/Init. ZoneUnknown stays 400
+/// and Unsupported stays 501. Deliberately NOT 401 for a vendor
+/// credential: 401 on any endpoint is this deploy's OWN auth outcome,
+/// and the HACS integration reacts to one by invalidating its stored
+/// LocalSky token and starting a reauth flow, so a revoked Rachio key
+/// would have sent it into a reauth loop over a valid token. Every error
+/// body now carries a stable `code` (zone_unknown,
+/// controller_auth_failed, controller_rate_limited,
+/// controller_unsupported, controller_unreachable): branch on that, not
+/// on the status. A client that treated any non-2xx as one failure is
+/// unaffected; one that pinned 502 as the controller-failure status must
+/// widen. No HACS integration change is required. Additive alongside it:
+/// the 429 body carries rate_limit_remaining (what the controller's LAST
+/// RESPONSE reported, null when it reported none, never a zero
+/// sentinel), the 400 body carries mapped_zones (the controller's zone
+/// map keys, so a slug mismatch is visible from the error), the
+/// 400/424/429 bodies carry a hint naming the fix, the ZoneUnknown error
+/// text now says the zone is not mapped to a zone on the controller
+/// rather than "zone unknown: <slug>", and a successful run/stop/stop_all
+/// response carries confirm_within_s (how long that controller can take
+/// to REPORT the change, in seconds; null when it reads state on demand)
+/// so a client can say a change was accepted and confirmation is still
+/// pending.
+pub const API_VERSION: &str = "1.23.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {
