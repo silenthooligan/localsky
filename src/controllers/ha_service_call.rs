@@ -111,6 +111,7 @@ impl IrrigationController for HaServiceCall {
             history_query: false,
             remote_program_upload: false,
             water_level: false,
+            per_zone_stop: true,
         }
     }
 

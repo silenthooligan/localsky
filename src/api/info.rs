@@ -130,7 +130,23 @@ use serde::{Deserialize, Serialize};
 /// /irrigation/history rows gain source + status. Open-Meteo
 /// past_days config is honored (clamp 1..=7, default 3). No existing
 /// response shape changes.
-pub const API_VERSION: &str = "1.21.0";
+/// 1.22.0 (additive): Rachio first-class. RachioConfig gains
+/// poll_interval_s (60..=3600, null = 120s default; validator-gated)
+/// and base_url (null = the production endpoint) in GET/PUT /config.
+/// POST /wizard/test_controller for a rachio entry adds
+/// discovered_device ({device_id, name, device_count}, null unless the
+/// posted entry had a token but no device id) and rate_limit_remaining
+/// (the cloud's X-RateLimit-Remaining, null when absent). POST
+/// /wizard/scan_zones and /wizard/test_controller now restore
+/// redacted-secret sentinels from the stored config by entry id and
+/// answer 400 unmatched_redacted_secret when no stored value matches;
+/// when a stored secret is restored the probe's transport fields pin
+/// to the stored entry (400 transport_field_mismatch on a change).
+/// The manual Stop action response gains scope ('zone'|'device') and,
+/// for device-wide stops, note. ControllerCaps.per_zone_stop is
+/// internal (caps never ride the wire). No existing response shape
+/// changes.
+pub const API_VERSION: &str = "1.22.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {

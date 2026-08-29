@@ -61,6 +61,21 @@ pub struct ControllerCaps {
     /// `#[serde(default)]` keeps older serialized caps deserializing.
     #[serde(default)]
     pub water_level: bool,
+    /// `stop_zone` stops ONLY the named zone. True for every adapter except
+    /// Rachio, whose public API's only stop operation is device-wide
+    /// `stop_water`: on a `per_zone_stop: false` controller a zone-stop
+    /// stops all watering on the device, and every stop consumer (reaper,
+    /// manual Stop) must treat it as a device-wide stop and say so. The
+    /// smart-morning reaper also widens its enforcement grace for these
+    /// controllers (cloud latency; see `CLOUD_DEVICE_STOP_GRACE_S`).
+    /// `#[serde(default = "default_true_cap")]` keeps older serialized caps
+    /// deserializing as "per-zone stop works", the pre-existing behavior.
+    #[serde(default = "default_true_cap")]
+    pub per_zone_stop: bool,
+}
+
+fn default_true_cap() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +84,19 @@ pub struct ZoneRuntimeStatus {
     pub running: bool,
     pub remaining_s: Option<u32>,
     pub last_run_epoch: Option<i64>,
+    /// False when the adapter could NOT determine live running state on this
+    /// poll (a cloud response shape it did not recognize, or the running
+    /// endpoint failed while the rest of the status succeeded). In that case
+    /// `running` carries the last KNOWN value rather than a fabricated
+    /// "idle", so the run-edge observer never records a false falling edge
+    /// from a parse surprise. `#[serde(default = "default_running_known")]`
+    /// keeps older serialized statuses deserializing as known.
+    #[serde(default = "default_running_known")]
+    pub running_known: bool,
+}
+
+fn default_running_known() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

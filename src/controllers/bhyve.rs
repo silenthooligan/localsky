@@ -190,6 +190,10 @@ impl IrrigationController for Bhyve {
             history_query: false,
             remote_program_upload: false,
             water_level: false,
+            // stop_zone falls back to the whole-device manual stop (the
+            // B-hyve API has no per-station stop), so consumers must treat
+            // a zone-stop as stopping every running station on the device.
+            per_zone_stop: false,
         }
     }
 
@@ -247,12 +251,18 @@ impl IrrigationController for Bhyve {
                     .values()
                     .map(|slug| ZoneRuntimeStatus {
                         slug: slug.clone(),
-                        // We could parse `v.status.run_mode` + active
-                        // station here; left as None for v1 since the
-                        // engine layer already tracks scheduled state.
+                        // v1 does not parse live running state (a future
+                        // wave could read `v.status.run_mode` + the active
+                        // station), so `running: false` here is a
+                        // placeholder, NOT a reading. running_known=false
+                        // says so: the run-edge observer must not treat
+                        // this as a confirmed idle, and the reaper's
+                        // verify-before-enforce path must not take it as
+                        // confirmation either.
                         running: false,
                         remaining_s: None,
                         last_run_epoch: None,
+                        running_known: false,
                     })
                     .collect();
                 let firmware = v

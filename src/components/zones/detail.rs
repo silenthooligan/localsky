@@ -240,9 +240,18 @@ pub fn ZoneDetailView(
             let on_stop = move |_: leptos::ev::MouseEvent| {
                 pending_gen.update_value(|g| *g += 1);
                 pending.set(Some(false));
-                post_action_then(
+                // Note-aware: a controller with no per-zone stop reports the
+                // real scope (the whole device stopped); relay it.
+                crate::components::irrigation::controls::post_action_note_then(
                     json!({ "kind": "stop", "zone": stop_slug.clone() }),
-                    action_done,
+                    Callback::new(move |result: Result<Option<String>, String>| match result {
+                        Ok(Some(note)) => use_toast().info(note),
+                        Ok(None) => {}
+                        Err(e) => {
+                            pending.set(None);
+                            use_toast().error(format!("Zone command failed: {e}"));
+                        }
+                    }),
                 );
             };
             let on_run = move |_: leptos::ev::MouseEvent| {

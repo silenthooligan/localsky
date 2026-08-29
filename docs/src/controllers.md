@@ -4,20 +4,22 @@ LocalSky's `IrrigationController` port abstracts the act of firing valves. The s
 
 ## Supported controllers
 
-| Controller | Path | Cloud required? | Hardware cost (US$) | Status |
-|---|---|---|---|---|
-| **OpenSprinkler** (boxed) | Direct HTTP on LAN | No | 130-180 | Shipped |
-| **OpenSprinkler Pi** | Direct HTTP on LAN | No | ~80 (Pi) + relay board | Shipped |
-| **[DIY / ESP32](diy-controllers.md)** (HTTP) | Direct HTTP on LAN | No | 5-40 ESP32 + valves | Shipped |
-| **[DIY / ESP32](diy-controllers.md)** (MQTT) | MQTT (ESPHome, Tasmota, Z2M) | No | 5-40 ESP32 + valves | Shipped |
-| **Home Assistant service call** | HA REST | No (HA local) | Whatever HA drives | Shipped |
-| **Rachio** Gen 2/3 | Rachio cloud API | Yes | 130-250 | Shipped |
-| **Hunter Hydrawise** | Hydrawise cloud API | Yes | 130-300 | Shipped |
-| **Orbit B-hyve** | B-hyve cloud API | Yes | 80-150 | Shipped |
-| **Rain Bird** | Rain Bird cloud API | Yes | 100-300 | Shipped |
-| **DryRun** | No-op | No | None | Shipped |
+| Controller | Path | Cloud required? | Scan zones | Hardware cost (US$) | Status |
+|---|---|---|---|---|---|
+| **OpenSprinkler** (boxed) | Direct HTTP on LAN | No | Yes | 130-180 | Shipped |
+| **OpenSprinkler Pi** | Direct HTTP on LAN | No | Yes | ~80 (Pi) + relay board | Shipped |
+| **[DIY / ESP32](diy-controllers.md)** (HTTP) | Direct HTTP on LAN | No | Yes | 5-40 ESP32 + valves | Shipped |
+| **[DIY / ESP32](diy-controllers.md)** (MQTT) | MQTT (ESPHome, Tasmota, Z2M) | No | No (zone map by hand) | 5-40 ESP32 + valves | Shipped |
+| **Home Assistant service call** | HA REST | No (HA local) | No (entity map by hand) | Whatever HA drives | Shipped |
+| **Rachio** Gen 2/3 | Rachio cloud API | Yes | Yes | 130-250 | Shipped |
+| **Hunter Hydrawise** | Hydrawise cloud API | Yes | Yes | 130-300 | Shipped |
+| **Orbit B-hyve** | B-hyve cloud API | Yes | Yes | 80-150 | Shipped |
+| **Rain Bird** | Rain Bird cloud API | Yes | Yes | 100-300 | Shipped |
+| **DryRun** | No-op | No | Yes (3 sample zones) | None | Shipped |
 
 Prices are US retail; availability and cost vary by region. Rachio, B-hyve, Hydrawise, and Rain Bird are sold mostly through North American retail; OpenSprinkler and ESP32 hardware ship worldwide, which makes them the natural picks outside North America too. All four cloud controllers are offered in the controller picker as of 0.7.
+
+The **Scan zones** column says whether the setup wizard and the controller editor can enumerate the controller's zones for you. In the wizard, scan results import as zone entries; in the editor, a scan fills the cloud kinds' zone map in the Advanced JSON (for LAN kinds like OpenSprinkler and DIY HTTP boards, zones bind through the Zones page instead and the scan lists what the board reports). Either path produces a working binding.
 
 > Rolling your own with an ESP32 or another relay board? See [DIY & ESP32 controllers](diy-controllers.md) for the two supported paths (a small HTTP contract, or MQTT) with copy-and-flash reference firmware, beginner to advanced.
 
@@ -113,11 +115,18 @@ An ESP32 with a relay board is a smart irrigation controller for ~$15-40 in part
 
 Four vendor controllers are driven natively through their own clouds; all ship in 0.7 and appear in the controller picker under "Cloud account". Each authenticates with your vendor account (an API token, or account email + password) and maps LocalSky zone slugs to that controller's zones/stations. Put secrets in env vars and interpolate them with `${...}` so they never sit in the config in cleartext.
 
+Two equivalent ways to bind zones, no hand-copying of ids required:
+
+- **Setup wizard**: add the controller, Test, Scan zones, and import the results. Imported zones carry the controller-native id in their `controller_station`, which the runtime overlays onto the controller's zone map at build time.
+- **Settings editor**: open the controller, click Scan zones, and the discovered zones are merged into the controller's zone map in the Advanced JSON (`zone_uuid_map` / `zone_relay_map` / `zone_station_map`). Review and save.
+
+When both exist for the same zone slug, the zone entry wins. Hand-written map entries for slugs a scan does not report survive a rescan.
+
 You do **not** need Home Assistant for any of these; the native adapter talks to the vendor cloud directly. (Driving one through HA with `ha_service_call` is still an option if you already do that.)
 
 ### Rachio Gen 2/3
 
-Uses a Rachio API token. Map each zone slug to its Rachio zone UUID.
+Uses a Rachio API token (Rachio app: Account Settings, "Get API key"). The device id can be left empty: the Test button resolves your account's first device and offers to fill it in. Scan zones (or the wizard import) fills the zone map, so the TOML below is the end state, not something to type.
 
 ```toml
 [[controllers]]
@@ -127,10 +136,19 @@ enabled = true
 kind = "rachio"
 [controllers.config]
 api_token = "${RACHIO_API_TOKEN}"
-device_id = "..."   # Rachio device id
+device_id = "..."        # Rachio device id; the Test button can discover it
+poll_interval_s = 120    # optional; 60..=3600, default 120
 [controllers.config.zone_uuid_map]
-back_yard = "..."   # Rachio zone UUID
+back_yard = "..."        # Rachio zone UUID; filled by Scan zones
 ```
+
+Facts to know about the Rachio path:
+
+- **Rate limit.** Rachio's cloud allows roughly 1700 API requests per day per token. LocalSky polls live status at most every `poll_interval_s` seconds (default 120, floor 60; each poll is two API calls) and serves the cached snapshot between polls, which fits the budget with room for dispatch. The controller Test result shows the cloud's remaining daily request count when Rachio reports it.
+- **Stopping one zone stops the device.** The public Rachio API has no per-zone stop; the only stop operation halts all watering on the device. LocalSky says so whenever it happens (the Stop button's confirmation, the logs), and its bookkeeping matches: every run the stop ended is recorded at its real length. The shutoff backstop also verifies with the cloud before enforcing a deadline on Rachio: a zone that already closed on its own timer is released without any stop, and the widened enforcement grace absorbs normal cloud latency, so a multi-zone morning is never cut short by the previous zone's deadline. Rachio's own on-device timer remains the primary shutoff: a started zone always closes itself at the requested duration.
+- **Run length cap.** A single zone start is capped at 3 hours by the API; longer requests are clamped.
+- **Live state.** Running state and remaining time come from the cloud's current-schedule endpoint, so runs LocalSky starts are observed and recorded in History like any other controller's.
+- **Deferred: webhooks and history backfill.** Rachio supports push webhooks (exact start/stop events, rain-sensor state) but they need a URL the cloud can reach, which most LocalSky installs do not expose; polling is the default. Event-history backfill rides the same future webhook work, so the adapter reports no flow meter, no rain sensor, and no history query today rather than pretending.
 
 ### Hunter Hydrawise
 
@@ -153,6 +171,8 @@ back_yard = 1                # Hydrawise relay_id
 
 Signs in with your B-hyve account email and password. `device_id` (from the account's device list) scopes commands; map each zone slug to its B-hyve station number (1-based).
 
+Like Rachio, B-hyve's cloud has no per-station stop: stopping one zone halts all watering on the device, and LocalSky says so when it happens.
+
 ```toml
 [[controllers]]
 id = "bhyve_main"
@@ -170,6 +190,8 @@ back_yard = 1                # B-hyve station number (1-based)
 ### Rain Bird
 
 Signs in with your Rain Bird account email and password. `controller_id` comes from your account's controller list; map each zone slug to its Rain Bird station number (1-based). `base_url` defaults to the production endpoint and only needs setting if Rain Bird rotates hosts.
+
+Like Rachio, the Rain Bird cloud has no per-station stop: stopping one zone halts the whole controller, and LocalSky says so when it happens.
 
 ```toml
 [[controllers]]

@@ -66,6 +66,7 @@ use chrono::{NaiveDate, Utc};
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
+use crate::controllers::reaper::effective_run_grace;
 use crate::controllers::registry::ControllerRegistry;
 use crate::engine::cycle_soak;
 use crate::engine::interleave;
@@ -79,10 +80,9 @@ use crate::ports::irrigation_controller::IrrigationController;
 use crate::push::dispatcher::{PushDispatcher, PushEvent};
 use crate::scheduler::dispatch_gate;
 
-/// Grace added to a zone's whole-cycle deadline before the reaper enforces a
-/// shutoff. Covers controller-clock skew + the reaper's own poll granularity, so
-/// a valve closing right on time is never falsely "enforced".
-const ACTIVE_RUN_GRACE_S: i64 = 30;
+// The whole-cycle shutoff deadline grace (base + widened device-wide-stop
+// variants) is shared with the manual arm sites and lives beside its
+// enforcement: crate::controllers::reaper::effective_run_grace.
 
 /// Width of the "we are at target_start" window, in seconds. The tick
 /// interval is 60s so a 90s tolerance guarantees exactly one match per
@@ -692,7 +692,8 @@ async fn dispatch_today(
                 INTER_ZONE_PREAMBLE_S,
                 step.zone_idx,
             ) {
-                let deadline = now + end_in as i64 + ACTIVE_RUN_GRACE_S;
+                let grace = effective_run_grace(controller.supports().per_zone_stop);
+                let deadline = now + end_in as i64 + grace;
                 if armed_deadline[step.zone_idx].is_none_or(|d| deadline > d) {
                     if let Err(e) = ar
                         .arm(
@@ -1260,6 +1261,7 @@ mod tests {
                 history_query: false,
                 remote_program_upload: false,
                 water_level: false,
+                per_zone_stop: true,
             }
         }
         async fn run_zone(&self, slug: &str, duration_s: u32) -> ControllerResult<RunHandle> {
@@ -1893,6 +1895,7 @@ mod tests {
                 history_query: false,
                 remote_program_upload: false,
                 water_level: false,
+                per_zone_stop: true,
             }
         }
         async fn run_zone(&self, slug: &str, duration_s: u32) -> ControllerResult<RunHandle> {

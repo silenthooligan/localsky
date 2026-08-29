@@ -1,6 +1,6 @@
 [package]
 name = "localsky"
-version = "0.7.17"
+version = "0.7.18"
 edition = "2021"
 license = "Apache-2.0"
 description = "Local-first weather and irrigation control with native FAO-56 ET, multi-source weather merge, multi-controller HAL, optional Home Assistant, and optional local LLM advisor."
@@ -204,6 +204,13 @@ insta = { version = "1", features = ["json"] }
 # integration tests virtualize cycle-soak sleeps (instant + deterministic).
 # Test-only; merges with the ssr build's optional tokio (features unify).
 tokio = { version = "1", features = ["full", "test-util"] }
+
+# Mock HTTP server for cloud-controller wire tests (Rachio talks plain
+# reqwest, so 127.0.0.1 mocks work with no loopback-exemption plumbing).
+# Native targets only: wiremock pulls a real socket stack that has no
+# business in any wasm build.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+wiremock = "0.6"
 
 [features]
 # Dev-ergonomics default so a bare `cargo clippy` / `cargo check` / rust-analyzer

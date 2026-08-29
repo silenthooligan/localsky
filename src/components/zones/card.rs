@@ -6,7 +6,7 @@
 use leptos::prelude::*;
 use serde_json::json;
 
-use crate::components::irrigation::controls::{post_action_then, OverrideControl};
+use crate::components::irrigation::controls::{post_action_note_then, OverrideControl};
 use crate::components::ui::{use_toast, Button, Icon};
 use crate::components::units_fmt::{depth_unit, depth_value_mm, use_unit_prefs};
 use crate::ha::snapshot::ZoneState;
@@ -82,10 +82,15 @@ pub fn ZoneCard(
             return;
         }
         stopping.set(true);
-        post_action_then(
+        post_action_note_then(
             json!({ "kind": "stop", "zone": stop_slug.clone() }),
-            Callback::new(move |result: Result<(), String>| {
-                if let Err(e) = result {
+            Callback::new(move |result: Result<Option<String>, String>| match result {
+                // A controller with no per-zone stop reports the real scope
+                // (the whole device stopped); relay it instead of implying
+                // one zone stopped.
+                Ok(Some(note)) => use_toast().info(note),
+                Ok(None) => {}
+                Err(e) => {
                     stopping.set(false);
                     use_toast().error(format!("Stop failed: {e}"));
                 }

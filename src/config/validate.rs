@@ -153,6 +153,69 @@ pub fn validate(cfg: &Config) -> ValidationReport {
         }
     }
 
+    // Rachio poll interval must respect the cloud's request budget: the
+    // adapter clamps to a 60s floor at use, but a config asking for less is
+    // a misunderstanding worth rejecting at Review (a 10s poll would spend
+    // the ~1700 daily requests before mid-morning). The upper bound guards
+    // an accidental huge value (unit confusion) that would freeze status.
+    for c in &cfg.controllers {
+        if let crate::config::schema::ControllerKind::Rachio(rc) = &c.controller {
+            if let Some(s) = rc.poll_interval_s {
+                if !(60..=3600).contains(&s) {
+                    r.error(
+                        "controller_poll_interval_invalid",
+                        format!(
+                            "controller '{}': poll_interval_s {} is outside 60..=3600 seconds \
+                             (Rachio's cloud allows roughly 1700 requests per day; 120 is the \
+                             default)",
+                            c.id, s
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    // Cloud zone-map keys that match no configured zone (after the same
+    // hyphen-to-underscore normalization dispatch uses) bind nothing: the
+    // entry sits in the config while the zone it was meant for never
+    // waters. Warning, not error: controllers are often added before zones
+    // exist, and an extra map entry is harmless by itself.
+    {
+        let zone_norm: std::collections::HashSet<String> =
+            cfg.zones.keys().map(|z| z.replace('-', "_")).collect();
+        for c in &cfg.controllers {
+            let keys: Vec<&String> = match &c.controller {
+                crate::config::schema::ControllerKind::Rachio(rc) => {
+                    rc.zone_uuid_map.keys().collect()
+                }
+                crate::config::schema::ControllerKind::Hydrawise(hc) => {
+                    hc.zone_relay_map.keys().collect()
+                }
+                crate::config::schema::ControllerKind::Bhyve(bc) => {
+                    bc.zone_station_map.keys().collect()
+                }
+                crate::config::schema::ControllerKind::Rainbird(rb) => {
+                    rb.zone_station_map.keys().collect()
+                }
+                _ => continue,
+            };
+            for k in keys {
+                if !zone_norm.contains(&k.replace('-', "_")) {
+                    r.warn(
+                        "controller_zone_map_key_unmatched",
+                        format!(
+                            "controller '{}': zone map key '{}' matches no configured zone \
+                             (slugs compare with hyphens normalized to underscores); nothing \
+                             dispatches through it",
+                            c.id, k
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
     // Source ids must be non-empty and free of whitespace/slashes (loader
     // save-gate parity).
     for s in &cfg.sources {
@@ -921,6 +984,90 @@ mod tests {
             "kind": "dry_run", "config": {"simulate_runs": false},
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn cloud_zone_map_key_unmatched_warns() {
+        fn rachio_with_map(map: serde_json::Value) -> ControllerEntry {
+            serde_json::from_value(serde_json::json!({
+                "id": "rachio_main", "default": true, "enabled": true,
+                "kind": "rachio", "config": {
+                    "api_token": "example-token",
+                    "device_id": "device-0001",
+                    "zone_uuid_map": map,
+                },
+            }))
+            .unwrap()
+        }
+        // A key with no matching zone warns; a hyphenated key matching a
+        // hyphenated zone (both normalize the same) stays quiet.
+        let mut cfg = base();
+        cfg.zones.insert(
+            "back-yard".to_string(),
+            serde_json::from_value(serde_json::json!({
+                "display_name": "Back",
+                "area_sqft": 1000.0,
+                "species": "other",
+                "soil_texture": "loam",
+                "sprinkler_type": "rotor",
+                "controller_id": "rachio_main",
+                "controller_station": "uuid-1",
+            }))
+            .unwrap(),
+        );
+        cfg.controllers.push(rachio_with_map(serde_json::json!({
+            "back_yard": "uuid-1",
+            "ghost_zone": "uuid-2",
+        })));
+        let r = validate(&cfg);
+        let warned: Vec<&String> = r
+            .warnings
+            .iter()
+            .filter(|i| i.code == "controller_zone_map_key_unmatched")
+            .map(|i| &i.detail)
+            .collect();
+        assert_eq!(
+            warned.len(),
+            1,
+            "exactly the unmatched key warns: {warned:?}"
+        );
+        assert!(warned[0].contains("ghost_zone"));
+    }
+
+    #[test]
+    fn rachio_poll_interval_range_gate() {
+        fn rachio_with_poll(poll: serde_json::Value) -> ControllerEntry {
+            serde_json::from_value(serde_json::json!({
+                "id": "rachio_main", "default": true, "enabled": true,
+                "kind": "rachio", "config": {
+                    "api_token": "example-token",
+                    "device_id": "device-0001",
+                    "poll_interval_s": poll,
+                },
+            }))
+            .unwrap()
+        }
+        // Below the floor: rejected with the coded error.
+        let mut cfg = base();
+        cfg.controllers
+            .push(rachio_with_poll(serde_json::json!(10)));
+        let r = validate(&cfg);
+        assert!(r
+            .errors
+            .iter()
+            .any(|i| i.code == "controller_poll_interval_invalid"));
+        // In range: clean. Absent (null): clean, the 120s default applies.
+        for poll in [serde_json::json!(120), serde_json::Value::Null] {
+            let mut cfg = base();
+            cfg.controllers.push(rachio_with_poll(poll));
+            let r = validate(&cfg);
+            assert!(
+                !r.errors
+                    .iter()
+                    .any(|i| i.code == "controller_poll_interval_invalid"),
+                "in-range/absent poll interval must validate clean"
+            );
+        }
     }
 
     #[test]

@@ -6,8 +6,9 @@
 //
 // Sub-10s blips are missed (acceptable; a tap-test for less than 10s
 // isn't a real run). For runs that span the poll boundary, we record
-// the start at the FIRST observation that saw the zone running and
-// duration as (now - start).
+// the start at the FIRST observation that saw the zone running and the
+// duration up to the LAST observation that saw it running with KNOWN
+// state (see RunLatch), so a carried-forward unknown gap never counts.
 
 use crate::ha::snapshot::IrrigationSnapshot;
 use crate::history::db::{record_decision, record_run};
@@ -17,14 +18,30 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Per-zone run latch: set on the rising edge, cleared (and written out)
+/// on the falling edge.
+struct RunLatch {
+    /// Epoch of the poll that first saw the zone running.
+    start_epoch: i64,
+    /// Whether a non-actuating dry-run controller was reporting it at the
+    /// rising edge (the honest source label for the row).
+    dry_run: bool,
+    /// Epoch of the last poll that saw the zone running WITH
+    /// running_known=true. Carried-forward unknown state (a cloud adapter
+    /// that could not read live running state) never advances this, so the
+    /// falling edge records only the VERIFIED running span: an hours-long
+    /// unknown outage that ends in idle cannot inflate one run row with
+    /// the whole outage as watering credit.
+    last_known_running_epoch: i64,
+}
+
 #[derive(Default)]
 pub struct IngestState {
-    /// Per-zone slug → (epoch the zone was first seen running, whether a
-    /// non-actuating dry-run controller was reporting it). None means we
-    /// last saw it idle (or never). On running→idle we take the start,
-    /// write the row (source 'dry_run' when the latch says the water was
-    /// pretend), and clear.
-    seen_running: HashMap<String, (i64, bool)>,
+    /// Per-zone slug → the active run latch. Absent means we last saw the
+    /// zone idle (or never). On running→idle we take the latch, write the
+    /// row (source 'dry_run' when the latch says the water was pretend),
+    /// and clear.
+    seen_running: HashMap<String, RunLatch>,
     /// Last observed (verdict, reason) pair. None until the first poll
     /// builds a valid skip_check; thereafter holds the most recent
     /// transition so we can detect changes against the next poll.
@@ -89,34 +106,53 @@ impl IngestState {
                 // run is in flight; the entry state is the honest one).
                 self.seen_running.insert(
                     zone.slug.clone(),
-                    (now, simulated_running.contains(&zone.slug)),
+                    RunLatch {
+                        start_epoch: now,
+                        dry_run: simulated_running.contains(&zone.slug),
+                        last_known_running_epoch: now,
+                    },
                 );
+            } else if zone.running && was_running {
+                // Steady running: only a KNOWN observation extends the
+                // verified span. Carried-forward unknown state (a cloud
+                // adapter that could not read live running this poll)
+                // leaves the latch's last-known epoch untouched, so an
+                // unknown gap can never turn into watering credit.
+                if zone.running_known {
+                    if let Some(latch) = self.seen_running.get_mut(&zone.slug) {
+                        latch.last_known_running_epoch = now;
+                    }
+                }
             } else if !zone.running && was_running {
                 // End of a run, emit the row.
-                let (start, dry_run) = self.seen_running.remove(&zone.slug).unwrap_or((now, false));
-                // APPROXIMATE duration. Both `start` and `now` are
-                // snapshot.last_refresh_epoch values, so this is the span
-                // between the first poll that saw the zone running and the
-                // first poll that saw it idle: it is quantized to the ~10s
-                // refresher boundary and can read up to one poll short or long
-                // of the true on-time. This matters most for a cycle-soak run,
-                // whose valve toggles on/off per segment: the observer records
-                // one such approximate row per ON segment rather than a single
-                // whole-cycle row, so several short rows is expected here and
-                // not a runtime error. Treat every observer-written
-                // duration_s as approximate (~10s); the scheduler's own rows
-                // (history::db, source "smart_morning") carry the planned
-                // intent and are the exact figure when one is needed.
-                let duration = (now - start).max(0);
+                let latch = self.seen_running.remove(&zone.slug).unwrap_or(RunLatch {
+                    start_epoch: now,
+                    dry_run: false,
+                    last_known_running_epoch: now,
+                });
+                // APPROXIMATE duration, bounded to the VERIFIED span: from
+                // the first poll that saw the zone running to the last poll
+                // that saw it running with known state. Quantized to the
+                // ~10s refresher boundary and up to one poll short of the
+                // true on-time. This matters most for a cycle-soak run,
+                // whose valve toggles on/off per segment: the observer
+                // records one such approximate row per ON segment rather
+                // than a single whole-cycle row, so several short rows is
+                // expected here and not a runtime error. Treat every
+                // observer-written duration_s as approximate (~10s); the
+                // scheduler's own rows (history::db, source
+                // "smart_morning") carry the planned intent and are the
+                // exact figure when one is needed.
+                let duration = (latch.last_known_running_epoch - latch.start_epoch).max(0);
                 let rec = RunRecord {
                     zone: zone.slug.clone(),
-                    start_epoch: start,
+                    start_epoch: latch.start_epoch,
                     duration_s: duration,
                     skip_reason: None,
                     // Pretend water from a non-simulating dry-run
                     // controller is recorded honestly as such, never as
                     // watering evidence.
-                    source: if dry_run {
+                    source: if latch.dry_run {
                         "dry_run".to_string()
                     } else {
                         "ha_refresher".to_string()
@@ -181,16 +217,21 @@ mod tests {
         Arc::new(Mutex::new(c))
     }
 
-    fn snap(epoch: i64, running: bool) -> IrrigationSnapshot {
+    fn snap_known(epoch: i64, running: bool, running_known: bool) -> IrrigationSnapshot {
         IrrigationSnapshot {
             last_refresh_epoch: epoch,
             zones: vec![ZoneState {
                 slug: "front".into(),
                 running,
+                running_known,
                 ..Default::default()
             }],
             ..Default::default()
         }
+    }
+
+    fn snap(epoch: i64, running: bool) -> IrrigationSnapshot {
+        snap_known(epoch, running, true)
     }
 
     /// The tick sequence the balance-cache invalidation keys on: the
@@ -212,5 +253,61 @@ mod tests {
         assert_eq!(ingest.observe(&db, &snap(1_030, false), &none).await, 1);
         // Idle again: nothing further.
         assert_eq!(ingest.observe(&db, &snap(1_040, false), &none).await, 0);
+    }
+
+    // The post-outage inflation scenario: a verified run (known ticks at
+    // t=100 and t=160) is followed by hours of carried-forward UNKNOWN
+    // running state (a cloud adapter that lost its running-state read);
+    // when the state recovers to idle, the single row written must cover
+    // only the VERIFIED span (60s), never the whole outage. Hours of
+    // phantom watering credit here made the balance skip real watering.
+    #[tokio::test]
+    async fn outage_carry_forward_cannot_inflate_the_recorded_run() {
+        let db = mem();
+        let mut ingest = IngestState::new();
+        let none = std::collections::HashSet::new();
+
+        assert_eq!(
+            ingest
+                .observe(&db, &snap_known(100, true, true), &none)
+                .await,
+            0
+        );
+        assert_eq!(
+            ingest
+                .observe(&db, &snap_known(160, true, true), &none)
+                .await,
+            0
+        );
+        // Outage: running carried forward, state unknown for two hours.
+        assert_eq!(
+            ingest
+                .observe(&db, &snap_known(200, true, false), &none)
+                .await,
+            0
+        );
+        assert_eq!(
+            ingest
+                .observe(&db, &snap_known(7_300, true, false), &none)
+                .await,
+            0
+        );
+        // Recovery shows idle: the falling edge writes exactly one row.
+        assert_eq!(
+            ingest
+                .observe(&db, &snap_known(7_360, false, true), &none)
+                .await,
+            1
+        );
+
+        let runs = crate::persistence::runs::RunsStore::new(db.clone());
+        let rows = runs.window(0, 100_000).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].start_epoch, 100);
+        assert_eq!(
+            rows[0].duration_s,
+            Some(60),
+            "only the verified running span is recorded, not the outage"
+        );
     }
 }

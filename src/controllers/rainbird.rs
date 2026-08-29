@@ -205,6 +205,10 @@ impl IrrigationController for Rainbird {
             history_query: false,
             remote_program_upload: false,
             water_level: false,
+            // stop_zone falls back to the whole-controller StopIrrigation
+            // command (the cloud API has no per-station stop), so consumers
+            // must treat a zone-stop as stopping the whole controller.
+            per_zone_stop: false,
         }
     }
 
@@ -276,6 +280,7 @@ impl IrrigationController for Rainbird {
                             running: remaining.is_some(),
                             remaining_s: remaining,
                             last_run_epoch: None,
+                            running_known: true,
                         }
                     })
                     .collect();

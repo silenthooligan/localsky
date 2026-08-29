@@ -23,8 +23,11 @@
 //     own minimum interval before re-polling, so we don't add our
 //     own here.
 //   - relay_id values are NOT zone numbers, they're stable Hydrawise
-//     relay IDs surfaced in statusschedule.php. The wizard's zone-scan
-//     populates `zone_relay_map`.
+//     relay IDs surfaced in statusschedule.php. Two paths fill the
+//     binding: the controller editor's "Scan zones" merges results into
+//     `zone_relay_map`, and zone entries bound to this controller
+//     (controller_station = relay id, e.g. from the wizard's import)
+//     overlay that map at build time (runtime::build_controllers).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -170,6 +173,7 @@ impl IrrigationController for Hydrawise {
             history_query: false,
             remote_program_upload: false,
             water_level: false,
+            per_zone_stop: true,
         }
     }
 
@@ -237,6 +241,7 @@ impl IrrigationController for Hydrawise {
                                     None
                                 },
                                 last_run_epoch: None,
+                                running_known: true,
                             }
                         })
                     })

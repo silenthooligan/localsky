@@ -783,6 +783,58 @@ fn controller_error_response(e: ControllerError) -> (StatusCode, Json<Value>) {
 /// controller. Confirmed manual runs are recorded in the runs table
 /// (source "manual") so the history Gantt and scheduler dedupe see
 /// them. Only called with the three zone-action variants.
+/// Shutoff-backstop deadline for a manually dispatched run: planned end plus
+/// the shared enforcement grace (30s; 90s when the controller's only stop is
+/// device-wide). A graceless deadline made the reaper fire the instant the
+/// planned end passed, which on a Rachio-class controller device-stops any
+/// sibling zone started meanwhile.
+fn manual_run_deadline(started_epoch: i64, duration_s: u32, per_zone_stop: bool) -> i64 {
+    started_epoch
+        + duration_s as i64
+        + crate::controllers::reaper::effective_run_grace(per_zone_stop)
+}
+
+/// Ledger + history bookkeeping after a successful manual zone Stop. A
+/// controller with a real per-zone stop is zone-scoped: disarm that zone's
+/// deadline, truncate that zone's open manual row. A DEVICE-WIDE stop
+/// (per_zone_stop=false) halted every zone on the controller, so every
+/// armed row on it clears (a survivor would re-fire another device-wide
+/// stop at its stale deadline) and every open manual row on it truncates
+/// (a sibling's pre-written full-duration row would otherwise credit water
+/// that stopped falling). Other controllers are untouched either way.
+async fn stop_bookkeeping(
+    active_runs: Option<&crate::persistence::ActiveRunsStore>,
+    runs: Option<&RunsStore>,
+    controller_id: &str,
+    zone: &str,
+    device_wide: bool,
+    now_epoch: i64,
+) {
+    if let Some(ar) = active_runs {
+        if device_wide {
+            if let Err(e) = ar.clear_for_controllers(&[controller_id]).await {
+                tracing::warn!(
+                    zone = %zone, controller = %controller_id, error = %e,
+                    "device-wide stop: clearing sibling deadlines failed"
+                );
+            }
+        } else {
+            let _ = ar.disarm(zone).await;
+        }
+    }
+    if let Some(rs) = runs {
+        let truncated = if device_wide {
+            rs.truncate_active_for_controller(controller_id, now_epoch)
+                .await
+        } else {
+            rs.truncate_active(zone, now_epoch).await
+        };
+        if let Err(e) = truncated {
+            tracing::debug!(zone = %zone, error = %e, "manual-row truncate failed");
+        }
+    }
+}
+
 async fn registry_zone_action(body: Action) -> (StatusCode, Json<Value>) {
     let Some(d) = DISPATCH.get() else {
         return (
@@ -860,14 +912,24 @@ async fn registry_zone_action(body: Action) -> (StatusCode, Json<Value>) {
                     }
                     // P0-1b: arm the persisted shutoff deadline so the reaper
                     // closes this valve even if the process dies before the
-                    // controller's own timer fires.
+                    // controller's own timer fires. The deadline carries the
+                    // shared enforcement grace (30s; 90s on device-wide-stop
+                    // clouds): the controller's own timer is the precise
+                    // shutoff, and a graceless deadline made the reaper fire
+                    // a stop the instant the planned end passed, which on a
+                    // Rachio-class controller is a device-wide stop that
+                    // kills any sibling zone the user started meanwhile.
                     if let Some(ar) = d.active_runs.as_ref() {
                         if let Err(e) = ar
                             .arm(
                                 zone.clone(),
                                 handle.controller_id.clone(),
                                 handle.started_epoch,
-                                handle.started_epoch + clamped as i64,
+                                manual_run_deadline(
+                                    handle.started_epoch,
+                                    clamped,
+                                    controller.supports().per_zone_stop,
+                                ),
                             )
                             .await
                         {
@@ -887,34 +949,55 @@ async fn registry_zone_action(body: Action) -> (StatusCode, Json<Value>) {
                 Err(e) => controller_error_response(e),
             }
         }
-        Action::Stop { zone } => match controller.stop_zone(&zone).await {
-            Ok(()) => {
-                // P0-1b: an explicit stop disarms the deadline so the reaper does
-                // not later re-stop an already-closed valve.
-                if let Some(ar) = d.active_runs.as_ref() {
-                    let _ = ar.disarm(&zone).await;
-                }
-                // The manual dispatch pre-wrote its row for the full
-                // planned duration; an early stop truncates it to the
-                // real span so the balance and history never credit
-                // water that was cut short.
-                if let Some(rs) = d.runs.as_ref() {
-                    let now = chrono::Utc::now().timestamp();
-                    if let Err(e) = rs.truncate_active(&zone, now).await {
-                        tracing::debug!(zone = %zone, error = %e, "manual-row truncate failed");
-                    }
-                }
-                (
-                    StatusCode::OK,
-                    Json(json!({
+        Action::Stop { zone } => {
+            // On a controller with no per-zone stop (Rachio-class clouds)
+            // this zone-stop is a DEVICE-WIDE stop: every running zone on
+            // the device stops. Surface the scope in the log and in the
+            // response so the client's toast can say what really happened.
+            let device_wide = !controller.supports().per_zone_stop;
+            if device_wide {
+                tracing::warn!(
+                    zone = %zone, controller = %controller.id(),
+                    "manual stop: controller has no per-zone stop; stopping ALL watering on the device"
+                );
+            }
+            match controller.stop_zone(&zone).await {
+                Ok(()) => {
+                    // P0-1b: an explicit stop disarms the deadline so the reaper does
+                    // not later re-stop an already-closed valve. A DEVICE-WIDE stop
+                    // (per_zone_stop=false) halted every zone on this controller, so
+                    // its bookkeeping must match the note the response carries:
+                    // every armed row on this controller clears (a survivor would
+                    // re-fire another device-wide stop at its stale deadline), and
+                    // every open manual row on this controller truncates to the
+                    // real span (a sibling's pre-written full-duration row would
+                    // otherwise credit water that stopped falling). Other
+                    // controllers' rows are untouched either way.
+                    stop_bookkeeping(
+                        d.active_runs.as_ref(),
+                        d.runs.as_ref(),
+                        controller.id(),
+                        &zone,
+                        device_wide,
+                        chrono::Utc::now().timestamp(),
+                    )
+                    .await;
+                    let mut body = json!({
                         "ok": true,
                         "dispatched": format!("controller:{}", controller.id()),
                         "stopped": zone,
-                    })),
-                )
+                        "scope": if device_wide { "device" } else { "zone" },
+                    });
+                    if device_wide {
+                        body["note"] = json!(
+                            "This controller cannot stop a single zone; all watering on the device was stopped."
+                        );
+                    }
+                    (StatusCode::OK, Json(body))
+                }
+                Err(e) => controller_error_response(e),
             }
-            Err(e) => controller_error_response(e),
-        },
+        }
         Action::StopAll => match controller.stop_all().await {
             Ok(()) => {
                 if let Some(ar) = d.active_runs.as_ref() {
@@ -1415,5 +1498,109 @@ mod tests {
         // the 410 body rather than a 422 deserialization error.
         let a: Action = serde_json::from_str(r#"{"kind":"run_sequence_now"}"#).unwrap();
         assert!(matches!(a, Action::RunSequenceNow));
+    }
+
+    // The manual API Run arms its shutoff deadline with the shared grace:
+    // base 30s, widened to 90s for device-wide-stop clouds. Zero grace here
+    // made the reaper device-stop a sibling the moment a run's planned end
+    // passed.
+    #[test]
+    fn manual_run_deadline_carries_the_shared_grace() {
+        assert_eq!(manual_run_deadline(1000, 600, true), 1000 + 600 + 30);
+        assert_eq!(manual_run_deadline(1000, 600, false), 1000 + 600 + 90);
+    }
+
+    fn mem_stores() -> (crate::persistence::ActiveRunsStore, RunsStore) {
+        let mut c = rusqlite::Connection::open_in_memory().unwrap();
+        crate::persistence::run_migrations(&mut c).unwrap();
+        let conn = std::sync::Arc::new(tokio::sync::Mutex::new(c));
+        (
+            crate::persistence::ActiveRunsStore::new(conn.clone()),
+            RunsStore::new(conn),
+        )
+    }
+
+    fn manual_row(zone: &str, controller: &str, start: i64) -> crate::persistence::runs::NewRun {
+        crate::persistence::runs::NewRun {
+            zone_slug: zone.into(),
+            start_epoch: start,
+            source: "manual".into(),
+            controller_id: controller.into(),
+            planned_duration_s: 1200,
+            skip_reason: None,
+            et0_mm: None,
+            etc_mm: None,
+            cycle_index: None,
+            cycle_count: None,
+        }
+    }
+
+    // Finding-7 scenario: front is running a manual 20 minute run on the
+    // cloud device; the user stops BACK (a sibling zone). The device-wide
+    // stop halted front too, so front's pre-written full-duration row must
+    // truncate and every armed deadline on that device must clear, while
+    // another controller's open run keeps its credit and its backstop.
+    #[tokio::test]
+    async fn device_wide_stop_bookkeeping_covers_the_whole_device() {
+        let (ar, rs) = mem_stores();
+        ar.arm("front".into(), "rachio_main".into(), 1000, 2290)
+            .await
+            .unwrap();
+        ar.arm("back".into(), "rachio_main".into(), 1000, 2290)
+            .await
+            .unwrap();
+        ar.arm("garden".into(), "os_main".into(), 1000, 2230)
+            .await
+            .unwrap();
+        rs.insert_completed(manual_row("front", "rachio_main", 1000), 2200, 1200, None)
+            .await
+            .unwrap();
+        rs.insert_completed(manual_row("garden", "os_main", 1000), 2200, 1200, None)
+            .await
+            .unwrap();
+
+        stop_bookkeeping(Some(&ar), Some(&rs), "rachio_main", "back", true, 1300).await;
+
+        let left = ar.due(10_000).await.unwrap();
+        assert_eq!(left.len(), 1, "only the other controller's row survives");
+        assert_eq!(left[0].zone_slug, "garden");
+        let rows = rs.window(0, 10_000).await.unwrap();
+        let front = rows.iter().find(|r| r.zone_slug == "front").unwrap();
+        assert_eq!(
+            front.duration_s,
+            Some(300),
+            "the sibling's open manual row shrinks to the real span"
+        );
+        let garden = rows.iter().find(|r| r.zone_slug == "garden").unwrap();
+        assert_eq!(garden.duration_s, Some(1200), "other controller untouched");
+    }
+
+    // Per-zone-stop controllers keep the zone-scoped bookkeeping.
+    #[tokio::test]
+    async fn zone_scoped_stop_bookkeeping_touches_only_the_stopped_zone() {
+        let (ar, rs) = mem_stores();
+        ar.arm("front".into(), "os_main".into(), 1000, 2230)
+            .await
+            .unwrap();
+        ar.arm("back".into(), "os_main".into(), 1000, 2230)
+            .await
+            .unwrap();
+        rs.insert_completed(manual_row("front", "os_main", 1000), 2200, 1200, None)
+            .await
+            .unwrap();
+        rs.insert_completed(manual_row("back", "os_main", 1000), 2200, 1200, None)
+            .await
+            .unwrap();
+
+        stop_bookkeeping(Some(&ar), Some(&rs), "os_main", "back", false, 1300).await;
+
+        let left = ar.due(10_000).await.unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].zone_slug, "front", "front's deadline stays armed");
+        let rows = rs.window(0, 10_000).await.unwrap();
+        let back = rows.iter().find(|r| r.zone_slug == "back").unwrap();
+        assert_eq!(back.duration_s, Some(300));
+        let front = rows.iter().find(|r| r.zone_slug == "front").unwrap();
+        assert_eq!(front.duration_s, Some(1200), "front's run keeps its span");
     }
 }

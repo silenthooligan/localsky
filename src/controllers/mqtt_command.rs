@@ -307,6 +307,7 @@ impl IrrigationController for MqttCommand {
             history_query: false,
             remote_program_upload: false,
             water_level: false,
+            per_zone_stop: true,
         }
     }
 
@@ -429,6 +430,7 @@ impl IrrigationController for MqttCommand {
                 running: running.get(slug).copied().unwrap_or(false),
                 remaining_s: None,
                 last_run_epoch: None,
+                running_known: true,
             })
             .collect();
 

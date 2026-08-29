@@ -2,6 +2,25 @@
 
 All notable changes to LocalSky are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.18] - 2026-08-28
+
+### Fixed
+
+- **Scan zones now fills the controller's zone map, and zones imported in the setup wizard now work for Rachio, Hydrawise, B-hyve, and Rain Bird.** The controller editor's scan used to report the zones it found while leaving the config JSON untouched, so saving persisted an empty zone map; and zones imported from a wizard scan were saved but never reached dispatch on the four cloud controllers. Both paths now produce a working binding: the editor merges scan results into the zone map (existing hand-edits survive a rescan), the wizard's imported zones are honored at dispatch, and when both bind the same zone the zone entry wins.
+- Scanning or testing an existing cloud controller no longer fails on the redacted secret: the stored token is used automatically, and a secret that cannot be resolved is reported plainly instead of being sent to the vendor cloud as the literal placeholder text.
+- Rachio watering runs now show up: running state and remaining minutes are read live from the Rachio cloud, so the dashboard reflects a running zone and completed runs are recorded in History, the water balance, and session spacing like any other controller.
+
+### Added
+
+- **Rachio device auto-discovery.** The controller Test button resolves your account's device from just the API token and offers to fill the device id in, so nothing needs hand-copying from a browser developer console. The test result also shows Rachio's remaining daily API request budget when the cloud reports it.
+- A `poll_interval_s` setting for Rachio (default 120 seconds, minimum 60) controls how often live status is read from the cloud.
+
+### Changed
+
+- **Rachio polling now respects Rachio's daily request budget.** Status reads are throttled to the poll interval (the cached snapshot serves in between), so the fast dashboard refresh no longer translates into a cloud call per tick; the previous cadence could exhaust Rachio's daily allowance before morning watering.
+- **Stopping one zone on Rachio, B-hyve, or Rain Bird now says what it does: it stops the whole device.** These vendor clouds offer no per-zone stop. The Stop confirmation and the logs state the real scope, and History records the real (shortened) length for every run the stop ended, not just the zone that was tapped. The automatic shutoff backstop also checks with the controller before enforcing on these devices: a zone that already finished on its own timer is released quietly, and a stop is issued only for a zone still reported running (or unknowable), so a normal multi-zone morning can no longer have each zone cut short by the previous zone's deadline. Manual runs get the same enforcement slack as scheduled ones.
+- Rachio now advertises only the capabilities the polled cloud API can deliver: no flow meter, no rain sensor, and no history query. (Push webhooks, which could provide exact run events and rain-sensor state, are a documented future path.)
+
 ## [0.7.17] - 2026-08-24
 
 The weekly budget becomes a true water balance, and tuning suggestions learn to stay quiet when told. No breaking changes.

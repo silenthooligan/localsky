@@ -12,7 +12,9 @@
 
 use leptos::prelude::*;
 
-use crate::components::controllers_form::{controller_kind_options, ControllerEditorPanel};
+use crate::components::controllers_form::{
+    controller_kind_options, zone_slug, ControllerEditorPanel,
+};
 use crate::components::setup::shell::{next_step_href, prev_step_href, SetupFooter};
 use crate::components::ui::{Button, HelpHint};
 
@@ -52,30 +54,6 @@ fn controller_kind_pretty(kind: &str) -> String {
         .unwrap_or_else(|| kind.to_string())
 }
 
-/// slug for a zone imported from a controller scan: lowercase, runs of
-/// non-alphanumerics collapse to single underscores.
-fn zone_slug(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    let mut last_us = true;
-    for ch in name.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-            last_us = false;
-        } else if !last_us {
-            out.push('_');
-            last_us = true;
-        }
-    }
-    while out.ends_with('_') {
-        out.pop();
-    }
-    if out.is_empty() {
-        "zone".into()
-    } else {
-        out
-    }
-}
-
 /// Minimal valid ZoneConfig stub for an imported station. Species, soil and
 /// sprinkler are deliberately generic; the Zones step is where they get real.
 fn zone_stub(name: &str, controller_id: &str, station_id: &str) -> serde_json::Value {
@@ -96,6 +74,30 @@ struct ScannedZone {
     name: String,
     selected: bool,
     already_added: bool,
+}
+
+/// Insert ZoneConfig stubs for imported stations into a draft's
+/// `config.zones` object: slug from `zone_slug(name)`, `controller_id` set
+/// to the scanned controller, `controller_station` set to the scan's
+/// station id (Rachio: zone uuid; OpenSprinkler/DIY: station number).
+/// A slug collision appends underscores so an existing zone is never
+/// overwritten. Returns how many stubs were inserted. Pure so the wizard
+/// import path has a native regression test.
+fn import_zone_stubs(
+    zones: &mut serde_json::Map<String, serde_json::Value>,
+    controller_id: &str,
+    picks: &[(String, String)], // (name, station_id)
+) -> usize {
+    let mut imported = 0usize;
+    for (name, station_id) in picks {
+        let mut slug = zone_slug(name);
+        while zones.contains_key(&slug) {
+            slug.push('_');
+        }
+        zones.insert(slug, zone_stub(name, controller_id, station_id));
+        imported += 1;
+    }
+    imported
 }
 
 #[component]
@@ -298,6 +300,11 @@ fn WizardControllerRow(
     let scan_msg = RwSignal::new(String::new());
     let scanned: RwSignal<Vec<ScannedZone>> = RwSignal::new(Vec::new());
 
+    // Device id the test probe auto-discovered from just the API token
+    // (Rachio: GET /person/info). Offered as a one-click fill; never written
+    // into the draft without the user choosing it.
+    let discovered_device: RwSignal<Option<String>> = RwSignal::new(None);
+
     let entry_for_test = entry.clone();
     let on_test = move |_| {
         if testing.get_untracked() {
@@ -305,6 +312,7 @@ fn WizardControllerRow(
         }
         testing.set(true);
         test_msg.set(String::new());
+        discovered_device.set(None);
         let body = serde_json::json!({ "controller": entry_for_test.clone() });
         #[cfg(feature = "hydrate")]
         leptos::task::spawn_local(async move {
@@ -326,7 +334,33 @@ fn WizardControllerRow(
                         .and_then(|f| f.as_str())
                         .map(|f| format!(", firmware {f}"))
                         .unwrap_or_default();
-                    Ok(format!("Connected: {zones} stations reported{fw}"))
+                    let mut msg = format!("Connected: {zones} stations reported{fw}");
+                    // A test run without a device id resolves the account's
+                    // first device and reports it; offer the fill below.
+                    if let Some(found) = v.get("discovered_device").filter(|d| d.is_object()) {
+                        if let Some(did) = found.get("device_id").and_then(|d| d.as_str()) {
+                            let name = found
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("unnamed device");
+                            let count = found
+                                .get("device_count")
+                                .and_then(|c| c.as_u64())
+                                .unwrap_or(1);
+                            msg.push_str(&format!(". Found device \"{name}\" ({did})"));
+                            if count > 1 {
+                                msg.push_str(&format!(
+                                    "; the account has {count} devices, this is the first"
+                                ));
+                            }
+                            discovered_device.set(Some(did.to_string()));
+                        }
+                    }
+                    if let Some(remaining) = v.get("rate_limit_remaining").and_then(|r| r.as_str())
+                    {
+                        msg.push_str(&format!(". API requests left today: {remaining}"));
+                    }
+                    Ok(msg)
                 } else {
                     Err(v
                         .get("detail")
@@ -350,6 +384,43 @@ fn WizardControllerRow(
         });
         #[cfg(not(feature = "hydrate"))]
         let _ = body;
+    };
+
+    // One-click fill for the discovered device id: writes it into THIS
+    // controller's draft config.device_id and saves the draft. Explicit
+    // user action; the test itself never writes config.
+    let id_for_fill = id.clone();
+    let on_use_discovered = move |_| {
+        let Some(did) = discovered_device.get_untracked() else {
+            return;
+        };
+        let cid = id_for_fill.clone();
+        draft.update(|d| {
+            let Some(arr) = d
+                .get_mut("config")
+                .and_then(|c| c.get_mut("controllers"))
+                .and_then(|v| v.as_array_mut())
+            else {
+                return;
+            };
+            if let Some(slot) = arr
+                .iter_mut()
+                .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(cid.as_str()))
+            {
+                if let Some(cfg) = slot.get_mut("config").and_then(|c| c.as_object_mut()) {
+                    cfg.insert("device_id".into(), serde_json::Value::String(did.clone()));
+                }
+            }
+        });
+        let candidate = draft.get_untracked();
+        #[cfg(feature = "hydrate")]
+        leptos::task::spawn_local(async move {
+            let _ = save_draft(candidate).await;
+        });
+        #[cfg(not(feature = "hydrate"))]
+        let _ = candidate;
+        discovered_device.set(None);
+        test_msg.set(format!("Device id set to {did}."));
     };
 
     let entry_for_scan = entry.clone();
@@ -447,13 +518,11 @@ fn WizardControllerRow(
             else {
                 return;
             };
-            for z in &picks {
-                let mut slug = zone_slug(&z.name);
-                while zones.contains_key(&slug) {
-                    slug.push('_');
-                }
-                zones.insert(slug, zone_stub(&z.name, &cid, &z.station_id));
-            }
+            let pairs: Vec<(String, String)> = picks
+                .iter()
+                .map(|z| (z.name.clone(), z.station_id.clone()))
+                .collect();
+            import_zone_stubs(zones, &cid, &pairs);
         });
         let candidate = draft.get_untracked();
         #[cfg(feature = "hydrate")]
@@ -560,10 +629,74 @@ fn WizardControllerRow(
                 })
             }}
             {move || {
+                // The test resolved a device id from the API token; offer it
+                // as a one-click fill instead of writing config silently.
+                discovered_device.get().map(|did| {
+                    let label = format!("Use device {did}");
+                    view! {
+                        <Button variant="ghost" on_click=Callback::new(on_use_discovered.clone())>
+                            {label}
+                        </Button>
+                    }
+                })
+            }}
+            {move || {
                 let m = scan_msg.get();
                 (!m.is_empty()).then(|| view! { <p class="setup-test-result">{m}</p> })
             }}
             {scan_list}
         </li>
+    }
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod tests {
+    use super::import_zone_stubs;
+
+    // The wizard's scan import writes ZoneConfig stubs that runtime
+    // composition can dispatch: controller_id binds the zone to the scanned
+    // controller and controller_station carries the controller-native id
+    // (for Rachio, the zone uuid). This is the wizard half of the issue #8
+    // fix contract.
+    #[test]
+    fn import_writes_dispatchable_zone_stubs() {
+        let mut zones = serde_json::Map::new();
+        let picks = vec![
+            (
+                "Front Lawn".to_string(),
+                "1f00aa00-0000-4000-8000-000000000001".to_string(),
+            ),
+            (
+                "Back Lawn".to_string(),
+                "1f00aa00-0000-4000-8000-000000000002".to_string(),
+            ),
+        ];
+        let n = import_zone_stubs(&mut zones, "rachio_main", &picks);
+        assert_eq!(n, 2);
+        let front = zones.get("front_lawn").expect("slugged zone key");
+        assert_eq!(front["controller_id"], "rachio_main");
+        assert_eq!(
+            front["controller_station"],
+            "1f00aa00-0000-4000-8000-000000000001"
+        );
+        assert_eq!(front["display_name"], "Front Lawn");
+        // The stub must deserialize into a real ZoneConfig so PUT /draft and
+        // apply accept it as-is.
+        let typed: Result<crate::config::schema::ZoneConfig, _> =
+            serde_json::from_value(front.clone());
+        assert!(typed.is_ok(), "zone stub must be a valid ZoneConfig");
+    }
+
+    #[test]
+    fn import_never_overwrites_an_existing_zone() {
+        let mut zones = serde_json::Map::new();
+        zones.insert(
+            "front_lawn".to_string(),
+            serde_json::json!({ "display_name": "existing" }),
+        );
+        let picks = vec![("Front Lawn".to_string(), "uuid-new".to_string())];
+        assert_eq!(import_zone_stubs(&mut zones, "rachio_main", &picks), 1);
+        assert_eq!(zones["front_lawn"]["display_name"], "existing");
+        assert_eq!(zones["front_lawn_"]["controller_station"], "uuid-new");
     }
 }

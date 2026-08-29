@@ -341,14 +341,21 @@ async fn run_tick(
                 // closes this valve even if the process dies before the
                 // controller's own (in-process) timer fires. This is the
                 // safety backstop the manual scheduler previously bypassed
-                // (stuck-valve risk on MQTT/DIY controllers).
+                // (stuck-valve risk on MQTT/DIY controllers). The deadline
+                // carries the shared enforcement grace (30s; 90s on
+                // device-wide-stop clouds) so an on-time self-shutoff is
+                // never "enforced", which on a Rachio-class controller
+                // would device-stop a sibling zone.
                 if let Some(ar) = active_runs.as_ref() {
+                    let grace = crate::controllers::reaper::effective_run_grace(
+                        controller.supports().per_zone_stop,
+                    );
                     if let Err(e) = ar
                         .arm(
                             s.zone_slug.clone(),
                             handle.controller_id.clone(),
                             handle.started_epoch,
-                            handle.started_epoch + duration_s as i64,
+                            handle.started_epoch + duration_s as i64 + grace,
                         )
                         .await
                     {
@@ -811,6 +818,114 @@ mod tests {
         assert!(
             !last_fired.keys().any(|(id, _, _)| id == "gone"),
             "the removed schedule's dedup entry was pruned"
+        );
+    }
+
+    /// Minimal cloud-style controller: NO per-zone stop, pinned
+    /// started_epoch so the armed deadline is exactly assertable.
+    struct PinnedCloud;
+
+    #[async_trait::async_trait]
+    impl crate::ports::irrigation_controller::IrrigationController for PinnedCloud {
+        fn id(&self) -> &str {
+            "cloud_main"
+        }
+        fn supports(&self) -> crate::ports::irrigation_controller::ControllerCaps {
+            crate::ports::irrigation_controller::ControllerCaps {
+                flow_meter: false,
+                rain_sensor: false,
+                master_valve: true,
+                multi_zone_parallel: false,
+                history_query: false,
+                remote_program_upload: false,
+                water_level: false,
+                per_zone_stop: false,
+            }
+        }
+        async fn run_zone(
+            &self,
+            slug: &str,
+            duration_s: u32,
+        ) -> crate::ports::irrigation_controller::ControllerResult<
+            crate::ports::irrigation_controller::RunHandle,
+        > {
+            Ok(crate::ports::irrigation_controller::RunHandle {
+                controller_id: "cloud_main".into(),
+                zone_slug: slug.to_string(),
+                started_epoch: 1000,
+                planned_duration_s: duration_s,
+                provider_ref: None,
+            })
+        }
+        async fn stop_zone(
+            &self,
+            _slug: &str,
+        ) -> crate::ports::irrigation_controller::ControllerResult<()> {
+            Ok(())
+        }
+        async fn stop_all(&self) -> crate::ports::irrigation_controller::ControllerResult<()> {
+            Ok(())
+        }
+        async fn status(
+            &self,
+        ) -> crate::ports::irrigation_controller::ControllerResult<
+            crate::ports::irrigation_controller::ControllerStatus,
+        > {
+            Ok(crate::ports::irrigation_controller::ControllerStatus {
+                reachable: true,
+                master_enabled: Some(true),
+                water_level_pct: None,
+                rain_sensor_tripped: None,
+                current_program: None,
+                zone_states: vec![],
+                flow_gpm: None,
+                flow_connected: false,
+                firmware: None,
+            })
+        }
+        async fn run_history(
+            &self,
+            _since_epoch: i64,
+        ) -> crate::ports::irrigation_controller::ControllerResult<
+            Vec<crate::ports::irrigation_controller::RunRecord>,
+        > {
+            Ok(vec![])
+        }
+    }
+
+    // The manual scheduler's arm site carries the shared enforcement grace:
+    // a device-wide-stop cloud gets 90s past the planned end, so the reaper
+    // never device-stops a sibling the instant a scheduled run's planned
+    // end passes. (sched_at pins a 10-minute schedule and PinnedCloud pins
+    // started_epoch=1000: deadline = 1000 + 600 + 90.)
+    #[tokio::test]
+    async fn manual_scheduler_arms_deadline_with_device_wide_grace() {
+        let (runs, active) = stores();
+        let registry = ControllerRegistry::new();
+        let ctl: Arc<dyn crate::ports::irrigation_controller::IrrigationController> =
+            Arc::new(PinnedCloud);
+        registry.set(vec![(ctl, true)]);
+        let now = frozen_now();
+        let schedules = vec![sched_at(now, "cloudrun", "back_yard")];
+        let mut last_fired = HashMap::new();
+
+        run_tick(
+            now,
+            &schedules,
+            &WateringPolicy::default(),
+            &registry,
+            Some(&runs),
+            Some(&active),
+            &mut last_fired,
+        )
+        .await;
+
+        let due = active.due(i64::MAX / 2).await.unwrap();
+        assert_eq!(due.len(), 1, "the dispatched run armed its backstop");
+        assert_eq!(
+            due[0].off_deadline_epoch,
+            1000 + 600 + 90,
+            "deadline = start + duration + device-wide-stop grace"
         );
     }
 }

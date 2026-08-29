@@ -1698,6 +1698,20 @@ pub struct RachioConfig {
     /// Map LocalSky zone slug -> Rachio zone UUID.
     #[serde(default)]
     pub zone_uuid_map: BTreeMap<String, String>,
+    /// Minimum seconds between live status polls against the Rachio cloud.
+    /// The adapter serves its cached snapshot inside this window so the
+    /// refresher's fast tick never translates 1:1 into cloud calls (Rachio
+    /// allows roughly 1700 requests per day per token). `None` = the 120s
+    /// default; values below 60 are clamped up to 60 at use and rejected by
+    /// the validator. Each poll costs two API calls (device + current
+    /// schedule), so the 120s default spends about 1440 calls per day.
+    #[serde(default)]
+    pub poll_interval_s: Option<u32>,
+    /// Optional API base URL override. Defaults to the public production
+    /// endpoint; exists as a test seam (Rain Bird precedent) and is not
+    /// surfaced in the editor form.
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
 
 /// Hunter Hydrawise cloud controller. The HC v3 / HPC v6 / Pro-C

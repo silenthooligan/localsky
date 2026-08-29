@@ -1085,22 +1085,52 @@ pub fn build_controllers(
                     Err(e) => skip(&entry.id, "ha_service_call", e),
                 }
             }
-            ControllerKind::Rachio(c) => match Rachio::new(entry.id.clone(), c.clone()) {
-                Ok(ctl) => Some(Arc::new(ctl)),
-                Err(e) => skip(&entry.id, "rachio", e),
-            },
-            ControllerKind::Hydrawise(c) => match Hydrawise::new(entry.id.clone(), c.clone()) {
-                Ok(ctl) => Some(Arc::new(ctl)),
-                Err(e) => skip(&entry.id, "hydrawise", e),
-            },
-            ControllerKind::Bhyve(c) => match Bhyve::new(entry.id.clone(), c.clone()) {
-                Ok(ctl) => Some(Arc::new(ctl)),
-                Err(e) => skip(&entry.id, "bhyve", e),
-            },
-            ControllerKind::Rainbird(c) => match Rainbird::new(entry.id.clone(), c.clone()) {
-                Ok(ctl) => Some(Arc::new(ctl)),
-                Err(e) => skip(&entry.id, "rainbird", e),
-            },
+            // The four cloud kinds keep a zone map inside their config AND
+            // accept zone entries bound by controller_id/controller_station
+            // (the wizard's import writes the latter). Both must dispatch:
+            // the config map is the base, zone entries overlay it and win on
+            // conflict (mirrors the OpenSprinkler/HttpGeneric derivation,
+            // including the hyphen-to-underscore slug normalization).
+            ControllerKind::Rachio(c) => {
+                let mut c = c.clone();
+                overlay_zone_entries(&mut c.zone_uuid_map, cfg, &entry.id, |station| {
+                    Some(station.to_string())
+                });
+                match Rachio::new(entry.id.clone(), c) {
+                    Ok(ctl) => Some(Arc::new(ctl)),
+                    Err(e) => skip(&entry.id, "rachio", e),
+                }
+            }
+            ControllerKind::Hydrawise(c) => {
+                let mut c = c.clone();
+                overlay_zone_entries(&mut c.zone_relay_map, cfg, &entry.id, |station| {
+                    station.parse::<i64>().ok()
+                });
+                match Hydrawise::new(entry.id.clone(), c) {
+                    Ok(ctl) => Some(Arc::new(ctl)),
+                    Err(e) => skip(&entry.id, "hydrawise", e),
+                }
+            }
+            ControllerKind::Bhyve(c) => {
+                let mut c = c.clone();
+                overlay_zone_entries(&mut c.zone_station_map, cfg, &entry.id, |station| {
+                    station.parse::<u32>().ok()
+                });
+                match Bhyve::new(entry.id.clone(), c) {
+                    Ok(ctl) => Some(Arc::new(ctl)),
+                    Err(e) => skip(&entry.id, "bhyve", e),
+                }
+            }
+            ControllerKind::Rainbird(c) => {
+                let mut c = c.clone();
+                overlay_zone_entries(&mut c.zone_station_map, cfg, &entry.id, |station| {
+                    station.parse::<u32>().ok()
+                });
+                match Rainbird::new(entry.id.clone(), c) {
+                    Ok(ctl) => Some(Arc::new(ctl)),
+                    Err(e) => skip(&entry.id, "rainbird", e),
+                }
+            }
             ControllerKind::MqttCommand(c) => {
                 Some(Arc::new(MqttCommand::new(entry.id.clone(), c.clone())))
             }
@@ -1138,6 +1168,55 @@ pub fn build_controllers(
         }
     }
     out
+}
+
+/// Overlay `cfg.zones` entries bound to `controller_id` onto a cloud
+/// controller's config-embedded zone map. The config map is the BASE; a zone
+/// entry with a non-empty `controller_station` that `parse` accepts wins on
+/// conflict, keyed by the zone slug with the same hyphen-to-underscore
+/// normalization the OpenSprinkler/HttpGeneric arms use (dispatch and status
+/// readback both resolve underscore slugs). A `controller_station` the
+/// kind's parser rejects is warn-skipped: the zone stays unbound (loud, no
+/// mis-actuation) rather than aliasing onto a wrong station.
+fn overlay_zone_entries<V>(
+    map: &mut std::collections::BTreeMap<String, V>,
+    cfg: &Config,
+    controller_id: &str,
+    parse: impl Fn(&str) -> Option<V>,
+) {
+    // Normalize the config-embedded BASE keys the same way dispatch and the
+    // snapshot resolve slugs (hyphen to underscore): a hand-filled map keyed
+    // "back-yard" must bind the zone dispatched as "back_yard", and status
+    // readback must report it under the slug the snapshot uses. Without
+    // this, only the overlay keys were normalized and a hand-entered map
+    // key with a hyphen never dispatched.
+    *map = std::mem::take(map)
+        .into_iter()
+        .map(|(k, v)| (k.replace('-', "_"), v))
+        .collect();
+    for (slug, zone) in &cfg.zones {
+        if zone.controller_id != controller_id {
+            continue;
+        }
+        let station = zone.controller_station.trim();
+        if station.is_empty() {
+            continue;
+        }
+        match parse(station) {
+            Some(v) => {
+                map.insert(slug.replace('-', "_"), v);
+            }
+            None => {
+                warn!(
+                    controller = %controller_id,
+                    zone = %slug,
+                    station = %station,
+                    "zone's controller_station does not parse for this controller kind; \
+                     dropping the mapping (set a station id the controller understands)"
+                );
+            }
+        }
+    }
 }
 
 /// Build a single controller adapter for the wizard's test/scan endpoints.
@@ -2452,5 +2531,193 @@ mod tests {
             "changing a source's inner config must flag restart_required: {:?}",
             outcome.restart_reasons
         );
+    }
+}
+
+#[cfg(test)]
+mod cloud_zone_overlay_tests {
+    use super::*;
+    use crate::config::schema::{
+        ControllerEntry, GrassSpecies, SoilTexture, SprinklerType, ZoneConfig,
+    };
+    use std::collections::BTreeMap;
+
+    fn zone(controller_id: &str, station: &str) -> ZoneConfig {
+        ZoneConfig {
+            display_name: "Zone".into(),
+            area_sqft: 1000.0,
+            species: GrassSpecies::StAugustine,
+            soil_texture: SoilTexture::Loam,
+            slope_pct: 0.0,
+            sun_exposure: Default::default(),
+            sprinkler_type: SprinklerType::Rotor,
+            precip_rate_mm_hr: None,
+            precip_rate_source: Default::default(),
+            root_depth_mm: None,
+            mad_pct_override: None,
+            controller_id: controller_id.into(),
+            controller_station: station.into(),
+            soil_sensor_id: None,
+            target_min_pct_soil: 30.0,
+            saturation_pct_soil: 70.0,
+            photo_url: None,
+            weekly_budget_in: None,
+            sessions_per_week: None,
+            max_run_minutes: None,
+        }
+    }
+
+    fn cfg_with_zones(zones: &[(&str, &str, &str)]) -> Config {
+        // (slug, controller_id, station)
+        let mut cfg = Config::default();
+        for (slug, cid, station) in zones {
+            cfg.zones.insert(slug.to_string(), zone(cid, station));
+        }
+        cfg
+    }
+
+    // ---- overlay semantics per kind ----
+
+    #[test]
+    fn rachio_overlay_normalizes_hyphens_and_zone_entries_win() {
+        let cfg = cfg_with_zones(&[
+            ("front-yard", "rachio_main", "uuid-from-zone-entry"),
+            ("other", "some_other_controller", "uuid-not-ours"),
+        ]);
+        let mut base: BTreeMap<String, String> = BTreeMap::new();
+        base.insert("front_yard".into(), "uuid-from-config-map".into());
+        base.insert("hand_edited".into(), "uuid-kept".into());
+        overlay_zone_entries(&mut base, &cfg, "rachio_main", |s| Some(s.to_string()));
+        // Zone entry wins the conflict, hyphens normalize to underscores.
+        assert_eq!(
+            base.get("front_yard").map(String::as_str),
+            Some("uuid-from-zone-entry")
+        );
+        // Config-map entries with no competing zone entry survive.
+        assert_eq!(
+            base.get("hand_edited").map(String::as_str),
+            Some("uuid-kept")
+        );
+        // Another controller's zones never leak in.
+        assert!(!base.values().any(|v| v == "uuid-not-ours"));
+    }
+
+    #[test]
+    fn base_map_keys_normalize_hyphens_like_every_other_binding_path() {
+        // A hand-filled config map keyed "back-yard" must bind the zone
+        // dispatch resolves as "back_yard", with or without zone entries.
+        let cfg = Config::default();
+        let mut base: BTreeMap<String, String> = BTreeMap::new();
+        base.insert("back-yard".into(), "uuid-hand".into());
+        overlay_zone_entries(&mut base, &cfg, "rachio_main", |s| Some(s.to_string()));
+        assert_eq!(base.get("back_yard").map(String::as_str), Some("uuid-hand"));
+        assert!(!base.contains_key("back-yard"));
+    }
+
+    #[test]
+    fn numeric_overlays_skip_unparseable_stations() {
+        let cfg = cfg_with_zones(&[
+            ("beds", "hydrawise_main", "5551234"),
+            ("broken", "hydrawise_main", "not-a-number"),
+            ("empty", "hydrawise_main", "  "),
+        ]);
+        let mut relays: BTreeMap<String, i64> = BTreeMap::new();
+        overlay_zone_entries(&mut relays, &cfg, "hydrawise_main", |s| {
+            s.parse::<i64>().ok()
+        });
+        assert_eq!(relays.get("beds"), Some(&5551234));
+        assert!(
+            !relays.contains_key("broken") && !relays.contains_key("empty"),
+            "unparseable/empty stations must stay unbound, never alias"
+        );
+
+        let cfg = cfg_with_zones(&[("front", "bhyve_main", "3"), ("bad", "bhyve_main", "-2")]);
+        let mut stations: BTreeMap<String, u32> = BTreeMap::new();
+        overlay_zone_entries(&mut stations, &cfg, "bhyve_main", |s| s.parse::<u32>().ok());
+        assert_eq!(stations.get("front"), Some(&3));
+        assert!(!stations.contains_key("bad"));
+    }
+
+    // ---- the issue #8 result contract, end to end through
+    // build_controllers + real dispatch against a mock cloud ----
+
+    fn rachio_entry(config: serde_json::Value) -> ControllerEntry {
+        serde_json::from_value(serde_json::json!({
+            "id": "rachio_main",
+            "default": true,
+            "enabled": true,
+            "kind": "rachio",
+            "config": config,
+        }))
+        .unwrap()
+    }
+
+    async fn start_zone_mock(expected_uuid: &str) -> wiremock::MockServer {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/zone/start"))
+            .and(body_partial_json(
+                serde_json::json!({ "id": expected_uuid }),
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn dispatch_front_yard(cfg: &Config) {
+        let controllers = build_controllers(cfg, None);
+        assert_eq!(controllers.len(), 1, "the rachio controller builds");
+        let (ctl, _default) = &controllers[0];
+        ctl.run_zone("front_yard", 300)
+            .await
+            .expect("run_zone dispatches through the derived zone map");
+    }
+
+    #[tokio::test]
+    async fn wizard_imported_zone_dispatches_with_empty_config_map() {
+        // Wizard path: zone entry carries the uuid, zone_uuid_map is empty.
+        let server = start_zone_mock("uuid-wizard").await;
+        let mut cfg = cfg_with_zones(&[("front-yard", "rachio_main", "uuid-wizard")]);
+        cfg.controllers.push(rachio_entry(serde_json::json!({
+            "api_token": "example-token",
+            "device_id": "device-0001",
+            "zone_uuid_map": {},
+            "base_url": server.uri(),
+        })));
+        dispatch_front_yard(&cfg).await;
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn editor_scanned_map_dispatches_with_no_zone_entries() {
+        // Editor path: zone_uuid_map filled by Scan zones, no zone entries.
+        let server = start_zone_mock("uuid-editor").await;
+        let mut cfg = Config::default();
+        cfg.controllers.push(rachio_entry(serde_json::json!({
+            "api_token": "example-token",
+            "device_id": "device-0001",
+            "zone_uuid_map": { "front_yard": "uuid-editor" },
+            "base_url": server.uri(),
+        })));
+        dispatch_front_yard(&cfg).await;
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn zone_entry_wins_when_both_bindings_exist() {
+        let server = start_zone_mock("uuid-zone-entry").await;
+        let mut cfg = cfg_with_zones(&[("front-yard", "rachio_main", "uuid-zone-entry")]);
+        cfg.controllers.push(rachio_entry(serde_json::json!({
+            "api_token": "example-token",
+            "device_id": "device-0001",
+            "zone_uuid_map": { "front_yard": "uuid-config-map" },
+            "base_url": server.uri(),
+        })));
+        dispatch_front_yard(&cfg).await;
+        server.verify().await;
     }
 }

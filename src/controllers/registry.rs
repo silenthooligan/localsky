@@ -214,6 +214,7 @@ mod tests {
                 history_query: false,
                 remote_program_upload: false,
                 water_level: false,
+                per_zone_stop: true,
             }
         }
         async fn run_zone(&self, slug: &str, duration_s: u32) -> ControllerResult<RunHandle> {

@@ -59,6 +59,14 @@ async fn assert_conformant(
     }
 
     // stop contract: stop_zone / stop_all are Ok and stop_all is idempotent.
+    //
+    // SCOPE of stop_zone is a caps-declared contract, not an assertion this
+    // offline harness can make: with `caps.per_zone_stop == true` stop_zone
+    // affects ONLY the named zone; with `false` (Rachio-class clouds whose
+    // only stop is device-wide) stop_zone MAY stop every running zone on
+    // the device, and consumers (reaper, manual Stop paths) must treat it
+    // as a device-wide stop and say so. An adapter must never claim `true`
+    // while implementing stop_zone as a whole-device stop.
     c.stop_zone(live_zone).await.expect("stop_zone Ok");
     c.stop_all().await.expect("stop_all Ok");
     c.stop_all().await.expect("stop_all must be idempotent");
@@ -98,4 +106,6 @@ async fn dry_run_is_conformant() {
         None,
     );
     assert_conformant(&c, "front_yard", false, "ghost_zone_xyz").await;
+    // DryRun's stop_zone is genuinely per-zone; the cap must say so.
+    assert!(c.supports().per_zone_stop);
 }

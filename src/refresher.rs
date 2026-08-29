@@ -2161,13 +2161,16 @@ async fn refresh_once_native(
     // A4: per-zone running-state + master/water_level from the controllers
     // directly (no HA binary_sensors). Best-effort: a controller that can't
     // report leaves running=false + running_known=false; a status() error
-    // is swallowed so a flaky controller never stalls the refresh.
+    // is swallowed so a flaky controller never stalls the refresh. An
+    // adapter can also report a zone with its OWN running_known=false (a
+    // cloud running-state read it could not interpret this poll): the value
+    // is its last known state carried forward, surfaced as unknown.
     let cs = native_controller_state(controllers).await;
     for z in snap.zones.iter_mut() {
         match cs.running.get(&z.slug) {
-            Some(r) => {
+            Some((r, known)) => {
                 z.running = *r;
-                z.running_known = true;
+                z.running_known = *known;
             }
             None => {
                 z.running = false;
@@ -2258,7 +2261,7 @@ async fn refresh_once_native(
 /// per-zone running (by slug), plus the first reported master-enable +
 /// water-level. Errors are swallowed (best-effort, never fails a refresh).
 async fn native_controller_state(controllers: &ControllerRegistry) -> NativeControllerState {
-    let mut running: HashMap<String, bool> = HashMap::new();
+    let mut running: HashMap<String, (bool, bool)> = HashMap::new();
     let mut master: Option<bool> = None;
     let mut water: Option<f64> = None;
     let mut flow_gpm: Option<f64> = None;
@@ -2281,7 +2284,7 @@ async fn native_controller_state(controllers: &ControllerRegistry) -> NativeCont
         match c.status().await {
             Ok(st) => {
                 for z in st.zone_states {
-                    running.insert(z.slug, z.running);
+                    running.insert(z.slug, (z.running, z.running_known));
                 }
                 if master.is_none() {
                     master = st.master_enabled;
@@ -2323,7 +2326,9 @@ async fn native_controller_state(controllers: &ControllerRegistry) -> NativeCont
 /// native refresh. Best-effort: a controller that can't report contributes
 /// nothing rather than failing the refresh.
 struct NativeControllerState {
-    running: HashMap<String, bool>,
+    /// slug -> (running, running_known). running_known=false means the
+    /// adapter carried its last known value forward this poll.
+    running: HashMap<String, (bool, bool)>,
     master: Option<bool>,
     water: Option<f64>,
     flow_gpm: Option<f64>,

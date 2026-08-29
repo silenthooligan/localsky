@@ -19,6 +19,33 @@ use crate::persistence::ActiveRunsStore;
 /// backstop, so 10s is ample.
 const REAP_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Grace added to a run's shutoff deadline before the reaper enforces a
+/// shutoff. Covers controller-clock skew + the reaper's own poll granularity,
+/// so a valve closing right on time is never falsely "enforced". Shared by
+/// every deadline-arm site (smart morning, the manual API run, the manual
+/// scheduler).
+pub const ACTIVE_RUN_GRACE_S: i64 = 30;
+
+/// Wider grace for controllers whose only stop is DEVICE-WIDE
+/// (caps.per_zone_stop = false: the Rachio-class clouds). Two reasons: their
+/// dispatch path rides a cloud (15s HTTP timeout plus cloud-to-controller
+/// propagation makes 30s tight against an on-time self-shutoff), and a false
+/// enforcement is expensive there because the reaper's stop kills every
+/// sibling zone on the device. The effective grace for these controllers is
+/// max(ACTIVE_RUN_GRACE_S, this); the controller's own duration timer stays
+/// the primary shutoff either way.
+pub const CLOUD_DEVICE_STOP_GRACE_S: i64 = 90;
+
+/// Deadline grace for a controller: the tight default when it can stop one
+/// zone precisely, the widened cloud grace when a zone-stop is device-wide.
+pub fn effective_run_grace(per_zone_stop: bool) -> i64 {
+    if per_zone_stop {
+        ACTIVE_RUN_GRACE_S
+    } else {
+        ACTIVE_RUN_GRACE_S.max(CLOUD_DEVICE_STOP_GRACE_S)
+    }
+}
+
 /// One reaper pass: enforce shutoff for every armed run at or past `now`. Returns
 /// the number of zones successfully stopped + disarmed this pass.
 pub async fn reap_once(store: &ActiveRunsStore, registry: &ControllerRegistry, now: i64) -> usize {
@@ -30,7 +57,14 @@ pub async fn reap_once(store: &ActiveRunsStore, registry: &ControllerRegistry, n
         }
     };
     let mut enforced = 0;
+    // Controllers already device-wide-stopped THIS pass: their remaining due
+    // rows were cleared from the ledger below, but this pass's `due` snapshot
+    // still lists them; skip rather than re-fire another device stop.
+    let mut device_stopped: std::collections::HashSet<String> = std::collections::HashSet::new();
     for run in due {
+        if device_stopped.contains(&run.controller_id) {
+            continue;
+        }
         // Resolve the controller to stop through. If the run's own controller
         // id is no longer registered, DO NOT silently disarm: that drops the
         // shutoff backstop and can strand a valve open. This id-miss happens
@@ -62,6 +96,43 @@ pub async fn reap_once(store: &ActiveRunsStore, registry: &ControllerRegistry, n
                 }
             },
         };
+        // A controller without a per-zone stop (Rachio, B-hyve, Rain Bird
+        // clouds) turns this zone-stop into a DEVICE-WIDE stop: any sibling
+        // zone running on the same device stops with it. Because nothing
+        // disarms a row on natural completion, the routine case at a
+        // deadline on these controllers is a zone that ALREADY finished on
+        // its own timer while a sibling is legitimately running (a serial
+        // multi-zone morning). VERIFY before enforcing: a zone the
+        // controller confirms idle (known, not running) satisfies its
+        // deadline with no stop at all. Only a zone reported running, a
+        // zone whose state is unknown, or an unreachable controller still
+        // gets the device-wide stop; that is the genuine stuck-valve case,
+        // where collateral is the accepted price of closing the valve.
+        let device_wide = !controller.supports().per_zone_stop;
+        if device_wide {
+            let confirmed_idle = match controller.status().await {
+                Ok(st) => st
+                    .zone_states
+                    .iter()
+                    .find(|z| z.slug == run.zone_slug)
+                    .map(|z| z.running_known && !z.running)
+                    .unwrap_or(false),
+                Err(_) => false, // unreachable: keep the fail-safe stop
+            };
+            if confirmed_idle {
+                tracing::info!(
+                    zone = %run.zone_slug, controller = %controller.id(),
+                    deadline = run.off_deadline_epoch,
+                    "reaper: zone confirmed idle at its deadline; disarmed without a device-wide stop"
+                );
+                let _ = store.disarm(&run.zone_slug).await;
+                continue;
+            }
+            tracing::warn!(
+                zone = %run.zone_slug, controller = %controller.id(),
+                "reaper: this controller has no per-zone stop; enforcement stops ALL watering on the device"
+            );
+        }
         match controller.stop_zone(&run.zone_slug).await {
             Ok(()) => {
                 // Routine, not an alarm: the reaper is the authoritative shutoff at
@@ -71,10 +142,38 @@ pub async fn reap_once(store: &ActiveRunsStore, registry: &ControllerRegistry, n
                 // already-closed valve.
                 tracing::info!(
                     zone = %run.zone_slug, controller = %run.controller_id,
+                    device_wide = device_wide,
                     deadline = run.off_deadline_epoch,
                     "reaper: backstop shutoff issued at deadline"
                 );
-                let _ = store.disarm(&run.zone_slug).await;
+                if device_wide {
+                    // The one stop closed EVERY valve on this device, so all
+                    // of its armed rows are satisfied; leaving them would
+                    // re-fire more device-wide stops against whatever the
+                    // operator restarts. Clear under both the row's id and
+                    // the resolved controller's id (rename fallback). Other
+                    // controllers' rows are untouched: their valves are
+                    // still open and their backstop must hold.
+                    match store
+                        .clear_for_controllers(&[run.controller_id.as_str(), controller.id()])
+                        .await
+                    {
+                        Ok(n) if n > 1 => tracing::info!(
+                            controller = %controller.id(),
+                            cleared = n,
+                            "reaper: device-wide stop satisfied sibling deadlines; cleared their rows"
+                        ),
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!(
+                            controller = %controller.id(), error = %e,
+                            "reaper: could not clear sibling rows after device-wide stop"
+                        ),
+                    }
+                    device_stopped.insert(run.controller_id.clone());
+                    device_stopped.insert(controller.id().to_string());
+                } else {
+                    let _ = store.disarm(&run.zone_slug).await;
+                }
                 enforced += 1;
             }
             Err(e) => {
@@ -149,7 +248,7 @@ mod tests {
     use super::*;
     use crate::ports::irrigation_controller::{
         ControllerCaps, ControllerError, ControllerResult, ControllerStatus, IrrigationController,
-        RunHandle, RunRecord,
+        RunHandle, RunRecord, ZoneRuntimeStatus,
     };
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -178,6 +277,7 @@ mod tests {
                 history_query: false,
                 remote_program_upload: false,
                 water_level: false,
+                per_zone_stop: true,
             }
         }
         async fn run_zone(&self, slug: &str, duration_s: u32) -> ControllerResult<RunHandle> {
@@ -403,5 +503,214 @@ mod tests {
             1,
             "valves are closed at boot even without a deadline ledger"
         );
+    }
+
+    // ---- device-wide-stop (per_zone_stop=false) enforcement ----
+
+    /// Cloud-style double: NO per-zone stop (stop_zone stops the device),
+    /// configurable zone states, records every stop, can be made
+    /// unreachable for status.
+    struct CloudRecorder {
+        id: String,
+        stopped: Arc<Mutex<Vec<String>>>,
+        states: Arc<Mutex<Vec<ZoneRuntimeStatus>>>,
+        status_fails: AtomicBool,
+    }
+
+    impl CloudRecorder {
+        fn new(id: &str, states: Vec<ZoneRuntimeStatus>) -> Arc<Self> {
+            Arc::new(Self {
+                id: id.into(),
+                stopped: Arc::new(Mutex::new(Vec::new())),
+                states: Arc::new(Mutex::new(states)),
+                status_fails: AtomicBool::new(false),
+            })
+        }
+    }
+
+    fn zstate(slug: &str, running: bool, running_known: bool) -> ZoneRuntimeStatus {
+        ZoneRuntimeStatus {
+            slug: slug.into(),
+            running,
+            remaining_s: None,
+            last_run_epoch: None,
+            running_known,
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl IrrigationController for CloudRecorder {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn supports(&self) -> ControllerCaps {
+            ControllerCaps {
+                flow_meter: false,
+                rain_sensor: false,
+                master_valve: true,
+                multi_zone_parallel: false,
+                history_query: false,
+                remote_program_upload: false,
+                water_level: false,
+                per_zone_stop: false,
+            }
+        }
+        async fn run_zone(&self, slug: &str, duration_s: u32) -> ControllerResult<RunHandle> {
+            Ok(RunHandle {
+                controller_id: self.id.clone(),
+                zone_slug: slug.to_string(),
+                started_epoch: 0,
+                planned_duration_s: duration_s,
+                provider_ref: None,
+            })
+        }
+        async fn stop_zone(&self, slug: &str) -> ControllerResult<()> {
+            self.stopped.lock().unwrap().push(slug.to_string());
+            Ok(())
+        }
+        async fn stop_all(&self) -> ControllerResult<()> {
+            Ok(())
+        }
+        async fn status(&self) -> ControllerResult<ControllerStatus> {
+            if self.status_fails.load(Ordering::SeqCst) {
+                return Err(ControllerError::Transport("unreachable".into()));
+            }
+            Ok(ControllerStatus {
+                reachable: true,
+                master_enabled: Some(true),
+                water_level_pct: None,
+                rain_sensor_tripped: None,
+                current_program: None,
+                zone_states: self.states.lock().unwrap().clone(),
+                flow_gpm: None,
+                flow_connected: false,
+                firmware: None,
+            })
+        }
+        async fn run_history(&self, _since_epoch: i64) -> ControllerResult<Vec<RunRecord>> {
+            Ok(vec![])
+        }
+    }
+
+    // THE two-zone cloud morning: front finished on its own timer (status
+    // confirms idle) while back is legitimately running. Front's deadline
+    // must disarm QUIETLY; a device-wide stop here would kill back
+    // mid-run, which is the exact multi-zone morning defect.
+    #[tokio::test]
+    async fn cloud_reaper_disarms_confirmed_idle_zone_without_device_stop() {
+        let cloud = CloudRecorder::new(
+            "rachio_main",
+            vec![zstate("front", false, true), zstate("back", true, true)],
+        );
+        let stopped = cloud.stopped.clone();
+        let ctl: Arc<dyn IrrigationController> = cloud;
+        let registry = ControllerRegistry::new();
+        registry.set(vec![(ctl, true)]);
+
+        let store = mem_store();
+        // front's deadline has passed (it finished naturally); back's is
+        // still in the future (it is mid-run).
+        store
+            .arm("front".into(), "rachio_main".into(), 0, 100)
+            .await
+            .unwrap();
+        store
+            .arm("back".into(), "rachio_main".into(), 0, 9_999)
+            .await
+            .unwrap();
+
+        let enforced = reap_once(&store, &registry, 200).await;
+        assert_eq!(enforced, 0, "confirmed idle needs no enforcement");
+        assert!(
+            stopped.lock().unwrap().is_empty(),
+            "NO device-wide stop may fire while the sibling zone runs"
+        );
+        assert!(
+            store.due(200).await.unwrap().is_empty(),
+            "front's satisfied deadline is disarmed"
+        );
+        assert_eq!(
+            store.due(10_000).await.unwrap().len(),
+            1,
+            "back's backstop row is untouched"
+        );
+    }
+
+    // Fail-safe direction: a zone REPORTED running at its deadline is the
+    // genuine stuck-valve case; the device-wide stop fires, and because it
+    // stopped every valve on the device, ALL of that controller's armed
+    // rows clear so no second device-wide stop can re-fire later.
+    #[tokio::test]
+    async fn cloud_reaper_stops_running_zone_and_clears_sibling_rows() {
+        let cloud = CloudRecorder::new(
+            "rachio_main",
+            vec![zstate("front", true, true), zstate("back", true, true)],
+        );
+        let stopped = cloud.stopped.clone();
+        let ctl: Arc<dyn IrrigationController> = cloud;
+        let registry = ControllerRegistry::new();
+        registry.set(vec![(ctl, true)]);
+
+        let store = mem_store();
+        store
+            .arm("front".into(), "rachio_main".into(), 0, 100)
+            .await
+            .unwrap();
+        store
+            .arm("back".into(), "rachio_main".into(), 0, 9_999)
+            .await
+            .unwrap();
+
+        let enforced = reap_once(&store, &registry, 200).await;
+        assert_eq!(enforced, 1);
+        assert_eq!(*stopped.lock().unwrap(), vec!["front".to_string()]);
+        assert!(
+            store.due(10_000).await.unwrap().is_empty(),
+            "the device-wide stop satisfied every row on this controller"
+        );
+    }
+
+    // Unknown state and unreachable status keep the fail-safe stop: the
+    // reaper may only skip enforcement on a CONFIRMED idle.
+    #[tokio::test]
+    async fn cloud_reaper_enforces_on_unknown_state_or_unreachable_status() {
+        // running_known=false: carried-forward state is not confirmation.
+        let cloud = CloudRecorder::new("cloud_a", vec![zstate("front", false, false)]);
+        let stopped = cloud.stopped.clone();
+        let ctl: Arc<dyn IrrigationController> = cloud;
+        let registry = ControllerRegistry::new();
+        registry.set(vec![(ctl, true)]);
+        let store = mem_store();
+        store
+            .arm("front".into(), "cloud_a".into(), 0, 100)
+            .await
+            .unwrap();
+        assert_eq!(reap_once(&store, &registry, 200).await, 1);
+        assert_eq!(*stopped.lock().unwrap(), vec!["front".to_string()]);
+
+        // Status unreachable: same fail-safe.
+        let cloud = CloudRecorder::new("cloud_b", vec![]);
+        cloud.status_fails.store(true, Ordering::SeqCst);
+        let stopped = cloud.stopped.clone();
+        let ctl: Arc<dyn IrrigationController> = cloud;
+        let registry = ControllerRegistry::new();
+        registry.set(vec![(ctl, true)]);
+        let store = mem_store();
+        store
+            .arm("back".into(), "cloud_b".into(), 0, 100)
+            .await
+            .unwrap();
+        assert_eq!(reap_once(&store, &registry, 200).await, 1);
+        assert_eq!(*stopped.lock().unwrap(), vec!["back".to_string()]);
+    }
+
+    // Pin the deadline-grace contract shared by every arm site: precise
+    // per-zone-stop controllers keep the tight 30s; device-wide-stop clouds
+    // get 90s so cloud latency never triggers an enforcement that would
+    // kill sibling zones.
+    #[test]
+    fn run_grace_widens_for_device_wide_stop_controllers() {
+        assert_eq!(effective_run_grace(true), 30);
+        assert_eq!(effective_run_grace(false), 90);
     }
 }

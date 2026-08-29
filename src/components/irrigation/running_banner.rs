@@ -46,7 +46,16 @@ pub fn RunningBanner(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 super::controls::post_action_then(json!({"kind": "stop_all"}), stop_done);
             } else {
                 let slug = first_slug.clone();
-                super::controls::post_action_then(json!({"kind": "stop", "zone": slug}), stop_done);
+                // Note-aware: a controller with no per-zone stop reports the
+                // real scope (the whole device stopped); relay it.
+                super::controls::post_action_note_then(
+                    json!({"kind": "stop", "zone": slug}),
+                    Callback::new(move |result: Result<Option<String>, String>| match result {
+                        Ok(Some(note)) => crate::components::ui::use_toast().info(note),
+                        Ok(None) => {}
+                        Err(e) => stop_done.run(Err(e)),
+                    }),
+                );
             }
         };
 

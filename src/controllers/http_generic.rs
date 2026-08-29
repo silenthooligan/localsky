@@ -215,6 +215,7 @@ impl IrrigationController for HttpGeneric {
             history_query: false,
             remote_program_upload: false,
             water_level: false,
+            per_zone_stop: true,
         }
     }
 
@@ -303,6 +304,7 @@ impl IrrigationController for HttpGeneric {
                 running: z.running,
                 remaining_s: z.remaining_s.filter(|_| z.running),
                 last_run_epoch: None,
+                running_known: true,
             })
             .collect();
         Ok(ControllerStatus {

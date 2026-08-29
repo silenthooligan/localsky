@@ -316,6 +316,34 @@ impl RunsStore {
         .map_err(|e| RunsError::Sqlite(e.to_string()))
     }
 
+    /// [`Self::truncate_active`] across every zone OF ONE CONTROLLER: the
+    /// device-wide-stop path (a per_zone_stop=false controller's zone stop
+    /// halts every zone on that device, so every open manual row on it must
+    /// shrink to the real span; other controllers' runs continue and keep
+    /// their planned credit).
+    pub async fn truncate_active_for_controller(
+        &self,
+        controller_id: &str,
+        now_epoch: i64,
+    ) -> Result<usize, RunsError> {
+        let c = self.conn.clone();
+        let ctrl = controller_id.to_string();
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
+            let conn = c.blocking_lock();
+            conn.execute(
+                "UPDATE runs
+                 SET end_epoch = ?2, duration_s = ?2 - start_epoch
+                 WHERE controller_id = ?1 AND status = 'completed'
+                   AND (source = 'manual' OR source LIKE 'manual:%')
+                   AND start_epoch <= ?2 AND end_epoch > ?2",
+                params![ctrl, now_epoch],
+            )
+        })
+        .await
+        .map_err(|e| RunsError::Sqlite(format!("join: {e}")))?
+        .map_err(|e| RunsError::Sqlite(e.to_string()))
+    }
+
     /// [`Self::truncate_active`] across every zone (the StopAll path).
     pub async fn truncate_active_all(&self, now_epoch: i64) -> Result<usize, RunsError> {
         let c = self.conn.clone();
@@ -506,6 +534,59 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(s.truncate_active_all(5060).await.unwrap(), 1);
+    }
+
+    // Device-wide stop bookkeeping: stopping one zone on a controller with
+    // no per-zone stop halts EVERY zone on that device, so every open
+    // manual row on that controller shrinks, while another controller's
+    // concurrent manual run keeps its credit.
+    #[tokio::test]
+    async fn truncate_active_for_controller_shrinks_sibling_rows_only() {
+        let s = fresh_store().await;
+        // Zone A: open manual run on the cloud device (planned full hour).
+        let a = NewRun {
+            source: "manual".into(),
+            controller_id: "rachio_main".into(),
+            ..new_run("front", 1000)
+        };
+        s.insert_completed(a, 1000 + 3600, 3600, None)
+            .await
+            .unwrap();
+        // Zone B on the SAME device, also open (the zone the user stopped).
+        let b = NewRun {
+            source: "manual:sched1".into(),
+            controller_id: "rachio_main".into(),
+            ..new_run("back", 1100)
+        };
+        s.insert_completed(b, 1100 + 3600, 3600, None)
+            .await
+            .unwrap();
+        // An open manual run on a DIFFERENT controller: still watering.
+        let other = NewRun {
+            source: "manual".into(),
+            controller_id: "os_main".into(),
+            ..new_run("garden", 1000)
+        };
+        s.insert_completed(other, 1000 + 3600, 3600, None)
+            .await
+            .unwrap();
+
+        let n = s
+            .truncate_active_for_controller("rachio_main", 1300)
+            .await
+            .unwrap();
+        assert_eq!(n, 2, "both of the stopped device's open rows shrink");
+        let rows = s.window(0, 10_000).await.unwrap();
+        let front = rows.iter().find(|r| r.zone_slug == "front").unwrap();
+        assert_eq!(front.duration_s, Some(300));
+        let back = rows.iter().find(|r| r.zone_slug == "back").unwrap();
+        assert_eq!(back.duration_s, Some(200));
+        let garden = rows.iter().find(|r| r.zone_slug == "garden").unwrap();
+        assert_eq!(
+            garden.duration_s,
+            Some(3600),
+            "the other controller's run keeps its planned credit"
+        );
     }
 
     #[tokio::test]

@@ -7,8 +7,13 @@
 // `on_commit`, the caller persists (and is responsible for the `default`
 // mutual-exclusivity across controllers). `on_cancel` dismisses the form.
 //
-// Keeps the "Scan zones" probe (POST /api/v1/wizard/scan_zones) so the user can
-// list a controller's stations from the draft config without saving first.
+// Keeps the "Scan zones" probe (POST /api/v1/wizard/scan_zones): it lists a
+// controller's stations from the draft config without saving first, and for
+// the cloud kinds that hold a zone map in their config (Rachio, Hydrawise,
+// B-hyve, Rain Bird) it merges the results into that map in the JSON below
+// (see merge::merge_scanned_zones). Kinds that bind zones through zone
+// entries instead (OpenSprinkler, DIY boards, HA, dry run) get an honest
+// message pointing at the Zones page.
 
 use leptos::prelude::*;
 
@@ -17,7 +22,9 @@ use crate::components::ui::{Button, FormField, Panel};
 use crate::docs::doc_url;
 
 mod fields;
+mod merge;
 pub use fields::{controller_fields, ControllerConfigForm};
+pub use merge::{merge_message, merge_scanned_zones, zone_slug, DiscoveredZone, MergeOutcome};
 
 /// Controller kinds offered in the Kind picker. (value, label) pairs.
 ///
@@ -366,21 +373,34 @@ pub fn ControllerEditorPanel(
                         .await
                         .unwrap_or(serde_json::Value::Null);
                     if let Some(zones) = v.get("zones").and_then(|z| z.as_array()) {
-                        let list: Vec<String> = zones
+                        let found: Vec<DiscoveredZone> = zones
                             .iter()
-                            .filter_map(|z| {
-                                Some(format!(
-                                    "{} → station {}",
-                                    z.get("name")?.as_str()?,
-                                    z.get("station_id")?.as_str()?
-                                ))
-                            })
+                            .filter_map(|z| serde_json::from_value(z.clone()).ok())
                             .collect();
-                        scan_msg.set(if list.is_empty() {
-                            "No zones found on this controller.".into()
-                        } else {
-                            format!("Found {}: {}", list.len(), list.join(" · "))
-                        });
+                        if found.is_empty() {
+                            scan_msg.set("No zones found on this controller.".into());
+                            return;
+                        }
+                        // THE #8 FIX: merge the scan results into the config
+                        // JSON's zone map (per kind), then report what actually
+                        // happened. Re-parse config_text fresh: the user may
+                        // have edited it while the scan was in flight.
+                        let mut cfg: serde_json::Value =
+                            match serde_json::from_str(&config_text.get_untracked()) {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    scan_msg.set(format!("Config JSON parse error: {e}"));
+                                    return;
+                                }
+                            };
+                        let outcome = merge_scanned_zones(&kind.get_untracked(), &mut cfg, &found);
+                        if matches!(outcome, MergeOutcome::Merged { .. }) {
+                            config_text.set(
+                                serde_json::to_string_pretty(&cfg)
+                                    .unwrap_or_else(|_| config_text.get_untracked()),
+                            );
+                        }
+                        scan_msg.set(merge_message(found.len(), &outcome));
                     } else {
                         let detail = v
                             .get("detail")
@@ -490,7 +510,9 @@ pub fn ControllerEditorPanel(
             // PRIMARY editing surface: labeled, per-kind connection fields
             // (host/url/tokens/poll cadence), two-way-synced to config_text.
             // The JSON textarea below stays as the advanced escape hatch and
-            // owns the nested zone maps (populated by "Scan zones").
+            // owns the nested zone maps. For the cloud kinds that keep a zone
+            // map in their config, "Scan zones" merges results into it (the
+            // merge module); zone-entry kinds bind zones on the Zones page.
             <Panel title="Connection".to_string()>
                 <ControllerConfigForm config_text=config_text kind=Signal::derive(move || kind.get())/>
             </Panel>
@@ -501,12 +523,12 @@ pub fn ControllerEditorPanel(
             <details class="settings-section-fold">
                 <summary class="settings-section-fold__summary">
                     "Advanced: raw config JSON"
-                    <span class="settings-section-fold__hint">"mostly the per-zone maps; Scan zones fills these"</span>
+                    <span class="settings-section-fold__hint">"per-zone maps and other keys; for cloud controllers, Scan zones fills the zone map"</span>
                 </summary>
                 <div class="settings-section-fold__body">
                     <FormField
                         label="Config (JSON)".to_string()
-                        helptext="Escape hatch for keys not in the labeled Connection form above, mainly the per-zone maps (zone_command_map, zone_*_map). Stays in sync both ways; \"Scan zones\" populates the zone map here.".to_string()
+                        helptext="Escape hatch for keys not in the labeled Connection form above, mainly the per-zone maps (zone_command_map, zone_*_map). Stays in sync both ways. For cloud controllers (Rachio, Hydrawise, B-hyve, Rain Bird), \"Scan zones\" fills the zone map here; other kinds bind their zones on the Zones page instead.".to_string()
                         error=Signal::derive(|| None::<String>)
                     >
                         <textarea

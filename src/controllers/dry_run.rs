@@ -66,6 +66,7 @@ impl IrrigationController for DryRunController {
             // capability bit exists to gate. (Demo mode sets its own
             // snapshot fields directly; it does not ride this adapter.)
             water_level: false,
+            per_zone_stop: true,
         }
     }
 
@@ -146,6 +147,7 @@ impl IrrigationController for DryRunController {
                     running: true,
                     remaining_s: None,
                     last_run_epoch: None,
+                    running_known: true,
                 })
                 .collect(),
             flow_gpm: None,

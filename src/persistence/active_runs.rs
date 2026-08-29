@@ -116,6 +116,33 @@ impl ActiveRunsStore {
         .map_err(|e| ActiveRunsError::Sqlite(e.to_string()))
     }
 
+    /// Clear every armed row belonging to any of the given controller ids.
+    /// Used after a DEVICE-WIDE stop (a per_zone_stop=false controller's
+    /// stop_zone, or its reaper enforcement): that one call physically
+    /// closed every valve on the device, so its sibling rows are satisfied
+    /// and must not later re-fire another device-wide stop against whatever
+    /// the operator restarts. Takes a LIST because a row can be armed under
+    /// a stale controller id while enforcement resolved through the current
+    /// one (the rename-fallback path). Rows of OTHER controllers are
+    /// untouched: their valves are still open and their backstop must hold.
+    pub async fn clear_for_controllers(
+        &self,
+        controller_ids: &[&str],
+    ) -> Result<usize, ActiveRunsError> {
+        let ids: Vec<String> = controller_ids.iter().map(|s| s.to_string()).collect();
+        let c = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
+            let conn = c.blocking_lock();
+            let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+            let sql = format!("DELETE FROM active_runs WHERE controller_id IN ({placeholders})");
+            let n = conn.execute(&sql, rusqlite::params_from_iter(ids.iter()))?;
+            Ok(n)
+        })
+        .await
+        .map_err(|e| ActiveRunsError::Sqlite(format!("join: {e}")))?
+        .map_err(|e| ActiveRunsError::Sqlite(e.to_string()))
+    }
+
     /// Clear the whole ledger. Called at boot AFTER reconcile_stop_all has
     /// physically closed every valve, so persisted deadlines do not re-fire
     /// against valves already known off. Returns rows cleared.
@@ -205,5 +232,29 @@ mod tests {
         s.arm("b".into(), "ctrl".into(), 100, 140).await.unwrap();
         assert_eq!(s.clear_all().await.unwrap(), 2);
         assert!(s.due(1000).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn clear_for_controllers_scopes_to_the_stopped_device() {
+        let s = mem();
+        // Two zones on the cloud device (one under a stale id), one on a
+        // different controller whose valve is still open.
+        s.arm("front".into(), "rachio_old".into(), 100, 130)
+            .await
+            .unwrap();
+        s.arm("back".into(), "rachio_main".into(), 100, 900)
+            .await
+            .unwrap();
+        s.arm("garden".into(), "os_main".into(), 100, 140)
+            .await
+            .unwrap();
+        let n = s
+            .clear_for_controllers(&["rachio_old", "rachio_main"])
+            .await
+            .unwrap();
+        assert_eq!(n, 2, "both device rows cleared, stale id included");
+        let left = s.due(10_000).await.unwrap();
+        assert_eq!(left.len(), 1, "the other controller's backstop holds");
+        assert_eq!(left[0].zone_slug, "garden");
     }
 }

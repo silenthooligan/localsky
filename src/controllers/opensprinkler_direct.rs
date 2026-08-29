@@ -230,6 +230,7 @@ impl IrrigationController for OpenSprinklerDirect {
             history_query: true,
             remote_program_upload: false,
             water_level: true,
+            per_zone_stop: true,
         }
     }
 
@@ -316,6 +317,7 @@ impl IrrigationController for OpenSprinklerDirect {
                     None
                 },
                 last_run_epoch: None,
+                running_known: true,
             });
         }
         // Flow: OS reports click rate in clicks/minute; convert to GPM

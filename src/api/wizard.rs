@@ -485,12 +485,195 @@ struct TestControllerBody {
     pub controller: crate::config::schema::ControllerEntry,
 }
 
+/// Non-secret config fields that name WHERE a probe connects. When a stored
+/// secret is restored into a probe entry, these must come from the STORED
+/// entry, never the client: honoring a client-supplied address alongside a
+/// server-restored credential would send that credential to an arbitrary
+/// host (token exfiltration; the probe surface is reachable LAN-anonymous
+/// by design). Lowercase; matching is case-insensitive on the key name.
+const TRANSPORT_FIELD_KEYS: &[&str] = &["base_url", "host", "broker_host", "port", "broker_port"];
+
+/// Walk the candidate entry alongside its stored counterpart and PIN every
+/// transport-named field to the stored value, recording the JSON paths whose
+/// client value differed (the caller rejects on any mismatch rather than
+/// silently probing a different address than the client asked for). A
+/// transport field the stored entry does not carry is pinned to null.
+fn pin_transport_fields(
+    candidate: &mut serde_json::Value,
+    stored: &serde_json::Value,
+    path: &str,
+    mismatched: &mut Vec<String>,
+) {
+    use serde_json::Value;
+    match (candidate, stored) {
+        (Value::Object(c), Value::Object(o)) => {
+            for (k, c_val) in c.iter_mut() {
+                let p = format!("{path}.{k}");
+                if TRANSPORT_FIELD_KEYS.contains(&k.to_lowercase().as_str()) {
+                    match o.get(k) {
+                        Some(o_val) => {
+                            if c_val != o_val {
+                                mismatched.push(p);
+                                *c_val = o_val.clone();
+                            }
+                        }
+                        None => {
+                            if !c_val.is_null() {
+                                mismatched.push(p);
+                                *c_val = Value::Null;
+                            }
+                        }
+                    }
+                } else if let Some(o_val) = o.get(k) {
+                    pin_transport_fields(c_val, o_val, &p, mismatched);
+                }
+            }
+        }
+        (Value::Array(c), Value::Array(o)) => {
+            for (i, c_v) in c.iter_mut().enumerate() {
+                if let Some(o_v) = o.get(i) {
+                    pin_transport_fields(c_v, o_v, &format!("{path}[{i}]"), mismatched);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Resolve redacted-secret sentinels in a probe's controller entry against
+/// the stored config (and, failing that, the wizard draft), matched BY ID,
+/// exactly like PUT /api/config. The settings editor and the wizard both
+/// hold the entry as served by their GET, which redacts secrets to the
+/// sentinel; posting that entry to test_controller/scan_zones verbatim
+/// would send the literal sentinel to the vendor cloud and fail auth. A
+/// sentinel that cannot be resolved (new entry, renamed id) is a plain 400
+/// telling the caller to re-enter the secret.
+///
+/// SECURITY: whenever a stored secret is restored here, the entry's
+/// transport fields (base_url/host/port and friends) are pinned to the
+/// stored entry's values, and a probe whose transport differs from stored
+/// is refused with a plain 400. Without this, a LAN-anonymous caller could
+/// post `{api_token: "***redacted***", base_url: "http://their-host"}` and
+/// have the server deliver the real stored token to their host. Probes that
+/// carry the real secret (no sentinel) are untouched: the caller already
+/// knows the credential, so directing it is not an escalation.
+async fn resolve_probe_entry_secrets(
+    s: &WizardApiState,
+    entry: crate::config::schema::ControllerEntry,
+) -> Result<crate::config::schema::ControllerEntry, Box<Response>> {
+    use crate::api::config::{remaining_sentinels, unredact_secrets};
+
+    let mut entry_json = match serde_json::to_value(&entry) {
+        Ok(v) => v,
+        Err(_) => return Ok(entry), // nothing sensible to do; probe as-is
+    };
+    let mut leftover = Vec::new();
+    remaining_sentinels(&entry_json, "$", &mut leftover);
+    if leftover.is_empty() {
+        return Ok(entry);
+    }
+
+    // A stored controller entry with the same id (live config first, wizard
+    // draft second) supplies the real secret values. The FIRST stored entry
+    // found is also the transport-pinning authority below.
+    let stored_entry_json = |controllers: serde_json::Value| -> Option<serde_json::Value> {
+        controllers.as_array().and_then(|arr| {
+            arr.iter()
+                .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(entry.id.as_str()))
+                .cloned()
+        })
+    };
+    let mut pin_source: Option<serde_json::Value> = None;
+    if let Ok(cfg) = s.config_store.load().await {
+        if let Ok(v) = serde_json::to_value(&cfg.controllers) {
+            if let Some(stored) = stored_entry_json(v) {
+                unredact_secrets(&mut entry_json, &stored);
+                pin_source = Some(stored);
+            }
+        }
+    }
+    leftover.clear();
+    remaining_sentinels(&entry_json, "$", &mut leftover);
+    if !leftover.is_empty() {
+        let store = s.draft_store.clone();
+        if let Ok(Ok(draft)) = tokio::task::spawn_blocking(move || store.load()).await {
+            if let Ok(v) = serde_json::to_value(&draft.config.controllers) {
+                if let Some(stored) = stored_entry_json(v) {
+                    unredact_secrets(&mut entry_json, &stored);
+                    if pin_source.is_none() {
+                        pin_source = Some(stored);
+                    }
+                }
+            }
+        }
+    }
+    leftover.clear();
+    remaining_sentinels(&entry_json, "$", &mut leftover);
+    if !leftover.is_empty() {
+        // Boxed: Response is large and Ok is the overwhelmingly common
+        // path (clippy::result_large_err).
+        return Err(Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ApiError {
+                    error: "unmatched_redacted_secret".into(),
+                    detail: Some(
+                        "this controller's secret is shown redacted and no stored value matches \
+                         it; re-enter the secret and try again"
+                            .into(),
+                    ),
+                }),
+            )
+                .into_response(),
+        ));
+    }
+
+    // Secrets were restored from a stored entry: pin the transport fields
+    // to that entry and refuse the probe when the client's differed.
+    if let Some(stored) = &pin_source {
+        let mut mismatched = Vec::new();
+        pin_transport_fields(&mut entry_json, stored, "$", &mut mismatched);
+        if !mismatched.is_empty() {
+            return Err(Box::new(
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiError {
+                        error: "transport_field_mismatch".into(),
+                        detail: Some(format!(
+                            "this controller's stored secret is only sent to its saved address, \
+                             and the probe changed {}. Save the address change first, or re-enter \
+                             the secret to probe a different address",
+                            mismatched.join(", ")
+                        )),
+                    }),
+                )
+                    .into_response(),
+            ));
+        }
+    }
+
+    match serde_json::from_value(entry_json) {
+        Ok(resolved) => Ok(resolved),
+        Err(_) => Ok(entry),
+    }
+}
+
 async fn post_test_controller(
     _guard: ProbeGuard,
-    State(_s): State<WizardApiState>,
+    State(s): State<WizardApiState>,
     Json(body): Json<TestControllerBody>,
 ) -> impl IntoResponse {
-    match crate::runtime::build_test_controller(&body.controller) {
+    let entry = match resolve_probe_entry_secrets(&s, body.controller).await {
+        Ok(e) => e,
+        Err(resp) => return *resp,
+    };
+    // Rachio runs through its concrete adapter so the probe can surface
+    // what the trait object cannot: device auto-discovery from just the
+    // token, and the cloud's remaining daily request budget.
+    if let crate::config::schema::ControllerKind::Rachio(rc) = &entry.controller {
+        return test_rachio_controller(&entry.id, rc).await;
+    }
+    match crate::runtime::build_test_controller(&entry) {
         Ok(c) => match c.status().await {
             Ok(st) => Json(serde_json::json!({
                 "ok": true,
@@ -526,6 +709,72 @@ async fn post_test_controller(
             }),
         )
             .into_response(),
+    }
+}
+
+/// Rachio-specific controller test. Two additions over the generic path:
+///
+/// 1. Device auto-discovery: with an api_token but NO device_id, resolve
+///    the account's first device (GET /person/info -> GET /person/{id}),
+///    run the status probe against it, and REPORT it in the result as
+///    `discovered_device` so the form can offer it. Config is never
+///    written silently.
+/// 2. `rate_limit_remaining` carries the cloud's X-RateLimit-Remaining
+///    header when it was present, so the operator can watch the daily
+///    request budget from the test button.
+async fn test_rachio_controller(id: &str, rc: &crate::config::schema::RachioConfig) -> Response {
+    use crate::controllers::rachio::Rachio;
+    // Method-call syntax on the CONCRETE adapter still resolves through the
+    // trait, which must be in scope.
+    use crate::ports::irrigation_controller::IrrigationController as _;
+
+    fn unreachable_response(e: &crate::ports::irrigation_controller::ControllerError) -> Response {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(ApiError {
+                error: "controller_unreachable".into(),
+                detail: Some(controller_error_detail(e)),
+            }),
+        )
+            .into_response()
+    }
+
+    let mut cfg = rc.clone();
+    let mut discovered: Option<serde_json::Value> = None;
+    if cfg.device_id.trim().is_empty() && !cfg.api_token.trim().is_empty() {
+        let probe = match Rachio::new(format!("{id}_probe"), cfg.clone()) {
+            Ok(p) => p,
+            Err(e) => return unreachable_response(&e),
+        };
+        match probe.resolve_device_id().await {
+            Ok(found) => {
+                cfg.device_id = found.device_id.clone();
+                discovered = Some(serde_json::json!({
+                    "device_id": found.device_id,
+                    "name": found.name,
+                    "device_count": found.device_count,
+                }));
+            }
+            Err(e) => return unreachable_response(&e),
+        }
+    }
+    let adapter = match Rachio::new(id.to_string(), cfg) {
+        Ok(a) => a,
+        Err(e) => return unreachable_response(&e),
+    };
+    match adapter.status().await {
+        Ok(st) => Json(serde_json::json!({
+            "ok": true,
+            "reachable": st.reachable,
+            "master_enabled": st.master_enabled,
+            "water_level_pct": st.water_level_pct,
+            "zone_count": st.zone_states.len(),
+            "firmware": st.firmware,
+            "discovered_device": discovered,
+            "rate_limit_remaining": adapter.last_rate_limit_remaining(),
+        }))
+        .into_response(),
+        Err(e) => unreachable_response(&e),
     }
 }
 
@@ -615,10 +864,18 @@ fn llm_error_detail(e: &crate::ports::llm_provider::LlmError) -> String {
 
 async fn post_scan_zones(
     _guard: ProbeGuard,
-    State(_s): State<WizardApiState>,
+    State(s): State<WizardApiState>,
     Json(body): Json<TestControllerBody>,
 ) -> impl IntoResponse {
-    match crate::runtime::build_test_controller(&body.controller) {
+    // Editing an EXISTING cloud controller serves its api_token/password as
+    // the redaction sentinel; restore the stored secret by entry id (the
+    // put_config pattern) so "Scan zones" works from the editor without
+    // retyping the token. Unresolvable sentinels are a plain 400.
+    let entry = match resolve_probe_entry_secrets(&s, body.controller).await {
+        Ok(e) => e,
+        Err(resp) => return *resp,
+    };
+    match crate::runtime::build_test_controller(&entry) {
         Ok(c) => match c.discover_zones().await {
             Ok(zones) => Json(serde_json::json!({ "zones": zones })).into_response(),
             // Trimmed category, not the raw upstream/transport string (the
@@ -1731,5 +1988,373 @@ mod probe_soil_tests {
         };
         let v = serde_json::to_value(&gw).expect("serializes");
         assert_eq!(v["soil_channels"], json!(3));
+    }
+}
+
+#[cfg(test)]
+mod scan_zones_tests {
+    use super::*;
+    use crate::config::schema::ControllerEntry;
+
+    fn state_in(dir: &std::path::Path) -> WizardApiState {
+        WizardApiState {
+            draft_store: Arc::new(WizardStore::new(dir.join("wizard-draft.json"))),
+            config_store: Arc::new(FileConfigStore::new(dir.join("localsky.toml"))),
+            auth_rt: None,
+            tempest_store: None,
+            runtime: None,
+        }
+    }
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("localsky-wizard-test-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn entry(v: serde_json::Value) -> ControllerEntry {
+        serde_json::from_value(v).expect("test controller entry deserializes")
+    }
+
+    async fn body_json(resp: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    // The offline scan path issue #8's fix rides on: a dry_run controller
+    // reports its three sample stations with no hardware and no network.
+    #[tokio::test]
+    async fn scan_zones_dry_run_returns_sample_stations() {
+        let dir = temp_dir("scan-dryrun");
+        let s = state_in(&dir);
+        let body = TestControllerBody {
+            controller: entry(serde_json::json!({
+                "id": "sim",
+                "default": true,
+                "enabled": true,
+                "kind": "dry_run",
+                "config": { "simulate_runs": false },
+            })),
+        };
+        let resp = post_scan_zones(ProbeGuard, State(s), Json(body))
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        let zones = v["zones"].as_array().expect("zones array");
+        assert_eq!(zones.len(), 3, "dry_run reports 3 sample stations");
+        assert_eq!(zones[0]["station_id"], "1");
+        assert!(zones[0]["name"].as_str().is_some_and(|n| !n.is_empty()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn scan_zones_unprobeable_kind_is_422() {
+        let dir = temp_dir("scan-422");
+        let s = state_in(&dir);
+        let body = TestControllerBody {
+            controller: entry(serde_json::json!({
+                "id": "mq",
+                "default": false,
+                "enabled": true,
+                "kind": "mqtt_command",
+                "config": { "broker_host": "broker.local" },
+            })),
+        };
+        let resp = post_scan_zones(ProbeGuard, State(s), Json(body))
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let v = body_json(resp).await;
+        assert_eq!(v["error"], "controller_unsupported");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Editing an EXISTING cloud controller serves api_token as the redaction
+    // sentinel; the scan must resolve it against the stored config by entry
+    // id before probing (the put_config pattern).
+    #[tokio::test]
+    async fn probe_entry_sentinel_resolves_against_stored_config_by_id() {
+        use crate::api::config::SECRET_REDACTED_SENTINEL;
+        use crate::config::schema::{Config, ControllerKind};
+
+        let dir = temp_dir("scan-unredact");
+        let s = state_in(&dir);
+
+        // Store a config holding the real token.
+        let mut cfg = Config::default();
+        cfg.controllers.push(entry(serde_json::json!({
+            "id": "rachio_main",
+            "default": true,
+            "enabled": true,
+            "kind": "rachio",
+            "config": {
+                "api_token": "stored-example-token",
+                "device_id": "device-0001",
+                "zone_uuid_map": {},
+            },
+        })));
+        s.config_store.save(&cfg).await.unwrap();
+
+        // The client posts the entry as served: token redacted.
+        let posted = entry(serde_json::json!({
+            "id": "rachio_main",
+            "default": true,
+            "enabled": true,
+            "kind": "rachio",
+            "config": {
+                "api_token": SECRET_REDACTED_SENTINEL,
+                "device_id": "device-0001",
+                "zone_uuid_map": {},
+            },
+        }));
+        let resolved = resolve_probe_entry_secrets(&s, posted)
+            .await
+            .expect("sentinel resolves against the stored entry");
+        match &resolved.controller {
+            ControllerKind::Rachio(rc) => {
+                assert_eq!(rc.api_token, "stored-example-token");
+                assert_eq!(rc.device_id, "device-0001");
+            }
+            other => panic!("expected rachio entry, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The WIZARD path: the entry lives only in the draft (no live config
+    // yet), served redacted by GET /draft. The resolver falls back to the
+    // draft store by entry id.
+    #[tokio::test]
+    async fn probe_entry_sentinel_resolves_against_the_wizard_draft() {
+        use crate::api::config::SECRET_REDACTED_SENTINEL;
+        use crate::config::schema::ControllerKind;
+
+        let dir = temp_dir("scan-unredact-draft");
+        let s = state_in(&dir);
+
+        let mut draft = WizardDraft::default();
+        draft.config.controllers.push(entry(serde_json::json!({
+            "id": "rachio_main",
+            "default": true,
+            "enabled": true,
+            "kind": "rachio",
+            "config": {
+                "api_token": "draft-example-token",
+                "device_id": "device-0001",
+                "zone_uuid_map": {},
+            },
+        })));
+        s.draft_store.save(&draft).unwrap();
+
+        let posted = entry(serde_json::json!({
+            "id": "rachio_main",
+            "default": true,
+            "enabled": true,
+            "kind": "rachio",
+            "config": {
+                "api_token": SECRET_REDACTED_SENTINEL,
+                "device_id": "device-0001",
+                "zone_uuid_map": {},
+            },
+        }));
+        let resolved = resolve_probe_entry_secrets(&s, posted)
+            .await
+            .expect("sentinel resolves against the draft entry");
+        match &resolved.controller {
+            ControllerKind::Rachio(rc) => assert_eq!(rc.api_token, "draft-example-token"),
+            other => panic!("expected rachio entry, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A sentinel with NO stored counterpart (fresh add, renamed id) must be
+    // a plain 400, not a doomed probe against the vendor cloud with the
+    // literal sentinel as the credential.
+    #[tokio::test]
+    async fn scan_zones_unresolvable_sentinel_is_400() {
+        use crate::api::config::SECRET_REDACTED_SENTINEL;
+
+        let dir = temp_dir("scan-unmatched");
+        let s = state_in(&dir);
+        let body = TestControllerBody {
+            controller: entry(serde_json::json!({
+                "id": "rachio_new",
+                "default": false,
+                "enabled": true,
+                "kind": "rachio",
+                "config": {
+                    "api_token": SECRET_REDACTED_SENTINEL,
+                    "device_id": "device-0002",
+                    "zone_uuid_map": {},
+                },
+            })),
+        };
+        let resp = post_scan_zones(ProbeGuard, State(s), Json(body))
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let v = body_json(resp).await;
+        assert_eq!(v["error"], "unmatched_redacted_secret");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // SECURITY: a probe that rides the sentinel restoration cannot redirect
+    // the restored token. Stored entry has the default endpoint (base_url
+    // null); the posted entry points base_url at another host. The probe
+    // must be refused with a plain 400 and NO request may reach that host.
+    #[tokio::test]
+    async fn scan_zones_sentinel_with_changed_transport_is_400_and_sends_nothing() {
+        use crate::api::config::SECRET_REDACTED_SENTINEL;
+        use crate::config::schema::Config;
+        use wiremock::matchers::any;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let attacker = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(0) // the restored token must never travel here
+            .mount(&attacker)
+            .await;
+
+        let dir = temp_dir("scan-transport-pin");
+        let s = state_in(&dir);
+        let mut cfg = Config::default();
+        cfg.controllers.push(entry(serde_json::json!({
+            "id": "rachio_main",
+            "default": true,
+            "enabled": true,
+            "kind": "rachio",
+            "config": {
+                "api_token": "stored-example-token",
+                "device_id": "device-0001",
+                "zone_uuid_map": {},
+                // base_url absent: the stored entry uses the built-in
+                // production endpoint.
+            },
+        })));
+        s.config_store.save(&cfg).await.unwrap();
+
+        let body = TestControllerBody {
+            controller: entry(serde_json::json!({
+                "id": "rachio_main",
+                "default": true,
+                "enabled": true,
+                "kind": "rachio",
+                "config": {
+                    "api_token": SECRET_REDACTED_SENTINEL,
+                    "device_id": "device-0001",
+                    "zone_uuid_map": {},
+                    "base_url": attacker.uri(),
+                },
+            })),
+        };
+        let resp = post_scan_zones(ProbeGuard, State(s.clone()), Json(body))
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let v = body_json(resp).await;
+        assert_eq!(v["error"], "transport_field_mismatch");
+
+        // Same guard on the test flow (the other probe that restores secrets).
+        let body = TestControllerBody {
+            controller: entry(serde_json::json!({
+                "id": "rachio_main",
+                "default": true,
+                "enabled": true,
+                "kind": "rachio",
+                "config": {
+                    "api_token": SECRET_REDACTED_SENTINEL,
+                    "device_id": "device-0001",
+                    "zone_uuid_map": {},
+                    "base_url": attacker.uri(),
+                },
+            })),
+        };
+        let resp = post_test_controller(ProbeGuard, State(s), Json(body))
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let v = body_json(resp).await;
+        assert_eq!(v["error"], "transport_field_mismatch");
+
+        attacker.verify().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // End to end: the editor posts a redacted rachio entry, the handler
+    // restores the stored token by id and the scan runs against the cloud
+    // (mocked) with the REAL token, returning the device's zones. Doubles
+    // as the transport-pin ALLOW case: the posted base_url equals the
+    // stored one, so the sentinel probe proceeds.
+    #[tokio::test]
+    async fn scan_zones_rachio_sentinel_end_to_end() {
+        use crate::api::config::SECRET_REDACTED_SENTINEL;
+        use crate::config::schema::Config;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/device/device-0001"))
+            .and(header("authorization", "Bearer stored-example-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "device-0001",
+                "status": "ONLINE",
+                "zones": [
+                    { "id": "1f00aa00-0000-4000-8000-000000000001", "zoneNumber": 1,
+                      "name": "Front Lawn", "enabled": true },
+                    { "id": "1f00aa00-0000-4000-8000-000000000002", "zoneNumber": 2,
+                      "name": "Back Lawn", "enabled": true },
+                ],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = temp_dir("scan-sentinel-e2e");
+        let s = state_in(&dir);
+        let mut cfg = Config::default();
+        cfg.controllers.push(entry(serde_json::json!({
+            "id": "rachio_main",
+            "default": true,
+            "enabled": true,
+            "kind": "rachio",
+            "config": {
+                "api_token": "stored-example-token",
+                "device_id": "device-0001",
+                "zone_uuid_map": {},
+                "base_url": server.uri(),
+            },
+        })));
+        s.config_store.save(&cfg).await.unwrap();
+
+        let body = TestControllerBody {
+            controller: entry(serde_json::json!({
+                "id": "rachio_main",
+                "default": true,
+                "enabled": true,
+                "kind": "rachio",
+                "config": {
+                    "api_token": SECRET_REDACTED_SENTINEL,
+                    "device_id": "device-0001",
+                    "zone_uuid_map": {},
+                    "base_url": server.uri(),
+                },
+            })),
+        };
+        let resp = post_scan_zones(ProbeGuard, State(s), Json(body))
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        let zones = v["zones"].as_array().expect("zones array");
+        assert_eq!(zones.len(), 2);
+        assert_eq!(zones[0]["name"], "Front Lawn");
+        server.verify().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

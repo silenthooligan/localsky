@@ -643,6 +643,21 @@ pub(crate) fn toast_on_err(prefix: &'static str) -> Callback<Result<(), String>>
 /// every mutating POST must report its outcome.
 #[cfg(feature = "hydrate")]
 pub(crate) fn post_action_then(body: serde_json::Value, done: Callback<Result<(), String>>) {
+    post_action_note_then(
+        body,
+        Callback::new(move |r: Result<Option<String>, String>| done.run(r.map(|_| ()))),
+    );
+}
+
+/// Like `post_action_then`, but a success also hands back the response's
+/// optional `note` string. The Stop action sets it when the controller has
+/// no per-zone stop (the whole device was stopped), so the caller's toast
+/// can say what actually happened instead of implying one zone stopped.
+#[cfg(feature = "hydrate")]
+pub(crate) fn post_action_note_then(
+    body: serde_json::Value,
+    done: Callback<Result<Option<String>, String>>,
+) {
     use leptos::task::spawn_local;
     spawn_local(async move {
         let payload = body.to_string();
@@ -651,7 +666,13 @@ pub(crate) fn post_action_then(body: serde_json::Value, done: Callback<Result<()
             .body(payload);
         let result = match req {
             Ok(r) => match r.send().await {
-                Ok(resp) if resp.ok() => Ok(()),
+                Ok(resp) if resp.ok() => {
+                    let note =
+                        resp.json::<serde_json::Value>().await.ok().and_then(|v| {
+                            v.get("note").and_then(|n| n.as_str()).map(str::to_string)
+                        });
+                    Ok(note)
+                }
                 Ok(resp) => Err(format!("HTTP {}", resp.status())),
                 Err(e) => Err(e.to_string()),
             },
@@ -664,6 +685,14 @@ pub(crate) fn post_action_then(body: serde_json::Value, done: Callback<Result<()
 #[cfg(not(feature = "hydrate"))]
 #[allow(dead_code)]
 pub(crate) fn post_action_then(_body: serde_json::Value, _done: Callback<Result<(), String>>) {}
+
+#[cfg(not(feature = "hydrate"))]
+#[allow(dead_code)]
+pub(crate) fn post_action_note_then(
+    _body: serde_json::Value,
+    _done: Callback<Result<Option<String>, String>>,
+) {
+}
 
 // `event_target_value` comes in from `leptos::prelude::*`. It's
 // defined on both ssr and hydrate builds (SSR returns empty since the
