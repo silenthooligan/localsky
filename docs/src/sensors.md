@@ -10,7 +10,7 @@ Just from weather forecasts + your latitude/longitude, LocalSky computes:
 
 - FAO-56 reference ET₀ (Hargreaves fallback when only temp range is available; Penman-Monteith when wind + solar + humidity show up)
 - Crop ET per zone from species-specific Kc curves
-- Single-bucket water balance with TAW + MAD-driven scheduling
+- Weekly per-zone water balance sizing every run
 - 17-rule skip ladder (rain forecast, freeze, wind, already-wet, etc.)
 - 7-day verdict strip projection
 - Cycle-and-soak runtime splitting
@@ -75,7 +75,7 @@ Examples: PurpleAir, AirGradient, Ecowitt WH41.
 
 ## Assigning soil probes to zones
 
-Wire a moisture probe to a zone and the engine stops guessing: the probe's reading sits alongside the modeled bucket as the zone's gate.
+Wire a moisture probe to a zone and the engine gains a measured gate: a saturated zone skips on its own, and a measured-dry zone can override a soft forecast-rain skip.
 
 **Supported paths in:**
 
@@ -86,11 +86,11 @@ Wire a moisture probe to a zone and the engine stops guessing: the probe's readi
 
 **How the engine uses it:**
 
-- Below the zone's target band: the zone is eligible; runs size to the deficit as usual.
+- Below the zone's target band: the zone is eligible, and a measured-dry zone can override a soft forecast-rain skip. Run length is unchanged; it comes from the weekly water balance.
 - Inside the band: healthy; scheduled runs still apply unless the saturation threshold says otherwise.
 - At or above saturation: the zone skips on its own, even when the day's verdict is Run, and the skip reason names the probe.
 
-The Sensors hub and each zone's detail show the probe's live reading, the target band, and a 7-day no-watering projection so you can sanity check that the moisture curve actually behaves like your yard. If the probe goes offline, the zone falls back to the modeled bucket automatically; nothing blocks.
+The Sensors hub and each zone's detail show the probe's live reading, the target band, and a 7-day no-watering projection so you can sanity check that the moisture curve actually behaves like your yard. If the probe goes offline, the zone simply loses its soil gate; nothing blocks, and run sizing is unaffected because the weekly water balance never reads a probe.
 
 ### Worked example: a Home Assistant sensor feeding LocalSky
 
@@ -178,7 +178,7 @@ You'll get:
 
 You won't get:
 
-- Soil saturation skip (the engine assumes the bucket model is correct, which it usually is)
+- Soil saturation skip (with no probe there is no measured gate, so the weekly water balance decides alone)
 - Soil frost skip (covered by air-temp freeze rules)
 - Flow-validated runs (the engine trusts that the controller ran the requested duration)
 

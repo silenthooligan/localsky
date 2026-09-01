@@ -485,7 +485,7 @@ async fn post_restore(State(s): State<BackupApiState>, mut multipart: Multipart)
         let Ok(text) = String::from_utf8(bytes) else {
             return err(StatusCode::UNPROCESSABLE_ENTITY, "config is not UTF-8");
         };
-        let cfg: crate::config::schema::Config = match toml::from_str(&text) {
+        let mut cfg: crate::config::schema::Config = match toml::from_str(&text) {
             Ok(c) => c,
             Err(e) => {
                 return err(
@@ -505,9 +505,61 @@ async fn post_restore(State(s): State<BackupApiState>, mut multipart: Multipart)
             )
                 .into_response();
         }
+        // Hold the read-modify-write guard the way PUT /api/config and the
+        // adoption commit do: without it this load/save can interleave with a
+        // concurrent whole-config writer and lose what that writer just wrote.
+        let _write_guard = s.cfg_store.begin_write().await;
         // Snapshot the running config BEFORE overwrite so the hot-apply diff +
         // restart-required set are computed against the pre-restore state.
         let prev_cfg = s.cfg_store.load().await.ok();
+        // `ha_adoption` is SERVER-OWNED on this path too, and this is the path
+        // where losing it hurts most: the config HOT-APPLIES here, arc-swapping
+        // a rebuilt WateringPolicy, while the database is only STAGED for the
+        // next boot. Config and controls do NOT move together, so the correct
+        // control values sit unread in SQLite while the config decides.
+        //
+        // A pre-0.7.22 bundle carries no `[[ha_adoption]]`, and a config-only
+        // upload need not carry one either. Persisting that would un-retire all
+        // seven reads on the very next tick, against helpers the migration
+        // notice invited the owner to delete: the vacation pause falls to
+        // `.unwrap_or(0)`, both toggles to false, the one-day override to
+        // "none". The adoption pass is disarmed for the life of the process, so
+        // nothing re-marks them until a restart.
+        //
+        // Straight overwrite from the running config, matching `put_config`: a
+        // union would let an uploaded bundle inject a marker retiring a read no
+        // pass on THIS instance ever handled. `None` means there is no running
+        // config at all, a fresh instance being restored onto new hardware,
+        // where the bundle's own ledger is the only record of what happened and
+        // is kept.
+        //
+        // `seeded_source_ids` is the same class of ledger and rides across as a
+        // union, matching `post_rollback`: it records which forecast
+        // authorities were auto-seeded so a source the owner deleted is not
+        // re-added at the next boot, and dropping an id costs them that
+        // deletion rather than a watering decision.
+        //
+        // The carry-forward is conditional on this request NOT also staging a
+        // database. When it does, config and controls DO move together out of
+        // one bundle, and carrying the running ledger over a database that
+        // predates it is the mirror of the hazard above: the reads stay
+        // retired while `pause_until_epoch`, both toggles and the one-day
+        // override come back at their pre-migration defaults from the older
+        // database, so an adopted vacation pause is gone with nothing on
+        // screen and the helper still holding it is never read again. Letting
+        // the bundle's own ledger stand means the install reverts to its
+        // pre-migration state and migrates again from the helpers.
+        let staging_db = db_bytes.is_some();
+        if let Some(prev) = prev_cfg.as_ref() {
+            if !staging_db {
+                cfg.ha_adoption = prev.ha_adoption.clone();
+            }
+            for id in &prev.seeded_source_ids {
+                if !cfg.seeded_source_ids.contains(id) {
+                    cfg.seeded_source_ids.push(id.clone());
+                }
+            }
+        }
         if let Err(e) = s.cfg_store.save(&cfg).await {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1068,6 +1120,118 @@ mod tests {
             std::path::Path::new(&format!("{db_path}.restore")).exists(),
             "a LocalSky db stages for the boot swap"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A config that passes : the only requirement is a location
+    /// that is not null island.
+    fn sited_config() -> crate::config::schema::Config {
+        let mut cfg = crate::config::schema::Config::default();
+        cfg.deployment.location = crate::config::schema::Location {
+            lat: 28.5,
+            lon: -81.4,
+            elevation_m: None,
+        };
+        cfg
+    }
+
+    // The blocker this carry-forward exists for. The config HOT-APPLIES on
+    // restore while the database only STAGES for the next boot, so a bundle
+    // taken before 0.7.22 (or a config-only upload) would un-retire all seven
+    // helper reads on the very next tick, against helpers the migration notice
+    // invited the owner to delete, with the adoption pass disarmed for the
+    // life of the process.
+    #[tokio::test]
+    async fn restoring_a_config_without_the_migration_ledger_keeps_it() {
+        let dir = test_dir("ledger-survives-restore");
+        let state = state_for(&dir);
+
+        // A migrated install: every helper read retired, plus a seeded id.
+        let mut migrated = sited_config();
+        for id in crate::ha_adopt::ENTITIES {
+            migrated
+                .ha_adoption
+                .push(crate::ha::snapshot::HaAdoptedHelper {
+                    entity: id.to_string(),
+                    outcome: crate::ha_adopt::OUTCOME_NOT_FOUND.to_string(),
+                    target: crate::ha_adopt::target_of(id).to_string(),
+                    adopted_value: None,
+                    observed_value: None,
+                    previous_value: None,
+                    epoch: 1,
+                });
+        }
+        migrated.seeded_source_ids.push("nws".into());
+        state.cfg_store.save(&migrated).await.unwrap();
+
+        // A pre-0.7.22 bundle: valid config, no [[ha_adoption]], no seeded ids.
+        let mut old = sited_config();
+        old.engine.skip_rules.max_wind_mph = 22.0;
+        let body = toml::to_string_pretty(&old).unwrap();
+        assert!(
+            !body.contains("ha_adoption"),
+            "the fixture must have no ledger"
+        );
+
+        let cfg_store = state.cfg_store.clone();
+        let mp = multipart_with("config", "localsky.toml", body.as_bytes()).await;
+        let resp = post_restore(State(state), mp).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json_body(resp).await["config_applied"], true);
+
+        let after = cfg_store.load().await.unwrap();
+        assert_eq!(
+            after.engine.skip_rules.max_wind_mph, 22.0,
+            "the restore still applies the values it was asked for"
+        );
+        assert_eq!(
+            after.ha_adoption.len(),
+            crate::ha_adopt::ENTITIES.len(),
+            "and every migration marker survives it"
+        );
+        let policy = crate::refresher::WateringPolicy::from_config(&after);
+        for id in crate::ha_adopt::ENTITIES {
+            assert!(
+                policy.ha_read_retired(id),
+                "{id} must not go back to reading a helper the owner was told to delete"
+            );
+        }
+        assert!(after.seeded_source_ids.contains(&"nws".to_string()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Disaster recovery onto new hardware: no running config at all, so the
+    // bundle's own ledger is the only record of what happened and it stands.
+    #[tokio::test]
+    async fn restoring_onto_a_fresh_instance_keeps_the_bundles_own_ledger() {
+        let dir = test_dir("ledger-fresh-instance");
+        let state = state_for(&dir);
+        assert!(!state.cfg_store.is_initialized());
+
+        let mut migrated = sited_config();
+        migrated
+            .ha_adoption
+            .push(crate::ha::snapshot::HaAdoptedHelper {
+                entity: crate::ha_adopt::PAUSE_UNTIL.to_string(),
+                outcome: crate::ha_adopt::OUTCOME_ADOPTED.to_string(),
+                target: crate::ha_adopt::target_of(crate::ha_adopt::PAUSE_UNTIL).to_string(),
+                adopted_value: Some("0".into()),
+                observed_value: None,
+                previous_value: Some("0".into()),
+                epoch: 1,
+            });
+        let body = toml::to_string_pretty(&migrated).unwrap();
+
+        let cfg_store = state.cfg_store.clone();
+        let mp = multipart_with("config", "localsky.toml", body.as_bytes()).await;
+        let resp = post_restore(State(state), mp).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let after = cfg_store.load().await.unwrap();
+        assert_eq!(after.ha_adoption.len(), 1);
+        assert_eq!(after.ha_adoption[0].entity, crate::ha_adopt::PAUSE_UNTIL);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

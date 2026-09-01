@@ -133,7 +133,7 @@ pub fn SettingsSchedules() -> impl IntoView {
                     <span class="settings-list__text">
                         <span class="settings-list__label">"No manual schedules configured"</span>
                         <span class="settings-list__helptext">
-                            "Smart irrigation runs as soon as the engine's deficit math triggers it. "
+                            "Smart irrigation runs on the mornings the weekly water balance says a zone still needs water. "
                             "Add a manual schedule below to fire a zone at a fixed weekday + time instead."
                         </span>
                     </span>
@@ -182,11 +182,12 @@ pub fn SettingsSchedules() -> impl IntoView {
                 </p>
                 <p class="settings-page__subtitle" style="margin-top: 0.5rem">
                     <strong>"Override"</strong>
-                    " (default) replaces the smart engine for the zone; smart math still "
-                    "computes for visibility but doesn't dispatch. "
+                    " (default) replaces the smart engine for the zone: on the days this "
+                    "schedule covers, smart watering will not run for that zone at all. "
+                    "The zone card says so too. "
                     <strong>"Floor"</strong>
-                    " fires the manual run AND lets smart add additional runs if the "
-                    "deficit math demands more."
+                    " fires the manual run AND lets smart add runs on top when the "
+                    "weekly budget calls for more."
                 </p>
             </header>
 
@@ -517,7 +518,7 @@ fn ScheduleForm(
 
             <FormField
                 label="Mode".to_string()
-                helptext="Override replaces smart-irrigation for this zone (smart still computes for nerd visibility). Floor fires alongside smart.".to_string()
+                helptext="Override stops smart watering for this zone on the days below. Floor fires the schedule and lets smart add runs on top.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 <SegmentedControl
@@ -752,6 +753,23 @@ fn ScheduleCard(
     let time_kv = format!("{h:02}:{m:02}");
     let dur_kv = format!("{dur} min");
     let mode_kv = mode.clone();
+    // An Override schedule suppresses smart watering for its zone on its
+    // days. That was the unlabelled default and nothing said it out loud,
+    // so a schedule added as a workaround silently locked smart out.
+    let suppression_kv = if enabled && mode == "override" && !weekdays.is_empty() {
+        format!("Smart watering is off for {zone} on {weekdays}")
+    } else if enabled && mode == "floor" {
+        // A Floor run is watering evidence like any other: it feeds the
+        // weekly balance AND resets the session-spacing anchor. The old
+        // flat "Smart watering still runs" was false for a zone whose
+        // schedule fires as often as its own session cadence, which is
+        // every 1-session-a-week bed on a weekly schedule.
+        format!(
+            "Smart watering may add runs for {zone}, but not until the zone's session spacing              has passed since this run"
+        )
+    } else {
+        "Nothing suppressed (schedule disabled)".to_string()
+    };
     let id_kv = id.clone();
     let id_for_edit = id.clone();
     let id_for_delete = id.clone();
@@ -835,6 +853,7 @@ fn ScheduleCard(
                     <SettingsKv label="Start time" value=time_kv/>
                     <SettingsKv label="Duration" value=dur_kv/>
                     <SettingsKv label="Mode" value=mode_kv/>
+                    <SettingsKv label="Effect on smart" value=suppression_kv/>
                 }.into_any())
                 actions=Box::new(move || view! {
                     <Button

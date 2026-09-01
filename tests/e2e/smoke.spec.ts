@@ -74,7 +74,25 @@ for (const p of PAGES) {
     // Give hydration a beat to attach and surface any deferred panic.
     await page.waitForTimeout(500);
 
-    // Baseline screenshot: the real regression signal for visual breakage.
+    expect(
+      errors,
+      `console/page errors on ${p.path}:\n${errors.join("\n")}`,
+    ).toEqual([]);
+  });
+
+  // Layout drift lives in its OWN test on purpose. Folded into the test above,
+  // a stale baseline failed the whole case, which made a cosmetic diff read
+  // exactly like a blank page or a WASM panic. Any real UI change then turned
+  // the canary red for weeks and taught us to skip past it. Split, the report
+  // says which happened: "renders without errors" red means the page is
+  // broken; "matches its visual baseline" red on its own means the baselines
+  // are stale. To refresh, delete them, let the next run write and upload new
+  // ones, and commit those to re-arm the diff.
+  test(`${p.name} (${p.path}) matches its visual baseline`, async ({ page }) => {
+    await page.goto(p.path, { waitUntil: "networkidle" });
+    // Give hydration a beat so this captures the hydrated page.
+    await page.waitForTimeout(500);
+
     // Viewport-only, not fullPage: live values change the page HEIGHT between
     // runs, and a dimension mismatch hard-fails before any pixel tolerance
     // applies. The fixed 1280x900 viewport keeps dimensions stable; the ratio
@@ -83,10 +101,5 @@ for (const p of PAGES) {
       maxDiffPixelRatio: 0.03,
       animations: "disabled",
     });
-
-    expect(
-      errors,
-      `console/page errors on ${p.path}:\n${errors.join("\n")}`,
-    ).toEqual([]);
   });
 }

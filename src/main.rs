@@ -246,7 +246,23 @@ async fn main() -> anyhow::Result<()> {
             .map(|c| c.controllers.is_empty() && c.zones.is_empty())
             .unwrap_or(true)
     {
-        let synthetic = localsky::demo_data::seed_config();
+        let mut synthetic = localsky::demo_data::seed_config();
+        // Whole-config write: carry the server-owned migration ledgers, the
+        // same rule PUT /api/config, the raw editor, rollback, backup restore
+        // and the wizard's apply follow. The seed only runs with no zones and
+        // no controllers configured, so it cannot land on a working irrigation
+        // install, but a config that has run the 0.7.22 helper adoption still
+        // has to keep saying so: dropping the record would put seven retired
+        // reads back on helpers the migration notice invited the owner to
+        // delete.
+        if let Some(prev) = boot_cfg.as_ref() {
+            synthetic.ha_adoption = prev.ha_adoption.clone();
+            for id in &prev.seeded_source_ids {
+                if !synthetic.seeded_source_ids.contains(id) {
+                    synthetic.seeded_source_ids.push(id.clone());
+                }
+            }
+        }
         match cfg_store.save(&synthetic).await {
             Ok(_) => {
                 tracing::info!(
@@ -535,6 +551,8 @@ async fn main() -> anyhow::Result<()> {
             shadow_store,
             control_store,
             boot_zones,
+            // Sink for the one-time Home Assistant helper adoption pass.
+            Some(cfg_store.clone()),
         );
         // P0-8b: supervise the refresher. If its heartbeat goes stale (panic or
         // hang in the one task that produces all live data + the today verdict),
@@ -773,6 +791,7 @@ async fn main() -> anyhow::Result<()> {
         device_registry.clone(),
         router_prefix.clone(),
         cfg_store.clone(),
+        watering_policy_handle.clone(),
     )
     .layer(axum::middleware::from_fn(json_error_envelope));
     let api_router_v1 = api::router(
@@ -785,6 +804,7 @@ async fn main() -> anyhow::Result<()> {
         device_registry.clone(),
         router_prefix.clone(),
         cfg_store.clone(),
+        watering_policy_handle.clone(),
     )
     .layer(axum::middleware::from_fn(json_error_envelope));
 

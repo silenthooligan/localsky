@@ -320,7 +320,7 @@ pub fn SettingsHomeAssistant() -> impl IntoView {
                             <HaCard
                                 icon="gauge"
                                 title="Watering brain"
-                                meaning="This instance is mirroring watering logic that still lives in Home Assistant. That's a migration mode, not the destination: LocalSky's engine is the brain (ET model, soil buckets, rules, scheduling), and HA stays the dashboard."
+                                meaning="This instance is mirroring watering logic that still lives in Home Assistant. That's a migration mode, not the destination: LocalSky's engine is the brain (ET model, the weekly water balance, rules, scheduling), and HA stays the dashboard."
                                 chip="Mirroring HA (migration)".to_string()
                                 tone="warn".to_string()
                             >
@@ -344,7 +344,7 @@ pub fn SettingsHomeAssistant() -> impl IntoView {
                             <HaCard
                                 icon="gauge"
                                 title="Watering brain"
-                                meaning="LocalSky computes everything itself (ET, soil buckets, rules, the morning schedule). HA mode exists only for mirroring an irrigation setup that still lives in Home Assistant."
+                                meaning="LocalSky computes everything itself (ET, the weekly water balance, rules, the morning schedule). HA mode exists only for mirroring an irrigation setup that still lives in Home Assistant."
                                 chip="LocalSky engine".to_string()
                                 tone="on".to_string()
                             >

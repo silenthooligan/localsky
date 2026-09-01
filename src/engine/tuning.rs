@@ -315,25 +315,33 @@ fn round1(v: f64) -> f64 {
 ///
 /// The two clamp signals stay separate because their evidence differs:
 /// `session_capped` is the weekly allocator's per-session slice over the
-/// cap, `deficit_cap_binding` (ZoneMath.raw_seconds) is a ONE-SHOT
-/// soil-deficit refill over it. Since the cap became real per-zone
-/// config (max_run_minutes), raising it is the PRIMARY remedy for both;
-/// the sessions/budget knobs are the session-capped fallback when the
-/// raise is blocked by the ceiling or the dispatch window.
+/// cap, `deficit_cap_binding` is a ONE-SHOT soil-deficit refill over it.
+/// Since the cap became real per-zone config (max_run_minutes), raising it
+/// is the PRIMARY remedy for both; the sessions/budget knobs are the
+/// session-capped fallback when the raise is blocked by the ceiling or the
+/// dispatch window.
+///
+/// NOTE: nothing produces `deficit_cap_binding` today. Its input was the
+/// soil-deficit read the engine no longer makes, and the caller passes
+/// false. The branch below stays because the depletion model that would
+/// feed it is written and waiting to be wired; it is not reachable on any
+/// live install.
 #[derive(Debug, Clone, Default)]
 pub struct CapClampInputs {
     /// WaterBudget.session_capped: the weekly allocator's per-session
     /// seconds exceed the cap.
     pub session_capped: bool,
-    /// ZoneMath.cap_binding: the one-shot soil-deficit refill exceeds
-    /// the cap.
+    /// The one-shot soil-deficit refill exceeds the cap. No producer
+    /// today: the deficit read is gone, and ZoneMath.cap_binding now
+    /// carries the ALLOCATOR's cap, which `session_capped` above already
+    /// says. The caller passes false rather than conflating the two.
     pub deficit_cap_binding: bool,
     /// The allocator's desired seconds per WEEKLY session before the cap
     /// (WaterBudget.seconds_per_session). Only meaningful alongside
     /// `session_capped`; never the one-shot deficit refill.
     pub desired_seconds: Option<u32>,
-    /// The one-shot refill seconds (ZoneMath.raw_seconds) when
-    /// `deficit_cap_binding`; sizes the deficit-path raise.
+    /// The one-shot refill seconds when `deficit_cap_binding`; sizes the
+    /// deficit-path raise. None today, for the same reason.
     pub deficit_refill_seconds: Option<u32>,
     /// The EFFECTIVE cap that clamps it (snapshot math value, already
     /// restriction-tightened when a restriction is active).
@@ -1750,7 +1758,7 @@ mod tests {
         assert_eq!(check_cap_clamped("back_yard", &inp), CheckOutcome::Pass);
     }
 
-    /// A one-shot soil-deficit refill over the cap (ZoneMath.cap_binding
+    /// A one-shot soil-deficit refill over the cap (deficit_cap_binding
     /// without a session-capped budget) now earns a real max_run_minutes
     /// recommendation sized to the refill; it must never turn into a
     /// sessions/budget recommendation (neither knob feeds the deficit

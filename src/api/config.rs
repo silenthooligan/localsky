@@ -1084,6 +1084,32 @@ async fn put_raw_toml(
         }
     };
 
+    // The migration ledger is server-owned on this path too: raw TOML with no
+    // `[[ha_adoption]]` block would otherwise un-retire every read. See the
+    // same restore in `put_config`.
+    parsed.ha_adoption = original
+        .as_ref()
+        .and_then(|v| v.get("ha_adoption"))
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    // `seeded_source_ids` is the same class of ledger, with a milder failure:
+    // dropping an id lets the next boot re-seed a forecast authority the owner
+    // deleted. It rides across as a UNION rather than an overwrite, because
+    // this editor CAN legitimately add one by hand, and matching
+    // `post_rollback` here means every whole-config write path treats both
+    // ledgers the same way.
+    if let Some(prev) = original
+        .as_ref()
+        .and_then(|v| v.get("seeded_source_ids"))
+        .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
+    {
+        for id in prev {
+            if !parsed.seeded_source_ids.contains(&id) {
+                parsed.seeded_source_ids.push(id);
+            }
+        }
+    }
+
     // A zone slug is a primary key, not a label, and the raw editor is the
     // one path that can change one. Refuse a save that drops a zone key and
     // introduces another in the same write, which is what a rename looks
@@ -1632,6 +1658,37 @@ async fn put_config(
                 .into_response();
         }
     };
+    // `ha_adoption` is SERVER-OWNED: only the one-time adoption pass writes it.
+    // It carries `#[serde(default)]`, so a body that omits the key (a restore
+    // script, an older UI build, any API client, and the settings pages
+    // themselves if they ever drop it) deserializes to an empty vec, persists
+    // a config with no markers, and arc-swaps a WateringPolicy whose
+    // `ha_read_retired` is false for all seven. Every retired read goes live
+    // again against helpers the migration notice invited the owner to delete:
+    // the vacation pause falls to `.unwrap_or(0)`, both toggles to false, and
+    // the pass is disarmed for the life of the process, so nothing repairs it
+    // until a restart. Restore it from the stored config, the same treatment
+    // secrets already get from `original` above. A straight overwrite rather
+    // than a union: only the pass appends, and a union would let a client
+    // inject a marker that retires a read no pass ever handled.
+    cfg.ha_adoption = original
+        .get("ha_adoption")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    // `seeded_source_ids` is the same class of ledger, with a milder failure:
+    // dropping an id lets the next boot re-seed a forecast authority the owner
+    // deleted. Union rather than overwrite, matching `post_rollback`, so every
+    // whole-config write path treats both ledgers the same way.
+    if let Some(prev) = original
+        .get("seeded_source_ids")
+        .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
+    {
+        for id in prev {
+            if !cfg.seeded_source_ids.contains(&id) {
+                cfg.seeded_source_ids.push(id);
+            }
+        }
+    }
     // Auto-mark the sole controller as default when none is set, exactly as the
     // wizard's finalize_for_apply does before its own save. Without this, a
     // settings editor that PUTs a single controller left at `default = false`
@@ -1815,11 +1872,26 @@ pub(crate) fn apply_zone_field(
             let old = json!(zone.sessions_per_week);
             zone.sessions_per_week = match value {
                 serde_json::Value::Null => None,
-                v => Some(
-                    v.as_u64()
+                v => {
+                    let n = v
+                        .as_u64()
                         .and_then(|n| u32::try_from(n).ok())
-                        .ok_or_else(|| format!("{field} expects a whole number or null"))?,
-                ),
+                        .ok_or_else(|| format!("{field} expects a whole number or null"))?;
+                    // 1..=7 is the range the spacing gate can resolve. The
+                    // allocator paces sessions at floor(7/sessions) days, so
+                    // 8 or more collapses that to 0 days and the gate stops
+                    // holding a zone that already watered today: it re-plans
+                    // it on the next tick. Told, not silently coerced: a
+                    // number the user typed and cannot see changed is its own
+                    // kind of wrong answer.
+                    if !(1..=7).contains(&n) {
+                        return Err(format!(
+                            "{field} must be between 1 and 7; a zone cannot water more \
+                             often than once a day"
+                        ));
+                    }
+                    Some(n)
+                }
             };
             Ok(old)
         }
@@ -2139,7 +2211,39 @@ async fn post_rollback(
     // current config simply skips the diff and reloads only the tunables).
     let prev_cfg = store.load().await.ok();
     match store.rollback(ts).await {
-        Ok(cfg) => {
+        Ok(mut cfg) => {
+            // `ha_adoption` and `seeded_source_ids` are migration LEDGERS, not
+            // tunables, so they ride across a rollback rather than being
+            // restored to whatever the snapshot happened to hold. For the
+            // adoption record that is a watering matter: the notice invites
+            // the owner to delete the helpers, so un-retiring a read points it
+            // at nothing, and a pause set through LocalSky after the migration
+            // reads as no pause. The pass is disarmed for the life of the
+            // process, so nothing re-marks until a restart.
+            let mut carried = false;
+            if let Some(prev) = prev_cfg.as_ref() {
+                for h in &prev.ha_adoption {
+                    if !cfg.ha_adoption.iter().any(|x| x.entity == h.entity) {
+                        cfg.ha_adoption.push(h.clone());
+                        carried = true;
+                    }
+                }
+                for id in &prev.seeded_source_ids {
+                    if !cfg.seeded_source_ids.contains(id) {
+                        cfg.seeded_source_ids.push(id.clone());
+                        carried = true;
+                    }
+                }
+            }
+            if carried {
+                // Best effort: the in-memory cfg below is what the policy swap
+                // and the response use either way, so a failed write degrades
+                // to the pre-carry behavior on the NEXT boot rather than on
+                // this request.
+                if let Err(e) = crate::ports::config_store::ConfigStore::save(&*store, &cfg).await {
+                    tracing::warn!(error = %e, "rollback: could not persist the carried migration ledger");
+                }
+            }
             // A rollback REPLACES the live config, so hot-reload the tunables to
             // the restored values and flag any boot-only residue, exactly like a
             // PUT. Without this a rollback would also "apply on next restart".
@@ -2164,6 +2268,179 @@ async fn post_rollback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─────────────────────────────────────────────────────────────
+    // `ha_adoption` is a migration LEDGER, not a tunable. Every whole-config
+    // write path has to carry it forward: a body that omits the key would
+    // otherwise persist a config with no markers, arc-swap a policy whose
+    // `ha_read_retired` is false for all seven, and put every retired read
+    // back on helpers the migration notice invited the owner to delete. The
+    // pass is disarmed for the life of the process, so nothing repairs it
+    // until a restart.
+    // ─────────────────────────────────────────────────────────────
+
+    fn ledger_dir(tag: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("localsky-cfg-ledger-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn marker(entity: &str) -> crate::ha::snapshot::HaAdoptedHelper {
+        crate::ha::snapshot::HaAdoptedHelper {
+            entity: entity.to_string(),
+            outcome: "adopted".into(),
+            target: crate::ha_adopt::target_of(entity).into(),
+            adopted_value: Some("on".into()),
+            observed_value: None,
+            previous_value: Some("off".into()),
+            epoch: 1_780_000_000,
+        }
+    }
+
+    /// A minimally valid config with the pass already committed.
+    async fn adopted_store(tag: &str) -> (Arc<FileConfigStore>, Config) {
+        let store = Arc::new(FileConfigStore::new(ledger_dir(tag).join("localsky.toml")));
+        let mut cfg = Config::default();
+        cfg.deployment.location.lat = 30.07;
+        cfg.deployment.location.lon = -81.47;
+        cfg.deployment.display_name = "Test".into();
+        for id in crate::ha_adopt::ENTITIES {
+            cfg.ha_adoption.push(marker(id));
+        }
+        cfg.seeded_source_ids.push("nws".into());
+        crate::ports::config_store::ConfigStore::save(&*store, &cfg)
+            .await
+            .unwrap();
+        (store, cfg)
+    }
+
+    #[tokio::test]
+    async fn a_settings_save_that_omits_the_adoption_ledger_does_not_erase_it() {
+        let (store, cfg) = adopted_store("put-json").await;
+        // The hazard shape: a client that round-trips the config through its
+        // own model and drops the key it does not know about.
+        let mut body = serde_json::to_value(&cfg).unwrap();
+        body.as_object_mut().unwrap().remove("ha_adoption");
+        body.as_object_mut().unwrap().remove("seeded_source_ids");
+        assert!(body.get("ha_adoption").is_none());
+
+        let resp = put_config(
+            State(ConfigApiState::store_only(store.clone())),
+            Query(ConfigSaveParams::default()),
+            Json(body),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let after = crate::ports::config_store::ConfigStore::load(&*store)
+            .await
+            .unwrap();
+        assert_eq!(
+            after.ha_adoption.len(),
+            crate::ha_adopt::ENTITIES.len(),
+            "the ledger is server-owned and survives a body that omits it"
+        );
+        let policy = crate::ha::WateringPolicy::from_config(&after);
+        for id in crate::ha_adopt::ENTITIES {
+            assert!(policy.ha_read_retired(id), "{id} went live again");
+        }
+        assert!(
+            after.seeded_source_ids.contains(&"nws".to_string()),
+            "the seeding ledger is server-owned too, or the next boot re-adds \
+             a source the owner deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_raw_toml_save_with_no_adoption_block_does_not_erase_it() {
+        let (store, cfg) = adopted_store("put-raw").await;
+        let mut stripped = cfg.clone();
+        stripped.ha_adoption.clear();
+        stripped.seeded_source_ids.clear();
+        let text = toml::to_string_pretty(&stripped).unwrap();
+        assert!(!text.contains("ha_adoption"));
+        assert!(!text.contains("seeded_source_ids"));
+
+        let resp = put_raw_toml(
+            State(ConfigApiState::store_only(store.clone())),
+            Query(ConfigSaveParams::default()),
+            text,
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let after = crate::ports::config_store::ConfigStore::load(&*store)
+            .await
+            .unwrap();
+        assert_eq!(after.ha_adoption.len(), crate::ha_adopt::ENTITIES.len());
+        assert!(after.seeded_source_ids.contains(&"nws".to_string()));
+    }
+
+    // A rollback to a pre-adoption snapshot must not un-retire the reads: the
+    // notice tells the owner the helpers are inert and invites deleting them,
+    // so pointing a read back at one points it at nothing. The values it
+    // rolls back are restored; the ledger rides across.
+    #[tokio::test]
+    async fn a_rollback_to_a_pre_adoption_snapshot_keeps_the_ledger() {
+        let store = Arc::new(FileConfigStore::new(
+            ledger_dir("rollback").join("localsky.toml"),
+        ));
+        let mut before = Config::default();
+        before.deployment.location.lat = 30.07;
+        before.deployment.location.lon = -81.47;
+        before.deployment.display_name = "Test".into();
+        before.engine.skip_rules.max_wind_mph = 10.0;
+        crate::ports::config_store::ConfigStore::save(&*store, &before)
+            .await
+            .unwrap();
+
+        // The pass runs: thresholds move, markers land, and the save
+        // snapshots the pre-adoption file.
+        let mut after = before.clone();
+        after.engine.skip_rules.max_wind_mph = 12.0;
+        for id in crate::ha_adopt::ENTITIES {
+            after.ha_adoption.push(marker(id));
+        }
+        after.seeded_source_ids.push("nws".into());
+        crate::ports::config_store::ConfigStore::save(&*store, &after)
+            .await
+            .unwrap();
+
+        let snaps = crate::ports::config_store::ConfigStore::list_snapshots(&*store)
+            .await
+            .unwrap();
+        let ts = snaps
+            .first()
+            .expect("a pre-adoption snapshot exists")
+            .version;
+
+        let resp = post_rollback(
+            State(ConfigApiState::store_only(store.clone())),
+            Query(RollbackQuery { to: None }),
+            Some(Json(RollbackBody { ts })),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let restored = crate::ports::config_store::ConfigStore::load(&*store)
+            .await
+            .unwrap();
+        assert_eq!(
+            restored.engine.skip_rules.max_wind_mph, 10.0,
+            "the rollback still restores the values it was asked for"
+        );
+        assert_eq!(
+            restored.ha_adoption.len(),
+            crate::ha_adopt::ENTITIES.len(),
+            "but the migration ledger is not a value to roll back"
+        );
+        assert!(restored.seeded_source_ids.contains(&"nws".to_string()));
+    }
 
     #[test]
     fn cloud_source_emitting_current_is_tier_cloud_not_forecast() {
@@ -3703,6 +3980,25 @@ mod tests {
         // Sessions + budget.
         apply_zone_field(&mut z, "sessions_per_week", &serde_json::json!(3)).unwrap();
         assert_eq!(z.sessions_per_week, Some(3));
+        // 1..=7 is the range the allocator's spacing gate can resolve: it
+        // paces at floor(7/sessions) days, so 8 gives a 0 day interval and
+        // stops holding a zone that already watered today. Both ends of the
+        // range are valid; outside it the write is refused and the stored
+        // value is untouched.
+        apply_zone_field(&mut z, "sessions_per_week", &serde_json::json!(1)).unwrap();
+        apply_zone_field(&mut z, "sessions_per_week", &serde_json::json!(7)).unwrap();
+        assert_eq!(z.sessions_per_week, Some(7));
+        assert!(apply_zone_field(&mut z, "sessions_per_week", &serde_json::json!(8)).is_err());
+        assert!(apply_zone_field(&mut z, "sessions_per_week", &serde_json::json!(0)).is_err());
+        assert_eq!(
+            z.sessions_per_week,
+            Some(7),
+            "a refused write changes nothing"
+        );
+        // Null still clears the override.
+        apply_zone_field(&mut z, "sessions_per_week", &serde_json::Value::Null).unwrap();
+        assert_eq!(z.sessions_per_week, None);
+        apply_zone_field(&mut z, "sessions_per_week", &serde_json::json!(3)).unwrap();
         apply_zone_field(&mut z, "weekly_budget_in", &serde_json::json!(1.9)).unwrap();
         assert_eq!(z.weekly_budget_in, Some(1.9));
         // Run limit (the check A cap-primary apply); null restores the default.

@@ -93,8 +93,12 @@ pub struct ZoneBalanceSummary {
 }
 
 /// Convenience: assemble a `ZoneBalanceSummary` from species + soil +
-/// current state. Used by the scheduler to render dashboard tiles and
-/// to feed the controller dispatch logic.
+/// current state.
+///
+/// NOT YET WIRED: no live caller. The scheduler renders its tiles and
+/// dispatches from the weekly water balance (`engine::budget`), not from
+/// this bucket. See
+/// docs/src/irrigation-engine.md#the-soil-depletion-bucket-for-later.
 pub fn summarize(
     species: GrassSpecies,
     soil: SoilTexture,

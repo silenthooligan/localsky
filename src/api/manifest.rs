@@ -28,7 +28,19 @@ use crate::ports::config_store::ConfigStore;
 /// soil moisture/temperature/EC/battery quartet (the zone must have a
 /// soil probe configured or live-reporting), and water_level_pct (the
 /// controller must report the capability).
-pub const MANIFEST_SCHEMA_VERSION: &str = "1.4";
+/// 1.5 (additive): the same rule extended to the per-zone
+/// `<slug>_soil_bucket` sensor. Its only producer was a Home Assistant
+/// entity the engine no longer reads, so `bucket_mm` is absent and the
+/// descriptor is not published. The per-zone `<slug>_run_today` sensor is
+/// gated the same way on `today_run_minutes`, which nothing produces, so it
+/// is not published either.
+/// 1.6 (additive): `min`/`max`/`step` on `number` descriptors, so the
+/// integration builds the three threshold entities on the range the server
+/// enforces rather than on the Home Assistant `number` platform defaults. An
+/// integration that does not read them builds from its own limits, and a
+/// write outside 0..50 mph, 20..70 F or 0..10 in reaches the server and is
+/// answered 400.
+pub const MANIFEST_SCHEMA_VERSION: &str = "1.6";
 
 /// One HA entity descriptor. HACS reads `platform` + `id` + `name` +
 /// `snapshot`/`path` to know where to fetch state from the coordinator,
@@ -76,6 +88,17 @@ pub struct EntityDescriptor {
     /// Absent = integration infers from `snapshot` (pre-1.15 behavior).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<&'static str>,
+    /// Accepted range and increment for a writable `number`. Filled from the
+    /// single source of truth the write path checks against
+    /// (`ha_adopt::threshold_range`), so the entity the integration builds
+    /// cannot offer a value `POST /action set_threshold` would refuse. Absent
+    /// on every non-`number` descriptor, and on an older schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<f64>,
 }
 
 /// Top-level manifest. Returned by GET /api/v1/sensors/manifest.
@@ -380,6 +403,7 @@ fn push_tempest_weather(out: &mut Vec<EntityDescriptor>, has_station: bool, has_
             icon: *icon,
             zone_slug: None,
             group: None,
+            ..Default::default()
         });
     }
     // Wet bulb, wind lull, and rain-last-minute are computed ONLY by the
@@ -432,6 +456,7 @@ fn push_tempest_weather(out: &mut Vec<EntityDescriptor>, has_station: bool, has_
                 icon: None,
                 zone_slug: None,
                 group: None,
+                ..Default::default()
             });
         }
     }
@@ -453,6 +478,7 @@ fn push_tempest_weather(out: &mut Vec<EntityDescriptor>, has_station: bool, has_
             icon: None,
             zone_slug: None,
             group: None,
+            ..Default::default()
         });
     }
     // Battery is a Tempest-specific live-station scalar. On a cloud-only or
@@ -474,6 +500,7 @@ fn push_tempest_weather(out: &mut Vec<EntityDescriptor>, has_station: bool, has_
             icon: None,
             zone_slug: None,
             group: None,
+            ..Default::default()
         });
     }
 }
@@ -505,6 +532,7 @@ fn push_irrigation_meta(
         icon: Some("mdi:water-check"),
         zone_slug: None,
         group: None,
+        ..Default::default()
     });
     out.push(EntityDescriptor {
         platform: "sensor",
@@ -518,6 +546,7 @@ fn push_irrigation_meta(
         icon: Some("mdi:tooltip-text"),
         zone_slug: None,
         group: None,
+        ..Default::default()
     });
     out.push(EntityDescriptor {
         platform: "sensor",
@@ -531,6 +560,7 @@ fn push_irrigation_meta(
         icon: Some("mdi:thermometer-alert"),
         zone_slug: None,
         group: None,
+        ..Default::default()
     });
     // Water level is a controller readback only OpenSprinkler-class hardware
     // reports; ungated it registered for every irrigation install (the
@@ -549,6 +579,7 @@ fn push_irrigation_meta(
             icon: Some("mdi:water-percent"),
             zone_slug: None,
             group: None,
+            ..Default::default()
         });
     }
     // Sticky global override (auto/skip/run), read-only in HA. Set it from the
@@ -566,6 +597,7 @@ fn push_irrigation_meta(
         icon: Some("mdi:tune"),
         zone_slug: None,
         group: None,
+        ..Default::default()
     });
 }
 
@@ -603,6 +635,10 @@ fn push_thresholds(out: &mut Vec<EntityDescriptor>, has_irrigation: bool) {
         ),
     ];
     for (id, name, field, unit, icon) in defs {
+        // The bound comes from the same function the write path checks
+        // against, so the entity and the server cannot drift into a slider
+        // that offers a value the API answers 400 to.
+        let range = crate::ha_adopt::threshold_range(id);
         out.push(EntityDescriptor {
             zone_slug: None,
             group: None,
@@ -615,6 +651,9 @@ fn push_thresholds(out: &mut Vec<EntityDescriptor>, has_irrigation: bool) {
             device_class: None,
             state_class: None,
             icon: *icon,
+            min: range.map(|r| r.0),
+            max: range.map(|r| r.1),
+            step: crate::ha_adopt::threshold_step(id),
         });
     }
 }
@@ -635,6 +674,7 @@ fn push_forecast(out: &mut Vec<EntityDescriptor>, has_pop: bool) {
         icon: Some("mdi:water-sync"),
         zone_slug: None,
         group: Some("forecast"),
+        ..Default::default()
     });
     out.push(EntityDescriptor {
         platform: "sensor",
@@ -648,6 +688,7 @@ fn push_forecast(out: &mut Vec<EntityDescriptor>, has_pop: bool) {
         icon: Some("mdi:weather-sunny"),
         zone_slug: None,
         group: Some("forecast"),
+        ..Default::default()
     });
     out.push(EntityDescriptor {
         platform: "sensor",
@@ -661,6 +702,7 @@ fn push_forecast(out: &mut Vec<EntityDescriptor>, has_pop: bool) {
         icon: Some("mdi:weather-rainy"),
         zone_slug: None,
         group: Some("forecast"),
+        ..Default::default()
     });
     // Forecast peak wind gust today (Open-Meteo). The Tempest is wind-shadowed
     // and under-reads gusts, so the high-wind alert keys on this instead.
@@ -677,6 +719,7 @@ fn push_forecast(out: &mut Vec<EntityDescriptor>, has_pop: bool) {
         icon: Some("mdi:weather-windy"),
         zone_slug: None,
         group: Some("forecast"),
+        ..Default::default()
     });
     // Current probability of precipitation, merged from whichever forecast
     // source owns WeatherField::Pop (NWS, Pirate Weather, ...). It rides the
@@ -707,6 +750,7 @@ fn push_forecast(out: &mut Vec<EntityDescriptor>, has_pop: bool) {
             icon: Some("mdi:weather-rainy"),
             zone_slug: None,
             group: Some("forecast"),
+            ..Default::default()
         });
     }
 }
@@ -732,6 +776,7 @@ fn push_provenance_and_flow(out: &mut Vec<EntityDescriptor>, has_flow: bool, has
         icon: Some("mdi:transit-connection-variant"),
         zone_slug: None,
         group: None,
+        ..Default::default()
     });
     // Which source currently drives the forecast.
     out.push(EntityDescriptor {
@@ -746,6 +791,7 @@ fn push_provenance_and_flow(out: &mut Vec<EntityDescriptor>, has_flow: bool, has
         icon: Some("mdi:weather-partly-cloudy"),
         zone_slug: None,
         group: Some("forecast"),
+        ..Default::default()
     });
     // Flow rate + cumulative flow today (a flow meter on a controller or a
     // standalone pulse meter). Gated on a flow CAPABILITY actually being
@@ -765,6 +811,7 @@ fn push_provenance_and_flow(out: &mut Vec<EntityDescriptor>, has_flow: bool, has
             icon: Some("mdi:water-pump"),
             zone_slug: None,
             group: None,
+            ..Default::default()
         });
         out.push(EntityDescriptor {
             platform: "sensor",
@@ -778,6 +825,7 @@ fn push_provenance_and_flow(out: &mut Vec<EntityDescriptor>, has_flow: bool, has
             icon: Some("mdi:water"),
             zone_slug: None,
             group: None,
+            ..Default::default()
         });
     }
     // Leaf wetness (Davis WLL soil/leaf, Ecowitt WH35, agronomic probes).
@@ -795,6 +843,7 @@ fn push_provenance_and_flow(out: &mut Vec<EntityDescriptor>, has_flow: bool, has
             icon: Some("mdi:leaf"),
             zone_slug: None,
             group: None,
+            ..Default::default()
         });
     }
 }
@@ -871,20 +920,26 @@ fn push_zone_entities(
             ..Default::default()
         });
 
-        // Soil bucket (LocalSky engine state in mm)
-        out.push(EntityDescriptor {
-            platform: "sensor",
-            id: format!("{slug}_soil_bucket"),
-            name: format!("{pretty} soil bucket"),
-            snapshot: "irrigation",
-            path: vec!["bucket_mm".into()],
-            unit: Some("mm"),
-            state_class: Some("measurement"),
-            icon: Some("mdi:water-percent"),
-            zone_slug: Some(slug.clone()),
-            group: None,
-            ..Default::default()
-        });
+        // Soil bucket (mm). Same capability gate the four probe-backed
+        // soil entities get below: published only when a model on this
+        // install actually produced a deficit. No model does today, so
+        // this registers nothing rather than a per-zone sensor that would
+        // read unavailable forever.
+        if zone.bucket_mm.is_some() {
+            out.push(EntityDescriptor {
+                platform: "sensor",
+                id: format!("{slug}_soil_bucket"),
+                name: format!("{pretty} soil bucket"),
+                snapshot: "irrigation",
+                path: vec!["bucket_mm".into()],
+                unit: Some("mm"),
+                state_class: Some("measurement"),
+                icon: Some("mdi:water-percent"),
+                zone_slug: Some(slug.clone()),
+                group: None,
+                ..Default::default()
+            });
+        }
 
         // The four probe-backed soil entities publish only for zones that
         // actually have a soil probe (configured or live-reporting). On a
@@ -974,20 +1029,26 @@ fn push_zone_entities(
             ..Default::default()
         });
 
-        // Today's accumulated run minutes
-        out.push(EntityDescriptor {
-            platform: "sensor",
-            id: format!("{slug}_run_today"),
-            name: format!("{pretty} run today"),
-            snapshot: "irrigation",
-            path: vec!["today_run_minutes".into()],
-            unit: Some("min"),
-            device_class: Some("duration"),
-            state_class: Some("total_increasing"),
-            zone_slug: Some(slug.clone()),
-            group: None,
-            ..Default::default()
-        });
+        // Today's accumulated run minutes. Same capability gate the soil
+        // bucket gets above: published only when something on this install
+        // actually produced the figure. Nothing does, so this registers
+        // nothing rather than a `total_increasing` sensor that records a
+        // fabricated 0 into Home Assistant's long-term statistics forever.
+        if zone.today_run_minutes.is_some() {
+            out.push(EntityDescriptor {
+                platform: "sensor",
+                id: format!("{slug}_run_today"),
+                name: format!("{pretty} run today"),
+                snapshot: "irrigation",
+                path: vec!["today_run_minutes".into()],
+                unit: Some("min"),
+                device_class: Some("duration"),
+                state_class: Some("total_increasing"),
+                zone_slug: Some(slug.clone()),
+                group: None,
+                ..Default::default()
+            });
+        }
 
         // Running binary_sensor
         out.push(EntityDescriptor {
@@ -1022,6 +1083,7 @@ fn push_diagnostics(out: &mut Vec<EntityDescriptor>, has_irrigation: bool) {
         icon: None,
         zone_slug: None,
         group: None,
+        ..Default::default()
     });
     // "Irrigation suspended" tracks the IU/skip-check suspension state, which
     // only exists when irrigation is configured. On a weather-only install it
@@ -1040,6 +1102,7 @@ fn push_diagnostics(out: &mut Vec<EntityDescriptor>, has_irrigation: bool) {
             icon: None,
             zone_slug: None,
             group: None,
+            ..Default::default()
         });
         // The forced-run safety signal: when a sticky Force override ran past a
         // hard guard (freeze / wind / restriction), this names the guard it
@@ -1058,6 +1121,7 @@ fn push_diagnostics(out: &mut Vec<EntityDescriptor>, has_irrigation: bool) {
             icon: Some("mdi:shield-alert"),
             zone_slug: None,
             group: None,
+            ..Default::default()
         });
     }
 }
@@ -1070,6 +1134,38 @@ mod tests {
     fn schema_version_is_semver() {
         let parts: Vec<&str> = MANIFEST_SCHEMA_VERSION.split('.').collect();
         assert_eq!(parts.len(), 2, "expected MAJOR.MINOR for schema_version");
+    }
+
+    // The integration builds the three threshold `number` entities from these
+    // descriptors, and the server answers 400 outside the same range. Without
+    // the bound on the descriptor, an automation repointed at the entity the
+    // migration notice names can write a value the entity accepts and the
+    // server refuses, with nothing on screen.
+    #[test]
+    fn a_threshold_number_carries_the_range_the_write_path_enforces() {
+        let mut out = Vec::new();
+        push_thresholds(&mut out, true);
+        assert_eq!(out.len(), 3);
+        for d in &out {
+            assert_eq!(d.platform, "number");
+            let (lo, hi) = crate::ha_adopt::threshold_range(&d.id)
+                .unwrap_or_else(|| panic!("no range for published threshold {}", d.id));
+            assert_eq!(d.min, Some(lo), "{}", d.id);
+            assert_eq!(d.max, Some(hi), "{}", d.id);
+            assert_eq!(d.step, crate::ha_adopt::threshold_step(&d.id), "{}", d.id);
+            assert!(d.step.is_some(), "{} needs a step", d.id);
+        }
+    }
+
+    // Only a writable number carries a bound; everything else stays the shape
+    // it has always had, so the field is additive on the wire.
+    #[test]
+    fn a_sensor_descriptor_carries_no_range() {
+        let mut out = Vec::new();
+        push_tempest_weather(&mut out, true, true);
+        assert!(out
+            .iter()
+            .all(|d| d.min.is_none() && d.max.is_none() && d.step.is_none()));
     }
 
     #[test]
@@ -1274,10 +1370,24 @@ mod tests {
         ] {
             assert!(ids.contains(&id), "soil zone missing {id}");
         }
-        // Engine-state and runtime entities publish for every zone either
-        // way (the bucket is engine math, not a probe reading).
-        assert!(ids.contains(&"front_soil_bucket"));
+        // Runtime entities publish for every zone either way.
         assert!(ids.contains(&"front_planned_run"));
+        // The soil bucket takes the same capability gate: absent on the
+        // snapshot means no model computed one, so no descriptor. Nothing
+        // produces one today, which is exactly why it must not register.
+        assert!(
+            !ids.contains(&"front_soil_bucket"),
+            "an absent bucket must not register a permanently empty sensor"
+        );
+        let with_bucket = vec![ZoneState {
+            slug: "front".into(),
+            name: "Front".into(),
+            bucket_mm: Some(-12.5),
+            ..Default::default()
+        }];
+        let mut bucketed = Vec::new();
+        push_zone_entities(&mut bucketed, &with_bucket, Some(&soil));
+        assert!(bucketed.iter().any(|e| e.id == "front_soil_bucket"));
 
         // Config unreadable (None): fail open, soil publishes for every zone.
         let mut open = Vec::new();

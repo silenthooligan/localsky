@@ -191,7 +191,7 @@ pub fn SettingsAdvanced() -> impl IntoView {
                 <Toggle
                     checked=nerd_mode
                     label="Show raw engine math everywhere".to_string()
-                    helptext="When on, every irrigation panel surfaces ET0, ETc, bucket depth, Kc, MAD, available water, and root depth. Per-device, persisted to localStorage.".to_string()
+                    helptext="When on, the irrigation page shows the raw inputs behind the verdict: the forecast intelligence block, ET0 and rain for today and tomorrow with the heat multiplier, the advisory soil model, today's temperature, wind and humidity, and the full skip-check breakdown. Per-device, persisted to localStorage.".to_string()
                 />
             </Panel>
 

@@ -72,6 +72,71 @@ mod tests {
         assert_json_snapshot!("irrigation_v1", IrrigationSnapshot::default());
     }
 
+    /// The per-zone shape inside `zones[]`, which `irrigation_v1` cannot
+    /// reach: `IrrigationSnapshot::default()` carries an empty `zones`, so
+    /// the wire gate locked nothing about a zone until this test. Entry one
+    /// pins the honest-unknown nulls (`bucket_mm`, `math`,
+    /// `smart_suppressed`); entry two pins the populated `ZoneMath` and
+    /// `SmartSuppression` shapes. Guards the 1.25.0 delta specifically: a
+    /// refactor that reintroduces a bare `bucket_mm: 0.0`, or renames
+    /// `smart_suppressed`, has to fail here rather than ship green.
+    #[test]
+    fn irrigation_zone_v1_shape() {
+        use crate::ha::snapshot::{SmartSuppression, ZoneMath, ZoneState};
+        let zones = vec![
+            ZoneState {
+                slug: "front_yard".into(),
+                name: "Front Yard".into(),
+                ..Default::default()
+            },
+            ZoneState {
+                slug: "back_yard".into(),
+                name: "Back Yard".into(),
+                bucket_mm: Some(-12.5),
+                math: Some(ZoneMath {
+                    bucket_mm: Some(-12.5),
+                    kc: 0.85,
+                    throughput_mm_hr: 20.0,
+                    heat_mult: 1.1,
+                    capture_eff: 0.7,
+                    max_duration_seconds: 3600,
+                    scheduled_seconds: 1200,
+                    cap_binding: false,
+                    ..Default::default()
+                }),
+                smart_suppressed: Some(SmartSuppression {
+                    weekdays: vec![1, 3, 5],
+                    schedules: vec!["Morning soak".into()],
+                    active_today: true,
+                }),
+                ..Default::default()
+            },
+        ];
+        assert_json_snapshot!("irrigation_zone_v1", zones);
+    }
+
+    /// Round-trip for the two `#[serde(default)]` attributes the shape
+    /// snapshot alone cannot see: an older producer that emits neither key
+    /// must still deserialize, with the deficit and the suppression both
+    /// absent rather than defaulting to a fabricated zero.
+    #[test]
+    fn zone_bucket_and_suppression_default_when_absent() {
+        use crate::ha::snapshot::ZoneState;
+        let mut v = serde_json::to_value(ZoneState {
+            slug: "back_yard".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let obj = v.as_object_mut().unwrap();
+        obj.remove("bucket_mm");
+        obj.remove("smart_suppressed");
+        obj.remove("math");
+        let zone: ZoneState = serde_json::from_value(v).unwrap();
+        assert_eq!(zone.bucket_mm, None);
+        assert!(zone.smart_suppressed.is_none());
+        assert!(zone.math.is_none());
+    }
+
     /// Flow surfacing: the snapshot must carry the controller's flow_meter
     /// capability flag and live flow_gpm reading. None (no meter) serializes
     /// as JSON null so non-flow setups render nothing; a real value (incl.

@@ -2,7 +2,7 @@
 
 A zone is one chunk of yard on one valve. LocalSky schedules each zone on
 its own: you describe the grass, the soil, and the area, and the engine
-computes the crop evapotranspiration (ETc), the soil-moisture bucket, and
+computes the crop evapotranspiration (ETc), the weekly water balance, and
 the runtime from there. Edit zones under Settings, then Zones; each save
 round-trips through the full config, so the engine picks up changes on the
 next tick.
@@ -78,10 +78,21 @@ just the fields above:
 - **Measured precip rate**: a catch-cup measurement in mm/hr. Leave blank
   to use the catalog default for the sprinkler type; measuring it improves
   runtime accuracy substantially.
+- **Max run time**: the longest single watering the zone may run, in
+  minutes. 60 unless you change it; every session is held to it.
+- **Weekly target** and **Sessions per week**: the two numbers that size
+  every run. The target is a gross depth in inches a week, rain included;
+  the sessions are how many mornings it is split across, 1 to 7, spaced
+  `floor(7 / sessions)` days apart. Leave either blank and LocalSky uses a
+  default inferred from the zone's name: 0.50 inches over 1 session for a
+  name containing shrub, garden or bed, 1.00 inches over 2 sessions
+  otherwise. The box shows the default in effect, and the zone list marks
+  a zone still watering on it. See the [weekly water
+  budget](water-budget.md).
 - **Soil moisture sensor** (optional): assign a probe to drive this zone's
   skip decision. The picker lists every discovered soil channel, both Home
-  Assistant entities and LocalSky-native sources. Blank means the engine
-  uses its modeled soil bucket only.
+  Assistant entities and LocalSky-native sources. Blank means the zone has no
+  measured soil gate; it waters on the weekly water balance alone.
 - **Healthy band low %** and **Saturation %**: the zone's soil thresholds.
   Below the low band the zone reads "dry" on the Sensors page; at or above
   the saturation percentage the zone skips watering.

@@ -58,6 +58,11 @@ pub struct ZoneBalanceInputs {
     /// cycle-soak segments and duplicate manual/observer rows count as
     /// one event).
     pub sessions_done: u32,
+    /// True when `weekly_budget_in` / `sessions_per_week` above are the
+    /// slug-inferred agronomic default rather than the operator's own
+    /// setting. Carried straight out on the `WaterBudget` so the UI can
+    /// say which zones are watering on a guess; it changes no math here.
+    pub target_inferred: bool,
 }
 
 /// Cross-zone inputs, computed once per tick by the assembly.
@@ -94,14 +99,26 @@ pub fn compute_zone(
     fc: &ForecastSnapshot,
 ) -> WaterBudget {
     use chrono::Datelike;
-    let sessions = zone.sessions_per_week.max(1);
+    // Clamped, not just floored at 1. The pacing below is
+    // floor(7/sessions) days, so anything above 7 gives a 0 day interval
+    // and the spacing gate stops holding a zone that already watered
+    // today. The config API rejects out-of-range values on the way in;
+    // this covers a file already on disk carrying one, which must not
+    // start double-watering just because it loads.
+    let sessions = zone.sessions_per_week.clamp(1, 7);
 
     // Forward context: next-24h rain for the defer gate, and the 7-day
     // probability-weighted total. The weighted total is wire-only
     // (`expected_rain_mm`, kept at its historical capture-adjusted
     // scaling for the external consumers that read it); the balance
     // itself never subtracts a whole-week forecast.
-    let next_24h_rain_in = fc.next_n_hours_precip_in(24);
+    //
+    // The defer gate reads the PROBABILITY-WEIGHTED next-24h depth, the
+    // same weighting the forward credit and the wire total use. It used a
+    // raw model sum, so a low-probability drizzle carried the full weight
+    // of certain rain against a 0.10 inch threshold and could zero every
+    // zone nearly every day in a convective climate.
+    let next_24h_rain_in = fc.next_n_hours_precip_weighted_in(24);
     let week_rain_weighted_in: f64 = fc
         .daily
         .iter()
@@ -210,8 +227,8 @@ pub fn compute_zone(
         (
             0,
             format!(
-                "deferred for forecast rain ({:.2}\" expected in the next 24h, threshold \
-                 {:.2}\")",
+                "deferred for forecast rain ({:.2}\" expected in the next 24h weighted by \
+                 probability, threshold {:.2}\")",
                 next_24h_rain_in, g.session_rain_defer_in
             ),
         )
@@ -259,6 +276,7 @@ pub fn compute_zone(
         bias_multiplier,
         bias_sample_count,
         remaining_sessions,
+        target_inferred: zone.target_inferred,
     }
 }
 
@@ -305,7 +323,35 @@ mod tests {
             last_run_epoch: 0,
             applied_trailing_mm: 0.0,
             sessions_done: 0,
+            target_inferred: false,
         }
+    }
+
+    /// The spacing gate paces sessions at floor(7/sessions) days. Above 7
+    /// sessions a week that floors to 0 days, and `days_since_last_run < 0`
+    /// is never true, so a zone that already watered TODAY gets planned
+    /// again. The config API refuses such a value, but a file already on
+    /// disk carrying one must not start double-watering just because it
+    /// loads, so the engine clamps too.
+    #[test]
+    fn sessions_above_seven_cannot_collapse_the_spacing_gate() {
+        let mut z = zone(1.0, 14);
+        // Watered today already.
+        z.last_run_epoch = now_epoch();
+        z.sessions_done = 1;
+        let b = compute_zone(&z, &globals(0.0, "gauge"), &ForecastSnapshot::default());
+        assert_eq!(
+            b.today_seconds, 0,
+            "a zone that watered today must not be re-planned today"
+        );
+        assert!(b.today_reason.contains("spaced"), "{}", b.today_reason);
+        // The clamp is reported honestly: the reason names 7, the value the
+        // engine actually paced on, not the 14 that was configured.
+        assert!(
+            b.today_reason.contains("7 per week"),
+            "the reason names the clamped rate: {}",
+            b.today_reason
+        );
     }
 
     fn globals(observed_mm: f64, source: &str) -> BalanceGlobals {
@@ -484,6 +530,67 @@ mod tests {
         let g_covered = globals(30.0, "gauge");
         let b = compute_zone(&z, &g_covered, &fc);
         assert!(b.today_reason.contains("covered"), "{}", b.today_reason);
+    }
+
+    /// The defer gate weighs forecast rain by probability, the same way
+    /// the forward credit and the wire's weekly total already do. 0.24"
+    /// of raw model rain at 30% probability is 0.072" of expected water:
+    /// under the 0.10" threshold, so the session runs. The raw sum this
+    /// gate used to read would have zeroed it.
+    #[test]
+    fn defer_gate_weighs_forecast_rain_by_probability() {
+        let now = now_epoch();
+        let mut fc = fc_with_daily(&[0.0; 7]);
+        fc.hourly = (0..24)
+            .map(|h| HourlyEntry {
+                time_epoch: now + h * 3600,
+                precip_in: 0.01, // 0.24" raw over 24h
+                precip_probability: Some(30),
+                ..Default::default()
+            })
+            .collect();
+        let z = zone(1.0, 2);
+        let g = globals(0.0, "none");
+        let b = compute_zone(&z, &g, &fc);
+        assert!(b.today_seconds > 0, "{}", b.today_reason);
+        assert!(b.today_reason.contains("session"), "{}", b.today_reason);
+
+        // Same depth at 90% probability is 0.216" expected: over the
+        // threshold, so it defers.
+        for h in fc.hourly.iter_mut() {
+            h.precip_probability = Some(90);
+        }
+        let b = compute_zone(&z, &g, &fc);
+        assert_eq!(b.today_seconds, 0);
+        assert!(b.today_reason.contains("deferred"), "{}", b.today_reason);
+    }
+
+    /// The configured threshold is what the gate compares against, not a
+    /// compile-time constant: the same forecast defers at 0.10" and runs
+    /// at 0.50".
+    #[test]
+    fn defer_threshold_is_the_configured_value() {
+        let now = now_epoch();
+        let mut fc = fc_with_daily(&[0.0; 7]);
+        fc.hourly = (0..24)
+            .map(|h| HourlyEntry {
+                time_epoch: now + h * 3600,
+                precip_in: 0.01, // 0.24" expected (no probability = full weight)
+                ..Default::default()
+            })
+            .collect();
+        let z = zone(1.0, 2);
+
+        let mut g = globals(0.0, "none");
+        g.session_rain_defer_in = SESSION_RAIN_DEFER_IN; // 0.10"
+        let b = compute_zone(&z, &g, &fc);
+        assert_eq!(b.today_seconds, 0);
+        assert!(b.today_reason.contains("deferred"), "{}", b.today_reason);
+
+        g.session_rain_defer_in = 0.50;
+        let b = compute_zone(&z, &g, &fc);
+        assert!(b.today_seconds > 0, "{}", b.today_reason);
+        assert!(b.today_reason.contains("session"), "{}", b.today_reason);
     }
 
     /// The cap still clamps the session and flags it.

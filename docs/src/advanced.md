@@ -9,11 +9,12 @@ anyone else's view.
 
 ## Nerd mode
 
-Nerd mode surfaces the raw engine math everywhere. With it on, every
-irrigation panel shows the numbers behind the verdict instead of just the
-conclusion: reference evapotranspiration (ET0), crop evapotranspiration
-(ETc), soil bucket depth, the species crop coefficient (Kc), the
-management allowed depletion (MAD), available water, and root depth.
+Nerd mode shows the raw inputs behind the verdict on the irrigation page.
+With it on, the forecast panel adds its forecast intelligence block,
+today's and tomorrow's reference evapotranspiration (ET0) and rain with the
+heat multiplier, the advisory soil model, and today's temperature range,
+peak wind and mean humidity, and the skip check shows its full breakdown
+rather than the summary.
 
 It is the right setting when you want to understand or audit a decision,
 or when you are tuning species and soil settings and want to watch the

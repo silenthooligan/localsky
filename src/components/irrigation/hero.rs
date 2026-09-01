@@ -881,12 +881,17 @@ fn HeroStats(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             None => "-".to_string(),
         };
         let water_unit = if water_empty { "" } else { "%" };
-        // Soil deficit is the mean of each zone's bucket, in MILLIMETERS.
-        let deficit_empty = s.zones.is_empty();
+        // Soil deficit is the mean of the zones that HAVE one, in
+        // MILLIMETERS. No zone has one unless a model computed it, so an
+        // all-absent set renders a dash rather than averaging nothing into
+        // a confident 0.00 (the guard used to be "are there any zones",
+        // which on a seven-zone yard printed a fabricated zero).
+        let measured: Vec<f64> = s.zones.iter().filter_map(|z| z.bucket_mm).collect();
+        let deficit_empty = measured.is_empty();
         let deficit = if deficit_empty {
             "-".to_string()
         } else {
-            let avg_mm = s.zones.iter().map(|z| z.bucket_mm).sum::<f64>() / s.zones.len() as f64;
+            let avg_mm = measured.iter().sum::<f64>() / measured.len() as f64;
             depth_value_mm(avg_mm, p)
         };
         // No unit glyph for the placeholder so "-" reads clean.

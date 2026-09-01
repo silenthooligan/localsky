@@ -389,6 +389,49 @@ pub fn override_active_today(schedules: &[ManualSchedule], zone_slug: &str, week
     })
 }
 
+/// Every enabled `Override` schedule bound to `zone_slug`, reduced to the
+/// weekdays it suppresses smart dispatch on and the names doing it.
+/// `None` when nothing suppresses the zone. Purely descriptive: the
+/// suppression is still decided by `override_active_today`, this only
+/// gives the UI something to say instead of an unexplained zero.
+pub fn override_suppression(
+    schedules: &[ManualSchedule],
+    zone_slug: &str,
+    today_weekday: u8,
+) -> Option<crate::ha::snapshot::SmartSuppression> {
+    let mut weekdays: Vec<u8> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    for s in schedules.iter().filter(|s| {
+        s.enabled
+            && s.zone_slug == zone_slug
+            && !s.weekdays.is_empty()
+            && matches!(s.mode, crate::config::schema::ManualMode::Override)
+    }) {
+        for d in &s.weekdays {
+            if *d <= 6 && !weekdays.contains(d) {
+                weekdays.push(*d);
+            }
+        }
+        let label = if s.name.is_empty() {
+            s.id.clone()
+        } else {
+            s.name.clone()
+        };
+        if !names.contains(&label) {
+            names.push(label);
+        }
+    }
+    if weekdays.is_empty() {
+        return None;
+    }
+    weekdays.sort_unstable();
+    Some(crate::ha::snapshot::SmartSuppression {
+        active_today: weekdays.contains(&today_weekday),
+        weekdays,
+        schedules: names,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

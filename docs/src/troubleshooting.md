@@ -133,9 +133,22 @@ Nothing dramatic, by design. When an enabled source crosses the offline threshol
 
 ### Controller was offline when watering should have started
 
-Runs do not queue. When the morning scheduler dispatches a zone and the controller call fails, LocalSky logs a warning (`smart morning: controller dispatch failed`), abandons the rest of that zone's segments, and moves on to the next zone. There is no retry later in the day; the next attempt is tomorrow's window. Check `docker logs` around your dispatch time and fix the controller's reachability (power, IP change, password).
+Runs do not queue. When the morning scheduler dispatches a zone and the controller call fails, LocalSky logs a warning (`smart morning: controller dispatch failed`), abandons the rest of that zone's segments, moves on to the next zone, and records the failure for that zone in History with the controller's own error text. As long as LocalSky itself keeps running there is no retry later in the day; the next attempt is tomorrow's window. Check `docker logs` around your dispatch time and fix the controller's reachability (power, IP change, password).
 
-Different case: if **LocalSky itself** was down through the morning window, it catches up at boot. Within a 2 hour grace period after the planned finish time it dispatches a late run (if the verdict is still "run"); past that, it records a skipped row with the reason "Missed dispatch window (LocalSky offline)" so the history stays honest.
+If LocalSky **restarts** while the watering window is still open (a redeploy, an out-of-memory kill, a host reboot) it re-checks the morning at boot, and the outcome depends on how far the sequence got:
+
+- **Every zone's dispatch failed.** Every row for the morning is a dispatch failure, so the morning does not count as handled. If the grace period below has not expired and the controller is reachable again, the catch-up waters. A morning that mixes a failure with a zone the engine itself decided to skip counts as handled: the skip row is a decision about the yard, and the refused zones wait for tomorrow.
+- **Two or more zones watered before the failure.** The morning counts as handled and the zones that never ran wait for tomorrow. On a large yard this is the common shape of a controller that dies partway through: the zones already watered are what stop a restart from re-running the whole sequence on top of water already on the ground, and the price is that the dry zones are not picked up until the next window. Run them by hand from the zone page if you do not want to wait.
+
+A zone the controller currently reports as running is skipped by the morning dispatcher, on the scheduled path and the catch-up path alike, so a catch-up cannot re-open a valve that is already open. A run you start by hand, from the zone page or from a manual schedule, is not gated this way: it commands the zone on whatever the controller currently reports.
+
+Different case: if **LocalSky itself** was down through the morning window, it catches up at boot. Within a 2 hour grace period after the planned finish time it dispatches a late run (if the verdict is still "run"); past that, it records a skipped row with the reason "Missed dispatch window (LocalSky offline)" so the history stays complete.
+
+### A smart-morning run is missing from History after a restart
+
+A smart-morning run is written to History when the zone stops, so a restart between a zone's start and its stop loses that record. The water reached the ground; History will not show it, and the weekly water balance will not count it, so the zone may come up for watering sooner than it needed to.
+
+Runs you start by hand and runs from a manual schedule behave differently: LocalSky writes those to History at dispatch, at their full planned length, so a restart never loses them. It does mean the opposite error. LocalSky closes every valve at boot, so a hand-started or scheduled run cut short by a restart is still credited in full, and the zone may come up for watering later than it needed to. If you need to restart LocalSky, doing it outside your watering window avoids both.
 
 ### Zone is running but the dashboard disagrees (or vice versa)
 
@@ -150,13 +163,43 @@ Before trusting a new setup with real valves, add a controller of kind `dry_run`
 
 ## Watering decisions
 
+### My zones started watering right after I upgraded to 0.7.22
+
+Expected, on a Home Assistant deployment. Until 0.7.22, run lengths there
+were sized by a Smart Irrigation entity and by nothing else, so an install
+without that HACS integration planned zero minutes on every zone and
+dispatched nothing. 0.7.22 sizes runs from LocalSky's own weekly water
+budget on every deployment, so those zones water for the first time on the
+first morning after the upgrade.
+
+If you never set a zone's weekly target, LocalSky infers one from the zone's
+name: 0.50 inches a week over one session for a zone whose name contains
+shrub, garden or bed, 1.00 inches over two sessions otherwise, each held to
+the zone's maximum run time. Open **Settings**, then **Zones**, open the zone
+and set **Weekly target** and **Sessions per week**; blank shows the inferred
+default in the box. Check **Max run time** there too. The zone list marks
+every zone still running on an inferred target. To hold everything while you
+decide, set **Rain delay** on the irrigation page.
+
 ### Why did my zone skip today?
 
 Every skip is recorded per zone with its reason. Open the zone's skip breakdown in the UI, or look at the run history. The full explanation of each threshold lives in [Skip thresholds explained](skip-breakdown.md), and the reporting views in [History and reporting](history.md).
 
-### Lots of skips in the first week
+### A zone never waters and the card just says a number
 
-Expected. Each zone's soil bucket starts full (zero depletion, soil assumed at field capacity). The engine will not water until evapotranspiration draws the bucket down past the allowed depletion for your soil and species, which typically takes days. If you know the soil is actually dry on day one, run the zones manually once; the engine accounts for the applied water and the model converges from there.
+Open the zone card or the zone detail. A zone the weekly budget zeroed reads **ON HOLD** with the allocator's own sentence under it, naming which gate fired: the week is already covered by rain and prior watering, rain is forecast inside the next 24 hours, or the session spacing has not elapsed since the last run. That line is the answer; tune against it.
+
+Two settings decide the size: **Weekly target** (`weekly_budget_in`, the gross weekly target in inches including rain) and **Sessions per week** (`sessions_per_week`), both in the zone editor under Settings, then Zones. The rain-defer threshold is `engine.session_rain_defer_in`, default 0.10 inches over the next 24 forecast hours weighted by probability.
+
+### I added a manual schedule and smart watering stopped for good
+
+A manual schedule's mode defaults to **Override**, which stops smart watering for that zone on every day the schedule covers. The zone card and the schedule's own card in Settings both say so now, naming the days. Delete the schedule to hand the zone back to the engine. Switching it to **Floor** keeps the scheduled run as a minimum, but a Floor run is watering like any other: it counts against the weekly target and it resets the session-spacing clock, so the engine can only add on top once `floor(7 / sessions_per_week)` days have passed since the scheduled run. On a zone whose schedule fires as often as its own session cadence, such as a weekly schedule on a 1-session-a-week bed, that leaves no eligible day and the zone reads ON HOLD naming the spacing every day.
+
+A schedule's water still counts against the zone's weekly budget on the days the schedule does not cover, because it is water the zone received. A schedule that already delivers the weekly target therefore leaves the engine nothing to add. Lower the zone's Weekly target, or delete the schedule, if you want the engine sizing the week instead.
+
+### The soil Deficit reads a dash
+
+Correct. No model on any current install computes a per-zone soil deficit; the field's only producer was a Home Assistant Smart Irrigation entity. Rather than print a 0.00 nothing measured, LocalSky shows a dash and publishes no Home Assistant sensor for it. Run decisions come from the weekly water budget, which is visible and explains itself.
 
 ## Auth and reverse proxy
 

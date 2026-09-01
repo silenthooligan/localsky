@@ -9,12 +9,13 @@
 pub mod advisor;
 pub mod anomaly_banner;
 pub mod controls;
+pub mod default_budget_banner;
 pub mod forecast;
+pub mod ha_adoption_banner;
 pub mod hero;
 pub mod mobile;
 pub mod running_banner;
 pub mod verdict_strip;
-pub mod zone_math;
 
 use crate::components::ui::EmptyState;
 use crate::ha::snapshot::IrrigationSnapshot;
@@ -23,7 +24,9 @@ use leptos::tachys::view::any_view::IntoAny;
 
 use anomaly_banner::AnomalyBanner;
 use controls::{OverrideControl, RainDelayPanel, StopAllPanel};
+use default_budget_banner::DefaultBudgetBanner;
 use forecast::ForecastPanel;
+use ha_adoption_banner::HaAdoptionBanner;
 use hero::NextRunHero;
 use mobile::MobileIrrigation;
 use running_banner::RunningBanner;
@@ -123,6 +126,12 @@ pub fn IrrigationPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         // desktop; SCSS handles position differences.
         <RunningBanner snap/>
         <AnomalyBanner snap/>
+        // Zones about to water on a target inferred from their name. Quiet
+        // once every zone carries one the operator set, and dismissible.
+        <DefaultBudgetBanner snap/>
+        // The Home Assistant helpers LocalSky read for the last time, and
+        // what it uses instead. Quiet on every standalone install.
+        <HaAdoptionBanner snap/>
         {body}
     }
 }

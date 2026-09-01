@@ -85,6 +85,12 @@ pub enum PushEvent {
         zone_slug: String,
         minutes: u32,
     },
+    /// A Home Assistant deployment planned a run for zones whose weekly
+    /// target is inferred from the name rather than set. Sent once per
+    /// process, the first tick that plans one: those installs dispatched
+    /// nothing before 0.7.22, and an owner who never opens the UI has no
+    /// other way to hear that the valves are about to open.
+    InferredTargetsPlanned { zones: Vec<String> },
 }
 
 #[derive(Clone, Serialize)]
@@ -337,6 +343,24 @@ fn render_payload(ev: &PushEvent) -> PushPayload {
             tag: format!("cap-raised-{zone_slug}"),
             url: format!("/zones/{zone_slug}"),
         },
+        PushEvent::InferredTargetsPlanned { zones } => {
+            let n = zones.len();
+            let title = if n == 1 {
+                "1 zone waters on an inferred target".to_string()
+            } else {
+                format!("{n} zones water on inferred targets")
+            };
+            PushPayload {
+                title,
+                body: format!(
+                    "{}: the weekly target comes from the zone name because none is set. Set \
+                     Weekly target and Sessions per week under Settings, then Zones.",
+                    zones.join(", ")
+                ),
+                tag: "inferred-targets".to_string(),
+                url: "/settings/zones".to_string(),
+            }
+        }
     }
 }
 
@@ -556,6 +580,25 @@ fn mask_endpoint(endpoint: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inferred_targets_payload_names_the_zones_and_the_fields() {
+        let p = render_payload(&PushEvent::InferredTargetsPlanned {
+            zones: vec!["Back Yard".into(), "Side Bed".into()],
+        });
+        assert_eq!(p.title, "2 zones water on inferred targets");
+        assert!(p.body.starts_with("Back Yard, Side Bed:"), "{}", p.body);
+        assert!(
+            p.body.contains("Weekly target and Sessions per week"),
+            "{}",
+            p.body
+        );
+        assert_eq!(p.url, "/settings/zones");
+        let one = render_payload(&PushEvent::InferredTargetsPlanned {
+            zones: vec!["Back Yard".into()],
+        });
+        assert_eq!(one.title, "1 zone waters on an inferred target");
+    }
 
     #[test]
     fn run_cap_raised_payload_names_the_zone_and_deep_links_it() {

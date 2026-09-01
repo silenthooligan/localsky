@@ -1,0 +1,66 @@
+---
+source: src/api/snapshot_tests.rs
+expression: zones
+---
+[
+  {
+    "name": "Front Yard",
+    "slug": "front_yard",
+    "override_mode": "",
+    "hex": "",
+    "running": false,
+    "running_known": false,
+    "today_run_minutes": null,
+    "bucket_mm": null,
+    "planned_run_seconds": 0,
+    "last_run_epoch": 0,
+    "math": null,
+    "photo_url": null,
+    "verdict": null,
+    "soil_temp_f": null,
+    "soil_ec": null,
+    "soil_battery_pct": null,
+    "soil_suspect": null,
+    "smart_suppressed": null
+  },
+  {
+    "name": "Back Yard",
+    "slug": "back_yard",
+    "override_mode": "",
+    "hex": "",
+    "running": false,
+    "running_known": false,
+    "today_run_minutes": null,
+    "bucket_mm": -12.5,
+    "planned_run_seconds": 0,
+    "last_run_epoch": 0,
+    "math": {
+      "bucket_mm": -12.5,
+      "kc": 0.85,
+      "throughput_mm_hr": 20.0,
+      "heat_mult": 1.1,
+      "capture_eff": 0.7,
+      "raw_seconds": 0,
+      "max_duration_seconds": 3600,
+      "scheduled_seconds": 1200,
+      "cap_binding": false
+    },
+    "photo_url": null,
+    "verdict": null,
+    "soil_temp_f": null,
+    "soil_ec": null,
+    "soil_battery_pct": null,
+    "soil_suspect": null,
+    "smart_suppressed": {
+      "weekdays": [
+        1,
+        3,
+        5
+      ],
+      "schedules": [
+        "Morning soak"
+      ],
+      "active_today": true
+    }
+  }
+]

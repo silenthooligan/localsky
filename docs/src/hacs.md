@@ -104,7 +104,7 @@ Entities come from the server's sensor manifest, and since 0.7.14 the manifest o
 | Rain tomorrow probability | `sensor` | % |
 | Heat multiplier | `sensor` | engine's heat adjustment factor |
 | Water level | `sensor` | controller water level %; only for controllers that report one (OpenSprinkler) |
-| Max wind, Min temp, Rain skip | `number` | skip-threshold sliders (0-50 mph, 20-60 °F, 0-1 in; about 0-80 km/h, -7 to 16 °C, 0-25 mm). These sliders do not convert to HA's unit system; set them in imperial | 
+| Max wind, Min temp, Rain skip | `number` | skip-threshold sliders. The integration builds them at 0-50 mph, 20-60 °F and 0-1 in (about 0-80 km/h, -7 to 16 °C, 0-25 mm); LocalSky accepts 0-50 mph, 20-70 °F and 0-10 in, so every slider value is accepted. They do not convert to HA's unit system; set them in imperial | 
 | HA reachable | `binary_sensor` | connectivity diagnostic |
 | Irrigation suspended | `binary_sensor` | on while a pause is active |
 | Any zone running | `binary_sensor` | on while any zone runs |
@@ -115,14 +115,16 @@ Entities come from the server's sensor manifest, and since 0.7.14 the manifest o
 |---|---|---|
 | `valve.<zone>` | `valve` | the canonical control: open = run (default duration from options), close = stop |
 | `<zone> running` | `binary_sensor` | device class `running` |
-| `<zone> soil bucket` | `sensor` | engine bucket state, mm |
 | `<zone> soil moisture` | `sensor` | live probe %; soil sensors are created only for zones with a probe |
 | `<zone> soil temperature` | `sensor` | °F, native Ecowitt probes |
 | `<zone> soil EC` | `sensor` | µS/cm, native Ecowitt probes |
 | `<zone> soil battery` | `sensor` | probe battery % |
 | `<zone> planned run` | `sensor` | seconds planned for the next run |
-| `<zone> run today` | `sensor` | minutes actually run today |
 | `switch.<zone> run` | `switch` | legacy shim, disabled by default; prefer the valve |
+
+`<zone> run today` is no longer produced: nothing on any install sums a
+zone's minutes since midnight, so the sensor that recorded 0 is gone. Delete
+it in Home Assistant if it lingers as unavailable.
 
 ## Service reference
 
@@ -206,7 +208,16 @@ Pause watering for three days when vacation mode turns on, resume on return:
 
 **Duplicate entities.** You have both MQTT discovery and the HACS integration active. Choose one:
 
-- Keep the HACS integration (recommended): disable MQTT publishing in LocalSky's config, then clear the retained discovery topics on your broker, for example `mosquitto_sub -h <broker> -t 'homeassistant/#' --remove-retained --retained-only -W 5`. The stale `sensor.localsky_*` MQTT entities disappear after an HA restart.
+- Keep the HACS integration (recommended): disable MQTT publishing in LocalSky's config, then clear the retained discovery topics on your broker, for example `mosquitto_sub -h <broker> -t 'homeassistant/#' --remove-retained --retained-only -W 5`. **That command removes every retained discovery topic on the broker, from every integration, not only LocalSky's**, which is what you want here (you are retiring the whole MQTT path) and is not what you want for a single stale sensor. The stale `sensor.localsky_*` MQTT entities disappear after an HA restart. Do this while MQTT publishing is still on if you can: LocalSky clears the retained topics it no longer publishes (the per-zone `zone_<slug>_bucket_mm` config and state topics, since 0.7.22), and it cannot clear anything once publishing is off.
+
+  To clear one stale sensor rather than the whole tree, publish an empty retained message to just its two topics, per zone:
+
+  ```
+  mosquitto_pub -h <broker> -r -n -t 'homeassistant/sensor/<node_id>/zone_<slug>_bucket_mm/config'
+  mosquitto_pub -h <broker> -r -n -t 'homeassistant/sensor/<node_id>/zone_<slug>_bucket_mm/state'
+  ```
+
+  `homeassistant` is the discovery prefix unless you changed it, and `<node_id>` is your deployment name, slugified.
 - Keep MQTT discovery: remove the LocalSky integration entry under **Settings > Devices & Services**.
 
 ## Catalog status

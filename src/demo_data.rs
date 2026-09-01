@@ -473,34 +473,14 @@ fn synth_irrigation(t_sim: f64) -> IrrigationSnapshot {
         synth_zone(
             "back_yard",
             "Back Yard",
-            -12.5 + 4.0 * day_phase.sin(),
-            1200,
             // Eight days back: the balance showcase has back_yard behind
             // on its week (capped sessions could not keep up), so its
             // last completed session predates the trailing window.
             now - 8 * 86_400,
         ),
-        synth_zone(
-            "front_yard",
-            "Front Yard",
-            -8.2 + 3.0 * (day_phase * 1.3).sin(),
-            900,
-            now - 24 * 3600,
-        ),
-        synth_zone(
-            "side_yard",
-            "Side Yard",
-            -5.1 + 2.0 * (day_phase * 0.7).sin(),
-            600,
-            now - 36 * 3600,
-        ),
-        synth_zone(
-            "back_yard_shrubs",
-            "Back Yard Shrubs",
-            -2.8 + 1.5 * (day_phase * 0.5).sin(),
-            1800,
-            now - 48 * 3600,
-        ),
+        synth_zone("front_yard", "Front Yard", now - 24 * 3600),
+        synth_zone("side_yard", "Side Yard", now - 36 * 3600),
+        synth_zone("back_yard_shrubs", "Back Yard Shrubs", now - 48 * 3600),
     ];
 
     // Five showcase phases per synthetic day. Every baked reason uses the
@@ -557,7 +537,8 @@ fn synth_irrigation(t_sim: f64) -> IrrigationSnapshot {
     snap.water_level_pct = Some(100.0);
     snap.water_level_capable = true;
     snap.next_run_epoch = now + 6 * 3600;
-    snap.next_run_total_minutes = 75.0;
+    // next_run_total_minutes is summed from the zone plans once the balance
+    // rows exist, below.
     snap.zones = zones;
     snap.skip_check = SkipCheck {
         temp_now_f: 82.0,
@@ -658,6 +639,43 @@ fn synth_irrigation(t_sim: f64) -> IrrigationSnapshot {
     snap.seven_day_verdicts = synth_seven_day_verdicts(now);
     snap.soil_forecasts = synth_soil_forecasts();
     snap.water_budgets = synth_water_budgets(now);
+    // Tonight's minutes come from the demo's own balance rows, exactly as
+    // `apply_budget_plan` fills them on a live install: planned seconds are
+    // the row's `today_seconds`, and the cap row goes amber only when the
+    // run SITS ON the ceiling because the allocator wanted more. The demo
+    // used to hand-set both numbers, which put a 20 minute run under a
+    // "capped at 60 min" label and left three zones showing minutes their
+    // own balance rows had already zeroed.
+    //
+    // `today_run_minutes` is NOT among them: nothing summarizes per-zone
+    // valve-open seconds since local midnight, here or on a live install,
+    // so it stays absent and the demo's Today tile shows the same dash a
+    // real one does.
+    //
+    // The demo has no seasonal dial and no Override schedule, so those two
+    // terms of the live predicate are constant here.
+    let plan: std::collections::HashMap<String, (u32, bool)> = snap
+        .water_budgets
+        .iter()
+        .map(|b| (b.zone_slug.clone(), (b.today_seconds, b.session_capped)))
+        .collect();
+    for z in snap.zones.iter_mut() {
+        let (today_s, session_capped) = plan.get(&z.slug).copied().unwrap_or((0, false));
+        z.planned_run_seconds = today_s;
+        if let Some(m) = z.math.as_mut() {
+            m.scheduled_seconds = today_s;
+            m.cap_binding =
+                m.max_duration_seconds > 0 && today_s == m.max_duration_seconds && session_capped;
+        }
+    }
+    // The hero total is the sum of what the zones actually plan, not a
+    // hand-typed figure that drifts from them.
+    snap.next_run_total_minutes = snap
+        .zones
+        .iter()
+        .map(|z| z.planned_run_seconds as f64)
+        .sum::<f64>()
+        / 60.0;
     snap
 }
 
@@ -666,25 +684,36 @@ fn synth_irrigation(t_sim: f64) -> IrrigationSnapshot {
 /// ([`synth_zone`]) resolve the documented 60 minute default from one place.
 const DEMO_MAX_RUN_MINUTES: Option<u32> = None;
 
-fn synth_zone(slug: &str, name: &str, bucket_mm: f64, planned_s: u32, last_run: i64) -> ZoneState {
+/// A demo zone WITHOUT its run length. Today's minutes come from the demo's
+/// own balance rows in `synth_irrigation`, the same way `apply_budget_plan`
+/// fills them on a live install; a hand-set number here is a run nothing
+/// sized, which is the thing this release exists to stop printing.
+fn synth_zone(slug: &str, name: &str, last_run: i64) -> ZoneState {
     let mut z = ZoneState::default();
     z.name = name.into();
     z.slug = slug.into();
     // Contract: "auto" | "skip" | "run", never empty. (`ZoneState::default()`
     // yields an empty string; the serde default only applies on deserialize.)
     z.override_mode = "auto".into();
-    z.bucket_mm = bucket_mm;
-    z.planned_run_seconds = planned_s;
+    // The demo shows what a real install shows. No model computes a soil
+    // deficit today, so the demo publishes none either: a synthetic deficit
+    // here is how every screenshot came to promise a number no install can
+    // produce.
+    z.bucket_mm = None;
+    // Pre-plan placeholder, overwritten from the balance row. Mirrors
+    // `refresh_once`, which also builds the zone at 0 and lets
+    // `apply_budget_plan` set the real figure.
+    z.planned_run_seconds = 0;
     z.last_run_epoch = last_run;
     z.math = Some(ZoneMath {
-        bucket_mm,
+        bucket_mm: None,
         kc: if slug.contains("shrub") { 0.50 } else { 1.00 },
         throughput_mm_hr: 14.2,
         heat_mult: 1.15,
         capture_eff: 0.70,
-        raw_seconds: planned_s + 200,
+        raw_seconds: 0,
         max_duration_seconds: DEMO_MAX_RUN_MINUTES.unwrap_or(60) * 60,
-        scheduled_seconds: planned_s,
+        scheduled_seconds: 0,
         cap_binding: false,
     });
     z
@@ -840,6 +869,10 @@ fn synth_water_budgets(now: i64) -> Vec<WaterBudget> {
                 last_run_epoch: *last_run,
                 applied_trailing_mm: *open_s as f64 / 3600.0 * THROUGHPUT_MM_HR,
                 sessions_done: *done,
+                // The demo sets a weekly target per zone above, so no zone
+                // here is watering on an inferred one and the Zones page's
+                // default-target banner stays quiet in the demo.
+                target_inferred: false,
             };
             crate::engine::compute_zone_balance(&inputs, &globals, &fc)
         })
@@ -1331,6 +1364,25 @@ mod seed_config_tests {
             "gross balance sizing at the demo numbers"
         );
         assert!(by.session_capped, "5635 s outgrows the 3600 s default cap");
+        // The math panel must agree with the budget row it sits beside.
+        let zone_math = synth_irrigation(0.0)
+            .zones
+            .into_iter()
+            .find(|z| z.slug == "back_yard")
+            .and_then(|z| z.math)
+            .expect("back_yard carries math");
+        assert!(
+            zone_math.cap_binding,
+            "the panel's cap row must say what the budget row says"
+        );
+        assert_eq!(
+            zone_math.scheduled_seconds, zone_math.max_duration_seconds,
+            "a cap-binding row must print the cap it names"
+        );
+        assert_eq!(
+            zone_math.scheduled_seconds, by.today_seconds,
+            "the panel's minutes are the balance row's minutes"
+        );
         assert_eq!(
             by.observed_rain_source, "gauge",
             "measured coverage outranks the regional archive"

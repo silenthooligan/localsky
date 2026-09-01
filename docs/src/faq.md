@@ -37,7 +37,7 @@ You can (separate data volumes, different ports), and a second instance in demo 
 
 ### Why did it skip watering today?
 
-There is always a recorded reason per zone: rain already received, rain expected, wind, temperature, a full soil bucket, restriction calendars, and so on. The UI shows the exact threshold that tripped. See [Skip thresholds explained](skip-breakdown.md) and [History and reporting](history.md).
+There is always a recorded reason per zone: rain already received, rain expected, wind, temperature, soil moisture from a probe, restriction calendars, and so on. The UI shows the exact threshold that tripped. A zone that is not skipping but still plans zero minutes reads ON HOLD on its card, with the weekly water balance's own reason beside it. See [Skip thresholds explained](skip-breakdown.md) and [History and reporting](history.md).
 
 ### Can I enter thresholds in metric?
 
@@ -54,11 +54,12 @@ No tracking lives in the app: no usage reporting, no crash reporting, no analyti
 ## Glossary
 
 - **ET0**: reference evapotranspiration; how much water (mm/day) a standardized grass surface would lose to evaporation plus transpiration under today's weather.
-- **ETc**: crop evapotranspiration; ET0 adjusted to your actual lawn (ETc = ET0 x Kc), the number that drains the soil bucket each day.
+- **ETc**: crop evapotranspiration; ET0 adjusted to your actual lawn (ETc = ET0 x Kc), how much water the lawn loses each day.
 - **Kc**: crop coefficient; a per-species, season-aware multiplier that converts ET0 into ETc.
 - **MAD**: management allowed depletion; the fraction of TAW the engine lets the soil dry out before watering is triggered.
 - **TAW**: total available water; how much water (mm) the root zone can hold between field capacity (full) and wilting point (empty).
-- **Soil bucket**: the per-zone water-balance model; rain and irrigation fill it, ETc drains it, and "depletion" is how far below full it currently sits.
+- **Soil bucket**: a per-zone depletion model where rain and irrigation fill and ETc drains. It is written but not yet wired to any decision; watering is decided by the weekly water balance instead.
+- **Weekly water balance**: what decides watering today. A gross weekly target per zone, settled against observed rain, water already applied, and a probability-weighted forecast credit; the remainder is split across the sessions still expected this week.
 - **Verdict**: the engine's daily decision for the yard: run or skip, with the reason attached.
 - **HAL**: hardware abstraction layer; the Rust trait every controller adapter implements, so the engine speaks one language to OpenSprinkler, Rachio, HA service calls, and the rest.
 - **FDR**: frequency domain reflectometry; the measuring principle behind common soil-moisture probes, whose raw readings LocalSky calibrates into a percentage.

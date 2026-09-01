@@ -55,8 +55,6 @@ pub fn help_topic(topic: &str) -> &'static str {
             "Forecast-driven view of whether each of the next 7 days will water, skip, or run extended, using the same skip-check that fires every morning.",
         "water-budget" =>
             "How much water this week's rain + irrigation has put down vs. what the engine thinks the lawn needed. Negative means the lawn ran short.",
-        "zone-math" =>
-            "Step-by-step math for the next planned run: ET from the day's weather, multiplied by species Kc, capped at the controller's max duration.",
         "soil-sensors" =>
             "Live soil-moisture percentages from each zone's probe. The engine skips entirely when every zone is at or above its saturation threshold.",
         "first-soil-sensor" =>

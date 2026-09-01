@@ -206,7 +206,83 @@ use serde::{Deserialize, Serialize};
 /// bare flag). The unknown-zone 400 hint stops advising a rename and
 /// points at Controller station. No HACS integration change: it gates on
 /// the API major and never reads /api/config.
-pub const API_VERSION: &str = "1.24.0";
+/// 1.25.0: the engine stops reading Home Assistant, and the soil deficit
+/// stops being fabricated. NULLABLE, following the 1.18.0 honest-unknowns
+/// precedent exactly (null = unknown, never a sentinel): zones[].bucket_mm,
+/// zones[].math.bucket_mm and zones[].today_run_minutes. The bucket fields'
+/// only producer was the Home Assistant entity
+/// sensor.smart_irrigation_<slug>, which the engine no longer reads for any
+/// purpose, so on every install the old bare f64 published a hardcoded 0.0
+/// as if it were a measurement; today_run_minutes has no producer on any
+/// install (nothing sums a zone's valve-open minutes since local midnight)
+/// and is null everywhere. Minor, not a break: the fields are still
+/// present, null is the documented unknown, and a client that treated the
+/// old 0.00 as data was reading a defect. Manifest schema 1.5
+/// capability-gates the per-zone <slug>_soil_bucket descriptor on the value
+/// being present, the same rule water_level_pct and the soil quartet already
+/// take, and <slug>_run_today on today_run_minutes, so no permanently
+/// unavailable entity is registered and the run-today sensor is no longer
+/// registered at all; MQTT
+/// zone discovery gates the same way AND clears the retained config/state
+/// topics it used to publish, so a broker holding the old 0.00 drops it
+/// and HA removes the entity instead of pinning it. NO HACS INTEGRATION
+/// CHANGE IS
+/// REQUIRED: it builds entities from the manifest, a manifest-driven value
+/// of null already reads unavailable, and a descriptor that stops being
+/// advertised is the documented capability-gate behavior. Additive:
+/// zones[].smart_suppressed { weekdays, schedules, active_today }, set
+/// when an enabled Override manual schedule suppresses smart dispatch for
+/// that zone (display only; the suppression itself is unchanged).
+/// Behavior, no shape change: Kc in zones[].math.kc now comes from the
+/// native species catalog rather than the SI entity's multiplier;
+/// water_budgets[] no longer lets HA input_number helpers outrank
+/// LocalSky's own weekly_budget_in / sessions_per_week; the 24h rain-defer
+/// gate weights forecast rain by probability and reads
+/// engine.session_rain_defer_in instead of a compile-time constant;
+/// zones[].math.cap_binding reports that the ceiling set tonight's minutes
+/// (scheduled_seconds sits at max_duration_seconds and some stage wanted
+/// more: the allocator's session, the seasonal dial, or a condition-rule
+/// multiplier), and is false whenever no run is planned. It was previously
+/// raw_seconds > max_duration_seconds off the Smart Irrigation soil
+/// deficit: live on a Home Assistant install carrying that entity, always
+/// false on standalone.
+/// A smart-morning dispatch that fails writes a skipped run row with the
+/// controller's error text, excluded from the boot dedupe so a restart
+/// inside the catch-up window can still water a morning whose every row is
+/// a dispatch failure (a verdict-skip row still marks the morning
+/// handled). New validation error zone_sessions_per_week_range;
+/// PATCH of a zone sessions_per_week outside 1..=7 is refused.
+/// Additive: ha_adoption[] on the irrigation snapshot (and in localsky.toml),
+/// one entry per retired Home Assistant helper carrying entity, outcome,
+/// target, the value taken and the value it replaced. Empty on every
+/// standalone install and omitted from the config file until first used; the
+/// migration notice renders it. Behavior, no shape change: POST /action
+/// set_threshold writes engine.skip_rules rather than an input_number helper
+/// once that helper is retired (range-checked 0..50 mph, 20..70 F, 0..10 in),
+/// and toggle writes LocalSky's own control store rather than an
+/// input_boolean; both keep their request and response shapes, and both still
+/// write the helper on a Home Assistant deployment that has not retired it
+/// yet, because until then that is what the engine reads.
+/// skip_check.max_wind_mph / min_temp_f / rain_skip_in stop reflecting a live
+/// input_number helper once it is retired and report engine.skip_rules.
+/// override_helpers_present keeps its shape and now means "the pause and
+/// override controls will land somewhere", which is always true once they are
+/// retired. Additive controls_persisted: true when a persistence database is
+/// mounted, so the migration notice can tell "the four controls have nowhere
+/// to land here" apart from "a control was not answering when the pass
+/// looked". Absent reads false, which is the no-database wording. Additive
+/// ha_adoption_awaiting_config: true while the pass cannot run because there
+/// is no localsky.toml to record it in, so every helper read is still live;
+/// absent reads false. Additive observed_value on an ha_adoption[] entry: what the helper
+/// held when it sat outside the range LocalSky can represent and was adopted
+/// at the nearest end. Manifest schema 1.6 adds min/max/step to `number`
+/// descriptors: the integration should build the three threshold entities on
+/// those, because set_threshold now answers 400 outside 0..50 mph, 20..70 F
+/// and 0..10 in. The shipping integration builds them from fixed limits of
+/// its own (0..50 mph, 20..60 F, 0..1 in), all inside the server's, so no
+/// slider value is refused; a write outside the server's range from any
+/// other client is refused there.
+pub const API_VERSION: &str = "1.25.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {

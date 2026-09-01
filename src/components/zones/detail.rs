@@ -317,10 +317,31 @@ pub fn ZoneDetailView(
             } else {
                 ((z.planned_run_seconds + 30) / 60).to_string()
             };
-            let today = format!("{:.0}", z.today_run_minutes);
+            // No producer on either path: a dash, not a fabricated zero.
+            let (today, today_unit) = match z.today_run_minutes {
+                Some(v) => (format!("{v:.0}"), "min"),
+                None => ("-".to_string(), ""),
+            };
             // Bucket deficit is stored in mm; convert at the display boundary.
-            let deficit = depth_value_mm(z.bucket_mm, p);
-            let deficit_unit = depth_unit(p);
+            // `None` = no model on this install computed one, so the tile
+            // renders a dash instead of a fabricated 0.00.
+            let (deficit, deficit_unit) = match z.bucket_mm {
+                Some(v) => (depth_value_mm(v, p), depth_unit(p)),
+                None => ("-".to_string(), ""),
+            };
+            // This zone's row from the weekly-budget allocator, the model
+            // that decides whether it waters at all.
+            let budget = snap
+                .get()
+                .water_budgets
+                .iter()
+                .find(|b| b.zone_slug == z.slug)
+                .cloned();
+            let budget_reason = budget
+                .as_ref()
+                .filter(|b| b.today_seconds == 0 && !b.today_reason.is_empty())
+                .map(|b| b.today_reason.clone());
+            let suppression = z.smart_suppressed.clone();
             let last_run = if z.last_run_epoch > 0 {
                 // "Jun 28, 14:05" in the deployment timezone (24-hour, local).
                 format!(
@@ -366,12 +387,25 @@ pub fn ZoneDetailView(
             // so it reads "SKIPPING" (after the in-flight/running states, which
             // still take precedence). (T4) Matches the zone card's status pill.
             // (zone_skipping computed above with `planned`.)
+            // A zone the weekly budget zeroed is not idle: the engine decided
+            // about it and names the gate. Matches the zone card's pill. An
+            // Override schedule covering today zeroes the plan AFTER the
+            // allocator sized it, so it leaves no reason behind and has to be
+            // its own hold signal or the zone reads IDLE on the one day the
+            // schedule explains everything.
+            let suppressed_today = suppression.as_ref().is_some_and(|x| x.active_today);
+            let budget_held = (budget_reason.is_some() || suppressed_today)
+                && z.planned_run_seconds == 0
+                && !running
+                && !zone_skipping
+                && pending_now.is_none();
             let status_label = match pending_now {
                 Some(true) if !running => "STARTING…",
                 Some(false) if running => "STOPPING…",
                 _ if running => "RUNNING",
                 _ if zone_skipping => "SKIPPING",
                 _ if z.planned_run_seconds > 0 => "SCHEDULED",
+                _ if budget_held => "ON HOLD",
                 _ => "IDLE",
             };
             let status_class = if pending_now.is_some() && running != pending_now.unwrap_or(false) {
@@ -382,9 +416,38 @@ pub fn ZoneDetailView(
                 "zone-detail__status zone-detail__status--skipping"
             } else if z.planned_run_seconds > 0 {
                 "zone-detail__status zone-detail__status--scheduled"
+            } else if budget_held {
+                "zone-detail__status zone-detail__status--held"
             } else {
                 "zone-detail__status zone-detail__status--idle"
             };
+            let budget_note = budget_held.then(|| {
+                // A schedule covering today outranks the allocator's
+                // sentence: the suppression overwrote the allocator's
+                // number, so its reason describes a plan that is not what
+                // zeroed the zone.
+                let body = crate::components::zones::card::hold_reason_text(
+                    suppression.as_ref(),
+                    budget_reason.as_deref(),
+                );
+                view! {
+                    <p class="zone-detail__reason zone-detail__reason--budget">{body}</p>
+                }
+            });
+            // The hold line names WHICH schedule; this line names HOW OFTEN,
+            // so it stays on the day the Override fires. It shortens to the
+            // frequency alone when the hold line already named today's
+            // schedule, so the pane does not say it twice.
+            let suppression_note = suppression
+                .as_ref()
+                .filter(|x| !x.weekdays.is_empty())
+                .map(|x| {
+                    let body = crate::components::zones::card::override_days_text(
+                        x,
+                        budget_held && x.active_today,
+                    );
+                    view! { <p class="zone-detail__reason zone-detail__reason--suppressed">{body}</p> }
+                });
             let math = z.math.clone();
             let chart_slug = zslug.clone();
             // Own copy of the deployment tz for the chart-label closure below.
@@ -425,10 +488,12 @@ pub fn ZoneDetailView(
                         </a>
                     </header>
                     {verdict_reason}
+                    {budget_note}
+                    {suppression_note}
 
                     <div class="zone-detail__stats">
                         <StatTile label="Planned" value=planned unit="min" icon="droplet"/>
-                        <StatTile label="Today" value=today unit="min" icon="history" accent="var(--accent-good)".to_string()/>
+                        <StatTile label="Today" value=today unit=today_unit icon="history" accent="var(--accent-good)".to_string()/>
                         <StatTile label="Deficit" value=deficit unit=deficit_unit icon="gauge" accent="var(--accent-cool)".to_string()/>
                         <StatTile label="Last run" value=last_run icon="calendar" accent="var(--accent-warm)".to_string()/>
                     </div>
@@ -557,27 +622,54 @@ pub fn ZoneDetailView(
     }
 }
 
+/// The panel is split because only two of its numbers reach the dispatch:
+/// throughput divides the weekly balance's session depth into seconds, and
+/// the ceiling can shorten the result. Kc, the heat multiplier and capture
+/// efficiency are real engine outputs, but they feed ETc and the soil
+/// projection, not the run length. They used to sit in one list with
+/// multiply and divide signs on them, under a heading asking why the
+/// duration is what it is, which read as a formula that no longer exists.
 #[component]
 fn ZoneMathPanel(m: ZoneMath, prefs: UnitPrefs) -> impl IntoView {
-    let cap = if m.cap_binding {
-        format!("capped at {} min", m.max_duration_seconds / 60)
+    // A zone with no run planned has nothing to compare against its ceiling,
+    // so the row states the zero and stops. The card says why the zone is at
+    // zero; repeating a cap here described a run that does not exist.
+    let cap = if m.scheduled_seconds == 0 {
+        String::new()
+    } else if m.cap_binding {
+        format!(" (capped at {} min)", m.max_duration_seconds / 60)
     } else {
-        format!("under {} min cap", m.max_duration_seconds / 60)
+        format!(" (under {} min cap)", m.max_duration_seconds / 60)
+    };
+    let final_class = if m.cap_binding {
+        "zone-detail__math-final zone-detail__math-final--capped"
+    } else {
+        "zone-detail__math-final"
     };
     // Bucket deficit (mm source) and throughput (mm/hr source) convert at
-    // the display boundary; the engine math itself stays in mm.
-    let deficit = fmt_rain_amount_mm(m.bucket_mm, prefs);
+    // the display boundary; the engine math itself stays in mm. An absent
+    // deficit renders a dash: nothing on this install computes one.
+    let deficit = match m.bucket_mm {
+        Some(v) => fmt_rain_amount_mm(v, prefs),
+        None => "-".to_string(),
+    };
     let throughput = fmt_rain_rate_mm(m.throughput_mm_hr, prefs);
     view! {
         <section class="zone-detail__panel">
             <h2 class="zone-detail__panel-title">"Why this duration?"</h2>
             <dl class="zone-detail__math">
-                <div><dt>"Bucket deficit"</dt><dd>{deficit}</dd></div>
-                <div><dt>"Crop coefficient"</dt><dd>{format!("× {:.2}", m.kc)}</dd></div>
-                <div><dt>"Heat multiplier"</dt><dd>{format!("× {:.2}", m.heat_mult)}</dd></div>
-                <div><dt>"Throughput"</dt><dd>{format!("÷ {throughput}")}</dd></div>
-                <div><dt>"Capture efficiency"</dt><dd>{format!("÷ {:.2}", m.capture_eff)}</dd></div>
-                <div class="zone-detail__math-final"><dt>"Scheduled"</dt><dd>{format!("{} min ({cap})", m.scheduled_seconds / 60)}</dd></div>
+                <div><dt>"Throughput"</dt><dd>{throughput}</dd></div>
+                <div class=final_class><dt>"Scheduled"</dt><dd>{format!("{} min{cap}", m.scheduled_seconds / 60)}</dd></div>
+            </dl>
+            <h3 class="zone-detail__panel-subtitle">"Not part of tonight's minutes"</h3>
+            <p class="zone-detail__panel-note">
+                "The soil deficit reads a dash because nothing on this install computes one. The crop coefficient, heat multiplier and capture efficiency feed the ETc figure and the soil projection. The minutes above start from the weekly water budget divided by the throughput, then take the seasonal adjustment and any condition rule's multiplier, and are held to the zone's cap. A forced run waters a bounded default even when the budget is zero."
+            </p>
+            <dl class="zone-detail__math">
+                <div><dt>"Soil deficit"</dt><dd>{deficit}</dd></div>
+                <div><dt>"Crop coefficient"</dt><dd>{format!("{:.2}", m.kc)}</dd></div>
+                <div><dt>"Heat multiplier"</dt><dd>{format!("{:.2}", m.heat_mult)}</dd></div>
+                <div><dt>"Capture efficiency"</dt><dd>{format!("{:.2}", m.capture_eff)}</dd></div>
             </dl>
         </section>
     }

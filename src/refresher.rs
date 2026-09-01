@@ -153,6 +153,10 @@ pub struct ZoneAgronomyCfg {
     pub precip_rate_mm_hr: Option<f64>,
     pub soil_texture: crate::config::schema::SoilTexture,
     pub slope_pct: f64,
+    /// Configured grass/planting species. Feeds `kc_at_doy_lat` for the
+    /// zone's crop coefficient, which is where Kc comes from now that the
+    /// Smart Irrigation entity's `multiplier` attribute is gone.
+    pub species: crate::config::schema::GrassSpecies,
 }
 
 /// Watering policy snapshot resolved at boot from localsky.toml. The
@@ -222,6 +226,13 @@ pub struct WateringPolicy {
     /// before either knob is read.
     pub soak_minutes: u32,
     pub interleave_cycles: bool,
+    /// Rain-defer threshold per session (inches over the next 24 forecast
+    /// hours, probability weighted), from `cfg.engine.session_rain_defer_in`.
+    /// The live assembly used to pass the compile-time constant instead, so
+    /// this documented, editable knob changed nothing. `Default` derives 0.0;
+    /// `defer_threshold_in` treats a non-positive value as "use the built-in
+    /// default" so a Default-policy path keeps the historical behavior.
+    pub session_rain_defer_in: f64,
     /// Per-zone run-duration sizing (throughput + max-duration), keyed by
     /// underscore-normalized slug. Previously a boot-built HashMap moved
     /// into spawn_refresher; carried here so a hot-reloaded
@@ -234,6 +245,36 @@ pub struct WateringPolicy {
     /// zone_runtime; empty map = every zone falls back to a single
     /// no-split segment (the pre-config behavior).
     pub zone_agronomy: HashMap<String, ZoneAgronomyCfg>,
+    /// Home Assistant helper entities the 0.7.22 adoption pass has handled,
+    /// from `cfg.ha_adoption`. Carried on the policy so the read gate and the
+    /// snapshot's copy of the record both hot-reload with the config.
+    ///
+    /// The record is a migration LEDGER, so every write path carries it
+    /// forward rather than accepting whatever the incoming document holds:
+    /// `PUT /api/config` and `PUT /api/config/raw` restore it from the stored
+    /// config, and a rollback unions the pre-rollback ledger back in. Dropping
+    /// a marker would put a read back on a helper the notice invited the owner
+    /// to delete, which is not "the engine on a value it can explain", it is
+    /// the vacation pause reading zero.
+    pub ha_adoption: Vec<crate::ha::snapshot::HaAdoptedHelper>,
+}
+
+impl WateringPolicy {
+    /// Whether the legacy Home Assistant read for `entity` is still live.
+    ///
+    /// This is the whole cutover. While an entity is unadopted the read
+    /// behaves exactly as it always did; the instant the pass records it,
+    /// LocalSky's own value governs and the entity is never consulted again,
+    /// whatever the pass found. That ordering is deliberate: there is no
+    /// moment where the value is neither adopted nor read, so a Home
+    /// Assistant outage across the upgrade decides nothing.
+    ///
+    /// The unreachable read paths this leaves behind come out in the next
+    /// release, once installs have migrated. They stay here for one release
+    /// so an install that has not run the pass yet keeps working.
+    pub fn ha_read_retired(&self, entity: &str) -> bool {
+        self.ha_adoption.iter().any(|h| h.entity == entity)
+    }
 }
 
 impl WateringPolicy {
@@ -279,11 +320,13 @@ impl WateringPolicy {
                     sessions_per_week: z.sessions_per_week,
                 })
                 .collect(),
+            ha_adoption: cfg.ha_adoption.clone(),
             ha_sprinkler_prefix: cfg.deployment.ha_sprinkler_prefix.clone(),
             seasonal_adjust_pct: cfg.engine.seasonal_adjust_pct,
             units: cfg.deployment.units,
             soak_minutes: cfg.engine.soak_minutes,
             interleave_cycles: cfg.engine.interleave_cycles,
+            session_rain_defer_in: cfg.engine.session_rain_defer_in,
             // Per-zone run sizing + cycle/soak agronomy. Underscore-normalized
             // like soil_zones/budget_zones so runtime slug lookups hit. The
             // cap comes from the zone's configured max_run_minutes; unset
@@ -315,10 +358,26 @@ impl WateringPolicy {
                             precip_rate_mm_hr: z.precip_rate_mm_hr,
                             soil_texture: z.soil_texture,
                             slope_pct: z.slope_pct,
+                            species: z.species,
                         },
                     )
                 })
                 .collect(),
+        }
+    }
+}
+
+impl WateringPolicy {
+    /// The rain-defer threshold the balance should use (inches). A
+    /// non-positive configured value (including the `Default` derive's 0.0
+    /// on unconfigured paths) falls back to the engine constant, so a
+    /// missing knob keeps the historical threshold rather than deferring on
+    /// any trace of forecast rain.
+    pub fn defer_threshold_in(&self) -> f64 {
+        if self.session_rain_defer_in > 0.0 {
+            self.session_rain_defer_in
+        } else {
+            crate::engine::SESSION_RAIN_DEFER_IN
         }
     }
 }
@@ -355,6 +414,25 @@ fn seasonal_capped(raw_seconds: u32, seasonal_pct: u32, max_dur: u32) -> u32 {
     }
 }
 
+/// True when `seasonal_capped`'s clamp is what set the returned seconds: the
+/// dial scaled the allocator's session past the zone's ceiling.
+///
+/// Every clamp that can shorten a dispatched run reports itself through
+/// `ZoneMath::cap_binding`, so the panel's warning does not depend on which
+/// stage did the shortening. There are three: the allocator's own
+/// `WaterBudget::session_capped` (the ideal weekly slice was wider than the
+/// ceiling), this seasonal clamp, and the condition-rule multiplier in
+/// `apply_verdict_multiplier`. Before, the dial clipped a run silently while
+/// the rule multiplier said so, which made the same shortening readable or
+/// invisible depending on which knob caused it.
+///
+/// Mirrors `seasonal_capped`'s arithmetic exactly so the two can never
+/// disagree about whether the ceiling was reached.
+fn seasonal_cap_binds(raw_seconds: u32, seasonal_pct: u32, max_dur: u32) -> bool {
+    max_dur > 0
+        && ((raw_seconds as f64 * seasonal_multiplier(seasonal_pct)).round() as u32) > max_dur
+}
+
 /// Apply each zone's custom condition-rule watering multiplier (from an
 /// `AdjustMultiplier` rule action, clamped to [0.5, 1.5] by the engine in
 /// `decide_per_zone`) to its dispatched run time, so a "halve the veg garden
@@ -385,6 +463,16 @@ fn apply_verdict_multiplier(snap: &mut crate::ha::snapshot::IrrigationSnapshot) 
         };
         if let Some(m) = z.math.as_mut() {
             m.scheduled_seconds = z.planned_run_seconds;
+            // A rule multiplier that ran into the ceiling shortens the run
+            // exactly as the allocator's own cap does, so the panel says so.
+            // Assignment, not a set-only branch: a multiplier below 1.0 pulls
+            // the run back under the ceiling, and then the ceiling is no
+            // longer what set the minutes even if an earlier stage had
+            // flagged it. Same predicate as `apply_budget_plan`: the run has
+            // to sit ON the ceiling for the ceiling to be the reason.
+            m.cap_binding = max_dur > 0
+                && z.planned_run_seconds == max_dur
+                && (scaled > max_dur || m.cap_binding);
         }
     }
 }
@@ -409,6 +497,46 @@ pub struct ZoneBudgetCfg {
     pub name: String,
     pub weekly_budget_in: Option<f64>,
     pub sessions_per_week: Option<u32>,
+}
+
+/// One budget row per ACTIVE zone, config-backed where a row exists and
+/// synthesized (no explicit target, so the allocator resolves the
+/// agronomic slug default) where it does not.
+///
+/// The active zone list and the budget rows are resolved independently:
+/// zones come from `cfg.zones` OR the `LOCALSKY_ZONES` env var, while
+/// `budget_zones` is built from `cfg.zones` alone. An install zoned by
+/// the env var therefore has a non-empty zone list and an empty budget
+/// list, and since 0.7.22 the allocator is what sizes dispatch on every
+/// path: without a row per zone, `apply_budget_plan` would find no plan
+/// for any slug and set every `planned_run_seconds` to 0, which is the
+/// `<slug>_planned_run` descriptor and the `zone_<slug>_planned_seconds`
+/// MQTT sensor that Irrigation Unlimited automations drive valves from.
+/// Those installs would have stopped watering with nothing on screen.
+///
+/// Rows the config supplies are passed through untouched, and a
+/// configured zone that is not in the active list keeps its row, so this
+/// only ever ADDS rows.
+pub fn budget_zones_for_active(
+    active: &[crate::zones::ZoneIdent],
+    configured: &[ZoneBudgetCfg],
+) -> Vec<ZoneBudgetCfg> {
+    let mut out = configured.to_vec();
+    for z in active {
+        if out.iter().any(|c| c.slug == z.slug) {
+            continue;
+        }
+        out.push(ZoneBudgetCfg {
+            slug: z.slug.clone(),
+            name: z.display_name.clone(),
+            // No explicit target: `compute_water_budgets` resolves the
+            // agronomic slug default, which is what the zone waters on
+            // until the operator sets one.
+            weekly_budget_in: None,
+            sessions_per_week: None,
+        });
+    }
+    out
 }
 
 /// Trailing window the water balance settles against: rolling 7 local
@@ -664,7 +792,17 @@ pub fn spawn_refresher(
     // the hot-swapped watering_policy instead of boot-bound arguments, so
     // an applied texture/sprinkler/precip change takes effect next tick.
     zones: Vec<crate::zones::ZoneIdent>,
+    // Config store for the one-time Home Assistant helper adoption pass, the
+    // sink for the three adopted thresholds and for the marker list. `None`
+    // on a fresh install with no config file yet, where there is nothing to
+    // adopt into and the app is still in the wizard.
+    cfg_store: Option<Arc<crate::config::FileConfigStore>>,
 ) {
+    // The swappable handle, kept beside the per-tick `load()` below: the
+    // adoption pass rebuilds the policy from the freshly saved config and
+    // stores it here, so the adopted thresholds AND the read cutover go live
+    // on the same swap.
+    let policy_handle = watering_policy.clone();
     tokio::spawn(async move {
         // HA client only when sourcing from Home Assistant. Native builds
         // the snapshot from local stores + controllers and needs no HA.
@@ -775,6 +913,56 @@ pub fn spawn_refresher(
         // exponential backoff between attempts while degraded.
         let mut consecutive_failures: u32 = 0;
         let mut degraded: bool = false;
+        // The last control row that actually came back. Once the helper
+        // reads are retired this store is the ONLY home of the vacation
+        // pause, so resolving a failed SELECT to the default would read as
+        // "not paused" and dispatch a morning somebody held. Reusing the
+        // last good row keeps the hold across a transient error; it only
+        // falls back to nothing before the first successful read of the
+        // process, which is a window no watering decision has run in yet.
+        let mut last_control: Option<crate::persistence::IrrigationControlState> = None;
+        // The one-time Home Assistant helper adoption pass. Armed only on the
+        // HA path with a config file to write into; `None` disarms it for the
+        // life of the process, which is where it lands the moment there is
+        // nothing left to adopt.
+        // Once per process, the first tick on the Home Assistant path that
+        // plans a run for a zone on a name-inferred target: those installs
+        // dispatched nothing before 0.7.22, and an owner who never opens the
+        // UI would otherwise learn it from the valves.
+        let mut inferred_plan_announced = false;
+        let mut adopt: Option<AdoptState> = match (source, cfg_store.as_ref(), client.as_ref()) {
+            (SnapshotSource::HomeAssistant, Some(store), Some(c)) => Some(AdoptState {
+                cfg_store: store.clone(),
+                control_store: control_store.clone(),
+                policy: policy_handle.clone(),
+                helpers: HelperFetch::Live(c.clone()),
+                fingerprint: None,
+                stable_ticks: 0,
+                awaiting_config: false,
+                no_config_warned: false,
+                pending_revert: None,
+            }),
+            _ => None,
+        };
+        if source == SnapshotSource::HomeAssistant {
+            if adopt.is_none() {
+                // No config file to write the ledger into, so the reads can
+                // never retire and every helper decides forever. Visible
+                // rather than silent.
+                tracing::warn!(
+                    "home assistant helper adoption cannot run: no config store, so the \
+                     helper reads stay live indefinitely"
+                );
+            } else if control_store.is_none() {
+                // The three thresholds still migrate; the four controls have
+                // nowhere to be kept, so their helpers keep deciding. The
+                // migration notice says the same thing on screen.
+                tracing::warn!(
+                    "home assistant helper adoption: no persistence database, so the four \
+                     operator controls keep reading their helpers"
+                );
+            }
+        }
 
         loop {
             // Watchdog heartbeat: stamp the start of every iteration so a stalled
@@ -797,7 +985,20 @@ pub fn spawn_refresher(
             // override) once per tick. Used by the native builder and, when
             // shadowing, the shadow build too. Cheap single-row select.
             let control = match control_store.as_ref() {
-                Some(cs) => Some(cs.get().await),
+                Some(cs) => match cs.try_get().await {
+                    Ok(c) => {
+                        last_control = Some(c.clone());
+                        Some(c)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            reusing = last_control.is_some(),
+                            "control state read failed; holding the last known pause and override"
+                        );
+                        last_control.clone()
+                    }
+                },
                 None => None,
             };
             // Refresh the balance evidence when the cache is stale or a
@@ -818,6 +1019,7 @@ pub fn spawn_refresher(
                 );
                 balance_fetched_epoch = tick_now;
             }
+            let mut readout: Option<HelperReadout> = None;
             let result = match source {
                 SnapshotSource::HomeAssistant => {
                     refresh_once(
@@ -831,9 +1033,12 @@ pub fn spawn_refresher(
                         sensor_history.as_ref(),
                         forecast_obs_store.as_ref(),
                         balance_tick.as_ref(),
+                        &controllers,
+                        control.as_ref(),
                     )
                     .await
-                    .map(|mut snap| {
+                    .map(|(mut snap, r)| {
+                        readout = Some(r);
                         // Latch the water-level capability across refreshes on
                         // the HA path: its only evidence is the per-tick entity
                         // read, and a transient unavailable (HA restart,
@@ -864,6 +1069,22 @@ pub fn spawn_refresher(
                 )
                 .await),
             };
+            // One tick of the Home Assistant helper adoption pass. Runs only
+            // on a successful poll, and disarms itself for the life of the
+            // process the moment there is nothing left to adopt.
+            if let (Some(st), Some(r)) = (adopt.as_mut(), readout.as_ref()) {
+                if adopt_tick(st, r).await {
+                    adopt = None;
+                }
+            }
+            // Carried onto the snapshot so the migration notice can say, on an
+            // install with no config file, that the helpers are still deciding
+            // rather than staying silent about a migration that never ran.
+            let awaiting_config = adopt.as_ref().is_some_and(|s| s.awaiting_config);
+            let result = result.map(|mut snap| {
+                snap.ha_adoption_awaiting_config = awaiting_config;
+                snap
+            });
             let sleep_for = match result {
                 Ok(snap) => {
                     // Shadow: build the native snapshot alongside HA for
@@ -944,6 +1165,30 @@ pub fn spawn_refresher(
                                         "forecast observation upsert failed"
                                     );
                                 }
+                            });
+                        }
+                    }
+                    if source == SnapshotSource::HomeAssistant && !inferred_plan_announced {
+                        let planned: Vec<&crate::ha::snapshot::WaterBudget> = snap
+                            .water_budgets
+                            .iter()
+                            .filter(|b| b.target_inferred && b.today_seconds > 0)
+                            .collect();
+                        if !planned.is_empty() {
+                            inferred_plan_announced = true;
+                            for b in &planned {
+                                tracing::warn!(
+                                    zone = %b.zone_slug,
+                                    weekly_budget_in = b.weekly_budget_in,
+                                    sessions_per_week = b.sessions_per_week,
+                                    today_seconds = b.today_seconds,
+                                    "zone plans a run on a weekly target inferred from its name; \
+                                     set Weekly target and Sessions per week under Settings, then \
+                                     Zones"
+                                );
+                            }
+                            push.emit(crate::push::PushEvent::InferredTargetsPlanned {
+                                zones: planned.iter().map(|b| b.zone_name.clone()).collect(),
                             });
                         }
                     }
@@ -1244,16 +1489,20 @@ async fn refresh_once(
     sensor_history: Option<&crate::persistence::SensorHistoryStore>,
     forecast_obs: Option<&crate::persistence::ForecastObservationsStore>,
     balance: Option<&BalanceTick>,
-) -> anyhow::Result<IrrigationSnapshot> {
+    controllers: &ControllerRegistry,
+    control: Option<&crate::persistence::IrrigationControlState>,
+) -> anyhow::Result<(IrrigationSnapshot, HelperReadout)> {
+    // Sampled BEFORE the read, so a control write that lands while this call
+    // is in flight moves the counter and forces the adoption commit to
+    // re-earn its evidence rather than planning from the pre-write answer.
+    let write_seq = crate::ha_adopt::write_seq();
     let states = client.states().await?;
-    let map: HashMap<String, Value> = states
-        .into_iter()
-        .filter_map(|v| {
-            v.get("entity_id")
-                .and_then(|e| e.as_str())
-                .map(|id| (id.to_string(), v.clone()))
-        })
-        .collect();
+    let map = states_to_map(states);
+    // What the adoption pass needs, taken before the map is consumed: just
+    // the seven helper entities, plus how many entities Home Assistant
+    // answered with at all (a zero-entity answer is not a working HA and is
+    // never evidence that a helper is missing).
+    let readout = HelperReadout::from_map(&map, write_seq);
     let mut snap = build_from_map(
         map,
         forecast_store,
@@ -1265,15 +1514,581 @@ async fn refresh_once(
         sensor_history,
         forecast_obs,
         balance,
-        None,
+        control,
+        true,
     )
     .await;
+    // A configured controller that actually reports outranks the entity
+    // readback. Two reasons. It is the better source: an adapter reports its
+    // own running_known, where the entity path hardcodes `true` whether or
+    // not the readback means anything. And it closes a live defect: an
+    // install with HA_URL set AND a Rachio or a direct OpenSprinkler
+    // configured resolves to the Home Assistant source, so Run/Stop already
+    // dispatch through the registry while `running` was read from a
+    // binary_sensor that does not exist. Running was permanently false, so no
+    // run row was ever written, and that cost those installs twice over. The
+    // weekly balance credited none of the water it had applied, so every
+    // session was sized as if the week were untouched; and, the larger of the
+    // two, `last_run_epoch` stayed 0, so the session spacing gate never held
+    // and the zone planned a full session every morning it was otherwise
+    // clear to water. Both correct themselves from the first morning after
+    // the upgrade, which means those zones water substantially less often.
+    // The entity read stays underneath for the legacy Home-Assistant-only
+    // install that has no controller in LocalSky at all.
+    overlay_reporting_controllers(&mut snap, controllers).await;
     // Custom-rule watering multiplier (AdjustMultiplier condition action) is
     // applied to the finalized per-zone run time here, where both the planned
     // seconds and the back-filled verdict are final. No-op for the common case
     // (no such rule => multiplier 1.0).
     apply_verdict_multiplier(&mut snap);
-    Ok(snap)
+    Ok((snap, readout))
+}
+
+/// `/api/states` as a map keyed by entity id. Shared by the snapshot build
+/// and by the adoption pass's own commit-time re-read.
+fn states_to_map(states: Vec<Value>) -> HashMap<String, Value> {
+    states
+        .into_iter()
+        .filter_map(|v| {
+            v.get("entity_id")
+                .and_then(|e| e.as_str())
+                .map(|id| (id.to_string(), v.clone()))
+        })
+        .collect()
+}
+
+/// The seven helper entities as Home Assistant last answered, plus the size
+/// of the answer and the pre-adoption write counter as it stood when the
+/// answer was taken. Carried out of `refresh_once` so the adoption pass runs
+/// in the loop body rather than inside the snapshot build.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HelperReadout {
+    pub total_entities: usize,
+    /// `ha_adopt::write_seq()` sampled immediately BEFORE the `/api/states`
+    /// call that produced this answer.
+    pub write_seq: u64,
+    pub helpers: HashMap<String, Value>,
+}
+
+impl HelperReadout {
+    fn from_map(map: &HashMap<String, Value>, write_seq: u64) -> Self {
+        HelperReadout {
+            total_entities: map.len(),
+            write_seq,
+            helpers: crate::ha_adopt::ENTITIES
+                .iter()
+                .filter_map(|id| map.get(*id).map(|v| ((*id).to_string(), v.clone())))
+                .collect(),
+        }
+    }
+
+    /// The stability key: the seven answers AND how many entities Home
+    /// Assistant answered with at all.
+    ///
+    /// The count is load-bearing. A Home Assistant that is up and still
+    /// registering entities gives the byte-identical `<absent>` string for
+    /// all seven helpers on every tick, so without the count three identical
+    /// ticks of a still-starting install look exactly like three ticks of an
+    /// install that has no helpers. A climbing count resets the counter; a
+    /// steady-state Home Assistant has a fixed one, and the only false resets
+    /// are a genuine device add or removal, which costs one extra window on a
+    /// pass that runs once per install.
+    fn stability_key(&self) -> String {
+        format!(
+            "{}|n={}",
+            crate::ha_adopt::fingerprint(&self.helpers),
+            self.total_entities
+        )
+    }
+}
+
+/// Where `adopt_tick` re-reads the answer set it commits from.
+pub(crate) enum HelperFetch {
+    /// Production: `/api/states` through the live client.
+    Live(HaClient),
+    /// Tests: the answers a re-read returns, in order. `None` is a failed
+    /// read, and so is an exhausted queue.
+    #[cfg(test)]
+    Canned(std::sync::Mutex<std::collections::VecDeque<Option<HelperReadout>>>),
+}
+
+impl HelperFetch {
+    /// Re-read the seven helpers now. `None` on any failure: the commit
+    /// defers rather than planning from an answer it could not confirm.
+    async fn read(&self) -> Option<HelperReadout> {
+        match self {
+            HelperFetch::Live(c) => {
+                let write_seq = crate::ha_adopt::write_seq();
+                match c.states().await {
+                    Ok(states) => Some(HelperReadout::from_map(&states_to_map(states), write_seq)),
+                    Err(e) => {
+                        tracing::debug!(error = %e, "ha helper adoption: commit-time re-read failed");
+                        None
+                    }
+                }
+            }
+            #[cfg(test)]
+            HelperFetch::Canned(q) => q.lock().expect("canned queue").pop_front().flatten(),
+        }
+    }
+}
+
+/// Consecutive ticks the answer set must come back identical before the pass
+/// concludes anything. The counter starts at 1 on the first sighting, so
+/// three ticks at the 10 second cadence is twenty seconds of observation.
+const ADOPT_STABLE_TICKS: u32 = 3;
+
+/// The window that applies when a control helper is MISSING rather than
+/// present and holding something. Five minutes.
+///
+/// Absence is the one shape where a retirement moves a PROTECTED gate onto a
+/// column no human wrote: before 0.7.22 the Home Assistant path never wrote
+/// the control store, so those columns hold M0017 defaults. It is also
+/// exactly the answer Home Assistant gives while its `input_*` platforms are
+/// still setting up, and on the Home Assistant OS add-on LocalSky and Home
+/// Assistant restart together on every host reboot with the supervisor
+/// starting the add-on first, so that shape is common rather than
+/// theoretical. Waiting costs nothing: there is nothing to adopt from an
+/// absence, and until the pass concludes, every read behaves exactly as it
+/// did before the upgrade.
+///
+/// Thirty-one sightings, because the counter starts at 1 on the first: thirty
+/// intervals at the ten second cadence, five minutes of observation.
+const ADOPT_STABLE_TICKS_ABSENT: u32 = 31;
+
+/// Live state of the one-time adoption pass. Dropped for the life of the
+/// process the moment there is nothing left to adopt.
+struct AdoptState {
+    cfg_store: Arc<crate::config::FileConfigStore>,
+    control_store: Option<crate::persistence::IrrigationControlStore>,
+    policy: Arc<ArcSwap<WateringPolicy>>,
+    /// Where the commit re-reads the answer set from, so it never plans from
+    /// an answer taken before the write it is about to overwrite.
+    helpers: HelperFetch,
+    fingerprint: Option<String>,
+    stable_ticks: u32,
+    /// True while the commit cannot run because there is no `localsky.toml`
+    /// to record it in. Copied onto every snapshot so the migration notice
+    /// can say the helpers are still deciding on this install.
+    awaiting_config: bool,
+    /// The one warning about that, per process.
+    no_config_warned: bool,
+    /// Control rows a failed attempt wrote and could not put back yet. Until
+    /// they are restored nothing is planned: the planner would read them as
+    /// an operator answer.
+    pending_revert: Option<PendingRevert>,
+}
+
+/// The control rows a failed pass has to put back: the state read under the
+/// guard before anything was written, and which columns were written. Filled
+/// in as each write lands, so a write that never happened is never undone.
+struct PendingRevert {
+    before: crate::persistence::IrrigationControlState,
+    day: String,
+    pause_until: bool,
+    override_tomorrow: bool,
+    is_paused: bool,
+    is_dry_run: bool,
+}
+
+impl PendingRevert {
+    fn new(before: &crate::persistence::IrrigationControlState, day: &str) -> Self {
+        Self {
+            before: before.clone(),
+            day: day.to_string(),
+            pause_until: false,
+            override_tomorrow: false,
+            is_paused: false,
+            is_dry_run: false,
+        }
+    }
+}
+
+/// Put back the columns a failed pass wrote. Nothing native writes these four
+/// columns on a Home Assistant deployment before the pass has adopted them
+/// (every control write still routes to the helper until then), so restoring
+/// the pre-write state cannot clobber an operator's answer.
+async fn revert_control_writes(
+    cs: &crate::persistence::IrrigationControlStore,
+    p: &PendingRevert,
+) -> Result<(), String> {
+    if p.pause_until {
+        cs.set_pause_until(p.before.pause_until_epoch)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    if p.override_tomorrow {
+        cs.set_override_tomorrow_on(p.before.override_tomorrow.clone(), p.day.clone())
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    if p.is_paused {
+        cs.set_paused(p.before.is_paused)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    if p.is_dry_run {
+        cs.set_dry_run(p.before.is_dry_run)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Restore now, or park the restore so the next tick retries it before
+/// planning anything. A restore that keeps failing keeps the pass parked,
+/// which is the safe side: an unadopted control behaves exactly as before.
+async fn revert_or_park(
+    cs: &crate::persistence::IrrigationControlStore,
+    slot: &mut Option<PendingRevert>,
+    undo: PendingRevert,
+) {
+    if let Err(e) = revert_control_writes(cs, &undo).await {
+        tracing::error!(
+            error = %e,
+            "ha helper adoption: the control rows this pass wrote could not be restored; \
+             nothing is planned until they are"
+        );
+        *slot = Some(undo);
+    }
+}
+
+/// One tick of the adoption pass. Returns true when the caller should disarm
+/// it: either it committed everything, or there was never anything to do. A
+/// commit that left something deferred returns false, so the pass stays armed
+/// and adopts that entity once Home Assistant can answer for it.
+///
+/// Three orderings inside the commit are fixed and load-bearing.
+///
+/// The CONTROL STORE is read under the config write guard, not at the top of
+/// the tick, and a failed read defers the whole pass. That state decides two
+/// irreversible things: whether LocalSky's own answer outranks the helper, and
+/// whether the read retires. `IrrigationControlStore::get` resolves an error to
+/// the all-default state, which here reads as "the operator never set
+/// anything", so a transient SQLite failure would overwrite a live native pause
+/// with a legacy helper. `try_get` reports the failure instead, and a genuinely
+/// missing singleton row stays a confident default.
+///
+/// The answer set is RE-READ under the config write guard, immediately before
+/// planning, and the plan is built from that fresh answer. The tick's own
+/// readout was taken before the snapshot build, the controller overlay and
+/// this function's own wait on the write guard, all of which are time in
+/// which a control write can land in Home Assistant. Planning from the stale
+/// answer would write the pre-write value into SQLite and then retire the
+/// read: the owner taps Rain delay, gets a 200, and the pause is gone. The
+/// re-read has to match the answer that earned stability, and
+/// `ha_adopt::write_seq` has to be unmoved, which covers a write that was
+/// still in flight when the re-read happened.
+///
+/// SQLite first, DURABLY, and the config marker last. A crash between them
+/// leaves the control values written and nothing marked, so the next tick
+/// plans again from the helpers as they stand then and marks. Marking first
+/// and crashing would retire a read whose value never landed, which for the
+/// vacation pause means watering a yard somebody paused before they left.
+/// A FAILURE (rather than a crash) after the control writes puts them back
+/// before returning: left in place, a written is_paused=1 would be read on
+/// the retry as LocalSky's own answer, recorded kept_local, and the read
+/// retired on a value the helper may no longer hold. A crash cannot do that
+/// restore, so that one window is still documented as a redo.
+/// The control connection runs WAL with `synchronous=NORMAL` and does not
+/// fsync on commit, while the config marker is fsynced immediately, so
+/// `flush_durable` is what makes the intended ordering the one that survives
+/// a power cut.
+async fn adopt_tick(st: &mut AdoptState, readout: &HelperReadout) -> bool {
+    // A previous attempt wrote control values, failed before it could record
+    // them, and could not put them back either. Until they are back the store
+    // holds this pass's own residue, which the planner would read as an
+    // operator answer, so nothing is planned before the restore succeeds.
+    if let Some(pending) = st.pending_revert.take() {
+        if let Some(cs) = st.control_store.as_ref() {
+            if let Err(e) = revert_control_writes(cs, &pending).await {
+                tracing::error!(
+                    error = %e,
+                    "ha helper adoption: control rows written by a failed pass are still not \
+                     restored; retrying before anything is planned"
+                );
+                st.pending_revert = Some(pending);
+                return false;
+            }
+            tracing::info!("ha helper adoption: control rows written by a failed pass restored");
+        }
+    }
+    // A Home Assistant that answered with nothing is not a Home Assistant we
+    // can conclude anything from.
+    if readout.total_entities == 0 {
+        st.fingerprint = None;
+        st.stable_ticks = 0;
+        return false;
+    }
+    let fp = readout.stability_key();
+    if st.fingerprint.as_deref() == Some(fp.as_str()) {
+        st.stable_ticks = st.stable_ticks.saturating_add(1);
+    } else {
+        st.fingerprint = Some(fp);
+        st.stable_ticks = 1;
+    }
+    // A missing control helper is held to the long window. See
+    // ADOPT_STABLE_TICKS_ABSENT: absence is the only shape where retiring a
+    // read moves a protected gate onto a column no human wrote, and it is
+    // what a Home Assistant that has not finished starting answers with.
+    let control_absent = crate::ha_adopt::CONTROL_ENTITIES
+        .iter()
+        .any(|id| !readout.helpers.contains_key(*id));
+    let needed = if control_absent {
+        ADOPT_STABLE_TICKS_ABSENT
+    } else {
+        ADOPT_STABLE_TICKS
+    };
+    if st.stable_ticks < needed {
+        return false;
+    }
+    // A deferral below re-earns stability rather than retrying every tick:
+    // whatever blocked the commit (an unreadable config, a failed write) is
+    // not going to clear inside ten seconds, and re-reading the answer set
+    // before trying again is the same evidence rule as the first attempt.
+    st.stable_ticks = 0;
+
+    // Hold the read-modify-write guard across the whole sequence, the same
+    // way PUT /api/config and the tuning apply do, and re-plan against the
+    // config as loaded under it: another writer may have committed since the
+    // tick began.
+    let _guard = st.cfg_store.begin_write().await;
+    let mut cfg = match crate::ports::config_store::ConfigStore::load(&*st.cfg_store).await {
+        Ok(c) => c,
+        Err(e) => {
+            if matches!(e, crate::ports::config_store::ConfigStoreError::NotFound) {
+                // No config file. On an install zoned by LOCALSKY_ZONES alone
+                // that is not a passing state: there is nowhere to record the
+                // pass, so every helper read stays live for as long as the
+                // file is missing, and the release notes' "deleting the
+                // helpers is safe" is false here. Say so once in the log and
+                // carry the fact onto the snapshot for the notice. The pass
+                // runs on its own once a config exists; the setup wizard
+                // writes one.
+                st.awaiting_config = true;
+                if !st.no_config_warned {
+                    st.no_config_warned = true;
+                    tracing::warn!(
+                        "home assistant helper adoption cannot run: no localsky.toml to record \
+                         it in, so all seven helper reads stay live until one exists"
+                    );
+                }
+            } else {
+                // An unreadable config. Nothing to adopt into; try again on a
+                // later tick.
+                tracing::debug!(error = %e, "ha helper adoption deferred: config unavailable");
+            }
+            return false;
+        }
+    };
+    st.awaiting_config = false;
+    // Read the control surface HERE, under the guard, rather than taking the
+    // tick's opening snapshot: the override panel and the action handler write
+    // this store directly, and between the tick's read and this point sit the
+    // /api/states call, the snapshot build, the controller overlay and the wait
+    // on the write guard.
+    //
+    // A failed read DEFERS the whole pass. `get` resolves an error to the
+    // all-default state, which here is indistinguishable from "the operator
+    // never set anything" and is the input to two irreversible decisions: the
+    // helper wins over LocalSky's own answer, and the read retires for good. A
+    // transient SQLite error must not be able to say that.
+    let control = match st.control_store.as_ref() {
+        Some(cs) => match cs.try_get().await {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "ha helper adoption deferred: the control store could not be read"
+                );
+                st.fingerprint = None;
+                return false;
+            }
+        },
+        None => None,
+    };
+    let control = control.as_ref();
+    let now = chrono::Utc::now().timestamp();
+    // Plan against the tick's answer first, only to find out whether there is
+    // anything left to commit. An empty plan needs no round trip: it either
+    // disarms the pass, or, when a control is present and holding nothing
+    // usable, leaves it armed at no cost.
+    let dry = crate::ha_adopt::plan(&readout.helpers, &cfg, control, now);
+    if dry.is_empty() {
+        return !dry.deferred;
+    }
+
+    // Re-read Home Assistant here, under the guard, and commit only from an
+    // answer that still matches the one that earned stability.
+    let Some(fresh) = st.helpers.read().await else {
+        tracing::debug!("ha helper adoption deferred: the answer set could not be re-read");
+        st.fingerprint = None;
+        return false;
+    };
+    if fresh.total_entities == 0
+        || st.fingerprint.as_deref() != Some(fresh.stability_key().as_str())
+    {
+        tracing::debug!("ha helper adoption deferred: the answer set moved during the tick");
+        st.fingerprint = None;
+        return false;
+    }
+    if crate::ha_adopt::write_seq() != readout.write_seq {
+        // A control write went to a helper this pass adopts, after the tick's
+        // answer was taken. Planning from either answer risks overwriting it
+        // with the value it replaced and then retiring the read, so re-earn
+        // the evidence: the next window reads the post-write answer and
+        // adopts that.
+        tracing::debug!("ha helper adoption deferred: a control write landed during the tick");
+        st.fingerprint = None;
+        return false;
+    }
+    let plan = crate::ha_adopt::plan(&fresh.helpers, &cfg, control, now);
+    if plan.is_empty() {
+        return !plan.deferred;
+    }
+    let mut revert: Option<PendingRevert> = None;
+    if plan.writes_controls() {
+        let Some(cs) = st.control_store.as_ref() else {
+            // Unreachable: the planner only plans control writes when it was
+            // given a control state, which only exists with a store. Refuse
+            // rather than mark a control whose value went nowhere.
+            tracing::error!("ha helper adoption: control writes planned with no store; skipping");
+            return true;
+        };
+        let Some(before) = control else {
+            // Same argument: a plan writes controls only when planned against
+            // a control state.
+            tracing::error!(
+                "ha helper adoption: control writes planned with no control state; skipping"
+            );
+            return true;
+        };
+        let today = crate::timeutil::now_local().date_naive().to_string();
+        // What to put back if a later step fails, marked as each write lands
+        // so a write that never happened is never undone.
+        let mut undo = PendingRevert::new(before, &today);
+        let mut failed: Option<String> = None;
+        if let Some(v) = plan.pause_until_epoch {
+            match cs.set_pause_until(v).await {
+                Ok(()) => undo.pause_until = true,
+                Err(e) => failed = Some(e.to_string()),
+            }
+        }
+        if failed.is_none() {
+            if let Some(v) = plan.override_tomorrow.clone() {
+                // Stamped with today: the helper carries no day of its own,
+                // and an unstamped one-day override never expires.
+                match cs.set_override_tomorrow_on(v, today).await {
+                    Ok(()) => undo.override_tomorrow = true,
+                    Err(e) => failed = Some(e.to_string()),
+                }
+            }
+        }
+        if failed.is_none() {
+            if let Some(v) = plan.is_paused {
+                match cs.set_paused(v).await {
+                    Ok(()) => undo.is_paused = true,
+                    Err(e) => failed = Some(e.to_string()),
+                }
+            }
+        }
+        if failed.is_none() {
+            if let Some(v) = plan.is_dry_run {
+                match cs.set_dry_run(v).await {
+                    Ok(()) => undo.is_dry_run = true,
+                    Err(e) => failed = Some(e.to_string()),
+                }
+            }
+        }
+        if failed.is_none() {
+            // Nothing above is durable yet, and the marker below is fsynced.
+            // Flush here so a power cut cannot leave a retired read pointing
+            // at a column that never got the value.
+            if let Err(e) = cs.flush_durable().await {
+                failed = Some(e.to_string());
+            }
+        }
+        if let Some(e) = failed {
+            // Nothing is marked, so every read stays exactly where it was.
+            // Whatever did land is put back now, so the next attempt plans
+            // from the operator's state and not from this pass's residue.
+            tracing::warn!(error = %e, "ha helper adoption deferred: control write failed");
+            revert_or_park(cs, &mut st.pending_revert, undo).await;
+            return false;
+        }
+        revert = Some(undo);
+    }
+
+    crate::ha_adopt::apply(&plan, &mut cfg);
+    if let Err(e) = crate::ports::config_store::ConfigStore::save(&*st.cfg_store, &cfg).await {
+        // The control values landed and the marker did not. Same rule as a
+        // failed write: put them back, or the retry reads them as an operator
+        // answer, records kept_local, and retires the read on a value the
+        // helper may have moved off in the meantime.
+        tracing::warn!(error = %e, "ha helper adoption deferred: config save failed");
+        if let (Some(cs), Some(undo)) = (st.control_store.as_ref(), revert) {
+            revert_or_park(cs, &mut st.pending_revert, undo).await;
+        }
+        return false;
+    }
+    // Swap the rebuilt policy in so the adopted thresholds AND the read
+    // cutover take effect without waiting for a restart. Same one-line effect
+    // the config hot-reload path applies.
+    st.policy.store(Arc::new(WateringPolicy::from_config(&cfg)));
+    if plan
+        .records
+        .iter()
+        .all(|r| r.outcome == crate::ha_adopt::OUTCOME_NOT_FOUND)
+    {
+        tracing::warn!(
+            count = plan.records.len(),
+            total_entities = fresh.total_entities,
+            "home assistant helper adoption: none of these helpers were present; \
+             LocalSky owns these controls itself now"
+        );
+    }
+    for r in &plan.records {
+        tracing::info!(
+            entity = %r.entity,
+            outcome = %r.outcome,
+            target = %r.target,
+            adopted = ?r.adopted_value,
+            observed = ?r.observed_value,
+            previous = ?r.previous_value,
+            "home assistant helper retired"
+        );
+    }
+    // A control that deferred is still unhandled, so the pass stays armed and
+    // picks it up once Home Assistant can answer for it.
+    !plan.deferred
+}
+
+/// Let a controller that actually reports outrank the Home Assistant entity
+/// readbacks, per field and per zone. Unlike the native path this never
+/// overwrites with an absence: a field no controller reports keeps whatever
+/// the entity said, so a legacy install with no controller configured is
+/// untouched.
+async fn overlay_reporting_controllers(
+    snap: &mut IrrigationSnapshot,
+    controllers: &ControllerRegistry,
+) {
+    if controllers.ids().is_empty() {
+        return;
+    }
+    let cs = native_controller_state(controllers).await;
+    for z in snap.zones.iter_mut() {
+        if let Some((running, known)) = cs.running.get(&z.slug) {
+            z.running = *running;
+            z.running_known = *known;
+        }
+    }
+    if let Some(m) = cs.master {
+        snap.master_enable = m;
+    }
+    if cs.water.is_some() {
+        snap.water_level_pct = cs.water;
+    }
+    snap.water_level_capable |= cs.water_level_capable || cs.water.is_some();
 }
 
 /// Build the `IrrigationSnapshot` from a pre-fetched entity `map` plus the
@@ -1302,13 +2117,24 @@ async fn build_from_map(
     // sync allocator never touches SQLite. `None` in tests / before the
     // first tick: the balance degrades to target-only sizing.
     balance: Option<&BalanceTick>,
-    // Native control surface. `Some` (standalone path) overrides the
-    // HA-helper-derived pause/override below with locally persisted state;
-    // `None` (HA path) reads them from the entity map as before.
+    // Native control surface. `Some` whenever a persistence DB is mounted,
+    // on BOTH deployment paths now: the Home Assistant path used to pass
+    // `None` unconditionally, which made the native store unreachable there
+    // even when it held a value, and hardcoded the sticky global override to
+    // "auto" so an override written from the Override panel was never read.
     // The sequence wall-time estimate's per-zone cycle/soak lookups read
     // watering_policy.zone_agronomy (hot-reloaded), not a boot config.
     control: Option<&crate::persistence::IrrigationControlState>,
+    // Whether this build may read Home Assistant helper entities at all.
+    // True on the HA path, where a helper the adoption pass has not handled
+    // yet is still read exactly as before; false on the native path, where
+    // the map is empty by construction and the control surface is the only
+    // source. Combined with `watering_policy.ha_read_retired` per entity.
+    ha_helper_reads: bool,
 ) -> IrrigationSnapshot {
+    // Per-entity read gate: live only while this build reads helpers at all
+    // AND the adoption pass has not recorded that entity.
+    let helper_live = |entity: &str| ha_helper_reads && !watering_policy.ha_read_retired(entity);
     let mut snap = IrrigationSnapshot {
         last_refresh_epoch: Utc::now().timestamp(),
         ha_reachable: true,
@@ -1378,41 +2204,73 @@ async fn build_from_map(
     snap.water_level_pct = state_f64(&map, &format!("sensor.{sp}_water_level"));
     snap.water_level_capable = snap.water_level_pct.is_some();
 
-    // Vacation pause + one-day override helpers. Both are user-created
-    // HA helpers (input_datetime + input_select). When missing, the snapshot
-    // exposes override_helpers_present=false so the mobile UI can disable
-    // the controls with a "(HA helper not configured)" hint rather than
-    // letting the action POST fail with a 502 on tap.
-    match control {
-        // Native (standalone) path: the control surface lives in local
-        // persisted state, not HA helpers. The controls always "exist"
-        // (the UI is fully functional without HA), so present = true.
-        Some(c) => {
-            snap.override_helpers_present = true;
-            snap.pause_until_epoch = c.pause_until_epoch;
-            snap.override_tomorrow = c.override_tomorrow.clone();
-            // Sticky global override is always LocalSky-native (its own sqlite),
-            // so it rides the native control surface even in HA mode.
-            snap.global_override = c.global_override.clone();
+    // Vacation pause + one-day override. LocalSky's own store owns both once
+    // the adoption pass has handled the matching helper; until then, on a
+    // Home Assistant deployment, they still come from the entity map exactly
+    // as before. The store is consulted only when it exists: if the
+    // persistence DB is gone the entity read stays live rather than the pause
+    // silently reading zero.
+    let pause_from_store = control.filter(|_| !helper_live(crate::ha_adopt::PAUSE_UNTIL));
+    let override_from_store = control.filter(|_| !helper_live(crate::ha_adopt::OVERRIDE_TOMORROW));
+    snap.pause_until_epoch = match pause_from_store {
+        Some(c) => c.pause_until_epoch,
+        None => map
+            .get(crate::ha_adopt::PAUSE_UNTIL)
+            .and_then(crate::ha_adopt::timestamp_attr)
+            .unwrap_or(0),
+    };
+    snap.override_tomorrow = match override_from_store {
+        // Already expired against the local date by the store, so a one-day
+        // override cannot outlive the day it was set on.
+        Some(c) => c.override_tomorrow.clone(),
+        None => map
+            .get(crate::ha_adopt::OVERRIDE_TOMORROW)
+            .and_then(|s| s.get("state"))
+            .and_then(Value::as_str)
+            .unwrap_or("none")
+            .to_string(),
+    };
+    // The sticky global and per-zone overrides are NOT part of this release.
+    //
+    // They have no Home Assistant helper and never had one: `POST /action`
+    // writes them to LocalSky's own sqlite on every source, while this
+    // builder has always reported "auto" on the Home Assistant path, so a
+    // Skip or Force set from the Override panel there is stored and never
+    // acted on. That is a real defect and it is PRE-EXISTING: it has nothing
+    // to do with retiring helper reads, and fixing it here would activate,
+    // for the first time and with no notice, an instruction the panel showed
+    // as Auto for the whole time it was set. A stale Force is the first rung
+    // of the ladder: it runs every zone past rain, freeze, wind and the
+    // vacation pause.
+    //
+    // So the gate is the deployment path, exactly as before: the native path
+    // reads the store, the Home Assistant path reads "auto". This release
+    // changes nothing about these two controls. The defect is fixed on its
+    // own, where the change can be the only thing in the release notes.
+    let sticky_from_store = control.filter(|_| !ha_helper_reads);
+    snap.global_override = sticky_from_store
+        .map(|c| c.global_override.clone())
+        .unwrap_or_else(|| "auto".to_string());
+    // True when the pause and override controls will land somewhere. Once
+    // they are adopted that is always, because they write LocalSky's own
+    // store; before adoption it still reports whether the helpers exist, so
+    // an install mid-migration is described accurately.
+    snap.override_helpers_present = match (pause_from_store, override_from_store) {
+        (Some(_), Some(_)) => true,
+        _ => {
+            map.contains_key(crate::ha_adopt::PAUSE_UNTIL)
+                && map.contains_key(crate::ha_adopt::OVERRIDE_TOMORROW)
         }
-        // HA path: read both from the entity map exactly as before.
-        None => {
-            let pause_state = map.get("input_datetime.irrigation_pause_until");
-            let override_state = map.get("input_select.irrigation_override_tomorrow");
-            snap.override_helpers_present = pause_state.is_some() && override_state.is_some();
-            snap.pause_until_epoch = pause_state
-                .and_then(|s| s.get("attributes"))
-                .and_then(|a| a.get("timestamp"))
-                .and_then(Value::as_i64)
-                .unwrap_or(0);
-            snap.override_tomorrow = override_state
-                .and_then(|s| s.get("state"))
-                .and_then(Value::as_str)
-                .unwrap_or("none")
-                .to_string();
-            snap.global_override = "auto".to_string();
-        }
-    }
+    };
+    // The migration record, for the notice. Empty on every standalone install
+    // and on a Home Assistant install before the pass runs.
+    snap.ha_adoption = watering_policy.ha_adoption.clone();
+    // Whether the four controls have a sink at all. Same condition the
+    // planner gets: a control state exists only where a control store does.
+    // The notice cannot work this out from the records, because a control
+    // that DEFERRED (present, holding unavailable) is missing from them for a
+    // completely different reason.
+    snap.controls_persisted = control.is_some();
 
     // Pre-compute the heat multiplier here (the snapshot.forecast struct
     // also recomputes this later, the dupe is intentional because the
@@ -1434,37 +2292,43 @@ async fn build_from_map(
         et_heat_multiplier(hi)
     };
 
-    // Per-zone state. Sum planned_run_seconds across the four zones to
-    // get the real next-run total (since IU's zones array carries the
-    // YAML placeholder until SI's nightly sync overwrites it).
-    //
-    // The math tile reads SI's per-zone attributes directly so the
-    // displayed formula matches SI's internal compute. heat_mult is the
-    // global forecast multiplier (same one SI multiplies into ET via
-    // the Phase C HA automation); capture_efficiency is the constant
-    // LocalSky uses in the Phase E water-balance projection.
+    // Per-zone state. Every number here is LocalSky's own: no zone field
+    // is read from a Home Assistant entity, on either deployment path.
+    // The soil deficit had exactly one producer, the Smart Irrigation
+    // entity, and it is gone: `bucket_mm` is now absent rather than a
+    // fabricated 0.0, and today's run length comes from the weekly-budget
+    // allocator (applied below, once `water_budgets` exists) on both
+    // paths. heat_mult is the global forecast multiplier; capture_eff is
+    // the constant the soil projection uses.
+    let today_doy = {
+        use chrono::Datelike;
+        crate::timeutil::now_local().date_naive().ordinal() as u16
+    };
+    let site_lat = watering_policy.location.0;
     snap.zones = zones
         .iter()
         .map(|zone| {
             let slug = zone.slug.as_str();
             let running_id = format!("binary_sensor.{sp}_{slug}_station_running");
-            let si_id = format!("sensor.smart_irrigation_{slug}");
-            let attrs = map.get(&si_id).and_then(|s| s.get("attributes"));
-            let bucket_mm = attrs
-                .and_then(|a| a.get("bucket"))
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0);
-            let kc = attrs
-                .and_then(|a| a.get("multiplier"))
-                .and_then(Value::as_f64)
+            // No native model computes a soil deficit today. Absent, not
+            // zero: a bare 0.0 read as "at field capacity" on every
+            // install that could never populate it.
+            let bucket_mm: Option<f64> = None;
+            // Kc from the native species catalog for the zone's configured
+            // species, hemisphere aware. Previously the Smart Irrigation
+            // entity's `multiplier` attribute, defaulting to 1.0 whenever
+            // the entity was absent (which is always, on a standalone
+            // install).
+            // A zone with no agronomy config (unconfigured install) keeps
+            // the neutral 1.0 the entity read used to fall back to.
+            let kc = watering_policy
+                .zone_agronomy
+                .get(slug)
+                .map(|a| crate::engine::kc_at_doy_lat(a.species, today_doy, site_lat))
                 .unwrap_or(1.0);
             // Throughput + max-duration resolve from LocalSky's config
             // (localsky.toml zone block -> sprinkler_catalog default by
-            // sprinkler_type, or precip_rate_mm_hr override when measured),
-            // NOT from SI entity attributes. SI's `throughput` and
-            // `maximum_duration` attrs are ignored; SI's `bucket` +
-            // `multiplier` are still consumed as a transitional bridge
-            // until the v2 water-balance loop owns them too.
+            // sprinkler_type, or precip_rate_mm_hr override when measured).
             let rt = zone_runtime
                 .get(slug)
                 .copied()
@@ -1478,45 +2342,22 @@ async fn build_from_map(
                 Some(c) => rt.max_duration_s.min(c),
                 None => rt.max_duration_s,
             };
-            // Per-zone session sizing:
-            //   seconds = (|bucket_mm| / throughput_mm_hr) * 3600 * multiplier
-            // Then capped at max_duration_s to keep a single dispatch from
-            // running away on a misconfigured throughput.
-            let raw_seconds = if throughput_mm_hr > 0.0 && bucket_mm < 0.0 {
-                (bucket_mm.abs() / throughput_mm_hr * 3600.0 * kc) as u32
-            } else {
-                0
-            };
-            // Scheduled run uses the engine's own computation, capped at the
-            // safety ceiling. If an Override-mode manual schedule applies
-            // today for this zone, zero the scheduled dispatch so smart
-            // doesn't run on top of the operator's planned manual run; the
-            // smart math chain (raw_seconds, cap_binding) still computes
-            // for nerd visibility.
-            // P2-6: scale the depth by the seasonal trust dial, then re-clamp to
-            // the safety cap (raw_seconds stays the pre-dial engine value for the
-            // math view). seasonal_capped enforces the cap-after-scaling order.
-            let raw_planned =
-                seasonal_capped(raw_seconds, watering_policy.seasonal_adjust_pct, max_dur);
-            let override_active = crate::scheduler::manual::override_active_today(
+            // Today's run length comes from the weekly-budget allocator,
+            // the one model that governs dispatch. It is applied in
+            // `apply_budget_plan` below, once `snap.water_budgets` exists;
+            // `scheduled_seconds` and `cap_binding` are pre-plan
+            // placeholders that it overwrites. `raw_seconds` was the Smart
+            // Irrigation bucket formula and has no producer left, so it
+            // stays 0 and nothing renders it.
+            let raw_seconds = 0u32;
+            // Which Override schedules suppress smart dispatch for this
+            // zone, so the UI can say so instead of showing a silent zero.
+            let smart_suppressed = crate::scheduler::manual::override_suppression(
                 &watering_policy.manual_schedules,
                 slug,
                 today_weekday,
             );
-            let planned = if override_active {
-                0
-            } else {
-                // P1-9: a force-run with a 0 soil budget still waters a bounded
-                // default instead of silently dispatching nothing.
-                let zone_ov = control
-                    .and_then(|c| c.zone_overrides.get(slug))
-                    .map(|s| s.as_str())
-                    .unwrap_or("auto");
-                let global_ov = control
-                    .map(|c| c.global_override.as_str())
-                    .unwrap_or("auto");
-                force_run_floor(zone_ov, global_ov, raw_planned, max_dur)
-            };
+            let planned = 0u32;
             let math = Some(crate::ha::snapshot::ZoneMath {
                 bucket_mm,
                 kc,
@@ -1526,14 +2367,16 @@ async fn build_from_map(
                 raw_seconds,
                 max_duration_seconds: max_dur,
                 scheduled_seconds: planned,
-                cap_binding: raw_seconds > max_dur,
+                cap_binding: false,
             });
             ZoneState {
                 name: zone.display_name.clone(),
                 slug: zone.slug.clone(),
                 // Sticky per-zone override from the native control surface;
-                // "auto" when unset or in HA mode (control = None).
-                override_mode: control
+                // "auto" when unset, and on the Home Assistant path, where
+                // this read is inert for the same reason the global one above
+                // is.
+                override_mode: sticky_from_store
                     .and_then(|c| c.zone_overrides.get(&zone.slug))
                     .cloned()
                     .unwrap_or_else(|| "auto".to_string()),
@@ -1542,8 +2385,13 @@ async fn build_from_map(
                 // HA path reads running from a binary_sensor, always a
                 // trusted readback. Native may override to false.
                 running_known: true,
-                today_run_minutes: 0.0, // Populated by SQLite history in Phase 3.
+                // No producer. Nothing summarizes per-zone valve-open
+                // seconds since local midnight on either path, so this is
+                // absent rather than a hardcoded 0.0 printed beside a hold
+                // line naming the inches already applied this week.
+                today_run_minutes: None,
                 bucket_mm,
+                smart_suppressed,
                 planned_run_seconds: planned,
                 // The latest completed watering event's end, from the
                 // per-tick runs evidence. This is what makes the
@@ -1979,11 +2827,12 @@ async fn build_from_map(
     let soil_temp_yard_min_f = soil_temps.iter().copied().reduce(f64::min);
     let soil_temp_yard_max_f = soil_temps.iter().copied().reduce(f64::max);
 
-    // Resolve each zone's live soil reading once; the engine inputs and
-    // the probe-fault detector consume the same list. Falls back to the
-    // legacy hardcoded reads when no zone config is present.
+    // Resolve each zone's live soil reading once; the engine inputs,
+    // the probe-fault detector and the per-zone verdicts all consume the
+    // same list. With no probe configured on any zone it is built from
+    // the active zone list, so every zone still gets a verdict.
     let soil_zones_resolved = if watering_policy.soil_zones.is_empty() {
-        build_legacy_soil_zones(&map)
+        build_legacy_soil_zones(&map, zones)
     } else {
         resolve_soil_zones(&watering_policy.soil_zones, &map, sensor_history).await
     };
@@ -2031,11 +2880,14 @@ async fn build_from_map(
         heat_index_max_3day_f: heat_index_3day,
         days_since_significant_rain: days_since_rain,
 
-        max_wind_mph: state_f64(&map, "input_number.irrigation_max_wind_mph")
+        // The three thresholds. Until the adoption pass records a helper it
+        // still outranks Settings, exactly as it always did; afterwards
+        // Settings is the only source and the two editors finally agree.
+        max_wind_mph: helper_f64(&map, crate::ha_adopt::MAX_WIND, &helper_live)
             .unwrap_or(watering_policy.skip_rules.max_wind_mph),
-        min_temp_f: state_f64(&map, "input_number.irrigation_min_temp_f")
+        min_temp_f: helper_f64(&map, crate::ha_adopt::MIN_TEMP, &helper_live)
             .unwrap_or(watering_policy.skip_rules.min_temp_f),
-        rain_skip_in: state_f64(&map, "input_number.irrigation_rain_skip_in")
+        rain_skip_in: helper_f64(&map, crate::ha_adopt::RAIN_SKIP, &helper_live)
             .unwrap_or(watering_policy.skip_rules.rain_skip_in),
 
         // Per-zone soil readings + thresholds. Resolved above from each
@@ -2053,8 +2905,19 @@ async fn build_from_map(
         // degraded on ForecastFallback.
         live_readings,
 
-        is_paused: state_eq(&map, "input_boolean.irrigation_pause", "on"),
-        is_dry_run: state_eq(&map, "input_boolean.irrigation_dry_run", "on"),
+        // The two toggles. Both had no native column at all before M0017, so
+        // on a standalone install they were permanently false; both are
+        // PROTECTED gates in the ladder, which made them controls that did
+        // not exist. Post-adoption they read LocalSky's own store on both
+        // paths.
+        is_paused: match control.filter(|_| !helper_live(crate::ha_adopt::PAUSE_TOGGLE)) {
+            Some(c) => c.is_paused,
+            None => state_eq(&map, crate::ha_adopt::PAUSE_TOGGLE, "on"),
+        },
+        is_dry_run: match control.filter(|_| !helper_live(crate::ha_adopt::DRY_RUN_TOGGLE)) {
+            Some(c) => c.is_dry_run,
+            None => state_eq(&map, crate::ha_adopt::DRY_RUN_TOGGLE, "on"),
+        },
 
         // Phase 4 control surfaces. Today's verdict ignores the tomorrow
         // override (is_tomorrow=false); the verdict-strip path below sets
@@ -2106,14 +2969,105 @@ async fn build_from_map(
     .await;
     snap.water_budgets = compute_water_budgets(
         &fc,
-        &map,
         zone_runtime,
+        watering_policy.defer_threshold_in(),
         restriction_cap_seconds,
-        &watering_policy.budget_zones,
+        &budget_zones_for_active(zones, &watering_policy.budget_zones),
         balance,
     );
+    // ONE model governs dispatch on BOTH paths now: the weekly-budget
+    // allocator. The Home Assistant path used to size runs from a Smart
+    // Irrigation entity's bucket instead, which is the read this release
+    // deleted, so both paths plan from `water_budgets` here.
+    apply_budget_plan(&mut snap, watering_policy);
 
     snap
+}
+
+/// Size every zone's run from the weekly-budget allocator's `today_seconds`,
+/// then apply, in order: the seasonal trust dial (re-clamped to the cap,
+/// because a >100% dial can push a capped figure back over the ceiling), an
+/// Override manual schedule for today (zeroes the smart dispatch so it does
+/// not run on top of the operator's own run), and the force-run floor.
+/// Recomputes the snapshot's next-run rollups from the result so display and
+/// dispatch cannot disagree.
+fn apply_budget_plan(snap: &mut IrrigationSnapshot, watering_policy: &WateringPolicy) {
+    let planned_by_slug: HashMap<String, u32> = snap
+        .water_budgets
+        .iter()
+        .map(|b| (b.zone_slug.clone(), b.today_seconds))
+        .collect();
+    // The allocator is the only thing that computes a real cap collision
+    // now that the soil-deficit formula is gone, so the math panel's cap
+    // row reads `session_capped` off the budget row instead of a flag
+    // nothing sets. Without this the "shorted by the safety ceiling"
+    // signal was false on every install while the panel still promised it.
+    let capped_by_slug: HashMap<String, bool> = snap
+        .water_budgets
+        .iter()
+        .map(|b| (b.zone_slug.clone(), b.session_capped))
+        .collect();
+    let today_weekday: u8 = {
+        use chrono::Datelike;
+        // Configured timezone, not the container's.
+        crate::timeutil::now_local()
+            .weekday()
+            .num_days_from_sunday() as u8
+    };
+    // Read before the mutable zone loop borrows snap. The snapshot value is
+    // the gated one, so re-deriving it from `control` here would put the
+    // sticky override back in force on the Home Assistant path behind the
+    // gate above.
+    let global_ov = snap.global_override.clone();
+    for z in snap.zones.iter_mut() {
+        let raw_budget = planned_by_slug.get(&z.slug).copied().unwrap_or(0);
+        let max_dur = z.math.as_ref().map(|m| m.max_duration_seconds).unwrap_or(0);
+        let seasonal_binds =
+            seasonal_cap_binds(raw_budget, watering_policy.seasonal_adjust_pct, max_dur);
+        let budget_seconds =
+            seasonal_capped(raw_budget, watering_policy.seasonal_adjust_pct, max_dur);
+        let override_active = crate::scheduler::manual::override_active_today(
+            &watering_policy.manual_schedules,
+            &z.slug,
+            today_weekday,
+        );
+        z.planned_run_seconds = if override_active {
+            0
+        } else {
+            // P1-9: a force-run against a zero budget still waters a
+            // bounded default instead of silently dispatching nothing.
+            force_run_floor(&z.override_mode, &global_ov, budget_seconds, max_dur)
+        };
+        if let Some(m) = z.math.as_mut() {
+            m.scheduled_seconds = z.planned_run_seconds;
+            // The ceiling binds only when there IS a run and that run sits ON
+            // the ceiling because something wanted more: the allocator's ideal
+            // weekly session (`session_capped`), or the seasonal dial scaling
+            // past it (`seasonal_binds`). Both clamps report themselves here;
+            // the third, the condition-rule multiplier, reports itself in
+            // `apply_verdict_multiplier` with the same predicate.
+            //
+            // The `planned == max_dur` term is what keeps the panel from
+            // describing a run that does not exist. `session_capped` is a
+            // property of the IDEAL weekly slice and stays true when today's
+            // plan is zero for an unrelated reason: spacing since the last
+            // session, a rain defer, budget mode off, an Override schedule.
+            // Reading it alone printed "0 min (capped at 60 min)". It also
+            // keeps a force-run floor honest: 5 minutes over a zero budget is
+            // a floor, not a run the ceiling shortened.
+            m.cap_binding = !override_active
+                && max_dur > 0
+                && z.planned_run_seconds == max_dur
+                && (capped_by_slug.get(&z.slug).copied().unwrap_or(false) || seasonal_binds);
+        }
+    }
+    snap.next_run_total_minutes = snap
+        .zones
+        .iter()
+        .map(|z| z.planned_run_seconds as f64)
+        .sum::<f64>()
+        / 60.0;
+    snap.next_run_epoch = compute_next_run_epoch(watering_policy, &snap.zones);
 }
 
 /// Native (no-Home-Assistant) snapshot builder. Reuses `build_from_map`
@@ -2153,6 +3107,10 @@ async fn refresh_once_native(
         forecast_obs,
         balance,
         control,
+        // No helper reads on this path: the map is empty by construction, so
+        // a live gate would resolve every control to its absent-entity
+        // default instead of to the store.
+        false,
     )
     .await;
     // Native builds have no remote dependency; the engine is always reachable.
@@ -2192,57 +3150,11 @@ async fn refresh_once_native(
     snap.flow_meter = cs.flow_meter;
     snap.flow_gpm = cs.flow_gpm;
 
-    // A5: native run-times. Without HA there's no Smart Irrigation bucket,
-    // so size each zone's run from LocalSky's own weekly-budget allocator
-    // (`compute_water_budgets` already ran inside build_from_map and is in
-    // `snap.water_budgets`; its `today_seconds` is the capped per-zone
-    // recommendation, rain-defer, session spacing, and max-duration all
-    // applied). A manual Override schedule for today still zeroes the smart
-    // dispatch so it doesn't run on top of the operator's planned run.
-    let planned_by_slug: HashMap<String, u32> = snap
-        .water_budgets
-        .iter()
-        .map(|b| (b.zone_slug.clone(), b.today_seconds))
-        .collect();
-    let today_weekday: u8 = {
-        use chrono::Datelike;
-        // Configured timezone, not the container's (same fix as build_from_map).
-        crate::timeutil::now_local()
-            .weekday()
-            .num_days_from_sunday() as u8
-    };
-    // Read before the mutable zone loop borrows snap.
-    let global_ov = snap.global_override.clone();
-    for z in snap.zones.iter_mut() {
-        // P2-6: the native (weekly-allocator) path applies the seasonal dial here,
-        // then re-clamps to the cap via seasonal_capped (today_seconds was already
-        // capped inside compute_water_budgets, but a >100% dial can push it back
-        // over the per-zone / regulatory ceiling, so the cap MUST be re-applied
-        // after the scaling, same contract as the HA path).
-        let raw_budget = planned_by_slug.get(&z.slug).copied().unwrap_or(0);
-        let max_dur = z.math.as_ref().map(|m| m.max_duration_seconds).unwrap_or(0);
-        let budget_seconds =
-            seasonal_capped(raw_budget, watering_policy.seasonal_adjust_pct, max_dur);
-        let override_active = crate::scheduler::manual::override_active_today(
-            &watering_policy.manual_schedules,
-            &z.slug,
-            today_weekday,
-        );
-        z.planned_run_seconds = if override_active {
-            0
-        } else {
-            // P1-9: same force-run floor as the HA path (z.override_mode is the
-            // resolved per-zone override; global from the snapshot).
-            force_run_floor(&z.override_mode, &global_ov, budget_seconds, max_dur)
-        };
-        if let Some(m) = z.math.as_mut() {
-            m.scheduled_seconds = z.planned_run_seconds;
-        }
-    }
-    // Custom-rule watering multiplier (AdjustMultiplier), applied after the
-    // native allocator finalized planned_run_seconds (which overwrote the
-    // value build_from_map computed), so display + dispatch agree. No-op
-    // when no zone carries such a rule.
+    // A5: run-times come from LocalSky's own weekly-budget allocator, applied
+    // inside build_from_map (`apply_budget_plan`) for both deployment paths.
+    // Custom-rule watering multiplier (AdjustMultiplier), applied after that
+    // plan is final, so display + dispatch agree. No-op when no zone carries
+    // such a rule.
     apply_verdict_multiplier(&mut snap);
     snap.next_run_total_minutes = snap
         .zones
@@ -2423,21 +3335,24 @@ fn apply_engine(
 }
 
 /// Weekly water-balance assembly. Resolves each zone's target and
-/// runtime inputs (HA helper -> config -> agronomic slug default), joins
-/// the pre-computed per-tick balance evidence, and calls the ONE pure
+/// runtime inputs (LocalSky config -> agronomic slug default), joins the
+/// pre-computed per-tick balance evidence, and calls the ONE pure
 /// implementation (`engine::budget::compute_zone`) per zone.
 ///
-/// Outputs `today_seconds` per zone, what the HA budget-override
-/// automation at 23:30:25 calls `IU.adjust_time(actual=...)` with. Zero
-/// means "don't run this zone today"; the reason names what decided.
+/// Outputs `today_seconds` per zone: the run length that actually
+/// dispatches. Zero means "don't run this zone today"; the reason names
+/// what decided.
 fn compute_water_budgets(
     fc: &ForecastSnapshot,
-    map: &HashMap<String, Value>,
     zone_runtime: &HashMap<String, ZoneRuntime>,
+    // Live rain-defer threshold from cfg.engine.session_rain_defer_in.
+    session_rain_defer_in: f64,
     restriction_cap_seconds: Option<u32>,
-    // A5b: per-zone budget config from cfg.zones. Drives which zones the
-    // allocator plans for (so any configured zone gets a run-time). Empty =
-    // unconfigured install -> nothing to plan until the wizard writes zones.
+    // Per-zone budget rows. The live call site passes
+    // `budget_zones_for_active`, which is one row per ACTIVE zone
+    // (config-backed where the operator wrote one, otherwise a row with
+    // no explicit target that resolves the agronomic slug default below).
+    // Empty = no zones at all -> nothing to plan until the wizard runs.
     budget_zones: &[ZoneBudgetCfg],
     // Pre-computed store evidence; `None` degrades to target-only sizing.
     balance: Option<&BalanceTick>,
@@ -2445,7 +3360,7 @@ fn compute_water_budgets(
     let now_epoch = chrono::Utc::now().timestamp();
     let globals = crate::engine::BalanceGlobals {
         now_epoch,
-        session_rain_defer_in: crate::engine::SESSION_RAIN_DEFER_IN,
+        session_rain_defer_in,
         observed_rain_mm: balance.map(|b| b.observed_rain_mm).unwrap_or(0.0),
         observed_rain_source: balance
             .map(|b| b.observed_rain_source.clone())
@@ -2459,33 +3374,26 @@ fn compute_water_budgets(
     for zone_cfg in budget_zones.iter() {
         let slug = zone_cfg.slug.as_str();
         let (default_budget_in, default_sessions) = agronomic_budget_default(slug);
-        // Precedence: live HA input_number helper (HA path, unchanged) ->
-        // per-zone config value (native + HA fallback, A5b) -> agronomic
-        // slug default. (HA helpers carry no initial: per the established
-        // convention so recorder restore_state preserves operator edits.)
-        let weekly_budget_in = state_f64(
-            map,
-            &format!("input_number.irrigation_{slug}_weekly_budget_in"),
-        )
-        .or(zone_cfg.weekly_budget_in)
-        .unwrap_or(default_budget_in);
-        let sessions_per_week = state_f64(
-            map,
-            &format!("input_number.irrigation_{slug}_sessions_per_week"),
-        )
-        .map(|v| v.round() as u32)
-        .or(zone_cfg.sessions_per_week)
-        .unwrap_or(default_sessions)
-        .max(1);
-        // Budget mode used to be a per-zone HA toggle while the SI -> LocalSky
-        // cutover was in progress. Post-cutover LocalSky is the only source of
-        // truth, so the toggle is force-on regardless of the HA helper's state.
+        // Precedence: per-zone config value -> agronomic slug default.
+        // Home Assistant `input_number` helpers used to win over both. They
+        // no longer participate: LocalSky is the engine and reads no entity
+        // to make a decision, so the weekly target and session count come
+        // from LocalSky's own config on every deployment path.
+        let weekly_budget_in = zone_cfg.weekly_budget_in.unwrap_or(default_budget_in);
+        let sessions_per_week = zone_cfg
+            .sessions_per_week
+            .unwrap_or(default_sessions)
+            .max(1);
+        // Whether this zone waters on a target the operator set or on one
+        // inferred from its slug. The allocator decides dispatch on every
+        // path now, so the Zones page names the inferred ones once rather
+        // than letting a yard start watering on a guess with nothing on
+        // screen.
+        let target_inferred =
+            zone_cfg.weekly_budget_in.is_none() || zone_cfg.sessions_per_week.is_none();
+        // Budget mode used to be a per-zone HA toggle while the cutover was
+        // in progress. LocalSky is the only source of truth, so it is on.
         let mode_active = true;
-        let _ = state_eq(
-            map,
-            &format!("input_boolean.irrigation_{slug}_weekly_budget_mode"),
-            "on",
-        );
 
         // Throughput + max-duration come from LocalSky's zone config
         // (catalog default by sprinkler_type, optional precip_rate_mm_hr
@@ -2523,6 +3431,7 @@ fn compute_water_budgets(
             last_run_epoch: evidence.last_run_epoch,
             applied_trailing_mm,
             sessions_done: evidence.sessions_done,
+            target_inferred,
         };
         out.push(crate::engine::compute_zone_balance(
             &zone_inputs,
@@ -2821,6 +3730,19 @@ fn state_f64(map: &HashMap<String, Value>, eid: &str) -> Option<f64> {
         .and_then(|s| s.get("state"))
         .and_then(Value::as_str)
         .and_then(|s| s.parse::<f64>().ok())
+}
+
+/// `state_f64` behind the adoption gate: `None` once the entity's read is
+/// retired, so the caller's `unwrap_or(config)` becomes the only source.
+fn helper_f64(
+    map: &HashMap<String, Value>,
+    eid: &str,
+    live: &impl Fn(&str) -> bool,
+) -> Option<f64> {
+    if !live(eid) {
+        return None;
+    }
+    state_f64(map, eid)
 }
 
 /// Native reference ET0 (mm/day) computed from a forecast day's temperature
@@ -3376,30 +4298,134 @@ async fn resolve_soil_sibling(
         .map(|r| r.value)
 }
 
-/// Build the legacy four soil zones from their hardcoded HA entities +
-/// input_number thresholds. Fallback when no zone config is present.
-fn build_legacy_soil_zones(map: &HashMap<String, Value>) -> Vec<ZoneSoil> {
-    [
-        ("back_yard", "back yard", 70.0, 30.0),
-        ("front_yard", "front yard", 70.0, 30.0),
-        ("side_yard", "side yard", 70.0, 30.0),
-        ("back_yard_shrubs", "back yard shrubs", 85.0, 25.0),
-    ]
-    .into_iter()
-    .map(|(slug, name, sat_default, target_min)| ZoneSoil {
-        slug: slug.into(),
-        name: name.into(),
-        // Offline guard: a raw 0% reading is a disconnected probe, not
-        // bone-dry soil.
-        pct: apply_soil_quality(state_f64(map, &format!("sensor.{slug}_soil_moisture"))),
-        saturation_pct: state_f64(
-            map,
-            &format!("input_number.irrigation_{slug}_saturation_pct"),
-        )
-        .unwrap_or(sat_default),
-        target_min_pct: target_min,
-    })
-    .collect()
+/// The four zone slugs of the deployment this app grew out of. On the one
+/// install shape that reaches `build_legacy_soil_zones`, these four, and
+/// only these four, read `sensor.<slug>_soil_moisture` and
+/// `input_number.irrigation_<slug>_saturation_pct` from Home Assistant.
+/// That is exactly the set of reads the previous release made there, so an
+/// upgrade adds no read to any other zone.
+const LEGACY_SOIL_SLUGS: [&str; 4] = ["back_yard", "front_yard", "side_yard", "back_yard_shrubs"];
+
+/// One soil entry per ACTIVE zone, for an install with no zones in
+/// `localsky.toml`: zones resolved from `LOCALSKY_ZONES` with no config
+/// file, or a config whose zones table is empty. An install with zones in
+/// its config never reaches this: `resolve_soil_zones` already emits one
+/// entry per configured zone, probe or no probe.
+///
+/// This list is not only about soil: `skip_rules::decide_per_zone`
+/// iterates it, so a zone missing from here gets no per-zone verdict at
+/// all. It used to be four hardcoded slugs inherited from the original
+/// deployment this app grew out of, which on this install shape meant a
+/// yard with seven zones of its own received verdicts for four zones it
+/// did not have and none for the seven it did. Building from the active
+/// zone list instead gives every real zone a verdict.
+///
+/// The two Home Assistant reads stay confined to `LEGACY_SOIL_SLUGS`. Every
+/// other zone carries `pct: None` and the slug's default saturation, so a
+/// third-party entity that happens to be named `sensor.<slug>_soil_moisture`
+/// cannot start deciding a zone the morning after an upgrade. `pct: None`
+/// reads as no probe, which the soil gates treat as inapplicable rather
+/// than as a probe that went quiet.
+fn build_legacy_soil_zones(
+    map: &HashMap<String, Value>,
+    zones: &[crate::zones::ZoneIdent],
+) -> Vec<ZoneSoil> {
+    // Saturation/target defaults that used to be per-slug literals. Beds
+    // and shrubs hold water longer than turf, so they keep the higher
+    // saturation ceiling and the lower dry floor.
+    fn defaults(slug: &str) -> (f64, f64) {
+        if slug.contains("shrub") || slug.contains("garden") || slug.contains("bed") {
+            (85.0, 25.0)
+        } else {
+            (70.0, 30.0)
+        }
+    }
+    zones
+        .iter()
+        .map(|z| {
+            let (sat_default, target_min) = defaults(&z.slug);
+            let slug = &z.slug;
+            let legacy = LEGACY_SOIL_SLUGS.contains(&slug.as_str());
+            ZoneSoil {
+                slug: slug.clone(),
+                name: z.display_name.clone(),
+                // Offline guard: a raw 0% reading is a disconnected probe, not
+                // bone-dry soil. Absent entirely means no probe on this zone.
+                pct: if legacy {
+                    apply_soil_quality(state_f64(map, &format!("sensor.{slug}_soil_moisture")))
+                } else {
+                    None
+                },
+                saturation_pct: if legacy {
+                    state_f64(
+                        map,
+                        &format!("input_number.irrigation_{slug}_saturation_pct"),
+                    )
+                    .unwrap_or(sat_default)
+                } else {
+                    sat_default
+                },
+                target_min_pct: target_min,
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod legacy_soil_zone_tests {
+    use super::*;
+
+    fn zones(slugs: &[&str]) -> Vec<crate::zones::ZoneIdent> {
+        crate::zones::from_pairs(slugs.iter().map(|s| (*s, *s)))
+    }
+
+    fn entity(state: &str) -> Value {
+        serde_json::json!({ "state": state })
+    }
+
+    /// A zone that is not one of the four legacy names ignores a Home
+    /// Assistant entity that happens to match the name pattern. The previous
+    /// release made no read for that zone at all, and an upgrade must not
+    /// hand a third-party sensor a vote over it. The legacy names keep the
+    /// read they always had.
+    #[test]
+    fn a_non_legacy_zone_ignores_a_matching_soil_entity() {
+        let mut map = HashMap::new();
+        map.insert("sensor.orchard_soil_moisture".to_string(), entity("90"));
+        map.insert(
+            "input_number.irrigation_orchard_saturation_pct".to_string(),
+            entity("10"),
+        );
+        map.insert("sensor.back_yard_soil_moisture".to_string(), entity("42"));
+        map.insert(
+            "input_number.irrigation_back_yard_saturation_pct".to_string(),
+            entity("65"),
+        );
+        let out = build_legacy_soil_zones(&map, &zones(&["orchard", "back_yard"]));
+        let orchard = out.iter().find(|z| z.slug == "orchard").unwrap();
+        assert_eq!(
+            orchard.pct, None,
+            "no read for a zone the previous release never read"
+        );
+        assert_eq!(
+            orchard.saturation_pct, 70.0,
+            "the slug default, not the helper"
+        );
+        let back = out.iter().find(|z| z.slug == "back_yard").unwrap();
+        assert_eq!(back.pct, Some(42.0), "a legacy name keeps its read");
+        assert_eq!(back.saturation_pct, 65.0);
+    }
+
+    /// And every active zone still gets an entry, legacy or not, because the
+    /// entry is what earns the zone a per-zone verdict.
+    #[test]
+    fn every_active_zone_gets_an_entry() {
+        let out = build_legacy_soil_zones(&HashMap::new(), &zones(&["orchard", "herb_bed"]));
+        let slugs: Vec<&str> = out.iter().map(|z| z.slug.as_str()).collect();
+        assert_eq!(slugs, vec!["orchard", "herb_bed"]);
+        assert!(out.iter().all(|z| z.pct.is_none()));
+        assert_eq!(out[1].saturation_pct, 85.0, "bed default");
+    }
 }
 
 #[cfg(test)]
@@ -3490,8 +4516,8 @@ mod watchdog_tests {
         let budget = |policy: &WateringPolicy, restriction: Option<u32>| {
             compute_water_budgets(
                 &fc,
-                &HashMap::new(),
                 &policy.zone_runtime,
+                policy.defer_threshold_in(),
                 restriction,
                 &policy.budget_zones,
                 None,
@@ -3568,8 +4594,8 @@ mod watchdog_tests {
         };
         let b = compute_water_budgets(
             &fc,
-            &HashMap::new(),
             &policy.zone_runtime,
+            policy.defer_threshold_in(),
             None,
             &policy.budget_zones,
             Some(&tick),
@@ -3592,6 +4618,72 @@ mod watchdog_tests {
             b.needed_mm
         );
         assert!((b.applied_mm - 12.7).abs() < 1e-6, "got {}", b.applied_mm);
+    }
+
+    /// `engine.session_rain_defer_in` reaches the live balance. The knob
+    /// was documented, editable, and dead: the assembly passed the
+    /// compile-time constant, so an operator who raised it to unstick an
+    /// install saw no change at all.
+    #[test]
+    fn configured_rain_defer_threshold_reaches_the_balance() {
+        let mut cfg = crate::config::schema::Config::default();
+        cfg.zones.insert(
+            "front".into(),
+            serde_json::from_value(serde_json::json!({
+                "display_name": "Front",
+                "area_sqft": 1000.0,
+                "species": "bermuda",
+                "soil_texture": "sandy_loam",
+                "sprinkler_type": "spray",
+                "precip_rate_mm_hr": 25.4,
+                "precip_rate_source": "measured",
+                "controller_id": "os_main",
+                "controller_station": "1",
+                "weekly_budget_in": 1.0,
+                "sessions_per_week": 2
+            }))
+            .unwrap(),
+        );
+        // 0.24" of certain rain over the next 24 hours.
+        let now = chrono::Utc::now().timestamp();
+        let mut fc = crate::forecast::snapshot::ForecastSnapshot::default();
+        fc.hourly = (0..24)
+            .map(|h| crate::forecast::snapshot::HourlyEntry {
+                time_epoch: now + h * 3600,
+                precip_in: 0.01,
+                ..Default::default()
+            })
+            .collect();
+
+        // Schema default (0.10"): the session defers.
+        let policy = WateringPolicy::from_config(&cfg);
+        assert_eq!(policy.session_rain_defer_in, 0.10);
+        let b = compute_water_budgets(
+            &fc,
+            &policy.zone_runtime,
+            policy.defer_threshold_in(),
+            None,
+            &policy.budget_zones,
+            None,
+        )
+        .remove(0);
+        assert_eq!(b.today_seconds, 0);
+        assert!(b.today_reason.contains("deferred"), "{}", b.today_reason);
+
+        // Operator raises the knob past the forecast: the session runs.
+        cfg.engine.session_rain_defer_in = 0.50;
+        let policy = WateringPolicy::from_config(&cfg);
+        let b = compute_water_budgets(
+            &fc,
+            &policy.zone_runtime,
+            policy.defer_threshold_in(),
+            None,
+            &policy.budget_zones,
+            None,
+        )
+        .remove(0);
+        assert!(b.today_seconds > 0, "{}", b.today_reason);
+        assert!(b.today_reason.contains("session"), "{}", b.today_reason);
     }
 
     /// Observed rain plus prior watering covering the target sizes the
@@ -3620,8 +4712,8 @@ mod watchdog_tests {
         };
         let b = compute_water_budgets(
             &fc,
-            &HashMap::new(),
             &policy.zone_runtime,
+            policy.defer_threshold_in(),
             None,
             &policy.budget_zones,
             Some(&tick),
@@ -3843,15 +4935,122 @@ mod watchdog_tests {
                 mk("c", 600, 1.5, 1200), // extend -> 900, under the cap
                 mk("d", 600, 1.5, 720),  // extend -> 900 held to the 720s ceiling
                 mk("e", 0, 0.5, 1200),   // a skipped zone (0s) stays 0
+                mk("f", 720, 0.5, 720),  // halve -> 360, back under the ceiling
             ],
             ..Default::default()
         };
+        // Zone f arrived from the allocator already sitting on its ceiling.
+        snap.zones[5].math.as_mut().unwrap().cap_binding = true;
         apply_verdict_multiplier(&mut snap);
         let planned: Vec<u32> = snap.zones.iter().map(|z| z.planned_run_seconds).collect();
-        assert_eq!(planned, vec![600, 300, 900, 720, 0]);
+        assert_eq!(planned, vec![600, 300, 900, 720, 0, 360]);
         // math.scheduled_seconds mirrors the dispatched value so the "why this
         // duration" tile agrees with what the controller receives.
         assert_eq!(snap.zones[3].math.as_ref().unwrap().scheduled_seconds, 720);
+        // A multiplier that ran into the ceiling reports it.
+        assert!(snap.zones[3].math.as_ref().unwrap().cap_binding);
+        // A multiplier that pulled the run back UNDER the ceiling clears it:
+        // the ceiling is no longer what set the minutes.
+        assert!(!snap.zones[5].math.as_ref().unwrap().cap_binding);
+    }
+
+    #[test]
+    fn cap_binding_needs_a_run_that_sits_on_the_ceiling() {
+        use crate::ha::snapshot::{IrrigationSnapshot, WaterBudget, ZoneMath, ZoneState};
+        // `session_capped` describes the IDEAL weekly session, not today's
+        // plan, so it stays true on a zone the allocator zeroed for an
+        // unrelated reason. Reading it straight onto `cap_binding` printed
+        // "0 min (capped at 60 min)": a ceiling shortening a run that does
+        // not exist.
+        let zone = |slug: &str, max_dur: u32, override_mode: &str| ZoneState {
+            slug: slug.into(),
+            override_mode: override_mode.into(),
+            math: Some(ZoneMath {
+                max_duration_seconds: max_dur,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let budget = |slug: &str, today_s: u32, capped: bool| WaterBudget {
+            zone_slug: slug.into(),
+            today_seconds: today_s,
+            session_capped: capped,
+            ..Default::default()
+        };
+        let mut snap = IrrigationSnapshot {
+            zones: vec![
+                // Spaced since the last session: the ideal slice outgrows the
+                // ceiling, but nothing runs today.
+                zone("spaced", 3600, "auto"),
+                // The allocator's session really did hit the ceiling.
+                zone("shorted", 3600, "auto"),
+                // Under the ceiling with room to spare.
+                zone("roomy", 3600, "auto"),
+                // Force-run over a zero budget: the floor sized this, not
+                // the ceiling.
+                zone("forced", 3600, "run"),
+            ],
+            water_budgets: vec![
+                budget("spaced", 0, true),
+                budget("shorted", 3600, true),
+                budget("roomy", 1200, false),
+                budget("forced", 0, true),
+            ],
+            ..Default::default()
+        };
+        let policy = WateringPolicy::default();
+        apply_budget_plan(&mut snap, &policy);
+        let read = |i: usize| {
+            let m = snap.zones[i].math.as_ref().unwrap();
+            (m.scheduled_seconds, m.cap_binding)
+        };
+        assert_eq!(read(0), (0, false), "a zone at zero was not shortened");
+        assert_eq!(read(1), (3600, true), "the ceiling set these minutes");
+        assert_eq!(read(2), (1200, false), "room under the ceiling");
+        assert_eq!(
+            read(3),
+            (FORCE_RUN_DEFAULT_S, false),
+            "a force-run floor is not a capped run"
+        );
+    }
+
+    #[test]
+    fn seasonal_dial_reports_its_own_clamp_like_the_rule_multiplier_does() {
+        use crate::ha::snapshot::{IrrigationSnapshot, WaterBudget, ZoneMath, ZoneState};
+        // The dial scales AFTER the allocator, so it can push an uncapped
+        // session into the ceiling. That clamp shortens the dispatched run
+        // exactly as the rule multiplier's does, and reports itself the same
+        // way instead of clipping the run silently.
+        assert!(seasonal_cap_binds(3000, 150, 3600));
+        assert!(!seasonal_cap_binds(3000, 100, 3600));
+        assert!(!seasonal_cap_binds(3000, 150, 0), "no cap known, no clamp");
+        let mut snap = IrrigationSnapshot {
+            zones: vec![ZoneState {
+                slug: "dialed".into(),
+                override_mode: "auto".into(),
+                math: Some(ZoneMath {
+                    max_duration_seconds: 3600,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            water_budgets: vec![WaterBudget {
+                zone_slug: "dialed".into(),
+                today_seconds: 3000,
+                // The allocator itself did NOT hit the ceiling.
+                session_capped: false,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let policy = WateringPolicy {
+            seasonal_adjust_pct: 150,
+            ..Default::default()
+        };
+        apply_budget_plan(&mut snap, &policy);
+        let m = snap.zones[0].math.as_ref().unwrap();
+        assert_eq!(m.scheduled_seconds, 3600, "4500 s held to the ceiling");
+        assert!(m.cap_binding, "the ceiling is what set these minutes");
     }
 
     #[test]
@@ -4218,6 +5417,31 @@ mod budget_default_tests {
             );
         }
     }
+
+    /// The zone editor shows the inferred default as the placeholder of the
+    /// two budget fields. It compiles for the browser, where this module does
+    /// not, so it carries its own copy of the rule; the two must never drift,
+    /// or the box would promise a number the yard is not watering on.
+    #[test]
+    fn the_zone_editor_placeholder_matches_the_engine_default() {
+        use crate::components::settings::zones::inferred_weekly_target;
+        for slug in [
+            "back_yard",
+            "front_yard",
+            "lawn",
+            "orchard",
+            "back_yard_shrubs",
+            "front_garden",
+            "flower_bed",
+            "herb_bed",
+        ] {
+            assert_eq!(
+                inferred_weekly_target(slug),
+                agronomic_budget_default(slug),
+                "{slug}"
+            );
+        }
+    }
 }
 
 /// End-to-end binding: a zone-bound MQTT soil subscription lands in
@@ -4364,21 +5588,45 @@ mod snapshot_assembly_tests {
             .collect()
     }
 
-    /// Assemble the snapshot the same way refresh_once does (empty HA entity map,
-    /// no soil config, no scripts), but with the raw stores under test. Returns
-    /// the published IrrigationSnapshot.
+    /// Assemble the snapshot the same way refresh_once_native does (empty HA
+    /// entity map, no soil config, no scripts), but with the raw stores under
+    /// test. Returns the published IrrigationSnapshot.
     async fn assemble(
         forecast: ForecastSnapshot,
         tempest: TempestSnapshot,
         zones: &[&str],
         policy: WateringPolicy,
     ) -> IrrigationSnapshot {
+        assemble_with(
+            forecast,
+            tempest,
+            zones,
+            policy,
+            HashMap::new(),
+            None,
+            false,
+        )
+        .await
+    }
+
+    /// `assemble` with the two arguments the migration turns on: the Home
+    /// Assistant entity map, and the native control surface. `ha_helper_reads`
+    /// is what the two deployment paths differ by.
+    async fn assemble_with(
+        forecast: ForecastSnapshot,
+        tempest: TempestSnapshot,
+        zones: &[&str],
+        policy: WateringPolicy,
+        map: HashMap<String, Value>,
+        control: Option<&crate::persistence::IrrigationControlState>,
+        ha_helper_reads: bool,
+    ) -> IrrigationSnapshot {
         let fs = forecast_store_with(forecast);
         let ts = tempest_store_with(tempest);
         let zone_runtime: HashMap<String, ZoneRuntime> = HashMap::new();
         let scripts = CompiledScripts::compile(&[]);
         build_from_map(
-            HashMap::new(),
+            map,
             &fs,
             &ts,
             &zone_idents(zones),
@@ -4388,9 +5636,307 @@ mod snapshot_assembly_tests {
             None, // sensor_history
             None, // forecast_obs
             None, // balance
-            None, // control
+            control,
+            ha_helper_reads,
         )
         .await
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // The 0.7.22 Home Assistant helper cutover.
+    //
+    // Every one of these asserts the same shape twice: unadopted behaves
+    // exactly as it did before, adopted reads LocalSky's own value and never
+    // touches the entity again. The pair is the point. A release that only
+    // proved the second half would leave a window where the value is neither
+    // adopted nor read, which for a vacation pause is a watered yard.
+    // ─────────────────────────────────────────────────────────────
+
+    fn adopted(entity: &str) -> crate::ha::snapshot::HaAdoptedHelper {
+        crate::ha::snapshot::HaAdoptedHelper {
+            entity: entity.to_string(),
+            outcome: "adopted".to_string(),
+            target: crate::ha_adopt::target_of(entity).to_string(),
+            adopted_value: None,
+            observed_value: None,
+            previous_value: None,
+            epoch: 1,
+        }
+    }
+
+    fn helper_map(pairs: &[(&str, serde_json::Value)]) -> HashMap<String, Value> {
+        pairs
+            .iter()
+            .map(|(id, v)| ((*id).to_string(), v.clone()))
+            .collect()
+    }
+
+    fn calm() -> (ForecastSnapshot, TempestSnapshot) {
+        let now = Utc::now().timestamp();
+        let fc = ForecastSnapshot {
+            last_refresh_epoch: now,
+            source_reachable: true,
+            hourly: vec![current_hour(72.0, 4.0, 50)],
+            ..Default::default()
+        };
+        (fc, live_station(now, 72.0, 3.0, 50.0, 0.0))
+    }
+
+    #[tokio::test]
+    async fn the_vacation_pause_flips_from_the_helper_to_the_store_on_adoption() {
+        let future = Utc::now().timestamp() + 86_400;
+        let map = helper_map(&[(
+            crate::ha_adopt::PAUSE_UNTIL,
+            serde_json::json!({ "state": "x", "attributes": { "timestamp": future } }),
+        )]);
+        let control = crate::persistence::IrrigationControlState::default();
+
+        // Unadopted: the helper still decides, exactly as before.
+        let (fc, ts) = calm();
+        let before = assemble_with(
+            fc,
+            ts,
+            &["front"],
+            WateringPolicy::default(),
+            map.clone(),
+            Some(&control),
+            true,
+        )
+        .await;
+        assert_eq!(before.pause_until_epoch, future);
+
+        // Adopted: LocalSky's own store governs and the entity is not read,
+        // even though it is sitting right there in the map holding a pause.
+        let policy = WateringPolicy {
+            ha_adoption: vec![adopted(crate::ha_adopt::PAUSE_UNTIL)],
+            ..Default::default()
+        };
+        let (fc, ts) = calm();
+        let after = assemble_with(fc, ts, &["front"], policy, map, Some(&control), true).await;
+        assert_eq!(
+            after.pause_until_epoch, 0,
+            "an adopted pause comes from the store, not from the entity"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_adopted_store_pause_decides_with_no_helper_in_the_map() {
+        // The install shape the migration exists for: a Home Assistant deploy
+        // whose owner never created the input_datetime. Before the pass, Rain
+        // Delay wrote to an entity that does not exist and the next tick read
+        // zero, so the owner who thought they had paused got a watered yard
+        // and no error. After it, the pause lives in LocalSky and holds.
+        let mut control = crate::persistence::IrrigationControlState::default();
+        control.pause_until_epoch = Utc::now().timestamp() + 3_600;
+        let policy = WateringPolicy {
+            ha_adoption: vec![adopted(crate::ha_adopt::PAUSE_UNTIL)],
+            ..Default::default()
+        };
+        let (fc, ts) = calm();
+        let snap = assemble_with(
+            fc,
+            ts,
+            &["front"],
+            policy,
+            HashMap::new(),
+            Some(&control),
+            true,
+        )
+        .await;
+        assert_eq!(snap.pause_until_epoch, control.pause_until_epoch);
+        assert_eq!(snap.skip_check.verdict, "skip");
+        assert!(
+            snap.skip_check.reason.contains("Paused"),
+            "{:?}",
+            snap.skip_check.reason
+        );
+    }
+
+    // The sticky overrides are deliberately NOT part of this release. They
+    // have no helper and no adoption marker; a store holding a Force or a
+    // Skip has to stay inert on the Home Assistant path, exactly as it was
+    // before, because the panel showed Auto for the whole time it was set and
+    // activating it here would force-run the yard past every gate with
+    // nothing on screen. The pre-existing defect is fixed on its own.
+    #[tokio::test]
+    async fn a_stored_sticky_override_stays_inert_on_the_home_assistant_path() {
+        let mut control = crate::persistence::IrrigationControlState::default();
+        control.global_override = "run".to_string();
+        control
+            .zone_overrides
+            .insert("front".to_string(), "skip".to_string());
+        let (fc, ts) = calm();
+        let snap = assemble_with(
+            fc,
+            ts,
+            &["front"],
+            WateringPolicy::default(),
+            HashMap::new(),
+            Some(&control),
+            true,
+        )
+        .await;
+        assert_eq!(snap.global_override, "auto");
+        assert_eq!(snap.zones[0].override_mode, "auto");
+        assert_ne!(snap.skip_check.reason, "Manual override: run");
+
+        // And it still decides on the native path, where it always has.
+        let (fc, ts) = calm();
+        let native = assemble_with(
+            fc,
+            ts,
+            &["front"],
+            WateringPolicy::default(),
+            HashMap::new(),
+            Some(&control),
+            false,
+        )
+        .await;
+        assert_eq!(native.global_override, "run");
+        assert_eq!(native.zones[0].override_mode, "skip");
+    }
+
+    #[tokio::test]
+    async fn the_two_toggles_flip_from_the_helpers_to_the_store_on_adoption() {
+        let map = helper_map(&[
+            (
+                crate::ha_adopt::PAUSE_TOGGLE,
+                serde_json::json!({ "state": "on" }),
+            ),
+            (
+                crate::ha_adopt::DRY_RUN_TOGGLE,
+                serde_json::json!({ "state": "on" }),
+            ),
+        ]);
+        let control = crate::persistence::IrrigationControlState::default();
+
+        let (fc, ts) = calm();
+        let before = assemble_with(
+            fc,
+            ts,
+            &["front"],
+            WateringPolicy::default(),
+            map.clone(),
+            Some(&control),
+            true,
+        )
+        .await;
+        assert!(before.skip_check.is_paused, "the helper still decides");
+
+        let policy = WateringPolicy {
+            ha_adoption: vec![
+                adopted(crate::ha_adopt::PAUSE_TOGGLE),
+                adopted(crate::ha_adopt::DRY_RUN_TOGGLE),
+            ],
+            ..Default::default()
+        };
+        let (fc, ts) = calm();
+        let after = assemble_with(fc, ts, &["front"], policy, map, Some(&control), true).await;
+        assert!(!after.skip_check.is_paused);
+        assert!(!after.skip_check.is_dry_run);
+
+        // And with the store holding one on, it decides with no helper at
+        // all, which is what makes these two work on a standalone install.
+        let mut on = crate::persistence::IrrigationControlState::default();
+        on.is_paused = true;
+        let policy = WateringPolicy {
+            ha_adoption: vec![adopted(crate::ha_adopt::PAUSE_TOGGLE)],
+            ..Default::default()
+        };
+        let (fc, ts) = calm();
+        let native =
+            assemble_with(fc, ts, &["front"], policy, HashMap::new(), Some(&on), true).await;
+        assert!(native.skip_check.is_paused);
+        assert_eq!(native.skip_check.verdict, "skip");
+    }
+
+    #[tokio::test]
+    async fn a_threshold_helper_outranks_settings_until_it_is_adopted() {
+        let map = helper_map(&[(
+            crate::ha_adopt::MAX_WIND,
+            serde_json::json!({ "state": "5" }),
+        )]);
+        let mut policy = WateringPolicy::default();
+        policy.skip_rules.max_wind_mph = 20.0;
+
+        let (fc, ts) = calm();
+        let before =
+            assemble_with(fc, ts, &["front"], policy.clone(), map.clone(), None, true).await;
+        assert_eq!(
+            before.skip_check.max_wind_mph, 5.0,
+            "before adoption the helper decides, exactly as it always did"
+        );
+
+        policy.ha_adoption = vec![adopted(crate::ha_adopt::MAX_WIND)];
+        let (fc, ts) = calm();
+        let after = assemble_with(fc, ts, &["front"], policy, map, None, true).await;
+        assert_eq!(
+            after.skip_check.max_wind_mph, 20.0,
+            "after adoption Settings is the only source"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_native_path_never_reads_a_helper_whatever_the_markers_say() {
+        // The map is empty by construction on the native path, so a gate that
+        // keyed on the marker list alone would resolve every control to its
+        // absent-entity default. ha_helper_reads = false is what stops that,
+        // and a standalone install carries no markers at all.
+        let mut control = crate::persistence::IrrigationControlState::default();
+        control.pause_until_epoch = 1_950_000_000;
+        control.is_dry_run = true;
+        let (fc, ts) = calm();
+        let snap = assemble_with(
+            fc,
+            ts,
+            &["front"],
+            WateringPolicy::default(),
+            HashMap::new(),
+            Some(&control),
+            false,
+        )
+        .await;
+        assert_eq!(snap.pause_until_epoch, 1_950_000_000);
+        assert!(snap.skip_check.is_dry_run);
+        assert!(snap.ha_adoption.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_migration_record_rides_the_snapshot_for_the_notice() {
+        let policy = WateringPolicy {
+            ha_adoption: vec![adopted(crate::ha_adopt::RAIN_SKIP)],
+            ..Default::default()
+        };
+        let (fc, ts) = calm();
+        let snap = assemble_with(fc, ts, &["front"], policy, HashMap::new(), None, true).await;
+        assert_eq!(snap.ha_adoption.len(), 1);
+        assert_eq!(snap.ha_adoption[0].entity, crate::ha_adopt::RAIN_SKIP);
+        assert!(
+            !snap.controls_persisted,
+            "no control state means no control store, which is what the notice has to say"
+        );
+    }
+
+    // The notice needs to tell "this install has no database, so the four
+    // controls can never be adopted" apart from "a control was not answering
+    // when the pass looked, so it was left alone". Both leave the control out
+    // of the record set, so the records alone cannot say which; the snapshot
+    // carries the bit.
+    #[tokio::test]
+    async fn a_mounted_control_store_says_so_on_the_snapshot() {
+        let control = crate::persistence::IrrigationControlState::default();
+        let (fc, ts) = calm();
+        let snap = assemble_with(
+            fc,
+            ts,
+            &["front"],
+            WateringPolicy::default(),
+            HashMap::new(),
+            Some(&control),
+            true,
+        )
+        .await;
+        assert!(snap.controls_persisted);
     }
 
     // The per-zone ZoneMath cap follows the CONFIGURED max_run_minutes through
@@ -4437,6 +5983,7 @@ mod snapshot_assembly_tests {
             None,
             None,
             None,
+            false,
         )
         .await;
         let math = snap.zones[0]
@@ -4454,6 +6001,51 @@ mod snapshot_assembly_tests {
     // plain "run" with an empty reason, and every per-zone verdict is run/global.
     // heat_index_max_3day_f is asserted to be the PER-DAY pairing (each day's
     // high temp × THAT day's humidity), proving the now-humidity bug is absent.
+    /// Per-zone verdicts are produced one per entry in `soil_zones`. On an
+    /// install with no zones in `localsky.toml` (zones from `LOCALSKY_ZONES`,
+    /// the `WateringPolicy::default()` passed here) that list is the legacy
+    /// fallback, which used to be four hardcoded slugs: it handed such an
+    /// install verdicts for zones it did not own and none for the zones it
+    /// did. Every active zone must appear, and nothing else.
+    #[tokio::test]
+    async fn probeless_install_gets_a_verdict_for_its_own_zones_only() {
+        let now = Utc::now().timestamp();
+        let fc = ForecastSnapshot {
+            last_refresh_epoch: now,
+            source_reachable: true,
+            daily: vec![DailyEntry {
+                time_epoch: now,
+                temp_max_f: 88.0,
+                temp_min_f: 70.0,
+                humidity_pct: 50,
+                precip_sum_in: 0.0,
+                precip_probability_max: Some(0),
+                wind_max_mph: 4.0,
+                ..Default::default()
+            }],
+            hourly: vec![current_hour(78.0, 4.0, 50)],
+            ..Default::default()
+        };
+        let snap = assemble(
+            fc,
+            live_station(now, 78.0, 3.0, 50.0, 0.0),
+            &["orchard", "west_strip", "herb_bed"],
+            WateringPolicy::default(),
+        )
+        .await;
+
+        let got: Vec<&str> = snap
+            .zone_verdicts
+            .iter()
+            .map(|v| v.zone_slug.as_str())
+            .collect();
+        assert_eq!(got, vec!["orchard", "west_strip", "herb_bed"], "{got:?}");
+        // Every zone on the snapshot carries its own verdict, not None.
+        for z in &snap.zones {
+            assert!(z.verdict.is_some(), "no verdict for {}", z.slug);
+        }
+    }
+
     #[tokio::test]
     async fn assembles_clear_run_with_per_day_heat_index() {
         let now = Utc::now().timestamp();
@@ -4662,5 +6254,624 @@ mod snapshot_assembly_tests {
             "today-only 0.04\" must not trip any rain gate; reason: {}",
             snap.skip_check.reason
         );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// The adoption COMMIT. `ha_adopt::plan` is pure and tested next to itself;
+// this is the orchestration where a wrong decision actually reaches SQLite
+// and the config file, and it is where both of the blockers this release
+// shipped and had to fix lived. Every branch of the evidence rule, the
+// ordering and the disarm is pinned here.
+// ─────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod adopt_tick_tests {
+    use super::*;
+    use crate::config::schema::Config;
+    use crate::ha_adopt::{
+        DRY_RUN_TOGGLE, MAX_WIND, MIN_TEMP, OVERRIDE_TOMORROW, PAUSE_TOGGLE, PAUSE_UNTIL, RAIN_SKIP,
+    };
+    use crate::persistence::IrrigationControlStore;
+    use crate::ports::config_store::ConfigStore;
+    use serde_json::json;
+    use std::collections::VecDeque;
+
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("localsky-adopt-tick-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    /// A migrated control DB on a READ-ONLY connection: every read answers,
+    /// every write fails. The only way to exercise the failed-write branch
+    /// now that a failed READ defers before it.
+    fn readonly_control_store(tag: &str) -> IrrigationControlStore {
+        let path = tmp_dir(tag).join("localsky.db");
+        let mut seed = Connection::open(&path).unwrap();
+        crate::persistence::run_migrations(&mut seed).unwrap();
+        drop(seed);
+        let ro = Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        )
+        .unwrap();
+        IrrigationControlStore::new(Arc::new(Mutex::new(ro)))
+    }
+
+    async fn control_store(migrated: bool) -> IrrigationControlStore {
+        let mut c = Connection::open_in_memory().unwrap();
+        if migrated {
+            crate::persistence::run_migrations(&mut c).unwrap();
+        }
+        IrrigationControlStore::new(Arc::new(Mutex::new(c)))
+    }
+
+    /// An `AdoptState` on a real tempdir config store and an in-memory
+    /// migrated control DB, with a canned queue standing in for the
+    /// commit-time re-read of `/api/states`.
+    async fn state(
+        tag: &str,
+        control: Option<IrrigationControlStore>,
+        canned: Vec<Option<HelperReadout>>,
+    ) -> (AdoptState, Arc<crate::config::FileConfigStore>) {
+        let path = tmp_dir(tag).join("localsky.toml");
+        let cfg_store = Arc::new(crate::config::FileConfigStore::new(&path));
+        ConfigStore::save(&*cfg_store, &Config::default())
+            .await
+            .unwrap();
+        let st = AdoptState {
+            cfg_store: cfg_store.clone(),
+            control_store: control,
+            policy: Arc::new(ArcSwap::from_pointee(WateringPolicy::from_config(
+                &Config::default(),
+            ))),
+            helpers: HelperFetch::Canned(std::sync::Mutex::new(VecDeque::from(canned))),
+            fingerprint: None,
+            stable_ticks: 0,
+            awaiting_config: false,
+            no_config_warned: false,
+            pending_revert: None,
+        };
+        (st, cfg_store)
+    }
+
+    fn entity(state: &str) -> Value {
+        json!({ "state": state })
+    }
+
+    fn pause_entity(ts: i64) -> Value {
+        json!({ "state": "2026-09-04 06:00:00", "attributes": { "timestamp": ts as f64 } })
+    }
+
+    /// Every helper present and holding a value, the way a working Home
+    /// Assistant answers.
+    fn full(total: usize) -> HelperReadout {
+        let mut helpers = HashMap::new();
+        helpers.insert(MAX_WIND.to_string(), entity("12"));
+        helpers.insert(MIN_TEMP.to_string(), entity("38"));
+        helpers.insert(RAIN_SKIP.to_string(), entity("0.3"));
+        helpers.insert(PAUSE_UNTIL.to_string(), pause_entity(1_900_000_000));
+        helpers.insert(OVERRIDE_TOMORROW.to_string(), entity("skip"));
+        helpers.insert(PAUSE_TOGGLE.to_string(), entity("on"));
+        helpers.insert(DRY_RUN_TOGGLE.to_string(), entity("off"));
+        HelperReadout {
+            total_entities: total,
+            write_seq: crate::ha_adopt::write_seq(),
+            helpers,
+        }
+    }
+
+    /// A Home Assistant answering with plenty of entities and none of the
+    /// seven helpers: the startup shape, and the shape of an install that
+    /// simply never made them.
+    fn all_absent(total: usize) -> HelperReadout {
+        HelperReadout {
+            total_entities: total,
+            write_seq: crate::ha_adopt::write_seq(),
+            helpers: HashMap::new(),
+        }
+    }
+
+    async fn marked(cfg_store: &crate::config::FileConfigStore) -> Vec<String> {
+        ConfigStore::load(cfg_store)
+            .await
+            .unwrap()
+            .ha_adoption
+            .into_iter()
+            .map(|h| h.entity)
+            .collect()
+    }
+
+    // The stability window itself: two ticks conclude nothing, the third
+    // commits, and nothing is written to either store before it.
+    #[tokio::test]
+    async fn three_identical_ticks_before_anything_commits() {
+        let _seq = crate::ha_adopt::SEQ_TEST_LOCK.lock().await;
+        let cs = control_store(true).await;
+        let (mut st, cfg_store) =
+            state("commit-on-three", Some(cs.clone()), vec![Some(full(400))]).await;
+
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(marked(&cfg_store).await.is_empty());
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(marked(&cfg_store).await.is_empty());
+        assert_eq!(cs.get().await.pause_until_epoch, 0);
+
+        assert!(
+            adopt_tick(&mut st, &full(400)).await,
+            "the third identical answer commits and disarms the pass"
+        );
+        let m = marked(&cfg_store).await;
+        for id in crate::ha_adopt::ENTITIES {
+            assert!(m.contains(&id.to_string()), "{id} not marked");
+        }
+        let stored = cs.get().await;
+        assert_eq!(stored.pause_until_epoch, 1_900_000_000);
+        assert!(stored.is_paused);
+        assert_eq!(
+            ConfigStore::load(&*cfg_store)
+                .await
+                .unwrap()
+                .engine
+                .skip_rules
+                .max_wind_mph,
+            12.0
+        );
+        // The policy swap is what makes the cutover live without a restart.
+        assert!(st.policy.load().ha_read_retired(PAUSE_TOGGLE));
+    }
+
+    // A moving answer restarts the window, so a Home Assistant whose helpers
+    // are still appearing never reaches a conclusion.
+    #[tokio::test]
+    async fn a_changed_answer_restarts_the_window() {
+        let _seq = crate::ha_adopt::SEQ_TEST_LOCK.lock().await;
+        let (mut st, cfg_store) = state(
+            "answer-moves",
+            Some(control_store(true).await),
+            vec![Some(full(400))],
+        )
+        .await;
+        let mut half = full(400);
+        half.helpers.remove(PAUSE_TOGGLE);
+
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(!adopt_tick(&mut st, &half).await);
+        assert_eq!(st.stable_ticks, 1, "a different answer starts over");
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(
+            marked(&cfg_store).await.is_empty(),
+            "five ticks, never three the same in a row: nothing concluded"
+        );
+    }
+
+    // The blocker this design exists for. `/api/states` answers long before
+    // the `input_*` platforms are set up, so all seven read absent while the
+    // entity COUNT climbs. Without the count in the stability key, three
+    // identical ticks of a starting Home Assistant look exactly like an
+    // install with no helpers, and the commit retires a live vacation pause
+    // onto an M0017 default.
+    #[tokio::test]
+    async fn a_climbing_entity_count_is_a_home_assistant_that_is_still_starting() {
+        let _seq = crate::ha_adopt::SEQ_TEST_LOCK.lock().await;
+        let (mut st, cfg_store) = state(
+            "starting-ha",
+            Some(control_store(true).await),
+            vec![Some(all_absent(400))],
+        )
+        .await;
+        for n in [120, 240, 360, 400] {
+            assert!(!adopt_tick(&mut st, &all_absent(n)).await);
+            assert_eq!(
+                st.stable_ticks, 1,
+                "n={n}: a moved count restarts the window"
+            );
+        }
+        assert!(marked(&cfg_store).await.is_empty());
+    }
+
+    // And once the count holds still, an absence is held to five minutes
+    // rather than twenty seconds, because absence is the only shape where a
+    // retirement moves a protected gate onto a column no human wrote.
+    #[tokio::test]
+    async fn an_absent_control_helper_is_held_to_the_long_window() {
+        let _seq = crate::ha_adopt::SEQ_TEST_LOCK.lock().await;
+        let (mut st, cfg_store) = state(
+            "absent-long-window",
+            Some(control_store(true).await),
+            vec![Some(all_absent(400))],
+        )
+        .await;
+        for tick in 1..ADOPT_STABLE_TICKS_ABSENT {
+            assert!(
+                !adopt_tick(&mut st, &all_absent(400)).await,
+                "tick {tick} must not conclude"
+            );
+            assert!(marked(&cfg_store).await.is_empty());
+        }
+        assert!(
+            adopt_tick(&mut st, &all_absent(400)).await,
+            "at five minutes of an unmoving answer, absence is finally evidence"
+        );
+        assert_eq!(
+            marked(&cfg_store).await.len(),
+            crate::ha_adopt::ENTITIES.len()
+        );
+    }
+
+    // A zero-entity answer is never evidence, and it cannot bank the ticks it
+    // already earned either.
+    #[tokio::test]
+    async fn a_zero_entity_answer_clears_the_evidence_it_had() {
+        let _seq = crate::ha_adopt::SEQ_TEST_LOCK.lock().await;
+        let (mut st, cfg_store) = state(
+            "zero-entities",
+            Some(control_store(true).await),
+            vec![Some(full(400))],
+        )
+        .await;
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert_eq!(st.stable_ticks, 2);
+
+        let mut empty = full(0);
+        empty.helpers.clear();
+        assert!(!adopt_tick(&mut st, &empty).await);
+        assert_eq!(st.stable_ticks, 0);
+        assert!(st.fingerprint.is_none());
+
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(
+            marked(&cfg_store).await.is_empty(),
+            "the window has to be re-earned from scratch"
+        );
+    }
+
+    // A control present and holding `unavailable` is NOT an answer. Recording
+    // it would retire the read onto the store's default, and `unavailable` is
+    // a stable answer, so the window is no protection. The rest of the set
+    // still commits, and the pass stays armed for the one that deferred.
+    #[tokio::test]
+    async fn an_unavailable_control_leaves_the_pass_armed_and_its_read_live() {
+        let _seq = crate::ha_adopt::SEQ_TEST_LOCK.lock().await;
+        let cs = control_store(true).await;
+        let mut r = full(400);
+        r.helpers
+            .insert(PAUSE_TOGGLE.to_string(), entity("unavailable"));
+        let (mut st, cfg_store) = state(
+            "unavailable-control",
+            Some(cs.clone()),
+            // One canned answer per commit attempt: the deferring one, then
+            // the recovered one after Home Assistant finishes its reload.
+            vec![Some(r.clone()), Some(full(400))],
+        )
+        .await;
+
+        assert!(!adopt_tick(&mut st, &r).await);
+        assert!(!adopt_tick(&mut st, &r).await);
+        assert!(
+            !adopt_tick(&mut st, &r).await,
+            "a deferral keeps the pass armed even though it committed the rest"
+        );
+        let m = marked(&cfg_store).await;
+        assert!(
+            !m.contains(&PAUSE_TOGGLE.to_string()),
+            "its read stays live"
+        );
+        assert!(
+            m.contains(&PAUSE_UNTIL.to_string()),
+            "the rest still committed"
+        );
+        assert!(!cs.get().await.is_paused, "and nothing was written for it");
+
+        // Home Assistant finishes its reload; the helper answers, and the
+        // pass finally takes it.
+        let good = full(400);
+        assert!(!adopt_tick(&mut st, &good).await);
+        assert!(!adopt_tick(&mut st, &good).await);
+        assert!(adopt_tick(&mut st, &good).await);
+        assert!(marked(&cfg_store).await.contains(&PAUSE_TOGGLE.to_string()));
+        assert!(cs.get().await.is_paused);
+    }
+
+    // The safety-critical branch: a control write that fails must leave
+    // NOTHING marked, so every read stays exactly where it was.
+    #[tokio::test]
+    async fn a_failed_control_write_marks_nothing_at_all() {
+        let _seq = crate::ha_adopt::SEQ_TEST_LOCK.lock().await;
+        // A readable database that refuses writes, so the pass gets all the
+        // way to the UPSERT and fails there rather than deferring on the read.
+        let (mut st, cfg_store) = state(
+            "write-fails",
+            Some(readonly_control_store("write-fails-db")),
+            vec![Some(full(400)), Some(full(400))],
+        )
+        .await;
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(
+            marked(&cfg_store).await.is_empty(),
+            "a marker written over a value that never landed is the whole hazard"
+        );
+        assert_eq!(
+            ConfigStore::load(&*cfg_store)
+                .await
+                .unwrap()
+                .engine
+                .skip_rules
+                .max_wind_mph,
+            10.0,
+            "and the thresholds are not written either, so the redo is identical"
+        );
+        assert_eq!(st.stable_ticks, 0, "the next attempt re-earns its evidence");
+    }
+
+    // A pass whose control writes landed and whose marker save then failed
+    // must not leave its own writes behind: the helper moved to off before
+    // the retry, and a retry reading is_paused=1 from the residue would have
+    // recorded kept_local, ignored the helper, retired the read and held the
+    // yard indefinitely with a notice saying LocalSky kept its own value.
+    #[tokio::test]
+    async fn a_failed_marker_save_restores_the_control_rows_it_wrote() {
+        let _seq = crate::ha_adopt::SEQ_TEST_LOCK.lock().await;
+        let cs = control_store(true).await;
+        let mut off = full(400);
+        off.helpers.insert(PAUSE_TOGGLE.to_string(), entity("off"));
+        let (mut st, cfg_store) = state(
+            "save-fails",
+            Some(cs.clone()),
+            vec![Some(full(400)), Some(off.clone())],
+        )
+        .await;
+        // Make the config save fail AFTER the control writes: the atomic
+        // write goes through localsky.toml.tmp, and a directory in its way
+        // fails File::create while the config itself still loads.
+        let tmp = cfg_store.path().with_extension("toml.tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(
+            !adopt_tick(&mut st, &full(400)).await,
+            "the marker save failed"
+        );
+        assert!(marked(&cfg_store).await.is_empty());
+        let after = cs.get().await;
+        assert!(!after.is_paused, "the pass's own write was put back");
+        assert_eq!(after.pause_until_epoch, 0);
+        assert_eq!(after.override_tomorrow, "none");
+        assert!(st.pending_revert.is_none(), "restored on the spot");
+
+        // The owner turns the pause off in Home Assistant, and the save starts
+        // working. The retry adopts what the helper holds NOW.
+        std::fs::remove_dir(&tmp).unwrap();
+        assert!(!adopt_tick(&mut st, &off).await);
+        assert!(!adopt_tick(&mut st, &off).await);
+        assert!(adopt_tick(&mut st, &off).await, "everything committed");
+        let cfg = ConfigStore::load(&*cfg_store).await.unwrap();
+        let rec = cfg
+            .ha_adoption
+            .iter()
+            .find(|h| h.entity == PAUSE_TOGGLE)
+            .expect("the pause switch was handled");
+        assert_eq!(
+            rec.outcome,
+            crate::ha_adopt::OUTCOME_ADOPTED,
+            "the residue must not read as an operator answer"
+        );
+        assert_eq!(rec.adopted_value.as_deref(), Some("off"));
+        assert!(!cs.get().await.is_paused, "and the yard is not held");
+    }
+
+    // A control read that FAILS is not "nothing was ever set". The pass plans
+    // two irreversible things from this state: whether LocalSky's own answer
+    // outranks the helper, and whether the read retires for good. An error
+    // resolving to the all-default state says "the operator never set
+    // anything", so a transient SQLite failure would overwrite a live native
+    // pause with a legacy helper and retire the read on the way out. It defers
+    // the whole pass instead, and stays armed.
+    #[tokio::test]
+    async fn a_control_read_that_fails_defers_the_whole_pass() {
+        let _seq = crate::ha_adopt::SEQ_TEST_LOCK.lock().await;
+        // Unmigrated DB: the SELECT hits "no such table".
+        let (mut st, cfg_store) = state(
+            "control-read-fails",
+            Some(control_store(false).await),
+            vec![Some(full(400)), Some(full(400))],
+        )
+        .await;
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(
+            !adopt_tick(&mut st, &full(400)).await,
+            "an unreadable control store leaves the pass armed"
+        );
+        assert!(
+            marked(&cfg_store).await.is_empty(),
+            "nothing may be concluded from a state that could not be read"
+        );
+        assert_eq!(
+            ConfigStore::load(&*cfg_store)
+                .await
+                .unwrap()
+                .engine
+                .skip_rules
+                .max_wind_mph,
+            10.0,
+            "not even the thresholds, whose sink is the config file"
+        );
+        assert!(
+            st.fingerprint.is_none(),
+            "and the evidence is re-earned in full"
+        );
+    }
+
+    // A control write landing DURING the committing tick: the answer the pass
+    // is about to plan from is now stale, and committing it would write the
+    // pre-write value back and then retire the read.
+    #[tokio::test]
+    async fn a_control_write_during_the_committing_tick_defers_the_commit() {
+        let _seq = crate::ha_adopt::SEQ_TEST_LOCK.lock().await;
+        let cs = control_store(true).await;
+        let (mut st, cfg_store) =
+            state("write-races", Some(cs.clone()), vec![Some(full(400))]).await;
+        let r = full(400);
+        assert!(!adopt_tick(&mut st, &r).await);
+        assert!(!adopt_tick(&mut st, &r).await);
+        // The owner taps Rain delay: the handler bumps the counter before it
+        // calls Home Assistant.
+        crate::ha_adopt::note_preadopt_write();
+        assert!(!adopt_tick(&mut st, &r).await);
+        assert!(marked(&cfg_store).await.is_empty());
+        assert_eq!(cs.get().await.pause_until_epoch, 0);
+        assert!(
+            st.fingerprint.is_none(),
+            "the evidence is re-earned in full"
+        );
+    }
+
+    // The action handler holds the config write guard while it decides where
+    // a control write goes and performs it, and the commit holds the same
+    // guard from its re-read through the policy swap. A tap that reached the
+    // handler first therefore lands, and bumps the counter, before the commit
+    // can plan; the commit then finds the counter moved and refuses.
+    #[tokio::test]
+    async fn a_write_serialized_ahead_of_the_commit_is_seen_by_it() {
+        let _seq = crate::ha_adopt::SEQ_TEST_LOCK.lock().await;
+        let cs = control_store(true).await;
+        let (mut st, cfg_store) =
+            state("guarded-write", Some(cs.clone()), vec![Some(full(400))]).await;
+        let r = full(400);
+        assert!(!adopt_tick(&mut st, &r).await);
+        assert!(!adopt_tick(&mut st, &r).await);
+        // The handler got the guard first. Its helper write goes out while
+        // the commit is parked behind it.
+        let guard = cfg_store.begin_write().await;
+        let handler = async {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            crate::ha_adopt::note_preadopt_write();
+            drop(guard);
+        };
+        let ((), committed) = tokio::join!(handler, adopt_tick(&mut st, &r));
+        assert!(!committed);
+        assert!(
+            marked(&cfg_store).await.is_empty(),
+            "the commit planned from an answer taken before the write, and refused"
+        );
+        assert_eq!(cs.get().await.pause_until_epoch, 0);
+        assert!(
+            st.fingerprint.is_none(),
+            "the evidence is re-earned in full"
+        );
+    }
+
+    // The commit-time re-read is what makes the plan come from this tick. An
+    // answer that moved between the tick and the commit is not committed.
+    #[tokio::test]
+    async fn an_answer_that_moved_since_the_tick_is_not_committed() {
+        let _seq = crate::ha_adopt::SEQ_TEST_LOCK.lock().await;
+        let mut moved = full(400);
+        moved
+            .helpers
+            .insert(PAUSE_UNTIL.to_string(), pause_entity(1_950_000_000));
+        let cs = control_store(true).await;
+        let (mut st, cfg_store) = state(
+            "answer-moved-at-commit",
+            Some(cs.clone()),
+            vec![Some(moved), Some(full(400))],
+        )
+        .await;
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(marked(&cfg_store).await.is_empty());
+        assert_eq!(cs.get().await.pause_until_epoch, 0);
+    }
+
+    // And a re-read that fails commits nothing rather than falling back to
+    // the answer it already had.
+    #[tokio::test]
+    async fn a_failed_commit_time_reread_commits_nothing() {
+        let _seq = crate::ha_adopt::SEQ_TEST_LOCK.lock().await;
+        let (mut st, cfg_store) =
+            state("reread-fails", Some(control_store(true).await), vec![None]).await;
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(marked(&cfg_store).await.is_empty());
+    }
+
+    // Nothing left to do disarms the pass, and costs no round trip: a plan
+    // that is empty never re-reads Home Assistant. The canned queue is empty
+    // here, so a re-read would fail the commit and return false.
+    #[tokio::test]
+    async fn a_fully_marked_config_disarms_without_re_reading() {
+        let _seq = crate::ha_adopt::SEQ_TEST_LOCK.lock().await;
+        let cs = control_store(true).await;
+        let (mut st, cfg_store) = state("already-done", Some(cs), vec![]).await;
+        let mut cfg = ConfigStore::load(&*st.cfg_store).await.unwrap();
+        for id in crate::ha_adopt::ENTITIES.iter() {
+            cfg.ha_adoption.push(crate::ha::snapshot::HaAdoptedHelper {
+                entity: (*id).to_string(),
+                outcome: crate::ha_adopt::OUTCOME_NOT_FOUND.to_string(),
+                target: crate::ha_adopt::target_of(id).to_string(),
+                adopted_value: None,
+                observed_value: None,
+                previous_value: None,
+                epoch: 1,
+            });
+        }
+        ConfigStore::save(&*cfg_store, &cfg).await.unwrap();
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(
+            adopt_tick(&mut st, &full(400)).await,
+            "nothing to adopt disarms the pass"
+        );
+    }
+
+    // No config file yet (the app is in the wizard): nothing is marked and
+    // the pass stays armed.
+    #[tokio::test]
+    async fn no_config_file_defers_rather_than_concluding() {
+        let _seq = crate::ha_adopt::SEQ_TEST_LOCK.lock().await;
+        let path = tmp_dir("no-config").join("localsky.toml");
+        let cfg_store = Arc::new(crate::config::FileConfigStore::new(&path));
+        let mut st = AdoptState {
+            cfg_store: cfg_store.clone(),
+            control_store: Some(control_store(true).await),
+            policy: Arc::new(ArcSwap::from_pointee(WateringPolicy::from_config(
+                &Config::default(),
+            ))),
+            helpers: HelperFetch::Canned(std::sync::Mutex::new(VecDeque::new())),
+            fingerprint: None,
+            stable_ticks: 0,
+            awaiting_config: false,
+            no_config_warned: false,
+            pending_revert: None,
+        };
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert_eq!(st.stable_ticks, 0);
+        assert!(!path.exists(), "and nothing was written");
+        assert!(
+            st.awaiting_config,
+            "the snapshot has to be able to say the pass never ran here"
+        );
+        // A config appears (the wizard finished): the flag clears on the next
+        // tick that can load it, whatever else that tick concludes.
+        ConfigStore::save(&*cfg_store, &Config::default())
+            .await
+            .unwrap();
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(!adopt_tick(&mut st, &full(400)).await);
+        assert!(!st.awaiting_config);
     }
 }

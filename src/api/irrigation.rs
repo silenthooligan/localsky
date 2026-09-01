@@ -95,15 +95,20 @@ pub fn router(
     history: Option<Arc<Mutex<Connection>>>,
     source: SnapshotSource,
     sprinkler_prefix: String,
+    cfg_store: Arc<crate::config::FileConfigStore>,
+    watering_policy: Arc<arc_swap::ArcSwap<crate::ha::WateringPolicy>>,
 ) -> Router {
-    // POST /action needs the snapshot source + (for native) the local
-    // control store, so it lives in its own sub-router with that state.
+    // POST /action needs the snapshot source, the local control store, and
+    // the adoption markers that say where each control's value lives, so it
+    // lives in its own sub-router with that state.
     let action_router = Router::new()
         .route("/action", post(action))
         .with_state(ActionState {
             source,
             control: history.clone().map(IrrigationControlStore::new),
             sprinkler_prefix,
+            cfg_store,
+            watering_policy,
         });
 
     let read_routes = Router::new()
@@ -568,23 +573,28 @@ pub enum Action {
     Stop { zone: String },
     /// Stop all four zones in parallel.
     StopAll,
-    /// Update a threshold slider (max_wind_mph / min_temp_f /
-    /// rain_skip_in). Persists in HA via input_number.set_value.
+    /// Update a threshold (max_wind_mph / min_temp_f / rain_skip_in).
+    /// Writes `engine.skip_rules`, the same field Settings > Skip rules
+    /// writes. On a Home Assistant deployment whose matching `input_number`
+    /// helper has not been adopted yet it still writes that helper, because
+    /// until then that is what the engine reads.
     SetThreshold { key: String, value: f64 },
-    /// Toggle one of the input_booleans (irrigation_pause /
-    /// irrigation_dry_run).
+    /// Toggle the vacation pause or dry-run mode. Writes LocalSky's own
+    /// control store, or the matching `input_boolean` on a Home Assistant
+    /// deployment that has not adopted it yet.
     Toggle { key: String, on: bool },
     /// Set the vacation-pause expiry to a UTC epoch. Honored by
     /// skip_logic::evaluate as a hard skip until the timestamp passes.
-    /// Pass 0 to clear (or use ClearPauseUntil).
-    /// Requires HA helper: input_datetime.irrigation_pause_until.
+    /// Pass 0 to clear (or use ClearPauseUntil). Requires a persistence DB,
+    /// or, before adoption on a Home Assistant deployment, the
+    /// input_datetime.irrigation_pause_until helper.
     SetPauseUntil { epoch: i64 },
     /// Convenience: clears the pause-until.
     ClearPauseUntil,
     /// One-day override for tomorrow's verdict. mode = "none" | "skip" | "run".
-    /// "none" returns to skip_logic auto. HA midnight automation should
-    /// reset this to "none" each day.
-    /// Requires HA helper: input_select.irrigation_override_tomorrow.
+    /// "none" returns to skip_logic auto. LocalSky expires it at local
+    /// midnight itself; the Home Assistant midnight automation that used to
+    /// reset the input_select is no longer part of it.
     SetOverrideTomorrow { mode: String },
     /// Sticky global override (LocalSky-native; persists until changed, no
     /// nightly reset). mode = "auto" | "skip" | "run". "run" forces watering
@@ -620,25 +630,19 @@ fn running_sensor(zone: &str, prefix: &str) -> Option<String> {
     Some(format!("binary_sensor.{prefix}_{zone}_station_running"))
 }
 
-/// Map a threshold key to the input_number entity ID. Restricts to
-/// the three known sliders so a hostile client can't poke arbitrary
-/// HA inputs through this endpoint.
+/// Map a threshold key to the input_number entity ID, for the pre-adoption
+/// path only. Restricts to the three known sliders so a hostile client can't
+/// poke arbitrary HA inputs through this endpoint. One list, shared with the
+/// read gate, so the write and the read can never disagree about which
+/// entity a key means.
 fn threshold_entity(key: &str) -> Option<String> {
-    match key {
-        "max_wind_mph" | "min_temp_f" | "rain_skip_in" => {
-            Some(format!("input_number.irrigation_{key}"))
-        }
-        _ => None,
-    }
+    crate::ha_adopt::threshold_entity(key).map(str::to_string)
 }
 
-/// Map a toggle key to the input_boolean entity ID, with the same
-/// allow-list shape.
+/// Map a toggle key to the input_boolean entity ID, same allow-list shape,
+/// same pre-adoption-only role.
 fn toggle_entity(key: &str) -> Option<String> {
-    match key {
-        "irrigation_pause" | "irrigation_dry_run" => Some(format!("input_boolean.{key}")),
-        _ => None,
-    }
+    crate::ha_adopt::toggle_entity(key).map(str::to_string)
 }
 
 /// Defensive cap on Action::Run duration. The mobile UI caps at 120 min;
@@ -646,16 +650,21 @@ fn toggle_entity(key: &str) -> Option<String> {
 /// request can't drown the lawn.
 const RUN_SECONDS_MAX: u32 = 7200;
 
-/// HA entity for the vacation-pause expiry helper. Created manually in
-/// HA's helpers UI (an input_datetime named irrigation_pause_until).
-const PAUSE_UNTIL_ENTITY: &str = "input_datetime.irrigation_pause_until";
+/// HA entity for the vacation-pause expiry helper, for the pre-adoption
+/// write path only. One definition, shared with the read gate.
+const PAUSE_UNTIL_ENTITY: &str = crate::ha_adopt::PAUSE_UNTIL;
 
-/// HA entity for the one-day override (none/skip/run).
-const OVERRIDE_ENTITY: &str = "input_select.irrigation_override_tomorrow";
+/// HA entity for the one-day override (none/skip/run), same role.
+const OVERRIDE_ENTITY: &str = crate::ha_adopt::OVERRIDE_TOMORROW;
 
-/// State for the POST /action handler. The vacation pause + one-day
-/// override are routed to local persisted state on a native (standalone)
-/// deploy and to HA helpers on an HA deploy; everything else is HA-only.
+/// State for the POST /action handler.
+///
+/// Every control write routes to whichever store the ENGINE will read it
+/// back from, decided by the same adoption markers the refresher uses and
+/// read from the same live handle. That is not a detail: a write that lands
+/// in SQLite while the gate still reads the Home Assistant helper is an owner
+/// tapping vacation pause and getting a watered yard. Read and write flip
+/// together, on one marker.
 #[derive(Clone)]
 struct ActionState {
     source: SnapshotSource,
@@ -665,6 +674,129 @@ struct ActionState {
     control: Option<IrrigationControlStore>,
     /// HA controller entity prefix (config-driven; default "opensprinkler").
     sprinkler_prefix: String,
+    /// Sink for an adopted threshold: `engine.skip_rules` is where the value
+    /// lives once the matching `input_number` is retired.
+    cfg_store: Arc<crate::config::FileConfigStore>,
+    /// The live policy, for its adoption markers and for swapping a rebuilt
+    /// one in after a threshold write so the change is live on the next tick.
+    watering_policy: Arc<arc_swap::ArcSwap<crate::ha::WateringPolicy>>,
+}
+
+impl ActionState {
+    /// Whether this action's value now lives in LocalSky rather than in the
+    /// Home Assistant helper named by `entity`. True on every native deploy,
+    /// and on a Home Assistant deploy once the adoption pass has handled that
+    /// entity. The refresher gates the matching READ on the identical
+    /// predicate against the identical handle.
+    fn owns(&self, entity: &str) -> bool {
+        self.source == SnapshotSource::Native || self.watering_policy.load().ha_read_retired(entity)
+    }
+}
+
+/// Whether a control write for `entity` lands in LocalSky's own store rather
+/// than the Home Assistant helper.
+///
+/// `owns` says the READ has moved. A mounted store is the other half, and it
+/// is not optional: with no persistence DB, `build_from_map` resolves
+/// `control.filter(..)` to None and the gate reads the entity map again even
+/// for a retired entity, so on a Home Assistant deploy the helper is what has
+/// to be written. Without this, an install that adopted the toggles and later
+/// lost its DB answered 503 to a vacation pause while the engine was reading
+/// `input_boolean.irrigation_pause` and the helper was still writable, which
+/// makes the pause unsettable from LocalSky's own UI on exactly the install
+/// where the DB is already broken. Native keeps the explicit 503 instead of a
+/// phantom call into a Home Assistant that is not there.
+fn routes_to_native_control(st: &ActionState, entity: &str) -> bool {
+    st.owns(entity) && (st.control.is_some() || st.source == SnapshotSource::Native)
+}
+
+/// Write one adopted threshold into `engine.skip_rules` and make it live.
+///
+/// Held under the config store's read-modify-write guard, the same one PUT
+/// /api/config and the tuning apply take, so a slider and a settings save
+/// cannot clobber each other. The rebuilt policy is swapped in on success so
+/// the new threshold decides on the next tick rather than after a restart.
+async fn config_threshold_action(
+    st: &ActionState,
+    key: &str,
+    value: f64,
+) -> (StatusCode, Json<Value>) {
+    let Some((lo, hi)) = crate::ha_adopt::threshold_range(key) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("unknown threshold: {key}") })),
+        );
+    };
+    if !value.is_finite() || value < lo || value > hi {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("{key} must be between {lo} and {hi}"),
+            })),
+        );
+    }
+    let _guard = st.cfg_store.begin_write().await;
+    let mut cfg = match crate::ports::config_store::ConfigStore::load(&*st.cfg_store).await {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": format!("config unavailable: {e}") })),
+            );
+        }
+    };
+    match key {
+        "max_wind_mph" => cfg.engine.skip_rules.max_wind_mph = value,
+        "min_temp_f" => cfg.engine.skip_rules.min_temp_f = value,
+        "rain_skip_in" => cfg.engine.skip_rules.rain_skip_in = value,
+        _ => unreachable!("threshold_range gates the key"),
+    }
+    if let Err(e) = crate::ports::config_store::ConfigStore::save(&*st.cfg_store, &cfg).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("config save failed: {e}") })),
+        );
+    }
+    st.watering_policy
+        .store(Arc::new(crate::ha::WateringPolicy::from_config(&cfg)));
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true, "source": "config", "key": key, "value": value })),
+    )
+}
+
+/// Write one adopted toggle (pause / dry-run) into LocalSky's control store.
+async fn control_toggle_action(
+    control: &Option<IrrigationControlStore>,
+    key: &str,
+    on: bool,
+) -> (StatusCode, Json<Value>) {
+    let Some(cs) = control else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "control state unavailable (no persistence DB mounted)" })),
+        );
+    };
+    let res = match key {
+        "irrigation_pause" => cs.set_paused(on).await,
+        "irrigation_dry_run" => cs.set_dry_run(on).await,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("unknown toggle: {key}") })),
+            );
+        }
+    };
+    match res {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "source": "native", "key": key, "on": on })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        ),
+    }
 }
 
 /// Handle the native (no-HA) vacation pause + one-day override by writing
@@ -1221,9 +1353,53 @@ async fn action(State(st): State<ActionState>, Json(body): Json<Action>) -> impl
         return native_control_action(&st.control, body).await;
     }
 
-    // Native deploys have no HA helpers; the vacation pause + one-day
-    // override live in local state. Route those three actions there. Every
-    // other action (thresholds, toggles) stays HA-only.
+    // On a Home Assistant deployment, where a control or threshold write
+    // lands is decided, and the write performed, under the config store's
+    // write guard: the same guard the adoption pass holds from its
+    // commit-time re-read of the helpers through the policy swap that retires
+    // their reads. Without it a tap landing between the pass's answer-set
+    // check and the swap saw the read as live, wrote the helper, and was
+    // retired underneath: the pass had planned from the pre-tap answer, wrote
+    // that into SQLite, and the pause the owner just set was gone with a 200
+    // on screen. Held here, the write either fully precedes the pass, which
+    // then re-reads it (and sees the write counter moved), or fully follows
+    // the swap and routes native below. The guard is released before a native
+    // write, which needs no serialization against the pass and, for a
+    // threshold, takes the guard itself.
+    let mut preadopt_guard = if st.source == SnapshotSource::HomeAssistant
+        && matches!(
+            body,
+            Action::SetThreshold { .. }
+                | Action::Toggle { .. }
+                | Action::SetPauseUntil { .. }
+                | Action::ClearPauseUntil
+                | Action::SetOverrideTomorrow { .. }
+        ) {
+        Some(st.cfg_store.begin_write().await)
+    } else {
+        None
+    };
+
+    // The vacation pause and the one-day override. They route to LocalSky's
+    // own store on every native deploy, and on a Home Assistant deploy once
+    // the matching helper has been adopted. Until then they still write the
+    // helper, because until then the engine still reads it.
+    if st.control.is_some()
+        && matches!(body, Action::SetPauseUntil { .. } | Action::ClearPauseUntil)
+        && st.owns(crate::ha_adopt::PAUSE_UNTIL)
+    {
+        drop(preadopt_guard.take());
+        return native_control_action(&st.control, body).await;
+    }
+    if st.control.is_some()
+        && matches!(body, Action::SetOverrideTomorrow { .. })
+        && st.owns(crate::ha_adopt::OVERRIDE_TOMORROW)
+    {
+        drop(preadopt_guard.take());
+        return native_control_action(&st.control, body).await;
+    }
+    // A native deploy with no persistence DB has nowhere to put a pause. Say
+    // so, rather than falling through to a Home Assistant that is not there.
     if st.source == SnapshotSource::Native
         && matches!(
             body,
@@ -1233,6 +1409,29 @@ async fn action(State(st): State<ActionState>, Json(body): Json<Action>) -> impl
         )
     {
         return native_control_action(&st.control, body).await;
+    }
+    // The two toggles. Before 0.7.22 these fell through to the Home Assistant
+    // client on every deploy, so on a standalone install the pause toggle
+    // answered 500 and the engine read a value nothing could set.
+    if let Action::Toggle { key, on } = &body {
+        if let Some(entity) = crate::ha_adopt::toggle_entity(key) {
+            if routes_to_native_control(&st, entity) {
+                drop(preadopt_guard.take());
+                return control_toggle_action(&st.control, key, *on).await;
+            }
+        }
+    }
+    // The three thresholds. Once adopted, the dashboard slider and Settings >
+    // Skip rules write the same field, which is the end of two editors for
+    // one number where only one of them was ever in effect.
+    if let Action::SetThreshold { key, value } = &body {
+        if let Some(entity) = crate::ha_adopt::threshold_entity(key) {
+            if st.owns(entity) {
+                // config_threshold_action takes the guard itself.
+                drop(preadopt_guard.take());
+                return config_threshold_action(&st, key, *value).await;
+            }
+        }
     }
 
     // Irrigation Unlimited support has been removed; answer stale
@@ -1244,6 +1443,26 @@ async fn action(State(st): State<ActionState>, Json(body): Json<Action>) -> impl
                 json!({ "error": "run_sequence_now was removed along with Irrigation Unlimited support; use per-zone Run instead" }),
             ),
         );
+    }
+
+    // Reaching here with one of these means the write goes to a Home Assistant
+    // helper the adoption pass has not retired yet, so the pass may be about
+    // to read the value this call replaces. Bump BEFORE the service call
+    // fires, not after: a write still in flight when the pass takes its
+    // answer set has to force that commit to re-earn its evidence, or the
+    // pass writes the pre-write value into SQLite and retires the read. The
+    // guard taken above is still held through the service call, so the pass
+    // cannot commit between this bump and the write landing, nor retire the
+    // read underneath it.
+    if matches!(
+        body,
+        Action::SetThreshold { .. }
+            | Action::Toggle { .. }
+            | Action::SetPauseUntil { .. }
+            | Action::ClearPauseUntil
+            | Action::SetOverrideTomorrow { .. }
+    ) {
+        crate::ha_adopt::note_preadopt_write();
     }
 
     let client = match HaClient::from_env() {
@@ -1599,6 +1818,117 @@ async fn export(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn action_state(source: SnapshotSource, adopted: &[&str]) -> ActionState {
+        let mut cfg = crate::config::schema::Config::default();
+        for e in adopted {
+            cfg.ha_adoption.push(crate::ha::snapshot::HaAdoptedHelper {
+                entity: (*e).to_string(),
+                outcome: "adopted".to_string(),
+                target: crate::ha_adopt::target_of(e).to_string(),
+                adopted_value: None,
+                observed_value: None,
+                previous_value: None,
+                epoch: 1,
+            });
+        }
+        ActionState {
+            source,
+            control: None,
+            sprinkler_prefix: "opensprinkler".to_string(),
+            cfg_store: Arc::new(crate::config::FileConfigStore::new(
+                std::env::temp_dir().join("localsky-action-state-test.toml"),
+            )),
+            watering_policy: Arc::new(arc_swap::ArcSwap::from_pointee(
+                crate::ha::WateringPolicy::from_config(&cfg),
+            )),
+        }
+    }
+
+    // The write cutover and the read cutover consult one marker, on one live
+    // handle. If they could ever disagree, an owner tapping vacation pause
+    // would write LocalSky's store while the gate still read the Home
+    // Assistant helper, see false, and water the yard.
+    #[test]
+    fn a_control_write_follows_the_same_marker_the_engine_reads() {
+        let before = action_state(SnapshotSource::HomeAssistant, &[]);
+        for e in crate::ha_adopt::ENTITIES {
+            assert!(
+                !before.owns(e),
+                "{e} must still write Home Assistant until it is adopted"
+            );
+        }
+        let after = action_state(SnapshotSource::HomeAssistant, &crate::ha_adopt::ENTITIES);
+        for e in crate::ha_adopt::ENTITIES {
+            assert!(after.owns(e), "{e} must write LocalSky once adopted");
+        }
+    }
+
+    #[test]
+    fn one_adopted_entity_does_not_carry_the_others_with_it() {
+        let st = action_state(
+            SnapshotSource::HomeAssistant,
+            &[crate::ha_adopt::PAUSE_UNTIL],
+        );
+        assert!(st.owns(crate::ha_adopt::PAUSE_UNTIL));
+        assert!(!st.owns(crate::ha_adopt::OVERRIDE_TOMORROW));
+        assert!(!st.owns(crate::ha_adopt::MAX_WIND));
+    }
+
+    #[test]
+    fn a_standalone_deploy_owns_every_control_with_no_migration_at_all() {
+        // Nothing about the migration runs on a native install: the map is
+        // empty, no marker is ever written. The controls are LocalSky's
+        // regardless, which is what makes the pause toggle work there for the
+        // first time.
+        let st = action_state(SnapshotSource::Native, &[]);
+        for e in crate::ha_adopt::ENTITIES {
+            assert!(st.owns(e));
+        }
+    }
+
+    // The toggle branch used to test `owns` alone, so an install that adopted
+    // the toggles and later lost its persistence DB answered 503 while the
+    // engine was reading the helper and the helper was still writable.
+    #[test]
+    fn a_toggle_write_with_no_store_falls_through_to_the_helper_the_engine_reads() {
+        let ha = action_state(SnapshotSource::HomeAssistant, &crate::ha_adopt::ENTITIES);
+        assert!(
+            ha.control.is_none(),
+            "the harness builds an unmounted store"
+        );
+        assert!(
+            !routes_to_native_control(&ha, crate::ha_adopt::PAUSE_TOGGLE),
+            "with no store the write has to go where the read goes: the helper"
+        );
+        // Native has no helper to fall back to, so it keeps the clear 503
+        // rather than a phantom call into a Home Assistant that is not there.
+        let native = action_state(SnapshotSource::Native, &[]);
+        assert!(routes_to_native_control(
+            &native,
+            crate::ha_adopt::PAUSE_TOGGLE
+        ));
+        // And an unadopted toggle on Home Assistant still writes the helper.
+        let unadopted = action_state(SnapshotSource::HomeAssistant, &[]);
+        assert!(!routes_to_native_control(
+            &unadopted,
+            crate::ha_adopt::PAUSE_TOGGLE
+        ));
+    }
+
+    #[test]
+    fn threshold_and_toggle_keys_map_to_the_entities_the_read_gate_uses() {
+        assert_eq!(
+            threshold_entity("max_wind_mph").as_deref(),
+            Some(crate::ha_adopt::MAX_WIND)
+        );
+        assert_eq!(
+            toggle_entity("irrigation_dry_run").as_deref(),
+            Some(crate::ha_adopt::DRY_RUN_TOGGLE)
+        );
+        assert_eq!(threshold_entity("gravity"), None);
+        assert_eq!(toggle_entity("irrigation_launch"), None);
+    }
 
     #[test]
     fn csv_field_escapes_per_rfc4180() {

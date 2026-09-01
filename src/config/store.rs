@@ -311,6 +311,69 @@ mod tests {
         assert_eq!(loaded.deployment.display_name, "Test");
     }
 
+    // The marker list is the whole idempotency mechanism, and it only works
+    // if it survives the two round trips a real install puts it through: the
+    // TOML file itself, and the GET /api/config -> mutate -> PUT round trip
+    // every settings page performs. `seeded_source_ids` already survives
+    // both in production; this pins it for the adoption record too, including
+    // the serialization hazard of putting an array of tables on Config (it
+    // has to serialize after every scalar, or the document does not parse).
+    #[tokio::test]
+    async fn adoption_markers_survive_the_toml_and_json_round_trips() {
+        let dir = tempfile_dir("ha-adoption-roundtrip");
+        let path = dir.join("localsky.toml");
+        let store = FileConfigStore::new(&path);
+
+        let mut cfg = Config::default();
+        cfg.deployment.location.lat = 30.07;
+        cfg.deployment.location.lon = -81.47;
+        cfg.engine.skip_rules.max_wind_mph = 12.0;
+        cfg.ha_adoption.push(crate::ha::snapshot::HaAdoptedHelper {
+            entity: "input_number.irrigation_max_wind_mph".into(),
+            outcome: "adopted".into(),
+            target: "engine.skip_rules.max_wind_mph".into(),
+            adopted_value: Some("12".into()),
+            observed_value: None,
+            previous_value: Some("10".into()),
+            epoch: 1_780_000_000,
+        });
+
+        store.save(&cfg).await.unwrap();
+        let loaded = store.load().await.unwrap();
+        assert_eq!(loaded.ha_adoption.len(), 1);
+        assert_eq!(loaded.ha_adoption[0].adopted_value.as_deref(), Some("12"));
+        assert_eq!(loaded.engine.skip_rules.max_wind_mph, 12.0);
+
+        // The settings-page shape: serialize to JSON, deserialize, save the
+        // whole document back, reload.
+        let json = serde_json::to_string(&loaded).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        store.save(&back).await.unwrap();
+        let again = store.load().await.unwrap();
+        assert_eq!(
+            again.ha_adoption.len(),
+            1,
+            "a settings save must not drop the adoption record"
+        );
+        assert_eq!(again.ha_adoption[0].entity, back.ha_adoption[0].entity);
+    }
+
+    // Additive: a config that has never been through the pass must not gain
+    // the key at all, so no existing file changes shape on upgrade.
+    #[tokio::test]
+    async fn an_unadopted_config_writes_no_adoption_key() {
+        let dir = tempfile_dir("ha-adoption-absent");
+        let path = dir.join("localsky.toml");
+        let store = FileConfigStore::new(&path);
+        let cfg = Config::default();
+        store.save(&cfg).await.unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("ha_adoption"),
+            "empty marker list must stay out of the TOML: {text}"
+        );
+    }
+
     #[tokio::test]
     async fn save_snapshots_previous_config() {
         let dir = tempfile_dir("snap-on-save");

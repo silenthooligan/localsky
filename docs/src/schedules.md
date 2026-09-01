@@ -1,8 +1,8 @@
 # Manual schedules
 
 Most of the time you want LocalSky's smart engine to decide when and how
-long to water: it reads the weather, runs the soil-water-balance math, and
-fires a zone the moment its deficit justifies it. Manual schedules are the
+long to water: it reads the weather, settles each zone's weekly water
+balance, and fires the zone on the mornings its session spacing allows. Manual schedules are the
 escape hatch for the cases where you want a zone on a clock instead, a
 fixed weekday and time you set yourself. You might use one for a drip line
 on a flower bed the engine does not model well, for a city that mandates a
@@ -25,28 +25,53 @@ smart engine does for that zone on the days the schedule fires.
 In **Override** mode the manual schedule replaces the smart engine for
 that zone, for that day. When an enabled Override schedule applies to a
 zone today, the engine zeroes its own planned run for that zone so it does
-not water on top of your manual run. The smart math still computes and
-still shows up in nerd-mode and on the zone-math tiles, so you can see
-what the engine would have done, but it does not dispatch. The manual
+not water on top of your manual run. The engine's own figures for the
+zone (throughput, crop coefficient, heat multiplier, capture efficiency)
+still compute and still show on the zone's detail panel, but its planned
+run for that day is zero and the panel reads "Scheduled 0 min". LocalSky
+does not show what the smart run would have been. On those days
+the zone card and the zone detail read ON HOLD and name the schedule. The manual
 schedule is the only thing that fires.
 
-Use Override when you want full manual control of a zone: the clock you
-set is exactly what runs, no more, no less (restrictions aside, see
-below).
+Use Override when you want full manual control of a zone on the days the
+schedule covers: on those days the clock you set is exactly what runs, no
+more, no less (restrictions aside, see below). On the days it does not
+cover, the zone is a normal smart zone again, and the engine sizes it from
+the weekly water balance with the schedule's own water already counted
+against that week's target. Cover every weekday, or delete the schedule,
+if you want the zone to water only on your clock.
 
 ### Floor
 
 In **Floor** mode the manual schedule is a minimum, not a replacement.
-The manual run fires on schedule, and the smart engine is still free to
-add more runs for that zone if its deficit math says the lawn needs more
-water than the scheduled run delivered. Think of it as "at least this
-much, plus whatever the engine adds on top."
+The manual run fires on schedule, and the smart engine may add more runs
+for that zone if the weekly water balance says the lawn needs more water
+than the scheduled run delivered. Think of it as "at least this much,
+plus whatever the engine adds on top."
 
 Floor is for minimum-coverage patterns: a guaranteed baseline run with
-the engine topping up during a heat wave. The trade-off is that Floor can
-overwater if your scheduled run already satisfies the deficit, because the
-engine does not subtract the manual run from its own sizing. Reach for
-Override unless you specifically want the engine to keep adding water.
+the engine topping up during a heat wave.
+
+Two things decide whether the engine ever gets to add on top, and both
+can close the door completely:
+
+- A Floor run is watering like any other, so its water counts against the
+  zone's weekly target. A schedule that already delivers the week's
+  target leaves the engine nothing to add.
+- A Floor run also **resets the session-spacing clock**. The engine paces
+  a zone at `floor(7 / sessions_per_week)` days between sessions, and it
+  measures that from the last run of any kind, including yours. So a
+  schedule that fires as often as the zone's own session cadence leaves
+  the engine no eligible day at all: a weekly Floor schedule on a
+  1-session-a-week bed (the default for any zone whose name contains
+  shrub, garden or bed) never opens the gate, and neither does a
+  Monday/Wednesday/Friday schedule on a 2-session-a-week zone. The zone
+  reads ON HOLD, naming the spacing, every day.
+
+If you want a zone fully engine-driven, delete the schedule rather than
+switching it to Floor. Switch to Floor when you want the scheduled run to
+stay as a guaranteed minimum and you have raised `sessions_per_week`
+enough to leave the engine a day to work with.
 
 The two modes differ only in what they do to smart dispatch. The manual
 run itself fires identically either way.

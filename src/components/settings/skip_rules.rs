@@ -190,7 +190,7 @@ pub fn SettingsSkipRules() -> impl IntoView {
                         helptext="Your personal 'how much rain is enough' threshold. Used in the 3-day rollup and the morning override. Default: 0.25".to_string()
                         error=Signal::derive(|| None::<String>)
                     >
-                        {numeric_input("rain_skip_in", rain_skip_in, 0.05)}
+                        {bounded_numeric_input("rain_skip_in", rain_skip_in, 0.05, Some((0.0, 10.0)))}
                     </FormField>
                 </div>
             </Panel>
@@ -207,7 +207,7 @@ pub fn SettingsSkipRules() -> impl IntoView {
                         helptext="Skip when sustained wind is at or above this. Default: 15".to_string()
                         error=Signal::derive(|| None::<String>)
                     >
-                        <Slider value=max_wind_mph min=0.0 max=40.0 step=1.0 suffix=format!(" {}", wind_unit(UnitPrefs::default()))/>
+                        <Slider value=max_wind_mph min=0.0 max=50.0 step=1.0 suffix=format!(" {}", wind_unit(UnitPrefs::default()))/>
                     </FormField>
                     <FormField
                         label=format!("Wind forecast slack ({})", wind_unit(UnitPrefs::default()))
@@ -307,15 +307,39 @@ pub fn SettingsSkipRules() -> impl IntoView {
 }
 
 fn numeric_input(_id: &'static str, sig: RwSignal<f64>, step: f64) -> impl IntoView {
+    bounded_numeric_input(_id, sig, step, None)
+}
+
+/// A numeric field carrying the server's own accepted range.
+///
+/// The three adopted thresholds are range-checked by `POST /action
+/// set_threshold` and published with min/max/step on their `number` entity, so
+/// Settings must not be able to save a value the dashboard slider and the Home
+/// Assistant entity would both refuse. `rain_skip_in` is the one of the three
+/// that is a free numeric field rather than a slider; max wind and min temp
+/// are sliders already bounded to the same ranges.
+fn bounded_numeric_input(
+    _id: &'static str,
+    sig: RwSignal<f64>,
+    step: f64,
+    range: Option<(f64, f64)>,
+) -> impl IntoView {
+    let lo = range.map(|r| r.0.to_string());
+    let hi = range.map(|r| r.1.to_string());
     view! {
         <input
             type="number"
             step={format!("{step}")}
+            min=lo
+            max=hi
             class="ui-input"
             prop:value=move || sig.get()
             on:input=move |ev| {
                 if let Ok(v) = event_target_value(&ev).parse::<f64>() {
-                    sig.set(v);
+                    sig.set(match range {
+                        Some((lo, hi)) => v.clamp(lo, hi),
+                        None => v,
+                    });
                 }
             }
         />

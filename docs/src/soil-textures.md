@@ -34,9 +34,9 @@ This is the depth of water the zone can hold between field capacity (fully wet, 
 RAW_mm = TAW_mm * MAD_pct
 ```
 
-MAD (Management Allowed Depletion) comes from the species catalog. RAW is the depletion threshold beyond which the plant starts to stress. LocalSky's irrigation trigger is `depletion >= RAW`.
+MAD (Management Allowed Depletion) comes from the species catalog. RAW is the depletion beyond which the plant starts to stress. It is a reference threshold the tuning report uses when it estimates a watering interval; it is not the live irrigation trigger. See [the irrigation engine](irrigation-engine.md) for what decides watering today.
 
-St. Augustine on sandy loam with default 50% MAD: RAW = 19.5 * 0.50 = 9.75 mm. The engine triggers irrigation when the bucket dips below ~10 mm of depletion.
+St. Augustine on sandy loam with default 50% MAD: RAW = 19.5 * 0.50 = 9.75 mm. That is the depletion at which St. Augustine on this soil would start to stress, which is why the tuning report flags an interval much longer than about two days here.
 
 ### Infiltration rate
 

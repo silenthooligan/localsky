@@ -194,11 +194,30 @@ max_run_minutes = null           # null = 60; longest single run (whole minutes,
 controller_id = "os_main"
 controller_station = "1"         # the controller's own id for this zone
 controller_zone_name = null      # the controller's name for it; a label only
-soil_sensor_id = null            # optional; engine uses modeled bucket when absent
+soil_sensor_id = null            # optional; no probe just means no soil gate
 target_min_pct_soil = 30.0
 saturation_pct_soil = 70.0
+weekly_budget_in = null          # null = 1.00 turf, 0.50 shrub/garden/bed
+sessions_per_week = null         # 1..=7; null = 2 turf, 1 shrub/garden/bed
 photo_url = null
 ```
+
+`weekly_budget_in` and `sessions_per_week` are the two settings that size a
+run; the zone editor (Settings, then Zones) carries them as **Weekly target**
+and **Sessions per week**. The weekly balance settles `weekly_budget_in` (a gross weekly depth,
+inches including rain) against observed rain, water already applied, and a
+probability-weighted forecast credit, then splits the remainder across the
+sessions still expected this week. Neither moves with the season: nothing
+recomputes them from ET0 or the crop coefficient. When unset, both come
+from a default by zone type, inferred from the zone's slug: 1.00 in over 2
+sessions for turf, 0.50 in over 1 session for a slug containing `shrub`,
+`garden` or `bed`. See [Weekly water budget](water-budget.md).
+
+`sessions_per_week` accepts 1 through 7. Sessions space at
+`floor(7 / sessions_per_week)` days, so above 7 that spacing works out to
+less than a day and stops holding a zone that has already watered today. A
+save outside the range is refused; a value already in a config file is read
+as 7 rather than blocking the file from loading.
 
 `species` enum: `st_augustine`, `bermuda`, `zoysia`, `bahia`, `centipede`, `kentucky_bluegrass`, `tall_fescue`, `perennial_ryegrass`, `ornamental_shrubs`, `vegetable_garden`, `drip_xeriscape`, `other`. See [grass-species.md](grass-species.md).
 
@@ -272,11 +291,11 @@ Each section is optional. Omit to disable that channel.
 
 ```toml
 [engine]
-capture_efficiency       = 0.70
+capture_efficiency       = 0.70     # not read by the watering engine (see below)
 session_rain_defer_in    = 0.10
 soak_minutes             = 30
 interleave_cycles        = true     # water other zones during soak pauses; turn off for well/low-recovery supplies
-et0_method               = "auto"   # auto | penman_monteith | asce_simplified | hargreaves_samani | source_native
+et0_method               = "auto"   # not read at all (see below)
 
 [engine.skip_rules]
 already_wet_in              = 0.05   # 1.3 mm
@@ -293,7 +312,9 @@ rain_skip_in                = 0.25   # 6.4 mm
 frost_skip_soil_f           = 35.0   # 1.7 C
 ```
 
-All values match v0.1 hardcoded constants. See [skip-rules.md](skip-rules.md) for what each one does.
+All values match v0.1 hardcoded constants, with two exceptions. See [skip-rules.md](skip-rules.md) for what each skip threshold does.
+
+`capture_efficiency` and `et0_method` are accepted and validated so an existing config still loads, but neither reaches the watering decision. The soil projection and the zone math panel use a fixed 0.70 capture factor, and the ET0 path always runs the automatic method (Penman-Monteith when the inputs are there, otherwise ASCE-simplified, otherwise Hargreaves-Samani). Editing either changes nothing about when or how long a zone waters. `capture_efficiency` has one live reader left: the tuning report's measured-sprinkler-rate check, on a zone with a soil probe bound, divides the probe's rise by it, so it does move a recommendation you can then choose to apply.
 
 `interleave_cycles` waters other zones during a zone's cycle-and-soak pauses instead of idling through them, shortening the morning sequence. Default on; turn it off on installs fed by a well or low-recovery pump, where the idle soak gaps double as supply recovery time (the setup wizard's water-supply question sets this for you). One valve still runs at a time and soaks are minimums that may stretch, never shrink; details in [irrigation-engine.md](irrigation-engine.md#cycle-interleaving). `interleave_cycles` and `soak_minutes` hot-reload with the rest of the watering policy: a change applies on the next scheduler tick (the next morning's plan), no restart needed. Both, plus the seasonal water-budget dial, are editable on the Engine settings page.
 
@@ -348,8 +369,8 @@ duration_minutes = 20
 mode = "override"              # override (default) | floor
 ```
 
-- `override` (default): while an enabled override schedule applies to a zone that day, smart-irrigation dispatch for that zone is suppressed. The smart math still computes for visibility.
-- `floor`: the schedule fires AND the smart engine may add more water if its deficit math justifies it. Useful for minimum-coverage requirements; can overwater if the scheduled run already covers the deficit.
+- `override` (default): while an enabled override schedule applies to a zone that day, smart-irrigation dispatch for that zone is suppressed. The zone's smart plan for that day is zero and the detail panel reads "Scheduled 0 min"; the engine's other figures still show.
+- `floor`: the schedule fires AND the smart engine may add more runs that week if the weekly water balance says the zone still needs water. The scheduled run's water counts against the weekly target like any other run, and it resets the session-spacing clock, so a schedule firing as often as the zone's own `sessions_per_week` cadence leaves the engine no day to add on. See [Manual schedules](schedules.md).
 
 Manual schedules respect watering restrictions exactly like smart runs do: a blocked dispatch is skipped with the reason logged to run history.
 

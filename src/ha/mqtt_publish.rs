@@ -120,9 +120,10 @@ impl HaMqttPublisher {
         }
     }
 
-    /// Publish discovery for one zone. Issues the bucket_mm + planned_seconds
-    /// sensors always, and the `running` binary_sensor only when
-    /// `running_known` is true. (No per-zone ET sensor: ET0 is a single
+    /// Publish discovery for one zone. Issues the planned_seconds sensor
+    /// always, the bucket_mm sensor only when a model on this install
+    /// actually produced a deficit, and the `running` binary_sensor only
+    /// when `running_known` is true. (No per-zone ET sensor: ET0 is a single
     /// yard-wide forecast value, not per-zone, so a per-zone et_today_mm would
     /// publish the same number N times with no real per-zone producer.)
     ///
@@ -131,15 +132,38 @@ impl HaMqttPublisher {
     /// running state forever. Publishing its discovery anyway would leave HA
     /// with a `running` binary_sensor stuck "unknown" for the life of the
     /// deployment, so we gate the discovery the same way `flow_meter` gates the
-    /// flow sensor: no producer, no entity.
+    /// flow sensor: no producer, no entity. `bucket_known` gets the same rule:
+    /// its only producer was a Home Assistant entity the engine no longer
+    /// reads, so publishing it would create a permanently empty sensor. The
+    /// bucket additionally CLEARS its retained config and state topics when
+    /// absent, because earlier versions published it retained with a
+    /// fabricated 0.00 and a broker holds that until something overwrites
+    /// it.
     pub async fn publish_zone_discovery(
         &self,
         zone_slug: &str,
         running_known: bool,
+        bucket_known: bool,
     ) -> Result<(), MqttPublishError> {
         let device = self.device();
-        let mut entities: Vec<(&str, String, DiscoveryEntity)> = vec![
-            (
+        let mut entities: Vec<(&str, String, DiscoveryEntity)> = vec![(
+            "sensor",
+            format!("zone_{zone_slug}_planned_seconds"),
+            DiscoveryEntity {
+                name: format!("{zone_slug} planned seconds"),
+                unique_id: format!("{}_zone_{zone_slug}_planned_s", self.node_id),
+                state_topic: self
+                    .state_topic("sensor", &format!("zone_{zone_slug}_planned_seconds")),
+                unit_of_measurement: Some("s".into()),
+                device_class: Some("duration".into()),
+                state_class: Some("measurement".into()),
+                icon: Some("mdi:timer".into()),
+                device: device.clone(),
+                attribution: "LocalSky".into(),
+            },
+        )];
+        if bucket_known {
+            entities.push((
                 "sensor",
                 format!("zone_{zone_slug}_bucket_mm"),
                 DiscoveryEntity {
@@ -153,24 +177,27 @@ impl HaMqttPublisher {
                     device: device.clone(),
                     attribution: "LocalSky".into(),
                 },
-            ),
-            (
-                "sensor",
-                format!("zone_{zone_slug}_planned_seconds"),
-                DiscoveryEntity {
-                    name: format!("{zone_slug} planned seconds"),
-                    unique_id: format!("{}_zone_{zone_slug}_planned_s", self.node_id),
-                    state_topic: self
-                        .state_topic("sensor", &format!("zone_{zone_slug}_planned_seconds")),
-                    unit_of_measurement: Some("s".into()),
-                    device_class: Some("duration".into()),
-                    state_class: Some("measurement".into()),
-                    icon: Some("mdi:timer".into()),
-                    device: device.clone(),
-                    attribution: "LocalSky".into(),
-                },
-            ),
-        ];
+            ));
+        } else {
+            // Versions before 0.7.22 published this sensor unconditionally,
+            // retained, holding a fabricated 0.00. Simply not publishing it
+            // leaves both retained topics on the broker, so Home Assistant
+            // keeps the entity registered and pinned at that 0.00 forever:
+            // the exact number this release removes, still on screen. An
+            // empty retained payload on the config topic is HA's documented
+            // "remove this entity", and one on the state topic drops the
+            // stale value. Both are idempotent, so re-issuing them on every
+            // reconnect costs nothing.
+            let object_id = format!("zone_{zone_slug}_bucket_mm");
+            for topic in [
+                self.config_topic("sensor", &object_id),
+                self.state_topic("sensor", &object_id),
+            ] {
+                self.client
+                    .publish(topic, QoS::AtLeastOnce, true, Vec::<u8>::new())
+                    .await?;
+            }
+        }
         if running_known {
             entities.push((
                 "binary_sensor",
@@ -310,7 +337,7 @@ impl HaMqttPublisher {
         snap: &IrrigationSnapshot,
     ) -> Result<(), MqttPublishError> {
         for z in &snap.zones {
-            self.publish_zone_discovery(&z.slug, z.running_known)
+            self.publish_zone_discovery(&z.slug, z.running_known, z.bucket_mm.is_some())
                 .await?;
         }
         self.publish_verdict_discovery().await?;
@@ -329,20 +356,15 @@ impl HaMqttPublisher {
         for z in &snap.zones {
             // `running_known=false` (fire-and-forget MQTT/DIY) means we cannot
             // trust the readback, so withhold the running state (None) rather
-            // than asserting a possibly-wrong OFF; the bucket + planned values
-            // are still meaningful.
+            // than asserting a possibly-wrong OFF; the planned value is still
+            // meaningful. An absent bucket publishes nothing at all.
             let running = if z.running_known {
                 Some(z.running)
             } else {
                 None
             };
-            self.publish_zone_state(
-                &z.slug,
-                Some(z.bucket_mm),
-                Some(z.planned_run_seconds),
-                running,
-            )
-            .await?;
+            self.publish_zone_state(&z.slug, z.bucket_mm, Some(z.planned_run_seconds), running)
+                .await?;
         }
         self.publish_verdict_state(&snap.skip_check.verdict, &snap.skip_check.reason)
             .await?;

@@ -37,27 +37,44 @@ pub struct ZoneState {
     /// show "running state unknown" rather than implying a confirmed off.
     #[serde(default = "default_true_running_known")]
     pub running_known: bool,
-    /// Today's accumulated run-minutes for this zone. Sums every
-    /// recorded run that started since local midnight. Populated from
-    /// the SQLite history layer once Phase 3 ingest lands; zero in
-    /// Phase 2.
-    pub today_run_minutes: f64,
-    /// Smart Irrigation deficit (mm) for this zone. Read from
-    /// `sensor.smart_irrigation_<slug>` attributes.
-    pub bucket_mm: f64,
-    /// Per-zone duration the next IU sequence will use (seconds). Read
-    /// from `sensor.smart_irrigation_<slug>` state. SI's nightly sync
-    /// pushes this into IU's next-run amounts.
+    /// Today's accumulated run-minutes for this zone. `None` on every
+    /// install: no producer summarizes per-zone valve-open seconds since
+    /// local midnight, on either deployment path. It was a bare `f64`
+    /// holding a hardcoded 0.0, which published "0 min" as if it were a
+    /// measurement while the zone card's hold line above it named the
+    /// inches already applied this week. Same treatment `bucket_mm` and
+    /// `water_level_pct` got: serialized null, every display renders a
+    /// dash, and the manifest publishes no descriptor.
+    /// `#[serde(default)]` so older JSON deserializes.
+    #[serde(default)]
+    pub today_run_minutes: Option<f64>,
+    /// Soil-water deficit (mm) for this zone. `None` when no model on
+    /// this install computed one, which is every install today: the only
+    /// producer was a Home Assistant Smart Irrigation entity, and the
+    /// engine no longer reads Home Assistant for anything. A bare f64
+    /// here published a hardcoded 0.00 as if it were a measurement, the
+    /// same defect `water_level_pct` was converted for. Serialized null;
+    /// every display renders a dash and the manifest publishes no
+    /// descriptor. `#[serde(default)]` so older JSON deserializes.
+    #[serde(default)]
+    pub bucket_mm: Option<f64>,
+    /// Per-zone duration the next sequence will use (seconds), from the
+    /// weekly-budget allocator.
     pub planned_run_seconds: u32,
-    /// Last-run epoch in UTC, or 0 if unknown. Populated from history
-    /// in Phase 3.
+    /// End epoch (UTC) of this zone's most recent completed watering
+    /// event, or 0 when the trailing window holds none. Populated from
+    /// the per-tick run-history evidence the weekly balance uses, so it
+    /// is the same anchor the session-spacing gate reads.
     pub last_run_epoch: i64,
 
-    /// Per-zone flex-math breakdown (Phase E followup, math transparency).
-    /// Surfaces SI's internal computation: bucket × Kc × heat_mult ÷
-    /// throughput ÷ capture = need_seconds, then the maximum_duration
-    /// safety ceiling. Renders the dashboard's "Why this duration?" tile.
-    /// `None` when SI hasn't populated yet (first boot or sensor offline).
+    /// Per-zone math breakdown behind the "Why this duration?" panel.
+    /// Two of its numbers reach the dispatch: `throughput_mm_hr`, which
+    /// divides the weekly balance's session depth into seconds, and
+    /// `max_duration_seconds`, the ceiling that can shorten the result.
+    /// `kc`, `heat_mult` and `capture_eff` are real engine outputs that
+    /// feed ETc and the soil projection; they do not scale the run, and
+    /// the panel groups them apart so nobody reads them as operands.
+    /// `None` before the first refresh builds one.
     #[serde(default)]
     pub math: Option<ZoneMath>,
 
@@ -99,26 +116,54 @@ pub struct ZoneState {
     /// computed from the raw readings, NOT the verdict. Changes no decision.
     #[serde(default)]
     pub soil_suspect: Option<String>,
+
+    /// Set when an enabled `Override` manual schedule suppresses smart
+    /// dispatch for this zone. `Override` is the DEFAULT schedule mode
+    /// and it zeroed the smart plan with nothing on any screen saying
+    /// so, which turned "add a manual schedule" into a permanent
+    /// lockout. Display only: the suppression itself is unchanged.
+    /// Additive; absent = nothing suppressing.
+    #[serde(default)]
+    pub smart_suppressed: Option<SmartSuppression>,
 }
 
-/// Per-zone flex-math breakdown for the math-transparency tile. All
-/// numbers pulled from `sensor.smart_irrigation_<slug>` attributes,
-/// with `heat_mult` carried from the snapshot's `forecast.heat_multiplier`
+/// Which manual schedules are suppressing smart dispatch for a zone.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SmartSuppression {
+    /// Weekdays the suppression applies on, `0 = Sun .. 6 = Sat`
+    /// (chrono's `num_days_from_sunday`), sorted and de-duplicated
+    /// across every schedule below.
+    pub weekdays: Vec<u8>,
+    /// Display names of the Override schedules doing it.
+    pub schedules: Vec<String>,
+    /// True when one of those schedules covers TODAY, so the zone's
+    /// planned seconds are zero for that reason right now.
+    pub active_today: bool,
+}
+
+/// Per-zone math breakdown for the math-transparency tile. Every
+/// number is LocalSky's own: throughput and the max-duration ceiling
+/// from the zone's config, `kc` from the native species catalog,
+/// `heat_mult` carried from the snapshot's `forecast.heat_multiplier`
 /// (it's a global, not per-zone, but applies to every zone's ET
-/// calculation). `capture_efficiency` is the constant LocalSky uses in
-/// the Phase E water-balance projection, surfaced here so the displayed
-/// math matches the projection's math.
+/// calculation), `capture_eff` the constant the soil projection uses.
+/// `scheduled_seconds` is what the weekly-budget allocator planned for
+/// today, which is the figure that actually dispatches.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ZoneMath {
-    /// Soil-water deficit, mm. Negative = needs water. From SI's
-    /// `bucket` attribute on `sensor.smart_irrigation_<slug>`.
-    pub bucket_mm: f64,
-    /// Crop coefficient. Drawn from SI's `multiplier` attribute (which
-    /// in this codebase is set per zone: 1.08 for turf, 0.50 for shrubs).
+    /// Soil-water deficit, mm. Negative = needs water. `None` when no
+    /// model on this install computed one (every install today; see
+    /// `ZoneState::bucket_mm`). Serialized null, rendered as a dash.
+    #[serde(default)]
+    pub bucket_mm: Option<f64>,
+    /// Crop coefficient for today, from the native species catalog
+    /// (`kc_at_doy_lat`, hemisphere aware) using the zone's configured
+    /// species. Never read from an entity.
     pub kc: f64,
-    /// Sprinkler precipitation rate, mm/hr. From SI's `throughput`
-    /// attribute. Low values (~2-3 mm/hr) suggest rotors or drip;
-    /// fixed sprays land around 20-40 mm/hr.
+    /// Sprinkler precipitation rate, mm/hr, from the zone's configured
+    /// sprinkler type or its measured `precip_rate_mm_hr` override. Low
+    /// values (~2-3 mm/hr) suggest rotors or drip; fixed sprays land
+    /// around 20-40 mm/hr.
     pub throughput_mm_hr: f64,
     /// ET heat multiplier, dimensionless. Drawn from
     /// `forecast.heat_multiplier`. 1.00 at HI ≤ 85 °F, scaling to 1.30
@@ -127,19 +172,36 @@ pub struct ZoneMath {
     /// Effective rain/applied-water capture efficiency, 0..1. Constant
     /// 0.70 to match the Phase E water-balance model.
     pub capture_eff: f64,
-    /// SI's computed need, seconds. = (|bucket_mm| / throughput_mm_hr) × 3600 × kc.
-    /// What SI would ship if maximum_duration didn't cap it.
+    /// A pre-cap need in seconds from a soil-deficit model. 0 on every
+    /// install today: the formula that produced it needed `bucket_mm`,
+    /// whose only producer was a Home Assistant entity the engine no
+    /// longer reads. Nothing renders it and nothing reads it for a
+    /// decision; it stays on the wire so the 1.25.0 shape holds.
     pub raw_seconds: u32,
-    /// SI's `maximum_duration` ceiling, seconds. Hard safety stop
-    /// prevents a misconfigured throughput from running for hours.
+    /// The zone's `max_run_minutes` ceiling in seconds, tightened by any
+    /// active watering restriction. Hard safety stop; prevents a
+    /// misconfigured throughput from running a zone for hours.
     pub max_duration_seconds: u32,
-    /// What SI actually emits as `sensor.smart_irrigation_<slug>` state.
-    /// Equal to `min(raw_seconds, max_duration_seconds)`. This is what
-    /// the SI -> IU sync at 23:30 pushes into IU's next-run amounts.
+    /// What the zone will actually run today, seconds. The weekly-budget
+    /// allocator's `today_seconds` after the seasonal dial, any Override
+    /// manual schedule, and the force-run floor. Equal to
+    /// `ZoneState::planned_run_seconds`.
     pub scheduled_seconds: u32,
-    /// True when `raw_seconds > max_duration_seconds` (the cap is
-    /// binding and the zone is being shorted). Dashboard renders the
-    /// max-duration row in a warning color when this is true.
+    /// True when the ceiling is what set tonight's minutes: there is a run,
+    /// `scheduled_seconds` equals `max_duration_seconds`, and some stage
+    /// wanted more than the ceiling. Three stages can want more, and all
+    /// three report here: the weekly allocator's `WaterBudget::session_capped`
+    /// (its ideal session was wider than the ceiling), the seasonal dial
+    /// scaling a run past it, and a condition-rule multiplier doing the same.
+    ///
+    /// False whenever `scheduled_seconds` is 0, so a zone held at zero by
+    /// spacing, a rain defer, budget mode off, or an Override manual schedule
+    /// never reads as shorted by its own cap; `session_capped` alone stays
+    /// true in those states because it describes the ideal weekly slice, not
+    /// today's plan. Also false for a force-run floor below the ceiling.
+    ///
+    /// The math panel's Scheduled row says "capped at N min" and renders in a
+    /// warning color when true.
     pub cap_binding: bool,
 }
 
@@ -204,7 +266,11 @@ pub struct SkipCheck {
     /// that pre-waters before a multi-day heat wave.
     pub heat_index_max_3day_f: f64,
 
-    // ── User-tunable thresholds (HA input_number helpers) ──
+    // ── User-tunable thresholds ──
+    // From `engine.skip_rules`. Before 0.7.22 a matching
+    // `input_number.irrigation_*` helper outranked the config value on a
+    // Home Assistant deployment; the adoption pass carried each helper's
+    // value into the config once and retired the read.
     pub max_wind_mph: f64,
     pub min_temp_f: f64,
     pub rain_skip_in: f64,
@@ -574,6 +640,14 @@ pub struct WaterBudget {
     /// completed watering events in the trailing window, floor 1.
     #[serde(default)]
     pub remaining_sessions: u32,
+    /// True when `weekly_budget_in` and `sessions_per_week` came from the
+    /// agronomic default inferred from the zone slug rather than from the
+    /// operator's own config. The allocator decides dispatch on every
+    /// deployment path now, so a zone watering on an inferred target is
+    /// watering on a guess nobody reviewed; the Zones page raises a
+    /// one-time banner naming those zones and their targets.
+    #[serde(default)]
+    pub target_inferred: bool,
 }
 
 fn default_bias_multiplier() -> f64 {
@@ -701,11 +775,38 @@ pub struct IrrigationSnapshot {
     /// this entity (helper not created), the field stays "none".
     #[serde(default)]
     pub override_tomorrow: String,
-    /// True when the input_datetime + input_select helpers exist in HA. Lets
-    /// the UI hide the controls with an "(HA helper not configured)" hint
-    /// instead of failing silently when the user taps them.
+    /// True when LocalSky's own pause and override controls will land
+    /// somewhere. Once the controls are adopted (0.7.22) that is always,
+    /// because they write LocalSky's own store; before adoption, on a Home
+    /// Assistant deployment, it still reports whether the two helpers exist.
     #[serde(default)]
     pub override_helpers_present: bool,
+    /// The Home Assistant helpers the one-time 0.7.22 adoption pass has
+    /// handled, copied verbatim from `config.ha_adoption` each refresh. Drives
+    /// the migration notice. Empty on every standalone install and on a Home
+    /// Assistant install before the pass runs.
+    #[serde(default)]
+    pub ha_adoption: Vec<HaAdoptedHelper>,
+    /// True when a persistence database is mounted, i.e. the four operator
+    /// controls have somewhere to land. The migration notice needs this to
+    /// tell two different reasons a control can be missing from
+    /// `ha_adoption` apart: false means it can never be adopted here and the
+    /// helper is still deciding, true means the pass is waiting on Home
+    /// Assistant to answer for it and there is nothing to do. Inferring it
+    /// from the records alone told an install with `/data` mounted to mount
+    /// `/data`. ADDITIVE; absent reads false, which is the old no-database
+    /// wording and the safe one.
+    #[serde(default)]
+    pub controls_persisted: bool,
+    /// True while the one-time helper adoption pass cannot run because this
+    /// install has no `localsky.toml` to record it in (zones from
+    /// `LOCALSKY_ZONES`, no config file). Every helper read is still live
+    /// there, exactly as before 0.7.22, and the notice has to say so, because
+    /// the release notes otherwise tell the owner deleting the helpers is
+    /// safe. Clears on its own once a config exists. ADDITIVE; absent reads
+    /// false.
+    #[serde(default)]
+    pub ha_adoption_awaiting_config: bool,
     /// Sticky global override: "auto" | "skip" | "run". Persisted in
     /// LocalSky's own sqlite (native) so it survives redeploys and applies
     /// regardless of HA mode. Unlike `override_tomorrow` it does NOT reset
@@ -1009,6 +1110,65 @@ pub struct SoilProbeFault {
     /// channel has never produced a valid value.
     #[serde(default)]
     pub since_epoch: Option<i64>,
+}
+
+/// One Home Assistant helper the 0.7.22 adoption pass has handled.
+///
+/// Both a marker and an audit record. The pass consults the entity ids in
+/// this list to decide what is left to do, so idempotency never rests on
+/// inspecting a config value: `FileConfigStore::save` serializes every
+/// default out explicitly, which makes "the value still looks like the
+/// default" carry no information about whether a human typed it. The same
+/// rule `seeded_source_ids` and `priority_repaired_ids` already follow.
+///
+/// It is also what the migration notice renders, and what answers "why is my
+/// max wind 12" six months later from the config file alone.
+///
+/// Lives here rather than in `config::schema` because `config` is ssr-only
+/// and the notice component compiles for hydrate as well.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(schemars::JsonSchema))]
+pub struct HaAdoptedHelper {
+    /// The entity id, e.g. `input_number.irrigation_max_wind_mph`. The
+    /// idempotency key: present here means the read is retired, whatever the
+    /// outcome was.
+    pub entity: String,
+    /// `adopted`: the entity was present and parseable and its value is now
+    /// LocalSky's. `not_found`: the entity was absent from /api/states.
+    /// `unreadable`: present but holding something that is not a value this
+    /// field can take. `kept_local`: LocalSky's own store already held a live
+    /// operator answer, so the helper's value was not taken. Every outcome
+    /// retires that entity's read; they are recorded apart so the notice can
+    /// tell the truth about which happened.
+    pub outcome: String,
+    /// Where the value lives now, e.g. `engine.skip_rules.max_wind_mph`.
+    pub target: String,
+    /// The value taken from Home Assistant, as text. None unless adopted.
+    #[serde(default)]
+    pub adopted_value: Option<String>,
+    /// What the helper actually held, when that differs from what was
+    /// adopted. Set only where a threshold sat outside the range LocalSky can
+    /// represent and was clamped to the nearest end, so the notice can print
+    /// both numbers instead of showing a value the owner never set. ADDITIVE:
+    /// absent on every record written before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_value: Option<String>,
+    /// What LocalSky held before the pass, as text. Present on every outcome:
+    /// on a non-adoption it is the value LocalSky keeps using.
+    #[serde(default)]
+    pub previous_value: Option<String>,
+    /// When the pass handled this entity.
+    #[serde(default)]
+    pub epoch: i64,
+}
+
+impl HaAdoptedHelper {
+    /// True when the value LocalSky now uses differs from what it held
+    /// before. The notice prints both numbers for these and says "nothing
+    /// changed" for the rest.
+    pub fn changed_the_value(&self) -> bool {
+        self.outcome == "adopted" && self.adopted_value != self.previous_value
+    }
 }
 
 /// What-If overrides for the Simulator. Every field is an absolute value

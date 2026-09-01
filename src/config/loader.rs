@@ -52,12 +52,39 @@ pub fn load_from_path(path: &Path) -> Result<Config, LoadError> {
 /// drop those installs from a 3-day model archive to 1 on upgrade. A
 /// stored 1 was never a value anyone chose against observed behavior;
 /// any other value (2..7, or a clamped-out-of-band one) is left alone.
+///
+/// `sessions_per_week` outside 1..=7 clamps into range. Nothing
+/// constrained the field before 0.7.22, so a hand-edited config can carry
+/// an 8, and the new `zone_sessions_per_week_range` validation error gates
+/// WHOLE-config writes: the raw-TOML save, `PUT /api/config` and the
+/// tuning apply all answer 422 while any zone is out of range. Without
+/// this, one stale value on disk would refuse every unrelated save, from a
+/// different zone's edit to a skip threshold, until the operator found and
+/// hand-fixed it. The engine already clamps the same way
+/// (`engine::budget::compute_zone`), so this only makes the stored value
+/// agree with the value that decides. Writes arriving from outside are
+/// still refused by the validator, so nothing is silently coerced on the
+/// way in.
 pub fn normalize_legacy_values(cfg: &mut Config) {
     use crate::config::schema::SourceKind;
     for src in cfg.sources.iter_mut() {
         if let SourceKind::OpenMeteo(c) = &mut src.source {
             if c.past_days == 1 {
                 c.past_days = 3;
+            }
+        }
+    }
+    for (slug, z) in cfg.zones.iter_mut() {
+        if let Some(n) = z.sessions_per_week {
+            if !(1..=7).contains(&n) {
+                let clamped = n.clamp(1, 7);
+                tracing::warn!(
+                    zone = %slug,
+                    stored = n,
+                    used = clamped,
+                    "sessions_per_week is outside 1..=7; treating it as the clamped value"
+                );
+                z.sessions_per_week = Some(clamped);
             }
         }
     }
@@ -436,6 +463,61 @@ mod tests {
         // Also verify a few common accents + a Cyrillic char for good measure.
         let src2 = "city = \"São Paulo · 春日\"";
         assert_eq!(interpolate_env(src2).unwrap(), src2);
+    }
+
+    /// A `sessions_per_week` already on disk must not write-lock the whole
+    /// config. Nothing constrained the field before 0.7.22, so an 8 can be
+    /// sitting in a hand-edited file; the new validation error gates every
+    /// whole-config write, so without the load-time clamp an unrelated save
+    /// (a different zone, a skip threshold, a tuning apply) would answer 422
+    /// until the operator found it. The clamp matches what the engine has
+    /// always done with the value.
+    #[test]
+    fn out_of_range_sessions_per_week_on_disk_is_clamped_at_load() {
+        let mut cfg = Config::default();
+        cfg.deployment.location.lat = 28.5;
+        cfg.deployment.location.lon = -81.4;
+        cfg.controllers
+            .push(crate::config::schema::ControllerEntry {
+                id: "c1".into(),
+                default: true,
+                enabled: true,
+                controller: crate::config::schema::ControllerKind::DryRun(Default::default()),
+            });
+        for (slug, sessions) in [("front", 8u32), ("back", 0), ("side", 3)] {
+            cfg.zones.insert(
+                slug.into(),
+                serde_json::from_value(serde_json::json!({
+                    "display_name": slug,
+                    "area_sqft": 1000.0,
+                    "species": "st_augustine",
+                    "soil_texture": "sandy_loam",
+                    "sprinkler_type": "rotor",
+                    "controller_id": "c1",
+                    "controller_station": "1",
+                    "sessions_per_week": sessions,
+                }))
+                .unwrap(),
+            );
+        }
+        // Before the clamp, one stale value refuses every whole-config write.
+        assert!(
+            !crate::config::validate::validate(&cfg).ok(),
+            "an out-of-range value must still be an error on the way in"
+        );
+
+        normalize_legacy_values(&mut cfg);
+
+        assert_eq!(cfg.zones["front"].sessions_per_week, Some(7), "8 clamps");
+        assert_eq!(cfg.zones["back"].sessions_per_week, Some(1), "0 clamps");
+        assert_eq!(
+            cfg.zones["side"].sessions_per_week,
+            Some(3),
+            "an in-range value is untouched"
+        );
+        // With the stored values healed, the whole-config validator passes,
+        // so an unrelated save is accepted instead of refused.
+        assert!(crate::config::validate::validate(&cfg).ok());
     }
 
     #[test]

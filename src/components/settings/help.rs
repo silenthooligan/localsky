@@ -32,7 +32,7 @@ pub fn SettingsHelp() -> impl IntoView {
                 <a class="about-link" href=doc_url("irrigation-engine") target="_blank" rel="noopener">
                     <Icon name="gauge" size=18/>
                     <strong>"How watering decisions work"</strong>
-                    <span>"ET, soil buckets, rules, scheduling"</span>
+                    <span>"ET, the weekly water balance, rules, scheduling"</span>
                 </a>
                 <a class="about-link" href=doc_url("migrating-from-ha") target="_blank" rel="noopener">
                     <Icon name="home" size=18/>

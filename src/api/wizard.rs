@@ -388,6 +388,13 @@ async fn post_apply(State(s): State<WizardApiState>) -> impl IntoResponse {
     // (which sources are NEW) and by the hot-reload restart-required diff.
     // `None` on a true fresh install (no prior config), which the normalizer's
     // contract handles as "every source is new".
+    // Hold the read-modify-write guard across this whole load, mutate and
+    // save, the way PUT /api/config and the backup restore do. The migration
+    // ledger carry-forward below is a load/save sequence, so without the
+    // guard it can interleave with the one-time adoption commit and write
+    // back the pre-commit (empty) `ha_adoption`, un-retiring all seven helper
+    // reads with nothing left to re-mark them until a restart.
+    let _write_guard = s.config_store.begin_write().await;
     let prev_cfg = s.config_store.load().await.ok();
     // Region-rank the cloud sources this apply INTRODUCES, exactly like the
     // PUT /api/config path: the wizard's cloud toggles ride the draft (they
@@ -406,6 +413,28 @@ async fn post_apply(State(s): State<WizardApiState>) -> impl IntoResponse {
     if let Some(rt) = &s.auth_rt {
         if rt.setup_complete.load(std::sync::atomic::Ordering::Relaxed) {
             draft.config.auth.mode = crate::config::schema::AuthMode::Required;
+        }
+    }
+    // `ha_adoption` and `seeded_source_ids` are migration LEDGERS, not
+    // tunables: they describe what happened on THIS instance, not what the
+    // draft holds. The wizard is re-enterable as an editor, and its "start
+    // fresh" branch builds from `WizardDraft::default()` rather than a copy of
+    // the live config, so both are empty on that branch. Persisting that would
+    // un-retire all seven helper reads against helpers the migration notice
+    // invited the owner to delete, and `apply_runtime_config` below arc-swaps
+    // the rebuilt policy immediately, so the vacation pause reads
+    // `.unwrap_or(0)` on the next tick with nothing to re-mark it until a
+    // restart. Same carry-forward as `post_rollback` and `post_restore`: the
+    // running config's adoption record wins outright, and its seeded ids are
+    // unioned in so a source the owner deleted is not re-added at the next
+    // boot. `prev_cfg` is `None` on a true first install, which correctly
+    // carries nothing.
+    if let Some(prev) = prev_cfg.as_ref() {
+        draft.config.ha_adoption = prev.ha_adoption.clone();
+        for id in &prev.seeded_source_ids {
+            if !draft.config.seeded_source_ids.contains(id) {
+                draft.config.seeded_source_ids.push(id.clone());
+            }
         }
     }
     // Write the config atomically.
@@ -1679,6 +1708,71 @@ mod draft_cloud_apply_tests {
             mrms.priority, 75,
             "apply region-ranks draft-added clouds (normalize_new_cloud_sources)"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Re-entering the wizard as an editor and taking the "start fresh" branch
+    // builds from WizardDraft::default(), which carries no .
+    // Saving that verbatim would un-retire all seven helper reads against
+    // helpers the migration notice invited the owner to delete, and apply
+    // hot-swaps the rebuilt policy, so it lands on the next tick with nothing
+    // to re-mark it until a restart.
+    #[tokio::test]
+    async fn apply_keeps_the_migration_ledger_the_draft_does_not_carry() {
+        let dir = std::env::temp_dir().join(format!(
+            "localsky-wizard-test-{}-ledger",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = state_in(&dir);
+
+        // A migrated install already on disk.
+        let mut stored = crate::config::schema::Config::default();
+        stored.deployment.location.lat = 29.9;
+        stored.deployment.location.lon = -81.3;
+        for id in crate::ha_adopt::ENTITIES {
+            stored
+                .ha_adoption
+                .push(crate::ha::snapshot::HaAdoptedHelper {
+                    entity: id.to_string(),
+                    outcome: crate::ha_adopt::OUTCOME_ADOPTED.to_string(),
+                    target: crate::ha_adopt::target_of(id).to_string(),
+                    adopted_value: Some("0".into()),
+                    observed_value: None,
+                    previous_value: Some("0".into()),
+                    epoch: 1,
+                });
+        }
+        stored.seeded_source_ids.push("nws".into());
+        s.config_store.save(&stored).await.unwrap();
+
+        // "Start fresh": a default draft with only what the wizard collects.
+        let mut draft = WizardDraft::default();
+        draft.license_accepted = true;
+        draft.telemetry_choice = Some(false);
+        draft.config.deployment.location.lat = 29.9;
+        draft.config.deployment.location.lon = -81.3;
+        assert!(draft.config.ha_adoption.is_empty());
+        s.draft_store.save(&draft).unwrap();
+
+        let apply = post_apply(State(s.clone())).await.into_response();
+        assert_eq!(apply.status(), StatusCode::OK);
+
+        let after = s.config_store.load().await.unwrap();
+        assert_eq!(
+            after.ha_adoption.len(),
+            crate::ha_adopt::ENTITIES.len(),
+            "every migration marker survives a start-fresh apply"
+        );
+        for id in crate::ha_adopt::ENTITIES {
+            assert!(
+                crate::refresher::WateringPolicy::from_config(&after).ha_read_retired(id),
+                "{id} must not go back to reading a helper the owner was told to delete"
+            );
+        }
+        assert!(after.seeded_source_ids.contains(&"nws".to_string()));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

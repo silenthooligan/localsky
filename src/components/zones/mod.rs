@@ -10,6 +10,7 @@ pub mod tuning;
 use leptos::prelude::*;
 
 use crate::components::irrigation::anomaly_banner::AnomalyBanner;
+use crate::components::irrigation::default_budget_banner::DefaultBudgetBanner;
 use crate::components::ui::StatTile;
 use crate::ha::snapshot::IrrigationSnapshot;
 use card::ZoneCard;
@@ -147,6 +148,10 @@ pub fn ZonesPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             // Quiet when there are no anomalies; the single owner of soil
             // offline/suspect warnings (never shown on the weather tab).
             <AnomalyBanner snap/>
+            // Zones about to water on a weekly target inferred from their
+            // name rather than one set here. Dismissible, and quiet once
+            // every zone carries a configured target.
+            <DefaultBudgetBanner snap/>
             <header class="zones-page__header">
                 <p class="zones-page__eyebrow">"Irrigation"</p>
                 <h1 class="zones-page__title">"Zones"</h1>
@@ -216,12 +221,21 @@ pub fn ZonesPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                             .get()
                             .map(|r| tuning::recommended_slugs(&r))
                             .unwrap_or_default();
+                        // The allocator's per-zone row, joined by slug. It is the
+                        // model that decides whether a zone waters, and its
+                        // today_reason had no reader in the whole app.
+                        let budgets: std::collections::HashMap<String, crate::ha::snapshot::WaterBudget> = s
+                            .water_budgets
+                            .iter()
+                            .map(|b| (b.zone_slug.clone(), b.clone()))
+                            .collect();
                         s.zones
                             .into_iter()
                             .map(|z| {
                                 let soil_pct = soil.get(&z.slug).copied();
                                 let has_suggestion = recs.contains(&z.slug.replace('-', "_"));
-                                view! { <ZoneCard zone=z selected soil_pct=soil_pct has_suggestion stop_done=card_stop_done/> }
+                                let budget = budgets.get(&z.slug).cloned();
+                                view! { <ZoneCard zone=z selected soil_pct=soil_pct has_suggestion budget=budget stop_done=card_stop_done/> }
                             })
                             .collect_view()
                             .into_any()

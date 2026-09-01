@@ -65,6 +65,8 @@ pub mod docs_serve;
 #[cfg(feature = "ssr")]
 pub mod engine;
 #[cfg(feature = "ssr")]
+pub mod ha_adopt;
+#[cfg(feature = "ssr")]
 pub mod instance;
 #[cfg(feature = "ssr")]
 pub mod llm;

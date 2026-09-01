@@ -164,6 +164,20 @@ pub struct HourlyEntry {
     pub wet_bulb_f: f64,
 }
 
+impl HourlyEntry {
+    /// Probability weight for this hour's precipitation, 0.0..=1.0.
+    /// `None` (the provider reports no probability) weights at FULL value,
+    /// the same conservative direction `DailyEntry::precip_weight` takes:
+    /// unknown probability is treated as certain rain, which holds water
+    /// rather than watering ahead of a storm. A reported 0 stays a real
+    /// "the model says it will not rain".
+    pub fn precip_weight(&self) -> f64 {
+        self.precip_probability
+            .map(|p| f64::from(p) / 100.0)
+            .unwrap_or(1.0)
+    }
+}
+
 /// Top-level forecast snapshot. Cheap to clone; arc-swapped into the
 /// store on every refresh.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -213,6 +227,23 @@ impl ForecastSnapshot {
     /// Saturates on short snapshots; returns 0 when hourly is empty.
     pub fn next_n_hours_precip_in(&self, n: usize) -> f64 {
         self.hourly.iter().take(n).map(|h| h.precip_in).sum()
+    }
+
+    /// Probability-WEIGHTED forecast precipitation over the next `n`
+    /// hourly entries, inches. Each hour's depth is scaled by that hour's
+    /// `precip_weight()`, the same treatment the balance's forward credit
+    /// and the wire's weighted 7-day total already get.
+    ///
+    /// The raw sum above is a deterministic model total: a 20%-probability
+    /// drizzle counts the same as a certain soaking. Comparing that raw
+    /// figure against a 0.10 inch threshold let a low-probability forecast
+    /// cancel a whole session, every day, with nothing visible about it.
+    pub fn next_n_hours_precip_weighted_in(&self, n: usize) -> f64 {
+        self.hourly
+            .iter()
+            .take(n)
+            .map(|h| h.precip_in * h.precip_weight())
+            .sum()
     }
 
     /// Epoch of the NEXT local midnight in the model's own frame:

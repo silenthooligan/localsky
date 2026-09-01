@@ -55,7 +55,7 @@ Most home irrigation systems are either dumb timers or cloud tethered too. The c
 
 <p align="center">
   <img src="docs/assets/screenshots/zone-controls-desktop.png" alt="Zones master-detail with live soil probe panel, target band, and run controls per zone" width="92%"><br>
-  <em>Manual zone controls: idle / running badge per zone, planned / today / bucket readouts, and 10 / 30 / 60-minute quick-run buttons. Running zones swap to a single red STOP.</em>
+  <em>Manual zone controls: idle / running badge per zone, planned and applied readouts, and 10 / 30 / 60-minute quick-run buttons. Running zones swap to a single red STOP.</em>
 </p>
 
 <table>
@@ -98,7 +98,8 @@ Most home irrigation systems are either dumb timers or cloud tethered too. The c
 ### Irrigation engine (optional)
 
 - **Native FAO-56 Penman-Monteith** reference ET with ASCE-EWRI 2005 simplified and Hargreaves-Samani 1985 fallbacks
-- **Single-bucket water balance** with TAW / RAW / MAD per zone; depletion-driven scheduling
+- **Weekly water balance** per zone: a gross weekly target settled against observed rain, water already applied, and a probability-weighted forecast credit, with the remainder split across the sessions still expected this week
+- **FAO-56 single-bucket model** (TAW / RAW / MAD per zone) implemented and tested, but not yet wired to any watering decision. See [the irrigation engine docs](https://localsky.io/docs/irrigation-engine) for what governs today
 - **Cycle-and-soak** infiltration splitter that respects soil texture and slope
 - **13-species grass catalog** with monthly, hemisphere-shifted Kc curves: warm-season (Bermuda, Zoysia, Kikuyu, St. Augustine, Bahia, Centipede), cool-season (Kentucky bluegrass, tall fescue, perennial ryegrass), plus ornamental shrubs, vegetable garden, and drip / xeriscape
 - **7-class soil texture catalog** (USDA texture classes, the standard used internationally) with field capacity, wilting point, available water, and slope-graded infiltration

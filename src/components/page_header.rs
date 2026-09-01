@@ -54,7 +54,7 @@ pub fn PageHeader() -> impl IntoView {
                     class=nerd_class
                     on:click=set_nerd
                     aria-pressed=move || if nerd_mode.get() { "true" } else { "false" }
-                    title="Nerd mode: surface ET0, ETc, Kc, bucket depth, and every skip-check input"
+                    title="Nerd mode: show the forecast intelligence, ET0, the advisory soil model and the full skip-check breakdown"
                 >
                     "Nerd"
                 </button>

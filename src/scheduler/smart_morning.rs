@@ -111,6 +111,27 @@ const MAX_SNAPSHOT_AGE_S: i64 = 30 * 60;
 /// refresher (or a restart) can still water the same morning.
 const STALE_INPUTS_REASON: &str = "stale inputs";
 
+/// Prefix of the skip-row reason recorded when the controller itself
+/// refused the dispatch. The boot dedupe ignores these rows for the same
+/// reason it ignores STALE_INPUTS_REASON: a refusal applied no water, so a
+/// restart inside the catch-up grace must still be able to water. This is
+/// the behavior the release before it had, where the failure path wrote no
+/// row at all, while keeping the failure visible in History.
+///
+/// The `watered_zones >= 2` signal is what suppresses a re-fire once water
+/// actually landed, and it is day-wide, not per zone: a controller that
+/// died partway through a sequence leaves two watered zones marking the
+/// WHOLE morning handled, so the zones that never ran wait for tomorrow.
+/// Making that promise unconditional needs a zone-aware catch-up, not a
+/// looser guard here; pinned by
+/// `boot_dedupe_partial_sequence_marks_the_whole_day_handled` and stated in
+/// the changelog and the troubleshooting guide.
+///
+/// The one thing that must never happen on any of these paths, re-opening a
+/// valve that is already open, is guarded at the dispatch site by
+/// `already_running` rather than by this reason string.
+const DISPATCH_FAILED_REASON_PREFIX: &str = "Controller dispatch failed:";
+
 /// Days of `last_fired` dedupe entries to retain.
 const LAST_FIRED_RETAIN_DAYS: i64 = 7;
 
@@ -227,8 +248,9 @@ pub fn spawn(
             // Boot-time reconciliation: consult the runs table once so a
             // restart never re-fires a morning that was already handled
             // (completed runs, a skip verdict, a manual stop, or a
-            // missed-window marker all count; only "stale inputs" rows
-            // are ignored so recovery can still water).
+            // missed-window marker all count; "stale inputs" and
+            // dispatch-failure rows are ignored so recovery can still
+            // water a morning that applied nothing).
             if !bootstrapped {
                 bootstrapped = true;
                 let already_handled_today = match runs.as_ref() {
@@ -413,6 +435,26 @@ pub fn spawn(
     });
 }
 
+/// A zone the controller currently reports open.
+///
+/// The MORNING DISPATCHER never commands such a zone on again, on either
+/// the scheduled or the catch-up path. Manual runs are NOT gated by this:
+/// `scheduler::manual` and the API's Run action both command the zone on
+/// whatever the controller reports. The success path here deliberately
+/// writes no run row (the snapshot run-edge observer records the falling
+/// edge later), so a restart mid-sequence can leave the boot catch-up with
+/// no evidence that this zone watered; without this guard the catch-up
+/// would re-open a valve that is already open, on top of water already on
+/// the ground.
+///
+/// `running_known` gates it because an UNKNOWN running state is not a claim
+/// that the zone is running: a fire-and-forget controller (MQTT) reports
+/// `running_known == false`, and treating that as "already open" would
+/// silently stop those installs from ever watering.
+fn already_running(z: &crate::ha::snapshot::ZoneState) -> bool {
+    z.running && z.running_known
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_today(
     snap: &crate::ha::snapshot::IrrigationSnapshot,
@@ -495,19 +537,28 @@ async fn dispatch_today(
     // every zone with planned seconds anyway. Resolve the skip set up
     // front so the announced totals count only zones that will water;
     // the loop below records each skip in the runs history.
-    let per_zone_skip_count = snap
-        .zones
-        .iter()
-        .filter(|z| z.planned_run_seconds > 0 && zone_skip_verdict(snap, z).is_some())
-        .count();
-    let per_zone_skip_secs: u64 = snap
-        .zones
-        .iter()
-        .filter(|z| z.planned_run_seconds > 0 && zone_skip_verdict(snap, z).is_some())
-        .map(|z| z.planned_run_seconds as u64)
-        .sum();
-    let zones_to_run = zones_to_run.saturating_sub(per_zone_skip_count);
-    let total_dispatch_s = total_dispatch_s.saturating_sub(per_zone_skip_secs);
+    //
+    // Resolved in one pass with the already-open set so the two cannot
+    // double-subtract a zone that is both.
+    let mut per_zone_skip_count = 0usize;
+    let mut per_zone_skip_secs = 0u64;
+    let mut already_open_count = 0usize;
+    let mut already_open_secs = 0u64;
+    for z in snap.zones.iter().filter(|z| z.planned_run_seconds > 0) {
+        if already_running(z) {
+            already_open_count += 1;
+            already_open_secs += z.planned_run_seconds as u64;
+        } else if zone_skip_verdict(snap, z).is_some() {
+            per_zone_skip_count += 1;
+            per_zone_skip_secs += z.planned_run_seconds as u64;
+        }
+    }
+    let zones_to_run = zones_to_run
+        .saturating_sub(per_zone_skip_count)
+        .saturating_sub(already_open_count);
+    let total_dispatch_s = total_dispatch_s
+        .saturating_sub(per_zone_skip_secs)
+        .saturating_sub(already_open_secs);
 
     info!(
         zones = zones_to_run,
@@ -554,6 +605,17 @@ async fn dispatch_today(
     let mut dispatch: Vec<DispatchZone> = Vec::new();
     for zone in snap.zones.iter() {
         if zone.planned_run_seconds == 0 {
+            continue;
+        }
+        // Never command open a valve the controller already reports open.
+        // Checked before the verdict skip so the two stay in the same order
+        // as the totals resolved above.
+        if already_running(zone) {
+            info!(
+                zone = %zone.slug,
+                is_catch_up,
+                "smart morning: zone already running; not dispatching it again"
+            );
             continue;
         }
         // Per-zone verdict skip: this zone's own engine verdict (soil
@@ -820,6 +882,34 @@ async fn dispatch_today(
                     );
                 }
                 failed[step.zone_idx] = true;
+                // A failed dispatch used to write NOTHING: no run row, no
+                // skip row, nothing. A morning that threw was indis-
+                // tinguishable in History from a morning that planned
+                // nothing, which is how weeks of failures left zero
+                // evidence anywhere. Record it with the controller's own
+                // error text, once per zone (the loop skips a failed
+                // zone's remaining segments), as a `skipped` row so it
+                // never counts as applied water.
+                if let Some(rs) = runs {
+                    let row = NewRun {
+                        zone_slug: dz.zone.slug.clone(),
+                        start_epoch: now_utc.timestamp(),
+                        source: "smart_morning".into(),
+                        controller_id: controller.id().to_string(),
+                        planned_duration_s: dz.zone.planned_run_seconds,
+                        skip_reason: None,
+                        et0_mm: None,
+                        etc_mm: None,
+                        cycle_index: cycle_pos.map(|(i, _)| i),
+                        cycle_count: cycle_pos.map(|(_, n)| n),
+                    };
+                    if let Err(err) = rs
+                        .insert_skipped(row, format!("{DISPATCH_FAILED_REASON_PREFIX} {e}"))
+                        .await
+                    {
+                        warn!(zone = %dz.zone.slug, error = %err, "smart morning: dispatch-failure row insert failed");
+                    }
+                }
                 anchor = Utc::now().timestamp();
             }
         }
@@ -1056,11 +1146,21 @@ fn build_cycle_plan(
 
 /// True when the runs table already has a smart_morning row for today
 /// that represents a handled morning: completed runs, a skip verdict, a
-/// manual stop, or a missed-window marker. "stale inputs" rows are
-/// excluded so a restart (or refresher recovery) can still water a
-/// morning that was only blocked by the freshness gate. Used by the
+/// manual stop, or a missed-window marker. "stale inputs" and
+/// dispatch-failure rows are excluded so a restart (or refresher
+/// recovery) can still water a morning that applied nothing: one was
+/// blocked by the freshness gate, the other was refused by the
+/// controller, and neither is a decision about the yard. Used by the
 /// boot reconciliation pass so a restart inside the same morning never
 /// fires the dispatch twice.
+///
+/// Note the boundary this draws: ANY other smart_morning row marks the
+/// day handled, including a per-zone verdict skip. So a morning where NO
+/// zone watered can still be handled, if even one zone carries a skip
+/// row while the rest were refused by the controller. That is deliberate
+/// (a skip is a decision about the yard, and the alternative is a
+/// zone-aware catch-up, not a looser guard) but it means "no zone
+/// watered" is not the condition; "every row is a dispatch failure" is.
 async fn handled_smart_morning_today(runs: &RunsStore, today: NaiveDate) -> bool {
     // P1-8c: the local day's UTC bounds key off the CONFIGURED timezone, so the
     // boot dedupe window matches the same "today" the dispatch loop uses.
@@ -1079,12 +1179,15 @@ async fn handled_smart_morning_today(runs: &RunsStore, today: NaiveDate) -> bool
         }
     };
     // Two signals count as "today is handled": a scheduler marker row
-    // (skip / missed / manual-stop; never written for stale inputs), or
-    // observer-recorded completed runs across 2+ distinct zones (a full
-    // or partial sequence actually watered). A single manual zone test
-    // does not suppress the morning run.
+    // (skip / missed / manual-stop; never written for stale inputs or a
+    // refused dispatch), or observer-recorded completed runs across 2+
+    // distinct zones (a full or partial sequence actually watered). A
+    // single manual zone test does not suppress the morning run.
     let marker = rows.iter().any(|r| {
-        r.source == "smart_morning" && r.skip_reason.as_deref() != Some(STALE_INPUTS_REASON)
+        let reason = r.skip_reason.as_deref().unwrap_or_default();
+        r.source == "smart_morning"
+            && reason != STALE_INPUTS_REASON
+            && !reason.starts_with(DISPATCH_FAILED_REASON_PREFIX)
     });
     let watered_zones: std::collections::HashSet<&str> = rows
         .iter()
@@ -1398,6 +1501,8 @@ mod tests {
             ]
         );
         assert_eq!(rec.stops(), 0);
+        // A clean morning writes no scheduler row: completed work is recorded
+        // by the run-edge observer.
         assert!(runs.window(WIDE.0, WIDE.1).await.unwrap().is_empty());
     }
 
@@ -1788,6 +1893,177 @@ mod tests {
             .await
             .unwrap();
         assert!(!handled_smart_morning_today(&store, today).await);
+    }
+
+    /// A controller that refused the dispatch applied no water, so the
+    /// failure rows it leaves behind must not mark the day handled: a
+    /// restart inside the same morning (redeploy, OOM, host reboot) has to
+    /// be able to catch up once the controller is back. The rows stay in
+    /// History either way, which is what they are there for.
+    #[tokio::test]
+    async fn boot_dedupe_ignores_dispatch_failure_rows() {
+        let store = fresh_store().await;
+        let (today, t0) = today_and_epoch(3600);
+        for (i, zone) in ["back_yard", "front_yard", "side_yard"].iter().enumerate() {
+            store
+                .insert_skipped(
+                    row(zone, "smart_morning", t0 + i as i64 * 10),
+                    format!("{DISPATCH_FAILED_REASON_PREFIX} HTTP 502"),
+                )
+                .await
+                .unwrap();
+        }
+        assert!(
+            !handled_smart_morning_today(&store, today).await,
+            "a refused dispatch applied no water; a restart must still be able to water"
+        );
+
+        // A single observed run is not a morning: one zone could be a manual
+        // test. The day stays unhandled and the catch-up may still fire.
+        //
+        // Source "ha_refresher" is what the run-edge observer actually
+        // writes. The scheduler records NOTHING on the success path, so a
+        // completed "smart_morning" row never exists on a live install; a
+        // test using one asserts through the `marker` branch and leaves the
+        // `watered_zones >= 2` threshold, which is the only backstop left
+        // once dispatch-failure rows are excluded, untested.
+        store
+            .insert_completed(
+                row("back_yard", "ha_refresher", t0 + 600),
+                t0 + 900,
+                300,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !handled_smart_morning_today(&store, today).await,
+            "one observed zone is not a sequence"
+        );
+
+        // Two distinct zones actually watered: the sequence landed, so the
+        // day IS handled again even though every scheduler row is a dispatch
+        // failure. This is the backstop the exclusion leans on.
+        store
+            .insert_completed(
+                row("front_yard", "ha_refresher", t0 + 960),
+                t0 + 1260,
+                300,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(handled_smart_morning_today(&store, today).await);
+    }
+
+    /// The boundary the release notes now state, pinned so it cannot drift
+    /// back to the looser claim.
+    ///
+    /// "No zone watered" is NOT what leaves a morning unhandled. Only the
+    /// stale-inputs and dispatch-failure reasons are excluded from the
+    /// marker, so a single per-zone verdict skip alongside a yard of
+    /// refused dispatches marks the whole morning handled and the catch-up
+    /// never fires, even though not one drop went on the ground. That is
+    /// deliberate: a skip is a decision about the yard. Lifting it needs a
+    /// zone-aware catch-up, not a looser guard.
+    #[tokio::test]
+    async fn boot_dedupe_verdict_skip_plus_dispatch_failures_marks_handled() {
+        let store = fresh_store().await;
+        let (today, t0) = today_and_epoch(3600);
+        // Six zones the controller refused.
+        for i in 0..6 {
+            store
+                .insert_skipped(
+                    row(&format!("zone_{i}"), "smart_morning", t0 + i as i64 * 10),
+                    format!("{DISPATCH_FAILED_REASON_PREFIX} HTTP 502"),
+                )
+                .await
+                .unwrap();
+        }
+        assert!(
+            !handled_smart_morning_today(&store, today).await,
+            "every row a dispatch failure: the morning is not handled"
+        );
+
+        // One zone the ENGINE skipped, for soil saturation. No zone watered,
+        // yet the morning now counts as handled.
+        store
+            .insert_skipped(
+                row("zone_6", "smart_morning", t0 + 70),
+                "Soil saturated (82% vs 70% threshold)".to_string(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            handled_smart_morning_today(&store, today).await,
+            "a verdict skip is a decision about the yard and marks the day handled"
+        );
+    }
+
+    /// The seven-zone partial-outage shape, recorded rather than assumed.
+    ///
+    /// A controller that dies partway through a sequence leaves the zones it
+    /// already ran with observer rows and the rest with dispatch-failure
+    /// rows. Two watered zones mark the whole day handled, so the five that
+    /// never ran wait for tomorrow. This is a real limit on the catch-up, not
+    /// a bug being pinned as correct: the `>= 2` threshold is what stops a
+    /// restart from re-watering a sequence that already landed, and lifting
+    /// it needs zone-aware catch-up rather than a looser day-wide guard.
+    /// Documented in the changelog and the troubleshooting guide; the test
+    /// exists so the behavior cannot change without someone noticing.
+    #[tokio::test]
+    async fn boot_dedupe_partial_sequence_marks_the_whole_day_handled() {
+        let store = fresh_store().await;
+        let (today, t0) = today_and_epoch(3600);
+        // Zones 1 and 2 completed; the observer closed both runs.
+        for (i, zone) in ["zone_1", "zone_2"].iter().enumerate() {
+            store
+                .insert_completed(
+                    row(zone, "ha_refresher", t0 + i as i64 * 400),
+                    t0 + i as i64 * 400 + 300,
+                    300,
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        // Zones 3 through 7 were refused by the controller.
+        for (i, zone) in ["zone_3", "zone_4", "zone_5", "zone_6", "zone_7"]
+            .iter()
+            .enumerate()
+        {
+            store
+                .insert_skipped(
+                    row(zone, "smart_morning", t0 + 800 + i as i64 * 10),
+                    format!("{DISPATCH_FAILED_REASON_PREFIX} HTTP 502"),
+                )
+                .await
+                .unwrap();
+        }
+        assert!(
+            handled_smart_morning_today(&store, today).await,
+            "two watered zones mark the day handled; the five dry zones wait for tomorrow"
+        );
+    }
+
+    /// The dispatch guard that keeps an already-open valve from being
+    /// commanded open a second time, on any path.
+    #[test]
+    fn dispatch_never_reopens_a_valve_the_controller_reports_open() {
+        use crate::ha::snapshot::ZoneState;
+        let z = |running: bool, known: bool| ZoneState {
+            running,
+            running_known: known,
+            ..Default::default()
+        };
+        assert!(already_running(&z(true, true)), "confirmed open");
+        assert!(!already_running(&z(false, true)), "confirmed closed");
+        // An UNKNOWN running state is not a claim that the zone is running.
+        // A fire-and-forget controller (MQTT) reports running_known false on
+        // every zone; treating that as "already open" would stop those
+        // installs from ever watering.
+        assert!(!already_running(&z(true, false)), "unknown is not open");
+        assert!(!already_running(&z(false, false)));
     }
 
     #[tokio::test]
@@ -2235,9 +2511,26 @@ mod tests {
             "failed-before-confirm zone must be disarmed; the healthy zone stays armed"
         );
         assert_eq!(rec.stops(), 0, "a dispatch failure is not a stop");
-        // The scheduler writes no history row for the failure (the run-edge
-        // observer owns what actually happened).
-        assert!(runs.window(WIDE.0, WIDE.1).await.unwrap().is_empty());
+        // A failed dispatch leaves a trace. Before this it wrote nothing at
+        // all, so a morning that threw was indistinguishable in History from
+        // a morning that planned nothing, and weeks of failures left zero
+        // evidence anywhere. One row per zone (the mask skips the zone's
+        // remaining segments), status "skipped" so it never counts as applied
+        // water, carrying the controller's own error text.
+        let rows = runs.window(WIDE.0, WIDE.1).await.unwrap();
+        assert_eq!(rows.len(), 1, "one failure row for the failed zone");
+        assert_eq!(rows[0].zone_slug, "front");
+        assert_eq!(rows[0].source, "smart_morning");
+        assert_eq!(rows[0].status, "skipped");
+        assert!(
+            rows[0]
+                .skip_reason
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("Controller dispatch failed:"),
+            "reason carries the controller's own text: {:?}",
+            rows[0].skip_reason
+        );
     }
 
     // Failure path, second segment: once ANY segment of the zone confirmed, a
@@ -2289,7 +2582,11 @@ mod tests {
             "a zone with a confirmed segment must keep its shutoff deadline armed"
         );
         assert_eq!(rec.stops(), 0);
-        assert!(runs.window(WIDE.0, WIDE.1).await.unwrap().is_empty());
+        // The failed segment still leaves its trace, once, for that zone.
+        let rows = runs.window(WIDE.0, WIDE.1).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].zone_slug, "front");
+        assert_eq!(rows[0].status, "skipped");
     }
 
     // Stop supremacy under interleave: a stop stamped DURING the first

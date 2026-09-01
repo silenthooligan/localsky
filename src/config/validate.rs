@@ -434,6 +434,25 @@ pub fn validate(cfg: &Config) -> ValidationReport {
         }
     }
 
+    // Sessions per week has to stay inside the range the spacing gate can
+    // resolve. The allocator paces sessions at floor(7/sessions) days
+    // (engine::budget), so 8 or more yields a 0 day interval and the gate
+    // stops holding a zone that already watered today. Error, not warning:
+    // the result is a zone that can be re-planned on the same day it ran.
+    for (slug, z) in &cfg.zones {
+        if let Some(n) = z.sessions_per_week {
+            if !(1..=7).contains(&n) {
+                r.error(
+                    "zone_sessions_per_week_range",
+                    format!(
+                        "zone '{slug}': sessions_per_week is {n}; it must be between 1 and 7 \
+                         (a zone cannot water more often than once a day)"
+                    ),
+                );
+            }
+        }
+    }
+
     // Manual schedules reference real zones.
     for sched in &cfg.manual_schedules {
         let normalized = sched.zone_slug.replace('-', "_");

@@ -1,7 +1,8 @@
 // SettingsZones. Per-zone editor with structured fields (not raw JSON):
 // slug + display_name + species + soil_texture + area + sprinkler type
-// + measured precip rate + controller mapping. Save round-trips through
-// the full Config PUT like the Sources/Controllers pages.
+// + measured precip rate + max run time + weekly target + sessions per week
+// + controller mapping. Save round-trips through the full Config PUT like
+// the Sources/Controllers pages.
 //
 // List view uses the SettingsCard UI kit so each zone is an
 // expandable card with status badges and a read-only details panel;
@@ -21,8 +22,8 @@ use crate::components::ui::{
     Button, ConfirmSheet, FormField, HelpHint, Panel, PhotoField, SegmentedControl,
 };
 use crate::components::units_fmt::{
-    area_unit, depth_unit, depth_value_mm, fmt_area_sqft, fmt_rain_rate_mm, use_unit_prefs,
-    UnitPrefs,
+    area_unit, depth_unit, depth_value_mm, fmt_area_sqft, fmt_rain_amount, fmt_rain_rate_mm,
+    use_unit_prefs, UnitPrefs,
 };
 use crate::docs::doc_url;
 
@@ -153,11 +154,16 @@ pub fn SettingsZones() -> impl IntoView {
     let new_sprinkler = RwSignal::new("rotor".to_string());
     let new_precip = RwSignal::new(String::new()); // empty = use catalog default
     let new_max_run = RwSignal::new(String::new()); // empty = 60 minute default
+                                                    // Weekly target (inches) and sessions per week, the two numbers that size
+                                                    // every run. Empty = the default inferred from the slug, which the form
+                                                    // shows as the placeholder so the owner can see what the zone waters on.
+    let new_weekly_budget = RwSignal::new(String::new());
+    let new_sessions = RwSignal::new(String::new());
     let new_controller = RwSignal::new(String::new());
     let new_station = RwSignal::new(String::new());
     let new_photo_url = RwSignal::new(String::new()); // optional zone photo
                                                       // Soil-moisture sensor assignment (the flexible per-zone wiring).
-                                                      // "" = none (modeled bucket only). Otherwise an `ha:<entity>` or
+                                                      // "" = none (no soil gate). Otherwise an `ha:<entity>` or
                                                       // `source:<id>:<key>` address. Thresholds drive the per-zone skip.
     let new_soil_sensor = RwSignal::new(String::new());
     let new_soil_min = RwSignal::new(30.0f64);
@@ -197,6 +203,8 @@ pub fn SettingsZones() -> impl IntoView {
                             new_area,
                             new_precip,
                             new_max_run,
+                            new_weekly_budget,
+                            new_sessions,
                             new_station,
                             new_photo_url,
                             new_soil_sensor,
@@ -254,6 +262,18 @@ pub fn SettingsZones() -> impl IntoView {
                     );
                     new_max_run.set(
                         z.get("max_run_minutes")
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v.to_string())
+                            .unwrap_or_default(),
+                    );
+                    new_weekly_budget.set(
+                        z.get("weekly_budget_in")
+                            .and_then(|v| v.as_f64())
+                            .map(|v| v.to_string())
+                            .unwrap_or_default(),
+                    );
+                    new_sessions.set(
+                        z.get("sessions_per_week")
                             .and_then(|v| v.as_u64())
                             .map(|v| v.to_string())
                             .unwrap_or_default(),
@@ -401,7 +421,7 @@ pub fn SettingsZones() -> impl IntoView {
                 <a class="settings-page__back" href="/settings">"← Settings"</a>
                 <h1 class="settings-page__title">"Zones"<HelpHint topic="zones"/></h1>
                 <p class="settings-page__subtitle">
-                    "One zone = one chunk of yard tied to one valve. Pick grass species + soil texture + measured precip rate; the engine computes ETc, soil bucket, and runtime from there. "
+                    "One zone = one chunk of yard tied to one valve. The weekly water balance decides when it waters and how much; the measured precip rate turns that depth into minutes, and the soil texture sets cycle-and-soak. Species and soil also feed the ET math shown on the zone page. "
                     "See "
                     <a href=doc_url("grass-species")
                         target="_blank" rel="noopener noreferrer"
@@ -466,6 +486,8 @@ pub fn SettingsZones() -> impl IntoView {
                     new_sprinkler=new_sprinkler
                     new_precip=new_precip
                     new_max_run=new_max_run
+                    new_weekly_budget=new_weekly_budget
+                    new_sessions=new_sessions
                     new_controller=new_controller
                     new_station=new_station
                     new_photo_url=new_photo_url
@@ -508,6 +530,8 @@ pub fn ZoneForm(
     new_sprinkler: RwSignal<String>,
     new_precip: RwSignal<String>,
     new_max_run: RwSignal<String>,
+    new_weekly_budget: RwSignal<String>,
+    new_sessions: RwSignal<String>,
     new_controller: RwSignal<String>,
     new_station: RwSignal<String>,
     new_photo_url: RwSignal<String>,
@@ -595,6 +619,8 @@ pub fn ZoneForm(
             new_area,
             new_precip,
             new_max_run,
+            new_weekly_budget,
+            new_sessions,
             new_station,
             new_photo_url,
             new_soil_sensor,
@@ -678,6 +704,45 @@ pub fn ZoneForm(
         let max_run_json = max_run
             .map(|v| serde_json::json!(v))
             .unwrap_or(serde_json::Value::Null);
+        // Weekly target and sessions per week. Blank means the default
+        // inferred from the slug, which is what the zone watered on before
+        // this form carried the fields. The server holds sessions_per_week
+        // to 1..=7 (zone_sessions_per_week_range), so the same bound is
+        // enforced here rather than discovered as a 422 at save.
+        let weekly_budget_value = new_weekly_budget.get();
+        let weekly_budget_json = if weekly_budget_value.trim().is_empty() {
+            serde_json::Value::Null
+        } else {
+            match weekly_budget_value.trim().parse::<f64>() {
+                Ok(v) if v > 0.0 && v <= 10.0 => serde_json::json!(v),
+                _ => {
+                    result_ok.set(false);
+                    result_msg.set(
+                        "Weekly target must be a number above 0 and at most 10 inches (or \
+                         blank for the default)"
+                            .into(),
+                    );
+                    return;
+                }
+            }
+        };
+        let sessions_value = new_sessions.get();
+        let sessions_json = if sessions_value.trim().is_empty() {
+            serde_json::Value::Null
+        } else {
+            match sessions_value.trim().parse::<u32>() {
+                Ok(v) if (1..=7).contains(&v) => serde_json::json!(v),
+                _ => {
+                    result_ok.set(false);
+                    result_msg.set(
+                        "Sessions per week must be a whole number from 1 to 7 (or blank for \
+                         the default)"
+                            .into(),
+                    );
+                    return;
+                }
+            }
+        };
         let precip_source = if precip.is_null() {
             "catalog"
         } else {
@@ -698,7 +763,7 @@ pub fn ZoneForm(
                 serde_json::Value::String(s)
             }
         };
-        // Soil-sensor assignment: "" -> null (modeled bucket), else the
+        // Soil-sensor assignment: "" -> null (no soil gate), else the
         // chosen ha:/source: address. Thresholds drive the per-zone skip.
         let soil_sensor_json = {
             let s = new_soil_sensor.get();
@@ -785,6 +850,8 @@ pub fn ZoneForm(
                         serde_json::json!(precip_source),
                     );
                     obj.insert("max_run_minutes".into(), max_run_json.clone());
+                    obj.insert("weekly_budget_in".into(), weekly_budget_json.clone());
+                    obj.insert("sessions_per_week".into(), sessions_json.clone());
                     obj.insert(
                         "controller_id".into(),
                         serde_json::json!(new_controller.get()),
@@ -817,6 +884,8 @@ pub fn ZoneForm(
                 "root_depth_mm": serde_json::Value::Null,
                 "mad_pct_override": serde_json::Value::Null,
                 "max_run_minutes": max_run_json,
+                "weekly_budget_in": weekly_budget_json,
+                "sessions_per_week": sessions_json,
                 "controller_id": new_controller.get(),
                 "controller_station": station,
                 "controller_zone_name": match vendor_name.clone() {
@@ -1005,6 +1074,8 @@ pub fn ZoneForm(
             new_area,
             new_precip,
             new_max_run,
+            new_weekly_budget,
+            new_sessions,
             new_station,
             new_photo_url,
             new_soil_sensor,
@@ -1026,7 +1097,7 @@ pub fn ZoneForm(
         // root_depth_mm is a stored depth in mm; render in the viewer's
         // depth unit at the display boundary.
         format!(
-            "Kc {kc_min:.2}-{kc_max:.2} · root {}{} · waters at {:.0}% soil depletion",
+            "Kc {kc_min:.2}-{kc_max:.2} · root {}{} · MAD {:.0}% (agronomy reference)",
             depth_value_mm(p.root_depth_mm, up),
             depth_unit(up),
             p.mad_pct * 100.0
@@ -1044,6 +1115,11 @@ pub fn ZoneForm(
             fmt_rain_rate_mm(rate, up)
         ))
     };
+
+    // The target the zone waters on while the two budget fields are blank,
+    // inferred from the slug exactly as the engine infers it, so the
+    // placeholder shows the number in effect rather than the word "default".
+    let inferred_target = move || inferred_weekly_target(&slugify(&new_slug.get()));
 
     view! {
         <div id="zone-form-panel"><Panel title="Zone form".to_string()>
@@ -1346,6 +1422,40 @@ pub fn ZoneForm(
                 }}
             </FormField>
 
+            <FormField
+                label="Weekly target (inches a week)".to_string()
+                helptext="Gross weekly depth this zone should receive, rain included. This is the number that sizes every run. Blank = the default inferred from the zone name, shown in the box.".to_string()
+                error=Signal::derive(|| None::<String>)
+            >
+                <input
+                    type="number"
+                    class="ui-input"
+                    min="0.05"
+                    max="10"
+                    step="0.05"
+                    placeholder=move || format!("(blank for the default {:.2})", inferred_target().0)
+                    prop:value=move || new_weekly_budget.get()
+                    on:input=move |ev| new_weekly_budget.set(event_target_value(&ev))
+                />
+            </FormField>
+
+            <FormField
+                label="Sessions per week".to_string()
+                helptext="How many mornings the weekly target is split across, 1 to 7. Sessions space at floor(7 / sessions) days apart. Blank = the default inferred from the zone name, shown in the box.".to_string()
+                error=Signal::derive(|| None::<String>)
+            >
+                <input
+                    type="number"
+                    class="ui-input"
+                    min="1"
+                    max="7"
+                    step="1"
+                    placeholder=move || format!("(blank for the default {})", inferred_target().1)
+                    prop:value=move || new_sessions.get()
+                    on:input=move |ev| new_sessions.set(event_target_value(&ev))
+                />
+            </FormField>
+
             // Everything below is fine-tuning with a sensible default; a
             // beginner can add a working zone with just the fields above.
             <details class="zone-form-advanced">
@@ -1430,7 +1540,7 @@ pub fn ZoneForm(
 
             <FormField
                 label="Soil moisture sensor (optional)".to_string()
-                helptext="Assign a sensor to drive this zone's skip decision. The dropdown lists every discovered soil channel, both Home Assistant entities and LocalSky native sources (incl. a zone-bound MQTT probe's channel). Or type an id below. Blank = modeled bucket only.".to_string()
+                helptext="Assign a sensor to drive this zone's skip decision. The dropdown lists every discovered soil channel, both Home Assistant entities and LocalSky native sources (incl. a zone-bound MQTT probe's channel). Or type an id below. Blank = no measured soil gate; the zone waters on the weekly water balance alone.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 <select
@@ -1438,7 +1548,7 @@ pub fn ZoneForm(
                     on:change=move |ev| new_soil_sensor.set(event_target_value(&ev))
                 >
                     <option value="" selected=move || new_soil_sensor.get().is_empty()>
-                        "(none, modeled bucket)"
+                        "(none, no soil gate)"
                     </option>
                     {move || soil_sensor_opts.get().into_iter().map(|(id, label, _, _)| {
                         let cur = new_soil_sensor.get();
@@ -1886,6 +1996,19 @@ fn slugify(s: &str) -> String {
 /// edit-mode plus the free-text fields, and restores the default area;
 /// the species/soil/sprinkler/controller pickers retain their prior
 /// selection exactly as before.
+/// The weekly target a zone waters on when neither budget field is set:
+/// 0.50 in over one session for a slug naming a shrub, garden or bed, 1.00 in
+/// over two sessions for everything else. Mirrors the engine's own default
+/// (`refresher::agronomic_budget_default`); an ssr-side test pins the two
+/// together so the placeholder cannot drift from the number in effect.
+pub fn inferred_weekly_target(slug: &str) -> (f64, u32) {
+    if slug.contains("shrub") || slug.contains("garden") || slug.contains("bed") {
+        (0.50, 1)
+    } else {
+        (1.00, 2)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn reset_zone_draft(
     editing_slug: RwSignal<Option<String>>,
@@ -1894,6 +2017,8 @@ fn reset_zone_draft(
     new_area: RwSignal<f64>,
     new_precip: RwSignal<String>,
     new_max_run: RwSignal<String>,
+    new_weekly_budget: RwSignal<String>,
+    new_sessions: RwSignal<String>,
     new_station: RwSignal<String>,
     new_photo_url: RwSignal<String>,
     new_soil_sensor: RwSignal<String>,
@@ -1906,6 +2031,8 @@ fn reset_zone_draft(
     new_area.set(1000.0);
     new_precip.set(String::new());
     new_max_run.set(String::new());
+    new_weekly_budget.set(String::new());
+    new_sessions.set(String::new());
     new_station.set(String::new());
     new_photo_url.set(String::new());
     new_soil_sensor.set(String::new());
@@ -2530,6 +2657,29 @@ fn ZoneCard(
         .unwrap_or("")
         .to_string();
     let precip = zone.get("precip_rate_mm_hr").and_then(|v| v.as_f64());
+    // The weekly target the allocator sizes this zone's week from, and
+    // whether the operator set it or it was inferred from the name. This is
+    // the row that lets the list answer "which zones still run on a guess".
+    let weekly_target_display = {
+        let set_budget = zone.get("weekly_budget_in").and_then(|v| v.as_f64());
+        let set_sessions = zone
+            .get("sessions_per_week")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok());
+        let (def_budget, def_sessions) = inferred_weekly_target(&slug);
+        let budget = set_budget.unwrap_or(def_budget);
+        let sessions = set_sessions.unwrap_or(def_sessions);
+        let sessions_word = if sessions == 1 { "session" } else { "sessions" };
+        let origin = if set_budget.is_some() && set_sessions.is_some() {
+            ""
+        } else {
+            " (inferred from the name; set it in the editor)"
+        };
+        format!(
+            "{} a week over {sessions} {sessions_word}{origin}",
+            fmt_rain_amount(budget, prefs)
+        )
+    };
     let subtitle = format!(
         "{slug} \u{00b7} {} \u{00b7} {} \u{00b7} {}",
         pretty_species(&species_slug),
@@ -2562,7 +2712,7 @@ fn ZoneCard(
                 .unwrap_or(70.0);
             format!("{s} (skip ≥ {sat:.0}%)")
         }
-        _ => "(none, modeled bucket)".to_string(),
+        _ => "(none, no soil gate)".to_string(),
     };
     let ctrl_id_for_badges = ctrl_id.clone();
     let slug_kv = slug.clone();
@@ -2653,6 +2803,7 @@ fn ZoneCard(
                     <SettingsKv label="Area" value=area_display/>
                     <SettingsKv label="Sprinkler" value=sprinkler_display/>
                     <SettingsKv label="Precip rate" value=precip_display/>
+                    <SettingsKv label="Weekly target" value=weekly_target_display/>
                     <SettingsKv label="Controller" value=ctrl_display/>
                     <SettingsKv label="Soil sensor" value=soil_sensor_display/>
                 }.into_any())

@@ -94,8 +94,15 @@ pub fn router(
     // HA controller entity prefix for the POST /action handler.
     sprinkler_prefix: String,
     // Config store for the manifest's capability gates (which source-provided
-    // readings, e.g. flow / leaf wetness, actually exist on this install).
+    // readings, e.g. flow / leaf wetness, actually exist on this install), and
+    // for POST /action, whose threshold writes land in engine.skip_rules once
+    // the matching helper is adopted.
     cfg_store: Arc<crate::config::FileConfigStore>,
+    // The live watering policy. POST /action reads the adoption markers off
+    // it, which is the same handle the refresher reads them from, so a control
+    // write and the engine read that consumes it can never disagree about
+    // where the value lives.
+    watering_policy: Arc<arc_swap::ArcSwap<crate::ha::WateringPolicy>>,
 ) -> Router {
     let tempest_routes = Router::new()
         .route("/snapshot", get(snapshot))
@@ -105,7 +112,7 @@ pub fn router(
     // Manifest needs the live irrigation snapshot to enumerate per-zone
     // entities, so it borrows the IrrigationStore Arc before we hand it
     // off to the irrigation routes' nested router.
-    let manifest_router = manifest::router(irrigation.clone(), cfg_store);
+    let manifest_router = manifest::router(irrigation.clone(), cfg_store.clone());
 
     let mut router = tempest_routes
         .nest(
@@ -116,6 +123,8 @@ pub fn router(
                 history.clone(),
                 source,
                 sprinkler_prefix,
+                cfg_store,
+                watering_policy,
             ),
         )
         .nest(

@@ -1,7 +1,8 @@
 # Soil sensors
 
-Wire a moisture probe to a zone and the engine stops guessing: the
-probe's reading replaces the modeled bucket as the zone's gate.
+Wire a moisture probe to a zone and the engine gets a measured gate: a
+saturated zone skips on its own, and a measured-dry zone can override a
+soft forecast-rain skip.
 
 **Supported paths in:**
 
@@ -16,8 +17,8 @@ which zones each source feeds.
 
 **How the engine uses it:**
 
-- Below the zone's target band: the zone is eligible; runs size to the
-  deficit as usual.
+- Below the zone's target band: the zone is eligible. Run length is
+  unchanged; it comes from the weekly water balance.
 - Inside the band: healthy; scheduled runs still apply unless the
   saturation threshold says otherwise.
 - At or above saturation: the zone skips on its own, even when the day's

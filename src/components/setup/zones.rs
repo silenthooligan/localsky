@@ -60,6 +60,8 @@ pub fn ZonesStep() -> impl IntoView {
     let new_sprinkler = RwSignal::new("rotor".to_string());
     let new_precip = RwSignal::new(String::new());
     let new_max_run = RwSignal::new(String::new());
+    let new_weekly_budget = RwSignal::new(String::new());
+    let new_sessions = RwSignal::new(String::new());
     let new_controller = RwSignal::new(String::new());
     let new_station = RwSignal::new(String::new());
     let new_photo_url = RwSignal::new(String::new());
@@ -67,7 +69,7 @@ pub fn ZonesStep() -> impl IntoView {
     let new_soil_min = RwSignal::new(30.0f64);
     let new_soil_sat = RwSignal::new(70.0f64);
     // Sensors are configured AFTER zones in the wizard, so the soil-sensor
-    // picker is empty here (modeled bucket); the user assigns probes later.
+    // picker is empty here (no soil gate); the user assigns probes later.
     let soil_sensor_opts = RwSignal::new(Vec::<(String, String, Option<f64>, String)>::new());
     let result_msg = RwSignal::new(String::new());
     let result_ok = RwSignal::new(false);
@@ -194,9 +196,9 @@ pub fn ZonesStep() -> impl IntoView {
                 "A zone is one watering district: a chunk of yard tied to "
                 "one valve. LocalSky asks for grass species, soil texture, "
                 "area, sprinkler type and measured precipitation rate, then "
-                "computes ETc from local weather, tracks soil depletion "
-                "with the FAO-56 single-bucket model, and only fires when "
-                "depletion crosses the species-specific MAD threshold."
+                "computes ETc from local weather and sizes each session "
+                "from the zone's weekly water target, firing on the "
+                "mornings the zone's session spacing allows."
             </p>
 
             // P2-1: the actual zone-creation surface (reuses the settings form).
@@ -279,6 +281,8 @@ pub fn ZonesStep() -> impl IntoView {
                     new_sprinkler=new_sprinkler
                     new_precip=new_precip
                     new_max_run=new_max_run
+                    new_weekly_budget=new_weekly_budget
+                    new_sessions=new_sessions
                     new_controller=new_controller
                     new_station=new_station
                     new_photo_url=new_photo_url

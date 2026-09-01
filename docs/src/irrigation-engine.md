@@ -17,7 +17,7 @@ Ecowitt GW (native poll) /                    |                |
                                                   (sensor.localsky_<zone>_soil_*, valves, verdict)
 ```
 
-LocalSky owns the full pipeline end to end: it polls the Ecowitt gateway directly, runs all ET and bucket math internally, evaluates skip rules (including frost-skip against its own native soil-temperature readings), and actuates OpenSprinkler via a direct HTTP controller (`opensprinkler_direct`, targeting the controller's LAN address). Results are published back to HA for display, but HA is a consumer, not a driver. No Smart Irrigation, no Irrigation Unlimited, no MQTT sidecar.
+LocalSky owns the full pipeline end to end: it polls the Ecowitt gateway directly, runs all ET and water-balance math internally, evaluates skip rules (including frost-skip against its own native soil-temperature readings), and actuates OpenSprinkler via a direct HTTP controller (`opensprinkler_direct`, targeting the controller's LAN address). Results are published back to HA for display, but HA is a consumer, not a driver: nothing LocalSky decides is read from a Home Assistant entity. As of 0.7.22 that includes the skip thresholds and the four operator controls, which used to live in `input_*` helpers and were read one last time on upgrade. What still reads a Home Assistant entity is what you pointed at one by name (a zone's soil sensor), your controller's own entities on a legacy Home-Assistant-only install, and nine legacy `sensor.open_meteo_*` forecast fallbacks. The complete list, and what changed, is in [Migrating your watering off Home Assistant](migrating-from-ha.md). No Smart Irrigation, no Irrigation Unlimited, no MQTT sidecar.
 
 Each box is a pure function of its inputs. No hidden state, no opinionated overrides, no proprietary fudge factors.
 
@@ -85,7 +85,7 @@ Implementation: [src/engine/et0.rs](../src/engine/et0.rs). Hand-trace tested aga
 
 ### 2. ASCE-EWRI 2005 short-crop reference ET
 
-Practically identical to FAO-56 for daily computation; the coefficients differ at sub-daily resolution where LocalSky doesn't operate. Same code path, different `et0_method` label for operators who want their dashboards to read "ASCE" instead.
+Practically identical to FAO-56 for daily computation; the coefficients differ at sub-daily resolution where LocalSky doesn't operate. Same code path as FAO-56 for LocalSky's daily computation. The method actually used is chosen automatically from the inputs available; it is not selectable, and no screen reports which one ran.
 
 ### 3. Hargreaves-Samani 1985
 
@@ -111,44 +111,41 @@ ETc = ET₀ * Kc(species, DOY) * heat_multiplier(heat_index)
 
 The heat index is computed per day: each day's high temperature is paired with that same day's humidity (the humidity at the time they co-occur), not the current "now" humidity. Pairing a cool, damp morning reading with the afternoon peak would inflate the multiplier, so the engine keeps the co-occurring pair intact.
 
-## Soil water balance
+## What decides watering today
 
-Per zone, LocalSky tracks one number: `depletion_mm`, the millimetres of water below field capacity. State evolves daily:
+One model, on every install: the weekly water balance below. It decides
+both whether a zone runs today and how long for. There is no per-zone soil
+bucket on any live path.
+
+That matters because a "Deficit" figure used to appear on the zone card and
+the zone detail. It came from a Home Assistant Smart Irrigation entity, and
+on an install without that integration the read simply missed and printed
+0.00 forever. As of 0.7.22 the field is absent rather than fabricated: every
+surface shows a dash, and the reason a zone is not watering comes from the
+weekly balance, which says so in plain English.
+
+### The soil depletion bucket, for later
+
+A complete FAO-56 single-bucket model lives in
+[src/engine/water_balance.rs](../src/engine/water_balance.rs) and is
+exercised by its own tests, but nothing calls it. It is not what decides
+watering today, and this page used to say it was.
+
+The intended destination is that bucket governing both the trigger and the
+run size, per zone:
 
 ```
 depletion[t+1] = clamp(depletion[t] + ETc - effective_rain - applied_water,
                        0, TAW)
+needs_irrigation = (depletion >= RAW),   RAW = TAW * MAD%
 ```
 
-Where:
-
-- `effective_rain = gross_rain * capture_efficiency`. Default capture efficiency is 0.70 (operator-tunable); accounts for runoff + canopy interception + evaporation losses before water enters the root zone.
-- `applied_water` is the depth (mm) of irrigation that reached the soil during this tick.
-- `TAW` (Total Available Water, mm) = `(FC - WP) * root_depth_mm`. FC and WP come from the [soil texture catalog](soil-textures.md) (USDA classes, sourced from FAO-56 Table 19 and USDA NRCS Part 652).
-
-Trigger to irrigate:
-
-```
-needs_irrigation = (depletion >= RAW)
-RAW = TAW * MAD%
-```
-
-`MAD` (Management Allowed Depletion) defaults per species. St. Augustine: 50%. Bahia: 55%. Ornamental shrubs: 40%. The catalog cites UF/IFAS extension publications for the warm-season species and FAO-56 Table 12 for the cool-season and non-turf categories.
-
-Implementation: [src/engine/water_balance.rs](../src/engine/water_balance.rs).
-
-## Runtime to depth
-
-Once the engine decides to irrigate, runtime in seconds is:
-
-```
-gross_mm_needed = depletion_mm / capture_efficiency
-seconds = (gross_mm_needed / precip_rate_mm_hr) * 3600
-```
-
-`precip_rate_mm_hr` per zone comes from either a measured catch-cup calibration (preferred) or the sprinkler-type default (rotor ~10 mm/hr; spray ~38 mm/hr; MP rotator ~10 mm/hr; drip ~4 mm/hr).
-
-Runtime is capped at the zone's run limit (`max_run_minutes`, 60 minutes when unset) so a misconfigured precip rate can't run a zone for hours; an active watering restriction's per-zone cap tightens it further via min().
+with `TAW` from the [soil texture catalog](soil-textures.md) and `MAD`
+per species. Shipping it is a separate release: switching the model changes
+which zones run on a given morning, and a yard whose zones all cross the
+threshold on the same hot morning needs sequencing behavior this release
+does not define. Nothing in the config turns it on today, because there is
+nothing to turn on.
 
 ## Weekly water balance
 
@@ -166,11 +163,12 @@ seconds_per_session = session_gross_mm / throughput_mm_hr * 3600   (capped at th
 
 - The trailing window is a rolling 7 local days ending now; there is no calendar-week anchor.
 - Observed rain resolves through a ladder with per-rung provenance and COVERAGE precedence: when the observations ledger holds any gauge or radar day rows for the window, the measured total wins outright, even at 0.00 in (a yard that measured a dry week is ground truth a wetter regional model must not override). Only when measured coverage is entirely absent does the forecast provider's past-day model archive supply the term, and an install with neither runs on the corrected forecast alone; the tuning report line names which rung applied.
-- Applied irrigation is the union of completed watering evidence in the window (cycle-soak segments and duplicate manual/observer rows cluster into single events) times the zone's precipitation rate. Gross in against a gross target: no capture factor on either side.
+- Applied irrigation is the union of completed watering evidence in the window (cycle-soak segments and duplicate manual/observer rows cluster into single events) times the zone's precipitation rate. Gross in against a gross target: no capture factor on either side. Every completed run counts, whoever commanded it: water in the ground is water in the ground, so a manual run and a manual schedule's run shrink the remainder and move the session-spacing anchor exactly as a smart run does.
 - The forecast credit covers only the days between tomorrow and the zone's next expected session, corrected by the per-month bias multiplier (below). Rain past the next session is never credited now; it will be observed rain by the time it matters. Imminent rain is handled by the 24-hour defer gate, not the credit.
+- The 24-hour defer gate compares the next 24 forecast hours against `engine.session_rain_defer_in` (default 0.10 in), weighting each hour by its precipitation probability, the same weighting the forward credit uses. An hour with no reported probability weights at full value. Before 0.7.22 the gate summed the raw model depth and read a compile-time constant instead of the configured threshold, so a low-probability drizzle could zero every zone almost daily and raising the documented knob changed nothing.
 - `remaining_sessions` is `sessions_per_week` minus the completed events in the window, floor 1. Sessions space at `floor(7 / sessions_per_week)` days, measured from the last completed event in the runs history.
 
-Fixed in 0.7.17: the previous formula multiplied delivery by the heat multiplier and divided by capture efficiency (0.70), inflating session length by up to about 1.9x against a target that already reads as gross, and it credited only forward forecast rain: rain that had already fallen and water already applied never counted, so a soaked week could still schedule full sessions. The heat multiplier stays an ETc input and capture efficiency stays a soil-projection input; neither shapes session delivery any more.
+Fixed in 0.7.17: the previous formula multiplied delivery by the heat multiplier and divided by capture efficiency (0.70), inflating session length by up to about 1.9x against a target that already reads as gross, and it credited only forward forecast rain: rain that had already fallen and water already applied never counted, so a soaked week could still schedule full sessions. The heat multiplier stays an ETc input, and the soil projection keeps a capture factor, though it is the fixed 0.70 rather than the configured `capture_efficiency`; neither shapes session delivery any more.
 
 Implementation: [src/engine/budget.rs](../src/engine/budget.rs) (the one pure implementation; the refresher assembles its inputs).
 

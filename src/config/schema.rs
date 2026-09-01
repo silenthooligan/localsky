@@ -157,6 +157,24 @@ pub struct Config {
     /// defaults only; per-browser overrides persist in localStorage.
     #[serde(default)]
     pub ui: UiConfig,
+    /// Home Assistant helper entities the one-time 0.7.22 adoption pass has
+    /// already handled, with what it did to each. Recorded whether or not a
+    /// value was carried across, so the pass runs at most once per entity and
+    /// a later Settings edit is never overwritten, and so the notice can name
+    /// every entity rather than only the ones that had a value.
+    ///
+    /// Idempotency rests on this list and never on inspecting a config value:
+    /// a save writes every default out explicitly, so "max_wind_mph is present
+    /// in the TOML" says nothing about whether a human typed it. Same rule as
+    /// `seeded_source_ids` above.
+    ///
+    /// ADDITIVE: empty on old configs (serde default) and omitted from the
+    /// TOML until first used, so no existing config file changes shape. Last
+    /// in the struct because an array of tables must serialize after every
+    /// scalar field, or `toml::to_string_pretty` writes a document it cannot
+    /// read back.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ha_adoption: Vec<crate::ha::snapshot::HaAdoptedHelper>,
 }
 
 impl Default for Config {
@@ -184,6 +202,7 @@ impl Default for Config {
             updates: UpdatesConfig::default(),
             persistence: PersistenceConfig::default(),
             ui: UiConfig::default(),
+            ha_adoption: Vec::new(),
         }
     }
 }
@@ -1978,16 +1997,16 @@ pub struct ZoneConfig {
     /// Optional photo URL for the zone card (Phase 10 wizard upload).
     #[serde(default)]
     pub photo_url: Option<String>,
-    /// Weekly water target (inches) for the standalone budget allocator.
-    /// `None` = use the agronomic default inferred from the zone slug
-    /// (turf 1.0", shrub/garden/bed 0.5"). On the HA path the live
-    /// `input_number.irrigation_<slug>_weekly_budget_in` helper still wins
-    /// when present; this is the native (no-HA) source + the HA fallback.
+    /// Weekly water target (inches) for the budget allocator. `None` = use
+    /// the agronomic default inferred from the zone slug (turf 1.0",
+    /// shrub/garden/bed 0.5"). This is the source on every deployment
+    /// path: a Home Assistant `input_number` helper used to outrank it and
+    /// no longer participates.
     #[serde(default)]
     pub weekly_budget_in: Option<f64>,
     /// Irrigation sessions per week for the budget allocator. `None` = use
-    /// the agronomic default (turf 2, shrub/garden/bed 1). Same HA-helper
-    /// precedence as `weekly_budget_in`.
+    /// the agronomic default (turf 2, shrub/garden/bed 1). Same rule as
+    /// `weekly_budget_in`: config, then the slug default, no entity.
     #[serde(default)]
     pub sessions_per_week: Option<u32>,
     /// Longest single dispatch the engine will queue for this zone
@@ -2214,9 +2233,21 @@ pub struct EngineParams {
     #[serde(default)]
     pub skip_rules: SkipRuleParams,
     /// Effective rain capture (gross_rain * capture_eff = soil intake).
+    ///
+    /// NOT READ BY THE WATERING DECISION. The soil projection and the
+    /// zone-math tile both use a hardcoded 0.70, and session sizing has
+    /// not divided by it since 0.7.17, so editing it changes no run
+    /// length on its own. ONE reader remains: the tuning report's
+    /// precipitation-rate back-out (src/tuning.rs) divides a soil probe's
+    /// measured rise by this value, so on a zone with a probe bound a
+    /// lower setting raises the sprinkler rate that check recommends, and
+    /// applying that recommendation DOES change run sizing. Left in place
+    /// rather than removed so an existing config still parses.
     #[serde(default = "default_capture_eff")]
     pub capture_efficiency: f64,
-    /// Rain defer threshold per session (in). Used by water-budget mode.
+    /// Rain-defer threshold per session (inches). The weekly water balance
+    /// defers today's session for a zone when the next 24 forecast hours,
+    /// weighted by precipitation probability, reach this depth.
     #[serde(default = "default_session_rain_defer_in")]
     pub session_rain_defer_in: f64,
     /// Default soak duration between cycles (min). Per-zone override
@@ -2235,6 +2266,11 @@ pub struct EngineParams {
     pub interleave_cycles: bool,
     /// ET0 method. Auto = prefer Penman-Monteith when sources provide
     /// the inputs; fall back to ASCE simplified, then Hargreaves-Samani.
+    ///
+    /// NOT READ ANYWHERE. The live ET0 path passes `Et0Method::Auto`
+    /// unconditionally, and no screen reports the method, so editing this
+    /// changes nothing at all. Left in place rather than removed so an
+    /// existing config still parses.
     #[serde(default)]
     pub et0_method: Et0Method,
     /// Jurisdictional watering restrictions (e.g. St. Johns River WMD).

@@ -759,8 +759,8 @@
   --surface-soft: rgba(15, 21, 37, 0.04);
   --surface-softer: rgba(15, 21, 37, 0.02);
 
-  // .water-budget-tile / .soil-tile read these via `var(--bento-bg, …)`
-  // with a white-overlay fallback that vanishes on a light backdrop.
+  // Panel tiles read these via `var(--bento-bg, …)` with a
+  // white-overlay fallback that vanishes on a light backdrop.
   // On light mode, push the tile fill all the way up to a near-solid
   // white so each tile reads as its own card alongside the
   // glass-bg panels, with a real ink-tinted border instead of a
@@ -827,19 +827,6 @@
   .sidebar {
     background: var(--brand-navy-900);
     border-right-color: rgba(15, 21, 37, 0.18);
-  }
-  // Zone-math row caption text was hard-coded white at 55%, invisible
-  // on a near-white panel. Use the ink-equivalent tint.
-  .zone-math-row-cap > dd { color: rgba(15, 21, 37, 0.62); }
-  // Status-keyed left borders that ride the brand at higher alphas
-  // need an ink tint when there's no status to convey ("off"/"no data").
-  .water-budget-tile-off { border-left-color: rgba(15, 21, 37, 0.22); }
-  .soil-tile-no-data { border-left-color: rgba(15, 21, 37, 0.22); }
-  // Tiny mono pills with a 5% white fill end up looking unframed on
-  // light; swap to the same alpha of ink.
-  .water-budget-tile-eyebrow,
-  .soil-tile-eyebrow {
-    background: rgba(15, 21, 37, 0.05);
   }
   .uv-bar { background: rgba(15, 21, 37, 0.08); }
   // The dry-run ribbon fills with --accent-warm, which light mode
@@ -1699,9 +1686,8 @@ a { color: var(--accent); }
 }
 
 // Wide-screen tiers. The weather page's .grid (auto-fit minmax(320px, 1fr))
-// reflows to 4 then 5 columns once the container cap loosens; the irrigation
-// page's .bento-irrigation gets matching 3- and 4-column area definitions
-// below. Mobile + tablet behavior (≤ 760px / 1280px default) is unchanged.
+// reflows to 4 then 5 columns once the container cap loosens. Mobile +
+// tablet behavior (≤ 760px / 1280px default) is unchanged.
 @media (min-width: 1440px) {
   .page { max-width: 1400px; }
 }
@@ -2976,24 +2962,6 @@ a { color: var(--accent); }
 }
 
 // ------------------------------------------------------------------
-// Bento grid scaffolding. The existing .grid (auto-fit minmax) stays
-// for backwards compat on the weather page panel grid. New routes
-// opt into bento via .bento + .bento-area-* on children. Each route
-// declares its own grid-template-areas in a route-scoped block.
-// ------------------------------------------------------------------
-
-.bento {
-  display: grid;
-  gap: 1.5rem;
-  align-items: start;
-}
-
-@media (max-width: 760px) {
-  .bento { grid-template-columns: 1fr !important; }
-  .bento > * { grid-area: auto !important; }
-}
-
-// ------------------------------------------------------------------
 // Top nav. Two claymorphic pill tabs side-by-side; active tab brightens
 // and lifts. Sits inside the existing .header so the brand glyph stays
 // on the left and the tabs cluster on the right where the live
@@ -3063,77 +3031,13 @@ a { color: var(--accent); }
   }
 }
 
-// ------------------------------------------------------------------
-// Irrigation page bento. Desktop is a 4-column mosaic; the hero spans
-// 3 cols and the live status strip takes the 4th, then zones occupy
-// a 4-col strip below. Phase 3b adds a controls strip and stop-all
-// pinned to the right; Phase 3c adds history + utilization rows.
-// ------------------------------------------------------------------
-
-.bento-irrigation {
-  grid-template-columns: repeat(2, 1fr);
-  grid-template-areas:
-    "verdict        verdict"
-    "hero           forecast"
-    "zones          zones"
-    "zone-math      zone-math"
-    "water-budget   water-budget"
-    "soil           soil"
-    "stop           thresholds"
-    "history        history"
-    "zone-history   zone-history";
-}
-
-@media (max-width: 760px) {
-  .bento-irrigation {
-    grid-template-columns: 1fr;
-    grid-template-areas:
-      "verdict"
-      "hero"
-      "forecast"
-      "zones"
-      "zone-math"
-      "water-budget"
-      "soil"
-      "stop"
-      "thresholds"
-      "history"
-      "zone-history";
-  }
-}
-
-// Wide-screen mosaic: pack the right-hand summary panels side-by-side so the
-// page is shorter and the irrigation summary fits above the fold on a 1920×1200
-// capture. Verdict, zones, history rows stay full-width because each renders
-// its own horizontal flow internally.
-@media (min-width: 1440px) {
-  .bento-irrigation {
-    grid-template-columns: repeat(3, 1fr);
-    grid-template-areas:
-      "verdict        verdict        verdict"
-      "hero           forecast       zone-math"
-      "zones          zones          zones"
-      "water-budget   soil           thresholds"
-      "stop           history        history"
-      "zone-history   zone-history   zone-history";
-  }
-}
-
-@media (min-width: 1920px) {
-  .bento-irrigation {
-    grid-template-columns: repeat(4, 1fr);
-    grid-template-areas:
-      "verdict        verdict        verdict        verdict"
-      "hero           hero           forecast       zone-math"
-      "zones          zones          zones          zones"
-      "water-budget   soil           stop           thresholds"
-      "history        history        zone-history   zone-history";
-  }
-}
-
-// Stack containers for the irrigation sub-routes. Replaces the dense
-// 11-cell bento with simple vertical flow per page; each sub-route
-// only renders 2-4 panels so the eye has room to land.
+// Stack containers for the irrigation sub-routes. These replaced a dense
+// 11-cell bento grid with simple vertical flow per page; each sub-route
+// only renders 2-4 panels so the eye has room to land. The bento's own
+// scaffolding (.bento, .bento-irrigation, the .bento-area-* hooks) went
+// with it: no markup had referenced it since the split, so its wide-screen
+// area templates were reshaping a grid nothing rendered. The --bento-bg /
+// --bento-border custom properties stay; the panel tiles still read them.
 .ir-stack {
   display: flex;
   flex-direction: column;
@@ -3232,7 +3136,6 @@ a { color: var(--accent); }
 // breathing gap. Applied to the cells that carry the chip IDs.
 #ir-today,
 #ir-zones,
-#ir-water-budget,
 #ir-controls,
 #ir-history {
   scroll-margin-top: 5rem;
@@ -3333,347 +3236,6 @@ html { scroll-behavior: smooth; }
     transform: translateX(2px);
     color: var(--text-soft);
   }
-}
-
-.bento-area-verdict-strip { grid-area: verdict; }
-.bento-area-hero          { grid-area: hero; }
-.bento-area-forecast      { grid-area: forecast; }
-.bento-area-zones         { grid-area: zones; }
-.bento-area-zone-math     { grid-area: zone-math; }
-.bento-area-water-budget  { grid-area: water-budget; }
-.bento-area-soil          { grid-area: soil; }
-.bento-area-stop          { grid-area: stop; }
-.bento-area-thresholds    { grid-area: thresholds; }
-.bento-area-history       { grid-area: history; }
-.bento-area-zone-history  { grid-area: zone-history; }
-
-// ------------------------------------------------------------------
-// Per-zone math transparency (Phase E followup).
-// Surfaces SI's flex math: bucket * Kc * heat_mult / throughput / capture = need_s,
-// then the maximum_duration cap. Per-zone tile in a 2x2 grid; the cap
-// row turns amber when binding (shorts the zone).
-// ------------------------------------------------------------------
-
-.zone-math {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-}
-
-// Assigned soil sensor's live reading + origin, shown under the zone's
-// sensor picker so the zone carries the full data picture.
-.zone-soil-live {
-  display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;
-  margin-top: 0.5rem; padding: 6px 10px; border-radius: var(--radius-sm);
-  background: var(--elev-1); border: 1px solid var(--elev-border);
-  &__pct { font-weight: 800; color: var(--accent); font-family: var(--font-mono); }
-  &__origin { color: var(--text-muted); font-size: var(--text-meta); }
-  &__manage { margin-left: auto; color: var(--accent); font-size: var(--text-meta); text-decoration: none;
-    &:hover { text-decoration: underline; } }
-}
-
-.zone-math-title {
-  font-size: 0.85rem;
-  font-weight: 600;
-  margin: 0;
-  color: var(--text);
-}
-
-.zone-math-sub {
-  font-size: 0.72rem;
-  line-height: 1.4;
-  color: var(--text-faint);
-  margin: 0 0 0.3rem 0;
-}
-
-.zone-math-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 0.55rem;
-}
-
-@media (max-width: 760px) {
-  .zone-math-grid { grid-template-columns: 1fr; }
-}
-
-.zone-math-tile {
-  background: var(--bento-bg, rgba(255, 255, 255, 0.02));
-  border: 1px solid var(--bento-border, rgba(255, 255, 255, 0.06));
-  border-radius: var(--radius);
-  padding: 0.65rem 0.75rem;
-  border-left-width: 3px;
-  border-left-color: rgba(180, 215, 255, 0.4);
-}
-
-.zone-math-tile-capped {
-  border-left-color: rgba(240, 170, 80, 0.85);
-}
-
-.zone-math-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  margin-bottom: 0.4rem;
-}
-
-.zone-math-name {
-  font-size: 0.9rem;
-  font-weight: 600;
-  margin: 0;
-}
-
-.zone-math-final {
-  font-family: var(--font-mono);
-  font-size: 1.1rem;
-  font-weight: 700;
-  color: rgba(180, 215, 255, 0.95);
-  font-variant-numeric: tabular-nums;
-}
-
-.zone-math-tile-capped .zone-math-final {
-  color: rgba(240, 170, 80, 0.95);
-}
-
-.zone-math-empty {
-  font-size: 0.75rem;
-  color: var(--text-faint);
-  font-style: italic;
-  margin: 0;
-}
-
-.zone-math-rows {
-  display: flex;
-  flex-direction: column;
-  gap: 0.18rem;
-  margin: 0;
-}
-
-.zone-math-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 0.5rem;
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-}
-
-.zone-math-row > dt {
-  color: var(--text-faint);
-  margin: 0;
-  letter-spacing: 0.02em;
-}
-
-.zone-math-row > dd {
-  color: var(--text);
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-  margin: 0;
-}
-
-.zone-math-row-raw {
-  border-top: 1px dashed rgba(255, 255, 255, 0.08);
-  padding-top: 0.2rem;
-  margin-top: 0.15rem;
-}
-
-.zone-math-row-raw > dd {
-  color: rgba(180, 215, 255, 0.85);
-}
-
-.zone-math-row-cap > dd {
-  color: rgba(255, 255, 255, 0.55);
-}
-
-.zone-math-tile-capped .zone-math-row-cap > dd {
-  color: rgba(240, 170, 80, 0.95);
-  font-weight: 600;
-}
-
-.zone-math-row-final {
-  border-top: 1px solid rgba(255, 255, 255, 0.10);
-  padding-top: 0.25rem;
-  margin-top: 0.15rem;
-}
-
-.zone-math-row-final > dt {
-  color: var(--text);
-  font-weight: 600;
-}
-
-.zone-math-row-final > dd {
-  font-weight: 700;
-  color: rgba(180, 215, 255, 0.95);
-}
-
-.zone-math-tile-capped .zone-math-row-final > dd {
-  color: rgba(240, 170, 80, 0.95);
-}
-
-// ------------------------------------------------------------------
-// Phase H: Weekly water-budget panel.
-// One tile per zone; status pill = OFF / HOLD / RUN TODAY. Border-left
-// accent encodes the same status: grey when SI flex owns the zone,
-// amber when budget says hold, green when run today.
-// ------------------------------------------------------------------
-
-.water-budget {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-}
-
-.water-budget-title {
-  font-size: 0.85rem;
-  font-weight: 600;
-  margin: 0;
-  color: var(--text);
-}
-
-.water-budget-sub {
-  font-size: 0.72rem;
-  line-height: 1.4;
-  color: var(--text-faint);
-  margin: 0 0 0.3rem 0;
-}
-
-.water-budget-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 0.75rem;
-}
-
-// At 1440+ flow to 4 columns so the per-zone tiles stop spanning
-// 1000+ px on ultrawide. Labels and values land within a comfortable
-// scan distance of each other rather than being pushed to opposite
-// edges of a card half the screen wide.
-@media (min-width: 1440px) {
-  .water-budget-grid { grid-template-columns: repeat(4, 1fr); }
-}
-
-@media (max-width: 760px) {
-  .water-budget-grid { grid-template-columns: 1fr; }
-}
-
-.water-budget-tile {
-  background: var(--bento-bg, rgba(255, 255, 255, 0.02));
-  border: 1px solid var(--bento-border, rgba(255, 255, 255, 0.06));
-  border-radius: var(--radius);
-  padding: 0.65rem 0.75rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-  border-left-width: 3px;
-}
-
-.water-budget-tile-off  { border-left-color: rgba(255, 255, 255, 0.12); opacity: 0.75; }
-.water-budget-tile-hold,
-.water-budget-tile-skip { border-left-color: rgba(240, 170, 80, 0.8); }
-.water-budget-tile-run  { border-left-color: rgba(80, 200, 120, 0.85); }
-
-.water-budget-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-}
-
-.water-budget-name {
-  font-size: 0.9rem;
-  font-weight: 600;
-  margin: 0;
-}
-
-.water-budget-badge {
-  font-family: var(--font-mono);
-  font-size: 0.6rem;
-  letter-spacing: 0.16em;
-  padding: 0.12rem 0.42rem;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--text-faint);
-}
-.water-budget-tile-run  .water-budget-badge {
-  color: rgba(80, 200, 120, 0.95);
-  background: rgba(80, 200, 120, 0.10);
-}
-.water-budget-tile-skip .water-budget-badge {
-  color: rgba(240, 170, 80, 0.95);
-  background: rgba(240, 170, 80, 0.10);
-}
-.water-budget-tile-off  .water-budget-badge {
-  color: var(--text-faint);
-}
-
-.water-budget-today {
-  display: flex;
-  align-items: baseline;
-  gap: 0.5rem;
-  border-top: 1px dashed rgba(255, 255, 255, 0.08);
-  padding-top: 0.4rem;
-}
-
-.water-budget-today-label {
-  font-family: var(--font-mono);
-  font-size: 0.7rem;
-  color: var(--text-faint);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.water-budget-today-value {
-  font-size: 1.4rem;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.02em;
-}
-
-.water-budget-tile-run  .water-budget-today-value { color: rgba(80, 200, 120, 0.95); }
-.water-budget-tile-skip .water-budget-today-value,
-.water-budget-tile-off  .water-budget-today-value { color: var(--text-faint); }
-
-.water-budget-reason {
-  font-size: 0.72rem;
-  line-height: 1.35;
-  color: var(--text);
-  margin: 0;
-  font-style: italic;
-}
-
-.water-budget-rows {
-  display: flex;
-  flex-direction: column;
-  gap: 0.18rem;
-  margin: 0;
-  border-top: 1px dashed rgba(255, 255, 255, 0.08);
-  padding-top: 0.4rem;
-}
-
-// Two-column grid keeps the label-value pair within a tight visual
-// rhythm: label hugs the left, value sits in its own right-aligned
-// column. The previous flex+space-between pushed them to opposite
-// edges of the card, which on a 1000px-wide tile looked broken
-// rather than tabular.
-.water-budget-row {
-  display: grid;
-  grid-template-columns: minmax(4.5em, auto) 1fr;
-  align-items: baseline;
-  gap: 0.75rem;
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-}
-
-.water-budget-row > dt {
-  color: var(--text-faint);
-  margin: 0;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  font-size: 0.62rem;
-}
-
-.water-budget-row > dd {
-  color: var(--text);
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-  margin: 0;
 }
 
 // ------------------------------------------------------------------
@@ -3953,151 +3515,6 @@ html { scroll-behavior: smooth; }
   color: var(--text-faint);
   font-style: italic;
 }
-
-// ------------------------------------------------------------------
-// Soil sensors (Phase E predictive). Per-zone tile with 7-day moisture
-// projection sparkline + target band overlay. Status pill color is
-// driven by .soil-tile-{ok,dry,wet,no-data} modifiers on the article.
-// Layout is a responsive 2x2 grid on desktop, single column on narrow.
-// ------------------------------------------------------------------
-
-.soil-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-}
-
-.soil-grid-title {
-  font-size: 0.85rem;
-  letter-spacing: 0.04em;
-  font-weight: 600;
-  margin: 0;
-  color: var(--text);
-}
-
-.soil-grid-sub {
-  font-size: 0.72rem;
-  line-height: 1.4;
-  color: var(--text-faint);
-  margin: 0 0 0.3rem 0;
-}
-
-.soil-tile-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 0.55rem;
-}
-
-@media (max-width: 760px) {
-  .soil-tile-grid { grid-template-columns: 1fr; }
-}
-
-.soil-tile {
-  background: var(--bento-bg, rgba(255, 255, 255, 0.02));
-  border: 1px solid var(--bento-border, rgba(255, 255, 255, 0.06));
-  border-radius: var(--radius);
-  padding: 0.65rem 0.75rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  border-left-width: 3px;
-}
-
-// Per-status accent stripe on the left edge. Color hints (green/amber/
-// blue/grey) keep the at-a-glance read working even when the badge text
-// is clipped on narrow viewports.
-.soil-tile-ok      { border-left-color: rgba(80, 200, 120, 0.7); }
-.soil-tile-dry     { border-left-color: rgba(240, 170, 80, 0.8); }
-.soil-tile-wet     { border-left-color: rgba(120, 170, 240, 0.8); }
-.soil-tile-no-data { border-left-color: rgba(255, 255, 255, 0.12); opacity: 0.7; }
-
-.soil-tile-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-}
-
-.soil-tile-name {
-  font-size: 0.85rem;
-  font-weight: 600;
-  margin: 0;
-}
-
-.soil-tile-badge {
-  font-family: var(--font-mono);
-  font-size: 0.6rem;
-  letter-spacing: 0.16em;
-  padding: 0.12rem 0.42rem;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--text-faint);
-}
-.soil-tile-ok      .soil-tile-badge { color: rgba(80, 200, 120, 0.95); background: rgba(80, 200, 120, 0.10); }
-.soil-tile-dry     .soil-tile-badge { color: rgba(240, 170, 80, 0.95); background: rgba(240, 170, 80, 0.10); }
-.soil-tile-wet     .soil-tile-badge { color: rgba(120, 170, 240, 0.95); background: rgba(120, 170, 240, 0.10); }
-
-.soil-tile-current {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.5rem;
-}
-
-.soil-tile-current-value {
-  font-size: 1.6rem;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.02em;
-}
-
-.soil-tile-current-band {
-  font-family: var(--font-mono);
-  font-size: 0.7rem;
-  color: var(--text-faint);
-}
-
-.soil-sparkline {
-  width: 100%;
-  height: 60px;
-  display: block;
-}
-
-.soil-sparkline-band {
-  fill: rgba(80, 200, 120, 0.10);
-  stroke: rgba(80, 200, 120, 0.30);
-  stroke-width: 0.5;
-  stroke-dasharray: 2 2;
-}
-
-.soil-sparkline-today {
-  stroke: rgba(255, 255, 255, 0.18);
-  stroke-width: 1;
-  stroke-dasharray: 1 2;
-}
-
-.soil-sparkline-path {
-  fill: none;
-  stroke: rgba(180, 215, 255, 0.9);
-  stroke-width: 1.6;
-  stroke-linejoin: round;
-  stroke-linecap: round;
-}
-.soil-tile-dry .soil-sparkline-path { stroke: rgba(240, 170, 80, 0.95); }
-.soil-tile-wet .soil-sparkline-path { stroke: rgba(120, 170, 240, 0.95); }
-
-.soil-tile-foot {
-  display: flex;
-  justify-content: space-between;
-  gap: 0.4rem;
-  font-family: var(--font-mono);
-  font-size: 0.65rem;
-  color: var(--text-faint);
-  flex-wrap: wrap;
-}
-
-.soil-tile-trend     { color: var(--text); }
-.soil-tile-min       { letter-spacing: 0.04em; }
-.soil-tile-dry-days  { letter-spacing: 0.04em; }
 
 // ------------------------------------------------------------------
 // 7-Day Verdict Strip (Phase A). Full-width row of seven cells, each
@@ -6245,8 +5662,8 @@ html { scroll-behavior: smooth; }
 // ------------------------------------------------------------------
 // Nerd mode reveal. The Advanced > Nerd mode toggle sets
 // data-nerd="true" on <html>. Two effects:
-//   1. `.nerd-only` blocks (forecast-intelligence, water-budget,
-//      day-block on the irrigation Today panel) are hidden by default
+//   1. `.nerd-only` blocks (forecast-intelligence, and the day-block
+//      on the irrigation Today panel) are hidden by default
 //      and revealed in nerd mode.
 //   2. In the skip breakdown, simple mode shows only rows that
 //      actually tripped the check; nerd mode shows all 9 inputs.
@@ -7141,6 +6558,51 @@ html[data-no-irrigation="true"] {
   text-overflow: ellipsis;
 }
 
+// Prose variant, for the migration notice. Its lines are full sentences
+// naming an entity and two values, and its closing paragraphs run several
+// sentences each; ellipsising those to one line each would leave a notice
+// that says nothing. The nowrap above exists to keep a live soil-fault line
+// on one row, and contain:inline-size on the parent already holds the layout
+// viewport, so wrapping here costs nothing. overflow-wrap breaks an entity id,
+// which is one long unbreakable token.
+.anomaly-banner-line--wrap {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+
+  code {
+    font-family: var(--font-mono);
+    color: var(--accent);
+  }
+
+  + .anomaly-banner-line--wrap {
+    margin-top: 0.35rem;
+  }
+}
+
+// Dismiss control for the banners that carry one (the default-target
+// notice). The soil-anomaly lines have no dismiss: a faulted probe is a
+// live condition, not a one-time notice.
+.anomaly-banner-dismiss {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: none;
+  color: var(--text-faint);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+
+  &:hover {
+    color: var(--text);
+    background: var(--elev-2);
+  }
+}
+
 .anomaly-banner-link {
   flex: 0 0 auto;
   font-size: 0.78rem;
@@ -7468,102 +6930,6 @@ html[data-no-irrigation="true"] {
   width: 100%;
   height: 72px;
   display: block;
-}
-
-// "Why this duration?" reveal on the zone detail page. Collapsed by default;
-// tap to expand the math rows that mirror the desktop ZoneMathPanel.
-.mobile-zone-math-details {
-  border-radius: var(--radius-md);
-  border: 1px solid var(--glass-border);
-  background: var(--glass-bg);
-  overflow: hidden;
-}
-
-.mobile-zone-math-summary {
-  cursor: pointer;
-  padding: 0.85rem 1rem;
-  font-family: var(--font-display);
-  font-size: 0.85rem;
-  letter-spacing: 0.04em;
-  color: var(--text-bright);
-  list-style: none;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-height: 48px;
-}
-
-.mobile-zone-math-summary::-webkit-details-marker { display: none; }
-
-.mobile-zone-math-summary::after {
-  content: "›";
-  color: var(--text-dim);
-  font-size: 1.2rem;
-  transition: transform 120ms ease;
-}
-
-.mobile-zone-math-details[open] .mobile-zone-math-summary::after {
-  transform: rotate(90deg);
-}
-
-.mobile-zone-math-empty {
-  padding: 0.5rem 1rem 0.9rem;
-  color: var(--text-dim);
-  font-style: italic;
-  margin: 0;
-}
-
-.mobile-zone-math-rows {
-  display: flex;
-  flex-direction: column;
-  margin: 0;
-  padding: 0 1rem 0.85rem;
-  gap: 0.35rem;
-}
-
-.mobile-zone-math-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 0.75rem;
-  padding: 0.4rem 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-}
-
-.mobile-zone-math-row:last-child { border-bottom: none; }
-
-.mobile-zone-math-row > dt {
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  letter-spacing: 0.04em;
-  color: var(--text-dim);
-}
-
-.mobile-zone-math-row > dd {
-  margin: 0;
-  font-size: 0.85rem;
-  color: var(--text-bright);
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
-.mobile-zone-math-row-raw > dd {
-  font-family: var(--font-mono);
-}
-
-.mobile-zone-math-row-cap.is-binding > dd {
-  color: var(--accent-warn);
-}
-
-.mobile-zone-math-row-final {
-  margin-top: 0.2rem;
-}
-
-.mobile-zone-math-row-final > dt,
-.mobile-zone-math-row-final > dd {
-  font-family: var(--font-display);
-  font-size: 0.95rem;
-  color: var(--text-bright);
 }
 
 // Schedule tab settings stub (Phase 4/5 will fill in)
@@ -11308,6 +10674,10 @@ button.mobile-tab {
   font-size: var(--text-meta); color: var(--text-faint); line-height: 1.3;
   margin: calc(-1 * var(--space-1)) 0 var(--space-1);
 }
+// Budget and Override-schedule notes reuse the reason row's geometry; the
+// suppression note sits quieter than the engine's own "why" line.
+.zone-card__reason--budget { color: var(--text-soft); }
+.zone-card__reason--suppressed { color: var(--text-faint); }
 .zone-card__stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-2); }
 .zone-card__stat { display: flex; flex-direction: column; gap: 1px; }
 .zone-card__k { font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); }
@@ -11456,6 +10826,26 @@ button.mobile-tab {
 .soil-card__band { position: absolute; top: 0; bottom: 0; background: color-mix(in oklab, var(--verdict-run) 30%, transparent); }
 .soil-card__marker { position: absolute; top: -2px; width: 3px; height: 12px; border-radius: 2px; background: var(--sc); transform: translateX(-1px); }
 .soil-card__scale { display: flex; justify-content: space-between; font-size: var(--text-micro); color: var(--text-faint); }
+
+// Assigned soil sensor's live reading + origin, shown under the zone's
+// sensor picker so the zone carries the full data picture. Also the chip
+// row inside .soil-card on settings/devices and in the setup wizard, which
+// override margin-top and flex-wrap inline but still need the flex box,
+// gap, padding and border from here.
+//
+// Restored: this block was deleted with the zone-math purge because it sat
+// physically inside that comment section, but it is unrelated to it and
+// three live components still emit it (settings/zones.rs,
+// settings/sensors.rs, setup/sensors.rs).
+.zone-soil-live {
+  display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;
+  margin-top: 0.5rem; padding: 6px 10px; border-radius: var(--radius-sm);
+  background: var(--elev-1); border: 1px solid var(--elev-border);
+  &__pct { font-weight: 800; color: var(--accent); font-family: var(--font-mono); }
+  &__origin { color: var(--text-muted); font-size: var(--text-meta); }
+  &__manage { margin-left: auto; color: var(--accent); font-size: var(--text-meta); text-decoration: none;
+    &:hover { text-decoration: underline; } }
+}
 
 // Weather readouts.
 .sensor-readouts { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: var(--space-3); }
@@ -11628,6 +11018,18 @@ button.mobile-tab {
 .zone-detail__status--scheduled { color: var(--accent); background: color-mix(in oklab, var(--accent) 16%, transparent); }
 .zone-detail__status--skipping { color: var(--verdict-skip); background: color-mix(in oklab, var(--verdict-skip) 16%, transparent); }
 .zone-detail__status--idle { color: var(--text-faint); background: var(--surface-soft); }
+// A zone the weekly budget zeroed: the engine decided about it and names
+// the gate, which is not the same thing as idle.
+.zone-detail__status--held { color: var(--accent-cool); background: color-mix(in oklab, var(--accent-cool) 16%, transparent); }
+// The allocator's own sentence, and the Override-schedule notice, shown
+// where the zero is.
+.zone-detail__reason {
+  margin: calc(-1 * var(--space-2)) 0 0;
+  color: var(--text-soft);
+  font-size: var(--text-meta);
+  line-height: 1.4;
+}
+.zone-detail__reason--suppressed { color: var(--text-faint); }
 .zone-detail__stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--space-3); }
 .zone-detail__panel {
   background: var(--elev-1); border: 1px solid var(--elev-border);
@@ -11911,6 +11313,16 @@ button.mobile-tab {
 .zone-detail__math dt { color: var(--text-dim); margin: 0; }
 .zone-detail__math dd { margin: 0; font-family: var(--font-mono); color: var(--text-bright); }
 .zone-detail__math-final { border-top: 1px solid var(--elev-line); padding-top: var(--space-2); dd { color: var(--accent); font-weight: 700; } }
+// The safety ceiling actually shortened the run: the Scheduled row is the
+// only place that says so, so it carries the warning tint.
+.zone-detail__math-final--capped dd { color: var(--accent-warn); }
+// Second group of the math panel: engine outputs that do NOT size the run.
+// Set apart so the panel cannot read as a formula whose operands they are.
+.zone-detail__panel-subtitle {
+  margin: var(--space-3) 0 0; font-size: var(--text-meta); font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint);
+}
+.zone-detail__panel-note { margin: 0; color: var(--text-faint); font-size: var(--text-meta); }
 
 // Tuning panel (results-based tuning report). Design-language v3: the
 // cadence line leads, secondary data notes collapse into one muted
@@ -13056,6 +12468,7 @@ html[data-kiosk="true"] .beta-fb,
   .data-source-chain__move,
   .help-hint__trigger,
   .ui-toast__close,
+  .anomaly-banner-dismiss,
   .health-banner__dismiss,
   .welcome-card__dismiss {
     min-width: 44px;

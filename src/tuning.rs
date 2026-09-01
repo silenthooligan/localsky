@@ -236,15 +236,15 @@ pub async fn generate_report_with(
         let effective_rate =
             crate::engine::effective_precip_rate_mm_hr(z.sprinkler_type, z.precip_rate_mm_hr);
         // The run length a raised cap would have to fit: the allocator's
-        // session when session-capped, else the one-shot deficit refill.
-        // Feeds the dispatch-window fit for the cap check's raise.
-        let needed_raise_s = if budget.map(|b| b.session_capped).unwrap_or(false) {
-            budget.map(|b| b.seconds_per_session)
-        } else {
-            math.as_ref()
-                .filter(|m| m.cap_binding)
-                .map(|m| m.raw_seconds)
-        };
+        // session when session-capped. Feeds the dispatch-window fit for
+        // the cap check's raise. The one-shot deficit refill that used to
+        // be the other branch has no producer since the soil-deficit read
+        // was deleted, and ZoneMath.cap_binding now mirrors the
+        // allocator's own session_capped, so reading it here would just
+        // re-answer the same question with raw_seconds = 0.
+        let needed_raise_s = budget
+            .filter(|b| b.session_capped)
+            .map(|b| b.seconds_per_session);
         let raised_fits_window = needed_raise_s.and_then(|needed| {
             raised_sequence_fits_window(
                 &policy,
@@ -259,17 +259,19 @@ pub async fn generate_report_with(
         });
         let cap_inputs = CapClampInputs {
             session_capped: budget.map(|b| b.session_capped).unwrap_or(false),
-            deficit_cap_binding: math.as_ref().map(|m| m.cap_binding).unwrap_or(false),
-            // ONLY the allocator's per-session seconds: ZoneMath.raw_seconds
-            // is a one-shot deficit refill, not a weekly session, and the
-            // sessions/budget knobs never feed that chain.
+            // The one-shot soil-deficit refill chain has no producer: its
+            // input was the Home Assistant deficit read, and ZoneMath's
+            // cap_binding now reports the ALLOCATOR's cap, which
+            // `session_capped` above already carries. Feeding it here would
+            // claim a deficit-driven clamp nothing computed.
+            deficit_cap_binding: false,
+            // ONLY the allocator's per-session seconds: the deficit refill
+            // is not a weekly session, and the sessions/budget knobs never
+            // feed that chain.
             desired_seconds: budget
                 .filter(|b| b.session_capped)
                 .map(|b| b.seconds_per_session),
-            deficit_refill_seconds: math
-                .as_ref()
-                .filter(|m| m.cap_binding)
-                .map(|m| m.raw_seconds),
+            deficit_refill_seconds: None,
             configured_max_run_minutes: z.max_run_minutes,
             raised_fits_window,
             // An effective cap tighter than the configured limit means an
