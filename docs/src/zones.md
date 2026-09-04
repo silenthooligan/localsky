@@ -84,9 +84,9 @@ just the fields above:
   every run. The target is a gross depth in inches a week, rain included;
   the sessions are how many mornings it is split across, 1 to 7, spaced
   `floor(7 / sessions)` days apart. Leave either blank and LocalSky uses a
-  default inferred from the zone's name: 0.50 inches over 1 session for a
-  name containing shrub, garden or bed, 1.00 inches over 2 sessions
-  otherwise. The box shows the default in effect, and the zone list marks
+  default set by the zone's species: its peak crop coefficient against
+  reference turf, so warm-season turf starts at 1.00 inches over 2 sessions
+  and established shrubs at 0.55 inches over 1. The box shows the default in effect, and the zone list marks
   a zone still watering on it. See the [weekly water
   budget](water-budget.md).
 - **Soil moisture sensor** (optional): assign a probe to drive this zone's

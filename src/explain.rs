@@ -49,6 +49,14 @@ pub struct ZoneLine {
     pub reason: String,
     /// Which layer decided ("global" | "soil_saturation" | "soil_floor" | ...).
     pub source: String,
+    /// Does this zone actually water at the next dispatch? Resolved by
+    /// the caller through `IrrigationSnapshot::zone_waters_next_run`, the
+    /// one skip-aware predicate every rollup reads. A non-skip verdict is
+    /// NOT enough on its own: a soil-governed zone holding at zero
+    /// planned seconds is the normal state most mornings, and counting it
+    /// as running made this sentence promise water the tile beside it
+    /// said was not coming.
+    pub waters: bool,
 }
 
 /// What the NEXT scheduled slot is predicted to do, as reconciled by the hero's
@@ -264,8 +272,8 @@ pub fn zone_run_summary(zones: &[ZoneLine], past: bool) -> String {
     if total == 0 {
         return String::new();
     }
-    let running: Vec<&ZoneLine> = zones.iter().filter(|z| z.verdict != "skip").collect();
-    let skipping: Vec<&ZoneLine> = zones.iter().filter(|z| z.verdict == "skip").collect();
+    let running: Vec<&ZoneLine> = zones.iter().filter(|z| z.waters).collect();
+    let skipping: Vec<&ZoneLine> = zones.iter().filter(|z| !z.waters).collect();
     let run_n = running.len();
     let skip_n = skipping.len();
 
@@ -505,7 +513,32 @@ mod tests {
             verdict: verdict.into(),
             reason: reason.into(),
             source: source.into(),
+            // These fixtures predate the field; a non-skip verdict here
+            // means the zone waters, which is what they were written to
+            // mean. `holds_at_zero` below covers the case that made the
+            // field necessary.
+            waters: verdict != "skip",
         }
+    }
+
+    /// A zone can carry a non-skip verdict and still not water: a
+    /// soil-governed zone holding at zero planned seconds is the normal
+    /// state most mornings. The summary counts what WATERS, so such a
+    /// zone reads as held, not as part of the run.
+    #[test]
+    fn a_zone_that_holds_at_zero_is_not_counted_as_running() {
+        let mut held = zline("Side Yard", "run", "soil_model", "the soil is wet enough");
+        held.waters = false;
+        let watering = zline("Back Yard", "run", "global", "");
+        let out = zone_run_summary(&[held, watering], false);
+        assert!(
+            out.contains('1') || out.contains("Side Yard"),
+            "one zone waters, the other holds: {out}"
+        );
+        assert!(
+            !out.starts_with("Watering all"),
+            "a held zone must not read as part of the run: {out}"
+        );
     }
 
     #[test]

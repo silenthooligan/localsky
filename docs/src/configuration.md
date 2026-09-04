@@ -199,6 +199,8 @@ target_min_pct_soil = 30.0
 saturation_pct_soil = 70.0
 weekly_budget_in = null          # null = 1.00 turf, 0.50 shrub/garden/bed
 sessions_per_week = null         # 1..=7; null = 2 turf, 1 shrub/garden/bed
+rain_credit_cap_in = null        # 0.05..=5.0 in/day; null = derived from soil + roots
+scheduling_model = null          # null = the engine default; weekly | soil
 photo_url = null
 ```
 
@@ -209,9 +211,30 @@ inches including rain) against observed rain, water already applied, and a
 probability-weighted forecast credit, then splits the remainder across the
 sessions still expected this week. Neither moves with the season: nothing
 recomputes them from ET0 or the crop coefficient. When unset, both come
-from a default by zone type, inferred from the zone's slug: 1.00 in over 2
-sessions for turf, 0.50 in over 1 session for a slug containing `shrub`,
-`garden` or `bed`. See [Weekly water budget](water-budget.md).
+from a default set by the zone's `species`: its peak crop coefficient
+against reference turf, so warm-season turf starts at 1.00 in over 2
+sessions, a vegetable bed at 1.15 in, and established shrubs at 0.55 in
+over 1. See [Weekly water budget](water-budget.md).
+
+`rain_credit_cap_in` caps how much rain one DAY may credit against the
+weekly target (inches). Rain beyond it in a single day drains past the
+roots and does not count. Unset, it derives from the zone's soil texture
+and root depth; the zone editor carries it as **Rain the soil can bank
+per day** with the derived value in the placeholder. A save outside
+0.05..=5.0 is refused; a value already in a config file is clamped into
+range at load. See [Weekly water budget](water-budget.md).
+
+`scheduling_model` pins this zone to one scheduling model regardless of
+the engine default; `null` follows `engine.scheduling_model`. The zone
+editor carries it as **Scheduling model** after the rain-cap field. Under
+`soil`, the weekly fields change roles: a `weekly_budget_in` you set by
+hand acts as a rolling-7-day delivery ceiling on the soil model's refills
+instead of sizing sessions (an inferred target never caps),
+`sessions_per_week` stops steering because cadence is emergent from soil
+texture and roots, and `rain_credit_cap_in` keeps its per-day meaning
+inside the soil replay. All three keep their full weekly meaning for
+zones the weekly model governs. See
+[the soil model](irrigation-engine.md#the-soil-model).
 
 `sessions_per_week` accepts 1 through 7. Sessions space at
 `floor(7 / sessions_per_week)` days, so above 7 that spacing works out to
@@ -291,8 +314,9 @@ Each section is optional. Omit to disable that channel.
 
 ```toml
 [engine]
-capture_efficiency       = 0.70     # not read by the watering engine (see below)
-session_rain_defer_in    = 0.10
+scheduling_model         = "weekly" # weekly | soil; the wizard writes soil for new installs
+capture_efficiency       = 0.70     # read by the soil model (see below)
+session_rain_defer_in    = 0.10     # weekly-model zones only; soil zones defer by deficit
 soak_minutes             = 30
 interleave_cycles        = true     # water other zones during soak pauses; turn off for well/low-recovery supplies
 et0_method               = "auto"   # not read at all (see below)
@@ -314,7 +338,9 @@ frost_skip_soil_f           = 35.0   # 1.7 C
 
 All values match v0.1 hardcoded constants, with two exceptions. See [skip-rules.md](skip-rules.md) for what each skip threshold does.
 
-`capture_efficiency` and `et0_method` are accepted and validated so an existing config still loads, but neither reaches the watering decision. The soil projection and the zone math panel use a fixed 0.70 capture factor, and the ET0 path always runs the automatic method (Penman-Monteith when the inputs are there, otherwise ASCE-simplified, otherwise Hargreaves-Samani). Editing either changes nothing about when or how long a zone waters. `capture_efficiency` has one live reader left: the tuning report's measured-sprinkler-rate check, on a zone with a soil probe bound, divides the probe's rise by it, so it does move a recommendation you can then choose to apply.
+`scheduling_model` picks which model sizes and schedules smart-morning runs for every zone without a per-zone pin: the weekly water balance (`weekly`, the default) or the [soil model](irrigation-engine.md#the-soil-model) (`soil`). The Engine settings page carries it, it hot-reloads like the rest of the watering policy, and the setup wizard writes `soil` for new installs at apply time; an upgraded config keeps whatever it holds. A config that never chose carries no key at all and follows the shipped default (`weekly` today), and saves of unrelated settings keep it that way: only choosing a model on the Engine page (or writing the key yourself) makes the choice explicit.
+
+`capture_efficiency` is read by the soil model: the replay credits rain and applied water through it and each refill divides by it, so on soil-governed zones editing it changes run length, and the zone math panel there shows the configured value. Weekly-governed sizing does not read it (the weekly target is gross), and the soil projection plus the math panel on weekly zones keep the fixed 0.70. Its other reader is the tuning report's measured-sprinkler-rate check, which divides a probe's rise by it. `et0_method` is accepted and validated but not read: the ET0 path always runs the automatic method (Penman-Monteith when the inputs are there, otherwise ASCE-simplified, otherwise Hargreaves-Samani).
 
 `interleave_cycles` waters other zones during a zone's cycle-and-soak pauses instead of idling through them, shortening the morning sequence. Default on; turn it off on installs fed by a well or low-recovery pump, where the idle soak gaps double as supply recovery time (the setup wizard's water-supply question sets this for you). One valve still runs at a time and soaks are minimums that may stretch, never shrink; details in [irrigation-engine.md](irrigation-engine.md#cycle-interleaving). `interleave_cycles` and `soak_minutes` hot-reload with the rest of the watering policy: a change applies on the next scheduler tick (the next morning's plan), no restart needed. Both, plus the seasonal water-budget dial, are editable on the Engine settings page.
 

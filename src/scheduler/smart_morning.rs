@@ -234,6 +234,10 @@ pub fn spawn(
                 lat,
                 lon,
                 sequence_total_s,
+                crate::engine::calendar::Calendar {
+                    local_date: crate::timeutil::local_date,
+                    day_bounds_utc: crate::timeutil::local_day_bounds_utc,
+                },
             ) {
                 Some(t) => t,
                 None => {
@@ -332,6 +336,10 @@ pub fn spawn(
                 lat,
                 lon,
                 sequence_total_s,
+                crate::engine::calendar::Calendar {
+                    local_date: crate::timeutil::local_date,
+                    day_bounds_utc: crate::timeutil::local_day_bounds_utc,
+                },
             )
             .unwrap_or_else(|| (target_finish - target_start).num_seconds());
             if available_s < sequence_total_s as i64 {
@@ -1000,7 +1008,12 @@ pub fn sequence_wall_seconds(
 /// enforcing them here would double-record), and run/run_extended
 /// verdicts never block. Reads the zone's back-filled verdict first,
 /// falling back to the snapshot-level zone_verdicts list.
-fn zone_skip_verdict<'a>(
+///
+/// pub(crate): the soil admission pass prices its fixed base with this
+/// same predicate (against the post-inertness snapshot), so a zone this
+/// verdict blocks at dispatch never occupies morning-window seconds in
+/// admission either.
+pub(crate) fn zone_skip_verdict<'a>(
     snap: &'a crate::ha::snapshot::IrrigationSnapshot,
     zone: &'a crate::ha::snapshot::ZoneState,
 ) -> Option<&'a crate::ha::snapshot::ZoneVerdict> {
@@ -2240,6 +2253,7 @@ mod tests {
             cfg.zones.insert(
                 (*slug).to_string(),
                 ZoneConfig {
+                    scheduling_model: None,
                     display_name: (*slug).to_string(),
                     area_sqft: 1000.0,
                     species: GrassSpecies::StAugustine,
@@ -2260,6 +2274,7 @@ mod tests {
                     photo_url: None,
                     weekly_budget_in: None,
                     sessions_per_week: None,
+                    rain_credit_cap_in: None,
                     max_run_minutes: None,
                 },
             );

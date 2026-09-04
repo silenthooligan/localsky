@@ -560,7 +560,12 @@ fn is_privileged_path(method: &Method, path: &str) -> bool {
     // Tuning dismiss/undismiss mutate persisted operator preferences
     // (which recommendations stay silenced, including the weekly push
     // trigger): same privileged posture as the zones/apply config write.
-    if (path == "/api/irrigation/tuning/dismiss" || path == "/api/irrigation/tuning/undismiss")
+    // The soil opt-in offer's dismissal is the same kind of record (an
+    // anonymous internet caller must not be able to silence, or snooze
+    // away, an offer the operator never saw), so it clears the same bar.
+    if (path == "/api/irrigation/tuning/dismiss"
+        || path == "/api/irrigation/tuning/undismiss"
+        || path == "/api/irrigation/soil-invite/dismiss")
         && !matches!(*method, Method::HEAD | Method::OPTIONS | Method::GET)
     {
         return true;
@@ -1283,6 +1288,20 @@ mod tests {
         assert!(!is_privileged_path(
             &Method::GET,
             "/api/v1/irrigation/tuning/dismiss"
+        ));
+        // The soil opt-in offer's dismissal is the same kind of persisted
+        // operator preference; its state read stays open like the report.
+        assert!(is_privileged_path(
+            &Method::POST,
+            "/api/irrigation/soil-invite/dismiss"
+        ));
+        assert!(is_privileged_path(
+            &Method::POST,
+            "/api/v1/irrigation/soil-invite/dismiss"
+        ));
+        assert!(!is_privileged_path(
+            &Method::GET,
+            "/api/v1/irrigation/soil-invite"
         ));
 
         // Retiring a soil probe persists config, deletes history, and can

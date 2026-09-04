@@ -27,7 +27,8 @@ fn default_true() -> bool {
 
 /// A value a condition can read. Most are global (one value per refresh);
 /// `ZoneSoilPct` resolves against the zone being evaluated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Metric {
     RainProbTomorrow,
@@ -46,7 +47,8 @@ pub enum Metric {
     ZoneSoilPct,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum CmpOp {
     Gt,
@@ -78,7 +80,8 @@ impl CmpOp {
 /// A boolean condition tree. Externally tagged so each node is a clean,
 /// unambiguous JSON object (no internal-tag sequence pitfalls). Empty
 /// `All` is vacuously true; empty `Any` is false.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ConditionExpr {
     Compare {
@@ -92,7 +95,8 @@ pub enum ConditionExpr {
 }
 
 /// What a fired rule does. Augment-only: no run-forcing variant exists.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum RuleAction {
     Skip,
@@ -104,7 +108,8 @@ pub enum RuleAction {
 }
 
 /// Which zones a rule applies to.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum RuleScope {
     #[default]
@@ -122,7 +127,8 @@ impl RuleScope {
 }
 
 /// One user rule. Lives in `config.conditions.rules`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(schemars::JsonSchema))]
 pub struct ConditionRule {
     /// snake_case id; shows in the Rule Lab trace.
     pub id: String,
@@ -285,6 +291,7 @@ pub fn apply_zone_rules(rules: &[ConditionRule], ctx: &ConditionCtx) -> Conditio
             category: "condition".into(),
             detail: describe(&rule.action),
             outcome: if fired { "fired" } else { "passed" }.into(),
+            over_line: false,
             verdict: if fired {
                 Some(action_verdict(&rule.action).into())
             } else {

@@ -65,6 +65,10 @@ pub fn load_from_path(path: &Path) -> Result<Config, LoadError> {
 /// agree with the value that decides. Writes arriving from outside are
 /// still refused by the validator, so nothing is silently coerced on the
 /// way in.
+///
+/// `rain_credit_cap_in` outside 0.05..=5.0 clamps into range for the same
+/// reason (its `zone_rain_credit_cap_range` error gates whole-config
+/// writes); a non-finite value drops to None, the derived cap.
 pub fn normalize_legacy_values(cfg: &mut Config) {
     use crate::config::schema::SourceKind;
     for src in cfg.sources.iter_mut() {
@@ -85,6 +89,31 @@ pub fn normalize_legacy_values(cfg: &mut Config) {
                     "sessions_per_week is outside 1..=7; treating it as the clamped value"
                 );
                 z.sessions_per_week = Some(clamped);
+            }
+        }
+        // Same treatment for the per-day rain-credit cap: the
+        // zone_rain_credit_cap_range validation error gates whole-config
+        // writes, so a hand-edited value on disk must clamp into range
+        // rather than refuse every unrelated save. A non-finite value
+        // was never operator intent at all and falls back to the derived
+        // cap.
+        if let Some(v) = z.rain_credit_cap_in {
+            if !v.is_finite() {
+                tracing::warn!(
+                    zone = %slug,
+                    "rain_credit_cap_in is not a finite number; deriving the cap from soil \
+                     texture and root depth instead"
+                );
+                z.rain_credit_cap_in = None;
+            } else if !(0.05..=5.0).contains(&v) {
+                let clamped = v.clamp(0.05, 5.0);
+                tracing::warn!(
+                    zone = %slug,
+                    stored = v,
+                    used = clamped,
+                    "rain_credit_cap_in is outside 0.05..=5.0; treating it as the clamped value"
+                );
+                z.rain_credit_cap_in = Some(clamped);
             }
         }
     }
@@ -536,6 +565,7 @@ mod tests {
         cfg.zones.insert(
             "bad".into(),
             ZoneConfig {
+                scheduling_model: None,
                 display_name: "Bad".into(),
                 area_sqft: 100.0,
                 species: GrassSpecies::StAugustine,
@@ -556,6 +586,7 @@ mod tests {
                 photo_url: None,
                 weekly_budget_in: None,
                 sessions_per_week: None,
+                rain_credit_cap_in: None,
                 max_run_minutes: None,
             },
         );
@@ -581,6 +612,7 @@ mod tests {
         cfg.zones.insert(
             "bad".into(),
             ZoneConfig {
+                scheduling_model: None,
                 display_name: "Bad".into(),
                 area_sqft: 0.0,
                 species: GrassSpecies::StAugustine,
@@ -601,6 +633,7 @@ mod tests {
                 photo_url: None,
                 weekly_budget_in: None,
                 sessions_per_week: None,
+                rain_credit_cap_in: None,
                 max_run_minutes: None,
             },
         );
@@ -625,6 +658,7 @@ mod tests {
         cfg.zones.insert(
             "bad".into(),
             ZoneConfig {
+                scheduling_model: None,
                 display_name: "Bad".into(),
                 area_sqft: 100.0,
                 species: GrassSpecies::StAugustine,
@@ -645,6 +679,7 @@ mod tests {
                 photo_url: None,
                 weekly_budget_in: None,
                 sessions_per_week: None,
+                rain_credit_cap_in: None,
                 max_run_minutes: None,
             },
         );
@@ -733,6 +768,7 @@ mod tests {
     fn bound_zone(controller_id: &str, station: &str) -> crate::config::schema::ZoneConfig {
         use crate::config::schema::*;
         ZoneConfig {
+            scheduling_model: None,
             display_name: "Zone".into(),
             area_sqft: 1000.0,
             species: GrassSpecies::StAugustine,
@@ -753,6 +789,7 @@ mod tests {
             photo_url: None,
             weekly_budget_in: None,
             sessions_per_week: None,
+            rain_credit_cap_in: None,
             max_run_minutes: None,
         }
     }

@@ -132,11 +132,14 @@ impl HaMqttPublisher {
     /// running state forever. Publishing its discovery anyway would leave HA
     /// with a `running` binary_sensor stuck "unknown" for the life of the
     /// deployment, so we gate the discovery the same way `flow_meter` gates the
-    /// flow sensor: no producer, no entity. `bucket_known` gets the same rule:
-    /// its only producer was a Home Assistant entity the engine no longer
-    /// reads, so publishing it would create a permanently empty sensor. The
-    /// bucket additionally CLEARS its retained config and state topics when
-    /// absent, because earlier versions published it retained with a
+    /// flow sensor: no producer, no entity. `bucket_known` gets the same rule,
+    /// value-based: the soil model's evidence replay produces a deficit for
+    /// every zone with a species and a soil texture, so the bucket sensor is
+    /// discovered exactly when the zone carries a bucket_mm value; a zone
+    /// with no derivable bucket (a LOCALSKY_ZONES list with no per-zone
+    /// agronomy, or an evidence-starved window) still publishes no entity.
+    /// The bucket additionally CLEARS its retained config and state topics
+    /// when absent, because earlier versions published it retained with a
     /// fabricated 0.00 and a broker holds that until something overwrites
     /// it.
     pub async fn publish_zone_discovery(

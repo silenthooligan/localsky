@@ -26,14 +26,21 @@ fn category(v: &DayVerdict) -> (&'static str, &'static str) {
         // Key on the structured reason_code (P2 units architecture) so the
         // category is unit-independent; legacy cells with an empty code fall back
         // to the baked-reason substring match (the original behavior).
-        "skip" => match v.reason_code.as_str() {
-            "restrictions" => ("Blocked by watering rules", "law"),
-            "freeze_now" | "overnight_freeze" | "soil_frost" => ("Skipped, freeze risk", "freeze"),
-            "wind_now" | "wind_forecast" => ("Skipped, too windy", "wind"),
-            "rain_now" | "already_wet" | "observed_rain" | "rain_next_4h" | "tomorrow_rain"
-            | "rain_3day" => ("Skipped, rain expected", "rain"),
-            "paused" | "pause_until" => ("Paused", "pause"),
-            "" => {
+        "skip" => match crate::gates_catalog::gate_family(&v.reason_code) {
+            crate::gates_catalog::GateFamily::Restriction => ("Blocked by watering rules", "law"),
+            crate::gates_catalog::GateFamily::Freeze => ("Skipped, freeze risk", "freeze"),
+            crate::gates_catalog::GateFamily::Wind => ("Skipped, too windy", "wind"),
+            // Saturated soil lands here too: the lawn is skipping BECAUSE
+            // it has water, so it reads in the water family rather than as
+            // a generic grey skip.
+            crate::gates_catalog::GateFamily::Water if v.reason_code == "soil_saturation" => {
+                ("Skipped, soil already wet", "rain")
+            }
+            crate::gates_catalog::GateFamily::Water => ("Skipped, rain expected", "rain"),
+            crate::gates_catalog::GateFamily::Pause => ("Paused", "pause"),
+            crate::gates_catalog::GateFamily::SoilModel => ("Watering", "run"),
+            crate::gates_catalog::GateFamily::NoData => ("Skipped, no weather data", "skip"),
+            crate::gates_catalog::GateFamily::Other if v.reason_code.is_empty() => {
                 let r = v.reason.to_lowercase();
                 if r.contains("restrict")
                     || r.contains("allowed")
@@ -55,7 +62,7 @@ fn category(v: &DayVerdict) -> (&'static str, &'static str) {
                     ("Skipped", "skip")
                 }
             }
-            _ => ("Skipped", "skip"),
+            crate::gates_catalog::GateFamily::Other => ("Skipped", "skip"),
         },
         // "run" and any unknown verdict read as watering.
         _ => ("Watering", "run"),

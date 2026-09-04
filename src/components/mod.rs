@@ -19,6 +19,7 @@ pub mod irrigation;
 pub mod lightning;
 pub mod login;
 pub mod mobile_nav;
+pub mod notice_center;
 pub mod page_header;
 pub mod pressure;
 pub mod radar;

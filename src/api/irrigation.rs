@@ -101,6 +101,7 @@ pub fn router(
     // POST /action needs the snapshot source, the local control store, and
     // the adoption markers that say where each control's value lives, so it
     // lives in its own sub-router with that state.
+    let watering_policy_for_invite = watering_policy.clone();
     let action_router = Router::new()
         .route("/action", post(action))
         .with_state(ActionState {
@@ -132,7 +133,21 @@ pub fn router(
     let merged = read_routes.merge(advisor_routes).merge(action_router);
 
     if let Some(h) = history {
-        merged.merge(
+        // The soil opt-in offer exists only where a dismissal can land
+        // somewhere durable: with no history database the promise "dismiss
+        // and it will not return" cannot be kept, so the routes are simply
+        // not registered and the popup never fires there.
+        let invite_router = Router::new()
+            .route("/soil-invite", get(soil_invite))
+            // Mutating: privileged like tuning/dismiss (the auth
+            // middleware lists the path).
+            .route("/soil-invite/dismiss", post(soil_invite_dismiss))
+            .with_state(SoilInviteApiState {
+                history: h.clone(),
+                store,
+                watering_policy: watering_policy_for_invite,
+            });
+        merged.merge(invite_router).merge(
             Router::new()
                 .route("/history", get(history_window))
                 .route("/decisions", get(decisions_window))
@@ -147,6 +162,165 @@ pub fn router(
         )
     } else {
         merged
+    }
+}
+
+/// State for the soil opt-in offer's two routes: the snapshot (whose
+/// budget rows carry the shadow soil blocks), the live watering policy
+/// (whose `scheduling_model` is the RESOLVED engine default), and the
+/// history connection the dismissal record lives in.
+#[derive(Clone)]
+struct SoilInviteApiState {
+    history: Arc<Mutex<Connection>>,
+    store: Arc<IrrigationStore>,
+    watering_policy: Arc<arc_swap::ArcSwap<crate::ha::WateringPolicy>>,
+}
+
+/// What the offer names about this yard, derived from the budget rows.
+/// `None` means the install is not offered at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SoilInviteFacts {
+    /// Weekly-governed zones whose shadow plan resolved (soil block
+    /// present, i.e. not evidence-starved and not a degraded tick).
+    pub shadow_zones: u32,
+    /// Of those, zones carrying a live deficit right now.
+    pub deficit_zones: u32,
+    /// Of those, zones where the soil plan and the weekly plan disagree
+    /// about watering today (either direction).
+    pub differs_today: u32,
+}
+
+/// Whether this install is offered the soil model, and what the offer
+/// can say about the yard. The offer exists for installs the WEEKLY
+/// default governs (an engine default of soil IS the opt-in, so those
+/// installs are retired with no record needed), and it needs at least
+/// one weekly-governed zone whose shadow plan resolved: a yard with
+/// every zone pinned to soil has nothing left to offer, and a yard
+/// whose shadow is evidence-starved everywhere has nothing to show yet.
+/// The starved case clears itself within the first few mornings as
+/// evidence lands, so the offer simply waits rather than firing empty.
+pub(crate) fn soil_invite_facts(
+    engine_default_weekly: bool,
+    budgets: &[crate::ha::snapshot::WaterBudget],
+) -> Option<SoilInviteFacts> {
+    if !engine_default_weekly {
+        return None;
+    }
+    let shadow: Vec<&crate::ha::snapshot::WaterBudget> = budgets
+        .iter()
+        .filter(|b| b.scheduling_model == "weekly" && b.soil_depletion_mm.is_some())
+        .collect();
+    if shadow.is_empty() {
+        return None;
+    }
+    let deficit_zones = shadow
+        .iter()
+        .filter(|b| b.soil_depletion_mm.unwrap_or(0.0) > 0.0)
+        .count() as u32;
+    let differs_today = shadow
+        .iter()
+        .filter(|b| (b.soil_planned_seconds > 0) != (b.today_seconds > 0))
+        .count() as u32;
+    Some(SoilInviteFacts {
+        shadow_zones: shadow.len() as u32,
+        deficit_zones,
+        differs_today,
+    })
+}
+
+/// GET /api/v1/irrigation/soil-invite: whether the soil opt-in offer
+/// shows here, what it says, and where its dismissal stands. One read,
+/// answered from the live snapshot + policy + the server-side record,
+/// so the popup has no second source to race and a dismissal from any
+/// device holds on every other one.
+async fn soil_invite(State(st): State<SoilInviteApiState>) -> impl IntoResponse {
+    use crate::config::schema::SchedulingModel;
+    // A demo instance never makes the offer: its database reseeds, so a
+    // dismissal could not keep its word, and a popup would cover every
+    // showcase surface. Same flag /api/v1/info reports as `demo`.
+    if std::env::var("LOCALSKY_DEMO").ok().as_deref() == Some("1") {
+        return (StatusCode::OK, Json(json!({ "eligible": false })));
+    }
+    let weekly_default = st.watering_policy.load().scheduling_model == SchedulingModel::Weekly;
+    let snap = st.store.snapshot();
+    let Some(facts) = soil_invite_facts(weekly_default, &snap.water_budgets) else {
+        return (StatusCode::OK, Json(json!({ "eligible": false })));
+    };
+    let store = crate::persistence::TuningDismissalsStore::new(st.history.clone());
+    let now = chrono::Utc::now().timestamp();
+    match store.soil_invite_state(now).await {
+        Ok(state) => {
+            use crate::persistence::InviteState;
+            let (state_str, until) = match state {
+                InviteState::Open => ("open", None),
+                InviteState::Snoozed { until_epoch } => ("snoozed", Some(until_epoch)),
+                InviteState::Dismissed => ("dismissed", None),
+            };
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "eligible": true,
+                    "state": state_str,
+                    "until_epoch": until,
+                    "shadow_zones": facts.shadow_zones,
+                    "deficit_zones": facts.deficit_zones,
+                    "differs_today": facts.differs_today,
+                })),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+/// Body for POST /soil-invite/dismiss: "snooze" (the offer returns
+/// after 30 days, the tuning precedent) or "permanent" (it never does).
+#[derive(Debug, Deserialize)]
+struct SoilInviteDismissBody {
+    kind: String,
+}
+
+/// POST /api/v1/irrigation/soil-invite/dismiss. Privileged (same
+/// posture as tuning/dismiss); records the choice server side so it
+/// survives restarts, other browsers, and other devices.
+async fn soil_invite_dismiss(
+    State(st): State<SoilInviteApiState>,
+    Json(body): Json<SoilInviteDismissBody>,
+) -> impl IntoResponse {
+    use crate::persistence::InviteState;
+    let permanent = match body.kind.as_str() {
+        "snooze" => false,
+        "permanent" => true,
+        other => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": format!("unknown dismissal kind: {other}") })),
+            );
+        }
+    };
+    let store = crate::persistence::TuningDismissalsStore::new(st.history.clone());
+    let now = chrono::Utc::now().timestamp();
+    // The store keeps permanent final (a stale tab's snooze never
+    // resurrects the offer) and hands back the state it actually holds,
+    // so the response is a read, not an assumption.
+    match store.record_soil_invite_choice(permanent, now).await {
+        Ok(state) => {
+            let (state_str, until) = match state {
+                InviteState::Dismissed => ("dismissed", Value::Null),
+                InviteState::Snoozed { until_epoch } => ("snoozed", json!(until_epoch)),
+                InviteState::Open => ("open", Value::Null),
+            };
+            (
+                StatusCode::OK,
+                Json(json!({ "state": state_str, "until_epoch": until })),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        ),
     }
 }
 
@@ -497,6 +671,7 @@ async fn simulate(
                     category: "script".into(),
                     detail: "your test rule".into(),
                     outcome: "fired".into(),
+                    over_line: false,
                     verdict: Some("skip".into()),
                     margin_label: None,
                     value: None,
@@ -2257,5 +2432,89 @@ mod tests {
         assert_eq!(back.duration_s, Some(300));
         let front = rows.iter().find(|r| r.zone_slug == "front").unwrap();
         assert_eq!(front.duration_s, Some(1200), "front's run keeps its span");
+    }
+
+    // ---- The soil opt-in offer's eligibility ----
+
+    /// A budget row as the refresher publishes it: `model` is the
+    /// resolved per-zone tag, `depletion` present only when the shadow
+    /// plan resolved (not starved, not a degraded tick).
+    fn invite_row(
+        slug: &str,
+        model: &str,
+        depletion: Option<f64>,
+        soil_planned: u32,
+        today: u32,
+    ) -> crate::ha::snapshot::WaterBudget {
+        crate::ha::snapshot::WaterBudget {
+            zone_slug: slug.into(),
+            zone_name: slug.into(),
+            scheduling_model: model.into(),
+            soil_depletion_mm: depletion,
+            soil_planned_seconds: soil_planned,
+            today_seconds: today,
+            ..Default::default()
+        }
+    }
+
+    /// The install the offer exists for: weekly engine default, at
+    /// least one weekly-governed zone with a resolved shadow plan. The
+    /// counts are what the popup names: live deficits, and zones where
+    /// the two models disagree about watering today, both directions.
+    #[test]
+    fn weekly_default_with_a_resolved_shadow_is_offered_with_counts() {
+        let budgets = vec![
+            // Deficit, and soil would water where weekly does not.
+            invite_row("back", "weekly", Some(6.0), 900, 0),
+            // Deficit, both models agree (both water).
+            invite_row("front", "weekly", Some(3.0), 600, 600),
+            // No deficit, weekly waters where soil would not: disagrees.
+            invite_row("side", "weekly", Some(0.0), 0, 300),
+            // Pinned to soil already: not part of the offer's counts.
+            invite_row("beds", "soil", Some(8.0), 700, 700),
+            // Starved shadow: no block, contributes nothing.
+            invite_row("strip", "weekly", None, 0, 0),
+        ];
+        let facts = soil_invite_facts(true, &budgets).expect("offered");
+        assert_eq!(
+            facts,
+            SoilInviteFacts {
+                shadow_zones: 3,
+                deficit_zones: 2,
+                differs_today: 2,
+            }
+        );
+    }
+
+    /// An engine default of soil IS the opt-in: the offer retires with
+    /// no record needed, whatever the rows say.
+    #[test]
+    fn a_soil_engine_default_is_never_offered() {
+        let budgets = vec![invite_row("back", "weekly", Some(6.0), 900, 0)];
+        assert_eq!(soil_invite_facts(false, &budgets), None);
+    }
+
+    /// Every zone pinned to soil individually: nothing left to offer,
+    /// again with no record needed.
+    #[test]
+    fn every_zone_pinned_to_soil_is_never_offered() {
+        let budgets = vec![
+            invite_row("back", "soil", Some(6.0), 900, 900),
+            invite_row("front", "soil", Some(3.0), 600, 600),
+        ];
+        assert_eq!(soil_invite_facts(true, &budgets), None);
+    }
+
+    /// Evidence-starved everywhere (every weekly row publishes absence):
+    /// the offer has nothing to show yet, so it waits rather than
+    /// firing empty. Same shape covers the no-zones install.
+    #[test]
+    fn a_shadow_starved_everywhere_is_not_offered_yet() {
+        let budgets = vec![
+            invite_row("back", "weekly", None, 0, 0),
+            invite_row("front", "weekly", None, 0, 900),
+        ];
+        assert_eq!(soil_invite_facts(true, &budgets), None);
+        assert_eq!(soil_invite_facts(true, &[]), None);
     }
 }

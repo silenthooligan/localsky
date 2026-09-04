@@ -383,7 +383,12 @@ async fn post_apply(State(s): State<WizardApiState>) -> impl IntoResponse {
     // a VAPID keypair if Web Push was enabled with no keys. This runs BEFORE
     // validation so the validator sees the finalized config (e.g. the
     // now-marked default controller), matching what gets written to disk.
-    WizardStore::finalize_for_apply(&mut draft);
+    // `fresh_install` gates the soil-model default to a genuine first run
+    // (no config on disk yet): the wizard is re-enterable as an editor
+    // over a configured instance, and a re-run must keep the scheduling
+    // model the install already holds.
+    let fresh_install = !s.config_store.is_initialized();
+    WizardStore::finalize_for_apply(&mut draft, fresh_install);
     // The previous on-disk config: consulted by the region normalizer below
     // (which sources are NEW) and by the hot-reload restart-required diff.
     // `None` on a true fresh install (no prior config), which the normalizer's

@@ -29,11 +29,13 @@ use crate::ports::config_store::ConfigStore;
 /// soil probe configured or live-reporting), and water_level_pct (the
 /// controller must report the capability).
 /// 1.5 (additive): the same rule extended to the per-zone
-/// `<slug>_soil_bucket` sensor. Its only producer was a Home Assistant
-/// entity the engine no longer reads, so `bucket_mm` is absent and the
-/// descriptor is not published. The per-zone `<slug>_run_today` sensor is
-/// gated the same way on `today_run_minutes`, which nothing produces, so it
-/// is not published either.
+/// `<slug>_soil_bucket` sensor, gated on `bucket_mm`. Its producer is
+/// now the soil model's evidence replay (`apply_soil_schedule`), which
+/// fills the field for every zone with agronomy config, so the
+/// descriptor publishes on those installs; a zone no model can derive a
+/// bucket for keeps the field absent and the descriptor unpublished.
+/// The per-zone `<slug>_run_today` sensor is gated the same way on
+/// `today_run_minutes`, which nothing produces, so it is not published.
 /// 1.6 (additive): `min`/`max`/`step` on `number` descriptors, so the
 /// integration builds the three threshold entities on the range the server
 /// enforces rather than on the Home Assistant `number` platform defaults. An
@@ -1373,8 +1375,9 @@ mod tests {
         // Runtime entities publish for every zone either way.
         assert!(ids.contains(&"front_planned_run"));
         // The soil bucket takes the same capability gate: absent on the
-        // snapshot means no model computed one, so no descriptor. Nothing
-        // produces one today, which is exactly why it must not register.
+        // snapshot means no bucket could be derived for the zone (no
+        // agronomy config), so no descriptor registers a permanently
+        // empty sensor; zones the soil replay fills publish it (below).
         assert!(
             !ids.contains(&"front_soil_bucket"),
             "an absent bucket must not register a permanently empty sensor"

@@ -453,6 +453,27 @@ pub fn validate(cfg: &Config) -> ValidationReport {
         }
     }
 
+    // The per-day rain-credit cap stays inside the band a root zone can
+    // plausibly hold. Below 0.05 in every drizzle clips and the balance
+    // stops crediting rain at all; above 5 in the cap can never bind.
+    // Error like sessions_per_week: an out-of-band value changes what
+    // the week settles to. Values already on disk are clamped at load
+    // (loader::normalize_legacy_values) so one stale number cannot
+    // refuse every unrelated save.
+    for (slug, z) in &cfg.zones {
+        if let Some(v) = z.rain_credit_cap_in {
+            if !(0.05..=5.0).contains(&v) {
+                r.error(
+                    "zone_rain_credit_cap_range",
+                    format!(
+                        "zone '{slug}': rain_credit_cap_in is {v}; it must be between 0.05 and \
+                         5.0 inches (blank derives the cap from soil texture and root depth)"
+                    ),
+                );
+            }
+        }
+    }
+
     // Manual schedules reference real zones.
     for sched in &cfg.manual_schedules {
         let normalized = sched.zone_slug.replace('-', "_");

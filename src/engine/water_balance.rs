@@ -24,6 +24,23 @@ impl Default for ZoneWaterState {
 }
 
 /// Crop ET (mm/day) = ET0 * Kc * heat_multiplier.
+/// The floor every capture-efficiency use clamps to. It exists so the
+/// refill's division cannot blow up, and it is applied on BOTH sides of
+/// the balance so the credit and the refill agree about how much of the
+/// water arrives. They did not: the credit clamped at 0 while the refill
+/// clamped at this floor, so an efficiency of zero credited no rain at
+/// all and still sized a run twenty times the deficit.
+///
+/// Live callers never reach it. `WateringPolicy::effective_capture_efficiency`
+/// resolves a non-positive configured value to the 0.70 default before
+/// the engine sees it; this is the guard for a direct caller.
+pub const MIN_CAPTURE_EFFICIENCY: f64 = 0.05;
+
+/// One resolution for the wet-loss factor, used everywhere it applies.
+pub fn resolve_capture_efficiency(v: f64) -> f64 {
+    v.clamp(MIN_CAPTURE_EFFICIENCY, 1.0)
+}
+
 pub fn etc_mm(et0_mm: f64, kc: f64, heat_multiplier: f64) -> f64 {
     (et0_mm * kc * heat_multiplier).max(0.0)
 }
@@ -47,7 +64,7 @@ pub fn step(
     capture_efficiency: f64,
     taw_mm: f64,
 ) -> f64 {
-    let effective_rain = gross_rain_mm * capture_efficiency.clamp(0.0, 1.0);
+    let effective_rain = gross_rain_mm * resolve_capture_efficiency(capture_efficiency);
     let next = state.depletion_mm + et_c_mm - effective_rain - applied_mm;
     state.depletion_mm = next.clamp(0.0, taw_mm.max(0.0));
     state.depletion_mm
@@ -72,7 +89,7 @@ pub fn refill_runtime_seconds(
     if depletion_mm <= 0.0 || precip_rate_mm_hr <= 0.01 {
         return 0;
     }
-    let eff = capture_efficiency.clamp(0.05, 1.0);
+    let eff = resolve_capture_efficiency(capture_efficiency);
     let gross_mm = depletion_mm / eff;
     let hours = gross_mm / precip_rate_mm_hr;
     let s = (hours * 3600.0).round() as i64;
@@ -95,10 +112,12 @@ pub struct ZoneBalanceSummary {
 /// Convenience: assemble a `ZoneBalanceSummary` from species + soil +
 /// current state.
 ///
-/// NOT YET WIRED: no live caller. The scheduler renders its tiles and
-/// dispatches from the weekly water balance (`engine::budget`), not from
-/// this bucket. See
-/// docs/src/irrigation-engine.md#the-soil-depletion-bucket-for-later.
+/// NOT YET WIRED: `summarize` itself has no live caller; the soil
+/// planner (`engine::soil_schedule`) calls step / should_irrigate /
+/// refill_runtime_seconds directly. Soil-governed zones dispatch from
+/// this bucket, weekly zones still dispatch from `engine::budget`, and
+/// the Deficit tiles render `bucket_mm` from its replay wherever
+/// evidence exists. See docs/src/irrigation-engine.md#the-soil-model.
 pub fn summarize(
     species: GrassSpecies,
     soil: SoilTexture,

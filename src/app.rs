@@ -756,7 +756,9 @@ fn HomeWateringVerdict(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             "off"
         } else if s.zones.iter().any(|z| z.running) {
             "run-now"
-        } else if s.skip_check.will_skip && s.skip_check.reason.starts_with("Paused") {
+        } else if s.skip_check.will_skip
+            && crate::ha::snapshot::is_pause_code(&s.skip_check.reason_code)
+        {
             "paused"
         } else if s.skip_check.will_skip && s.next_run_epoch <= 0 {
             "skip"

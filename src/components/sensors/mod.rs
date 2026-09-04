@@ -882,18 +882,16 @@ fn SoilDetail(
     on_remove: Callback<String>,
 ) -> impl IntoView {
     let name = z.zone_name.clone();
-    let (cur, status, color) = match z.current_pct {
-        None => ("offline".to_string(), "OFFLINE", "var(--verdict-off)"),
-        Some(c) => {
-            let s = if c >= z.target_max_pct {
-                ("SATURATED", "var(--verdict-skip)")
-            } else if c < z.target_min_pct {
-                ("DRY", "var(--accent-warm)")
-            } else {
-                ("HEALTHY", "var(--verdict-run)")
-            };
-            (format!("{c:.0}%"), s.0, s.1)
+    // The band comes from the wire type's own classifier, which uses the
+    // engine's gate comparisons. This card used to repeat them inline.
+    use crate::ha::snapshot::SoilBand;
+    let (cur, status, color) = match (z.current_band(), z.current_pct) {
+        (SoilBand::Offline, _) | (_, None) => {
+            ("offline".to_string(), "OFFLINE", "var(--verdict-off)")
         }
+        (SoilBand::Saturated, Some(c)) => (format!("{c:.0}%"), "SATURATED", "var(--verdict-skip)"),
+        (SoilBand::Dry, Some(c)) => (format!("{c:.0}%"), "DRY", "var(--accent-warm)"),
+        (SoilBand::Healthy, Some(c)) => (format!("{c:.0}%"), "HEALTHY", "var(--verdict-run)"),
     };
     let proj = z.predicted_pct.clone();
     // Entity identity + .is-control: the card itself is not clickable but

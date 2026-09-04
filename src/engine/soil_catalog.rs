@@ -2,116 +2,48 @@
 // infiltration rate keyed by USDA SoilTexture.
 //
 // Citations:
-//   * FAO Irrigation and Drainage Paper No. 56, Table 19 (Allen et al., 1998)
-//   * USDA NRCS Part 652 National Irrigation Guide, Table 11-3
+//   * Water holding: FAO Irrigation and Drainage Paper No. 56, Table 19
+//     "Typical soil water characteristics for different soil types"
+//     (Allen et al., 1998).
+//   * Infiltration: USDA NRCS Part 652 National Irrigation Guide,
+//     Table 11-3.
 //
 // Field capacity (FC) and wilting point (WP) are reported as volumetric
 // water content (m³ water / m³ soil). Available water (AW) per metre of
 // soil depth equals (FC - WP) * 1000 mm. The engine computes TAW (total
 // available water in the root zone) as AW * root_depth_mm / 1000.
+//
+// The DATA lives in the shared, slug-keyed `crate::agronomy` catalog
+// (plain data, no ssr-only deps), so the zone editor can show the same
+// derived rain cap the engine clips at without an ssr round-trip. This
+// module keeps the SoilTexture-keyed API the engine depends on, the TAW
+// and RAW arithmetic, and the FAO-56 band test that guards the numbers.
 
 use crate::config::schema::SoilTexture;
 
-#[derive(Debug, Clone, Copy)]
-pub struct SoilProfile {
-    /// Volumetric field capacity (m³/m³).
-    pub field_capacity: f64,
-    /// Volumetric wilting point (m³/m³).
-    pub wilting_point: f64,
-    /// Available water per metre depth (mm/m). Derived: (FC-WP) * 1000.
-    pub aw_mm_per_m: f64,
-    /// Basic infiltration rate (mm/hr) on flat, 3-5% slope, and >5% slope.
-    pub infiltration_mm_hr: InfiltrationRates,
-    pub citation: &'static str,
-}
+pub use crate::agronomy::{InfiltrationRates, SoilProfile};
 
-#[derive(Debug, Clone, Copy)]
-pub struct InfiltrationRates {
-    pub flat: f64,
-    pub moderate_slope: f64,
-    pub steep_slope: f64,
-}
-
+/// Water-holding + infiltration profile for a texture. Delegates to the
+/// shared, slug-keyed `agronomy` catalog, the single source of truth the
+/// wasm zone editor reads too, so the cap the editor shows and the cap
+/// the balance clips at can never drift apart. `soil_slug` maps the enum
+/// to its serde slug and is pinned to serde by `soil_slug_matches_serde`.
 pub fn lookup(texture: SoilTexture) -> SoilProfile {
+    crate::agronomy::soil_profile_by_slug(soil_slug(texture))
+}
+
+/// Enum -> snake_case slug used by the agronomy catalog + the config wire
+/// format. Kept in lockstep with serde by a test.
+pub fn soil_slug(texture: SoilTexture) -> &'static str {
     use SoilTexture::*;
     match texture {
-        Sand => SoilProfile {
-            field_capacity: 0.09,
-            wilting_point: 0.03,
-            aw_mm_per_m: 60.0,
-            infiltration_mm_hr: InfiltrationRates {
-                flat: 50.0,
-                moderate_slope: 35.0,
-                steep_slope: 25.0,
-            },
-            citation: "FAO-56 Table 19; USDA NRCS Part 652 Table 11-3",
-        },
-        LoamySand => SoilProfile {
-            field_capacity: 0.14,
-            wilting_point: 0.06,
-            aw_mm_per_m: 80.0,
-            infiltration_mm_hr: InfiltrationRates {
-                flat: 35.0,
-                moderate_slope: 25.0,
-                steep_slope: 18.0,
-            },
-            citation: "FAO-56 Table 19; USDA NRCS Part 652 Table 11-3",
-        },
-        SandyLoam => SoilProfile {
-            field_capacity: 0.23,
-            wilting_point: 0.10,
-            aw_mm_per_m: 130.0,
-            infiltration_mm_hr: InfiltrationRates {
-                flat: 25.0,
-                moderate_slope: 18.0,
-                steep_slope: 12.0,
-            },
-            citation: "FAO-56 Table 19; USDA NRCS Part 652 Table 11-3",
-        },
-        Loam => SoilProfile {
-            field_capacity: 0.34,
-            wilting_point: 0.12,
-            aw_mm_per_m: 220.0,
-            infiltration_mm_hr: InfiltrationRates {
-                flat: 13.0,
-                moderate_slope: 10.0,
-                steep_slope: 7.0,
-            },
-            citation: "FAO-56 Table 19; USDA NRCS Part 652 Table 11-3",
-        },
-        SiltLoam => SoilProfile {
-            field_capacity: 0.32,
-            wilting_point: 0.15,
-            aw_mm_per_m: 170.0,
-            infiltration_mm_hr: InfiltrationRates {
-                flat: 10.0,
-                moderate_slope: 8.0,
-                steep_slope: 5.0,
-            },
-            citation: "FAO-56 Table 19; USDA NRCS Part 652 Table 11-3",
-        },
-        ClayLoam => SoilProfile {
-            field_capacity: 0.39,
-            wilting_point: 0.20,
-            aw_mm_per_m: 190.0,
-            infiltration_mm_hr: InfiltrationRates {
-                flat: 8.0,
-                moderate_slope: 6.0,
-                steep_slope: 4.0,
-            },
-            citation: "FAO-56 Table 19; USDA NRCS Part 652 Table 11-3",
-        },
-        Clay => SoilProfile {
-            field_capacity: 0.42,
-            wilting_point: 0.25,
-            aw_mm_per_m: 170.0,
-            infiltration_mm_hr: InfiltrationRates {
-                flat: 5.0,
-                moderate_slope: 4.0,
-                steep_slope: 3.0,
-            },
-            citation: "FAO-56 Table 19; USDA NRCS Part 652 Table 11-3",
-        },
+        Sand => "sand",
+        LoamySand => "loamy_sand",
+        SandyLoam => "sandy_loam",
+        Loam => "loam",
+        SiltLoam => "silt_loam",
+        ClayLoam => "clay_loam",
+        Clay => "clay",
     }
 }
 
@@ -143,6 +75,115 @@ pub fn infiltration_mm_hr(texture: SoilTexture, slope_pct: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The catalog cites FAO-56 Table 19, so every entry has to sit
+    /// inside it. These bands are the table verbatim (Allen et al.,
+    /// 1998); Table 19 has no clay-loam row, so ClayLoam is held against
+    /// its "silt clay loam", the nearest published analogue. The three
+    /// figures are checked separately because the table publishes
+    /// (FC - WP) as its own range rather than as the difference of the
+    /// other two. A texture that drifts outside its band changes how
+    /// much storm rain a real yard banks and how big its bucket is, so
+    /// it fails here rather than shipping.
+    #[test]
+    fn catalog_entries_sit_inside_the_fao56_bands() {
+        // texture, FC lo/hi, WP lo/hi, (FC-WP) lo/hi
+        let bands = [
+            (SoilTexture::Sand, 0.07, 0.17, 0.02, 0.07, 0.05, 0.11),
+            (SoilTexture::LoamySand, 0.11, 0.19, 0.03, 0.10, 0.06, 0.12),
+            (SoilTexture::SandyLoam, 0.18, 0.28, 0.06, 0.16, 0.11, 0.15),
+            (SoilTexture::Loam, 0.20, 0.30, 0.07, 0.17, 0.13, 0.18),
+            (SoilTexture::SiltLoam, 0.22, 0.36, 0.09, 0.21, 0.13, 0.19),
+            (SoilTexture::ClayLoam, 0.30, 0.37, 0.17, 0.24, 0.13, 0.18),
+            (SoilTexture::Clay, 0.32, 0.40, 0.20, 0.24, 0.12, 0.20),
+        ];
+        for (t, fc_lo, fc_hi, wp_lo, wp_hi, aw_lo, aw_hi) in bands {
+            let p = lookup(t);
+            assert!(
+                p.field_capacity >= fc_lo && p.field_capacity <= fc_hi,
+                "{t:?} field capacity {} outside FAO-56 {fc_lo}..{fc_hi}",
+                p.field_capacity
+            );
+            assert!(
+                p.wilting_point >= wp_lo && p.wilting_point <= wp_hi,
+                "{t:?} wilting point {} outside FAO-56 {wp_lo}..{wp_hi}",
+                p.wilting_point
+            );
+            let aw = p.field_capacity - p.wilting_point;
+            assert!(
+                aw >= aw_lo - 1e-9 && aw <= aw_hi + 1e-9,
+                "{t:?} available water {aw} outside FAO-56 {aw_lo}..{aw_hi}"
+            );
+            // The published mm/m field has to agree with the two it is
+            // derived from, or TAW and the displayed cap disagree.
+            assert!(
+                (p.aw_mm_per_m - aw * 1000.0).abs() < 1e-6,
+                "{t:?} aw_mm_per_m {} does not match (FC - WP) * 1000 = {}",
+                p.aw_mm_per_m,
+                aw * 1000.0
+            );
+        }
+    }
+
+    /// Water held rises with fineness up to the silt loams and eases off
+    /// on the heavy clays, the ordering every published table carries. A
+    /// catalog that put loam above silt loam once gave silt-loam yards a
+    /// tighter rain cap than loam, which is backwards.
+    #[test]
+    fn water_held_follows_the_published_texture_ordering() {
+        let aw = |t| lookup(t).aw_mm_per_m;
+        assert!(aw(SoilTexture::Sand) < aw(SoilTexture::LoamySand));
+        assert!(aw(SoilTexture::LoamySand) < aw(SoilTexture::SandyLoam));
+        assert!(aw(SoilTexture::SandyLoam) < aw(SoilTexture::Loam));
+        assert!(aw(SoilTexture::Loam) <= aw(SoilTexture::SiltLoam));
+        assert!(aw(SoilTexture::ClayLoam) <= aw(SoilTexture::SiltLoam));
+        assert!(aw(SoilTexture::Clay) <= aw(SoilTexture::SiltLoam));
+    }
+
+    /// The slug this module hands the shared catalog has to be the slug
+    /// serde writes into the config, or a texture would silently read
+    /// another texture's profile (or the sandy-loam fallback).
+    /// The slug conversion round-trips, both directions. A form holds its
+    /// texture picker as a string and hands `from_slug` to the engine, so
+    /// a mismatch here would silently water a zone on another texture's
+    /// numbers.
+    #[test]
+    fn soil_texture_slug_round_trips() {
+        for t in [
+            SoilTexture::Sand,
+            SoilTexture::LoamySand,
+            SoilTexture::SandyLoam,
+            SoilTexture::Loam,
+            SoilTexture::SiltLoam,
+            SoilTexture::ClayLoam,
+            SoilTexture::Clay,
+        ] {
+            assert_eq!(SoilTexture::from_slug(soil_slug(t)), t, "{t:?}");
+        }
+        // An unknown slug takes the form's own load default.
+        assert_eq!(
+            SoilTexture::from_slug("mystery"),
+            SoilTexture::SandyLoam,
+            "unknown slugs fall back to sandy loam"
+        );
+    }
+
+    #[test]
+    fn soil_slug_matches_serde() {
+        for t in [
+            SoilTexture::Sand,
+            SoilTexture::LoamySand,
+            SoilTexture::SandyLoam,
+            SoilTexture::Loam,
+            SoilTexture::SiltLoam,
+            SoilTexture::ClayLoam,
+            SoilTexture::Clay,
+        ] {
+            let serde_slug = serde_json::to_string(&t).unwrap();
+            let serde_slug = serde_slug.trim_matches('"');
+            assert_eq!(soil_slug(t), serde_slug, "{t:?}");
+        }
+    }
 
     #[test]
     fn sandy_loam_holds_more_than_sand() {

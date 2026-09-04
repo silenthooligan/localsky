@@ -55,14 +55,24 @@ impl ForecastObservationsStore {
         let source = observed_source.to_string();
         tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
             let conn = c.blocking_lock();
-            // Both SET expressions read the PRE-update row (SQLite upsert
+            // Every SET expression reads the PRE-update row (SQLite upsert
             // semantics), so the source follows the value: it changes only
             // when the incoming observation is the new day max.
+            //
+            // The predicted repair: a row planted by `upsert_et0` before
+            // any rain writer ran carries the -1.0 placeholder prediction
+            // (no rain writer has supplied the morning figure yet). The
+            // first rain write for the day replaces it with the real
+            // prediction; a real prediction, once planted, never drifts.
             conn.execute(
                 "INSERT INTO forecast_observations
                     (date, predicted_in, observed_in, month, inserted_at_epoch, observed_source)
                  VALUES (?1, ?2, ?3, ?4, strftime('%s','now'), ?5)
                  ON CONFLICT(date) DO UPDATE SET
+                    predicted_in = CASE
+                        WHEN predicted_in < 0.0 THEN excluded.predicted_in
+                        ELSE predicted_in
+                    END,
                     observed_in = MAX(observed_in, excluded.observed_in),
                     observed_source = CASE
                         WHEN excluded.observed_in >= observed_in THEN excluded.observed_source
@@ -76,6 +86,111 @@ impl ForecastObservationsStore {
         .await
         .map_err(|e| ForecastObservationsError::Sqlite(format!("join: {e}")))?
         .map_err(|e| ForecastObservationsError::Sqlite(e.to_string()))
+    }
+
+    /// Record a day's reference ET0 (mm) under the same day-MAX rule as
+    /// the observed rain: a writer going stale must not pull a recorded
+    /// figure down, and the provenance tag follows the value that holds
+    /// the max. A day with no row yet gets one planted with the rain
+    /// fields as placeholders: observed 0.0 under source 'none' (the
+    /// established no-rain-capable-source marker, excluded from every
+    /// rain consumer) and predicted -1.0 (a sentinel no real writer can
+    /// produce; the first rain upsert for the day replaces it, so the
+    /// bias fit never trains on a fabricated zero prediction).
+    /// `inserted_at_epoch` is deliberately untouched on conflict: it is
+    /// the RAIN write recency marker `recent()` windows on.
+    pub async fn upsert_et0(
+        &self,
+        date: NaiveDate,
+        et0_mm: f64,
+        source: &str,
+    ) -> Result<(), ForecastObservationsError> {
+        let c = self.conn.clone();
+        let date_str = date.format("%Y-%m-%d").to_string();
+        let month = date.month() as i64;
+        let source = source.to_string();
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
+            let conn = c.blocking_lock();
+            // The SET expressions read the PRE-update row, so both CASEs
+            // judge the same comparison: a NULL column (no ET0 recorded
+            // yet) always accepts the incoming value.
+            conn.execute(
+                "INSERT INTO forecast_observations
+                    (date, predicted_in, observed_in, month, inserted_at_epoch,
+                     observed_source, et0_mm, et0_source)
+                 VALUES (?1, -1.0, 0.0, ?2, strftime('%s','now'), 'none', ?3, ?4)
+                 ON CONFLICT(date) DO UPDATE SET
+                    et0_mm = CASE
+                        WHEN et0_mm IS NULL OR excluded.et0_mm >= et0_mm
+                            THEN excluded.et0_mm
+                        ELSE et0_mm
+                    END,
+                    et0_source = CASE
+                        WHEN et0_mm IS NULL OR excluded.et0_mm >= et0_mm
+                            THEN excluded.et0_source
+                        ELSE et0_source
+                    END",
+                params![date_str, month, et0_mm, source],
+            )?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| ForecastObservationsError::Sqlite(format!("join: {e}")))?
+        .map_err(|e| ForecastObservationsError::Sqlite(e.to_string()))
+    }
+
+    /// Per-day reference ET0 rows over the trailing `window_days` local
+    /// days INCLUDING today, ascending by date. Only days with a
+    /// recorded value return (et0_mm NOT NULL): an absent day is absent
+    /// evidence, and the replay charges it from the zone's fallback
+    /// rung rather than from anything fabricated here. Same window
+    /// anchor as `observed_rain_window_days` (configured-timezone
+    /// dates), so the rain series and the ET0 series describe the same
+    /// day frames.
+    pub async fn et0_window_days(
+        &self,
+        window_days: i64,
+    ) -> Result<Vec<Et0LedgerDay>, ForecastObservationsError> {
+        let c = self.conn.clone();
+        let today_naive = crate::timeutil::now_local().date_naive();
+        let end = today_naive.format("%Y-%m-%d").to_string();
+        let start = (today_naive - chrono::Duration::days((window_days - 1).max(0)))
+            .format("%Y-%m-%d")
+            .to_string();
+        let rows =
+            tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<(String, f64, String)>> {
+                let conn = c.blocking_lock();
+                let mut stmt = conn.prepare(
+                    "SELECT date, et0_mm, COALESCE(et0_source, 'unknown')
+                     FROM forecast_observations
+                     WHERE date >= ?1 AND date <= ?2 AND et0_mm IS NOT NULL
+                     ORDER BY date ASC",
+                )?;
+                let mapped = stmt
+                    .query_map(params![start, end], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, f64>(1)?,
+                            r.get::<_, String>(2)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(mapped)
+            })
+            .await
+            .map_err(|e| ForecastObservationsError::Sqlite(format!("join: {e}")))?
+            .map_err(|e| ForecastObservationsError::Sqlite(e.to_string()))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for (date_str, et0_mm, source) in rows {
+            let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
+                .map_err(|e| ForecastObservationsError::Date(format!("{date_str}: {e}")))?;
+            out.push(Et0LedgerDay {
+                date,
+                et0_mm,
+                source,
+            });
+        }
+        Ok(out)
     }
 
     /// Days since the most recent local day whose OBSERVED rain met
@@ -261,6 +376,63 @@ impl ForecastObservationsStore {
         Ok(total)
     }
 
+    /// Per-day observed-rain rows over the trailing `window_days` local
+    /// days INCLUDING today, ascending by date. The day-granular
+    /// companion to `observed_rain_window_by_source`: same window
+    /// anchor, same 'none' exclusion. The balance reads ONLY this and
+    /// reconstructs the per-source sums from the rows in memory
+    /// (`ObservedRainWindow::from_days`); issuing both queries live
+    /// races the fire-and-forget day-max upsert and can describe
+    /// different rows. Feeds the balance's per-day rain-credit cap,
+    /// which needs each day's depth rather than the window sum (one
+    /// 1.2 in day and six dry days settle differently from 0.2 in on
+    /// six days once soil capacity caps what a single day may credit).
+    pub async fn observed_rain_window_days(
+        &self,
+        window_days: i64,
+    ) -> Result<Vec<ObservedRainDay>, ForecastObservationsError> {
+        let c = self.conn.clone();
+        let today_naive = crate::timeutil::now_local().date_naive();
+        let end = today_naive.format("%Y-%m-%d").to_string();
+        let start = (today_naive - chrono::Duration::days((window_days - 1).max(0)))
+            .format("%Y-%m-%d")
+            .to_string();
+        let rows =
+            tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<(String, f64, String)>> {
+                let conn = c.blocking_lock();
+                let mut stmt = conn.prepare(
+                    "SELECT date, observed_in, observed_source
+                 FROM forecast_observations
+                 WHERE date >= ?1 AND date <= ?2 AND observed_source != 'none'
+                 ORDER BY date ASC",
+                )?;
+                let mapped = stmt
+                    .query_map(params![start, end], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, f64>(1)?,
+                            r.get::<_, String>(2)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(mapped)
+            })
+            .await
+            .map_err(|e| ForecastObservationsError::Sqlite(format!("join: {e}")))?
+            .map_err(|e| ForecastObservationsError::Sqlite(e.to_string()))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for (date_str, observed_in, source) in rows {
+            let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
+                .map_err(|e| ForecastObservationsError::Date(format!("{date_str}: {e}")))?;
+            out.push(ObservedRainDay {
+                date,
+                observed_in,
+                source,
+            });
+        }
+        Ok(out)
+    }
+
     /// Per-source observed-rain sums AND row counts over the trailing
     /// `window_days` local days INCLUDING today (today's row is
     /// live-updated by the day-max writer). Feeds the water balance's
@@ -324,6 +496,31 @@ impl ForecastObservationsStore {
     }
 }
 
+/// One ledger day carrying a recorded reference ET0: the local date,
+/// the day-max value (mm), and the provenance tag that holds it
+/// ('localsky_engine' once the refresher self-emits; 'unknown' for a
+/// value recorded without a tag). Days with no recorded ET0 have no
+/// entry: absence means no evidence, and the replay's fallback rung
+/// owns those days.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Et0LedgerDay {
+    pub date: NaiveDate,
+    pub et0_mm: f64,
+    pub source: String,
+}
+
+/// One ledger day inside the balance window: the local date, its
+/// observed total (inches), and the provenance tag that holds the day
+/// max ('gauge' | 'radar' | 'model' | 'legacy'; 'none' placeholders are
+/// excluded at the query). The primary key is the date, so a day is
+/// exactly one row and one source.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObservedRainDay {
+    pub date: NaiveDate,
+    pub observed_in: f64,
+    pub source: String,
+}
+
 /// Per-source observed-rain sums (inches) + covered-day counts over a
 /// trailing window. 'legacy' rows predate the provenance column: the
 /// caller classifies them by install class (gauge-quality when a station
@@ -339,6 +536,38 @@ pub struct ObservedRainWindow {
     pub gauge_days: u32,
     pub radar_days: u32,
     pub legacy_days: u32,
+}
+
+impl ObservedRainWindow {
+    /// Reconstruct the per-source sums and coverage counts from day
+    /// rows, grouping by source exactly as the SQL GROUP BY in
+    /// `observed_rain_window_by_source` does (a row is one covered day;
+    /// unknown tags land on the model bucket). Lets the balance fetch
+    /// the window ONCE as day rows and derive the sum rung and the day
+    /// series from the same rows: two separate reads of the live table
+    /// let a day-max upsert land between them, so the day series could
+    /// describe different rain than the sum it is supposed to refine.
+    pub fn from_days(days: &[ObservedRainDay]) -> Self {
+        let mut out = Self::default();
+        for d in days {
+            match d.source.as_str() {
+                "gauge" => {
+                    out.gauge_in += d.observed_in;
+                    out.gauge_days += 1;
+                }
+                "radar" => {
+                    out.radar_in += d.observed_in;
+                    out.radar_days += 1;
+                }
+                "legacy" => {
+                    out.legacy_in += d.observed_in;
+                    out.legacy_days += 1;
+                }
+                _ => out.model_in += d.observed_in,
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -491,6 +720,11 @@ mod tests {
         assert_eq!(win.gauge_days, 1);
         assert_eq!(win.legacy_days, 1);
         assert_eq!(win.radar_days, 0);
+        // The in-memory reconstruction from day rows lands on the same
+        // sums and counts as the SQL grouping, mixed sources included:
+        // the balance derives its sum rung this way from one read.
+        let days = s.observed_rain_window_days(7).await.unwrap();
+        assert_eq!(ObservedRainWindow::from_days(&days), win);
     }
 
     /// A dry gauge day is COVERAGE: the day count registers even when
@@ -509,6 +743,145 @@ mod tests {
         let win = s.observed_rain_window_by_source(7).await.unwrap();
         assert_eq!(win.gauge_days, 2, "dry rows still count as coverage");
         assert_eq!(win.gauge_in, 0.0);
+    }
+
+    /// The per-day read describes the SAME rows as the per-source sums:
+    /// same window (today inclusive, 7 days), same 'none' exclusion,
+    /// ascending dates, so the balance's day-capped credit and its raw
+    /// sum can never disagree about which days exist.
+    #[tokio::test]
+    async fn window_days_matches_the_source_sums() {
+        let s = fresh_store().await;
+        let today = chrono::Local::now().date_naive();
+        s.upsert(today, 0.0, 0.20, "gauge").await.unwrap();
+        s.upsert(today - chrono::Duration::days(2), 0.0, 1.20, "gauge")
+            .await
+            .unwrap();
+        s.upsert(today - chrono::Duration::days(4), 0.4, 0.0, "none")
+            .await
+            .unwrap();
+        // Outside the window: stays out of both reads.
+        s.upsert(today - chrono::Duration::days(9), 0.0, 2.00, "gauge")
+            .await
+            .unwrap();
+        let days = s.observed_rain_window_days(7).await.unwrap();
+        assert_eq!(days.len(), 2, "the 'none' placeholder is excluded");
+        assert_eq!(days[0].date, today - chrono::Duration::days(2));
+        assert!((days[0].observed_in - 1.20).abs() < 1e-9);
+        assert_eq!(days[0].source, "gauge");
+        assert_eq!(days[1].date, today, "today's live row is included");
+        let win = s.observed_rain_window_by_source(7).await.unwrap();
+        let day_sum: f64 = days.iter().map(|d| d.observed_in).sum();
+        assert!(
+            (day_sum - win.gauge_in).abs() < 1e-9,
+            "day rows and source sums describe the same window"
+        );
+        assert_eq!(
+            ObservedRainWindow::from_days(&days),
+            win,
+            "the reconstruction matches the SQL grouping row for row"
+        );
+    }
+
+    /// The ET0 side is day-max with provenance following the value,
+    /// mirroring the rain rule: a stale writer cannot pull a recorded
+    /// figure down, and the tag always names the writer that holds the
+    /// max.
+    #[tokio::test]
+    async fn et0_upsert_keeps_the_day_max_and_its_source() {
+        let s = fresh_store().await;
+        let day = chrono::Local::now().date_naive();
+        s.upsert_et0(day, 5.2, "localsky_engine").await.unwrap();
+        // A lower later write must not clobber down.
+        s.upsert_et0(day, 4.0, "station").await.unwrap();
+        let rows = s.et0_window_days(1).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            (rows[0].et0_mm - 5.2).abs() < 1e-9,
+            "got {}",
+            rows[0].et0_mm
+        );
+        assert_eq!(rows[0].source, "localsky_engine");
+        // A HIGHER later value moves both the figure and the tag.
+        s.upsert_et0(day, 6.1, "station").await.unwrap();
+        let rows = s.et0_window_days(1).await.unwrap();
+        assert!((rows[0].et0_mm - 6.1).abs() < 1e-9);
+        assert_eq!(rows[0].source, "station");
+    }
+
+    /// A row planted by the ET0 writer before any rain writer ran must
+    /// stay invisible to every rain consumer (its rain fields are
+    /// placeholders, not measurements), and the first rain write for
+    /// the day must supply the real prediction: the placeholder -1.0
+    /// never reaches the bias fit.
+    #[tokio::test]
+    async fn et0_first_then_rain_repairs_the_placeholder_prediction() {
+        let s = fresh_store().await;
+        let day = chrono::Local::now().date_naive();
+        s.upsert_et0(day, 5.0, "localsky_engine").await.unwrap();
+        // Rain consumers see nothing: the planted row is a 'none'
+        // placeholder with a sentinel prediction.
+        assert_eq!(s.recent(30).await.unwrap().len(), 0);
+        assert_eq!(s.observed_rain_window_days(7).await.unwrap().len(), 0);
+        assert_eq!(s.days_since_observed_rain(0.05).await.unwrap(), None);
+        // The day's rain write lands afterwards.
+        s.upsert(day, 0.30, 0.55, "gauge").await.unwrap();
+        let recent = s.recent(30).await.unwrap();
+        assert_eq!(recent.len(), 1);
+        assert!(
+            (recent[0].predicted_in - 0.30).abs() < 1e-9,
+            "the real prediction replaces the placeholder, got {}",
+            recent[0].predicted_in
+        );
+        assert!((recent[0].observed_in - 0.55).abs() < 1e-9);
+        // The recorded ET0 rides untouched beside the rain pair.
+        let rows = s.et0_window_days(1).await.unwrap();
+        assert!((rows[0].et0_mm - 5.0).abs() < 1e-9);
+    }
+
+    /// The reverse order: an ET0 write onto an existing rain row leaves
+    /// every rain field exactly as the rain writer set it.
+    #[tokio::test]
+    async fn rain_first_then_et0_leaves_the_rain_pair_alone() {
+        let s = fresh_store().await;
+        let day = chrono::Local::now().date_naive();
+        s.upsert(day, 0.40, 0.20, "gauge").await.unwrap();
+        s.upsert_et0(day, 4.8, "localsky_engine").await.unwrap();
+        let recent = s.recent(30).await.unwrap();
+        assert_eq!(recent.len(), 1);
+        assert!((recent[0].predicted_in - 0.40).abs() < 1e-9);
+        assert!((recent[0].observed_in - 0.20).abs() < 1e-9);
+        let win = s.observed_rain_window_by_source(1).await.unwrap();
+        assert!((win.gauge_in - 0.20).abs() < 1e-9);
+        let rows = s.et0_window_days(1).await.unwrap();
+        assert!((rows[0].et0_mm - 4.8).abs() < 1e-9);
+    }
+
+    /// The ET0 window read returns only days with a recorded value,
+    /// ascending, today inclusive, window bounded: a rain-only day is
+    /// absent evidence, not a zero.
+    #[tokio::test]
+    async fn et0_window_returns_only_recorded_days() {
+        let s = fresh_store().await;
+        let today = chrono::Local::now().date_naive();
+        s.upsert_et0(today, 5.5, "localsky_engine").await.unwrap();
+        s.upsert_et0(today - chrono::Duration::days(2), 4.2, "localsky_engine")
+            .await
+            .unwrap();
+        // Rain only: no ET0 evidence for this day.
+        s.upsert(today - chrono::Duration::days(1), 0.0, 0.10, "gauge")
+            .await
+            .unwrap();
+        // Outside the window.
+        s.upsert_et0(today - chrono::Duration::days(9), 6.0, "localsky_engine")
+            .await
+            .unwrap();
+        let rows = s.et0_window_days(7).await.unwrap();
+        assert_eq!(rows.len(), 2, "rain-only and out-of-window days stay out");
+        assert_eq!(rows[0].date, today - chrono::Duration::days(2));
+        assert!((rows[0].et0_mm - 4.2).abs() < 1e-9);
+        assert_eq!(rows[1].date, today);
+        assert!((rows[1].et0_mm - 5.5).abs() < 1e-9);
     }
 
     /// range() (the tuning scorecard's date-keyed read) excludes 'none'

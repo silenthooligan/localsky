@@ -33,18 +33,30 @@ schedule, only when the longer sequence still finishes before sunrise.
 When the raise cannot work, the report falls back to splitting the
 week's water across more sessions, or, when even daily capped sessions
 cannot deliver the configured weekly target, aligning the target with
-what the system can actually deliver. A soil deficit too large to
-refill in one run gets the same run-limit suggestion. While an active
-watering restriction caps runs below the zone's own limit, run-length
-suggestions pause and the report names the restriction's cap instead.
+what the system can actually deliver. On a zone the
+[soil model](irrigation-engine.md#the-soil-model) governs, the run
+being trimmed is the one-shot refill of the zone's soil deficit. When
+the per-run duration cap is the clamp, the run-limit raise is the whole
+suggestion chain there: session count and weekly target never shape a
+refill, so neither fallback is offered. When an explicitly set weekly
+target is the clamp instead (under the soil model a set target acts as
+a rolling 7-day delivery ceiling), the report suggests raising that
+target to the soil model's weekly demand estimate, or clearing it; an
+inferred target never caps and never draws this suggestion. While an
+active watering restriction caps runs below the zone's own limit,
+run-length suggestions pause and the report names the restriction's cap
+instead.
 
 **A water bucket that cannot be right.** From your soil texture, root
 depth, and the week's forecast demand, the engine computes how many days
-one filling of the root zone should last. A bucket that empties in under
-a day and a half, or lasts more than three weeks, points at a gross
-misconfiguration: usually a root-depth override or a texture one step
-off. The report only flags implausible setups; a plausible bucket is
-left alone.
+one filling of the root zone should last. A bucket that lasts more than
+three weeks points at a gross misconfiguration and draws a one-step
+suggestion: a drier texture, or restoring the species-default root depth
+when an override explains it. A small bucket only draws a suggestion
+when a root-depth override explains it. Sand and other fast-draining
+soils legitimately compute a day or less of demand, the engine tops them
+up daily, and texture now sets how much storm rain counts against the
+weekly target, so state your real soil and the report leaves it alone.
 
 **Drying drift** (needs a soil probe). During stretches of two days or
 more with no watering and no rain, your probe's drying rate is compared
@@ -81,9 +93,16 @@ against, one plain line per term with its source:
 - **Irrigation applied** over the last 7 days, from the run history,
   with the sessions remaining this week.
 - **Forecast credit** until the zone's next session, with the bias
-  correction applied, or the honest reason there is none (the next
+  correction applied, or the plain reason there is none (the next
   session is due now, or the bias model has too few rain days this
   month to correct anything).
+
+Every zone the weekly plan governs also carries a **soil model
+comparison** line: what the soil model would have watered this morning
+against what the weekly plan did. It is the running preview of the
+selectable [soil model](irrigation-engine.md#the-soil-model), on your
+own yard's numbers. A zone the soil model governs does not carry the
+line, because the soil plan is the plan there.
 
 When a suggestion fires, its evidence includes the full numeric
 breakdown (target, rain, applied, credit, remainder) so the numbers
@@ -127,7 +146,7 @@ Every check states exactly what it is missing rather than guessing: not
 enough completed runs, not enough qualifying dry stretches, too few
 probe readings, no clean watering events with a probe response. A zone
 without a soil probe shows which checks a probe would unlock. Zones
-bound to a live Home Assistant soil entity get the honest version too:
+bound to a live Home Assistant soil entity get the same plain statement:
 LocalSky keeps no local history for those bindings, so the probe checks
 are unavailable.
 

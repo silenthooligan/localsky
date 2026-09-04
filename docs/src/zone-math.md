@@ -4,11 +4,15 @@ Every zone's detail view shows the inputs behind tonight's planned
 minutes, because "trust me" is not a number.
 
 **Where the depth comes from.** Tonight's run length is decided by the
+zone's governing model. Under the default
 [weekly water balance](water-budget.md): a gross weekly target per zone,
 settled against observed rain, water already applied, and a
 probability-weighted forecast credit, with the remainder split across the
-sessions still expected this week. That page is where the arithmetic that
-produced the minutes lives.
+sessions still expected this week. Under the
+[soil model](irrigation-engine.md#the-soil-model): the zone's replayed
+soil deficit divided by the capture efficiency and the throughput, capped
+at the run limit. Those pages hold the arithmetic that produced the
+minutes.
 
 The panel is in two parts, because only two of its numbers reach the
 dispatch.
@@ -40,17 +44,19 @@ dispatch.
 
 ## Not part of tonight's minutes
 
-None of these four scales the run. Three are real outputs of the engine
-and feed the ETc figure and the soil projection, not the weekly balance.
-The fourth, the soil deficit, has no producer today and reads a dash.
+On a weekly-governed zone none of these four scales the run; they feed
+the ETc figure and the soil projection. On a soil-governed zone the
+panel moves the soil deficit and the capture efficiency above the line,
+because there the run length IS the deficit divided by the capture
+efficiency and the throughput.
 
-3. **Soil deficit (mm)**: how far the zone's soil sits below full. This
-   reads a dash on every current install, because no model computes it
-   yet. Its only producer was a Home Assistant integration LocalSky no
-   longer reads, and printing a 0.00 there told people their soil was
-   full on the strength of a number nothing measured. The per-zone
-   depletion model that would fill it is written but not yet wired to any
-   decision.
+3. **Soil deficit (mm)**: how far the zone's soil sits below full,
+   negative when the zone needs water. The soil model's replay of
+   measured ET, rain and completed runs computes it for every zone with
+   a species and a soil texture, whichever model governs; a dash appears
+   only where no bucket can be derived (env-var zone lists). Printing a
+   0.00 there used to tell people their soil was full on the strength of
+   a number nothing measured.
 4. **Crop coefficient (Kc)**: the species' seasonal multiplier on
    reference ET (see the grass species catalog). Hemisphere-aware:
    south of the equator the curve shifts six months.
@@ -60,7 +66,10 @@ The fourth, the soil deficit, has no producer today and reads a dash.
    current, often night-time, humidity), so a cool morning's humidity
    is never combined with a hot afternoon's peak to inflate the run.
 6. **Capture efficiency**: how much of the applied water lands in the
-   root zone (wind drift, overspray, runoff losses).
+   root zone (wind drift, overspray, runoff losses). Weekly-governed
+   zones show the fixed 0.70 the soil projection uses; soil-governed
+   zones show the configured `engine.capture_efficiency`, the number
+   each refill divides by.
 
 The panel prints no formula. It used to print one belonging to that Home
 Assistant integration, which matched nothing LocalSky computes, and which

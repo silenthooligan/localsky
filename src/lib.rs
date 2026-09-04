@@ -50,7 +50,8 @@ pub mod push_client;
 pub mod api;
 #[cfg(feature = "ssr")]
 pub mod auth;
-#[cfg(feature = "ssr")]
+// Config types, catalogs and the validator are pure and compile for the
+// browser too; only its disk-touching submodules are server-gated.
 pub mod config;
 #[cfg(feature = "ssr")]
 pub mod controllers;
@@ -62,7 +63,12 @@ pub mod devices;
 pub mod discovery;
 #[cfg(feature = "ssr")]
 pub mod docs_serve;
-#[cfg(feature = "ssr")]
+// The engine is pure arithmetic: no IO, no async, no database, in any of
+// its modules. It is shared so the UI can CALL it rather than carry a
+// second copy of what it computes; only `engine::scripting` (the Rhai
+// interpreter) stays server-side. What remains server-gated below is the
+// machinery around the engine that genuinely needs a server: the clock
+// and history the refresher owns, persistence, controllers, the API.
 pub mod engine;
 #[cfg(feature = "ssr")]
 pub mod ha_adopt;

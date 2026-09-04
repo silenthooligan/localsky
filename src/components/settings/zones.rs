@@ -159,6 +159,14 @@ pub fn SettingsZones() -> impl IntoView {
                                                     // shows as the placeholder so the owner can see what the zone waters on.
     let new_weekly_budget = RwSignal::new(String::new());
     let new_sessions = RwSignal::new(String::new());
+    // Per-day rain-credit cap (inches). Empty = derived from this zone's
+    // soil texture and root depth; the form shows the derived value as
+    // the placeholder so the owner can see what the zone clips at.
+    let new_rain_cap = RwSignal::new(String::new());
+    // Per-zone scheduling-model pin: "" = the engine default, else
+    // "weekly" | "soil". Same blank-follows-the-default pattern as the
+    // optional overrides above.
+    let new_sched_model = RwSignal::new(String::new());
     let new_controller = RwSignal::new(String::new());
     let new_station = RwSignal::new(String::new());
     let new_photo_url = RwSignal::new(String::new()); // optional zone photo
@@ -205,6 +213,8 @@ pub fn SettingsZones() -> impl IntoView {
                             new_max_run,
                             new_weekly_budget,
                             new_sessions,
+                            new_rain_cap,
+                            new_sched_model,
                             new_station,
                             new_photo_url,
                             new_soil_sensor,
@@ -278,6 +288,13 @@ pub fn SettingsZones() -> impl IntoView {
                             .map(|v| v.to_string())
                             .unwrap_or_default(),
                     );
+                    new_rain_cap.set(
+                        z.get("rain_credit_cap_in")
+                            .and_then(|v| v.as_f64())
+                            .map(|v| v.to_string())
+                            .unwrap_or_default(),
+                    );
+                    new_sched_model.set(gs("scheduling_model"));
                     new_controller.set(gs("controller_id"));
                     new_station.set(gs("controller_station"));
                     new_photo_url.set(gs("photo_url"));
@@ -308,8 +325,10 @@ pub fn SettingsZones() -> impl IntoView {
                 .and_then(|v| v.as_f64());
             let Some(lat) = lat else { return };
             seeded.set(true);
-            if lat.abs() >= 35.0 && new_species.get_untracked() == "st_augustine" {
-                new_species.set("tall_fescue".to_string());
+            let current = new_species.get_untracked();
+            let picked = crate::agronomy::climate_default_species(&current, lat);
+            if picked != current {
+                new_species.set(picked.to_string());
             }
         });
     }
@@ -488,6 +507,8 @@ pub fn SettingsZones() -> impl IntoView {
                     new_max_run=new_max_run
                     new_weekly_budget=new_weekly_budget
                     new_sessions=new_sessions
+                    new_rain_cap=new_rain_cap
+                    new_sched_model=new_sched_model
                     new_controller=new_controller
                     new_station=new_station
                     new_photo_url=new_photo_url
@@ -532,6 +553,8 @@ pub fn ZoneForm(
     new_max_run: RwSignal<String>,
     new_weekly_budget: RwSignal<String>,
     new_sessions: RwSignal<String>,
+    new_rain_cap: RwSignal<String>,
+    new_sched_model: RwSignal<String>,
     new_controller: RwSignal<String>,
     new_station: RwSignal<String>,
     new_photo_url: RwSignal<String>,
@@ -621,6 +644,8 @@ pub fn ZoneForm(
             new_max_run,
             new_weekly_budget,
             new_sessions,
+            new_rain_cap,
+            new_sched_model,
             new_station,
             new_photo_url,
             new_soil_sensor,
@@ -743,6 +768,40 @@ pub fn ZoneForm(
                 }
             }
         };
+        // Per-day rain-credit cap. Blank round-trips to null (the cap
+        // derived from soil texture and root depth), like the weekly
+        // target above. The server holds the value to 0.05..=5.0
+        // (zone_rain_credit_cap_range), so the same bound is enforced
+        // here rather than discovered as a 422 at save.
+        let rain_cap_value = new_rain_cap.get();
+        let rain_cap_json = if rain_cap_value.trim().is_empty() {
+            serde_json::Value::Null
+        } else {
+            match rain_cap_value.trim().parse::<f64>() {
+                Ok(v) if (0.05..=5.0).contains(&v) => serde_json::json!(v),
+                _ => {
+                    result_ok.set(false);
+                    result_msg.set(
+                        "Rain the soil can bank per day must be between 0.05 and 5 inches \
+                         (or blank for the value derived from the soil)"
+                            .into(),
+                    );
+                    return;
+                }
+            }
+        };
+        // Per-zone scheduling-model pin. Blank round-trips to null (the
+        // engine default governs); the segmented control only offers the
+        // two enum variants, so no free-text validation is needed here
+        // and the server's enum parse still gates a raw PUT.
+        let sched_model_json = {
+            let s = new_sched_model.get();
+            if s.trim().is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(s.trim().to_string())
+            }
+        };
         let precip_source = if precip.is_null() {
             "catalog"
         } else {
@@ -852,6 +911,8 @@ pub fn ZoneForm(
                     obj.insert("max_run_minutes".into(), max_run_json.clone());
                     obj.insert("weekly_budget_in".into(), weekly_budget_json.clone());
                     obj.insert("sessions_per_week".into(), sessions_json.clone());
+                    obj.insert("rain_credit_cap_in".into(), rain_cap_json.clone());
+                    obj.insert("scheduling_model".into(), sched_model_json.clone());
                     obj.insert(
                         "controller_id".into(),
                         serde_json::json!(new_controller.get()),
@@ -886,6 +947,8 @@ pub fn ZoneForm(
                 "max_run_minutes": max_run_json,
                 "weekly_budget_in": weekly_budget_json,
                 "sessions_per_week": sessions_json,
+                "rain_credit_cap_in": rain_cap_json,
+                "scheduling_model": sched_model_json,
                 "controller_id": new_controller.get(),
                 "controller_station": station,
                 "controller_zone_name": match vendor_name.clone() {
@@ -911,7 +974,7 @@ pub fn ZoneForm(
             })
         });
         if cap_raise_needs_confirm(max_run, prior_max_run) {
-            pending_cap_min.set(max_run.unwrap_or(60));
+            pending_cap_min.set(max_run.unwrap_or(crate::config::schema::DEFAULT_MAX_RUN_MINUTES));
             pending_zone_name.set(confirm_name);
             pending_commit.set(Some((slug, entry)));
             confirm_open.set(true);
@@ -1076,6 +1139,8 @@ pub fn ZoneForm(
             new_max_run,
             new_weekly_budget,
             new_sessions,
+            new_rain_cap,
+            new_sched_model,
             new_station,
             new_photo_url,
             new_soil_sensor,
@@ -1116,10 +1181,32 @@ pub fn ZoneForm(
         ))
     };
 
-    // The target the zone waters on while the two budget fields are blank,
-    // inferred from the slug exactly as the engine infers it, so the
-    // placeholder shows the number in effect rather than the word "default".
-    let inferred_target = move || inferred_weekly_target(&slugify(&new_slug.get()));
+    // The target the zone waters on while the two budget fields are
+    // blank, resolved from the species picker exactly as the engine
+    // resolves it, so the placeholder shows the number in effect and
+    // follows the picker live.
+    let inferred_target = move || inferred_weekly_target(&new_species.get());
+
+    // The per-day rain cap in effect while the cap field is blank,
+    // derived exactly as the engine derives it (the texture's FC-WP
+    // spread times the root depth): the stored root override when this
+    // zone carries one, else the species default from the shared
+    // agronomy profile. Tracks the form's live texture and species picks
+    // so the placeholder moves with them.
+    let derived_rain_cap = move || {
+        let root_override = editing_slug.get().and_then(|slug| {
+            config_json.with(|cfg| {
+                cfg.get("zones")
+                    .and_then(|z| z.get(&slug))
+                    .and_then(|z| z.get("root_depth_mm"))
+                    .and_then(|v| v.as_f64())
+            })
+        });
+        let root = root_override.unwrap_or_else(|| {
+            crate::agronomy::species_profile_by_slug(&new_species.get()).root_depth_mm
+        });
+        derived_rain_cap_in(&new_soil.get(), root)
+    };
 
     view! {
         <div id="zone-form-panel"><Panel title="Zone form".to_string()>
@@ -1422,9 +1509,55 @@ pub fn ZoneForm(
                 }}
             </FormField>
 
+            // The model pin leads the three fields whose meaning it
+            // changes (Weekly target, Sessions per week, the rain cap),
+            // so their helptexts read as refinements of a visible choice
+            // instead of three conditionals about a knob two fields
+            // further down. The "Engine default" option resolves what it
+            // means TODAY from the already-loaded config, so the choice
+            // reads as a fact instead of a pointer to another page.
+            <FormField
+                label="Scheduling model".to_string()
+                helptext="Engine default follows the setting on the Engine page. Weekly waters toward the weekly target in sessions. Soil waters when this zone's soil deficit crosses its trigger and refills it; cadence follows soil texture and roots, and a set weekly target acts as a ceiling.".to_string()
+                error=Signal::derive(|| None::<String>)
+            >
+                {move || {
+                    let engine_model = config_json.with(|cfg| {
+                        if cfg.is_null() {
+                            return None;
+                        }
+                        Some(
+                            cfg.get("engine")
+                                .and_then(|e| e.get("scheduling_model"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("weekly")
+                                .to_string(),
+                        )
+                    });
+                    let default_label = match engine_model.as_deref() {
+                        Some("soil") => "Engine default (Soil)",
+                        Some(_) => "Engine default (Weekly)",
+                        // Before the config loads, the plain label; the
+                        // resolved one takes over on load.
+                        None => "Engine default",
+                    };
+                    view! {
+                        <SegmentedControl
+                            value=new_sched_model
+                            options=vec![
+                                ("".into(), default_label.into()),
+                                ("weekly".into(), "Weekly".into()),
+                                ("soil".into(), "Soil".into()),
+                            ]
+                            aria_label="Scheduling model".to_string()
+                        />
+                    }
+                }}
+            </FormField>
+
             <FormField
                 label="Weekly target (inches a week)".to_string()
-                helptext="Gross weekly depth this zone should receive, rain included. This is the number that sizes every run. Blank = the default inferred from the zone name, shown in the box.".to_string()
+                helptext="Gross weekly depth this zone should receive. Weekly model: sizes every run, and rain counts toward the target. Soil model: a value set here becomes a ceiling on sprinkler water delivered over the trailing 7 days; rain does not count against the ceiling, and a blank or inferred target caps nothing. Blank = the default inferred from the zone name, shown in the box.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 <input
@@ -1441,7 +1574,7 @@ pub fn ZoneForm(
 
             <FormField
                 label="Sessions per week".to_string()
-                helptext="How many mornings the weekly target is split across, 1 to 7. Sessions space at floor(7 / sessions) days apart. Blank = the default inferred from the zone name, shown in the box.".to_string()
+                helptext="How many mornings the weekly target is split across, 1 to 7. Sessions space at floor(7 / sessions) days apart. Weekly model only: a soil-governed zone sets its own cadence from soil texture and root depth. Blank = the default inferred from the zone name, shown in the box.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 <input
@@ -1453,6 +1586,23 @@ pub fn ZoneForm(
                     placeholder=move || format!("(blank for the default {})", inferred_target().1)
                     prop:value=move || new_sessions.get()
                     on:input=move |ev| new_sessions.set(event_target_value(&ev))
+                />
+            </FormField>
+
+            <FormField
+                label="Rain the soil can bank per day (inches)".to_string()
+                helptext="The most rain one day can count against the weekly target. Rain beyond it in one day drains past the roots and does not count. Under the soil model the same cap limits how much of one day's rain the soil deficit credits. Blank = derived from this zone's soil texture and root depth, shown in the box; sandy soils want it low.".to_string()
+                error=Signal::derive(|| None::<String>)
+            >
+                <input
+                    type="number"
+                    class="ui-input"
+                    min="0.05"
+                    max="5"
+                    step="0.05"
+                    placeholder=move || format!("(blank for the derived {:.2})", derived_rain_cap())
+                    prop:value=move || new_rain_cap.get()
+                    on:input=move |ev| new_rain_cap.set(event_target_value(&ev))
                 />
             </FormField>
 
@@ -1996,17 +2146,25 @@ fn slugify(s: &str) -> String {
 /// edit-mode plus the free-text fields, and restores the default area;
 /// the species/soil/sprinkler/controller pickers retain their prior
 /// selection exactly as before.
-/// The weekly target a zone waters on when neither budget field is set:
-/// 0.50 in over one session for a slug naming a shrub, garden or bed, 1.00 in
-/// over two sessions for everything else. Mirrors the engine's own default
-/// (`refresher::agronomic_budget_default`); an ssr-side test pins the two
-/// together so the placeholder cannot drift from the number in effect.
-pub fn inferred_weekly_target(slug: &str) -> (f64, u32) {
-    if slug.contains("shrub") || slug.contains("garden") || slug.contains("bed") {
-        (0.50, 1)
-    } else {
-        (1.00, 2)
-    }
+/// The weekly target a zone waters on when neither budget field is set,
+/// from the SPECIES it is planted with. The engine's own resolution,
+/// called directly, so the placeholder cannot promise a target the
+/// engine does not water on.
+pub fn inferred_weekly_target(species_slug: &str) -> (f64, u32) {
+    crate::agronomy::default_weekly_target_in(species_slug)
+}
+
+/// The per-day rain-credit cap (inches) the engine derives while the
+/// zone's `rain_credit_cap_in` is blank: TAW = (field capacity - wilting
+/// point) x root depth, converted to inches. Reads the same shared
+/// `agronomy` catalog `engine::soil_catalog::taw_mm` reads, so the
+/// placeholder and the cap in effect come from one set of numbers rather
+/// than two that can drift. An unknown slug takes the sandy_loam spread,
+/// matching this form's own load default for an unset texture.
+pub fn derived_rain_cap_in(soil_slug: &str, root_depth_mm: f64) -> f64 {
+    // The engine's own function, called directly. Not a mirror of it.
+    let texture = crate::config::schema::SoilTexture::from_slug(soil_slug);
+    crate::engine::taw_mm(texture, root_depth_mm) / 25.4
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2019,6 +2177,8 @@ fn reset_zone_draft(
     new_max_run: RwSignal<String>,
     new_weekly_budget: RwSignal<String>,
     new_sessions: RwSignal<String>,
+    new_rain_cap: RwSignal<String>,
+    new_sched_model: RwSignal<String>,
     new_station: RwSignal<String>,
     new_photo_url: RwSignal<String>,
     new_soil_sensor: RwSignal<String>,
@@ -2033,6 +2193,8 @@ fn reset_zone_draft(
     new_max_run.set(String::new());
     new_weekly_budget.set(String::new());
     new_sessions.set(String::new());
+    new_rain_cap.set(String::new());
+    new_sched_model.set(String::new());
     new_station.set(String::new());
     new_photo_url.set(String::new());
     new_soil_sensor.set(String::new());
@@ -2050,8 +2212,8 @@ pub(crate) fn cap_raise_needs_confirm(
     new_minutes: Option<u32>,
     prior_minutes: Option<u32>,
 ) -> bool {
-    let new_eff = new_minutes.unwrap_or(60);
-    let prior_eff = prior_minutes.unwrap_or(60);
+    let new_eff = new_minutes.unwrap_or(crate::config::schema::DEFAULT_MAX_RUN_MINUTES);
+    let prior_eff = prior_minutes.unwrap_or(crate::config::schema::DEFAULT_MAX_RUN_MINUTES);
     new_eff > 60 && new_eff > prior_eff
 }
 
@@ -2666,19 +2828,32 @@ fn ZoneCard(
             .get("sessions_per_week")
             .and_then(|v| v.as_u64())
             .and_then(|v| u32::try_from(v).ok());
-        let (def_budget, def_sessions) = inferred_weekly_target(&slug);
+        let (def_budget, def_sessions) = inferred_weekly_target(&species_slug);
         let budget = set_budget.unwrap_or(def_budget);
         let sessions = set_sessions.unwrap_or(def_sessions);
         let sessions_word = if sessions == 1 { "session" } else { "sessions" };
         let origin = if set_budget.is_some() && set_sessions.is_some() {
             ""
         } else {
-            " (inferred from the name; set it in the editor)"
+            " (inferred from the species; set it in the editor)"
         };
         format!(
             "{} a week over {sessions} {sessions_word}{origin}",
             fmt_rain_amount(budget, prefs)
         )
+    };
+    // The 0.8.0 knobs, on the page whose job is scanning zone config: a
+    // zone pinned to a model was indistinguishable from its neighbors
+    // without opening Edit, and the rain cap had no read-only surface at
+    // all.
+    let sched_model_display = match zone.get("scheduling_model").and_then(|v| v.as_str()) {
+        Some("soil") => "Soil (pinned)".to_string(),
+        Some("weekly") => "Weekly (pinned)".to_string(),
+        _ => "Engine default".to_string(),
+    };
+    let rain_cap_display = match zone.get("rain_credit_cap_in").and_then(|v| v.as_f64()) {
+        Some(v) => format!("{} a day", fmt_rain_amount(v, prefs)),
+        None => "(derived from soil and roots)".to_string(),
     };
     let subtitle = format!(
         "{slug} \u{00b7} {} \u{00b7} {} \u{00b7} {}",
@@ -2804,6 +2979,8 @@ fn ZoneCard(
                     <SettingsKv label="Sprinkler" value=sprinkler_display/>
                     <SettingsKv label="Precip rate" value=precip_display/>
                     <SettingsKv label="Weekly target" value=weekly_target_display/>
+                    <SettingsKv label="Scheduling model" value=sched_model_display/>
+                    <SettingsKv label="Rain cap / day" value=rain_cap_display/>
                     <SettingsKv label="Controller" value=ctrl_display/>
                     <SettingsKv label="Soil sensor" value=soil_sensor_display/>
                 }.into_any())

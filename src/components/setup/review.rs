@@ -17,6 +17,36 @@ async fn fetch_draft() -> Option<serde_json::Value> {
     resp.json::<serde_json::Value>().await.ok()
 }
 
+/// The scheduling-model sentence for the final step. The apply stamps
+/// the Soil model on a genuine first install (no config on disk yet)
+/// and otherwise keeps whatever the config holds, so the biggest
+/// behavioral decision of the install is stated to the person applying
+/// it instead of being made silently. Derived from the draft: an
+/// explicit value names itself; an absent key states the apply rule.
+fn scheduling_model_sentence(draft: &serde_json::Value) -> String {
+    let model = draft
+        .get("config")
+        .and_then(|c| c.get("engine"))
+        .and_then(|e| e.get("scheduling_model"))
+        .and_then(|v| v.as_str());
+    match model {
+        Some("soil") => "Watering runs on the Soil model: each zone waters when its own \
+                         soil deficit crosses its trigger, and the first mornings assume \
+                         a dry yard while evidence accumulates. Change it any time under \
+                         Settings, then Engine."
+            .to_string(),
+        Some(_) => "Watering runs on the Weekly model: each zone waters toward its \
+                    weekly target split across sessions. Change it any time under \
+                    Settings, then Engine."
+            .to_string(),
+        None => "A first-time install starts on the Soil model: each zone waters when \
+                 its own soil deficit crosses its trigger, and the first mornings assume \
+                 a dry yard while evidence accumulates. A rerun over an existing setup \
+                 keeps its current model. Change it any time under Settings, then Engine."
+            .to_string(),
+    }
+}
+
 /// One summary row: section label, computed value text, Edit link target.
 fn summary_rows(draft: &serde_json::Value) -> Vec<(&'static str, String, &'static str)> {
     let cfg = draft.get("config").cloned().unwrap_or_default();
@@ -112,7 +142,9 @@ fn summary_rows(draft: &serde_json::Value) -> Vec<(&'static str, String, &'stati
         })
         .count();
     let sensors_text = if bound_count == 0 {
-        "None bound (weather-model only; bind probes in Settings -> Sensors any time)".into()
+        "None bound (fine either way: scheduling runs from weather evidence; bind probes \
+         in Settings -> Sensors any time)"
+            .into()
     } else {
         format!(
             "{bound_count} zone{} bound to a soil probe",
@@ -253,6 +285,19 @@ pub fn ReviewStep() -> impl IntoView {
                 view! { <div class="review-table">{rows}</div> }.into_any()
             }}
 
+            {move || {
+                let d = draft.get();
+                if d.is_null() {
+                    return ().into_any();
+                }
+                view! {
+                    <div class="review-summary">
+                        <p class="review-summary__line">{scheduling_model_sentence(&d)}</p>
+                    </div>
+                }
+                .into_any()
+            }}
+
             <div class="review-summary">
                 <p class="review-summary__line">
                     "Settings will be saved to "
@@ -327,5 +372,35 @@ async fn call_apply() -> Result<(), String> {
             Err(format!("Apply failed (HTTP {status}): {body}"))
         }
         Err(e) => Err(format!("Network error: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The final step states the model that will govern watering, in one
+    /// sentence, for all three draft shapes: explicit soil, explicit
+    /// weekly, and the absent key whose fate the apply decides (Soil on
+    /// a genuine first install, unchanged on a rerun).
+    #[test]
+    fn the_review_states_the_scheduling_model() {
+        let soil = serde_json::json!({ "config": { "engine": { "scheduling_model": "soil" } } });
+        let s = scheduling_model_sentence(&soil);
+        assert!(s.starts_with("Watering runs on the Soil model"), "{s}");
+        assert!(s.contains("assume a dry yard"), "{s}");
+
+        let weekly =
+            serde_json::json!({ "config": { "engine": { "scheduling_model": "weekly" } } });
+        let s = scheduling_model_sentence(&weekly);
+        assert!(s.starts_with("Watering runs on the Weekly model"), "{s}");
+
+        let absent = serde_json::json!({ "config": { "engine": {} } });
+        let s = scheduling_model_sentence(&absent);
+        assert!(
+            s.starts_with("A first-time install starts on the Soil model"),
+            "{s}"
+        );
+        assert!(s.contains("keeps its current model"), "{s}");
     }
 }

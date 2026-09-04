@@ -32,17 +32,64 @@
 // and on every Home Assistant install until the pass runs, so nothing renders.
 //
 // Dismissal is sticky in localStorage, keyed by the exact set adopted, the same
-// rule the default-budget notice follows. SSR and the first hydrate frame
-// render nothing: the dismissal is read in a hydrate-only effect, so the server
-// DOM and the first client DOM match.
-
-use leptos::prelude::*;
+// rule the default-budget notice follows.
+//
+// PRESENTATION lives in the centralized notice popup
+// (`components::notice_center`), which pops the notice once and keeps the
+// page clear; this module owns the copy, the identity key, and the stored
+// dismissal, all unchanged from the page-strip era so a dismissal recorded
+// then still holds.
 
 use crate::ha::snapshot::{HaAdoptedHelper, IrrigationSnapshot};
 
 /// localStorage key holding the adopted set the operator dismissed.
 #[cfg(feature = "hydrate")]
 const DISMISS_KEY: &str = "ha_adoption_banner_dismissed";
+
+/// The stored dismissal key ("" when none). Off the browser there is no
+/// storage and nothing was dismissed. Only the hydrate build has a call
+/// site (the popup center's mount effect), hence the cfg_attr.
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
+pub(crate) fn read_dismissed() -> String {
+    #[cfg(feature = "hydrate")]
+    {
+        if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+            if let Ok(Some(v)) = s.get_item(DISMISS_KEY) {
+                return v;
+            }
+        }
+    }
+    String::new()
+}
+
+/// Record a dismissal for the given adopted-set key.
+pub(crate) fn store_dismissed(key: &str) {
+    #[cfg(feature = "hydrate")]
+    {
+        if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+            let _ = s.set_item(DISMISS_KEY, key);
+        }
+    }
+    #[cfg(not(feature = "hydrate"))]
+    let _ = key;
+}
+
+/// The notice's copy, assembled exactly as the strip rendered it: the
+/// header, one line per handled helper, any live holds, then the
+/// derived closing sentences.
+pub(crate) fn lines(s: &IrrigationSnapshot) -> Vec<String> {
+    if awaiting_config(s) {
+        return vec![awaiting_config_line()];
+    }
+    let tz = s.timezone.clone();
+    let mut lines = vec![header_line(&s.ha_adoption)];
+    lines.extend(s.ha_adoption.iter().map(|h| helper_line(h, &tz)));
+    lines.extend(hold_lines(&s.ha_adoption, s.last_refresh_epoch, &tz));
+    lines.extend(still_exist_line(&s.ha_adoption));
+    lines.extend(still_live_line(&s.ha_adoption, s.controls_persisted));
+    lines.extend(automation_line(&s.ha_adoption));
+    lines
+}
 
 /// The four operator controls. They only adopt when a persistence database is
 /// mounted, so an install without one keeps reading them and the notice has to
@@ -59,77 +106,6 @@ const CONTROLS: [&str; 4] = [
 const PAUSE_UNTIL: &str = "input_datetime.irrigation_pause_until";
 const PAUSE_TOGGLE: &str = "input_boolean.irrigation_pause";
 
-#[component]
-pub fn HaAdoptionBanner(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
-    // The dismissed set key. Empty until the hydrate effect reads it, so SSR
-    // and the first client frame agree.
-    let dismissed: RwSignal<String> = RwSignal::new(String::new());
-
-    #[cfg(feature = "hydrate")]
-    Effect::new(move |_| {
-        if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
-            if let Ok(Some(v)) = s.get_item(DISMISS_KEY) {
-                dismissed.set(v);
-            }
-        }
-    });
-
-    let on_dismiss = move |_| {
-        let key = adopted_key(&snap.get_untracked());
-        #[cfg(feature = "hydrate")]
-        {
-            if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
-                let _ = s.set_item(DISMISS_KEY, &key);
-            }
-        }
-        dismissed.set(key);
-    };
-
-    move || {
-        let s = snap.get();
-        if !worth_showing(&s) || dismissed.get() == adopted_key(&s) {
-            return ().into_any();
-        }
-        let tz = s.timezone.clone();
-        let lines: Vec<String> = if awaiting_config(&s) {
-            vec![awaiting_config_line()]
-        } else {
-            let mut lines = vec![header_line(&s.ha_adoption)];
-            lines.extend(s.ha_adoption.iter().map(|h| helper_line(h, &tz)));
-            lines.extend(hold_lines(&s.ha_adoption, s.last_refresh_epoch, &tz));
-            lines.extend(still_exist_line(&s.ha_adoption));
-            lines.extend(still_live_line(&s.ha_adoption, s.controls_persisted));
-            lines.extend(automation_line(&s.ha_adoption));
-            lines
-        };
-        view! {
-            <div class="anomaly-banner" role="status" aria-live="polite">
-                <div class="anomaly-banner-icon" aria-hidden="true">"!"</div>
-                <div class="anomaly-banner-text">
-                    {lines
-                        .into_iter()
-                        .map(|l| {
-                            view! {
-                                <div class="anomaly-banner-line anomaly-banner-line--wrap">{l}</div>
-                            }
-                        })
-                        .collect_view()}
-                </div>
-                <a class="anomaly-banner-link" href="/settings/skip-rules">"Open Settings"</a>
-                <button
-                    type="button"
-                    class="anomaly-banner-dismiss"
-                    aria-label="Dismiss Home Assistant migration notice"
-                    on:click=on_dismiss
-                >
-                    "\u{2715}"
-                </button>
-            </div>
-        }
-        .into_any()
-    }
-}
-
 /// Whether this install has anything to be told.
 ///
 /// Anything retired or changed speaks, including a set where every helper was
@@ -137,7 +113,7 @@ pub fn HaAdoptionBanner(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
 /// what makes Rain delay work, and the read gate flipped for all seven. The
 /// notice used to require a helper to have been PRESENT, which silenced it on
 /// exactly the install where the pass concluded the most from the least.
-fn worth_showing(s: &IrrigationSnapshot) -> bool {
+pub(crate) fn worth_showing(s: &IrrigationSnapshot) -> bool {
     !s.ha_adoption.is_empty() || awaiting_config(s)
 }
 
@@ -436,7 +412,7 @@ fn render_value(entity: &str, raw: &str, tz: &str) -> String {
 /// Stable identity for the set this notice is about. Dismissal stores it, so
 /// silencing one migration never silences a different one: if a later release
 /// retires another read, the key changes and the notice speaks up again.
-fn adopted_key(s: &IrrigationSnapshot) -> String {
+pub(crate) fn adopted_key(s: &IrrigationSnapshot) -> String {
     if awaiting_config(s) {
         // Distinct from the empty set's key, which is what "nothing to show"
         // looks like: the empty key would read as already dismissed.

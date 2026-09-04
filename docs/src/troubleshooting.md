@@ -173,9 +173,9 @@ budget on every deployment, so those zones water for the first time on the
 first morning after the upgrade.
 
 If you never set a zone's weekly target, LocalSky infers one from the zone's
-name: 0.50 inches a week over one session for a zone whose name contains
-shrub, garden or bed, 1.00 inches over two sessions otherwise, each held to
-the zone's maximum run time. Open **Settings**, then **Zones**, open the zone
+species: 1.00 inches a week over two sessions for warm-season turf, scaled
+by each species' own peak crop coefficient, each held to the zone's maximum
+run time. Open **Settings**, then **Zones**, open the zone
 and set **Weekly target** and **Sessions per week**; blank shows the inferred
 default in the box. Check **Max run time** there too. The zone list marks
 every zone still running on an inferred target. To hold everything while you
@@ -189,17 +189,21 @@ Every skip is recorded per zone with its reason. Open the zone's skip breakdown 
 
 Open the zone card or the zone detail. A zone the weekly budget zeroed reads **ON HOLD** with the allocator's own sentence under it, naming which gate fired: the week is already covered by rain and prior watering, rain is forecast inside the next 24 hours, or the session spacing has not elapsed since the last run. That line is the answer; tune against it.
 
-Two settings decide the size: **Weekly target** (`weekly_budget_in`, the gross weekly target in inches including rain) and **Sessions per week** (`sessions_per_week`), both in the zone editor under Settings, then Zones. The rain-defer threshold is `engine.session_rain_defer_in`, default 0.10 inches over the next 24 forecast hours weighted by probability.
+A zone the [soil model](irrigation-engine.md#the-soil-model) governs holds with its own vocabulary: the soil bucket holds (depletion has not crossed the trigger), forecast rain refills the deficit, the morning window fits N of M zones that need water, or delivery is held to the weekly ceiling. The zone detail's Soil model block shows the deficit, the trigger, and when the zone waters next.
+
+For weekly-governed zones, two settings decide the size: **Weekly target** (`weekly_budget_in`, the gross weekly target in inches including rain) and **Sessions per week** (`sessions_per_week`), both in the zone editor under Settings, then Zones. The rain-defer threshold is `engine.session_rain_defer_in`, default 0.10 inches over the next 24 forecast hours weighted by probability; soil-governed zones defer by deficit instead.
+
+Rain counts per day, and each day is capped at what the zone's root zone can hold, so a single storm no longer covers a whole week on sandy soil: the covered line then names both figures, what fell and what counted. The cap derives from the zone's soil texture and root depth; **Rain the soil can bank per day** in the zone editor overrides it.
 
 ### I added a manual schedule and smart watering stopped for good
 
 A manual schedule's mode defaults to **Override**, which stops smart watering for that zone on every day the schedule covers. The zone card and the schedule's own card in Settings both say so now, naming the days. Delete the schedule to hand the zone back to the engine. Switching it to **Floor** keeps the scheduled run as a minimum, but a Floor run is watering like any other: it counts against the weekly target and it resets the session-spacing clock, so the engine can only add on top once `floor(7 / sessions_per_week)` days have passed since the scheduled run. On a zone whose schedule fires as often as its own session cadence, such as a weekly schedule on a 1-session-a-week bed, that leaves no eligible day and the zone reads ON HOLD naming the spacing every day.
 
-A schedule's water still counts against the zone's weekly budget on the days the schedule does not cover, because it is water the zone received. A schedule that already delivers the weekly target therefore leaves the engine nothing to add. Lower the zone's Weekly target, or delete the schedule, if you want the engine sizing the week instead.
+A schedule's water still counts against the zone's weekly budget on the days the schedule does not cover, because it is water the zone received, and applied water always counts in full (the per-day cap above is a rain rule: irrigation is sized to what the soil takes, a storm is not). A schedule that already delivers the weekly target therefore leaves the engine nothing to add. Lower the zone's Weekly target, or delete the schedule, if you want the engine sizing the week instead.
 
 ### The soil Deficit reads a dash
 
-Correct. No model on any current install computes a per-zone soil deficit; the field's only producer was a Home Assistant Smart Irrigation entity. Rather than print a 0.00 nothing measured, LocalSky shows a dash and publishes no Home Assistant sensor for it. Run decisions come from the weekly water budget, which is visible and explains itself.
+The deficit is computed for every zone with a species and a soil texture, from the soil model's replay of measured ET, rain, and completed runs (negative = needs water), so a dash appears only where no bucket can be derived: a zone list from `LOCALSKY_ZONES` with no per-zone agronomy configured. Add the zone under Settings, then Zones, and the deficit fills on the next refresh. Before 0.8.0 the field's only producer was a Home Assistant Smart Irrigation entity and every install showed a dash rather than a 0.00 nothing measured.
 
 ## Auth and reverse proxy
 

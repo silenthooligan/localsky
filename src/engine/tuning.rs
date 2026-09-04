@@ -321,27 +321,28 @@ fn round1(v: f64) -> f64 {
 /// session-capped fallback when the raise is blocked by the ceiling or the
 /// dispatch window.
 ///
-/// NOTE: nothing produces `deficit_cap_binding` today. Its input was the
-/// soil-deficit read the engine no longer makes, and the caller passes
-/// false. The branch below stays because the depletion model that would
-/// feed it is written and waiting to be wired; it is not reachable on any
-/// live install.
+/// The assembly feeds exactly one arm per zone by governing model: a
+/// weekly-governed row feeds `session_capped`, a soil-governed row feeds
+/// `deficit_cap_binding` from `SoilZonePlan.session_capped` (the cap
+/// shorted the refill) with the uncapped refill seconds beside it.
 #[derive(Debug, Clone, Default)]
 pub struct CapClampInputs {
-    /// WaterBudget.session_capped: the weekly allocator's per-session
-    /// seconds exceed the cap.
+    /// WaterBudget.session_capped on a WEEKLY-governed row: the
+    /// allocator's per-session seconds exceed the cap. The assembly
+    /// passes false for soil-governed zones, whose row flag means the
+    /// deficit arm below.
     pub session_capped: bool,
-    /// The one-shot soil-deficit refill exceeds the cap. No producer
-    /// today: the deficit read is gone, and ZoneMath.cap_binding now
-    /// carries the ALLOCATOR's cap, which `session_capped` above already
-    /// says. The caller passes false rather than conflating the two.
+    /// The one-shot soil-deficit refill exceeds the cap. Produced for
+    /// soil-governed zones from the soil plan's session_capped flag;
+    /// sessions/budget knobs never shape this refill, so the raise is
+    /// the whole remedy chain.
     pub deficit_cap_binding: bool,
     /// The allocator's desired seconds per WEEKLY session before the cap
     /// (WaterBudget.seconds_per_session). Only meaningful alongside
     /// `session_capped`; never the one-shot deficit refill.
     pub desired_seconds: Option<u32>,
-    /// The one-shot refill seconds when `deficit_cap_binding`; sizes the
-    /// deficit-path raise. None today, for the same reason.
+    /// The one-shot refill seconds (uncapped) when `deficit_cap_binding`;
+    /// sizes the deficit-path raise.
     pub deficit_refill_seconds: Option<u32>,
     /// The EFFECTIVE cap that clamps it (snapshot math value, already
     /// restriction-tightened when a restriction is active).
@@ -378,6 +379,21 @@ pub struct CapClampInputs {
     /// session sizing.
     pub weekly_budget_in: f64,
     pub throughput_mm_hr: f64,
+    /// The operator's EXPLICIT weekly target is clamping delivery on a
+    /// soil-governed zone this tick (the row's `soil_ceiling_binding`).
+    /// Inferred targets never set it (they never cap), so the ceiling
+    /// arm stays silent for them by construction. The assembly passes
+    /// false for weekly-governed zones.
+    pub ceiling_binding: bool,
+    /// The soil model's gross weekly demand estimate (inches): mean
+    /// daily crop ET x 7 / capture efficiency. Sizes the ceiling arm's
+    /// suggested target; None emits the raise-or-clear guidance with no
+    /// number (suggested_value null).
+    pub soil_weekly_demand_in: Option<f64>,
+    /// Replayed depletion and root-zone capacity (mm) for the ceiling
+    /// arm's evidence; absent when the row carries no bucket.
+    pub soil_depletion_mm: Option<f64>,
+    pub soil_taw_mm: Option<f64>,
 }
 
 /// Ceiling on a recommended per-zone run limit (minutes); matches the
@@ -430,7 +446,11 @@ fn evaluate_cap_raise(
     let suggested_min = suggested_cap_minutes(needed_seconds);
     // Covered first: a just-applied raise the snapshot has not caught up
     // with must read Pass, never a restriction line it does not have.
-    if inp.configured_max_run_minutes.unwrap_or(60) >= suggested_min {
+    if inp
+        .configured_max_run_minutes
+        .unwrap_or(crate::config::schema::DEFAULT_MAX_RUN_MINUTES)
+        >= suggested_min
+    {
         return CapRaise::Covered;
     }
     if inp.restriction_clamped {
@@ -471,6 +491,67 @@ pub fn check_cap_clamped(slug: &str, inp: &CapClampInputs) -> CheckOutcome {
     }
     if inp.run_days < CAP_MIN_RUN_DAYS {
         return CheckOutcome::Pass;
+    }
+    // The ceiling arm, checked first: when the operator's explicit
+    // weekly target is what clamps a soil-governed zone's delivery, the
+    // target is the binding knob and raising the run limit fixes
+    // nothing. Only an explicit target ever sets `ceiling_binding`
+    // (inferred targets never cap), and the CAP_MIN_RUN_DAYS gate above
+    // keeps a one-off clamp from firing this: the zone has watered on
+    // enough days in the window for the starvation to be a pattern.
+    if inp.ceiling_binding {
+        let suggested_in = inp
+            .soil_weekly_demand_in
+            .map(round1)
+            .filter(|v| *v > 0.0)
+            // A demand estimate at or under the configured target could
+            // not lift the ceiling; fall to the raise-or-clear guidance.
+            .filter(|v| {
+                inp.configured_weekly_budget_in
+                    .map(|cur| *v > cur)
+                    .unwrap_or(true)
+            });
+        let suggested = suggested_in.map(|v| json!(v)).unwrap_or(Value::Null);
+        let id = recommendation_id(slug, "weekly_budget_in", &suggested);
+        let mut evidence = vec![
+            "The weekly target acts as a delivery ceiling under the soil model, \
+             and it clamped this zone's refill."
+                .to_string(),
+            format!("Watered on {} day(s) in this window.", inp.run_days),
+        ];
+        if let (Some(dep), Some(taw)) = (inp.soil_depletion_mm, inp.soil_taw_mm) {
+            evidence.push(format!(
+                "Depletion sits at {dep:.1} of {taw:.1} mm root-zone capacity while the \
+                 ceiling binds."
+            ));
+        }
+        let headline = match suggested_in {
+            Some(v) => {
+                evidence.push(format!(
+                    "The soil model's demand estimate is {v:.1} in per week gross."
+                ));
+                format!(
+                    "Raise this zone's weekly target to {v:.1} in (or clear it) so \
+                     the soil model can refill the deficit; the target is capping delivery."
+                )
+            }
+            None => "Raise or clear this zone's weekly target so the soil model \
+                     can refill the deficit; the target is capping delivery."
+                .to_string(),
+        };
+        return CheckOutcome::Recommend(TuningRecommendation {
+            id,
+            field: "weekly_budget_in".to_string(),
+            current_value: inp
+                .configured_weekly_budget_in
+                .map(|v| json!(v))
+                .unwrap_or(Value::Null),
+            suggested_value: suggested,
+            companion_fields: Vec::new(),
+            headline,
+            evidence,
+            confidence: "medium".to_string(),
+        });
     }
     if !inp.session_capped {
         // A one-shot deficit refill over the cap: the run limit is the
@@ -634,7 +715,7 @@ pub fn check_cap_clamped(slug: &str, inp: &CapClampInputs) -> CheckOutcome {
         suggested_value: suggested,
         companion_fields: Vec::new(),
         headline: format!(
-            "Set the weekly water target to {deliverable_week_in:.1} in, the most this zone \
+            "Set the weekly target to {deliverable_week_in:.1} in, the most this zone \
              can deliver under its duration cap."
         ),
         evidence,
@@ -726,6 +807,18 @@ pub fn check_interval(slug: &str, inp: &IntervalInputs) -> CheckOutcome {
                 confidence: "medium".to_string(),
             });
         }
+    }
+    if too_small {
+        // A small bucket with no explaining override is not a misconfig:
+        // the driest textures legitimately sit below any fixed floor
+        // (sand at default turf roots computes about 0.9 days in summer),
+        // and the engine tops such zones up daily just fine. Suggesting a
+        // wetter texture here taught owners of sandy yards to misstate
+        // their soil, and texture now sets how much storm rain credits
+        // the weekly balance, so that lie has a real cost. A texture that
+        // is wrong in the dry direction shows up as storms not counting,
+        // which the owner can see; it needs no guess from this check.
+        return CheckOutcome::Pass;
     }
     let Some(next) = adjacent_texture_toward(inp.soil_texture, too_small) else {
         // No one-step texture move can fix the bucket size; gross-misconfig
@@ -1254,6 +1347,7 @@ pub fn assemble_zone(
     balance_lines: &[String],
     silenced: &[SilencedRec],
     now_epoch: i64,
+    cal: crate::engine::calendar::Calendar,
 ) -> ZoneTuning {
     let mut lines: Vec<String> = Vec::new();
     if run_day_count > 0 {
@@ -1321,7 +1415,7 @@ pub fn assemble_zone(
         let line = match silenced_hits.as_slice() {
             [(_, d)] => match (d.kind.as_str(), d.until_epoch) {
                 ("snooze", Some(until)) => {
-                    let date = crate::timeutil::local_date(until)
+                    let date = (cal.local_date)(until)
                         .map(|dt| dt.format("%Y-%m-%d").to_string())
                         .unwrap_or_default();
                     format!("1 suggestion snoozed until {date}")
@@ -1352,32 +1446,113 @@ pub fn assemble_zone(
 }
 
 // ---------------------------------------------------------------------
-// Water-balance provenance lines (honest-unknowns register)
+// Water-balance provenance lines (unknowns register)
 // ---------------------------------------------------------------------
+
+use crate::ha::snapshot::SOIL_DIVERGENCE_PREFIX;
+
+/// The soil-vs-weekly line, one per weekly-governed zone with a shadow
+/// bucket: what the soil model would have done this morning against
+/// what the weekly plan did. Same rounding as every minutes display
+/// ((s + 30) / 60). Returns the sentence plus whether the two models
+/// DIVERGE (different watering call, or different minutes): a divergent
+/// line names where the switch lives and the panel surfaces it beside
+/// the lead, while agreement stays a quiet data note. This is the one
+/// line that sells the opt-in decision, so it must not read as
+/// telemetry filed behind a disclosure. Pure so the copy is pinned by
+/// tests.
+pub fn soil_comparison_line(
+    soil_planned_seconds: u32,
+    weekly_today_seconds: u32,
+) -> (String, bool) {
+    let soil_min = (soil_planned_seconds + 30) / 60;
+    let weekly_min = (weekly_today_seconds + 30) / 60;
+    const ACTION: &str =
+        "Switch models under Settings, then Engine, or pin this zone in the zone editor.";
+    let p = SOIL_DIVERGENCE_PREFIX;
+    match (soil_planned_seconds > 0, weekly_today_seconds > 0) {
+        (true, true) if soil_min != weekly_min => (
+            format!(
+                "{p}water {soil_min} min this morning; the weekly plan \
+                 waters {weekly_min} min. {ACTION}"
+            ),
+            true,
+        ),
+        (true, true) => (
+            format!(
+                "The soil model and the weekly plan agree this morning: both water about \
+                 {soil_min} min."
+            ),
+            false,
+        ),
+        (true, false) => (
+            format!(
+                "{p}water {soil_min} min this morning; the weekly plan \
+                 holds today. {ACTION}"
+            ),
+            true,
+        ),
+        (false, true) => (
+            format!("{p}hold today; the weekly plan waters {weekly_min} min. {ACTION}"),
+            true,
+        ),
+        (false, false) => (
+            "The soil model and the weekly plan both hold today.".to_string(),
+            false,
+        ),
+    }
+}
 
 /// One line per balance term: value, source rung, window, and the
 /// specific insufficiency when a rung was skipped. Plain fact; the
 /// assembly appends these to the zone's lines. `day_total_upsell` adds
 /// the one informational line for US installs whose observed term has
 /// no gauge or radar day totals.
+/// A depth from MILLIMETERS for the balance lines, in the household's
+/// units. These lines are assembled server side, where a per-device
+/// override is not knowable, so they follow the deployment's configured
+/// units. They were baked in inches for everyone before this, which put
+/// inches in front of every metric household on the one panel that
+/// explains the watering arithmetic.
+fn balance_depth(mm: f64, rain_mm: bool) -> String {
+    if rain_mm {
+        format!("{mm:.1} mm")
+    } else {
+        format!("{:.2} in", mm / 25.4)
+    }
+}
+
 pub fn balance_term_lines(
     b: &crate::ha::snapshot::WaterBudget,
     day_total_upsell: bool,
+    rain_mm: bool,
 ) -> Vec<String> {
     let mut lines = Vec::new();
+    // Appended only when the per-day soil cap actually clipped a day
+    // (credited equals raw bit-for-bit otherwise), so an unclipped
+    // install sees the identical line it always saw.
+    let cap_suffix =
+        if b.rain_credit_cap_mm > 0.0 && b.observed_rain_credited_mm < b.observed_rain_mm {
+            format!(
+                "; {} counted after the per-day rain cap",
+                balance_depth(b.observed_rain_credited_mm, rain_mm)
+            )
+        } else {
+            String::new()
+        };
     match b.observed_rain_source.as_str() {
         "gauge" => lines.push(format!(
-            "Observed rain: {:.2} in over the last 7 days (gauge).",
-            b.observed_rain_mm / 25.4
+            "Observed rain: {} over the last 7 days (gauge){cap_suffix}.",
+            balance_depth(b.observed_rain_mm, rain_mm)
         )),
         "radar" => lines.push(format!(
-            "Observed rain: {:.2} in over the last 7 days (radar day totals).",
-            b.observed_rain_mm / 25.4
+            "Observed rain: {} over the last 7 days (radar day totals){cap_suffix}.",
+            balance_depth(b.observed_rain_mm, rain_mm)
         )),
         "model_archive" => lines.push(format!(
-            "Observed rain: {:.2} in over the last 7 days (model archive; no gauge or radar \
-             day totals on this install).",
-            b.observed_rain_mm / 25.4
+            "Observed rain: {} over the last 7 days (model archive; no gauge or radar \
+             day totals on this install){cap_suffix}.",
+            balance_depth(b.observed_rain_mm, rain_mm)
         )),
         _ => lines.push(
             "No observed-rain source; the balance runs on the corrected forecast alone."
@@ -1393,8 +1568,8 @@ pub fn balance_term_lines(
     }
     if b.applied_mm > 0.0 {
         lines.push(format!(
-            "Irrigation applied: {:.2} in over the last 7 days; {} of {} session(s) remain.",
-            b.applied_mm / 25.4,
+            "Irrigation applied: {} over the last 7 days; {} of {} session(s) remain.",
+            balance_depth(b.applied_mm, rain_mm),
             b.remaining_sessions,
             b.sessions_per_week
         ));
@@ -1405,17 +1580,17 @@ pub fn balance_term_lines(
         "bias_forecast" => {
             if (b.bias_sample_count as usize) >= crate::engine::forecast_bias::MIN_OBSERVATIONS {
                 lines.push(format!(
-                    "Forecast credit: {:.2} in until the next session (bias {:.2}x from {} \
+                    "Forecast credit: {} until the next session (bias {:.2}x from {} \
                      days).",
-                    b.forecast_credit_mm / 25.4,
+                    balance_depth(b.forecast_credit_mm, rain_mm),
                     b.bias_multiplier,
                     b.bias_sample_count
                 ));
             } else {
                 lines.push(format!(
-                    "Forecast credit: {:.2} in until the next session (no bias correction: \
+                    "Forecast credit: {} until the next session (no bias correction: \
                      need {} rain days this month, have {}).",
-                    b.forecast_credit_mm / 25.4,
+                    balance_depth(b.forecast_credit_mm, rain_mm),
                     crate::engine::forecast_bias::MIN_OBSERVATIONS,
                     b.bias_sample_count
                 ));
@@ -1428,12 +1603,22 @@ pub fn balance_term_lines(
 
 /// The numeric balance breakdown, appended to a recommendation's
 /// evidence so the numbers behind a suggestion are auditable in place.
+/// The rain term is the CREDITED figure whenever the soil cap clipped a
+/// day (equal to the raw sum otherwise): this line audits the
+/// arithmetic, and the remainder it prints derives from the credited
+/// term; the raw depth and the clip live in `balance_term_lines`.
 pub fn balance_breakdown_line(b: &crate::ha::snapshot::WaterBudget) -> String {
+    let rain_mm = if b.rain_credit_cap_mm > 0.0 && b.observed_rain_credited_mm < b.observed_rain_mm
+    {
+        b.observed_rain_credited_mm
+    } else {
+        b.observed_rain_mm
+    };
     format!(
         "Water balance: target {:.2} in; rain {:.2} in; applied {:.2} in; forecast credit \
          {:.2} in; remainder {:.2} in across {} remaining session(s).",
         b.weekly_budget_in,
-        b.observed_rain_mm / 25.4,
+        rain_mm / 25.4,
         b.applied_mm / 25.4,
         b.forecast_credit_mm / 25.4,
         b.needed_mm / 25.4,
@@ -1574,20 +1759,35 @@ mod tests {
 
     // ---- texture ladder ----
 
+    /// The ladder walks the FAO-56 profile: water held climbs from sand
+    /// to silt loam, then eases back through the clays, whose high
+    /// wilting point leaves less of what they hold available to a plant.
+    /// So silt loam is the top of the ladder and clay is the bottom end
+    /// of the heavy side, and every step is one texture.
     #[test]
-    fn adjacent_texture_handles_nonmonotonic_aw() {
+    fn adjacent_texture_walks_the_published_ladder() {
         // Sandy loam wanting more water moves to loam.
         assert_eq!(
             adjacent_texture_toward(SoilTexture::SandyLoam, true),
             Some(SoilTexture::Loam)
         );
-        // Loam has the highest AW of its neighbors; wanting more goes nowhere.
-        assert_eq!(adjacent_texture_toward(SoilTexture::Loam, true), None);
-        // Loam wanting less prefers the closer neighbor (silt loam 0.17 is
-        // closer to loam 0.22 than sandy loam 0.13).
+        // Loam sits between its neighbors, so both directions step.
+        assert_eq!(
+            adjacent_texture_toward(SoilTexture::Loam, true),
+            Some(SoilTexture::SiltLoam)
+        );
         assert_eq!(
             adjacent_texture_toward(SoilTexture::Loam, false),
-            Some(SoilTexture::SiltLoam)
+            Some(SoilTexture::SandyLoam)
+        );
+        // Silt loam holds the most: wanting more goes nowhere.
+        assert_eq!(adjacent_texture_toward(SoilTexture::SiltLoam, true), None);
+        // Clay is the dry end of the heavy side: wanting less goes
+        // nowhere, wanting more steps to clay loam.
+        assert_eq!(adjacent_texture_toward(SoilTexture::Clay, false), None);
+        assert_eq!(
+            adjacent_texture_toward(SoilTexture::Clay, true),
+            Some(SoilTexture::ClayLoam)
         );
         // Ladder ends stay one-step.
         assert_eq!(adjacent_texture_toward(SoilTexture::Sand, false), None);
@@ -1615,6 +1815,10 @@ mod tests {
             configured_weekly_budget_in: Some(1.0),
             weekly_budget_in: 1.0,
             throughput_mm_hr: 10.0,
+            ceiling_binding: false,
+            soil_weekly_demand_in: None,
+            soil_depletion_mm: None,
+            soil_taw_mm: None,
         }
     }
 
@@ -1689,6 +1893,93 @@ mod tests {
         };
         assert_eq!(rec.field, "sessions_per_week");
         assert_eq!(rec.suggested_value, json!(5));
+    }
+
+    /// The ceiling arm: a soil-governed zone the operator's explicit
+    /// weekly target starves gets a recommendation on the target field
+    /// itself, sized to the soil model's gross weekly demand when one is
+    /// available, and raise-or-clear guidance with a null value when it
+    /// is not. It outranks the deficit arm (the ceiling is the tighter
+    /// clamp when it binds), and the CAP_MIN_RUN_DAYS gate holds a
+    /// one-off clamp quiet.
+    #[test]
+    fn cap_check_ceiling_arm_recommends_raising_or_clearing_the_target() {
+        let mut inp = cap_inputs();
+        inp.session_capped = false;
+        inp.ceiling_binding = true;
+        inp.soil_weekly_demand_in = Some(2.03);
+        inp.soil_depletion_mm = Some(8.7);
+        inp.soil_taw_mm = Some(9.0);
+        let CheckOutcome::Recommend(rec) = check_cap_clamped("walk", &inp) else {
+            panic!("expected the ceiling recommendation");
+        };
+        assert_eq!(rec.field, "weekly_budget_in");
+        assert_eq!(rec.suggested_value, json!(2.0));
+        assert_eq!(rec.current_value, json!(1.0));
+        assert!(rec.headline.contains("or clear it"), "{}", rec.headline);
+        assert_eq!(rec.confidence, "medium");
+        assert!(
+            rec.evidence.iter().any(|e| e.contains("delivery ceiling")),
+            "{:?}",
+            rec.evidence
+        );
+        assert!(
+            rec.evidence.iter().any(|e| e.contains("8.7 of 9.0 mm")),
+            "{:?}",
+            rec.evidence
+        );
+
+        // No demand estimate: raise-or-clear guidance, null value.
+        inp.soil_weekly_demand_in = None;
+        let CheckOutcome::Recommend(rec) = check_cap_clamped("walk", &inp) else {
+            panic!("expected the null-value guidance");
+        };
+        assert_eq!(rec.suggested_value, Value::Null);
+        assert!(
+            rec.headline.starts_with("Raise or clear"),
+            "{}",
+            rec.headline
+        );
+
+        // A demand estimate at or under the current target cannot lift
+        // the ceiling: same null guidance instead of a no-op number.
+        inp.soil_weekly_demand_in = Some(0.9);
+        let CheckOutcome::Recommend(rec) = check_cap_clamped("walk", &inp) else {
+            panic!("expected the null-value guidance");
+        };
+        assert_eq!(rec.suggested_value, Value::Null);
+
+        // The ceiling outranks the deficit arm when both bind.
+        inp.soil_weekly_demand_in = Some(2.03);
+        inp.deficit_cap_binding = true;
+        inp.deficit_refill_seconds = Some(7200);
+        let CheckOutcome::Recommend(rec) = check_cap_clamped("walk", &inp) else {
+            panic!("expected the ceiling recommendation over the deficit arm");
+        };
+        assert_eq!(rec.field, "weekly_budget_in");
+
+        // The persistence gate holds a one-off clamp quiet.
+        let mut early = cap_inputs();
+        early.session_capped = false;
+        early.ceiling_binding = true;
+        early.run_days = CAP_MIN_RUN_DAYS - 1;
+        assert!(matches!(
+            check_cap_clamped("walk", &early),
+            CheckOutcome::Pass
+        ));
+    }
+
+    /// Inferred targets never cap, so `ceiling_binding` is never set for
+    /// them and the ceiling arm stays silent: the flag defaulted false
+    /// walks the existing arms untouched.
+    #[test]
+    fn cap_check_inferred_targets_never_reach_the_ceiling_arm() {
+        let mut inp = cap_inputs();
+        inp.session_capped = false;
+        assert!(matches!(
+            check_cap_clamped("walk", &inp),
+            CheckOutcome::Pass
+        ));
     }
 
     #[test]
@@ -1814,6 +2105,119 @@ mod tests {
         assert_eq!(check_cap_clamped("back_yard", &inp), CheckOutcome::Pass);
     }
 
+    /// The comparison line, every shape: the report's copy is
+    /// user-facing and the minutes use the same (s + 30) / 60 rounding
+    /// every other minutes display uses. Divergence carries the action
+    /// (where the switch lives) and flags true so the zone panel can
+    /// surface it beside the lead; agreement stays a quiet note.
+    #[test]
+    fn soil_comparison_line_covers_every_shape() {
+        assert_eq!(
+            soil_comparison_line(1560, 900),
+            (
+                "The soil model would water 26 min this morning; the weekly plan waters \
+                 15 min. Switch models under Settings, then Engine, or pin this zone in \
+                 the zone editor."
+                    .to_string(),
+                true
+            )
+        );
+        assert_eq!(
+            soil_comparison_line(1560, 0),
+            (
+                "The soil model would water 26 min this morning; the weekly plan holds \
+                 today. Switch models under Settings, then Engine, or pin this zone in \
+                 the zone editor."
+                    .to_string(),
+                true
+            )
+        );
+        assert_eq!(
+            soil_comparison_line(0, 900),
+            (
+                "The soil model would hold today; the weekly plan waters 15 min. Switch \
+                 models under Settings, then Engine, or pin this zone in the zone editor."
+                    .to_string(),
+                true
+            )
+        );
+        // Agreement, both shapes: quiet, no action sentence, and never
+        // the divergence prefix the panel keys on.
+        assert_eq!(
+            soil_comparison_line(0, 0),
+            (
+                "The soil model and the weekly plan both hold today.".to_string(),
+                false
+            )
+        );
+        let (line, diverges) = soil_comparison_line(1545, 1560);
+        assert_eq!(
+            line,
+            "The soil model and the weekly plan agree this morning: both water about \
+             26 min."
+        );
+        assert!(!diverges);
+        assert!(!line.starts_with(SOIL_DIVERGENCE_PREFIX));
+    }
+
+    /// The contract the zone Tuning panel places lines by: the returned
+    /// flag and the prefix agree on EVERY shape. The panel re-derives
+    /// divergence from the prefix alone, so a copy edit that broke this
+    /// pairing would file the line that sells the opt-in behind the
+    /// data-notes disclosure with nothing failing.
+    #[test]
+    fn the_divergence_flag_and_the_prefix_never_disagree() {
+        for (soil_s, weekly_s) in [
+            (1560, 900),
+            (1560, 0),
+            (0, 900),
+            (0, 0),
+            (1545, 1560),
+            (900, 900),
+        ] {
+            let (line, diverges) = soil_comparison_line(soil_s, weekly_s);
+            assert_eq!(
+                line.starts_with(SOIL_DIVERGENCE_PREFIX),
+                diverges,
+                "({soil_s}, {weekly_s}) -> {line}"
+            );
+        }
+    }
+
+    /// A metric household reads the balance panel in millimetres. These
+    /// lines are assembled server side and were baked in inches for
+    /// everyone, so the one panel that explains the watering arithmetic
+    /// spoke imperial to every metric yard.
+    #[test]
+    fn the_balance_lines_speak_the_households_units() {
+        let b = crate::ha::snapshot::WaterBudget {
+            observed_rain_mm: 25.4,
+            observed_rain_credited_mm: 25.4,
+            observed_rain_source: "gauge".into(),
+            applied_mm: 12.7,
+            forecast_credit_mm: 5.0,
+            forecast_credit_source: "forecast".into(),
+            sessions_per_week: 2,
+            remaining_sessions: 1,
+            ..Default::default()
+        };
+        let imperial = balance_term_lines(&b, false, false).join(" ");
+        assert!(imperial.contains("1.00 in"), "{imperial}");
+        assert!(!imperial.contains("mm"), "{imperial}");
+
+        let metric = balance_term_lines(&b, false, true).join(" ");
+        assert!(metric.contains("25.4 mm"), "{metric}");
+        assert!(
+            !metric.contains(" in "),
+            "no inches left for a metric household: {metric}"
+        );
+        // Same sentences, same order: only the numbers change.
+        assert_eq!(
+            balance_term_lines(&b, false, false).len(),
+            balance_term_lines(&b, false, true).len()
+        );
+    }
+
     #[test]
     fn cap_check_reports_no_runs_as_insufficient() {
         let mut inp = cap_inputs();
@@ -1884,16 +2288,35 @@ mod tests {
     }
 
     #[test]
-    fn interval_flags_texture_when_no_override_set() {
+    fn honest_sand_never_draws_a_texture_suggestion() {
+        // Issue #9: sand at default depth computes ~0.9 days of demand,
+        // which is how coastal sand really behaves. The old too-small
+        // texture step ("try loamy sand") taught the reporter to misstate
+        // his soil, and texture now drives rain crediting, so the honest
+        // value must pass clean.
         let mut inp = interval_inputs();
-        // Sand at default depth: RAW = 0.06*150*0.5 = 4.5 mm -> 0.9 days.
         inp.soil_texture = SoilTexture::Sand;
+        assert_eq!(check_interval("back_yard", &inp), CheckOutcome::Pass);
+    }
+
+    #[test]
+    fn oversized_bucket_still_draws_a_drier_texture_step() {
+        // The too-large direction keeps its texture suggestion: a bucket
+        // claiming a month of demand is a gross misconfig, and nagging
+        // toward drier soil carries no lie incentive.
+        // Loam, not clay: clay is the dry end of the heavy side of the
+        // ladder, has no drier one-step neighbor, and stays quiet by
+        // design. Loam at 0.2 mm/day computes ~56 days and steps down to
+        // sandy loam.
+        let mut inp = interval_inputs();
+        inp.soil_texture = SoilTexture::Loam;
+        inp.mean_daily_etc_mm = Some(0.2);
         let out = check_interval("back_yard", &inp);
         let CheckOutcome::Recommend(rec) = out else {
             panic!("expected a recommendation, got {out:?}");
         };
         assert_eq!(rec.field, "soil_texture");
-        assert_eq!(rec.suggested_value, json!("loamy_sand"));
+        assert_eq!(rec.suggested_value, json!("sandy_loam"));
     }
 
     #[test]
@@ -2332,6 +2755,7 @@ mod tests {
             &[],
             &[],
             0,
+            crate::engine::calendar::Calendar::utc(),
         );
         assert_eq!(z.status, "recommendation");
         assert_eq!(z.recommendation.unwrap().field, "sessions_per_week");
@@ -2353,6 +2777,7 @@ mod tests {
             &[],
             &[],
             0,
+            crate::engine::calendar::Calendar::utc(),
         );
         assert_eq!(z.recommendation.unwrap().field, "root_depth_mm");
     }
@@ -2376,6 +2801,7 @@ mod tests {
             &[],
             &[],
             0,
+            crate::engine::calendar::Calendar::utc(),
         );
         assert_eq!(z.status, "ok");
         assert!(z.lines.iter().any(|l| l.contains("Watered 3 time(s)")));
@@ -2402,6 +2828,7 @@ mod tests {
             &[],
             &[],
             0,
+            crate::engine::calendar::Calendar::utc(),
         );
         assert!(z
             .lines
@@ -2418,6 +2845,7 @@ mod tests {
             &[],
             &[],
             0,
+            crate::engine::calendar::Calendar::utc(),
         );
         assert!(z
             .lines
@@ -2444,6 +2872,7 @@ mod tests {
             &[],
             &[],
             0,
+            crate::engine::calendar::Calendar::utc(),
         );
         assert_eq!(z.status, "insufficient_data");
     }
@@ -2482,6 +2911,7 @@ mod tests {
             &[],
             &silenced,
             now,
+            crate::engine::calendar::Calendar::utc(),
         );
         assert_eq!(
             z.recommendation.as_ref().unwrap().field,
@@ -2521,6 +2951,7 @@ mod tests {
             &[],
             &[permanent("max_run_minutes")],
             now,
+            crate::engine::calendar::Calendar::utc(),
         );
         assert!(z.recommendation.is_none(), "total silencing on the wire");
         assert_eq!(z.status, "ok");
@@ -2561,6 +2992,7 @@ mod tests {
             &[],
             &sl,
             now,
+            crate::engine::calendar::Calendar::utc(),
         );
         assert!(z.recommendation.is_none());
         assert!(z
@@ -2580,6 +3012,7 @@ mod tests {
             &[],
             &sl,
             until + 1,
+            crate::engine::calendar::Calendar::utc(),
         );
         assert!(z.recommendation.is_some());
         assert!(!z.dismissed);
@@ -2599,6 +3032,7 @@ mod tests {
             &[],
             &[drifted],
             now,
+            crate::engine::calendar::Calendar::utc(),
         );
         assert!(z.recommendation.is_some());
     }
@@ -2626,9 +3060,67 @@ mod tests {
             &balance,
             &[permanent("max_run_minutes")],
             now,
+            crate::engine::calendar::Calendar::utc(),
         );
         let n = z.lines.len();
         assert!(z.lines[n - 2].starts_with("Observed rain:"));
         assert_eq!(z.lines[n - 1], "1 suggestion dismissed");
+    }
+
+    /// The observed-rain line names the credited figure ONLY when the
+    /// per-day soil cap clipped a day; an unclipped install (credited ==
+    /// raw) keeps the identical line it always printed, and the numeric
+    /// breakdown audits with the credited term so its arithmetic adds
+    /// up to the remainder it prints.
+    #[test]
+    fn balance_rain_line_names_the_soil_cap_only_when_clipped() {
+        let unclipped = crate::ha::snapshot::WaterBudget {
+            observed_rain_mm: 0.4 * 25.4,
+            observed_rain_credited_mm: 0.4 * 25.4,
+            rain_credit_cap_mm: 9.0,
+            observed_rain_source: "gauge".into(),
+            ..Default::default()
+        };
+        let lines = balance_term_lines(&unclipped, false, false);
+        assert_eq!(
+            lines[0],
+            "Observed rain: 0.40 in over the last 7 days (gauge)."
+        );
+        assert!(
+            balance_breakdown_line(&unclipped).contains("rain 0.40 in"),
+            "{}",
+            balance_breakdown_line(&unclipped)
+        );
+
+        let clipped = crate::ha::snapshot::WaterBudget {
+            observed_rain_mm: 1.2 * 25.4,
+            observed_rain_credited_mm: 9.0,
+            rain_credit_cap_mm: 9.0,
+            observed_rain_source: "gauge".into(),
+            ..Default::default()
+        };
+        let lines = balance_term_lines(&clipped, false, false);
+        assert_eq!(
+            lines[0],
+            "Observed rain: 1.20 in over the last 7 days (gauge); 0.35 in counted after \
+             the per-day rain cap."
+        );
+        assert!(
+            balance_breakdown_line(&clipped).contains("rain 0.35 in"),
+            "{}",
+            balance_breakdown_line(&clipped)
+        );
+
+        // A legacy row (cap 0 = unknown) never grows the suffix.
+        let legacy = crate::ha::snapshot::WaterBudget {
+            observed_rain_mm: 1.2 * 25.4,
+            observed_rain_source: "gauge".into(),
+            ..Default::default()
+        };
+        let lines = balance_term_lines(&legacy, false, false);
+        assert_eq!(
+            lines[0],
+            "Observed rain: 1.20 in over the last 7 days (gauge)."
+        );
     }
 }

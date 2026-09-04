@@ -282,7 +282,62 @@ use serde::{Deserialize, Serialize};
 /// its own (0..50 mph, 20..60 F, 0..1 in), all inside the server's, so no
 /// slider value is refused; a write outside the server's range from any
 /// other client is refused there.
-pub const API_VERSION: &str = "1.25.0";
+/// 1.26.0: single-day rain stops out-crediting the soil. Minor, following
+/// the 1.25.0 precedent. Additive fields on water_budgets[] rows:
+/// observed_rain_credited_mm (the trailing rain the balance actually
+/// offset, each day held to the cap before summing; equals
+/// observed_rain_mm whenever no day clipped), rain_credit_cap_mm (the
+/// per-day cap in effect, mm; 0 on JSON from an older producer =
+/// unknown/legacy), and rain_cap_inferred (true when the cap was derived
+/// from soil texture and root depth rather than set). observed_rain_mm
+/// keeps carrying the RAW trailing sum. Behavior change with no shape
+/// change: each observed day and each forward forecast-credit day is
+/// capped at the zone's root-zone capacity (TAW = (field capacity -
+/// wilting point) x root depth), so a single day's rain beyond what the
+/// root zone can bank no longer credits the weekly balance and
+/// today_seconds / today_reason move for storm weeks; the covered reason
+/// string is unchanged whenever no day clipped. New ZoneConfig field
+/// rain_credit_cap_in (inches, 0.05..=5.0, null = derived) rides GET/PUT
+/// /config and the config schema; new validation error
+/// zone_rain_credit_cap_range; POST /config/zones/apply accepts the
+/// field with the same band; a value already on disk is clamped at load.
+/// No existing response shape changes.
+/// 1.27.0: the soil scheduling model. Minor, following the 1.25.0
+/// precedent: additive fields, and a behavior change only for zones
+/// opted into the soil model. zones[].bucket_mm and math.bucket_mm gain
+/// their producer (the soil model's evidence replay; negative = needs
+/// water; still null where no bucket can be derived), so the manifest's
+/// gated <slug>_soil_bucket descriptor and the MQTT bucket sensor
+/// publish again on zones with agronomy config. Additive fields on
+/// water_budgets[] rows: scheduling_model ("weekly" | "soil"; empty on
+/// older JSON), soil_depletion_mm / soil_taw_mm / soil_raw_mm (null
+/// where no bucket), soil_due, soil_planned_seconds (shadow figure
+/// under weekly; under soil the POST-admission plan, window admission
+/// applied, 0 when deferred with soil_deferred_reason carrying the
+/// hold), soil_deferred_reason, soil_ceiling_binding. New config:
+/// engine.scheduling_model (absent = never chosen, follows the shipped
+/// default, weekly today, and the key is omitted from GET while unset
+/// so a round-tripped body cannot stamp the default in as a choice;
+/// the wizard writes soil for new installs) and
+/// ZoneConfig.scheduling_model (null = engine default), both on
+/// GET/PUT /config, the schema, and the per-field apply. Weekly-governed rows are byte-identical to 1.26.0 apart from
+/// the additive fields and ONE declared value change: the run-evidence
+/// fetch widened to the soil replay window, so last_run_epoch (the
+/// water_budgets row, zones[].last_run_epoch, and the zone detail's
+/// last-ran line) now populates for a zone whose newest run ended 8-15
+/// days ago, where the 7-day fetch read 0. Planned seconds, reasons,
+/// session spacing, and forecast credit are unchanged (min interval is
+/// at most 7 days). A soil-governed zone's today_seconds /
+/// today_reason / session_capped come from the soil plan.
+/// New endpoints (registered only when the history database is
+/// mounted): GET /irrigation/soil-invite answers whether the soil
+/// opt-in offer shows on this install ({eligible}; when eligible also
+/// state "open" | "snoozed" | "dismissed", until_epoch, and the
+/// shadow_zones / deficit_zones / differs_today counts the popup
+/// names), and POST /irrigation/soil-invite/dismiss {kind: "snooze" |
+/// "permanent"} records the choice server side (privileged, same
+/// posture as tuning/dismiss). No existing response shape changes.
+pub const API_VERSION: &str = "1.27.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {

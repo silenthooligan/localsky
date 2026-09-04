@@ -6,17 +6,17 @@ Pick texture per zone in the zone editor. If unsure, use the [USDA texture trian
 
 ## Catalog
 
-Values per FAO-56 Table 19 + USDA NRCS Part 652 Table 11-3.
+Water holding per FAO-56 Table 19 (Allen et al., 1998); infiltration per USDA NRCS Part 652 Table 11-3. Every FC and WP below sits inside the range Table 19 publishes for that class, and a test in the engine keeps it that way.
 
 | Texture | FC (m³/m³) | WP (m³/m³) | AW (mm/m) | Infil flat (mm/hr) | Infil 3-5% (mm/hr) | Infil >5% (mm/hr) |
 |---|---:|---:|---:|---:|---:|---:|
 | Sand          | 0.09 | 0.03 |  60 | 50 | 35 | 25 |
 | Loamy sand    | 0.14 | 0.06 |  80 | 35 | 25 | 18 |
 | Sandy loam    | 0.23 | 0.10 | 130 | 25 | 18 | 12 |
-| Loam          | 0.34 | 0.12 | 220 | 13 | 10 |  7 |
+| Loam          | 0.27 | 0.12 | 150 | 13 | 10 |  7 |
 | Silt loam     | 0.32 | 0.15 | 170 | 10 |  8 |  5 |
-| Clay loam     | 0.39 | 0.20 | 190 |  8 |  6 |  4 |
-| Clay          | 0.42 | 0.25 | 170 |  5 |  4 |  3 |
+| Clay loam     | 0.36 | 0.20 | 160 |  8 |  6 |  4 |
+| Clay          | 0.38 | 0.24 | 140 |  5 |  4 |  3 |
 
 ## How the values map into the engine
 
@@ -26,7 +26,7 @@ Values per FAO-56 Table 19 + USDA NRCS Part 652 Table 11-3.
 TAW_mm = (FC - WP) * root_depth_mm
 ```
 
-This is the depth of water the zone can hold between field capacity (fully wet, no gravity drainage) and the wilting point (so dry the plant gives up). St. Augustine on sandy loam at the default 150 mm root depth: TAW = (0.23 - 0.10) * 150 = 19.5 mm. Tall fescue on loam at its 250 mm default depth: TAW = (0.34 - 0.12) * 250 = 55 mm, nearly triple the buffer.
+This is the depth of water the zone can hold between field capacity (fully wet, no gravity drainage) and the wilting point (so dry the plant gives up). St. Augustine on sandy loam at the default 150 mm root depth: TAW = (0.23 - 0.10) * 150 = 19.5 mm. Tall fescue on loam at its 250 mm default depth: TAW = (0.27 - 0.12) * 250 = 37.5 mm, nearly double the buffer.
 
 ### Readily Available Water (RAW)
 

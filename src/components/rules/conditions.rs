@@ -12,7 +12,7 @@
 use leptos::prelude::*;
 
 use crate::components::ui::Button;
-use crate::ha::snapshot::{IrrigationSnapshot, SkipCheck};
+use crate::ha::snapshot::IrrigationSnapshot;
 
 /// (value, label, unit) for every metric a comparison can read. `value`
 /// must match the backend `Metric` serde (snake_case) exactly.
@@ -53,37 +53,6 @@ struct Row {
     metric: String,
     op: String,
     value: f64,
-}
-
-/// Live value of a metric from the snapshot's skip_check, for the preview.
-/// `zone_soil_pct` is per-zone (no single value) so it's not previewable.
-fn metric_live(m: &str, s: &SkipCheck) -> Option<f64> {
-    Some(match m {
-        // Mirrors engine::conditions: unreported probability reads as 100
-        // (full weight), so the preview agrees with the live evaluation.
-        "rain_prob_tomorrow" => f64::from(s.rain_tomorrow_prob_pct.unwrap_or(100)),
-        "rain_next4h_in" => s.rain_next_4h_in,
-        "rain_today_in" => s.rain_today_in,
-        "rain3day_weighted_in" => s.rain_3day_weighted_in,
-        "wind_now_mph" => s.wind_now_mph,
-        "wind_max_today_mph" => s.wind_max_today_mph,
-        "temp_now_f" => s.temp_now_f,
-        "temp_min24h_f" => s.temp_min_24h_f,
-        "temp_max3day_f" => s.temp_max_3day_f,
-        "humidity_now_pct" => s.humidity_now_pct,
-        "days_since_rain" => s.days_since_significant_rain as f64,
-        _ => return None,
-    })
-}
-
-fn op_apply(op: &str, a: f64, b: f64) -> bool {
-    match op {
-        "gt" => a > b,
-        "gte" => a >= b,
-        "lt" => a < b,
-        "lte" => a <= b,
-        _ => false,
-    }
 }
 
 /// Human one-liner for a stored rule's condition + action (list view).
@@ -563,29 +532,63 @@ fn ConditionRuleEditor(
         on_done.run(());
     };
 
-    // Live "would fire now?", evaluate the flat rows against skip_check.
+    // Live "would fire now?", answered by the ENGINE's own evaluator.
+    //
+    // This used to resolve each metric and apply each operator here, a
+    // second implementation of `engine::conditions` that had already lost
+    // its three-valued logic: it returned a number for the 24-hour low
+    // whether or not the forecast reported one, so a yard with no
+    // overnight low previewed a freeze rule as firing while the live
+    // evaluation held it Unknown. The evaluator is shared now, so the
+    // preview runs the same code the morning check runs. Rows naming a
+    // per-zone metric stay unpreviewable: there is no single yard-wide
+    // soil reading to evaluate against.
     let would_fire = move || {
+        use crate::engine::conditions::{eval_expr, ConditionCtx, ConditionExpr};
         let s = snap.get();
-        let sc = &s.skip_check;
         let rs = rows.get();
-        let mut evaluable = false;
-        let results: Vec<bool> = rs
+        let terms: Vec<ConditionExpr> = rs
             .iter()
             .filter_map(|r| {
-                metric_live(&r.metric, sc).map(|v| {
-                    evaluable = true;
-                    op_apply(&r.op, v, r.value)
+                Some(ConditionExpr::Compare {
+                    metric: serde_json::from_value(serde_json::json!(r.metric)).ok()?,
+                    op: serde_json::from_value(serde_json::json!(r.op)).ok()?,
+                    value: r.value,
                 })
             })
+            .filter(|t| {
+                !matches!(
+                    t,
+                    ConditionExpr::Compare {
+                        metric: crate::engine::conditions::Metric::ZoneSoilPct,
+                        ..
+                    }
+                )
+            })
             .collect();
-        if !evaluable {
+        if terms.is_empty() {
             return None; // only zone_soil_pct rows -> per-zone, not previewable
         }
-        Some(if mode.get_untracked() == "any" {
-            results.iter().any(|b| *b)
+        let inputs = crate::engine::skip_rules::inputs_from_skipcheck(&s.skip_check);
+        // No yard-wide probe: a zone-soil term is filtered out above, so
+        // this stands in for the per-zone reading the engine would use.
+        let zone = crate::engine::skip_rules::ZoneSoil {
+            slug: String::new(),
+            name: String::new(),
+            pct: None,
+            saturation_pct: 0.0,
+            target_min_pct: 0.0,
+        };
+        let ctx = ConditionCtx {
+            i: &inputs,
+            zone: &zone,
+        };
+        let expr = if mode.get_untracked() == "any" {
+            ConditionExpr::Any(terms)
         } else {
-            results.iter().all(|b| *b)
-        })
+            ConditionExpr::All(terms)
+        };
+        Some(eval_expr(&expr, &ctx))
     };
 
     view! {
@@ -703,6 +706,65 @@ mod template_tests {
             let r: ConditionRule = serde_json::from_str(t.json)
                 .unwrap_or_else(|e| panic!("template '{}' invalid: {e}", t.name));
             assert!(r.enabled, "{} should instantiate enabled", t.name);
+        }
+    }
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod editor_vocabulary_tests {
+    use super::{METRICS, OPS};
+    use crate::engine::conditions::{CmpOp, Metric};
+
+    /// Every metric and operator this editor offers has to deserialize
+    /// into the ENGINE's own enum, because the "would fire now" preview
+    /// builds a real `ConditionExpr` and hands it to the engine's
+    /// evaluator. A slug the engine does not know is dropped silently
+    /// from the expression, which would preview a rule against fewer
+    /// terms than it contains, and would save a rule the engine cannot
+    /// evaluate at all.
+    #[test]
+    fn every_offered_metric_and_operator_is_one_the_engine_knows() {
+        for (slug, label, _unit) in METRICS {
+            let parsed: Result<Metric, _> = serde_json::from_value(serde_json::json!(slug));
+            assert!(
+                parsed.is_ok(),
+                "the editor offers {slug} ({label}) but the engine has no such metric"
+            );
+        }
+        for (symbol, slug) in OPS {
+            let parsed: Result<CmpOp, _> = serde_json::from_value(serde_json::json!(slug));
+            assert!(
+                parsed.is_ok(),
+                "the editor offers {symbol} as {slug} but the engine has no such operator"
+            );
+        }
+    }
+
+    /// The reverse direction: a metric the engine can evaluate but the
+    /// editor never offers is a rule nobody can build in the UI. Kept as
+    /// an explicit list so adding one to the engine surfaces here.
+    #[test]
+    fn the_editor_offers_every_metric_the_engine_evaluates() {
+        for m in [
+            Metric::RainProbTomorrow,
+            Metric::RainNext4hIn,
+            Metric::RainTodayIn,
+            Metric::Rain3dayWeightedIn,
+            Metric::WindNowMph,
+            Metric::WindMaxTodayMph,
+            Metric::TempNowF,
+            Metric::TempMin24hF,
+            Metric::TempMax3dayF,
+            Metric::HumidityNowPct,
+            Metric::DaysSinceRain,
+            Metric::ZoneSoilPct,
+        ] {
+            let slug = serde_json::to_value(m).unwrap();
+            let slug = slug.as_str().unwrap();
+            assert!(
+                METRICS.iter().any(|(s, _, _)| *s == slug),
+                "the engine evaluates {slug} but the rule editor offers no way to pick it"
+            );
         }
     }
 }

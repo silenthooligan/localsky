@@ -22,11 +22,10 @@ use crate::ha::snapshot::IrrigationSnapshot;
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
 
+use crate::components::notice_center::NoticeCenter;
 use anomaly_banner::AnomalyBanner;
 use controls::{OverrideControl, RainDelayPanel, StopAllPanel};
-use default_budget_banner::DefaultBudgetBanner;
 use forecast::ForecastPanel;
-use ha_adoption_banner::HaAdoptionBanner;
 use hero::NextRunHero;
 use mobile::MobileIrrigation;
 use running_banner::RunningBanner;
@@ -126,12 +125,10 @@ pub fn IrrigationPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         // desktop; SCSS handles position differences.
         <RunningBanner snap/>
         <AnomalyBanner snap/>
-        // Zones about to water on a target inferred from their name. Quiet
-        // once every zone carries one the operator set, and dismissible.
-        <DefaultBudgetBanner snap/>
-        // The Home Assistant helpers LocalSky read for the last time, and
-        // what it uses instead. Quiet on every standalone install.
-        <HaAdoptionBanner snap/>
+        // The one-time notices (the soil opt-in offer, the Home Assistant
+        // migration, the inferred-target warning) pop once from the
+        // centralized popup and leave the page clear; nothing sits here.
+        <NoticeCenter snap/>
         {body}
     }
 }

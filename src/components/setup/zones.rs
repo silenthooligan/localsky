@@ -62,6 +62,11 @@ pub fn ZonesStep() -> impl IntoView {
     let new_max_run = RwSignal::new(String::new());
     let new_weekly_budget = RwSignal::new(String::new());
     let new_sessions = RwSignal::new(String::new());
+    let new_rain_cap = RwSignal::new(String::new());
+    // Per-zone scheduling-model pin ("" = engine default). New installs
+    // apply onto the soil model at wizard finish, so a blank pin here
+    // means the zone follows that.
+    let new_sched_model = RwSignal::new(String::new());
     let new_controller = RwSignal::new(String::new());
     let new_station = RwSignal::new(String::new());
     let new_photo_url = RwSignal::new(String::new());
@@ -95,8 +100,10 @@ pub fn ZonesStep() -> impl IntoView {
                     .and_then(|l| l.get("lat"))
                     .and_then(|v| v.as_f64())
                     .unwrap_or(0.0);
-                if lat.abs() >= 35.0 && new_species.get_untracked() == "st_augustine" {
-                    new_species.set("tall_fescue".to_string());
+                let current = new_species.get_untracked();
+                let picked = crate::agronomy::climate_default_species(&current, lat);
+                if picked != current {
+                    new_species.set(picked.to_string());
                 }
                 // Default the (required) controller to the first one configured in
                 // the prior step, so a beginner never faces an empty required field.
@@ -197,7 +204,7 @@ pub fn ZonesStep() -> impl IntoView {
                 "one valve. LocalSky asks for grass species, soil texture, "
                 "area, sprinkler type and measured precipitation rate, then "
                 "computes ETc from local weather and sizes each session "
-                "from the zone's weekly water target, firing on the "
+                "from the zone's weekly target, firing on the "
                 "mornings the zone's session spacing allows."
             </p>
 
@@ -283,6 +290,8 @@ pub fn ZonesStep() -> impl IntoView {
                     new_max_run=new_max_run
                     new_weekly_budget=new_weekly_budget
                     new_sessions=new_sessions
+                    new_rain_cap=new_rain_cap
+                    new_sched_model=new_sched_model
                     new_controller=new_controller
                     new_station=new_station
                     new_photo_url=new_photo_url
@@ -448,13 +457,7 @@ fn SpeciesCard(species: SpeciesCardData) -> impl IntoView {
             </div>
             <div class="species-card__body">
                 <h4 class="species-card__name">{species.name}</h4>
-                <p class="species-card__meta">
-                    <span>{format!("Kc {:.2}-{:.2}", species.kc_low, species.kc_high)}</span>
-                    " · "
-                    <span>{format!("root {}", species.root_depth)}</span>
-                    " · "
-                    <span>{format!("MAD {}%", species.mad_pct)}</span>
-                </p>
+                <p class="species-card__meta">{species_meta(species.slug)}</p>
                 <p class="species-card__desc">{species.note}</p>
             </div>
         </article>
@@ -465,11 +468,25 @@ fn SpeciesCard(species: SpeciesCardData) -> impl IntoView {
 struct SpeciesCardData {
     slug: &'static str,
     name: &'static str,
-    kc_low: f64,
-    kc_high: f64,
-    root_depth: &'static str,
-    mad_pct: u32,
     note: &'static str,
+}
+
+/// The agronomy line under a species card, read from the shared FAO-56
+/// catalog the engine waters on. The cards used to carry their own Kc
+/// range, root depth and MAD, hand-typed, and had drifted from the
+/// catalog on most species: a gallery that sells the pick has to state
+/// the numbers the pick actually produces.
+fn species_meta(slug: &str) -> String {
+    let p = crate::agronomy::species_profile_by_slug(slug);
+    let (kc_low, kc_high) = crate::agronomy::kc_range(&p);
+    format!(
+        "Kc {:.2}-{:.2} · root {:.0}\" ({:.0} cm) · MAD {:.0}%",
+        kc_low,
+        kc_high,
+        p.root_depth_mm / 25.4,
+        p.root_depth_mm / 10.0,
+        p.mad_pct * 100.0
+    )
 }
 
 /// Gallery sections: (title, climate hint, cards). Grouped by climate
@@ -484,55 +501,31 @@ fn species_groups() -> Vec<(&'static str, &'static str, Vec<SpeciesCardData>)> {
                 SpeciesCardData {
                     slug: "bahia",
                     name: "Bahia",
-                    kc_low: 0.70,
-                    kc_high: 0.85,
-                    root_depth: "6-8\" (15-20 cm)",
-                    mad_pct: 50,
                     note: "Low-input warm-season turfgrass. Tolerates poor sandy soils.",
                 },
                 SpeciesCardData {
                     slug: "bermuda",
                     name: "Bermuda",
-                    kc_low: 0.70,
-                    kc_high: 0.95,
-                    root_depth: "4-8\" (10-20 cm)",
-                    mad_pct: 50,
                     note: "Aggressive warm-season turfgrass (Couch in AU/NZ). High wear tolerance, full sun.",
                 },
                 SpeciesCardData {
                     slug: "centipede",
                     name: "Centipede",
-                    kc_low: 0.60,
-                    kc_high: 0.85,
-                    root_depth: "3-5\" (8-13 cm)",
-                    mad_pct: 50,
                     note: "Acidic-soil warm-season turfgrass. Low fertilizer requirement.",
                 },
                 SpeciesCardData {
                     slug: "kikuyu",
                     name: "Kikuyu",
-                    kc_low: 0.55,
-                    kc_high: 1.00,
-                    root_depth: "10-14\" (25-36 cm)",
-                    mad_pct: 50,
                     note: "Vigorous warm-season runner; a staple in AU / NZ / ZA.",
                 },
                 SpeciesCardData {
                     slug: "st_augustine",
                     name: "St. Augustine",
-                    kc_low: 0.80,
-                    kc_high: 1.00,
-                    root_depth: "4-6\" (10-15 cm)",
-                    mad_pct: 50,
                     note: "Dominant warm-season turfgrass of the US Southeast; sold as Buffalo grass in Australia/NZ. Coarse-textured, good shade tolerance.",
                 },
                 SpeciesCardData {
                     slug: "zoysia",
                     name: "Zoysia",
-                    kc_low: 0.70,
-                    kc_high: 0.90,
-                    root_depth: "4-6\" (10-15 cm)",
-                    mad_pct: 50,
                     note: "Fine-textured warm-season turfgrass. Slow to establish, drought tolerant.",
                 },
             ],
@@ -544,28 +537,16 @@ fn species_groups() -> Vec<(&'static str, &'static str, Vec<SpeciesCardData>)> {
                 SpeciesCardData {
                     slug: "kentucky_bluegrass",
                     name: "Kentucky Bluegrass",
-                    kc_low: 0.75,
-                    kc_high: 0.95,
-                    root_depth: "4-8\" (10-20 cm)",
-                    mad_pct: 50,
                     note: "Cool-season turfgrass. Best fit for cool-temperate climates (northern US and Canada, northern Europe, NZ South Island).",
                 },
                 SpeciesCardData {
                     slug: "perennial_ryegrass",
                     name: "Perennial Ryegrass",
-                    kc_low: 0.75,
-                    kc_high: 0.95,
-                    root_depth: "4-6\" (10-15 cm)",
-                    mad_pct: 50,
                     note: "Cool-season turfgrass. Fast-establishing; often overseeded into warm-season for winter color.",
                 },
                 SpeciesCardData {
                     slug: "tall_fescue",
                     name: "Tall Fescue",
-                    kc_low: 0.70,
-                    kc_high: 0.95,
-                    root_depth: "6-12\" (15-30 cm)",
-                    mad_pct: 50,
                     note: "Cool-season turfgrass. Deep-rooted, drought-tolerant relative to other cool-season.",
                 },
             ],
@@ -577,40 +558,71 @@ fn species_groups() -> Vec<(&'static str, &'static str, Vec<SpeciesCardData>)> {
                 SpeciesCardData {
                     slug: "ornamental_shrubs",
                     name: "Ornamental Shrubs",
-                    kc_low: 0.40,
-                    kc_high: 0.60,
-                    root_depth: "8-12\" (20-30 cm)",
-                    mad_pct: 40,
                     note: "Mixed shrub bed. Drip or low-precip rotor preferred; less frequent, deeper waterings.",
                 },
                 SpeciesCardData {
                     slug: "vegetable_garden",
                     name: "Vegetable Garden",
-                    kc_low: 0.65,
-                    kc_high: 1.15,
-                    root_depth: "12-24\" (30-60 cm)",
-                    mad_pct: 50,
                     note: "Mixed vegetable bed. High demand at fruiting; consider seasonal Kc override.",
                 },
                 SpeciesCardData {
                     slug: "drip_xeriscape",
                     name: "Drip / Xeriscape",
-                    kc_low: 0.30,
-                    kc_high: 0.30,
-                    root_depth: "n/a",
-                    mad_pct: 30,
                     note: "Native + xeriscape plantings. Minimal supplemental irrigation; long soak cycles.",
                 },
                 SpeciesCardData {
                     slug: "other",
                     name: "Other (custom Kc)",
-                    kc_low: 0.40,
-                    kc_high: 0.80,
-                    root_depth: "varies",
-                    mad_pct: 50,
                     note: "Generic placeholder. Override per zone with measured values.",
                 },
             ],
         ),
     ]
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod species_gallery_tests {
+    use super::species_groups;
+
+    /// Every card names a species the catalog knows, and every species the
+    /// catalog knows has a card. The gallery used to carry its own copy of
+    /// each species' Kc range, root depth and MAD, which had drifted from
+    /// the catalog on most of them; the numbers now come from the catalog,
+    /// and this keeps the two lists in step.
+    #[test]
+    fn the_gallery_and_the_catalog_cover_the_same_species() {
+        let carded: Vec<&str> = species_groups()
+            .iter()
+            .flat_map(|(_, _, cards)| cards.iter().map(|c| c.slug))
+            .collect();
+        for slug in carded.iter() {
+            let p = crate::agronomy::species_profile_by_slug(slug);
+            let generic = crate::agronomy::species_profile_by_slug("__unknown__");
+            assert!(
+                p.root_depth_mm != generic.root_depth_mm
+                    || p.kc_monthly != generic.kc_monthly
+                    || *slug == "other",
+                "card {slug} falls through to the generic profile: the catalog does not know it"
+            );
+        }
+        for species in [
+            crate::config::schema::GrassSpecies::StAugustine,
+            crate::config::schema::GrassSpecies::Bermuda,
+            crate::config::schema::GrassSpecies::Zoysia,
+            crate::config::schema::GrassSpecies::Bahia,
+            crate::config::schema::GrassSpecies::Centipede,
+            crate::config::schema::GrassSpecies::Kikuyu,
+            crate::config::schema::GrassSpecies::KentuckyBluegrass,
+            crate::config::schema::GrassSpecies::TallFescue,
+            crate::config::schema::GrassSpecies::OrnamentalShrubs,
+            crate::config::schema::GrassSpecies::VegetableGarden,
+            crate::config::schema::GrassSpecies::DripXeriscape,
+        ] {
+            let slug = crate::engine::species_slug(species);
+            assert!(
+                carded.contains(&slug),
+                "the catalog knows {slug} but the setup gallery offers no card for it"
+            );
+        }
+    }
 }

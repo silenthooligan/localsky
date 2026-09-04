@@ -15,19 +15,23 @@ use crate::components::units_fmt::{temp_unit, wind_unit, UnitPrefs};
 
 #[component]
 pub fn SettingsSkipRules() -> impl IntoView {
-    // -- Engine SkipRuleParams fields (mirrors src/config/schema.rs) --
-    let already_wet_in = RwSignal::new(0.05f64);
-    let rain_now_in_hr = RwSignal::new(0.01f64);
-    let rain_next_4h_skip_in = RwSignal::new(0.10f64);
-    let rain_3day_factor = RwSignal::new(1.5f64);
-    let heat_advisory_temp_f = RwSignal::new(95.0f64);
-    let heat_advisory_humidity_pct = RwSignal::new(60.0f64);
-    let heat_advisory_dry_days = RwSignal::new(2u32);
-    let wind_forecast_slack_mph = RwSignal::new(5.0f64);
-    let max_wind_mph = RwSignal::new(15.0f64);
-    let min_temp_f = RwSignal::new(40.0f64);
-    let rain_skip_in = RwSignal::new(0.25f64);
-    let frost_skip_soil_f = RwSignal::new(38.0f64);
+    // Every field below is seeded from the ENGINE's own defaults, not from
+    // numbers retyped here. The form loads the live config over these a
+    // moment later; this is only what shows before that lands, and what
+    // Reset restores.
+    let seed = crate::config::schema::SkipRuleParams::default();
+    let already_wet_in = RwSignal::new(seed.already_wet_in);
+    let rain_now_in_hr = RwSignal::new(seed.rain_now_in_hr);
+    let rain_next_4h_skip_in = RwSignal::new(seed.rain_next_4h_skip_in);
+    let rain_3day_factor = RwSignal::new(seed.rain_3day_factor);
+    let heat_advisory_temp_f = RwSignal::new(seed.heat_advisory_temp_f);
+    let heat_advisory_humidity_pct = RwSignal::new(seed.heat_advisory_humidity_pct);
+    let heat_advisory_dry_days = RwSignal::new(seed.heat_advisory_dry_days);
+    let wind_forecast_slack_mph = RwSignal::new(seed.wind_forecast_slack_mph);
+    let max_wind_mph = RwSignal::new(seed.max_wind_mph);
+    let min_temp_f = RwSignal::new(seed.min_temp_f);
+    let rain_skip_in = RwSignal::new(seed.rain_skip_in);
+    let frost_skip_soil_f = RwSignal::new(seed.frost_skip_soil_f);
 
     let loaded = RwSignal::new(false);
     // Initial-load state: Some(err) when the config GET failed. The editor body is
@@ -113,19 +117,26 @@ pub fn SettingsSkipRules() -> impl IntoView {
         }
     };
 
+    // Reset writes the ENGINE's defaults, taken from the schema's own
+    // Default impl rather than retyped here. Three of the numbers this
+    // used to set (wind 15 against the engine's 10, min temp 40 against
+    // 38, soil frost 38 against 35) were values the engine never chooses,
+    // so Reset silently moved a yard onto thresholds no default install
+    // has ever run.
     let on_reset = move |_| {
-        already_wet_in.set(0.05);
-        rain_now_in_hr.set(0.01);
-        rain_next_4h_skip_in.set(0.10);
-        rain_3day_factor.set(1.5);
-        heat_advisory_temp_f.set(95.0);
-        heat_advisory_humidity_pct.set(60.0);
-        heat_advisory_dry_days.set(2);
-        wind_forecast_slack_mph.set(5.0);
-        max_wind_mph.set(15.0);
-        min_temp_f.set(40.0);
-        rain_skip_in.set(0.25);
-        frost_skip_soil_f.set(38.0);
+        let d = crate::config::schema::SkipRuleParams::default();
+        already_wet_in.set(d.already_wet_in);
+        rain_now_in_hr.set(d.rain_now_in_hr);
+        rain_next_4h_skip_in.set(d.rain_next_4h_skip_in);
+        rain_3day_factor.set(d.rain_3day_factor);
+        heat_advisory_temp_f.set(d.heat_advisory_temp_f);
+        heat_advisory_humidity_pct.set(d.heat_advisory_humidity_pct);
+        heat_advisory_dry_days.set(d.heat_advisory_dry_days);
+        wind_forecast_slack_mph.set(d.wind_forecast_slack_mph);
+        max_wind_mph.set(d.max_wind_mph);
+        min_temp_f.set(d.min_temp_f);
+        rain_skip_in.set(d.rain_skip_in);
+        frost_skip_soil_f.set(d.frost_skip_soil_f);
     };
 
     view! {

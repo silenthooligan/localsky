@@ -139,6 +139,27 @@ pub fn applied_in_window(
     }
 }
 
+/// Union valve-open evidence bucketed per day: `applied_in_window` run
+/// against each frame in `day_bounds` (epoch pairs, one per local day,
+/// typically midnight-to-midnight in the configured timezone). A run
+/// straddling a boundary splits at it, so each day counts only its own
+/// coverage and the per-day figures sum to the whole-window union;
+/// duplicate manual + observer rows still count once inside each day.
+/// The soil replay multiplies each day's valve seconds by throughput
+/// and capture efficiency to get that day's net applied depth.
+///
+/// Day frames come from the caller: this module compiles for the WASM
+/// client too, where the configured-timezone clock helpers do not
+/// exist. The `events` count in each bucket describes that day alone,
+/// so a straddling run counts as an event on both sides of midnight;
+/// consumers wanting event counts should use the whole-window read.
+pub fn applied_per_day(segments: &[RunSegment], day_bounds: &[(i64, i64)]) -> Vec<WindowedApplied> {
+    day_bounds
+        .iter()
+        .map(|&(start, end)| applied_in_window(segments, start, end))
+        .collect()
+}
+
 /// Union-clustered watering events per zone from wire run records.
 /// The minutes any surface derives from these agree with the balance's
 /// applied-irrigation credit (same filter, same union), so the history
@@ -211,6 +232,50 @@ mod tests {
             applied_in_window(&outside, 0, 1000),
             WindowedApplied::default()
         );
+    }
+
+    /// The per-day split preserves the whole-window union: a run
+    /// straddling midnight contributes its pre-midnight seconds to the
+    /// first day and the rest to the second, duplicate manual +
+    /// observer rows count once per day, and the day figures sum to the
+    /// single-window figure for the same segments.
+    #[test]
+    fn applied_per_day_splits_at_the_boundary_and_sums_to_the_window() {
+        let d0 = 100_000; // day frames: [d0,d1), [d1,d2)
+        let d1 = d0 + 86_400;
+        let d2 = d1 + 86_400;
+        let segments = [
+            // Straddles midnight: 600 s on each side.
+            seg(d1 - 600, 1200),
+            // The same physical run persisted twice (manual + observer),
+            // fully inside day one.
+            seg(d0 + 10_000, 1200),
+            seg(d0 + 10_010, 1200),
+            // A cycle-soak pair inside day two.
+            seg(d1 + 40_000, 600),
+            seg(d1 + 42_000, 600),
+            // Fully outside both frames.
+            seg(d2 + 5_000, 900),
+        ];
+        let days = applied_per_day(&segments, &[(d0, d1), (d1, d2)]);
+        assert_eq!(days.len(), 2);
+        assert_eq!(days[0].valve_open_s, 1210 + 600, "union pair + straddle");
+        assert_eq!(days[1].valve_open_s, 600 + 600 + 600);
+        let whole = applied_in_window(&segments, d0, d2);
+        assert_eq!(
+            days[0].valve_open_s + days[1].valve_open_s,
+            whole.valve_open_s,
+            "day figures sum to the window union"
+        );
+    }
+
+    /// Empty inputs stay empty on both axes: no frames yields no
+    /// buckets, and a frame with no coverage yields a zero bucket.
+    #[test]
+    fn applied_per_day_empty_inputs() {
+        assert!(applied_per_day(&[seg(0, 100)], &[]).is_empty());
+        let days = applied_per_day(&[], &[(0, 86_400)]);
+        assert_eq!(days, vec![WindowedApplied::default()]);
     }
 
     #[test]

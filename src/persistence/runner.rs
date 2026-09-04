@@ -104,6 +104,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "control_toggles",
         sql: include_str!("migrations/M0017_control_toggles.sql"),
     },
+    Migration {
+        version: "M0018",
+        name: "et0_ledger",
+        sql: include_str!("migrations/M0018_et0_ledger.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]
@@ -272,6 +277,7 @@ mod tests {
                 "M0015".to_string(),
                 "M0016".to_string(),
                 "M0017".to_string(),
+                "M0018".to_string(),
             ]
         );
     }

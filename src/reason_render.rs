@@ -77,7 +77,19 @@ fn wind0(mph: f64, p: UnitPrefs) -> String {
     }
 }
 
-/// Rain depth, two decimals with a trailing-quote glyph: "0.20\"" / "5.1 mm".
+/// Wind, whole numbers, CONVERTED but with no unit word. The engine's
+/// forecast-wind sentence names the unit once and leaves the two
+/// threshold operands bare ("peak 30 mph > 10 + 5"), so a metric render
+/// converts those two without re-stating the unit.
+fn wind0_bare(mph: f64, p: UnitPrefs) -> String {
+    if p.wind_metric {
+        format!("{:.0}", mph_to_kph(mph))
+    } else {
+        format!("{mph:.0}")
+    }
+}
+
+/// Rain depth, two decimals with a trailing-quote glyph:/// Rain depth, two decimals with a trailing-quote glyph: "0.20\"" / "5.1 mm".
 /// Matches the engine's `{:.2}\"`. (Imperial keeps the engine's no-space inch
 /// glyph; metric uses a space + "mm".)
 fn depth(inches: f64, p: UnitPrefs) -> String {
@@ -166,11 +178,24 @@ pub fn render_skip_reason(s: &SkipCheck, p: UnitPrefs) -> String {
             "Heat advisory: running planned + 15% (peak {})",
             temp(s.temp_max_3day_f, p)
         ),
-        // Codes whose operands aren't fully carried on SkipCheck (wind_forecast:
-        // slack mph; observed_rain: window-day count), plus the static/variable
-        // control gates (override, paused, pause_until, restrictions, live_data,
-        // dry_run), the clean run, and the aggregate soil_floor: keep the engine's
-        // baked string. Never fabricate.
+        // "Windy day forecast (peak {:.0} mph > {:.0} + {:.0})"
+        "wind_forecast" => format!(
+            "Windy day forecast (peak {} > {} + {})",
+            wind0(s.wind_max_today_mph, p),
+            wind0_bare(s.max_wind_mph, p),
+            wind0_bare(s.wind_forecast_slack_mph, p)
+        ),
+        // "Already wet ({:.2}\" rain in the last {} day(s))"
+        "observed_rain" => format!(
+            "Already wet ({} rain in the last {} day(s))",
+            depth(s.rain_observed_recent_in, p),
+            s.rain_observed_window_days + 1
+        ),
+        // What remains are the control gates (override, paused,
+        // pause_until, restrictions, live_data, dry_run), the clean run,
+        // and the aggregate soil_floor: sentences with no measurement in
+        // them, so keeping the engine's baked string cannot show a metric
+        // viewer an imperial number. Never fabricate.
         _ => s.reason.clone(),
     }
 }
@@ -349,16 +374,14 @@ pub fn render_rule_margin(r: &RuleEval, p: UnitPrefs) -> Option<String> {
     let fired = r.outcome == "fired";
     // Mirror annotate_margins: a passed gate whose OWN raw threshold is met was
     // overridden (the baked label already says so). We can't recompute fires_raw
-    // without the gate's exact operator, but the baked label tells us: if it
-    // contains "overridden" reproduce that branch; otherwise headroom. (Fired is
-    // unambiguous from the outcome.)
+    // without the gate's exact operator, and `over_line` carries that
+    // answer as data: the engine computed it from the gate's own operator
+    // while building the row. This used to read the baked label back and
+    // look for the word "overridden". (Fired is unambiguous from the
+    // outcome.)
     let label = if fired {
         format!("skipped, {dist_str}{unit_tok} past the line")
-    } else if r
-        .margin_label
-        .as_deref()
-        .is_some_and(|m| m.contains("overridden"))
-    {
+    } else if r.over_line {
         format!("{dist_str}{unit_tok} past the line, but overridden")
     } else {
         format!("{dist_str}{unit_tok} of headroom before this skips")
@@ -390,6 +413,76 @@ pub fn render_zone_reason(z: &ZoneVerdict, _p: UnitPrefs) -> String {
 
 #[cfg(all(test, feature = "ssr"))]
 mod tests {
+
+    /// A metric viewer sees metric in every reason that HAS a unit in it.
+    /// These two used to fall through to the engine's baked sentence,
+    /// because their operands were not on the wire, so a metric yard read
+    /// miles per hour and inches on two of the most common skips there
+    /// are: a windy forecast and a wet week.
+    #[test]
+    fn the_common_reasons_read_metric_for_a_metric_yard() {
+        let metric = UnitPrefs {
+            rain_mm: true,
+            wind_metric: true,
+            ..UnitPrefs::default()
+        };
+        let windy = SkipCheck {
+            reason_code: "wind_forecast".into(),
+            wind_max_today_mph: 30.0,
+            max_wind_mph: 10.0,
+            wind_forecast_slack_mph: 5.0,
+            ..Default::default()
+        };
+        let out = render_skip_reason(&windy, metric);
+        assert!(out.contains("km/h"), "{out}");
+        assert!(!out.contains("mph"), "no imperial left: {out}");
+
+        let wet = SkipCheck {
+            reason_code: "observed_rain".into(),
+            rain_observed_recent_in: 1.5,
+            rain_observed_window_days: 2,
+            ..Default::default()
+        };
+        let out = render_skip_reason(&wet, metric);
+        assert!(out.contains("mm"), "{out}");
+        assert!(!out.contains('"'), "no inch glyph left: {out}");
+        // A day count is a count, not a measurement: same in both systems.
+        assert!(out.contains("3 day(s)"), "{out}");
+    }
+
+    /// The reasons that still fall back to the engine's baked sentence
+    /// are exactly the ones with no unit in them, so falling back cannot
+    /// show a metric viewer an imperial number. A future gate that
+    /// carries operands belongs in the match, not in this list.
+    #[test]
+    fn every_remaining_fallback_reason_is_unitless() {
+        let metric = UnitPrefs {
+            rain_mm: true,
+            wind_metric: true,
+            ..UnitPrefs::default()
+        };
+        for code in [
+            "run",
+            "override",
+            "paused",
+            "pause_until",
+            "restrictions",
+            "live_data",
+            "dry_run",
+            "soil_floor",
+        ] {
+            let s = SkipCheck {
+                reason_code: code.into(),
+                reason: "a sentence with no measurement in it".into(),
+                ..Default::default()
+            };
+            assert_eq!(
+                render_skip_reason(&s, metric),
+                s.reason,
+                "{code} falls back, which is only safe while its sentence carries no units"
+            );
+        }
+    }
     use super::*;
     use crate::config::schema::{AddressParity, SkipRuleParams};
     use crate::engine::skip_rules::{decide_traced, evaluate_with, Inputs, LiveReadings, ZoneSoil};
@@ -415,6 +508,7 @@ mod tests {
     // over the full reason battery without reaching into that crate-private fn.
     fn base() -> Inputs {
         Inputs {
+            utc_offset_seconds: 0,
             temp_now_f: 70.0,
             wind_now_mph: 3.0,
             rain_today_in: 0.0,

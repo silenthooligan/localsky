@@ -263,8 +263,12 @@ pub fn strip_visible(rep: &TuningReport) -> bool {
 }
 
 /// The recommendation's current -> suggested summary for the card's mono
-/// row: (row label, "from -> to").
-pub(crate) fn delta_line(rec: &TuningRecommendation) -> (String, String) {
+/// row: (row label, "from -> to"). Depth fields convert at the display
+/// boundary via `prefs`.
+pub(crate) fn delta_line(
+    rec: &TuningRecommendation,
+    prefs: crate::components::units_fmt::UnitPrefs,
+) -> (String, String) {
     let label = match rec.field.as_str() {
         "max_run_minutes" => "Run limit",
         "sessions_per_week" => "Sessions per week",
@@ -278,29 +282,44 @@ pub(crate) fn delta_line(rec: &TuningRecommendation) -> (String, String) {
     .to_string();
     let value = format!(
         "{} -> {}",
-        fmt_rec_value(&rec.field, &rec.current_value),
-        fmt_rec_value(&rec.field, &rec.suggested_value)
+        fmt_rec_value(&rec.field, &rec.current_value, false, prefs),
+        fmt_rec_value(&rec.field, &rec.suggested_value, true, prefs)
     );
     (label, value)
 }
 
-fn fmt_rec_value(field: &str, v: &serde_json::Value) -> String {
+fn fmt_rec_value(
+    field: &str,
+    v: &serde_json::Value,
+    suggested: bool,
+    prefs: crate::components::units_fmt::UnitPrefs,
+) -> String {
     let unit = match field {
         "max_run_minutes" => " min",
         "sessions_per_week" => "/wk",
-        "weekly_budget_in" => " in",
         "precip_rate_mm_hr" => " mm/hr",
         "root_depth_mm" => " mm",
         _ => "",
     };
     match v {
-        // Null means "the default": for the run limit that default is a
-        // real number (60 min); everywhere else name it plainly.
+        // Null means "the default" on the CURRENT side: for the run
+        // limit that default is a real number (60 min); everywhere else
+        // name it plainly. A null SUGGESTED weekly target is the
+        // raise-or-clear recommendation, and applying it clears the
+        // target, which under the soil model means NO ceiling at all;
+        // "default" said the opposite of the effect.
         serde_json::Value::Null => match field {
             "max_run_minutes" => "60 min".to_string(),
+            "weekly_budget_in" if suggested => "cleared (no ceiling)".to_string(),
             _ => "default".to_string(),
         },
         serde_json::Value::String(s) => s.replace('_', " "),
+        // The weekly target is a depth in inches on the wire; render it
+        // in the viewer's depth unit like every other depth on the page.
+        n if field == "weekly_budget_in" => match n.as_f64() {
+            Some(v) => crate::components::units_fmt::depth_phrase_in(v, prefs),
+            None => format!("{n}"),
+        },
         n => format!("{n}{unit}"),
     }
 }
@@ -392,7 +411,16 @@ pub fn ZoneTuningPanel(slug: Signal<String>) -> impl IntoView {
                             };
                             let mut lines = all_lines.into_iter();
                             let lead = lines.next();
-                            let notes: Vec<String> = lines.collect();
+                            // The soil-vs-weekly comparison surfaces
+                            // beside the lead when the two models
+                            // DIVERGE (its line starts with the
+                            // divergence prefix); agreement stays a
+                            // quiet data note. Decision support does
+                            // not belong behind the disclosure the
+                            // provenance rows live in.
+                            let (compare, notes): (Vec<String>, Vec<String>) = lines.partition(|l| {
+                                l.starts_with(crate::ha::snapshot::SOIL_DIVERGENCE_PREFIX)
+                            });
                             let window_days = rep.window_days;
                             let card = zt.recommendation.clone().map(|rec| {
                                 let zone_slug = zt.slug.clone();
@@ -408,6 +436,14 @@ pub fn ZoneTuningPanel(slug: Signal<String>) -> impl IntoView {
                                 {lead.map(|l| view! {
                                     <p class="zone-tuning__line zone-tuning__line--lead">{l}</p>
                                 })}
+                                {compare
+                                    .into_iter()
+                                    .map(|l| view! {
+                                        <p class="zone-tuning__line zone-tuning__line--compare">
+                                            {l}
+                                        </p>
+                                    })
+                                    .collect_view()}
                                 {(!notes.is_empty()).then(|| view! {
                                     <details class="zone-tuning__notes">
                                         <summary>{format!("Data notes ({})", notes.len())}</summary>
@@ -537,7 +573,17 @@ fn TuningRecommendationCard(
         "medium" => "status-chip status-chip--stale",
         _ => "status-chip status-chip--unknown",
     };
-    let (delta_label, delta_value) = delta_line(&rec);
+    // Depth values in the delta row follow the display-units setting;
+    // read prefs.get() in the render closure so the post-hydration
+    // preference load re-renders the row.
+    let prefs = crate::components::units_fmt::use_unit_prefs();
+    let rec_for_delta = rec.clone();
+    let delta = move || delta_line(&rec_for_delta, prefs.get());
+    let delta_label = {
+        let d = delta.clone();
+        move || d().0
+    };
+    let delta_value = move || delta().1;
     // The override-style gate: a run limit raised past 60 confirms first.
     let confirm_open = RwSignal::new(false);
     let suggested_minutes: Option<u32> = (rec.field == "max_run_minutes")
@@ -548,7 +594,8 @@ fn TuningRecommendationCard(
         })
         .flatten();
     let needs_confirm = suggested_minutes.map(|m| m > 60).unwrap_or(false);
-    let confirm_minutes = suggested_minutes.unwrap_or(60);
+    let confirm_minutes =
+        suggested_minutes.unwrap_or(crate::config::schema::DEFAULT_MAX_RUN_MINUTES);
 
     // The POST itself, shared by the direct path and the sheet's Confirm.
     let rec_for_apply = rec.clone();
@@ -1011,21 +1058,59 @@ mod tests {
 
     #[test]
     fn delta_line_renders_the_run_limit_defaults_and_units() {
+        let p = crate::components::units_fmt::UnitPrefs::default();
         // Unset current renders the real 60 minute default, not "null".
         let r = rec("max_run_minutes", serde_json::Value::Null, json!(116));
         assert_eq!(
-            delta_line(&r),
+            delta_line(&r, p),
             ("Run limit".to_string(), "60 min -> 116 min".to_string())
         );
         let r = rec("sessions_per_week", json!(2), json!(3));
         assert_eq!(
-            delta_line(&r),
+            delta_line(&r, p),
             ("Sessions per week".to_string(), "2/wk -> 3/wk".to_string())
         );
         let r = rec("soil_texture", json!("sandy_loam"), json!("loam"));
         assert_eq!(
-            delta_line(&r),
+            delta_line(&r, p),
             ("Soil texture".to_string(), "sandy loam -> loam".to_string())
+        );
+    }
+
+    /// The weekly target's delta row: depths convert at the display
+    /// boundary, and a null SUGGESTED value renders the real effect of
+    /// applying it (the target clears and nothing caps) instead of
+    /// "default", which said the opposite.
+    #[test]
+    fn delta_line_weekly_target_converts_and_names_the_clear() {
+        let p = crate::components::units_fmt::UnitPrefs::default();
+        let r = rec("weekly_budget_in", json!(1.3), json!(1.5));
+        assert_eq!(
+            delta_line(&r, p),
+            ("Weekly target".to_string(), "1.30\" -> 1.50\"".to_string())
+        );
+        let metric = crate::components::units_fmt::METRIC;
+        assert_eq!(
+            delta_line(&r, metric),
+            (
+                "Weekly target".to_string(),
+                "33.0 mm -> 38.1 mm".to_string()
+            )
+        );
+        // Raise-or-clear: suggested null clears the ceiling; current
+        // null stays "default" (an inferred target).
+        let r = rec("weekly_budget_in", json!(1.3), serde_json::Value::Null);
+        assert_eq!(
+            delta_line(&r, p),
+            (
+                "Weekly target".to_string(),
+                "1.30\" -> cleared (no ceiling)".to_string()
+            )
+        );
+        let r = rec("weekly_budget_in", serde_json::Value::Null, json!(1.5));
+        assert_eq!(
+            delta_line(&r, p),
+            ("Weekly target".to_string(), "default -> 1.50\"".to_string())
         );
     }
 }

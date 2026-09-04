@@ -2072,6 +2072,7 @@ mod tests {
         cfg0.zones.insert(
             "front".to_string(),
             ZoneConfig {
+                scheduling_model: None,
                 display_name: "front".into(),
                 area_sqft: 1000.0,
                 species: GrassSpecies::StAugustine,
@@ -2092,6 +2093,7 @@ mod tests {
                 photo_url: None,
                 weekly_budget_in: None,
                 sessions_per_week: None,
+                rain_credit_cap_in: None,
                 max_run_minutes: None,
             },
         );
@@ -2148,6 +2150,7 @@ mod tests {
         cfg0.zones.insert(
             "front".to_string(),
             ZoneConfig {
+                scheduling_model: None,
                 display_name: "front".into(),
                 area_sqft: 1000.0,
                 species: GrassSpecies::StAugustine,
@@ -2168,6 +2171,7 @@ mod tests {
                 photo_url: None,
                 weekly_budget_in: None,
                 sessions_per_week: None,
+                rain_credit_cap_in: None,
                 max_run_minutes: None,
             },
         );
@@ -2218,6 +2222,7 @@ mod tests {
         cfg0.zones.insert(
             "front".to_string(),
             ZoneConfig {
+                scheduling_model: None,
                 display_name: "front".into(),
                 area_sqft: 1000.0,
                 species: GrassSpecies::StAugustine,
@@ -2238,6 +2243,7 @@ mod tests {
                 photo_url: None,
                 weekly_budget_in: None,
                 sessions_per_week: None,
+                rain_credit_cap_in: None,
                 max_run_minutes: None,
             },
         );
@@ -2277,6 +2283,7 @@ mod tests {
     fn run_cap_raise_detection_matrix() {
         use crate::config::schema::{GrassSpecies, SoilTexture, SprinklerType, ZoneConfig};
         let zone = |cap: Option<u32>| ZoneConfig {
+            scheduling_model: None,
             display_name: "Back Yard".into(),
             area_sqft: 1000.0,
             species: GrassSpecies::Bermuda,
@@ -2297,6 +2304,7 @@ mod tests {
             photo_url: None,
             weekly_budget_in: None,
             sessions_per_week: None,
+            rain_credit_cap_in: None,
             max_run_minutes: cap,
         };
         let cfg_with = |cap: Option<u32>| {
@@ -2604,6 +2612,7 @@ mod cloud_zone_overlay_tests {
 
     fn zone(controller_id: &str, station: &str) -> ZoneConfig {
         ZoneConfig {
+            scheduling_model: None,
             display_name: "Zone".into(),
             area_sqft: 1000.0,
             species: GrassSpecies::StAugustine,
@@ -2624,6 +2633,7 @@ mod cloud_zone_overlay_tests {
             photo_url: None,
             weekly_budget_in: None,
             sessions_per_week: None,
+            rain_credit_cap_in: None,
             max_run_minutes: None,
         }
     }

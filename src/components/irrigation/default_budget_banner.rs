@@ -13,7 +13,7 @@
 //
 // A yard that starts watering unattended, on a target nobody reviewed, with
 // nothing on screen saying so is the failure this release exists to end. So
-// the banner names every affected zone and the target it will use, and
+// the notice names every affected zone and the target it will use, and
 // points at the page where the target is set.
 //
 // It fires on every install where a zone's `weekly_budget_in` or
@@ -31,87 +31,86 @@
 // (The same rule the health banner applies per session, persisted, because
 // this one is about a decision the operator makes once.)
 //
-// SSR and the first hydrate frame render nothing: the dismissal is read in a
-// hydrate-only effect, so the server DOM and the first client DOM match.
+// PRESENTATION lives in the centralized notice popup
+// (`components::notice_center`), which pops the notice once and keeps the
+// page clear; this module owns the copy, the identity key, and the stored
+// dismissal, all unchanged from the page-strip era so a dismissal recorded
+// then still holds.
 
-use leptos::prelude::*;
-
-use crate::components::units_fmt::{fmt_rain_amount, use_unit_prefs};
+use crate::components::units_fmt::{fmt_rain_amount, UnitPrefs};
 use crate::ha::snapshot::IrrigationSnapshot;
 
 /// localStorage key holding the zone-set the operator dismissed.
 #[cfg(feature = "hydrate")]
 const DISMISS_KEY: &str = "default_budget_banner_dismissed";
 
-#[component]
-pub fn DefaultBudgetBanner(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
-    let prefs = use_unit_prefs();
-    // The dismissed zone-set key. Empty until the hydrate effect reads it,
-    // so SSR and the first client frame agree.
-    let dismissed: RwSignal<String> = RwSignal::new(String::new());
-
+/// The stored dismissal key ("" when none). Off the browser there is no
+/// storage and nothing was dismissed. Only the hydrate build has a call
+/// site (the popup center's mount effect), hence the cfg_attr.
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
+pub(crate) fn read_dismissed() -> String {
     #[cfg(feature = "hydrate")]
-    Effect::new(move |_| {
+    {
         if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
             if let Ok(Some(v)) = s.get_item(DISMISS_KEY) {
-                dismissed.set(v);
+                return v;
             }
         }
-    });
-
-    let on_dismiss = move |_| {
-        let key = inferred_key(&snap.get_untracked());
-        #[cfg(feature = "hydrate")]
-        {
-            if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
-                let _ = s.set_item(DISMISS_KEY, &key);
-            }
-        }
-        dismissed.set(key);
-    };
-
-    move || {
-        let s = snap.get();
-        let p = prefs.get();
-        let rows: Vec<String> = s
-            .water_budgets
-            .iter()
-            .filter(|b| b.target_inferred)
-            .map(|b| zone_line(&b.zone_name, b.weekly_budget_in, b.sessions_per_week, p))
-            .collect();
-        if rows.is_empty() || dismissed.get() == inferred_key(&s) {
-            return ().into_any();
-        }
-        view! {
-            <div class="anomaly-banner" role="status" aria-live="polite">
-                <div class="anomaly-banner-icon" aria-hidden="true">"!"</div>
-                <div class="anomaly-banner-text">
-                    <div class="anomaly-banner-line">
-                        "These zones water on a weekly target inferred from the zone name, because none is set. Set Weekly target and Sessions per week under Settings, then Zones, if that is not what you want."
-                    </div>
-                    {rows
-                        .into_iter()
-                        .map(|l| view! { <div class="anomaly-banner-line">{l}</div> })
-                        .collect_view()}
-                </div>
-                <a class="anomaly-banner-link" href="/settings/zones">"Set targets"</a>
-                <button
-                    type="button"
-                    class="anomaly-banner-dismiss"
-                    aria-label="Dismiss default watering target notice"
-                    on:click=on_dismiss
-                >
-                    "\u{2715}"
-                </button>
-            </div>
-        }
-        .into_any()
     }
+    String::new()
+}
+
+/// Record a dismissal for the given zone-set key.
+pub(crate) fn store_dismissed(key: &str) {
+    #[cfg(feature = "hydrate")]
+    {
+        if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+            let _ = s.set_item(DISMISS_KEY, key);
+        }
+    }
+    #[cfg(not(feature = "hydrate"))]
+    let _ = key;
+}
+
+/// A row the notice's claim is TRUE for: an inferred target on a zone
+/// the WEEKLY model governs. A soil-governed zone never waters on the
+/// inferred figure (an inferred target caps nothing there), so listing
+/// it steered owners into setting a weekly target that becomes a
+/// delivery ceiling, the exact starvation the tuning report's ceiling
+/// arm exists to catch; and on a fresh install, which lands
+/// soil-governed on day one, every listed zone was wrong. An empty
+/// `scheduling_model` (older producer) reads as weekly.
+fn weekly_inferred(b: &crate::ha::snapshot::WaterBudget) -> bool {
+    b.on_inferred_weekly_target()
+}
+
+/// The notice's copy: the instruction first, then one line per zone
+/// still watering on an inferred target. Empty when every zone carries
+/// a target the operator set, or waters by soil deficit, which is what
+/// retires the notice.
+pub(crate) fn lines(s: &IrrigationSnapshot, p: UnitPrefs) -> Vec<String> {
+    let rows: Vec<String> = s
+        .water_budgets
+        .iter()
+        .filter(|b| weekly_inferred(b))
+        .map(|b| zone_line(&b.zone_name, b.weekly_budget_in, b.sessions_per_week, p))
+        .collect();
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![
+        "These zones water on a weekly target inferred from the zone name, because none is set. \
+         Set Weekly target and Sessions per week under Settings, then Zones, if that is not what \
+         you want."
+            .to_string(),
+    ];
+    lines.extend(rows);
+    lines
 }
 
 /// One zone's line: the name, the weekly target it will water on, and how
 /// many sessions that target is split across.
-fn zone_line(
+pub(crate) fn zone_line(
     name: &str,
     weekly_budget_in: f64,
     sessions_per_week: u32,
@@ -126,13 +125,16 @@ fn zone_line(
     format!("{name}: {amount} a week over {sessions}")
 }
 
-/// Stable identity for the CURRENT set of inferred-target zones. Dismissal
-/// stores this, so silencing one set never silences a different one.
-fn inferred_key(s: &IrrigationSnapshot) -> String {
+/// Stable identity for the CURRENT set of listed zones (same filter as
+/// `lines`, so the dismissal key always matches what was shown).
+/// Dismissal stores this, so silencing one set never silences a
+/// different one; a zone leaving soil governance later produces a new
+/// key and speaks up again.
+pub(crate) fn inferred_key(s: &IrrigationSnapshot) -> String {
     let mut slugs: Vec<&str> = s
         .water_budgets
         .iter()
-        .filter(|b| b.target_inferred)
+        .filter(|b| weekly_inferred(b))
         .map(|b| b.zone_slug.as_str())
         .collect();
     slugs.sort_unstable();
@@ -194,5 +196,53 @@ mod tests {
         let mut s = IrrigationSnapshot::default();
         s.water_budgets = vec![budget("front_yard", false), budget("back_yard", false)];
         assert_eq!(inferred_key(&s), "");
+        assert!(lines(&s, UnitPrefs::default()).is_empty());
+    }
+
+    /// A soil-governed zone never waters on the inferred target, so it
+    /// is never listed and never keys the dismissal: an all-soil install
+    /// (a fresh install's day-one shape) shows nothing at all, and a
+    /// mixed install lists only the weekly-governed zones the claim is
+    /// true for.
+    #[test]
+    fn soil_governed_zones_are_never_listed() {
+        let mut s = IrrigationSnapshot::default();
+        let mut soil = budget("front_yard", true);
+        soil.scheduling_model = "soil".into();
+        s.water_budgets = vec![soil, budget("back_yard", true)];
+        assert_eq!(inferred_key(&s), "back_yard");
+        let lines = lines(&s, UnitPrefs::default());
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(!lines.iter().any(|l| l.contains("front_yard")), "{lines:?}");
+
+        // All zones soil-governed: the notice retires entirely.
+        for b in s.water_budgets.iter_mut() {
+            b.scheduling_model = "soil".into();
+        }
+        assert_eq!(inferred_key(&s), "");
+        assert!(super::lines(&s, UnitPrefs::default()).is_empty());
+    }
+
+    /// The popup copy: the instruction leads, then one line per zone on
+    /// an inferred target and no line for a configured one.
+    #[test]
+    fn the_notice_lines_lead_with_the_instruction_then_the_zones() {
+        let mut s = IrrigationSnapshot::default();
+        let mut back = budget("back_yard", true);
+        back.zone_name = "Back Yard".into();
+        back.weekly_budget_in = 1.0;
+        back.sessions_per_week = 2;
+        s.water_budgets = vec![back, budget("front_yard", false)];
+        let lines = lines(&s, UnitPrefs::default());
+        assert_eq!(
+            lines,
+            vec![
+                "These zones water on a weekly target inferred from the zone name, because none \
+                 is set. Set Weekly target and Sessions per week under Settings, then Zones, if \
+                 that is not what you want."
+                    .to_string(),
+                "Back Yard: 1.00\" a week over 2 sessions".to_string(),
+            ]
+        );
     }
 }

@@ -20,6 +20,16 @@ use crate::ha::snapshot::{DecisionTrace, RainNature, RuleEval, SkipCheck, ZoneVe
 /// ForecastSnapshot helpers + TempestStore.
 #[derive(Debug, Clone, Default)]
 pub struct Inputs {
+    /// The DEPLOYMENT's UTC offset in seconds at `now_epoch`, supplied by
+    /// the caller. Watering restrictions are evaluated against the
+    /// operator's wall clock, so this decides which weekday, parity and
+    /// forbidden-hours window applies: a legal question. The engine used
+    /// to read it from a process-wide timezone, which meant a container
+    /// left on the wrong zone could water on a banned day or block every
+    /// legal morning, and made the answer depend on where the process
+    /// ran. Defaults to 0 (UTC), so a caller that forgets is
+    /// deterministic rather than machine-dependent.
+    pub utc_offset_seconds: i32,
     // ── Live readings ──
     pub temp_now_f: f64,
     pub wind_now_mph: f64,
@@ -385,7 +395,7 @@ fn rebuild_soil_zones(s: &crate::ha::snapshot::SkipCheck) -> Vec<ZoneSoil> {
                 .get(&format!("saturation_{slug}_pct"))
                 .copied()
                 .flatten()
-                .unwrap_or(70.0);
+                .unwrap_or(crate::config::schema::DEFAULT_SATURATION_PCT);
             // P1-2: recover the per-zone floor; 30.0 only when absent (an older
             // serialized SkipCheck or demo fixture written before target_*).
             let target_min_pct = s
@@ -393,7 +403,7 @@ fn rebuild_soil_zones(s: &crate::ha::snapshot::SkipCheck) -> Vec<ZoneSoil> {
                 .get(&format!("target_{slug}_pct"))
                 .copied()
                 .flatten()
-                .unwrap_or(30.0);
+                .unwrap_or(crate::config::schema::DEFAULT_TARGET_MIN_PCT);
             ZoneSoil {
                 name: slug.replace('_', " "),
                 slug: slug.to_string(),
@@ -405,14 +415,14 @@ fn rebuild_soil_zones(s: &crate::ha::snapshot::SkipCheck) -> Vec<ZoneSoil> {
         .collect()
 }
 
-fn format_pause_until(epoch: i64) -> String {
+fn format_pause_until(epoch: i64, offset: chrono::FixedOffset) -> String {
     // #3 (TZ correctness) + #8 (24h rule): render the vacation-pause "until"
     // timestamp in the deployment's CONFIGURED timezone (not chrono::Local, the
     // container TZ) and in 24-hour local time. The configured-TZ offset comes
     // from timeutil (process-wide, set at boot from cfg.deployment.timezone);
     // applied to the epoch it yields the operator's wall clock. %H:%M is 24-hour
     // (was %-I %p, 12-hour).
-    let tz_offset = *crate::timeutil::now_local().offset();
+    let tz_offset = offset;
     match chrono::DateTime::from_timestamp(epoch, 0).map(|dt| dt.with_timezone(&tz_offset)) {
         Some(dt) => dt.format("%a %b %-d, %H:%M").to_string(),
         None => format!("epoch {epoch}"),
@@ -488,6 +498,15 @@ fn disabled_set(p: &SkipRuleParams) -> HashSet<&str> {
 
 /// Back-compat entrypoint using `SkipRuleParams::default()`. Defaults
 /// reproduce the v0.1 hardcoded thresholds.
+impl Inputs {
+    /// The deployment's offset as a chrono value. One place converts it,
+    /// so no gate has to remember the units.
+    pub fn tz_offset(&self) -> chrono::FixedOffset {
+        chrono::FixedOffset::east_opt(self.utc_offset_seconds)
+            .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).expect("UTC is representable"))
+    }
+}
+
 pub fn evaluate(i: &Inputs) -> SkipCheck {
     evaluate_with(i, &SkipRuleParams::default())
 }
@@ -534,6 +553,10 @@ pub fn evaluate_with(i: &Inputs, params: &SkipRuleParams) -> SkipCheck {
         max_wind_mph: i.max_wind_mph,
         min_temp_f: i.min_temp_f,
         rain_skip_in: i.rain_skip_in,
+        already_wet_in: params.already_wet_in,
+        wind_forecast_slack_mph: params.wind_forecast_slack_mph,
+        rain_observed_window_days: params.rain_observed_window_days,
+        rain_next_4h_skip_in: params.rain_next_4h_skip_in,
 
         // Generalized per-zone soil: one "soil_<slug>_pct" + "saturation_
         // <slug>_pct" entry per configured zone (any slug, any count). The
@@ -870,7 +893,7 @@ fn pre_soil(
         }
     }
     if i.pause_until_epoch > 0 && i.now_epoch > 0 && i.now_epoch < i.pause_until_epoch {
-        let until = format_pause_until(i.pause_until_epoch);
+        let until = format_pause_until(i.pause_until_epoch, i.tz_offset());
         return Some((
             "skip",
             format!("Paused (vacation until {until})"),
@@ -890,7 +913,7 @@ fn pre_soil(
     // and could water on a legally banned day or block every legal morning.
     // Same fix as format_pause_until above.
     if !i.watering_restrictions.is_empty() && i.now_epoch > 0 {
-        let tz_offset = *crate::timeutil::now_local().offset();
+        let tz_offset = i.tz_offset();
         if let Some(now_local) =
             chrono::DateTime::from_timestamp(i.now_epoch, 0).map(|dt| dt.with_timezone(&tz_offset))
         {
@@ -1370,6 +1393,7 @@ fn gate(
             category: category.into(),
             detail: "disabled by operator".into(),
             outcome: "skipped".into(),
+            over_line: false,
             verdict: None,
             margin_label: None,
             // P1 operands filled in by annotate_margins for evaluated threshold
@@ -1387,6 +1411,7 @@ fn gate(
             category: category.into(),
             detail: "not reached (an earlier rule decided)".into(),
             outcome: "not_reached".into(),
+            over_line: false,
             verdict: None,
             margin_label: None,
             // P1 operands filled in by annotate_margins for evaluated threshold
@@ -1404,6 +1429,7 @@ fn gate(
             category: category.into(),
             detail,
             outcome: "skipped".into(),
+            over_line: false,
             verdict: None,
             margin_label: None,
             // P1 operands filled in by annotate_margins for evaluated threshold
@@ -1420,6 +1446,7 @@ fn gate(
         category: category.into(),
         detail,
         outcome: if cond { "fired" } else { "passed" }.into(),
+        over_line: false,
         verdict: if cond { Some(verdict.into()) } else { None },
         margin_label: None,
         // P1 operands written by annotate_margins after the ladder is built (it
@@ -1440,6 +1467,10 @@ fn gate(
 /// or pause would mask every weather slider behind the same skip.
 pub fn inputs_from_skipcheck(s: &SkipCheck) -> Inputs {
     Inputs {
+        // The wire does not round-trip the deployment offset; the
+        // Simulator rebuilding from a snapshot evaluates in UTC, which is
+        // deterministic and never a live decision.
+        utc_offset_seconds: 0,
         temp_now_f: s.temp_now_f,
         wind_now_mph: s.wind_now_mph,
         rain_today_in: s.rain_today_in,
@@ -1548,8 +1579,9 @@ fn annotate_margins(rules: &mut [RuleEval], i: &Inputs, p: &SkipRuleParams) {
                   fires_raw: bool,
                   unit: &str,
                   prec: usize|
-         -> Option<(String, f64, f64, &'static str)> {
+         -> Option<(String, f64, f64, &'static str, bool)> {
             let dist = (actual - threshold).abs();
+            let over_line = !fired && fires_raw;
             let label = if fired {
                 past(dist, unit, prec)
             } else if fires_raw {
@@ -1560,7 +1592,7 @@ fn annotate_margins(rules: &mut [RuleEval], i: &Inputs, p: &SkipRuleParams) {
             } else {
                 head(dist, unit, prec)
             };
-            Some((label, actual, threshold, unit_kind_for(unit)))
+            Some((label, actual, threshold, unit_kind_for(unit), over_line))
         };
         let annotated = match r.id.as_str() {
             "rain_now" => {
@@ -1628,10 +1660,13 @@ fn annotate_margins(rules: &mut [RuleEval], i: &Inputs, p: &SkipRuleParams) {
         // operands. A gate with no numeric threshold annotates nothing (all None),
         // which is correct for the binary control/safety gates.
         match annotated {
-            Some((label, value, threshold, unit_kind)) => {
+            Some((label, value, threshold, unit_kind, over_line)) => {
                 r.margin_label = Some(label);
                 r.value = Some(value);
                 r.threshold = Some(threshold);
+                // The same fact the label phrases, kept as data so a
+                // renderer never has to read the phrasing back.
+                r.over_line = over_line;
                 // soil_frost shares the `°F` display unit with the air-temp gates
                 // but measures SOIL temperature; remap it to the soil dimension so
                 // a client can resolve the correct (and distinct) unit preference.
@@ -1646,6 +1681,7 @@ fn annotate_margins(rules: &mut [RuleEval], i: &Inputs, p: &SkipRuleParams) {
                 r.value = None;
                 r.threshold = None;
                 r.unit_kind = None;
+                r.over_line = false;
             }
         }
     }
@@ -1836,14 +1872,17 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
         // the live clock into the trace, so the decision_trace mutated every
         // ~10s tick and defeated the P3-2 SSE change-gate (and read as noise).
         if i.pause_until_epoch > 0 {
-            format!("until {}", format_pause_until(i.pause_until_epoch))
+            format!(
+                "until {}",
+                format_pause_until(i.pause_until_epoch, i.tz_offset())
+            )
         } else {
             "no timed pause set".to_string()
         },
         "skip",
         format!(
             "Paused (vacation until {})",
-            format_pause_until(i.pause_until_epoch)
+            format_pause_until(i.pause_until_epoch, i.tz_offset())
         ),
     );
 
@@ -1867,7 +1906,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
         let applicable = !i.watering_restrictions.is_empty() && i.now_epoch > 0;
         // TZ: configured deployment timezone, not chrono::Local. Mirrors
         // pre_soil so the trace matches the live decision.
-        let tz_offset = *crate::timeutil::now_local().offset();
+        let tz_offset = i.tz_offset();
         let (cond, reason) = if applicable {
             match chrono::DateTime::from_timestamp(i.now_epoch, 0)
                 .map(|dt| dt.with_timezone(&tz_offset))
@@ -2361,6 +2400,105 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
 
 #[cfg(test)]
 mod tests {
+
+    /// The probe card's band and the engine's gates have to agree at the
+    /// boundaries, because they are the same claim shown two ways: a pill
+    /// reading HEALTHY on a reading the saturation gate is skipping on
+    /// would be the app contradicting itself. Both edges are exact: the
+    /// gate skips at or above saturation, and the dry-floor veto needs
+    /// STRICTLY below the floor.
+    #[test]
+    fn the_probe_band_matches_the_gate_operators_at_the_edges() {
+        use crate::ha::snapshot::{SoilBand, SoilForecast};
+        let fc = |pct: f64| SoilForecast {
+            zone_slug: "z".into(),
+            current_pct: Some(pct),
+            target_min_pct: 30.0,
+            target_max_pct: 70.0,
+            ..Default::default()
+        };
+        // Saturation edge: exactly at the ceiling is saturated, and the
+        // gate skips there too.
+        assert_eq!(fc(70.0).current_band(), SoilBand::Saturated);
+        assert_eq!(fc(69.9).current_band(), SoilBand::Healthy);
+        // Floor edge: exactly at the floor is NOT dry, matching the
+        // veto's strict <.
+        assert_eq!(fc(30.0).current_band(), SoilBand::Healthy);
+        assert_eq!(fc(29.9).current_band(), SoilBand::Dry);
+        assert_eq!(
+            SoilForecast {
+                current_pct: None,
+                ..fc(50.0)
+            }
+            .current_band(),
+            SoilBand::Offline
+        );
+    }
+
+    /// `over_line` and the margin label have to agree on every evaluated
+    /// gate: the label is written for people, the flag is what renderers
+    /// read, and a row where one says "overridden" and the other does not
+    /// would render the opposite of what the engine decided.
+    #[test]
+    fn the_over_line_flag_and_its_label_never_disagree() {
+        let mut i = base();
+        // A yard whose soil floor demotes a forecast-rain skip: gates sit
+        // over their own thresholds while a stronger rule holds the call.
+        i.rain_next_4h_in = 1.0;
+        i.rain_3day_weighted_in = 3.0;
+        i.rain_today_in = 1.0;
+        let trace = decide_traced(&i, &SkipRuleParams::default());
+        let mut checked = 0;
+        for r in &trace.rules {
+            let Some(label) = r.margin_label.as_deref() else {
+                assert!(!r.over_line, "{}: flag set with no margin label", r.id);
+                continue;
+            };
+            assert_eq!(
+                r.over_line,
+                label.contains("overridden"),
+                "{}: flag {} against label {label:?}",
+                r.id,
+                r.over_line
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "no evaluated gate carried a margin label");
+    }
+
+    /// The UI decides "this yard is paused" from the reason CODE, via
+    /// `snapshot::is_pause_code`. Both pause gates have to be covered by
+    /// it, and no other gate may be: a rename here with no matching
+    /// change there would quietly stop the paused banner from showing, or
+    /// show it for an unrelated skip.
+    #[test]
+    fn the_pause_codes_are_exactly_what_the_ui_treats_as_paused() {
+        use crate::ha::snapshot::is_pause_code;
+        let mut i = base();
+        i.is_paused = true;
+        let toggle = evaluate_with(&i, &SkipRuleParams::default());
+        assert_eq!(toggle.reason_code, "paused");
+        assert!(is_pause_code(&toggle.reason_code));
+
+        let mut i = base();
+        i.is_paused = false;
+        i.now_epoch = 1_700_000_000;
+        i.pause_until_epoch = i.now_epoch + 86_400;
+        let timed = evaluate_with(&i, &SkipRuleParams::default());
+        assert_eq!(timed.reason_code, "pause_until");
+        assert!(is_pause_code(&timed.reason_code));
+
+        // Nothing else counts as paused.
+        for other in [
+            "rain_now",
+            "wind_now",
+            "heat_advisory",
+            "tomorrow_rain",
+            "run",
+        ] {
+            assert!(!is_pause_code(other), "{other} is not a pause");
+        }
+    }
     use super::*;
     use crate::engine::conditions::{
         CmpOp, ConditionExpr, ConditionRule, Metric, RuleAction, RuleScope,
@@ -2417,6 +2555,9 @@ mod tests {
 
     fn base() -> Inputs {
         Inputs {
+            // Fixtures evaluate in UTC so a restriction window means the
+            // same thing on every machine.
+            utc_offset_seconds: 0,
             temp_now_f: 70.0,
             wind_now_mph: 3.0,
             rain_today_in: 0.0,

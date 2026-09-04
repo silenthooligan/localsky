@@ -10,7 +10,7 @@ pub mod tuning;
 use leptos::prelude::*;
 
 use crate::components::irrigation::anomaly_banner::AnomalyBanner;
-use crate::components::irrigation::default_budget_banner::DefaultBudgetBanner;
+use crate::components::notice_center::NoticeCenter;
 use crate::components::ui::StatTile;
 use crate::ha::snapshot::IrrigationSnapshot;
 use card::ZoneCard;
@@ -148,10 +148,9 @@ pub fn ZonesPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             // Quiet when there are no anomalies; the single owner of soil
             // offline/suspect warnings (never shown on the weather tab).
             <AnomalyBanner snap/>
-            // Zones about to water on a weekly target inferred from their
-            // name rather than one set here. Dismissible, and quiet once
-            // every zone carries a configured target.
-            <DefaultBudgetBanner snap/>
+            // The one-time notices pop once from the centralized popup
+            // (soil opt-in offer first) and leave the page clear.
+            <NoticeCenter snap/>
             <header class="zones-page__header">
                 <p class="zones-page__eyebrow">"Irrigation"</p>
                 <h1 class="zones-page__title">"Zones"</h1>
@@ -166,12 +165,26 @@ pub fn ZonesPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 let s = snap.get();
                 let total = s.zones.len();
                 let running = s.zones.iter().filter(|z| z.running).count();
-                let due = s.zones.iter().filter(|z| !z.running && z.planned_run_seconds > 0).count();
-                let planned_min: u32 = s.zones.iter().map(|z| (z.planned_run_seconds + 30) / 60).sum();
+                // Due and Planned ride the shared skip-aware predicate
+                // (snapshot::zone_waters_next_run), the same one the hero
+                // and the cards use: a zone carrying a skip verdict with
+                // leftover planned seconds must not read as due here while
+                // its own card two lines down says SKIPPING and 0 min.
+                let due = s
+                    .zones
+                    .iter()
+                    .filter(|z| !z.running && s.zone_waters_next_run(z))
+                    .count();
+                let planned_min: u32 = s
+                    .zones
+                    .iter()
+                    .filter(|z| s.zone_waters_next_run(z))
+                    .map(|z| (z.planned_run_seconds + 30) / 60)
+                    .sum();
                 let skipping = s
                     .zones
                     .iter()
-                    .filter(|z| z.verdict.as_ref().map(|v| v.verdict == "skip").unwrap_or(false))
+                    .filter(|z| s.zone_skips_next_run(z))
                     .count();
                 let suggestions = tuning_report
                     .get()
@@ -181,7 +194,7 @@ pub fn ZonesPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                     <div class="zones-kpis">
                         <StatTile label="Zones" value=total.to_string() icon="zones"/>
                         <StatTile label="Running" value=running.to_string() icon="play" accent="var(--verdict-run)".to_string()/>
-                        <StatTile label="Due tonight" value=due.to_string() icon="droplet" accent="var(--accent)".to_string()/>
+                        <StatTile label="Due this morning" value=due.to_string() icon="droplet" accent="var(--accent)".to_string()/>
                         <StatTile label="Skipping" value=skipping.to_string() icon="ban" accent="var(--verdict-skip)".to_string()/>
                         <StatTile label="Planned" value=planned_min.to_string() unit="min" icon="gauge" accent="var(--accent-warm)".to_string()/>
                         <StatTile label="Suggestions" value=suggestions icon="zap" accent="var(--attention)".to_string()/>
@@ -229,13 +242,14 @@ pub fn ZonesPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                             .iter()
                             .map(|b| (b.zone_slug.clone(), b.clone()))
                             .collect();
+                        let engine_model = s.engine_scheduling_model.clone();
                         s.zones
                             .into_iter()
                             .map(|z| {
                                 let soil_pct = soil.get(&z.slug).copied();
                                 let has_suggestion = recs.contains(&z.slug.replace('-', "_"));
                                 let budget = budgets.get(&z.slug).cloned();
-                                view! { <ZoneCard zone=z selected soil_pct=soil_pct has_suggestion budget=budget stop_done=card_stop_done/> }
+                                view! { <ZoneCard zone=z selected soil_pct=soil_pct has_suggestion budget=budget engine_model=engine_model.clone() stop_done=card_stop_done/> }
                             })
                             .collect_view()
                             .into_any()

@@ -222,7 +222,7 @@ Configure under `/settings/notifications`. None of these touch HA.
 
 No. LocalSky's engine is a complete, native replacement for both:
 
-- **Smart Irrigation (HACS)** does ET₀ + per-zone bucket + Kc + planned-run-seconds. LocalSky's [engine/et0.rs](../src/engine/et0.rs) + [engine/species_catalog.rs](../src/engine/species_catalog.rs) + [engine/budget.rs](../src/engine/budget.rs) cover ET₀, Kc and planned run seconds with the same FAO-56 math, deciding both the trigger and the run length from a weekly water balance rather than a per-zone soil bucket. The per-zone bucket in [engine/water_balance.rs](../src/engine/water_balance.rs) is written and tested but is not yet on a live path; see [the soil depletion bucket, for later](irrigation-engine.md#the-soil-depletion-bucket-for-later).
+- **Smart Irrigation (HACS)** does ET₀ + per-zone bucket + Kc + planned-run-seconds. LocalSky's [engine/et0.rs](../src/engine/et0.rs) + [engine/species_catalog.rs](../src/engine/species_catalog.rs) + [engine/budget.rs](../src/engine/budget.rs) cover ET₀, Kc and planned run seconds with the same FAO-56 math, deciding the trigger and the run length from a weekly water balance by default, or from the per-zone soil bucket in [engine/water_balance.rs](../src/engine/water_balance.rs) when a zone selects the soil scheduling model; see [the soil model](irrigation-engine.md#the-soil-model).
 - **Irrigation Unlimited (HACS)** does schedule sequencing + zone dispatch. LocalSky's [engine/skip_rules.rs](../src/engine/skip_rules.rs) + [engine/budget.rs](../src/engine/budget.rs) + the controller HAL do the same thing.
 
 The clean-room rewrite was deliberate: both projects are excellent and were the prior art that proved this design space works. LocalSky absorbs their lessons + adds:

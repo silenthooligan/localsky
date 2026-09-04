@@ -6558,51 +6558,6 @@ html[data-no-irrigation="true"] {
   text-overflow: ellipsis;
 }
 
-// Prose variant, for the migration notice. Its lines are full sentences
-// naming an entity and two values, and its closing paragraphs run several
-// sentences each; ellipsising those to one line each would leave a notice
-// that says nothing. The nowrap above exists to keep a live soil-fault line
-// on one row, and contain:inline-size on the parent already holds the layout
-// viewport, so wrapping here costs nothing. overflow-wrap breaks an entity id,
-// which is one long unbreakable token.
-.anomaly-banner-line--wrap {
-  white-space: normal;
-  overflow: visible;
-  text-overflow: clip;
-  overflow-wrap: anywhere;
-
-  code {
-    font-family: var(--font-mono);
-    color: var(--accent);
-  }
-
-  + .anomaly-banner-line--wrap {
-    margin-top: 0.35rem;
-  }
-}
-
-// Dismiss control for the banners that carry one (the default-target
-// notice). The soil-anomaly lines have no dismiss: a faulted probe is a
-// live condition, not a one-time notice.
-.anomaly-banner-dismiss {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border: none;
-  background: none;
-  color: var(--text-faint);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-
-  &:hover {
-    color: var(--text);
-    background: var(--elev-2);
-  }
-}
-
 .anomaly-banner-link {
   flex: 0 0 auto;
   font-size: 0.78rem;
@@ -7043,6 +6998,35 @@ html[data-no-irrigation="true"] {
   min-height: 48px;
   font-size: 0.95rem;
   letter-spacing: 0.04em;
+}
+
+// The centralized notice popup (notice_center). Copy lines wrap like the
+// long-form banner lines used to (entity ids are one unbreakable token),
+// and the action row holds up to three affordances (navigate / snooze /
+// dismiss), so it is a wrapping flex row rather than the confirm sheet's
+// two-column grid.
+// Every notice line is one escaped sentence (the builders return plain
+// Strings), so this styles text and nothing else.
+.notice-popup__line {
+  margin: 0 0 0.6rem 0;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.notice-popup__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  margin-top: 0.5rem;
+
+  .btn {
+    flex: 1 1 auto;
+    min-height: 44px;
+    font-size: 0.9rem;
+    letter-spacing: 0.04em;
+  }
 }
 
 // Duration picker
@@ -7854,6 +7838,14 @@ html[data-no-irrigation="true"] {
   font-variant-numeric: tabular-nums;
 }
 .seasonal-dial__effect {
+  margin: 0.5rem 0 0;
+  font-size: var(--text-body-sm);
+  color: var(--text-dim);
+}
+// Block-agnostic dynamic-effect line under a form control ("what this
+// setting does right now"). Same geometry as the dial's effect line,
+// without coupling a dial-free panel to the dial block's future edits.
+.form-effect {
   margin: 0.5rem 0 0;
   font-size: var(--text-body-sm);
   color: var(--text-dim);
@@ -10678,7 +10670,23 @@ button.mobile-tab {
 // suppression note sits quieter than the engine's own "why" line.
 .zone-card__reason--budget { color: var(--text-soft); }
 .zone-card__reason--suppressed { color: var(--text-faint); }
-.zone-card__stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-2); }
+// auto-fit, not a fixed 3: every agronomy zone now carries a live
+// Deficit and any probed zone adds the Soil stat, so the four-stat card
+// is the common case and a fixed 3-column grid wrapped the fourth stat
+// alone onto a ragged second row.
+.zone-card__stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(72px, 1fr)); gap: var(--space-2); }
+// The scheduling-model chip, mixed installs only (a zone whose model
+// differs from the engine default). Cool accent so it reads as a fact
+// tag, not a live status.
+.zone-card__model {
+  display: inline-flex; align-items: center;
+  font-family: var(--font-mono); font-size: var(--text-micro); font-weight: 700; letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--accent-cool);
+  padding: 2px var(--space-2); border-radius: 999px;
+  border: 1px solid color-mix(in oklab, var(--accent-cool) 45%, transparent);
+  background: color-mix(in oklab, var(--accent-cool) 10%, transparent);
+}
 .zone-card__stat { display: flex; flex-direction: column; gap: 1px; }
 .zone-card__k { font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); }
 .zone-card__v { font-family: var(--font-mono); font-weight: 700; font-size: var(--text-data); color: var(--text-bright); }
@@ -11037,6 +11045,32 @@ button.mobile-tab {
   display: flex; flex-direction: column; gap: var(--space-4);
 }
 .zone-detail__panel-title { margin: 0; font-size: var(--text-h3); color: var(--text-bright); }
+// The Soil model panel's governs-vs-preview pill: the at-a-glance
+// distinction the verb mood ("Waters" / "Would water") used to carry
+// alone. Same pill grammar as the zone-card status pill.
+.zone-detail__panel-pill {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  margin-left: var(--space-2);
+  padding: 2px var(--space-2);
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  font-weight: 700;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+}
+.zone-detail__panel-pill--governs {
+  color: var(--accent);
+  border: 1px solid color-mix(in oklab, var(--accent) 45%, transparent);
+  background: color-mix(in oklab, var(--accent) 10%, transparent);
+}
+.zone-detail__panel-pill--preview {
+  color: var(--text-dim);
+  border: 1px solid color-mix(in oklab, var(--text-dim) 40%, transparent);
+  background: color-mix(in oklab, var(--text-dim) 8%, transparent);
+}
 .zone-detail__actions { flex-direction: row; align-items: center; }
 .zone-detail__run { display: flex; align-items: center; gap: var(--space-3); }
 // Home Assistant integration: hero + capability cards with status
@@ -11333,6 +11367,10 @@ button.mobile-tab {
 .zone-tuning__line { margin: 0; color: var(--text-soft); font-size: var(--text-meta); }
 .zone-tuning__line--lead { color: var(--text-dim); font-size: var(--text-body-sm); }
 .zone-tuning__line--muted { color: var(--text-faint); }
+// The soil-vs-weekly comparison when the models diverge: visible beside
+// the lead (never behind the Data-notes disclosure), cool accent so it
+// reads as decision support rather than provenance.
+.zone-tuning__line--compare { color: var(--accent-cool); font-size: var(--text-body-sm); }
 // The probe-availability and insufficient-data lines fold into ONE quiet
 // group instead of co-equal paragraphs.
 .zone-tuning__notes summary {
@@ -12468,7 +12506,6 @@ html[data-kiosk="true"] .beta-fb,
   .data-source-chain__move,
   .help-hint__trigger,
   .ui-toast__close,
-  .anomaly-banner-dismiss,
   .health-banner__dismiss,
   .welcome-card__dismiss {
     min-width: 44px;

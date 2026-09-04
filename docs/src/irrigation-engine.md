@@ -113,26 +113,36 @@ The heat index is computed per day: each day's high temperature is paired with t
 
 ## What decides watering today
 
-One model, on every install: the weekly water balance below. It decides
-both whether a zone runs today and how long for. There is no per-zone soil
-bucket on any live path.
+Two models are selectable, per install and per zone. `engine.scheduling_model`
+picks the default: `weekly`, the shipped default for existing installs, or
+`soil`, which the setup wizard writes for new installs. A zone's own
+`scheduling_model` field pins either model for that zone regardless of the
+engine default. The Engine settings page carries the install-wide selector
+and the zone editor carries the per-zone pin; both hot-reload, so a save
+applies on the next scheduler tick.
 
-That matters because a "Deficit" figure used to appear on the zone card and
-the zone detail. It came from a Home Assistant Smart Irrigation entity, and
-on an install without that integration the read simply missed and printed
-0.00 forever. As of 0.7.22 the field is absent rather than fabricated: every
-surface shows a dash, and the reason a zone is not watering comes from the
-weekly balance, which says so in plain English.
+- **Weekly water balance** (`weekly`): the model in the next section. A
+  gross weekly target per zone, settled against rain, applied water, and a
+  forecast credit; the remainder splits across the week's sessions.
+- **Soil model** (`soil`): the FAO-56 depletion bucket below. Each zone
+  waters when its own soil deficit crosses the trigger, and each run
+  refills the deficit, so cadence follows soil texture and roots instead
+  of `sessions_per_week`.
 
-### The soil depletion bucket, for later
+Whichever model governs, the soil model computes on every install for
+every zone with a species and a soil texture. The Deficit tiles on the
+zone card, the zone detail and the dashboard show the replayed deficit
+(negative = needs water), the zone detail's Soil model block shows what
+the model waters, or would water, today and when it waters next, and the
+[tuning report](tuning-report.md) carries a comparison line on every
+weekly-governed zone. A zone with no agronomy config (env-var zone lists)
+stays on the weekly model and its deficit reads a dash.
 
-A complete FAO-56 single-bucket model lives in
-[src/engine/water_balance.rs](../src/engine/water_balance.rs) and is
-exercised by its own tests, but nothing calls it. It is not what decides
-watering today, and this page used to say it was.
+### The soil model
 
-The intended destination is that bucket governing both the trigger and the
-run size, per zone:
+The bucket arithmetic lives in
+[src/engine/water_balance.rs](../src/engine/water_balance.rs) and the
+planner in [src/engine/soil_schedule.rs](../src/engine/soil_schedule.rs):
 
 ```
 depletion[t+1] = clamp(depletion[t] + ETc - effective_rain - applied_water,
@@ -140,21 +150,85 @@ depletion[t+1] = clamp(depletion[t] + ETc - effective_rain - applied_water,
 needs_irrigation = (depletion >= RAW),   RAW = TAW * MAD%
 ```
 
-with `TAW` from the [soil texture catalog](soil-textures.md) and `MAD`
-per species. Shipping it is a separate release: switching the model changes
-which zones run on a given morning, and a yard whose zones all cross the
-threshold on the same hot morning needs sequencing behavior this release
-does not define. Nothing in the config turns it on today, because there is
-nothing to turn on.
+with `TAW` from the [soil texture catalog](soil-textures.md) at the
+species' default or overridden root depth, and `MAD` per species.
+
+**Replay.** Nothing persists the deficit. Every evaluation replays the
+trailing 14 local days of evidence through the bucket step: each day's
+resolved ET0 times the species' Kc charges the bucket, and the day's
+observed rain and completed runs (union valve seconds times throughput
+times capture efficiency) refill it. The window starts at field capacity,
+and the `[0, TAW]` clamp erases that anchor at the first saturating or
+fully-depleting day, so a restart or a late-arriving rain correction
+heals within the window instead of corrupting a stored figure. Per-day
+ET0 resolves through a ladder: the observations ledger's own day rows
+(the engine records its resolved daily figure there), then the forecast
+provider's past-day archive, then a fixed daily mean derived from the
+zone's explicit weekly target or its species class. No fabricated
+constant enters the replay. An install with less coverage than the
+14-day window charges the uncovered days at that daily mean, as dry
+days: a fresh soil-default install reads a nearly full deficit on its
+early mornings and waters toward filling the bucket at the run cap,
+cycle-soak and every safety gate still applying, until real coverage
+accumulates. A window with fewer than three evidenced days (a resolved
+ET0 day, a rain day, or a completed run) publishes no bucket at all,
+and the weekly allocator sizes the zone until enough evidence lands:
+one resolved day over thirteen assumed days is not a reconstruction,
+so a single reading never flips a fresh install to full confidence.
+
+**Trigger.** The zone is due when depletion crosses RAW. A due zone holds
+when the bias-corrected, probability-weighted next-24-hour forecast rain
+would pull the deficit back under RAW (defer by deficit). The fixed
+`session_rain_defer_in` depth does not apply to soil-governed zones: the
+threshold is the zone's own physics, so sand tolerates little forecast
+rain and clay tolerates a lot.
+
+**Sizing.** A run refills the full deficit back to field capacity: gross
+seconds = deficit / capture efficiency / throughput, capped at the zone's
+run limit. A capped run carries its remainder in the bucket itself: the
+zone triggers again the next morning until the deficit drops under RAW,
+and the reason line says so. A `weekly_budget_in` the operator set by
+hand additionally acts as a rolling-7-day delivery ceiling: the run is
+clamped to the remaining headroom, with a reason naming delivered, target
+and headroom. An inferred target never caps.
+
+**Window admission.** When several zones trigger on the same morning,
+they are admitted most-stressed-first (deficit over RAW, descending)
+against the pre-sunrise window, priced by the dispatcher's own wall-time
+arithmetic (cycle-soak splits, soak gaps, interleaving). The
+most-stressed zone is always admitted, even alone over the window. A zone
+that does not fit waters tomorrow at higher stress and says so in its
+reason line; nothing is dropped silently.
+
+**Gates.** Every safety and compliance gate still binds: wind, freeze,
+rain now, already wet, the observed-rain backstop, soil-probe saturation
+and quarantine, watering restrictions, pause, dry-run. Three forward-rain
+gates (rain within 4 hours, tomorrow rain, 3-day rain) and the
+heat-advisory extension are inert for soil-governed zones: defer by
+deficit already prices forecast rain against the deficit, and measured
+ET0 already charges hot days into it, so those gates would count the same
+signal twice. The rule catalog names this on each row; weekly-governed
+zones keep all four.
+
+**Weekly fields under the soil model.** A hand-set `weekly_budget_in`
+stays honored as the delivery ceiling above. `sessions_per_week` stops
+steering: cadence is emergent, roughly RAW divided by daily ETc, which is
+the same interval the tuning report's bucket check computes. Both keep
+their full meaning for weekly-governed zones. `rain_credit_cap_in` keeps
+its per-day meaning inside the replay, and an unset cap is emergent: the
+`[0, TAW]` clamp already bounds what a single day of rain can credit.
 
 ## Weekly water balance
 
-The weekly allocator sizes each zone's sessions against a true water balance in gross homeowner terms: the target is "inches per week including rain," and the week's ledger settles before any session is sized.
+The default model. The weekly allocator sizes each zone's sessions against a true water balance in gross homeowner terms: the target is "inches per week including rain," and the week's ledger settles before any session is sized.
 
 ```
-weekly_target_gross_mm = weekly_budget_in * 25.4
+rain_cap_mm             = rain_credit_cap_in * 25.4, or unset:
+                          (field_capacity - wilting_point) * root_depth_mm
+credited_rain_mm        = sum over trailing days of min(day_rain_mm, rain_cap_mm)
+weekly_target_gross_mm  = weekly_budget_in * 25.4
 remainder = max(0, weekly_target_gross_mm
-                   - observed_rain_trailing_mm
+                   - credited_rain_mm
                    - irrigation_applied_trailing_mm
                    - bias_corrected_forecast_credit_mm)
 session_gross_mm    = remainder / remaining_sessions
@@ -162,10 +236,11 @@ seconds_per_session = session_gross_mm / throughput_mm_hr * 3600   (capped at th
 ```
 
 - The trailing window is a rolling 7 local days ending now; there is no calendar-week anchor.
-- Observed rain resolves through a ladder with per-rung provenance and COVERAGE precedence: when the observations ledger holds any gauge or radar day rows for the window, the measured total wins outright, even at 0.00 in (a yard that measured a dry week is ground truth a wetter regional model must not override). Only when measured coverage is entirely absent does the forecast provider's past-day model archive supply the term, and an install with neither runs on the corrected forecast alone; the tuning report line names which rung applied.
+- Observed rain resolves through a ladder with per-rung provenance and COVERAGE precedence: when the observations ledger holds any gauge or radar day rows for the window, the measured record wins outright, even at 0.00 in (a yard that measured a dry week is ground truth a wetter regional model must not override). Only when measured coverage is entirely absent does the forecast provider's past-day model archive supply the term, and an install with neither runs on the corrected forecast alone; the tuning report line names which rung applied. The winning rung supplies both the raw window total (which rides the wire as `observed_rain_mm`) and the per-day series the credit is computed from.
+- Rain credits per day, each day capped at `rain_cap_mm`, the root zone's own capacity (TAW from the [soil texture catalog](soil-textures.md) at the species' default or overridden root depth, or the zone's explicit `rain_credit_cap_in`). Rain beyond the cap in a single day drains below the root zone and never becomes plant-available, so a 1.2 in storm day on sand credits about 0.35 in rather than settling a 1.0 in week outright. A week whose rain never exceeded the cap on any day settles exactly as the raw sum. The cap does not decay older rain by ET: the weekly target already encodes typical ET, and decaying the credit would count it twice. Each forward forecast-credit day is held to the same cap.
 - Applied irrigation is the union of completed watering evidence in the window (cycle-soak segments and duplicate manual/observer rows cluster into single events) times the zone's precipitation rate. Gross in against a gross target: no capture factor on either side. Every completed run counts, whoever commanded it: water in the ground is water in the ground, so a manual run and a manual schedule's run shrink the remainder and move the session-spacing anchor exactly as a smart run does.
 - The forecast credit covers only the days between tomorrow and the zone's next expected session, corrected by the per-month bias multiplier (below). Rain past the next session is never credited now; it will be observed rain by the time it matters. Imminent rain is handled by the 24-hour defer gate, not the credit.
-- The 24-hour defer gate compares the next 24 forecast hours against `engine.session_rain_defer_in` (default 0.10 in), weighting each hour by its precipitation probability, the same weighting the forward credit uses. An hour with no reported probability weights at full value. Before 0.7.22 the gate summed the raw model depth and read a compile-time constant instead of the configured threshold, so a low-probability drizzle could zero every zone almost daily and raising the documented knob changed nothing.
+- The 24-hour defer gate compares the next 24 forecast hours against `engine.session_rain_defer_in` (default 0.10 in), weighting each hour by its precipitation probability, the same weighting the forward credit uses. An hour with no reported probability weights at full value. Before 0.7.22 the gate summed the raw model depth and read a compile-time constant instead of the configured threshold, so a low-probability drizzle could zero every zone almost daily and raising the documented knob changed nothing. Soil-governed zones replace this fixed depth with defer by deficit (above).
 - `remaining_sessions` is `sessions_per_week` minus the completed events in the window, floor 1. Sessions space at `floor(7 / sessions_per_week)` days, measured from the last completed event in the runs history.
 
 Fixed in 0.7.17: the previous formula multiplied delivery by the heat multiplier and divided by capture efficiency (0.70), inflating session length by up to about 1.9x against a target that already reads as gross, and it credited only forward forecast rain: rain that had already fallen and water already applied never counted, so a soaked week could still schedule full sessions. The heat multiplier stays an ETc input, and the soil projection keeps a capture factor, though it is the fixed 0.70 rather than the configured `capture_efficiency`; neither shapes session delivery any more.

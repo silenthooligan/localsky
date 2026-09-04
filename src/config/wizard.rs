@@ -204,11 +204,26 @@ impl WizardStore {
     /// hour even when the container TZ is UTC; units -> pre-select from
     /// the timezone (US keeps imperial, everywhere else gets metric).
     /// Called by apply after validation passes, before the config is
-    /// written.
-    pub fn finalize_for_apply(draft: &mut WizardDraft) {
+    /// written. `fresh_install` is true only when no config exists on
+    /// disk yet (a genuine first run); the soil-model default below is
+    /// gated on it.
+    pub fn finalize_for_apply(draft: &mut WizardDraft, fresh_install: bool) {
         if draft.config.deployment.timezone.is_none() {
             let loc = &draft.config.deployment.location;
             draft.config.deployment.timezone = crate::timeutil::tz_name_for(loc.lat, loc.lon);
+        }
+        // NEW installs start on the soil model: the wizard collects the
+        // texture and species the bucket derives everything from, and a
+        // fresh install has no watering history the weekly default would
+        // preserve. Gated on `fresh_install` because the wizard is
+        // re-enterable as an editor over a configured instance
+        // (GET /state -> POST /seed_current -> POST /apply): a re-run
+        // over an existing install keeps the model the config already
+        // holds, an explicit weekly choice included. A per-zone
+        // `scheduling_model` pin still overrides per zone.
+        if fresh_install {
+            draft.config.engine.scheduling_model =
+                Some(crate::config::schema::SchedulingModel::Soil);
         }
         Self::finalize_units(draft);
         Self::finalize_sources(draft);
@@ -538,11 +553,63 @@ mod tests {
         d
     }
 
+    /// A NEW install applies onto the soil model: the wizard already
+    /// collected the texture and species the bucket derives from, and a
+    /// fresh install has no watering history the weekly default would be
+    /// preserving. The unset field (None = follow the shipped default)
+    /// keeps every upgrade byte-identical.
+    #[test]
+    fn finalize_defaults_new_installs_to_the_soil_model() {
+        use crate::config::schema::SchedulingModel;
+        let mut d = draft_at(28.5, -81.4);
+        assert_eq!(
+            d.config.engine.scheduling_model, None,
+            "the draft starts unset, following the shipped default"
+        );
+        WizardStore::finalize_for_apply(&mut d, true);
+        assert_eq!(
+            d.config.engine.scheduling_model,
+            Some(SchedulingModel::Soil)
+        );
+    }
+
+    /// A wizard RE-RUN over a configured instance (seed_current -> apply,
+    /// fresh_install=false) keeps the scheduling model the config already
+    /// holds: an existing weekly install is never flipped to soil by
+    /// re-entering the wizard to edit something unrelated, an install
+    /// already on soil stays on soil, and an install that never chose
+    /// stays unset (still eligible for a later default flip).
+    #[test]
+    fn finalize_reentry_keeps_the_existing_scheduling_model() {
+        use crate::config::schema::SchedulingModel;
+        let mut d = draft_at(28.5, -81.4);
+        d.config.engine.scheduling_model = Some(SchedulingModel::Weekly);
+        WizardStore::finalize_for_apply(&mut d, false);
+        assert_eq!(
+            d.config.engine.scheduling_model,
+            Some(SchedulingModel::Weekly),
+            "a re-entered wizard keeps an existing weekly install weekly"
+        );
+        let mut d = draft_at(28.5, -81.4);
+        d.config.engine.scheduling_model = Some(SchedulingModel::Soil);
+        WizardStore::finalize_for_apply(&mut d, false);
+        assert_eq!(
+            d.config.engine.scheduling_model,
+            Some(SchedulingModel::Soil)
+        );
+        let mut d = draft_at(28.5, -81.4);
+        WizardStore::finalize_for_apply(&mut d, false);
+        assert_eq!(
+            d.config.engine.scheduling_model, None,
+            "an install that never chose stays unset"
+        );
+    }
+
     #[test]
     fn finalize_units_metric_outside_us() {
         // Berlin: timezone inferred from lat/lon, units flip to metric.
         let mut d = draft_at(52.52, 13.40);
-        WizardStore::finalize_for_apply(&mut d);
+        WizardStore::finalize_for_apply(&mut d, true);
         assert_eq!(
             d.config.deployment.timezone.as_deref(),
             Some("Europe/Berlin")
@@ -551,7 +618,7 @@ mod tests {
 
         // Sydney: metric too.
         let mut d = draft_at(-33.87, 151.21);
-        WizardStore::finalize_for_apply(&mut d);
+        WizardStore::finalize_for_apply(&mut d, true);
         assert_eq!(d.config.deployment.units, Units::Metric);
     }
 
@@ -559,7 +626,7 @@ mod tests {
     fn finalize_units_imperial_inside_us() {
         // Orlando: US timezone keeps the imperial default.
         let mut d = draft_at(28.5, -81.4);
-        WizardStore::finalize_for_apply(&mut d);
+        WizardStore::finalize_for_apply(&mut d, true);
         assert_eq!(
             d.config.deployment.timezone.as_deref(),
             Some("America/New_York")
@@ -569,7 +636,7 @@ mod tests {
         // Legacy US/ alias set explicitly also keeps imperial.
         let mut d = draft_at(39.74, -104.99);
         d.config.deployment.timezone = Some("US/Mountain".into());
-        WizardStore::finalize_for_apply(&mut d);
+        WizardStore::finalize_for_apply(&mut d, true);
         assert_eq!(d.config.deployment.units, Units::Imperial);
     }
 
@@ -578,7 +645,7 @@ mod tests {
         // An explicit metric choice in a US timezone is left alone.
         let mut d = draft_at(41.88, -87.63);
         d.config.deployment.units = Units::Metric;
-        WizardStore::finalize_for_apply(&mut d);
+        WizardStore::finalize_for_apply(&mut d, true);
         assert_eq!(
             d.config.deployment.timezone.as_deref(),
             Some("America/Chicago")
@@ -590,7 +657,7 @@ mod tests {
     fn finalize_units_no_timezone_keeps_default() {
         // lat/lon 0,0 derives no timezone; the serde default stands.
         let mut d = WizardDraft::default();
-        WizardStore::finalize_for_apply(&mut d);
+        WizardStore::finalize_for_apply(&mut d, true);
         assert_eq!(d.config.deployment.timezone, None);
         assert_eq!(d.config.deployment.units, Units::Imperial);
     }
@@ -632,7 +699,7 @@ mod tests {
             enabled: true,
             controller: ControllerKind::DryRun(Default::default()),
         });
-        WizardStore::finalize_for_apply(&mut d);
+        WizardStore::finalize_for_apply(&mut d, true);
         assert!(
             d.config.controllers[0].default,
             "the sole controller must be auto-marked default"
@@ -656,7 +723,7 @@ mod tests {
                 controller: ControllerKind::DryRun(Default::default()),
             });
         }
-        WizardStore::finalize_for_apply(&mut d);
+        WizardStore::finalize_for_apply(&mut d, true);
         assert_eq!(
             d.config.controllers.iter().filter(|c| c.default).count(),
             0,
@@ -691,7 +758,7 @@ mod tests {
             vapid_private_path: String::new(),
             vapid_subject: String::new(),
         });
-        WizardStore::finalize_for_apply(&mut d);
+        WizardStore::finalize_for_apply(&mut d, true);
 
         let wp = d.config.notifications.web_push.as_ref().unwrap();
         assert!(
@@ -861,7 +928,7 @@ mod tests {
             vapid_private_path: "/data/keys/existing.pem".into(),
             vapid_subject: "mailto:ops@example.com".into(),
         });
-        WizardStore::finalize_for_apply(&mut d);
+        WizardStore::finalize_for_apply(&mut d, true);
         let wp = d.config.notifications.web_push.as_ref().unwrap();
         assert_eq!(wp.vapid_public, "ALREADY_SET");
         assert_eq!(wp.vapid_private_path, "/data/keys/existing.pem");

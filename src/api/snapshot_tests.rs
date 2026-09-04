@@ -115,6 +115,99 @@ mod tests {
         assert_json_snapshot!("irrigation_zone_v1", zones);
     }
 
+    /// The per-entry shape inside `water_budgets[]`, which `irrigation_v1`
+    /// cannot reach: `IrrigationSnapshot::default()` pins that collection
+    /// EMPTY, so no fixture locked a budget row until this test (the
+    /// `irrigation_zone_v1` pattern). Entry one is the all-defaults row;
+    /// entry two populates the balance terms including the 1.26.0
+    /// rain-credit trio (raw observed alongside the credited figure, the
+    /// per-day cap, and whether the cap was derived) and the 1.27.0
+    /// soil-model block (the shadow-computed bucket terms plus the
+    /// governing-model tag); entry three pins the soil-governed hold
+    /// shapes (the "soil" tag, a populated deferred reason, the ceiling
+    /// flag), so a rename or retype of any budget field fails here
+    /// instead of shipping green.
+    #[test]
+    fn irrigation_water_budget_v1_shape() {
+        use crate::ha::snapshot::WaterBudget;
+        let budgets = vec![
+            WaterBudget {
+                zone_slug: "front_yard".into(),
+                zone_name: "Front Yard".into(),
+                ..Default::default()
+            },
+            WaterBudget {
+                zone_slug: "back_yard".into(),
+                zone_name: "Back Yard".into(),
+                mode_active: true,
+                weekly_budget_in: 1.0,
+                sessions_per_week: 2,
+                expected_rain_mm: 4.5,
+                needed_mm: 16.4,
+                mm_per_session: 8.2,
+                seconds_per_session: 2952,
+                session_capped: false,
+                last_run_epoch: 1_750_000_000,
+                today_seconds: 2952,
+                today_reason: "session 1 of 2 this week: 8.2 mm over 49 min".into(),
+                observed_rain_mm: 30.48,
+                observed_rain_source: "gauge".into(),
+                observed_rain_credited_mm: 9.0,
+                rain_credit_cap_mm: 9.0,
+                rain_cap_inferred: true,
+                applied_mm: 0.0,
+                forecast_credit_mm: 0.0,
+                forecast_credit_source: "none".into(),
+                bias_multiplier: 1.0,
+                bias_sample_count: 6,
+                remaining_sessions: 2,
+                target_inferred: false,
+                scheduling_model: "weekly".into(),
+                soil_depletion_mm: Some(5.2),
+                soil_taw_mm: Some(9.0),
+                soil_raw_mm: Some(4.5),
+                soil_due: true,
+                soil_planned_seconds: 1783,
+                soil_deferred_reason: None,
+                soil_deferred_kind: None,
+                soil_ceiling_binding: false,
+                // Zero on purpose: the evidence-census pair skips
+                // serialization at zero, so the pinned wire snapshot
+                // stays byte-identical to the pre-0.8.0 shape.
+                soil_evidence_days: 0,
+                soil_fallback_days: 0,
+            },
+            // Entry three pins the soil-GOVERNED hold shapes the entry
+            // above cannot reach: the "soil" model tag, a populated
+            // deferred reason, and the weekly-ceiling flag, so a rename
+            // or retype of either optional fails here instead of
+            // shipping green.
+            WaterBudget {
+                zone_slug: "side_yard".into(),
+                zone_name: "Side Yard".into(),
+                mode_active: true,
+                weekly_budget_in: 1.3,
+                sessions_per_week: 2,
+                today_seconds: 0,
+                today_reason: "deferred: forecast rain refills the deficit (3.2 of 5.1 mm \
+                               expected)"
+                    .into(),
+                scheduling_model: "soil".into(),
+                soil_depletion_mm: Some(5.1),
+                soil_taw_mm: Some(9.0),
+                soil_raw_mm: Some(4.5),
+                soil_due: true,
+                soil_planned_seconds: 0,
+                soil_deferred_reason: Some(
+                    "deferred: forecast rain refills the deficit (3.2 of 5.1 mm expected)".into(),
+                ),
+                soil_ceiling_binding: true,
+                ..Default::default()
+            },
+        ];
+        assert_json_snapshot!("irrigation_water_budget_v1", budgets);
+    }
+
     /// Round-trip for the two `#[serde(default)]` attributes the shape
     /// snapshot alone cannot see: an older producer that emits neither key
     /// must still deserialize, with the deficit and the suppression both

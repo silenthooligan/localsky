@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 
+#[cfg(feature = "ssr")]
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -23,7 +24,8 @@ fn default_schema_version() -> u32 {
     CURRENT_SCHEMA_VERSION
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct Config {
     /// Bumped on every breaking schema change; defaults to
     /// CURRENT_SCHEMA_VERSION when a hand-edited TOML omits it (so a
@@ -209,13 +211,15 @@ impl Default for Config {
 
 // ----- UI preferences -----
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct UiConfig {
     #[serde(default)]
     pub radar: RadarUiConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct RadarUiConfig {
     /// Radar tile providers offered in the layer menu, by catalog id
     /// (see radar_catalog::providers()). Empty (the default) means
@@ -256,7 +260,8 @@ fn default_radar_layers() -> Vec<String> {
 
 // ----- Persistence retention -----
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct PersistenceConfig {
     /// Days of sensor_history readings to keep. Rows older than this are
     /// pruned opportunistically as new readings are ingested. 0 disables
@@ -285,7 +290,8 @@ pub fn default_retention_days() -> u32 {
 
 // ----- Update check -----
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct UpdatesConfig {
     /// When true, poll https://localsky.io/latest.json daily and surface
     /// "update available" in the UI. Plain GET (version in the User-Agent,
@@ -297,7 +303,8 @@ pub struct UpdatesConfig {
 
 // ----- LAN presence -----
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct NetworkConfig {
     /// Announce _localsky._tcp via mDNS so clients (HACS zeroconf)
     /// discover this instance. Announce-only; requires host networking
@@ -318,7 +325,8 @@ fn default_true_network() -> bool {
 
 // ----- Authentication policy -----
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum AuthMode {
     /// No authentication. The pre-auth behavior; right for deployments
@@ -330,7 +338,8 @@ pub enum AuthMode {
     Required,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct AuthConfig {
     #[serde(default)]
     pub mode: AuthMode,
@@ -396,7 +405,8 @@ fn default_session_ttl_days() -> u32 {
 // container so every existing localsky.toml (which has no `[conditions]`
 // block) still parses via `#[serde(default)]`.
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct ConditionsConfig {
     #[serde(default)]
     pub rules: Vec<crate::engine::conditions::ConditionRule>,
@@ -412,13 +422,15 @@ pub struct ConditionsConfig {
 // syntax) is a no-op (fail-safe). Scripts are sandboxed: no I/O, no
 // imports, bounded operation count.
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct ScriptingConfig {
     #[serde(default)]
     pub skip_rules: Vec<ScriptRule>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct ScriptRule {
     /// snake_case id; shows in the Rule Lab trace.
     pub id: String,
@@ -451,7 +463,8 @@ pub struct ScriptRule {
 // useful for "minimum coverage" patterns where smart adds extra when
 // the deficit grows large.
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct ManualSchedule {
     /// Operator-set unique identifier (snake_case). Used by the
     /// scheduler dedupe key + the runs table source column.
@@ -484,7 +497,8 @@ fn default_true_schedule() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ManualMode {
     /// Default: smart-irrigation dispatch for this zone is suppressed
@@ -501,7 +515,8 @@ pub enum ManualMode {
 
 // ----- Deployment -----
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct Deployment {
     pub location: Location,
     #[serde(default)]
@@ -544,7 +559,8 @@ fn default_ha_sprinkler_prefix() -> String {
 
 /// Snapshot-source mode. Standalone needs no Home Assistant; HA is one
 /// optional source among many.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum DeploymentMode {
     /// Native when no HA env is configured, otherwise Home Assistant.
@@ -556,7 +572,8 @@ pub enum DeploymentMode {
     Standalone,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum AddressParity {
     #[default]
@@ -569,7 +586,8 @@ fn default_display_name() -> String {
     "LocalSky".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct Location {
     pub lat: f64,
     pub lon: f64,
@@ -585,7 +603,8 @@ pub use crate::ha::snapshot::Units;
 
 // ----- Feature toggles -----
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct Features {
     #[serde(default)]
     pub demo_mode: bool,
@@ -622,7 +641,8 @@ fn default_true() -> bool {
 
 // ----- Weather sources -----
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct SourceEntry {
     /// Stable identifier the engine + UI use to reference this source.
     pub id: String,
@@ -642,11 +662,19 @@ pub struct SourceEntry {
     pub source: SourceKind,
 }
 
+/// Merge priority a source entry gets when it states none. Public
+/// because the Cloud and Weather chain view resolves the same missing
+/// value, and it used to assume 100 while the config assumes this, so a
+/// station with no explicit priority sat in a different place on screen
+/// than it did in the merge.
+pub const DEFAULT_SOURCE_PRIORITY: i32 = 50;
+
 fn default_source_priority() -> i32 {
-    50
+    DEFAULT_SOURCE_PRIORITY
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 #[serde(tag = "kind", content = "config", rename_all = "snake_case")]
 pub enum SourceKind {
     TempestUdp(TempestUdpConfig),
@@ -759,7 +787,8 @@ impl SourceKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct TempestUdpConfig {
     #[serde(default = "default_tempest_bind")]
     pub bind_addr: String,
@@ -773,13 +802,15 @@ fn default_tempest_bind() -> String {
     "0.0.0.0:50222".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct TempestWsConfig {
     pub access_token: String,
     pub station_id: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct OpenMeteoConfig {
     #[serde(default = "default_open_meteo_forecast_days")]
     pub forecast_days: u32,
@@ -835,7 +866,8 @@ fn default_open_meteo_model() -> String {
     crate::forecast::model_catalog::DEFAULT_MODEL.to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct EcowittLocalConfig {
     /// HTTP endpoint LocalSky exposes for the Ecowitt gateway to POST to.
     /// Default = /ingest/ecowitt under the main listener.
@@ -857,7 +889,8 @@ fn default_ecowitt_path() -> String {
 /// keyed the same way the push path keys them (soilmoisture1.., tempf, ...).
 /// It coexists with Home Assistant's own Ecowitt integration because polling
 /// the local API doesn't contend for the gateway's single push destination.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct EcowittGwPollConfig {
     /// Gateway IP or hostname on the LAN (e.g. "192.0.2.12"). Found via
     /// native discovery (Phase E2) or entered manually.
@@ -895,7 +928,8 @@ pub struct EcowittGwPollConfig {
 
 /// Dry (probe in air) and wet (probe in water/saturated) raw-AD endpoints for
 /// one soil channel. moisture% = (ad - ad_dry) / (ad_wet - ad_dry) * 100.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct SoilAdCalibration {
     pub ad_dry: f64,
     pub ad_wet: f64,
@@ -905,7 +939,8 @@ fn default_ecowitt_poll_s() -> u32 {
     30
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct NwsConfig {
     /// Identity sent to api.weather.gov (plain ASCII). Empty or omitted =
     /// LocalSky derives a real per-install identity at request time
@@ -915,17 +950,20 @@ pub struct NwsConfig {
     pub user_agent: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct OpenWeatherConfig {
     pub api_key: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct PirateWeatherConfig {
     pub api_key: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct MetNorwayConfig {
     /// Identity sent to api.met.no (their terms require one). Empty or
     /// omitted = LocalSky derives a real per-install identity at request
@@ -941,7 +979,8 @@ pub struct MetNorwayConfig {
 /// station pin + search radius; a config that omits either optional inherits its
 /// default (nearest station within the default radius), so older on-disk configs
 /// round-trip unchanged.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct SynopticConfig {
     /// Synoptic public API token from your synopticdata.com account. Treat like
     /// a password (Synoptic bills against it). The adapter passes it as the
@@ -970,7 +1009,8 @@ fn default_synoptic_radius_mi() -> f64 {
 /// rain RATE (`rate_product`, valid ~now, refreshed every couple minutes). A
 /// config that omits either field inherits its default, so older on-disk
 /// configs and the keyless region auto-seed both round-trip unchanged.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct NoaaMrmsConfig {
     /// MRMS ACCUMULATION product grid id. Defaults to the gauge-corrected
     /// pass-2 1 hour QPE grid, the observation-grade gauge-corrected rainfall
@@ -1009,7 +1049,8 @@ impl Default for NoaaMrmsConfig {
 /// HTTP endpoint `http://{host}/v1/current_conditions` (no auth) on
 /// the configured interval. Compatible with Vantage Pro 2 + Vantage
 /// Vue + EnviroMonitor connected to a WLL hub.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct DavisWllConfig {
     /// IP or hostname of the WLL device on the LAN.
     pub host: String,
@@ -1033,7 +1074,8 @@ fn default_davis_wll_txid() -> u32 {
     1
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct AmbientWeatherConfig {
     pub app_key: String,
     pub api_key: String,
@@ -1055,7 +1097,8 @@ pub struct AmbientWeatherConfig {
 ///   - LeakSensor (YS7903-UC), binary; map to a custom field via HA bridge if needed
 ///   - WaterMeterController, flow + total volume reads via state.waterFlow / state.waterReading
 ///   - GarageDoor / Hub / Switch, not weather/irrigation, skip
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct YolinkConfig {
     /// UAID from the YoLink app developer settings.
     pub client_id: String,
@@ -1069,7 +1112,8 @@ pub struct YolinkConfig {
     pub base_url: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct YolinkFieldMap {
     /// WeatherField variant name (CamelCase or snake_case accepted). Ignored
     /// when `zone_slug` is set (then this maps a per-zone soil channel).
@@ -1121,7 +1165,8 @@ fn default_one() -> f64 {
 ///
 /// Same per-device-mapping shape as YoLink: list of WeatherField ->
 /// (device_id + status code) pairs with linear scale + offset.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct TuyaCloudConfig {
     pub client_id: String,
     pub client_secret: String,
@@ -1135,7 +1180,8 @@ pub struct TuyaCloudConfig {
     pub device_field_map: Vec<TuyaFieldMap>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct TuyaFieldMap {
     /// WeatherField variant name. Ignored when `zone_slug` is set (then this
     /// maps a per-zone soil channel).
@@ -1168,7 +1214,8 @@ fn default_one_tuya() -> f64 {
 /// LaCrosse stations with the Gateway / View hub upload to the LaCrosse
 /// cloud; the mobile + web apps read from a documented REST endpoint
 /// (community-mapped by ha-lacrosseview and homeassistant-lacrosseview).
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct LacrosseConfig {
     pub email: String,
     pub password: String,
@@ -1184,7 +1231,8 @@ pub struct LacrosseConfig {
 /// the adapter handles access_token rotation internally). Each MAC
 /// addresses a single station; the adapter walks all modules under
 /// that station and merges their readings.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct NetatmoConfig {
     pub client_id: String,
     pub client_secret: String,
@@ -1194,7 +1242,8 @@ pub struct NetatmoConfig {
     pub device_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct HaPassthroughConfig {
     pub base_url: String,
     pub bearer_token: String,
@@ -1214,7 +1263,8 @@ pub struct HaPassthroughConfig {
 /// JSON path) pair. Standalone-friendly: works against any MQTT broker
 /// (Mosquitto, EMQX, HiveMQ, the HA broker if you have HA, anything that
 /// speaks MQTT 3.1.1 or 5.0). No HA required.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct MqttSourceConfig {
     pub broker_host: String,
     #[serde(default = "default_mqtt_broker_port")]
@@ -1233,7 +1283,8 @@ fn default_mqtt_broker_port() -> u16 {
     1883
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct MqttSubscription {
     /// MQTT topic. Wildcards supported per MQTT spec (+/# segments).
     pub topic: String,
@@ -1271,7 +1322,8 @@ fn default_scale() -> f64 {
 /// Generic HTTP webhook receiver. POSTs land at /ingest/<path>; field
 /// mappings drill into the payload per the same json_path scheme MQTT
 /// subscribe uses. Optional token gate.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct HttpWebhookConfig {
     /// Path under /ingest/ where the device POSTs. e.g. "/ingest/lawn"
     /// or "/ingest/my-gateway". Must start with /.
@@ -1285,7 +1337,8 @@ pub struct HttpWebhookConfig {
     pub fields: Vec<HttpWebhookField>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct HttpWebhookField {
     /// WeatherField variant name. Ignored when `zone_slug` is set (then this
     /// maps a per-zone soil channel for a DIY gateway).
@@ -1309,7 +1362,8 @@ pub struct HttpWebhookField {
 /// shape; the only extra config is the request (url, method, headers, body) and
 /// the poll interval. Put query-param API keys in `url`; put header/bearer keys
 /// in `headers`.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct RestPollConfig {
     /// Full URL to poll. HTTPS recommended. Query-param API keys go here.
     pub url: String,
@@ -1343,7 +1397,8 @@ fn default_rest_interval_s() -> u64 {
 /// the interval and maps each PromQL result to a WeatherField or per-zone soil
 /// channel. For self-hosters who already scrape weather/soil metrics into
 /// Prometheus (a PWS exporter, ESPHome-via-prometheus, node_exporter textfile).
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct PrometheusConfig {
     /// Base URL of the Prometheus server (e.g. http://prometheus.lan:9090).
     pub url: String,
@@ -1361,7 +1416,8 @@ pub struct PrometheusConfig {
     pub queries: Vec<PrometheusQuery>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct PrometheusQuery {
     /// WeatherField variant name (snake_case). Ignored when `zone_slug` is set
     /// (then this maps a per-zone soil channel instead of a global field).
@@ -1384,7 +1440,8 @@ pub struct PrometheusQuery {
 /// InfluxDB source. Polls `{url}/query` (InfluxQL, JSON results) once per query.
 /// Auth is a v2 token (Authorization: Token) when `token` is set, else v1 HTTP
 /// basic-auth from `username`/`password` (both optional for an open instance).
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct InfluxDbConfig {
     /// Base URL of the InfluxDB server (e.g. http://influxdb.lan:8086).
     pub url: String,
@@ -1413,7 +1470,8 @@ pub struct InfluxDbConfig {
 
 /// Apple WeatherKit credentials. From the Apple Developer portal: a WeatherKit
 /// service id, your team id, the key id, and the PKCS#8 .p8 private key contents.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct WeatherKitConfig {
     /// Key ID of the WeatherKit key (the `kid` JWT header).
     pub key_id: String,
@@ -1434,7 +1492,8 @@ fn default_wk_language() -> String {
     "en".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct InfluxQuery {
     /// WeatherField variant name (snake_case). Ignored when `zone_slug` is set.
     #[serde(default)]
@@ -1464,7 +1523,8 @@ pub struct InfluxQuery {
 /// explicitly NEVER a storm-warning/safety feature; LocalSky also never
 /// feeds these strikes into irrigation or automation logic, and never
 /// rebroadcasts them from project infrastructure.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct BlitzortungConfig {
     /// Explicit opt-in, default FALSE, on top of the entry-level
     /// `enabled` flag (which defaults true for every source kind).
@@ -1502,7 +1562,8 @@ pub struct BlitzortungConfig {
 }
 
 /// Which Blitzortung endpoint LocalSky connects to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum BlitzortungTransport {
     /// Public web-map WebSocket firehose (ws1/ws2/ws7/ws8), the legacy
@@ -1515,7 +1576,8 @@ pub enum BlitzortungTransport {
 }
 
 /// Connection settings for the `mqtt` Blitzortung transport.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct BlitzortungMqtt {
     /// Broker hostname.
     #[serde(default = "default_blitzortung_mqtt_host")]
@@ -1605,7 +1667,8 @@ pub fn default_blitzortung_hosts() -> Vec<String> {
     .collect()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct DemoReplayConfig {
     /// Replay rate. 1.0 = real-time; 10.0 = 10x; 60.0 = 1 hour per minute.
     #[serde(default = "default_demo_rate")]
@@ -1622,7 +1685,8 @@ fn default_demo_rate() -> f64 {
 
 // ----- Irrigation controllers -----
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct ControllerEntry {
     pub id: String,
     /// When true, this controller is the default target for zones whose
@@ -1635,7 +1699,8 @@ pub struct ControllerEntry {
     pub controller: ControllerKind,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 #[serde(tag = "kind", content = "config", rename_all = "snake_case")]
 pub enum ControllerKind {
     OpensprinklerDirect(OpenSprinklerDirectConfig),
@@ -1675,7 +1740,8 @@ impl ControllerKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct OpenSprinklerDirectConfig {
     pub host: String,
     #[serde(default = "default_os_port")]
@@ -1696,7 +1762,8 @@ fn default_controller_poll() -> u32 {
     10
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct HaServiceCallConfig {
     pub base_url: String,
     pub bearer_token: String,
@@ -1720,7 +1787,8 @@ fn default_ha_stop_service() -> String {
     "opensprinkler.stop".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct EsphomeNativeConfig {
     pub host: String,
     #[serde(default = "default_esphome_port")]
@@ -1735,7 +1803,8 @@ fn default_esphome_port() -> u16 {
     6053
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct RachioConfig {
     pub api_token: String,
     pub device_id: String,
@@ -1763,7 +1832,8 @@ pub struct RachioConfig {
 /// per-account API key (Account > Settings > API in the customer
 /// portal). The "Restful API" docs at app.hydrawise.com/config/api
 /// are the source of truth.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct HydrawiseConfig {
     pub api_key: String,
     /// Controller serial / id. Used to scope status + commands when an
@@ -1778,7 +1848,8 @@ pub struct HydrawiseConfig {
 /// XR + XD models. Uses the orbit API at api.orbitbhyve.com with a
 /// token-based auth (email + password -> session token). The session
 /// token is rotated by the adapter; users provide email + password.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct BhyveConfig {
     pub email: String,
     pub password: String,
@@ -1798,7 +1869,8 @@ pub struct BhyveConfig {
 /// by the pyrainbird community) is a future wave, requires bringing in
 /// aes + cbc + pbkdf2 deps. Until then, HA users can wire HA's existing
 /// RainBird LAN integration through `ha_service_call` instead.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct RainbirdConfig {
     /// Account email registered with the Rain Bird app.
     pub email: String,
@@ -1829,7 +1901,8 @@ fn default_rainbird_base_url() -> String {
 /// `state_topic` per zone (and optionally an `availability_topic` /
 /// `flow_topic`) and the board's reported state flows back into status() and
 /// the snapshot, the HA-native MQTT convention most ESP32 firmware speaks.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct MqttCommandConfig {
     pub broker_host: String,
     #[serde(default = "default_mqtt_broker_port")]
@@ -1863,7 +1936,8 @@ pub struct MqttCommandConfig {
     pub zone_command_map: BTreeMap<String, MqttZoneCommand>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct MqttZoneCommand {
     /// Topic to publish the on/off command to.
     pub topic: String,
@@ -1914,7 +1988,8 @@ fn default_mqtt_payload_not_available() -> String {
 /// discovery, and the wizard "test connection" all work. The board's station
 /// id comes from `zones[*].controller_station` (any string the board uses,
 /// e.g. "1" or "back_yard"). An optional bearer token is sent on every request.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct HttpGenericConfig {
     /// Base URL of the board, e.g. `http://192.0.2.50` or `http://board.local:8080`.
     pub base_url: String,
@@ -1927,7 +2002,8 @@ pub struct HttpGenericConfig {
     pub poll_interval_s: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct DryRunConfig {
     /// When true, every `run_zone` call ALSO writes a synthetic ran-X-min
     /// row into the runs table so the dashboard shows activity. Used by
@@ -1938,7 +2014,8 @@ pub struct DryRunConfig {
 
 // ----- Zones -----
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct ZoneConfig {
     pub display_name: String,
     pub area_sqft: f64,
@@ -2009,6 +2086,16 @@ pub struct ZoneConfig {
     /// `weekly_budget_in`: config, then the slug default, no entity.
     #[serde(default)]
     pub sessions_per_week: Option<u32>,
+    /// The most rain (inches) one DAY may credit against this zone's
+    /// weekly target. Rain beyond it in a single day drains past the
+    /// root zone and never becomes plant-available, so it must not
+    /// settle the week. `None` = derived from the zone's soil texture
+    /// and root depth (TAW = (field capacity - wilting point) x root
+    /// depth): about 0.35 in on sand and 1.30 in on loam at default turf
+    /// roots. Valid range 0.05..=5.0; out-of-band values on disk are
+    /// clamped at load (`loader::normalize_legacy_values`).
+    #[serde(default)]
+    pub rain_credit_cap_in: Option<f64>,
     /// Longest single dispatch the engine will queue for this zone
     /// (minutes). `None` = the historical 60 minute default. Valid range
     /// 5..=360; an active watering restriction's per-zone cap still wins
@@ -2016,16 +2103,32 @@ pub struct ZoneConfig {
     /// `soak_minutes`; the engine's internal `ZoneRuntime` stays seconds.
     #[serde(default)]
     pub max_run_minutes: Option<u32>,
+    /// Per-zone scheduling-model override. `None` = the engine default
+    /// (`EngineParams::scheduling_model`); `Some(Weekly)` pins this zone
+    /// to the weekly balance while the engine runs the soil bucket, and
+    /// `Some(Soil)` the reverse. Same enum-parse validation as the
+    /// sibling enums (`soil_texture` et al): the TOML load, the config
+    /// PUT, and the per-field apply all refuse an unknown variant.
+    #[serde(default)]
+    pub scheduling_model: Option<SchedulingModel>,
 }
+
+/// The zone moisture band a zone gets when it states none: dry floor and
+/// saturation ceiling, in probe percent. Public because the engine's
+/// SkipCheck rebuild and the legacy zone builder both need the same two
+/// numbers, and each used to carry its own copy.
+pub const DEFAULT_TARGET_MIN_PCT: f64 = 30.0;
+pub const DEFAULT_SATURATION_PCT: f64 = 70.0;
 
 fn default_target_min_pct() -> f64 {
-    30.0
+    DEFAULT_TARGET_MIN_PCT
 }
 fn default_saturation_pct() -> f64 {
-    70.0
+    DEFAULT_SATURATION_PCT
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum PrecipRateSource {
     Measured,
@@ -2033,7 +2136,8 @@ pub enum PrecipRateSource {
     Catalog,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SunExposure {
     #[default]
@@ -2042,7 +2146,8 @@ pub enum SunExposure {
     Shade,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SprinklerType {
     Rotor,
@@ -2053,7 +2158,8 @@ pub enum SprinklerType {
     Other,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum GrassSpecies {
     StAugustine,
@@ -2071,7 +2177,8 @@ pub enum GrassSpecies {
     Other,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SoilTexture {
     Sand,
@@ -2083,9 +2190,38 @@ pub enum SoilTexture {
     Clay,
 }
 
+/// The longest single dispatch a zone gets when its `max_run_minutes` is
+/// unset. The field is an Option with no serde default, so this value is
+/// what every `unwrap_or` around the codebase was restating: the policy
+/// build, the tuning report's cap check, the zone editor's pending-cap
+/// display and the confirm dialog all resolve it here now, so raising the
+/// unset default is one edit rather than nine.
+pub const DEFAULT_MAX_RUN_MINUTES: u32 = 60;
+
+impl SoilTexture {
+    /// The texture a config slug names. The inverse of the serde
+    /// representation, pinned to it by `soil_texture_slug_round_trips`,
+    /// so a form that holds its picker as a string can hand the engine a
+    /// real texture instead of re-deriving what the engine would do with
+    /// it. An unknown slug takes sandy loam, the same middle-of-the-road
+    /// default the zone form loads for an unset texture.
+    pub fn from_slug(slug: &str) -> Self {
+        match slug {
+            "sand" => SoilTexture::Sand,
+            "loamy_sand" => SoilTexture::LoamySand,
+            "loam" => SoilTexture::Loam,
+            "silt_loam" => SoilTexture::SiltLoam,
+            "clay_loam" => SoilTexture::ClayLoam,
+            "clay" => SoilTexture::Clay,
+            _ => SoilTexture::SandyLoam,
+        }
+    }
+}
+
 // ----- LLM advisor -----
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct LlmConfig {
     #[serde(flatten)]
     pub provider: LlmProviderKind,
@@ -2109,7 +2245,8 @@ fn default_anomaly_ttl() -> i64 {
     3600
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 #[serde(tag = "provider", content = "config", rename_all = "snake_case")]
 pub enum LlmProviderKind {
     /// Probe localhost:11434 / :8080 / :1234 at boot; first reachable wins.
@@ -2122,26 +2259,30 @@ pub enum LlmProviderKind {
     OpenaiCompat(OpenaiCompatConfig),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct AutoProviderConfig {
     /// Override the default probe order. Each entry is a base URL.
     #[serde(default)]
     pub probe_order: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct OllamaProviderConfig {
     pub base_url: String,
     pub model: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct LlamacppProviderConfig {
     pub base_url: String,
     pub model: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct OpenaiCompatConfig {
     pub base_url: String,
     pub model: String,
@@ -2150,7 +2291,8 @@ pub struct OpenaiCompatConfig {
 
 // ----- Notifications -----
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct Notifications {
     #[serde(default)]
     pub web_push: Option<WebPushConfig>,
@@ -2164,14 +2306,16 @@ pub struct Notifications {
     pub email: Option<EmailConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct WebPushConfig {
     pub vapid_public: String,
     pub vapid_private_path: String,
     pub vapid_subject: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct MqttConfig {
     pub host: String,
     #[serde(default = "default_mqtt_port")]
@@ -2193,19 +2337,22 @@ fn default_mqtt_discovery_prefix() -> String {
     "homeassistant".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct NtfyConfig {
     pub base_url: String,
     pub topic: String,
     pub auth_token: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct SlackConfig {
     pub webhook_url: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct EmailConfig {
     pub smtp_host: String,
     #[serde(default = "default_smtp_port")]
@@ -2228,21 +2375,26 @@ fn default_smtp_port() -> u16 {
 // src/refresher.rs becomes a typed config field with documented
 // default. Operators rarely tune these, but the option is there.
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct EngineParams {
     #[serde(default)]
     pub skip_rules: SkipRuleParams,
     /// Effective rain capture (gross_rain * capture_eff = soil intake).
     ///
-    /// NOT READ BY THE WATERING DECISION. The soil projection and the
-    /// zone-math tile both use a hardcoded 0.70, and session sizing has
-    /// not divided by it since 0.7.17, so editing it changes no run
-    /// length on its own. ONE reader remains: the tuning report's
-    /// precipitation-rate back-out (src/tuning.rs) divides a soil probe's
-    /// measured rise by this value, so on a zone with a probe bound a
-    /// lower setting raises the sprinkler rate that check recommends, and
-    /// applying that recommendation DOES change run sizing. Left in place
-    /// rather than removed so an existing config still parses.
+    /// READ BY THE SOIL MODEL: the depletion replay credits rain and
+    /// applied irrigation through it, defer-by-deficit weights forecast
+    /// rain by it, and each refill to field capacity divides by it, so
+    /// on soil-governed zones editing it changes watering decisions and
+    /// run lengths, and the zone math panel there shows this configured
+    /// value. Weekly-governed sizing does not read it (the weekly
+    /// target is gross; sizing stopped dividing by it in 0.7.17), and
+    /// the soil projection plus the math panel on weekly zones keep the
+    /// fixed 0.70. The tuning report's precipitation-rate back-out
+    /// (src/tuning.rs) also divides a probe's measured rise by it.
+    /// Non-positive values fall back to the 0.70 default and values
+    /// above 1.0 clamp on the applied conversion (see
+    /// WateringPolicy::effective_capture_efficiency).
     #[serde(default = "default_capture_eff")]
     pub capture_efficiency: f64,
     /// Rain-defer threshold per session (inches). The weekly water balance
@@ -2286,10 +2438,33 @@ pub struct EngineParams {
     /// it (display + dispatch agree).
     #[serde(default = "default_seasonal_adjust_pct")]
     pub seasonal_adjust_pct: u32,
+    /// Which model sizes and schedules smart-morning runs: the weekly
+    /// water balance or the FAO-56 soil bucket. `null`/absent means the
+    /// operator never chose and the install follows the shipped default
+    /// (`weekly` today), resolved at read time by
+    /// `effective_scheduling_model`; a value present in the file is a
+    /// deliberate choice and persists as one. The field skips
+    /// serializing when unset so a GET-PUT round trip (or any unrelated
+    /// save) cannot stamp the default in as if the operator picked it,
+    /// which would strand every install off a later default flip.
+    /// Per-zone `ZoneConfig::scheduling_model` overrides this (the same
+    /// Option shape); the wizard writes `soil` for NEW installs at apply
+    /// time, and existing configs keep whatever they hold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduling_model: Option<SchedulingModel>,
 }
 
 fn default_seasonal_adjust_pct() -> u32 {
     100
+}
+
+impl EngineParams {
+    /// The engine-default scheduling model, resolved at read time:
+    /// `None` (the operator never chose) follows the shipped default,
+    /// so round-tripped configs still follow a future default flip.
+    pub fn effective_scheduling_model(&self) -> SchedulingModel {
+        self.scheduling_model.unwrap_or_default()
+    }
 }
 
 impl Default for EngineParams {
@@ -2303,13 +2478,15 @@ impl Default for EngineParams {
             et0_method: Et0Method::default(),
             watering_restrictions: Vec::new(),
             seasonal_adjust_pct: default_seasonal_adjust_pct(),
+            scheduling_model: None,
         }
     }
 }
 
 /// A single regulatory or HOA watering restriction. Multiple may stack;
 /// the engine ANDs every enabled, in-effective-window restriction.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct WateringRestriction {
     /// Stable id (`sjrwmd_dst`, `sjrwmd_est`, `hoa`, ...). Used for
     /// dedupe and as a primary key in the settings UI.
@@ -2347,7 +2524,8 @@ pub struct WateringRestriction {
 /// switch rules with daylight saving). `DateRange` lets local authority,
 /// council, or HOA rules name an arbitrary MM-DD..MM-DD range, including
 /// wraparound (e.g. Nov-15..Feb-28).
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EffectiveWindow {
     AllYear,
@@ -2373,7 +2551,30 @@ fn default_soak_minutes() -> u32 {
     30
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, Default, PartialEq, Eq)]
+/// Which model sizes and schedules smart-morning runs. `Weekly` is the
+/// shipped weekly water balance (gross target settled against trailing
+/// rain, applied irrigation, and a bias-corrected forecast credit).
+/// `Soil` is the FAO-56 depletion bucket (`engine::soil_schedule`):
+/// trailing evidence replays into a per-zone soil deficit, the zone
+/// triggers when depletion crosses RAW, and each run refills to field
+/// capacity. Cadence is then emergent from texture and roots instead of
+/// `sessions_per_week`. The engine default applies to every zone that
+/// carries no per-zone `ZoneConfig::scheduling_model` override; zones
+/// with no agronomy config at all (env-var installs) stay on the weekly
+/// model regardless, because the bucket has no texture or species to
+/// derive from. Hot-swapped like every engine knob: a settings save
+/// applies on the next tick.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SchedulingModel {
+    #[default]
+    Weekly,
+    Soil,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Et0Method {
     #[default]
@@ -2385,7 +2586,8 @@ pub enum Et0Method {
     SourceNative,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct SkipRuleParams {
     /// Considered "already wet" if rain_today >= this (in).
     #[serde(default = "default_already_wet_in")]
@@ -2573,6 +2775,47 @@ mod tests {
             ["librewxr", "rainviewer", "nexrad_iem", "lightning_tempest"]
         );
         assert!(cfg.ui.radar.providers.is_empty());
+    }
+
+    /// The engine scheduling model preserves absent-vs-chosen across a
+    /// save round trip (the 0.7.9 GET-PUT lesson): an unset field
+    /// serializes NO key (TOML and JSON both), parses back to None, and
+    /// resolves to the shipped default at read time, so an untouched
+    /// install still follows a later default flip. An explicit choice,
+    /// weekly included, persists as explicit.
+    #[test]
+    fn engine_scheduling_model_round_trips_absent_vs_chosen() {
+        let cfg = Config::default();
+        assert_eq!(cfg.engine.scheduling_model, None);
+        assert_eq!(
+            cfg.engine.effective_scheduling_model(),
+            SchedulingModel::Weekly
+        );
+        let toml_str = toml::to_string_pretty(&cfg).unwrap();
+        assert!(
+            !toml_str.contains("scheduling_model"),
+            "unset writes no key:\n{toml_str}"
+        );
+        let back: Config = toml::from_str(&toml_str).unwrap();
+        assert_eq!(back.engine.scheduling_model, None, "absent stays absent");
+        // The GET /api/config JSON shape omits the unset key too, so a
+        // PUT of a fetched body cannot stamp the default back in.
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert!(json["engine"].get("scheduling_model").is_none());
+        // An explicit weekly choice is NOT the same as unset: it
+        // persists through both formats.
+        let mut chosen = Config::default();
+        chosen.engine.scheduling_model = Some(SchedulingModel::Weekly);
+        let toml_str = toml::to_string_pretty(&chosen).unwrap();
+        assert!(
+            toml_str.contains("scheduling_model = \"weekly\""),
+            "{toml_str}"
+        );
+        let back: Config = toml::from_str(&toml_str).unwrap();
+        assert_eq!(back.engine.scheduling_model, Some(SchedulingModel::Weekly));
+        let json = serde_json::to_string(&chosen).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.engine.scheduling_model, Some(SchedulingModel::Weekly));
     }
 
     #[test]

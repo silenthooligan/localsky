@@ -48,14 +48,18 @@ pub struct ZoneState {
     /// `#[serde(default)]` so older JSON deserializes.
     #[serde(default)]
     pub today_run_minutes: Option<f64>,
-    /// Soil-water deficit (mm) for this zone. `None` when no model on
-    /// this install computed one, which is every install today: the only
-    /// producer was a Home Assistant Smart Irrigation entity, and the
-    /// engine no longer reads Home Assistant for anything. A bare f64
-    /// here published a hardcoded 0.00 as if it were a measurement, the
-    /// same defect `water_level_pct` was converted for. Serialized null;
-    /// every display renders a dash and the manifest publishes no
-    /// descriptor. `#[serde(default)]` so older JSON deserializes.
+    /// Soil-water deficit (mm) for this zone. Negative = needs water,
+    /// the sign convention the field has carried since the Smart
+    /// Irrigation era. PRODUCER: the soil model's evidence replay
+    /// (`engine::soil_schedule`, assembled in the refresher's
+    /// `apply_soil_schedule`) publishes `-depletion_mm` for every zone
+    /// with agronomy config, in shadow on weekly-model installs and
+    /// live on soil-model ones. `None` when no bucket can be derived
+    /// (no agronomy config, e.g. env-var zones): a bare f64 here once
+    /// published a hardcoded 0.00 as if it were a measurement, the same
+    /// defect `water_level_pct` was converted for. Serialized null;
+    /// displays render a dash and the manifest publishes no descriptor.
+    /// `#[serde(default)]` so older JSON deserializes.
     #[serde(default)]
     pub bucket_mm: Option<f64>,
     /// Per-zone duration the next sequence will use (seconds), from the
@@ -151,9 +155,10 @@ pub struct SmartSuppression {
 /// today, which is the figure that actually dispatches.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ZoneMath {
-    /// Soil-water deficit, mm. Negative = needs water. `None` when no
-    /// model on this install computed one (every install today; see
-    /// `ZoneState::bucket_mm`). Serialized null, rendered as a dash.
+    /// Soil-water deficit, mm. Negative = needs water. Produced by the
+    /// soil model's evidence replay for every zone with agronomy config
+    /// (see `ZoneState::bucket_mm`); `None` when no bucket can be
+    /// derived. Serialized null, rendered as a dash.
     #[serde(default)]
     pub bucket_mm: Option<f64>,
     /// Crop coefficient for today, from the native species catalog
@@ -172,11 +177,12 @@ pub struct ZoneMath {
     /// Effective rain/applied-water capture efficiency, 0..1. Constant
     /// 0.70 to match the Phase E water-balance model.
     pub capture_eff: f64,
-    /// A pre-cap need in seconds from a soil-deficit model. 0 on every
-    /// install today: the formula that produced it needed `bucket_mm`,
-    /// whose only producer was a Home Assistant entity the engine no
-    /// longer reads. Nothing renders it and nothing reads it for a
-    /// decision; it stays on the wire so the 1.25.0 shape holds.
+    /// A pre-cap need in seconds from the RETIRED Smart Irrigation
+    /// formula. Still 0 on every install: the soil model sizes its
+    /// refills through `engine::soil_schedule` and publishes them via
+    /// the budget row, never through this field. Nothing renders it and
+    /// nothing reads it for a decision; it stays on the wire so the
+    /// 1.25.0 shape holds.
     pub raw_seconds: u32,
     /// The zone's `max_run_minutes` ceiling in seconds, tightened by any
     /// active watering restriction. Hard safety stop; prevents a
@@ -274,6 +280,26 @@ pub struct SkipCheck {
     pub max_wind_mph: f64,
     pub min_temp_f: f64,
     pub rain_skip_in: f64,
+    /// The already-wet floor and the next-4h skip threshold, both
+    /// operator-tunable on the Skip rules page. The dashboard's rain bars
+    /// draw their threshold marks from these; they used to hardcode the
+    /// schema defaults, so a yard that tuned either saw a mark that no
+    /// longer matched the line the engine skips on. Additive; absent
+    /// reads as the schema default.
+    #[serde(default = "default_already_wet_in_wire")]
+    pub already_wet_in: f64,
+    #[serde(default = "default_rain_next_4h_skip_in_wire")]
+    pub rain_next_4h_skip_in: f64,
+    /// The forecast-wind gate's slack over the wind limit, and the
+    /// observed-rain gate's trailing window in days. Both are operands of
+    /// reasons the engine writes; without them on the wire a metric
+    /// viewer could not have those two sentences re-rendered and read
+    /// miles per hour and inches instead. Additive; absent reads as the
+    /// schema default.
+    #[serde(default = "default_wind_forecast_slack_wire")]
+    pub wind_forecast_slack_mph: f64,
+    #[serde(default = "default_rain_observed_window_days_wire")]
+    pub rain_observed_window_days: u32,
 
     // ── Soil sensor inputs (per-zone, generalized) ──
     /// Per-zone calibrated soil moisture AND saturation threshold, for EVERY
@@ -468,6 +494,16 @@ pub struct Forecast {
     pub soil_moisture_3_9_in48h_vwc: f64,
 }
 
+/// Appended to a mixed-install forecast-rain skip (the aggregate
+/// skip_check and the 7-day strip cells) when soil-governed zones ride
+/// through the hold: the skip stands for the Weekly-model zones only.
+/// One shared sentence so the refresher's producer and the strip's
+/// footer qualifier (the cell tag that marks the skip as partial) can
+/// never drift apart.
+pub const MIXED_SKIP_NOTE: &str =
+    "Holds Weekly-model zones only; Soil-model zones already count this rain against \
+     their deficit.";
+
 /// One day in the 7-day forward verdict strip. Result of running the
 /// skip-check engine against synthetic Inputs derived from each future
 /// day's forecast, gives the user an at-a-glance preview of which
@@ -500,6 +536,14 @@ pub struct DayVerdict {
     /// deserializes to "".
     #[serde(default)]
     pub reason_code: String,
+    /// This day's hold covers only the zones the WEEKLY plan governs:
+    /// the soil-governed zones water through it, so the cell is a
+    /// partial hold rather than a whole-yard one. The refresher knows
+    /// this as a bool while it rewrites the cell; the strip used to
+    /// recover it by searching the sentence for the mixed-install note.
+    /// Additive; absent = a whole-yard hold.
+    #[serde(default)]
+    pub mixed_hold: bool,
 }
 
 /// Per-zone 7-day soil-moisture projection (Phase E predictive). Built
@@ -616,6 +660,23 @@ pub struct WaterBudget {
     /// "gauge" | "radar" | "model_archive" | "none".
     #[serde(default)]
     pub observed_rain_source: String,
+
+    // ---- Rain-credit cap (additive, 1.26.0). Absent on older JSON. ----
+    /// Observed rain the balance actually credited (mm): each covered
+    /// day held to `rain_credit_cap_mm` before summing. Equals
+    /// `observed_rain_mm` whenever no single day exceeded the cap.
+    #[serde(default)]
+    pub observed_rain_credited_mm: f64,
+    /// The per-day rain-credit cap in effect (mm): the most one day's
+    /// observed or forecast rain may offset against the weekly target.
+    /// 0 on JSON from an older producer = unknown/legacy (no cap
+    /// applied).
+    #[serde(default)]
+    pub rain_credit_cap_mm: f64,
+    /// True when the cap was derived from soil texture and root depth
+    /// (TAW) rather than set through the zone's `rain_credit_cap_in`.
+    #[serde(default)]
+    pub rain_cap_inferred: bool,
     /// Gross irrigation applied over the trailing 7 days, mm
     /// (union-clustered completed watering evidence x throughput).
     #[serde(default)]
@@ -648,10 +709,190 @@ pub struct WaterBudget {
     /// one-time banner naming those zones and their targets.
     #[serde(default)]
     pub target_inferred: bool,
+
+    // ---- Soil model (additive, bucket-governs wave 3). Absent on
+    // older JSON. The bucket computes in SHADOW on every install whose
+    // zone carries agronomy config, whichever model governs, so these
+    // ride the wire under the weekly model too. ----
+    /// Which model produced this zone's `today_seconds`:
+    /// "weekly" | "soil". Empty on JSON from an older producer.
+    #[serde(default)]
+    pub scheduling_model: String,
+    /// Reconstructed root-zone depletion below field capacity (mm), in
+    /// [0, TAW], from `engine::soil_schedule`'s evidence replay. `None`
+    /// when the zone has no agronomy config to derive a bucket from
+    /// (env-var zones) or the producer predates the soil model.
+    #[serde(default)]
+    pub soil_depletion_mm: Option<f64>,
+    /// Total available water in the root zone (mm), from texture and
+    /// root depth. `None` with `soil_depletion_mm`.
+    #[serde(default)]
+    pub soil_taw_mm: Option<f64>,
+    /// Readily available water (mm): the trigger threshold depletion
+    /// crosses. `None` with `soil_depletion_mm`.
+    #[serde(default)]
+    pub soil_raw_mm: Option<f64>,
+    /// Depletion crossed RAW this tick (the soil trigger fired).
+    #[serde(default)]
+    pub soil_due: bool,
+    /// The soil plan's seconds. Under the soil model this is what
+    /// `today_seconds` starts from (window admission applied); under
+    /// weekly it is the shadow figure ("would water N seconds today"),
+    /// with no admission pass.
+    #[serde(default)]
+    pub soil_planned_seconds: u32,
+    /// The hold that zeroed a due soil zone: defer-by-deficit, or the
+    /// morning-window admission reason. `None` when not due or watering.
+    #[serde(default)]
+    pub soil_deferred_reason: Option<String>,
+    /// WHICH hold it was, as data rather than as the opening words of
+    /// the sentence above. Surfaces that compose their own copy in the
+    /// viewer's units read this; the sentence stays for logs and
+    /// external consumers. Additive; absent on older payloads, where the
+    /// consumer falls back to reading the sentence.
+    #[serde(default)]
+    pub soil_deferred_kind: Option<crate::engine::soil_schedule::SoilDeferKind>,
+    /// The EXPLICIT weekly target, honored as a rolling-7-day delivery
+    /// ceiling, shorted today's soil refill.
+    #[serde(default)]
+    pub soil_ceiling_binding: bool,
+    /// Replay-window days that carried ANY evidence (a resolved ET0
+    /// rung, a nonzero rain row, or applied valve seconds). Additive
+    /// (0.8.0); omitted from the JSON when zero, so a row with no soil
+    /// block and the pinned wire snapshots stay byte-identical.
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub soil_evidence_days: u32,
+    /// Replay-window days with no evidence at all: they charged the
+    /// fallback daily mean under the assumed-dry rule. When these
+    /// dominate the window, the published deficit is mostly assumption
+    /// and the soil panel says so. Additive (0.8.0); omitted when zero.
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub soil_fallback_days: u32,
 }
+
+fn default_wind_forecast_slack_wire() -> f64 {
+    crate::config::schema::SkipRuleParams::default().wind_forecast_slack_mph
+}
+
+fn default_rain_observed_window_days_wire() -> u32 {
+    crate::config::schema::SkipRuleParams::default().rain_observed_window_days
+}
+
+fn default_already_wet_in_wire() -> f64 {
+    crate::config::schema::SkipRuleParams::default().already_wet_in
+}
+
+fn default_rain_next_4h_skip_in_wire() -> f64 {
+    crate::config::schema::SkipRuleParams::default().rain_next_4h_skip_in
+}
+
+fn u32_is_zero(v: &u32) -> bool {
+    *v == 0
+}
+
+/// Where a probe reading sits against its zone's band, right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SoilBand {
+    /// No reading: the probe is offline or unbound.
+    Offline,
+    /// At or above the saturation ceiling. Matches the engine's
+    /// soil-saturation gate operator exactly (`pct >= saturation`).
+    Saturated,
+    /// Strictly below the dry floor. Matches the engine's soil-floor veto
+    /// (`pct < target_min`), which is what lets a dry zone override a
+    /// forecast-rain skip.
+    Dry,
+    /// Inside the band.
+    Healthy,
+}
+
+impl SoilForecast {
+    /// Classify this zone's CURRENT reading against its band, with the
+    /// same comparisons the engine's soil gates use. The probe card used
+    /// to repeat those comparisons inline, so a threshold operator could
+    /// change in the engine and leave the pill saying the opposite of
+    /// what the gate decided.
+    pub fn current_band(&self) -> SoilBand {
+        match self.current_pct {
+            None => SoilBand::Offline,
+            Some(c) if c >= self.target_max_pct => SoilBand::Saturated,
+            Some(c) if c < self.target_min_pct => SoilBand::Dry,
+            Some(_) => SoilBand::Healthy,
+        }
+    }
+}
+
+impl WaterBudget {
+    /// Is this zone still watering on a weekly target nobody set? Only
+    /// the WEEKLY plan waters toward a target, so a soil-governed zone
+    /// carrying an inferred one is not on a guess for anything that
+    /// matters: its runs come from its own soil deficit. An empty
+    /// `scheduling_model` (an older producer) reads as weekly.
+    ///
+    /// Both the notice that lists such zones and the push that warns
+    /// about them ask this one question here. They used to ask it
+    /// separately, and the push never learned about soil governance, so
+    /// a soil-run yard was told to go set weekly targets it does not
+    /// use.
+    pub fn on_inferred_weekly_target(&self) -> bool {
+        self.target_inferred && self.scheduling_model != "soil"
+    }
+}
+
+/// Does this skip-check reason code mean the operator paused watering?
+/// TWO gates pause a yard and both have to count: the timed vacation
+/// pause (`pause_until`) and the plain toggle (`paused`). Surfaces used
+/// to ask this by testing whether the engine's sentence began with the
+/// word "Paused", which made a wording change a silent behavior change
+/// and skipped the `is_paused` flag sitting on the same struct. The flag
+/// alone is not the answer either: it covers the toggle only, so a yard
+/// on a timed vacation pause would have read as running.
+pub fn is_pause_code(reason_code: &str) -> bool {
+    reason_code == "paused" || reason_code == "pause_until"
+}
+
+/// How a DIVERGENT soil-vs-weekly balance line opens. The engine writes
+/// these lines into the snapshot and the zone Tuning panel decides from
+/// this prefix whether to place one beside the lead or behind the
+/// data-notes disclosure, so it lives on the wire type both sides
+/// compile: a copy edit cannot quietly file the one line that sells the
+/// opt-in behind a disclosure.
+pub const SOIL_DIVERGENCE_PREFIX: &str = "The soil model would ";
 
 fn default_bias_multiplier() -> f64 {
     1.0
+}
+
+impl IrrigationSnapshot {
+    /// Does this zone actually water at the next dispatch? The ONE
+    /// skip-aware predicate for every rollup (hero Tonight minutes and
+    /// zone count, the Zones-page KPI strip), so no surface can promise
+    /// water for a zone the effective verdict skips, or count a
+    /// soil-governed zone holding at zero planned seconds (the NORMAL
+    /// soil-model state most mornings) as watering. A decided zone
+    /// waters when its effective verdict is not a skip AND it carries
+    /// planned seconds; before any verdict exists, planned seconds
+    /// alone decide, so a pre-decision frame still reads sensibly.
+    pub fn zone_waters_next_run(&self, z: &ZoneState) -> bool {
+        match z
+            .verdict
+            .as_ref()
+            .or_else(|| self.zone_verdicts.iter().find(|v| v.zone_slug == z.slug))
+        {
+            Some(v) => v.verdict != "skip" && z.planned_run_seconds > 0,
+            None => z.planned_run_seconds > 0,
+        }
+    }
+
+    /// The effective verdict says this zone skips (its own back-filled
+    /// verdict first, the snapshot-level list by slug as fallback, the
+    /// engine's own lookup order).
+    pub fn zone_skips_next_run(&self, z: &ZoneState) -> bool {
+        z.verdict
+            .as_ref()
+            .or_else(|| self.zone_verdicts.iter().find(|v| v.zone_slug == z.slug))
+            .is_some_and(|v| v.verdict == "skip")
+    }
 }
 
 /// Top-level snapshot for the irrigation page. Cheap to clone (`Arc`-
@@ -759,6 +1000,16 @@ pub struct IrrigationSnapshot {
     /// at 23:30:25 (contract unchanged: actual seconds to water today).
     #[serde(default)]
     pub water_budgets: Vec<WaterBudget>,
+
+    /// The engine-level scheduling model default ("weekly" | "soil"),
+    /// the baseline a per-zone pin diverges FROM: the zone card and
+    /// detail render a model chip only on zones whose effective model
+    /// differs from this, so single-model installs stay quiet and a
+    /// mixed install becomes scannable. Additive (0.8.0); omitted from
+    /// the JSON when empty, so older producers and the pinned wire
+    /// snapshots stay byte-identical.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub engine_scheduling_model: String,
 
     /// Vacation pause expiry, UTC epoch seconds. 0 means not set / not paused.
     /// Read from `input_datetime.irrigation_pause_until` (a manually-created
@@ -939,6 +1190,14 @@ pub struct RuleEval {
     pub detail: String,
     /// fired | passed | skipped | not_reached
     pub outcome: String,
+    /// This gate's own threshold IS met, yet it did not fire: a stronger
+    /// rule earlier in the ladder overrode it. The engine knows this
+    /// exactly, from each gate's own comparison operator, while it builds
+    /// the row; renderers used to recover it by searching the margin
+    /// label for the word "overridden". Additive; absent = not over its
+    /// line.
+    #[serde(default)]
+    pub over_line: bool,
     /// Verdict produced if this rule fired.
     pub verdict: Option<String>,
     /// P3-9: plain-language "distance to flip" for the threshold gates, e.g.
@@ -1201,4 +1460,97 @@ pub struct SimRequest {
 pub struct SimResult {
     pub baseline: DecisionTrace,
     pub hypothetical: DecisionTrace,
+}
+
+#[cfg(test)]
+mod rollup_predicate_tests {
+    use super::*;
+
+    fn verdict(slug: &str, v: &str) -> ZoneVerdict {
+        ZoneVerdict {
+            zone_slug: slug.into(),
+            zone_name: slug.into(),
+            verdict: v.into(),
+            reason: String::new(),
+            source: "global".into(),
+            multiplier: 1.0,
+            reason_code: String::new(),
+            value: None,
+            threshold: None,
+        }
+    }
+
+    fn zone(slug: &str, planned: u32, v: Option<&str>) -> ZoneState {
+        ZoneState {
+            slug: slug.into(),
+            planned_run_seconds: planned,
+            verdict: v.map(|v| verdict(slug, v)),
+            ..Default::default()
+        }
+    }
+
+    /// The mixed fixture every rollup rides: one zone waters, one skips
+    /// with leftover planned seconds, one holds at zero under a run
+    /// verdict (the normal soil-model state), one is undecided. Only the
+    /// first and the undecided-with-seconds count as watering, so the
+    /// hero tiles, the Zones KPI strip, and the cards state one truth.
+    #[test]
+    fn waters_next_run_is_skip_aware_and_hold_aware() {
+        let mut s = IrrigationSnapshot::default();
+        s.zones = vec![
+            zone("waters", 1200, Some("run")),
+            zone("skips_with_leftover", 900, Some("skip")),
+            zone("holds_at_zero", 0, Some("run")),
+            zone("undecided", 600, None),
+            zone("undecided_idle", 0, None),
+        ];
+        let watering: Vec<&str> = s
+            .zones
+            .iter()
+            .filter(|z| s.zone_waters_next_run(z))
+            .map(|z| z.slug.as_str())
+            .collect();
+        assert_eq!(watering, vec!["waters", "undecided"]);
+        let skipping: Vec<&str> = s
+            .zones
+            .iter()
+            .filter(|z| s.zone_skips_next_run(z))
+            .map(|z| z.slug.as_str())
+            .collect();
+        assert_eq!(skipping, vec!["skips_with_leftover"]);
+    }
+
+    /// The evidence-census fields are additive AND self-erasing: a row
+    /// that never got a soil block (every weekly row pre-soil, the
+    /// pinned wire snapshots, the starved cold start) serializes
+    /// byte-identically to 0.7.22, and legacy JSON without the keys
+    /// reads back as zero.
+    #[test]
+    fn soil_evidence_fields_skip_when_zero_and_default_on_legacy_json() {
+        let bare = serde_json::to_string(&WaterBudget::default()).unwrap();
+        assert!(!bare.contains("soil_evidence_days"), "{bare}");
+        assert!(!bare.contains("soil_fallback_days"), "{bare}");
+        let b = WaterBudget {
+            soil_evidence_days: 5,
+            soil_fallback_days: 9,
+            ..Default::default()
+        };
+        let full = serde_json::to_string(&b).unwrap();
+        assert!(full.contains("\"soil_evidence_days\":5"), "{full}");
+        assert!(full.contains("\"soil_fallback_days\":9"), "{full}");
+        let back: WaterBudget = serde_json::from_str(&bare).unwrap();
+        assert_eq!(back.soil_evidence_days, 0);
+        assert_eq!(back.soil_fallback_days, 0);
+    }
+
+    /// The snapshot-level verdict list is the fallback when a zone's own
+    /// verdict is not back-filled, mirroring the engine's lookup order.
+    #[test]
+    fn waters_next_run_falls_back_to_the_verdict_list() {
+        let mut s = IrrigationSnapshot::default();
+        s.zones = vec![zone("front", 900, None)];
+        s.zone_verdicts = vec![verdict("front", "skip")];
+        assert!(!s.zone_waters_next_run(&s.zones[0]));
+        assert!(s.zone_skips_next_run(&s.zones[0]));
+    }
 }

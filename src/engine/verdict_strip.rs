@@ -161,6 +161,11 @@ pub fn compute(fc: &ForecastSnapshot, today: &Inputs, params: &SkipRuleParams) -
         };
 
         let inputs = Inputs {
+            // The 7-day strip evaluates whole forecast DAYS, so no
+            // wall-clock window applies and the offset never moves a
+            // verdict; restrictions are re-checked per morning on the
+            // live path with the deployment's own offset.
+            utc_offset_seconds: 0,
             temp_now_f: d.temp_min_f,
             wind_now_mph: 0.0,
             rain_today_in: d.precip_sum_in,
@@ -239,6 +244,10 @@ pub fn compute(fc: &ForecastSnapshot, today: &Inputs, params: &SkipRuleParams) -
             // P1 (units architecture): copy the engine's per-day firing rule id
             // straight off the SkipCheck the strip just ran. Additive + invisible.
             reason_code: s.reason_code,
+            // The strip evaluates the yard as a whole; the refresher sets
+            // this when it rewrites a cell that only the weekly-governed
+            // zones obey.
+            mixed_hold: false,
         });
     }
     out

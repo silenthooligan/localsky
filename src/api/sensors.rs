@@ -775,6 +775,7 @@ mod inventory_tests {
 
     fn zone(name: &str, soil_sensor_id: Option<&str>) -> ZoneConfig {
         ZoneConfig {
+            scheduling_model: None,
             display_name: name.to_string(),
             area_sqft: 1000.0,
             species: GrassSpecies::StAugustine,
@@ -795,6 +796,7 @@ mod inventory_tests {
             photo_url: None,
             weekly_budget_in: None,
             sessions_per_week: None,
+            rain_credit_cap_in: None,
             max_run_minutes: None,
         }
     }

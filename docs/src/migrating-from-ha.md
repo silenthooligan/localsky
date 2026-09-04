@@ -207,9 +207,10 @@ deployment, so those zones start watering on the first morning after the
 upgrade.
 
 **If you never set a zone's weekly target and sessions per week, LocalSky
-infers them from the zone's name**: 0.50 inches a week over one session for
-a zone whose name contains shrub, garden or bed, and 1.00 inches over two
-sessions for every other zone. Each session is held to the zone's maximum
+infers them from the zone's species**: 1.00 inches a week over two sessions
+for warm-season turf, scaled by each species' own peak crop coefficient, so
+established shrubs start at 0.55 inches over one session and a vegetable bed
+at 1.15 inches over two. Each session is held to the zone's maximum
 run time, 60 minutes unless you changed it, and on a default zone the first
 eligible morning lands on that ceiling.
 

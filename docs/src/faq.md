@@ -58,8 +58,8 @@ No tracking lives in the app: no usage reporting, no crash reporting, no analyti
 - **Kc**: crop coefficient; a per-species, season-aware multiplier that converts ET0 into ETc.
 - **MAD**: management allowed depletion; the fraction of TAW the engine lets the soil dry out before watering is triggered.
 - **TAW**: total available water; how much water (mm) the root zone can hold between field capacity (full) and wilting point (empty).
-- **Soil bucket**: a per-zone depletion model where rain and irrigation fill and ETc drains. It is written but not yet wired to any decision; watering is decided by the weekly water balance instead.
-- **Weekly water balance**: what decides watering today. A gross weekly target per zone, settled against observed rain, water already applied, and a probability-weighted forecast credit; the remainder is split across the sessions still expected this week.
+- **Soil bucket**: a per-zone depletion model where rain and irrigation fill and ETc drains. The soil scheduling model waters a zone when the bucket's deficit crosses its trigger and refills it; the deficit shows on every zone's tiles whichever model governs.
+- **Weekly water balance**: the default scheduling model. A gross weekly target per zone, settled against observed rain (credited per day, each day capped at what the root zone can hold), water already applied, and a probability-weighted forecast credit; the remainder is split across the sessions still expected this week. A zone can run on the soil bucket instead (`scheduling_model`).
 - **Verdict**: the engine's daily decision for the yard: run or skip, with the reason attached.
 - **HAL**: hardware abstraction layer; the Rust trait every controller adapter implements, so the engine speaks one language to OpenSprinkler, Rachio, HA service calls, and the rest.
 - **FDR**: frequency domain reflectometry; the measuring principle behind common soil-moisture probes, whose raw readings LocalSky calibrates into a percentage.

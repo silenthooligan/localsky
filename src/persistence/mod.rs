@@ -29,14 +29,16 @@ pub mod weather_sampler;
 pub use active_runs::{ActiveRun, ActiveRunsError, ActiveRunsStore};
 pub use config_snapshots::ConfigSnapshotStore;
 pub use forecast_observations::{
-    ForecastObservationsError, ForecastObservationsStore, ObservedRainWindow,
+    Et0LedgerDay, ForecastObservationsError, ForecastObservationsStore, ObservedRainDay,
+    ObservedRainWindow,
 };
 pub use irrigation_control::{IrrigationControlState, IrrigationControlStore};
 pub use runner::{run as run_migrations, Migration, MigrationError, MIGRATIONS};
 pub use runs::{NewRun, RunRow, RunsError, RunsStore};
 pub use sensor_history::{Reading, SensorHistoryError, SensorHistoryStore};
 pub use tuning_dismissals::{
-    DismissalRow, TuningDismissalsError, TuningDismissalsStore, SNOOZE_DAYS,
+    DismissalRow, InviteState, TuningDismissalsError, TuningDismissalsStore, INSTALL_SCOPE,
+    SNOOZE_DAYS, SOIL_INVITE_FIELD,
 };
 pub use tuning_report::{TuningReportStateError, TuningReportStateStore};
 pub use verdict_history::{NewVerdict, VerdictHistoryError, VerdictHistoryStore, VerdictRow};

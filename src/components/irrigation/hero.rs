@@ -12,7 +12,7 @@
 
 use crate::components::irrigation::advisor::AdvisorExplanation;
 use crate::components::units_fmt::{
-    depth_unit, depth_value_mm, fmt_rain_amount, fmt_wind, temp_unit, temp_value, use_unit_prefs,
+    deficit_value_mm, depth_unit, fmt_rain_amount, fmt_wind, temp_unit, temp_value, use_unit_prefs,
     wind_unit, wind_value,
 };
 use crate::ha::snapshot::IrrigationSnapshot;
@@ -336,6 +336,7 @@ fn zone_lines(s: &IrrigationSnapshot) -> Vec<crate::explain::ZoneLine> {
                 verdict: v.verdict.clone(),
                 reason: v.reason.clone(),
                 source: v.source.clone(),
+                waters: s.zone_waters_next_run(z),
             })
         })
         .collect()
@@ -364,7 +365,9 @@ pub fn NextRunHero(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             "OFFLINE"
         } else if s.zones.iter().any(|z| z.running) {
             "WATERING NOW"
-        } else if s.skip_check.will_skip && s.skip_check.reason.starts_with("Paused") {
+        } else if s.skip_check.will_skip
+            && crate::ha::snapshot::is_pause_code(&s.skip_check.reason_code)
+        {
             "PAUSED"
         } else if s.next_run_epoch > 0 {
             if resolve_next_run(&s).slot_skips {
@@ -383,7 +386,9 @@ pub fn NextRunHero(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             "x"
         } else if s.zones.iter().any(|z| z.running) {
             "droplet"
-        } else if s.skip_check.will_skip && s.skip_check.reason.starts_with("Paused") {
+        } else if s.skip_check.will_skip
+            && crate::ha::snapshot::is_pause_code(&s.skip_check.reason_code)
+        {
             "pause"
         } else if resolve_next_run(&s).slot_skips
             || (s.skip_check.will_skip && s.next_run_epoch <= 0)
@@ -395,20 +400,24 @@ pub fn NextRunHero(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             // architecture) so the glyph is correct regardless of rendered unit;
             // legacy rows with an empty code fall back to the baked reason.
             let nr = resolve_next_run(&s);
+            // The SLOT's own structured code, not an empty string. This
+            // passed "" deliberately to force the prose fallback below,
+            // discarding a populated code that describes the very slot
+            // being glyphed, so the icon was chosen by searching an
+            // already-condensed sentence for the word "rain".
             let (code, reason) = if s.next_run_epoch > 0 && nr.slot_skips {
-                // Use the slot's own reason vocabulary (already condensed).
-                ("", nr.skip_reason_short.clone())
+                (nr.skip_reason_code.clone(), nr.skip_reason_short.clone())
             } else {
                 (
-                    s.skip_check.reason_code.as_str(),
+                    s.skip_check.reason_code.clone(),
                     s.skip_check.reason.clone(),
                 )
             };
-            match code {
-                "rain_now" | "already_wet" | "observed_rain" | "rain_next_4h" | "tomorrow_rain"
-                | "rain_3day" => "cloud-rain",
-                "wind_now" | "wind_forecast" => "wind",
-                "freeze_now" | "overnight_freeze" | "soil_frost" => "snowflake",
+            use crate::gates_catalog::GateFamily;
+            match crate::gates_catalog::gate_family(&code) {
+                GateFamily::Water => "cloud-rain",
+                GateFamily::Wind => "wind",
+                GateFamily::Freeze => "snowflake",
                 _ => {
                     let r = reason.to_ascii_lowercase();
                     if r.contains("rain") || r.contains("wet") || r.contains("moist") {
@@ -437,7 +446,9 @@ pub fn NextRunHero(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             "HA unreachable".to_string()
         } else if s.zones.iter().any(|z| z.running) {
             "Running now".to_string()
-        } else if s.skip_check.will_skip && s.skip_check.reason.starts_with("Paused") {
+        } else if s.skip_check.will_skip
+            && crate::ha::snapshot::is_pause_code(&s.skip_check.reason_code)
+        {
             if s.next_run_epoch > 0 {
                 format_relative_time(s.next_run_epoch, &s.timezone)
             } else {
@@ -480,7 +491,9 @@ pub fn NextRunHero(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             } else {
                 format!("{} running", z.name)
             }
-        } else if s.skip_check.will_skip && s.skip_check.reason.starts_with("Paused") {
+        } else if s.skip_check.will_skip
+            && crate::ha::snapshot::is_pause_code(&s.skip_check.reason_code)
+        {
             // Eyebrow says PAUSED; the tag is the live reason ("Paused until ...").
             render_skip_reason(&s.skip_check, prefs.get())
         } else if s.skip_check.will_skip && s.next_run_epoch <= 0 {
@@ -517,22 +530,18 @@ pub fn NextRunHero(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 let any_decided = s.zones.iter().any(|z| {
                     z.verdict.is_some() || s.zone_verdicts.iter().any(|v| v.zone_slug == z.slug)
                 });
-                let watering_n =
-                    if any_decided {
-                        s.zones
-                            .iter()
-                            .filter(|z| {
-                                match z.verdict.as_ref().or_else(|| {
-                                    s.zone_verdicts.iter().find(|v| v.zone_slug == z.slug)
-                                }) {
-                                    Some(v) => v.verdict != "skip",
-                                    None => z.planned_run_seconds > 0,
-                                }
-                            })
-                            .count()
-                    } else {
-                        s.zones.len()
-                    };
+                // The shared skip-aware predicate, so this count can never
+                // disagree with the HeroStats tile beside it. The predicate
+                // already handles the no-verdict case (planned seconds
+                // decide), so the all-zones default is reserved for the one
+                // frame where NOTHING is decided and nothing carries planned
+                // seconds yet.
+                let skip_aware_n = s.zones.iter().filter(|z| s.zone_waters_next_run(z)).count();
+                let watering_n = if any_decided || skip_aware_n > 0 {
+                    skip_aware_n
+                } else {
+                    s.zones.len()
+                };
                 format!(
                     "Will water {} zones for {:.0} min total",
                     watering_n, s.next_run_total_minutes
@@ -584,7 +593,9 @@ pub fn NextRunHero(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             "off"
         } else if s.zones.iter().any(|z| z.running) {
             "run"
-        } else if s.skip_check.will_skip && s.skip_check.reason.starts_with("Paused") {
+        } else if s.skip_check.will_skip
+            && crate::ha::snapshot::is_pause_code(&s.skip_check.reason_code)
+        {
             "paused"
         } else if s.next_run_epoch > 0 {
             // Theme by what the NEXT SLOT actually does. A slot the engine will
@@ -825,20 +836,12 @@ fn HeroStats(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     move || {
         let s = snap.get();
         let p = prefs.get();
-        // Single per-zone "waters tonight" predicate so the Tonight minutes and
-        // the Zones-watering count stay in lockstep (T10): a zone the engine will
-        // skip (verdict == "skip") must NOT contribute to either tile. Falls back
-        // to planned-run-seconds for zones the engine hasn't decided yet.
-        let waters_tonight = |z: &crate::ha::snapshot::ZoneState| -> bool {
-            match z
-                .verdict
-                .as_ref()
-                .or_else(|| s.zone_verdicts.iter().find(|v| v.zone_slug == z.slug))
-            {
-                Some(v) => v.verdict != "skip",
-                None => z.planned_run_seconds > 0,
-            }
-        };
+        // The shared skip-aware predicate (snapshot::zone_waters_next_run)
+        // keeps the minutes and the zone count in lockstep (T10) with the
+        // Zones-page KPI strip and the cards: a zone the engine will skip
+        // must NOT contribute, and a zone holding at zero planned seconds
+        // (the normal soil-model state most mornings) is not "watering".
+        let waters_tonight = |z: &crate::ha::snapshot::ZoneState| s.zone_waters_next_run(z);
         // Tonight's minutes EXCLUDING skip zones, so it agrees with the
         // Zones-watering count beside it: a 4-zone schedule where 3 are
         // soil-saturated shows only the one running zone's minutes, not the
@@ -882,9 +885,11 @@ fn HeroStats(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         };
         let water_unit = if water_empty { "" } else { "%" };
         // Soil deficit is the mean of the zones that HAVE one, in
-        // MILLIMETERS. No zone has one unless a model computed it, so an
-        // all-absent set renders a dash rather than averaging nothing into
-        // a confident 0.00 (the guard used to be "are there any zones",
+        // MILLIMETERS. The soil model's evidence replay fills it for every
+        // zone with agronomy config, so this tile carries a live figure on
+        // those installs; an all-absent set (env-var zones, no agronomy)
+        // still renders a dash rather than averaging nothing into a
+        // confident 0.00 (the guard used to be "are there any zones",
         // which on a seven-zone yard printed a fabricated zero).
         let measured: Vec<f64> = s.zones.iter().filter_map(|z| z.bucket_mm).collect();
         let deficit_empty = measured.is_empty();
@@ -892,7 +897,10 @@ fn HeroStats(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             "-".to_string()
         } else {
             let avg_mm = measured.iter().sum::<f64>() / measured.len() as f64;
-            depth_value_mm(avg_mm, p)
+            // Same display rule as the zone-card Deficit tiles: the label
+            // carries the direction, the value is the magnitude, and the
+            // sign column is reserved for a true surplus.
+            deficit_value_mm(avg_mm, p)
         };
         // No unit glyph for the placeholder so "-" reads clean.
         let deficit_unit = if deficit_empty { "" } else { depth_unit(p) };
@@ -900,7 +908,7 @@ fn HeroStats(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             <div class="ir-hero-stats">
                 <div class="ir-hero-stat">
                     <span class="ir-hero-stat__v">{tonight}<span class="ir-hero-stat__u">"min"</span></span>
-                    <span class="ir-hero-stat__k">"Tonight"</span>
+                    <span class="ir-hero-stat__k">"This morning"</span>
                 </div>
                 <div class="ir-hero-stat">
                     <span class="ir-hero-stat__v">{watering}</span>

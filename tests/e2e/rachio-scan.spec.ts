@@ -38,6 +38,11 @@ const SCAN_ZONES = [
   { station_id: "1f00aa00-0000-4000-8000-000000000007", name: "Front Trees" },
 ];
 
+// Developer repro: drives a real Rachio scan against a locally configured
+// instance. Meaningless against the demo (record-only, no Rachio), so it
+// runs only when pointed at a target that has one.
+test.skip(!process.env.RACHIO_SCAN_TARGET, "set RACHIO_SCAN_TARGET to run the Rachio scan repro");
+
 test("Rachio scan fills zone_uuid_map, saves, and persists across reload", async ({
   page,
 }) => {

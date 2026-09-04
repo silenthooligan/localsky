@@ -153,22 +153,28 @@ fn BalanceHeadline(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
 #[component]
 fn StressFlags(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     let prefs = use_unit_prefs();
-    let heat_flagged = move || {
-        let f = snap.get().forecast;
-        let s = snap.get().skip_check;
-        f.temp_max_3day_f >= 95.0
-            && f.humidity_now_pct >= 60.0
-            && f.days_since_significant_rain >= 2
-            && f.rain_3day_weighted_in < 0.5 * s.rain_skip_in
+    // Each tile asks the ENGINE whether its gate tripped, by the gate's
+    // own id in the decision trace, instead of re-testing the readings
+    // against thresholds of its own. Re-testing is how these three drifted
+    // in the first place: the wind tile compared against the bare wind
+    // limit while the engine's forecast gate adds a slack margin, so the
+    // tile went loud on nights the engine never intended to skip, and the
+    // heat tile hardcoded three thresholds the operator can change and
+    // ignored the switch that disables the gate outright.
+    let gate_fired = move |id: &'static str| {
+        snap.with(|s| {
+            s.decision_trace.as_ref().is_some_and(|t| {
+                // "fired" is the only outcome that means the gate tripped.
+                // "skipped" is the engine's word for a gate the operator
+                // DISABLED, so treating it as tripped would light the tile
+                // for a rule that is switched off.
+                t.rules.iter().any(|r| r.id == id && r.outcome == "fired")
+            })
+        })
     };
-    let freeze_flagged = move || {
-        let s = snap.get();
-        s.skip_check.temp_min_24h_valid && s.forecast.temp_min_24h_f < s.skip_check.min_temp_f
-    };
-    let wind_flagged = move || {
-        let s = snap.get();
-        s.forecast.wind_max_today_mph > s.skip_check.max_wind_mph
-    };
+    let heat_flagged = move || gate_fired("heat_advisory");
+    let freeze_flagged = move || gate_fired("freeze_now");
+    let wind_flagged = move || gate_fired("wind_forecast") || gate_fired("wind_now");
     view! {
         <div class="forecast-block fc-stress">
             <div class="forecast-block-title">"Conditions & stress"</div>
@@ -381,7 +387,7 @@ fn RainBlock(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 <RainBar
                     label="Today (used)"
                     value=Signal::derive(used_in)
-                    threshold=Signal::derive(|| 0.05_f64)
+                    threshold=Signal::derive(move || snap.get().skip_check.already_wet_in)
                     threshold_label="Already-wet floor"
                     prefs=prefs.get()
                 />
@@ -538,7 +544,7 @@ fn MultiDayRainBlock(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 <RainBar
                     label="Next 4h (hourly)"
                     value=Signal::derive(move || snap.get().forecast.rain_next_4h_in)
-                    threshold=Signal::derive(|| 0.10_f64)
+                    threshold=Signal::derive(move || snap.get().skip_check.rain_next_4h_skip_in)
                     threshold_label="Skip-if-≥"
                     prefs=prefs.get()
                 />
@@ -763,5 +769,25 @@ fn DayBlock(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 </div>
             </div>
         </div>
+    }
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod stress_flag_tests {
+    /// The three stress tiles read the engine's own gate outcomes by id,
+    /// so those ids have to be ids the engine actually emits. They used to
+    /// re-test the readings against thresholds of their own and drifted:
+    /// the wind tile ignored the forecast gate's slack margin and the heat
+    /// tile hardcoded three operator-tunable numbers. If a gate is ever
+    /// renamed, this fails instead of the tile going quiet forever.
+    #[test]
+    fn the_tiles_name_gates_the_engine_emits() {
+        let catalog = crate::gates_catalog::builtin_rule_catalog();
+        for id in ["heat_advisory", "freeze_now", "wind_forecast", "wind_now"] {
+            assert!(
+                catalog.iter().any(|(gate_id, _, _, _)| *gate_id == id),
+                "stress tile reads gate {id}, which the engine no longer emits"
+            );
+        }
     }
 }

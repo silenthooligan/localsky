@@ -732,13 +732,15 @@ async fn fetch_station_entries() -> Vec<StationEntry> {
                 return None;
             }
             let id = s.get("id").and_then(|i| i.as_str())?.to_string();
-            // The LAN-station default priority is 100 (config schema convention),
-            // used when the entry omits it.
+            // The priority the MERGE will use when the entry omits one,
+            // read from the schema rather than assumed. This said 100
+            // while the config default is 50, so an entry with no
+            // explicit priority was drawn in the wrong place on the chain.
             let priority = s
                 .get("priority")
                 .and_then(|p| p.as_i64())
                 .map(|p| p as i32)
-                .unwrap_or(100);
+                .unwrap_or(crate::config::schema::DEFAULT_SOURCE_PRIORITY);
             let friendly_name = crate::components::sources_form::friendly_source_name(kind);
             let fields = station_field_keys(kind)
                 .into_iter()

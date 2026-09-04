@@ -215,6 +215,60 @@ pub fn depth_value_mm(mm: f64, p: UnitPrefs) -> String {
     }
 }
 
+/// A soil-deficit reading for display, from the wire's `bucket_mm`
+/// (negative = needs water, the field's documented sign). The label
+/// beside the tile ("Deficit") already carries the direction, so the
+/// tile shows the MAGNITUDE: a thirsty zone reads "Deficit 0.20" beside
+/// prose that says "refilling the 0.20\" deficit", never a stray minus
+/// sign that reads as a surplus. The sign column is reserved for a true
+/// surplus: no producer can emit a positive bucket today, but if one
+/// ever does it renders with an explicit "+" so it can never
+/// masquerade as a shortfall. Wire convention untouched; this is the
+/// display boundary only.
+pub fn deficit_value_mm(bucket_mm: f64, p: UnitPrefs) -> String {
+    if bucket_mm > 0.0 {
+        format!("+{}", depth_value_mm(bucket_mm, p))
+    } else {
+        depth_value_mm(bucket_mm.abs(), p)
+    }
+}
+
+/// The same deficit display rule with the unit attached ("0.20\"" /
+/// "5.2mm"), for rows that render value and unit as one string (the
+/// math panel's Soil deficit row).
+pub fn deficit_amount_mm(bucket_mm: f64, p: UnitPrefs) -> String {
+    if bucket_mm > 0.0 {
+        format!("+{}", fmt_rain_amount_mm(bucket_mm, p))
+    } else {
+        fmt_rain_amount_mm(bucket_mm.abs(), p)
+    }
+}
+
+/// A depth from a MILLIMETER source as sentence text: "5.2 mm" or
+/// "0.20\"". Inches keep the glyph flush against the value the way
+/// every engine reason string prints them; millimeters take a space.
+pub fn depth_phrase_mm(mm: f64, p: UnitPrefs) -> String {
+    let v = depth_value_mm(mm, p);
+    let u = depth_unit(p);
+    if u == "mm" {
+        format!("{v} {u}")
+    } else {
+        format!("{v}{u}")
+    }
+}
+
+/// A depth from an INCHES source as sentence text, same glyph rules as
+/// `depth_phrase_mm`.
+pub fn depth_phrase_in(inches: f64, p: UnitPrefs) -> String {
+    let v = depth_value_in(inches, p);
+    let u = depth_unit(p);
+    if u == "mm" {
+        format!("{v} {u}")
+    } else {
+        format!("{v}{u}")
+    }
+}
+
 /// Rain rate from a MILLIMETER/HOUR source: "0.50in/h" or "12.7mm/h".
 pub fn fmt_rain_rate_mm(mm_per_hr: f64, p: UnitPrefs) -> String {
     if p.rain_mm {
@@ -445,6 +499,37 @@ mod tests {
         // Rate from a mm/hr source.
         assert_eq!(fmt_rain_rate_mm(12.7, IMPERIAL), "0.50in/h");
         assert_eq!(fmt_rain_rate_mm(12.7, METRIC), "12.7mm/h");
+    }
+
+    /// The deficit tiles show magnitude (the "Deficit" label carries the
+    /// direction), matching the positive deficit every adjacent sentence
+    /// prints; the sign column is reserved for a true surplus, which no
+    /// producer emits today.
+    #[test]
+    fn deficit_display_is_magnitude_with_sign_reserved_for_surplus() {
+        // The everyday case: a thirsty zone's negative bucket reads as a
+        // plain magnitude in either unit system.
+        assert_eq!(deficit_value_mm(-5.2, IMPERIAL), "0.20");
+        assert_eq!(deficit_value_mm(-5.2, METRIC), "5.2");
+        assert_eq!(deficit_amount_mm(-5.2, IMPERIAL), "0.20\"");
+        assert_eq!(deficit_amount_mm(-5.2, METRIC), "5.2mm");
+        // A charged bucket is a clean zero, never "-0.00".
+        assert_eq!(deficit_value_mm(0.0, IMPERIAL), "0.00");
+        assert_eq!(deficit_value_mm(-0.0, IMPERIAL), "0.00");
+        // The impossible-today surplus keeps an explicit sign so it can
+        // never read as a shortfall.
+        assert_eq!(deficit_value_mm(2.0, IMPERIAL), "+0.08");
+        assert_eq!(deficit_amount_mm(25.4, METRIC), "+25.4mm");
+    }
+
+    /// Sentence-text depth phrases: mm takes a space, inches keep the
+    /// flush glyph, from either source unit.
+    #[test]
+    fn depth_phrases_follow_the_glyph_rules() {
+        assert_eq!(depth_phrase_mm(5.2, IMPERIAL), "0.20\"");
+        assert_eq!(depth_phrase_mm(5.2, METRIC), "5.2 mm");
+        assert_eq!(depth_phrase_in(1.3, IMPERIAL), "1.30\"");
+        assert_eq!(depth_phrase_in(1.0, METRIC), "25.4 mm");
     }
 
     #[test]

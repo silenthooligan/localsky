@@ -1895,6 +1895,28 @@ pub(crate) fn apply_zone_field(
             };
             Ok(old)
         }
+        // Future-proofing, the mad_pct_override arm's precedent: no
+        // tuning check emits a `rain_credit_cap_in` recommendation yet,
+        // so `verify_recommendation` never lets the tuning report's
+        // Apply reach this arm today. It stands ready for a check that
+        // suggests a cap override, with the band already enforced.
+        "rain_credit_cap_in" => {
+            let old = json!(zone.rain_credit_cap_in);
+            zone.rain_credit_cap_in = match opt_f64(value, field)? {
+                None => None,
+                Some(v) => {
+                    // Same band the validator enforces; refusing here gives
+                    // the apply caller a field-named message instead of a
+                    // report. Null clears the override back to the cap
+                    // derived from soil texture and root depth.
+                    if !(0.05..=5.0).contains(&v) {
+                        return Err(format!("{field} must be between 0.05 and 5.0 inches"));
+                    }
+                    Some(v)
+                }
+            };
+            Ok(old)
+        }
         "root_depth_mm" => {
             let old = json!(zone.root_depth_mm);
             zone.root_depth_mm = opt_f64(value, field)?;
@@ -1920,6 +1942,20 @@ pub(crate) fn apply_zone_field(
             let old = serde_json::to_value(zone.soil_texture).unwrap_or_default();
             zone.soil_texture =
                 serde_json::from_value(value.clone()).map_err(|e| format!("{field}: {e}"))?;
+            Ok(old)
+        }
+        // The per-zone scheduling-model pin. Null clears the override so
+        // the engine default governs again; a string must parse as one of
+        // the model variants ("weekly" | "soil"), same enum gate as
+        // `soil_texture`. No tuning check recommends this field yet; the
+        // arm stands ready (the rain_credit_cap_in precedent) and serves
+        // the flip banner's per-zone "Keep weekly" writeback.
+        "scheduling_model" => {
+            let old = serde_json::to_value(zone.scheduling_model).unwrap_or_default();
+            zone.scheduling_model = match value {
+                serde_json::Value::Null => None,
+                v => Some(serde_json::from_value(v.clone()).map_err(|e| format!("{field}: {e}"))?),
+            };
             Ok(old)
         }
         "max_run_minutes" => {
@@ -3935,6 +3971,7 @@ mod tests {
     fn apply_zone_fixture() -> crate::config::schema::ZoneConfig {
         use crate::config::schema::*;
         ZoneConfig {
+            scheduling_model: None,
             display_name: "Front".into(),
             area_sqft: 1000.0,
             species: GrassSpecies::Bermuda,
@@ -3955,6 +3992,7 @@ mod tests {
             photo_url: None,
             weekly_budget_in: Some(1.0),
             sessions_per_week: Some(2),
+            rain_credit_cap_in: None,
             max_run_minutes: None,
         }
     }
@@ -4008,6 +4046,18 @@ mod tests {
         let old = apply_zone_field(&mut z, "max_run_minutes", &serde_json::Value::Null).unwrap();
         assert_eq!(old, serde_json::json!(90));
         assert_eq!(z.max_run_minutes, None);
+        // The per-zone scheduling-model pin (the flip banner's per-zone
+        // "Keep weekly" writeback path); null clears back to the engine
+        // default.
+        use crate::config::schema::SchedulingModel;
+        let old = apply_zone_field(&mut z, "scheduling_model", &serde_json::json!("soil")).unwrap();
+        assert_eq!(old, serde_json::Value::Null);
+        assert_eq!(z.scheduling_model, Some(SchedulingModel::Soil));
+        apply_zone_field(&mut z, "scheduling_model", &serde_json::json!("weekly")).unwrap();
+        assert_eq!(z.scheduling_model, Some(SchedulingModel::Weekly));
+        let old = apply_zone_field(&mut z, "scheduling_model", &serde_json::Value::Null).unwrap();
+        assert_eq!(old, serde_json::json!("weekly"));
+        assert_eq!(z.scheduling_model, None);
     }
 
     #[test]
@@ -4020,6 +4070,10 @@ mod tests {
         assert!(apply_zone_field(&mut z, "max_run_minutes", &serde_json::json!(4)).is_err());
         assert!(apply_zone_field(&mut z, "max_run_minutes", &serde_json::json!(400)).is_err());
         assert!(apply_zone_field(&mut z, "max_run_minutes", &serde_json::json!(90.5)).is_err());
+        // An unknown model variant is refused by the enum parse, and the
+        // stored pin is untouched.
+        assert!(apply_zone_field(&mut z, "scheduling_model", &serde_json::json!("lunar")).is_err());
+        assert_eq!(z.scheduling_model, None);
     }
 
     // ---- raw-TOML zone rename guard ----

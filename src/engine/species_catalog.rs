@@ -27,7 +27,7 @@ pub fn lookup(species: GrassSpecies) -> SpeciesProfile {
 
 /// Enum -> snake_case slug used by the agronomy catalog + the config wire
 /// format. Kept in lockstep with serde by a test.
-fn species_slug(species: GrassSpecies) -> &'static str {
+pub fn species_slug(species: GrassSpecies) -> &'static str {
     use GrassSpecies::*;
     match species {
         StAugustine => "st_augustine",

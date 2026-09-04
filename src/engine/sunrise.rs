@@ -71,11 +71,12 @@ pub fn smart_morning_target_start(
     lat: f64,
     lon: f64,
     sequence_total_s: u64,
+    cal: crate::engine::calendar::Calendar,
 ) -> Option<chrono::DateTime<Utc>> {
     let sunrise = sunrise_utc(date, lat, lon)?;
     let target_finish = sunrise - chrono::Duration::minutes(FINISH_BEFORE_SUNRISE_MIN);
     let start = target_finish - chrono::Duration::seconds(sequence_total_s as i64);
-    match crate::timeutil::local_day_bounds_utc(date) {
+    match (cal.day_bounds_utc)(date) {
         Some((day_start, _)) if start < day_start => Some(day_start),
         _ => Some(start),
     }
@@ -92,10 +93,11 @@ pub fn smart_morning_available_s(
     lat: f64,
     lon: f64,
     sequence_total_s: u64,
+    cal: crate::engine::calendar::Calendar,
 ) -> Option<i64> {
     let sunrise = sunrise_utc(date, lat, lon)?;
     let target_finish = sunrise - chrono::Duration::minutes(FINISH_BEFORE_SUNRISE_MIN);
-    let target_start = smart_morning_target_start(date, lat, lon, sequence_total_s)?;
+    let target_start = smart_morning_target_start(date, lat, lon, sequence_total_s, cal)?;
     Some((target_finish - target_start).num_seconds())
 }
 
@@ -122,8 +124,14 @@ mod tests {
         // 25 min sequence = 40 min before sunrise.
         let date = NaiveDate::from_ymd_opt(2026, 5, 26).unwrap();
         let sr = sunrise_utc(date, 40.7128, -74.006).unwrap();
-        let target =
-            smart_morning_target_start(date, 40.7128, -74.006, 25 * 60).expect("target exists");
+        let target = smart_morning_target_start(
+            date,
+            40.7128,
+            -74.006,
+            25 * 60,
+            crate::engine::calendar::Calendar::utc(),
+        )
+        .expect("target exists");
         let delta = (sr - target).num_minutes();
         // 15 min finish-before + 25 min sequence = 40 min.
         assert_eq!(delta, 40);
@@ -134,18 +142,31 @@ mod tests {
         // A 20h "sequence" is longer than any midnight-to-sunrise span, so the
         // unclamped start would land deep in the previous local day; the clamp
         // pins it to the date's own local midnight instead. Asserted via the
-        // same local_day_bounds_utc the clamp uses, so the test holds under
-        // any test-machine timezone (CONFIGURED_TZ is unset here and both
-        // sides share the system-local fallback).
+        // same calendar the call was given, which is UTC here, so the
+        // assertion holds on any machine instead of inheriting the
+        // runner's zone.
         let date = NaiveDate::from_ymd_opt(2026, 5, 26).unwrap();
-        let target =
-            smart_morning_target_start(date, 40.7128, -74.006, 20 * 3600).expect("target exists");
-        let (day_start, _) =
-            crate::timeutil::local_day_bounds_utc(date).expect("representable day");
+        let target = smart_morning_target_start(
+            date,
+            40.7128,
+            -74.006,
+            20 * 3600,
+            crate::engine::calendar::Calendar::utc(),
+        )
+        .expect("target exists");
+        let cal = crate::engine::calendar::Calendar::utc();
+        let (day_start, _) = (cal.day_bounds_utc)(date).expect("representable day");
         assert_eq!(target, day_start);
         // A plan that fits stays unclamped (the legacy arithmetic).
         let sr = sunrise_utc(date, 40.7128, -74.006).unwrap();
-        let fits = smart_morning_target_start(date, 40.7128, -74.006, 25 * 60).unwrap();
+        let fits = smart_morning_target_start(
+            date,
+            40.7128,
+            -74.006,
+            25 * 60,
+            crate::engine::calendar::Calendar::utc(),
+        )
+        .unwrap();
         assert_eq!((sr - fits).num_minutes(), 40);
     }
 
@@ -153,8 +174,22 @@ mod tests {
     fn polar_day_returns_none() {
         let date = NaiveDate::from_ymd_opt(2026, 6, 21).unwrap();
         assert!(sunrise_utc(date, 80.0, 0.0).is_none());
-        assert!(smart_morning_target_start(date, 80.0, 0.0, 600).is_none());
-        assert!(smart_morning_available_s(date, 80.0, 0.0, 600).is_none());
+        assert!(smart_morning_target_start(
+            date,
+            80.0,
+            0.0,
+            600,
+            crate::engine::calendar::Calendar::utc()
+        )
+        .is_none());
+        assert!(smart_morning_available_s(
+            date,
+            80.0,
+            0.0,
+            600,
+            crate::engine::calendar::Calendar::utc()
+        )
+        .is_none());
     }
 
     #[test]
@@ -163,17 +198,31 @@ mod tests {
         // the sequence itself (start = finish - sequence).
         let date = NaiveDate::from_ymd_opt(2026, 5, 26).unwrap();
         let seq = 25 * 60u64;
-        let avail = smart_morning_available_s(date, 40.7128, -74.006, seq).unwrap();
+        let avail = smart_morning_available_s(
+            date,
+            40.7128,
+            -74.006,
+            seq,
+            crate::engine::calendar::Calendar::utc(),
+        )
+        .unwrap();
         assert_eq!(avail, seq as i64, "unclamped start: available == sequence");
         // A 20h plan clamps the start to local midnight, so the available
         // span is midnight..sunrise-15min, strictly less than the sequence:
         // the overshoot condition the dispatcher warns on.
         let long = 20 * 3600u64;
-        let avail_long = smart_morning_available_s(date, 40.7128, -74.006, long).unwrap();
+        let avail_long = smart_morning_available_s(
+            date,
+            40.7128,
+            -74.006,
+            long,
+            crate::engine::calendar::Calendar::utc(),
+        )
+        .unwrap();
         let sr = sunrise_utc(date, 40.7128, -74.006).unwrap();
         let finish = sr - chrono::Duration::minutes(FINISH_BEFORE_SUNRISE_MIN);
-        let (day_start, _) =
-            crate::timeutil::local_day_bounds_utc(date).expect("representable day");
+        let cal = crate::engine::calendar::Calendar::utc();
+        let (day_start, _) = (cal.day_bounds_utc)(date).expect("representable day");
         assert_eq!(avail_long, (finish - day_start).num_seconds());
         assert!(
             avail_long < long as i64,

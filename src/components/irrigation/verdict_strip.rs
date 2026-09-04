@@ -281,17 +281,34 @@ fn verdict_skip_class(v: &DayVerdict) -> &'static str {
 }
 
 /// One-word tag for the cell footer. Echoes the verdict but condensed; keys on
-/// `reason_code` with a baked-reason fallback for legacy cells.
+/// `reason_code` with a baked-reason fallback for legacy cells. Two
+/// soil-model shapes carry their own tag, because the title attribute
+/// has no touch affordance and a hover-only narration is invisible on
+/// mobile: a cell the inert-gate demotion rewrote to a run reads SOIL
+/// (run tint, the class already keys on the verdict), and a
+/// mixed-install rain skip that holds only the Weekly-model zones reads
+/// RAIN* so the cell itself says the skip is partial (the Week page
+/// carries the full sentence).
 fn verdict_short_label(v: &DayVerdict) -> &'static str {
     match v.verdict.as_str() {
         "run_extended" => "EXTEND",
-        "skip" => match v.reason_code.as_str() {
-            "freeze_now" | "overnight_freeze" | "soil_frost" => "FREEZE",
-            "wind_now" | "wind_forecast" => "WIND",
-            "rain_now" | "already_wet" | "observed_rain" | "rain_next_4h" | "tomorrow_rain"
-            | "rain_3day" => "RAIN",
-            "paused" | "pause_until" => "PAUSE",
-            "" => {
+        "skip" => match crate::gates_catalog::gate_family(&v.reason_code) {
+            crate::gates_catalog::GateFamily::Freeze => "FREEZE",
+            crate::gates_catalog::GateFamily::Wind => "WIND",
+            crate::gates_catalog::GateFamily::Water => {
+                if v.mixed_hold {
+                    "RAIN*"
+                } else {
+                    "RAIN"
+                }
+            }
+            crate::gates_catalog::GateFamily::Pause => "PAUSE",
+            // A restriction is a legal block, not weather; the Week page
+            // spells it out, the strip keeps the neutral tag.
+            crate::gates_catalog::GateFamily::Restriction => "SKIP",
+            crate::gates_catalog::GateFamily::SoilModel => "SOIL",
+            crate::gates_catalog::GateFamily::NoData => "NO DATA",
+            crate::gates_catalog::GateFamily::Other if v.reason_code.is_empty() => {
                 let r = v.reason.to_lowercase();
                 if r.contains("freeze") {
                     "FREEZE"
@@ -305,8 +322,60 @@ fn verdict_short_label(v: &DayVerdict) -> &'static str {
                     "SKIP"
                 }
             }
-            _ => "SKIP",
+            crate::gates_catalog::GateFamily::Other => "SKIP",
         },
+        _ if v.reason_code == "soil_model" => "SOIL",
         _ => "RUN",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cell(verdict: &str, code: &str, reason: &str) -> DayVerdict {
+        DayVerdict {
+            verdict: verdict.into(),
+            reason_code: code.into(),
+            reason: reason.into(),
+            ..Default::default()
+        }
+    }
+
+    /// The demotion and the mixed partial hold are visible IN the cell,
+    /// not only in the hover title: a demoted cell reads SOIL on the run
+    /// tint, a mixed-install rain hold reads RAIN*, and a plain run or a
+    /// yard-wide rain skip keeps its shipped tag.
+    #[test]
+    fn soil_model_cells_carry_their_own_tags() {
+        let demoted = cell(
+            "run",
+            "soil_model",
+            "Waters anyway: soil zones already count this forecast rain against their \
+             deficit. (Rain expected)",
+        );
+        assert_eq!(verdict_short_label(&demoted), "SOIL");
+        // The partial hold is a FIELD now, not a phrase inside the
+        // sentence: the strip reads what the refresher set rather than
+        // searching the prose for the mixed-install note.
+        let mut mixed = cell(
+            "skip",
+            "tomorrow_rain",
+            &format!("Rain expected. {}", crate::ha::snapshot::MIXED_SKIP_NOTE),
+        );
+        mixed.mixed_hold = true;
+        assert_eq!(verdict_short_label(&mixed), "RAIN*");
+        // The note alone no longer makes the tag: without the flag this
+        // is a whole-yard hold.
+        let note_only = cell(
+            "skip",
+            "tomorrow_rain",
+            &format!("Rain expected. {}", crate::ha::snapshot::MIXED_SKIP_NOTE),
+        );
+        assert_eq!(verdict_short_label(&note_only), "RAIN");
+        let plain_skip = cell("skip", "tomorrow_rain", "Rain expected");
+        assert_eq!(verdict_short_label(&plain_skip), "RAIN");
+        let plain_run = cell("run", "run", "");
+        assert_eq!(verdict_short_label(&plain_run), "RUN");
     }
 }
