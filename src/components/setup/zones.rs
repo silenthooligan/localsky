@@ -279,6 +279,7 @@ pub fn ZonesStep() -> impl IntoView {
 
             <Show when=move || add_open.get()>
                 <ZoneForm
+                    panel_title="Zone details".to_string()
                     config_json=config_json
                     new_slug=new_slug
                     new_display_name=new_display_name

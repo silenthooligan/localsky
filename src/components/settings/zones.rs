@@ -19,7 +19,7 @@ use crate::components::settings_ui::{
     SettingsResult,
 };
 use crate::components::ui::{
-    Button, ConfirmSheet, FormField, HelpHint, Panel, PhotoField, SegmentedControl,
+    Button, ConfirmSheet, FormField, HelpHint, Panel, PhotoField, SegmentedControl, Sheet,
 };
 use crate::components::units_fmt::{
     area_unit, depth_unit, depth_value_mm, fmt_area_sqft, fmt_rain_amount, fmt_rain_rate_mm,
@@ -404,6 +404,30 @@ pub fn SettingsZones() -> impl IntoView {
         });
     }
 
+    // The ADD form is an overlay, not a panel at the end of the list.
+    // Appending it meant clicking "+ Add zone" scrolled nothing and opened
+    // the form below the fold: on a four-zone yard it landed 69px past the
+    // viewport, and on a fourteen-zone yard it is nowhere near the screen.
+    // An overlay is unmissable and costs nothing at any zone count.
+    //
+    // Two effects keep it in step with the URL state that owns form
+    // open-ness. In: the sheet opens when the form is open and no zone is
+    // being edited. Out: dismissing the sheet (its X, the backdrop, Escape)
+    // routes back through `close_form`, so the URL and the draft reset the
+    // same way Cancel does.
+    let add_sheet_open = RwSignal::new(false);
+    Effect::new(move |_| {
+        add_sheet_open.set(add_open.get() && editing_slug.get().is_none());
+    });
+    Effect::new(move |_| {
+        if !add_sheet_open.get()
+            && add_open.get_untracked()
+            && editing_slug.get_untracked().is_none()
+        {
+            close_form.run(());
+        }
+    });
+
     let zones_view = move || {
         let cfg = config_json.get();
         let zones_obj = cfg
@@ -420,6 +444,19 @@ pub fn SettingsZones() -> impl IntoView {
                     .get(&slug)
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
+                // The editor for THIS zone renders directly beneath its own
+                // row, so clicking Edit opens something the operator can see
+                // without scrolling past the rest of the yard.
+                let editing_this = {
+                    let slug = slug.clone();
+                    move || editing_slug.get().as_deref() == Some(slug.as_str())
+                };
+                let zone_label = zone
+                    .get("display_name")
+                    .and_then(|v| v.as_str())
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or(slug.as_str())
+                    .to_string();
                 view! {
                     <ZoneCard
                         slug=slug
@@ -429,6 +466,39 @@ pub fn SettingsZones() -> impl IntoView {
                         persist=persist
                         prefs=p
                     />
+                    <Show when=editing_this.clone()>
+                        <li class="settings-card-list__item zone-edit-inline">
+                            <ZoneForm
+                                panel_title=format!("Editing {zone_label}")
+                                config_json=config_json
+                                new_slug=new_slug
+                                new_display_name=new_display_name
+                                new_species=new_species
+                                new_soil=new_soil
+                                new_area=new_area
+                                new_sprinkler=new_sprinkler
+                                new_precip=new_precip
+                                new_max_run=new_max_run
+                                new_weekly_budget=new_weekly_budget
+                                new_sessions=new_sessions
+                                new_rain_cap=new_rain_cap
+                                new_sched_model=new_sched_model
+                                new_controller=new_controller
+                                new_station=new_station
+                                new_photo_url=new_photo_url
+                                new_soil_sensor=new_soil_sensor
+                                new_soil_min=new_soil_min
+                                new_soil_sat=new_soil_sat
+                                soil_sensor_opts=soil_sensor_opts
+                                editing_slug=editing_slug
+                                add_open=add_open
+                                on_close=close_form
+                                result_msg=result_msg
+                                result_ok=result_ok
+                                persist=persist
+                            />
+                        </li>
+                    </Show>
                 }
             })
             .collect_view()
@@ -480,12 +550,8 @@ pub fn SettingsZones() -> impl IntoView {
                     })
                 >
                     {move || {
-                        if add_open.get() {
-                            if editing_slug.get().is_some() {
-                                "× Cancel edit"
-                            } else {
-                                "× Cancel add"
-                            }
+                        if add_open.get() && editing_slug.get().is_none() {
+                            "× Cancel add"
                         } else {
                             "+ Add zone"
                         }
@@ -494,8 +560,19 @@ pub fn SettingsZones() -> impl IntoView {
                 </div>
             </Panel>
 
-            <Show when=move || add_open.get()>
+            // ADD only. An EDIT renders inline, directly under the zone it
+            // belongs to (see `zones_view`): a form that opened below every
+            // zone left the operator scrolling past the whole yard to find
+            // the editor they just asked for, and on a fourteen-zone yard it
+            // was off screen entirely.
+            // Mounted only when nothing is being edited. The sheet keeps its
+            // children in the DOM while it animates closed, so leaving it
+            // mounted during an edit would put two #zone-form-panel ids on
+            // the page and the scroll-into-view would find the hidden one.
+            <Show when=move || editing_slug.get().is_none()>
+            <Sheet open=add_sheet_open title="Add a zone" aria_label="Add a zone">
                 <ZoneForm
+                    panel_title=String::new()
                     config_json=config_json
                     new_slug=new_slug
                     new_display_name=new_display_name
@@ -523,6 +600,7 @@ pub fn SettingsZones() -> impl IntoView {
                     result_ok=result_ok
                     persist=persist
                 />
+            </Sheet>
             </Show>
             </Show>
 
@@ -562,6 +640,10 @@ pub fn ZoneForm(
     new_soil_min: RwSignal<f64>,
     new_soil_sat: RwSignal<f64>,
     soil_sensor_opts: RwSignal<Vec<(String, String, Option<f64>, String)>>,
+    /// Heading for the panel. An inline edit names the zone it belongs to,
+    /// so an open editor sitting between two zone rows is unmistakably
+    /// attached to one of them.
+    panel_title: String,
     editing_slug: RwSignal<Option<String>>,
     add_open: RwSignal<bool>,
     /// Optional close handler. The settings page passes one that navigates
@@ -1209,7 +1291,7 @@ pub fn ZoneForm(
     };
 
     view! {
-        <div id="zone-form-panel"><Panel title="Zone form".to_string()>
+        <div id="zone-form-panel"><Panel title=panel_title>
             <Show when=move || editing_slug.get().is_some()>
                 <p class="settings-page__subtitle" style="margin: 0 0 0.75rem">
                     "Editing "
@@ -1557,7 +1639,7 @@ pub fn ZoneForm(
 
             <FormField
                 label="Weekly target (inches a week)".to_string()
-                helptext="Gross weekly depth this zone should receive. Weekly model: sizes every run, and rain counts toward the target. Soil model: a value set here becomes a ceiling on sprinkler water delivered over the trailing 7 days; rain does not count against the ceiling, and a blank or inferred target caps nothing. Blank = the default inferred from the zone name, shown in the box.".to_string()
+                helptext="Gross weekly depth this zone should receive. Weekly model: sizes every run, and rain counts toward the target. Soil model: a value set here becomes a ceiling on sprinkler water delivered over the trailing 7 days; rain does not count against the ceiling, and a blank or inferred target caps nothing. Blank = the starting value taken from this zone's species, shown in the box.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 <input
@@ -1574,7 +1656,7 @@ pub fn ZoneForm(
 
             <FormField
                 label="Sessions per week".to_string()
-                helptext="How many mornings the weekly target is split across, 1 to 7. Sessions space at floor(7 / sessions) days apart. Weekly model only: a soil-governed zone sets its own cadence from soil texture and root depth. Blank = the default inferred from the zone name, shown in the box.".to_string()
+                helptext="How many mornings the weekly target is split across, 1 to 7. Sessions space at floor(7 / sessions) days apart. Weekly model only: a soil-governed zone sets its own cadence from soil texture and root depth. Blank = the starting value taken from this zone's species, shown in the box.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 <input

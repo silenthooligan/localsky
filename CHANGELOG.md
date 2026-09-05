@@ -4,6 +4,13 @@ All notable changes to LocalSky are documented here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-04
+
+### Fixed
+
+- **The zone editor opens where you clicked it.** Editing a zone rendered the form after the whole zone list, so on a long yard the editor for the second zone opened below the fourteenth and it looked like the button did nothing. The editor now opens in the list, directly under the row it belongs to, and names the zone it is editing. It also reads as an editor rather than another card in the stack: an accent rail ties it to its row, and the panel sits inset from its neighbors. Adding a zone now opens in a dialog over the page instead of appending a form below the list. Clicking Add used to scroll nothing and open the form past the bottom of the screen, so on any yard bigger than a few zones you had to know it was down there and go find it.
+- **The watering-targets notice stopped implying something is unfinished.** It said the targets were "inferred from the zone name", which stopped being true in 0.8.0 when the starting target moved onto the species, and the two fields in the zone editor said it too. It also read as a chore, so an operator who had filled in every field they were shown was still told to go set something. It now states what those zones water on and offers the alternative.
+
 ## [0.8.0] - 2026-09-04
 
 ### Added

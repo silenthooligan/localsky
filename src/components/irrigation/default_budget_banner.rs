@@ -99,9 +99,10 @@ pub(crate) fn lines(s: &IrrigationSnapshot, p: UnitPrefs) -> Vec<String> {
         return Vec::new();
     }
     let mut lines = vec![
-        "These zones water on a weekly target inferred from the zone name, because none is set. \
-         Set Weekly target and Sessions per week under Settings, then Zones, if that is not what \
-         you want."
+        "These zones water on a starting target taken from what each one is \
+         planted with. Nobody set a target, so the engine used the species. \
+         Below is what they run on today. Set your own under Settings, then \
+         Zones, if you want different."
             .to_string(),
     ];
     lines.extend(rows);
@@ -237,9 +238,10 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "These zones water on a weekly target inferred from the zone name, because none \
-                 is set. Set Weekly target and Sessions per week under Settings, then Zones, if \
-                 that is not what you want."
+                "These zones water on a starting target taken from what each one is \
+                 planted with. Nobody set a target, so the engine used the species. \
+                 Below is what they run on today. Set your own under Settings, then \
+                 Zones, if you want different."
                     .to_string(),
                 "Back Yard: 1.00\" a week over 2 sessions".to_string(),
             ]

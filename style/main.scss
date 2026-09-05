@@ -8369,6 +8369,37 @@ html[data-no-irrigation="true"] {
   gap: var(--space-3);
 }
 
+// The zone editor, opened in place beneath the row it belongs to. It reads as
+// an open drawer hanging off that zone rather than another card in the list:
+// an accent rail down the left ties it to the row above, the inset ground and
+// the step in from the edge say "this is a form, not a peer", and the whole
+// thing is unmistakably attached to one zone rather than floating under all of
+// them. Before this the editor rendered after the entire list, flat and
+// card-shaped, so on a long yard the operator clicked Edit and nothing they
+// could see happened.
+.zone-edit-inline {
+  margin-left: var(--space-4);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  background: var(--elev-1);
+  box-shadow: inset 0 1px 0 color-mix(in oklab, var(--accent) 18%, transparent);
+
+  // The panel inside already carries its own padding; drop its border so the
+  // rail is the only edge and the drawer does not read as a nested box.
+  .panel {
+    border-color: transparent;
+    background: transparent;
+  }
+}
+
+@media (max-width: 640px) {
+  // Screen width is scarcer than the visual tie-in; keep the rail, lose the
+  // indent.
+  .zone-edit-inline {
+    margin-left: 0;
+  }
+}
+
 // "Add a device" bar on the Devices hub: the two create actions grouped on the
 // left, the "scan the network" discovery action clearly separated on the right,
 // so what-does-what is obvious. A defined card with real breathing room below it
