@@ -1,0 +1,473 @@
+@use "mixins" as *;
+
+// photo field, form fields, settings forms
+//
+// Split out of main.scss, which had grown to 11,330 lines.
+// Load order is the cascade: see the @use list in main.scss.
+
+// ── PhotoField ──────────────────────────────────────────────────────
+// Drop-zone + browse button + URL text fallback, used by the zone form.
+.photo-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.photo-field__drop {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 180px;
+  padding: 1rem;
+  border: 1.5px dashed color-mix(in oklab, var(--text-bright) 18%, transparent);
+  border-radius: var(--radius);
+  background: color-mix(in oklab, var(--text-bright) 2%, transparent);
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.photo-field__drop:hover {
+  border-color: color-mix(in oklab, var(--accent) 50%, transparent);
+}
+.photo-field__drop.is-drag {
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 10%, transparent);
+}
+.photo-field__drop.has-image {
+  padding: 0;
+  border-style: solid;
+  border-color: color-mix(in oklab, var(--text-bright) 10%, transparent);
+  background: var(--bg-deep);
+}
+
+.photo-field__hint {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  text-align: center;
+  pointer-events: none;
+}
+.photo-field__hint > * {
+  pointer-events: auto;
+}
+.photo-field__hint-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--accent) 18%, transparent);
+  color: var(--accent);
+  font-size: 1.4rem;
+  font-weight: 600;
+  line-height: 1;
+}
+.photo-field__hint-text {
+  color: var(--text);
+  font-size: 0.92rem;
+}
+.photo-field__hint-meta {
+  color: var(--text-faint);
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+}
+
+.photo-field__preview {
+  display: block;
+  max-width: 100%;
+  max-height: 320px;
+  border-radius: calc(var(--radius) - 1px);
+  object-fit: contain;
+}
+.photo-field__clear { position: absolute; top: 0.5rem; right: 0.5rem; width: 28px; height: 28px; }
+
+.photo-field__status {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+.photo-field__error {
+  margin: 0;
+  font-size: 0.78rem;
+  color: #ff9696;
+}
+.photo-field__url {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+}
+
+// shared input style used inside setup + settings forms
+.ui-input {
+  width: 100%;
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: var(--radius-sm);
+  padding: 0.55rem 0.75rem;
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  min-height: var(--control-h);
+  transition: border-color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out);
+}
+.ui-input:hover:not(:disabled) {
+  border-color: var(--input-border-hover);
+}
+.ui-input:focus,
+.ui-input:focus-visible {
+  @include focus-ring;
+  border-color: var(--input-border-focus);
+  box-shadow: var(--focus-halo);
+}
+// Real disabled styling (NOT opacity, which drops contrast below AA): muted
+// text on a recessed fill so a disabled field is legible AND obviously inert.
+.ui-input:disabled,
+.ui-input[disabled] {
+  color: var(--text-faint);
+  background: var(--input-bg-disabled);
+  border-color: var(--input-border);
+  cursor: not-allowed;
+}
+// Invalid field: a clear 2px danger border + faint tint, so an error reads
+// without relying on an adjacent message alone.
+.ui-input[aria-invalid="true"] {
+  border: 2px solid var(--input-border-invalid);
+  background: color-mix(in oklab, var(--accent-danger) 6%, var(--input-bg));
+}
+// A read-only displayed value (NOT an input): muted, borderless, so it never
+// reads as a disabled/editable field.
+.field-readonly {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0.55rem 0;
+  color: var(--text-dim);
+  font-family: var(--font-sans);
+}
+
+// SecretInput: masked field + inline show/hide reveal toggle. The field
+// reserves right padding so its value never slides under the eye button.
+// Reduced-motion is handled globally (prefers-reduced-motion guard).
+.ui-secret-input { position: relative; display: block; }
+.ui-secret-input__field { padding-right: 2.6rem; }
+.ui-secret-input__toggle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  height: 100%;
+  width: 2.4rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: color var(--motion-fast) ease;
+}
+.ui-secret-input__toggle:hover { color: var(--text); }
+.ui-secret-input__toggle:focus-visible { @include focus-ring(-2px); }
+.ui-secret-input__toggle[disabled] { color: var(--text-faint); cursor: not-allowed; }
+
+// review step
+// One-time post-wizard welcome card on the Weather home.
+.welcome-card { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-5); @include surface($border: (1px solid var(--elev-border-strong)));    }
+.welcome-card__head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.welcome-card__title { margin: 0; font-size: var(--text-h2); color: var(--text-bright); }
+.welcome-card__dismiss { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; @include surface($background: (none), $border: (none), $radius: (var(--radius-sm)), $shadow: null);  color: var(--text-faint);  cursor: pointer; }
+.welcome-card__dismiss:hover { color: var(--text); background: var(--elev-2); }
+.welcome-card__body { margin: 0; color: var(--text-dim); }
+// P2-2: first-decision panel inside the welcome card.
+.welcome-card__decision {
+  margin: var(--space-3) 0;
+  padding: 0.75rem 0.9rem;
+  border-radius: var(--radius-md);
+  border-left: 3px solid var(--accent);
+  background: color-mix(in oklab, var(--accent) 8%, transparent);
+}
+.welcome-card__decision-head {
+  margin: 0;
+  line-height: 1.5;
+  color: var(--text);
+}
+.welcome-card__why {
+  margin-top: var(--space-2);
+}
+.welcome-card__why > summary {
+  cursor: pointer;
+  font-size: var(--text-body-sm);
+  font-weight: 600;
+  color: var(--accent);
+  list-style: none;
+}
+.welcome-card__why > summary::-webkit-details-marker { display: none; }
+.welcome-card__why > summary::before { content: "\25b8  "; }
+.welcome-card__why[open] > summary::before { content: "\25be  "; }
+.welcome-card__why .decision-explainer__checks { margin-top: var(--space-2); }
+.welcome-card__links { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-3); }
+.welcome-card__link { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3) var(--space-4); @include surface($background: (var(--elev-2)), $radius: (var(--radius-md)), $shadow: null);   color: var(--accent); text-decoration: none; transition: border-color var(--motion-fast) ease, background var(--motion-fast) ease; }
+.welcome-card__link:hover { border-color: var(--accent); background: var(--elev-3); }
+.welcome-card__link-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.welcome-card__link-text strong { color: var(--text-bright); font-size: var(--text-body-sm); }
+.welcome-card__link-text span { color: var(--text-faint); font-size: var(--text-meta); }
+
+// Review step summary table: one row per wizard section with an Edit link.
+.review-table { display: flex; flex-direction: column; gap: 1px; background: var(--elev-border); border: 1px solid var(--elev-border); border-radius: var(--radius-md); overflow: hidden; margin-bottom: var(--space-4); }
+.review-row { display: flex; align-items: baseline; gap: var(--space-3); padding: var(--space-3) var(--space-4); background: var(--elev-1); }
+.review-row__label { flex: none; width: 9.5rem; font-size: var(--text-meta); font-weight: 700; color: var(--text-bright); }
+.review-row__value { flex: 1; min-width: 0; font-size: var(--text-body-sm); color: var(--text-dim); overflow-wrap: anywhere; }
+.review-row__edit { flex: none; font-size: var(--text-meta); color: var(--accent); text-decoration: none; }
+.review-row__edit:hover { text-decoration: underline; }
+@include phone {
+  .review-row { flex-wrap: wrap; }
+  .review-row__label { width: 100%; }
+}
+
+.review-summary {
+  background: var(--bg-panel-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 1rem 1.2rem;
+  margin: 1rem 0 1.5rem;
+}
+.review-summary__line { margin: 0.5rem 0; color: var(--text-dim); line-height: 1.55; }
+.review-summary__line code {
+  background: var(--bg-deep);
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  color: var(--accent);
+}
+
+.setup-apply-btn { min-height: 48px; }
+
+.setup-result {
+  margin: 1rem 0 0;
+  padding: 0.7rem 1rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.95rem;
+}
+.setup-result--ok {
+  // Tokenized (was an ad-hoc rgba literal) so the confirmation tint tracks the
+  // theme. Reused by the Units "Saved on this device" indicator, the wizard
+  // step results, etc.
+  background: color-mix(in oklab, var(--accent-good) 12%, transparent);
+  color: var(--accent-good);
+  border: 1px solid var(--accent-good);
+}
+.setup-result--err {
+  background: color-mix(in oklab, var(--accent-danger) 12%, transparent);
+  color: var(--accent-danger);
+  border: 1px solid var(--accent-danger);
+}
+
+// ---- Wizard info-step lists ----
+.setup-source-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.setup-source-list li {
+  padding: 0.65rem 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+  line-height: 1.55;
+}
+.setup-source-list li:last-child { border-bottom: none; }
+.setup-source-list li strong { color: var(--text); margin-right: 0.4rem; }
+
+/* ── Kiosk / read-only mode ──────────────────────────────────────────
+   Set via Settings -> Advanced -> "Kiosk mode" (stored in
+   localStorage.readonly). The app.rs boot script applies
+   data-readonly="true" to <html> synchronously before first paint, so
+   destructive controls are hidden before any tap is possible.
+
+   We hide the buttons rather than disable them: a tap on a hidden
+   element is impossible, whereas a tap on a disabled button still
+   surfaces the hit area on touch devices. Status displays (running
+   zones, verdict, history) stay fully visible.
+
+   Every selector here must match a class that actually ships in a
+   component (renamed classes once let controls leak through in kiosk
+   mode; the SCSS liveness test now catches that). Coverage: stop-all
+   panel + button, running-banner stop, zone-detail run/stop. */
+html[data-readonly="true"] .stop-all,
+html[data-readonly="true"] .stop-all-btn,
+html[data-readonly="true"] .running-banner-stop,
+html[data-readonly="true"] .zone-detail__actions {
+  display: none !important;
+}
+/* Subtle banner cue so kiosk users know controls are locked. */
+html[data-readonly="true"] body::before {
+  content: "kiosk mode · controls hidden";
+  display: block;
+  text-align: center;
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  background: var(--bg-panel-soft);
+  border-bottom: 1px solid var(--border);
+  padding: 0.35rem 0.5rem;
+}
+
+/* ── Source freshness (Settings -> Advanced) ─────────────────────────
+   Compact row per source with a pill that lights up green/yellow/red
+   depending on reachability and age. */
+.source-status-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.source-status-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.55rem 0.7rem;
+  border-radius: var(--radius);
+  background: var(--bg-panel-soft);
+  border: 1px solid var(--border);
+  font-size: 0.92rem;
+}
+.source-status-label {
+  color: var(--text);
+}
+.source-status-age {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+.source-status-pill {
+  display: inline-flex;
+  align-items: center;
+  font-size: var(--text-micro);
+  font-weight: 700;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  padding: 2px var(--space-2);
+  border-radius: 999px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.source-status-pill-fresh {
+  color: var(--accent-good);
+  background: color-mix(in oklab, var(--accent-good) 12%, transparent);
+  border-color: color-mix(in oklab, var(--accent-good) 40%, transparent);
+}
+.source-status-pill-stale {
+  color: var(--accent-warm);
+  background: color-mix(in oklab, var(--accent-warm) 12%, transparent);
+  border-color: color-mix(in oklab, var(--accent-warm) 40%, transparent);
+}
+.source-status-pill-offline {
+  color: var(--accent-hot);
+  background: color-mix(in oklab, var(--accent-hot) 12%, transparent);
+  border-color: color-mix(in oklab, var(--accent-hot) 40%, transparent);
+}
+.source-status-pill-waiting {
+  color: var(--text-faint);
+  background: rgba(255, 255, 255, 0.05);
+  border-color: var(--border);
+}
+
+/* ── Help hint disclosure (UI primitive) ─────────────────────────────
+   Native <details>/<summary> styled as a small circular "?". Open
+   reveals a one-paragraph explanation. */
+.help-hint {
+  display: inline-block;
+  position: relative;
+  vertical-align: middle;
+  margin-left: 0.55rem;
+}
+// In a settings/page title the "?" follows large text; nudge it so it reads as
+// centered against the cap height instead of crowding the baseline.
+.settings-page__title .help-hint {
+  margin-left: 0.5rem;
+  transform: translateY(0.06em);
+}
+.help-hint__trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.35rem;
+  height: 1.35rem;
+  // WCAG 2.5.8 floor on every pointer (1.35rem is only ~21.6px); the
+  // pointer:coarse block raises this to 44px.
+  min-width: 24px;
+  min-height: 24px;
+  border-radius: 50%;
+  border: 1px solid var(--glass-border, rgba(255, 255, 255, 0.12));
+  background: var(--glass-bg, rgba(15, 19, 28, 0.55));
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.help-hint__trigger::-webkit-details-marker { display: none; }
+.help-hint__trigger::marker { content: ""; }
+.help-hint__trigger:hover { color: var(--text); border-color: rgba(94, 200, 255, 0.4); }
+.help-hint[open] .help-hint__trigger { color: var(--text); border-color: rgba(94, 200, 255, 0.5); }
+.help-hint__body {
+  // Float as a popover anchored to the "?" instead of pushing into the layout:
+  // an in-flow body reflowed the row and shifted the trigger to the far side,
+  // so closing meant a long mouse trip back. Absolute keeps the "?" put.
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  left: 0;
+  z-index: var(--z-dropdown);
+  width: max-content;
+  max-width: min(24rem, 86vw);
+  padding: 0.7rem 0.85rem;
+  background: var(--bg-panel-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-2, 0 10px 28px rgba(0, 0, 0, 0.45));
+  color: var(--text-dim);
+  font-size: 0.86rem;
+  line-height: 1.55;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+// In a panel header the "?" sits on the right, so anchor the popover to its
+// right edge (extends left) to stay on-screen.
+.panel__tools .help-hint__body {
+  left: auto;
+  right: 0;
+}
+// Panels clip their content (overflow: hidden), which cut off the help popover.
+// While a help popover is open inside a panel, let it escape the clip and paint
+// above the panels below it. Closed: the normal clip is restored.
+.panel:has(.help-hint[open]) {
+  overflow: visible;
+  z-index: var(--z-raised);
+}
+
+.help-hint__text {
+  margin: 0;
+}
+
+.help-hint__doc-link {
+  align-self: flex-start;
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px dashed color-mix(in oklab, var(--accent) 40%, transparent);
+  &:hover {
+    color: var(--text-bright);
+    border-bottom-color: var(--accent);
+  }
+}
+
+.settings-form-error { color: var(--accent-danger); line-height: 1.5; }

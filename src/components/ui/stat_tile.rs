@@ -1,19 +1,10 @@
-// <StatTile/>, label + big number + unit, with an optional delta arrow
-// and an optional inline sparkline. The unit of the new dense dashboards
+// <StatTile/>, label + big number + unit, with an optional inline
+// sparkline. The unit of the new dense dashboards
 // (weather telemetry + irrigation KPIs). Pure render.
 
 use leptos::prelude::*;
 
 use crate::components::ui::Sparkline;
-
-/// Whether an upward delta is good (green) or bad (red). Weather deltas
-/// are usually neutral; budget/savings deltas carry sentiment.
-#[derive(Clone, Copy, PartialEq)]
-pub enum DeltaSense {
-    Neutral,
-    UpGood,
-    UpBad,
-}
 
 #[component]
 pub fn StatTile(
@@ -22,22 +13,20 @@ pub fn StatTile(
     label: String,
     /// The primary value already formatted (e.g. "72").
     #[prop(into)]
-    value: String,
+    value: Signal<String>,
     /// Trailing unit (e.g. "%", "°F", "mph"). Optional.
     #[prop(into, optional)]
-    unit: String,
+    unit: Signal<String>,
+    /// card | compact | inline | hero; one metric anatomy across surfaces.
+    #[prop(default = "card")]
+    layout: &'static str,
+    #[prop(into, optional)] detail: String,
+    #[prop(into, optional)] detail_class: String,
+    #[prop(into, optional)] value_class: String,
+    #[prop(into, optional)] role: Option<&'static str>,
     /// Optional leading icon name.
     #[prop(into, optional)]
     icon: Option<&'static str>,
-    /// Optional signed delta value already formatted (e.g. "+3.1").
-    #[prop(into, optional)]
-    delta: Option<String>,
-    /// Sentiment for the delta coloring.
-    #[prop(default = DeltaSense::Neutral)]
-    delta_sense: DeltaSense,
-    /// True if the delta is negative (drives arrow direction + sign color).
-    #[prop(default = false)]
-    delta_down: bool,
     /// Optional sparkline series.
     #[prop(optional)]
     spark: Option<Vec<f64>>,
@@ -45,20 +34,17 @@ pub fn StatTile(
     #[prop(into, default = "var(--accent)".to_string())]
     accent: String,
 ) -> impl IntoView {
-    let delta_class = match (delta_sense, delta_down) {
-        (DeltaSense::Neutral, _) => "stat-tile__delta",
-        (DeltaSense::UpGood, false) | (DeltaSense::UpBad, true) => {
-            "stat-tile__delta stat-tile__delta--good"
-        }
-        (DeltaSense::UpGood, true) | (DeltaSense::UpBad, false) => {
-            "stat-tile__delta stat-tile__delta--bad"
-        }
+    let class = match layout {
+        "compact" => "stat-tile stat-tile--compact",
+        "inline" => "stat-tile stat-tile--inline",
+        "hero" => "stat-tile stat-tile--hero",
+        _ => "stat-tile",
     };
-    let arrow = if delta_down { "arrow-down" } else { "arrow-up" };
-    let has_unit = !unit.is_empty();
+    let detail_class = format!("stat-tile__detail {detail_class}");
+    let value_class = format!("stat-tile__value {value_class}");
     let icon_accent = accent.clone();
     view! {
-        <div class="stat-tile" style=format!("--tile-accent:{accent}")>
+        <div class=class role=role style=format!("--tile-accent:{accent}")>
             <div class="stat-tile__head">
                 {icon.map(|n| view! {
                     <span class="stat-tile__icon" style=format!("color:{icon_accent}")>
@@ -68,15 +54,10 @@ pub fn StatTile(
                 <span class="stat-tile__label">{label}</span>
             </div>
             <div class="stat-tile__value-row">
-                <span class="stat-tile__value">{value}</span>
-                {has_unit.then(|| view! { <span class="stat-tile__unit">{unit}</span> })}
-                {delta.map(|d| view! {
-                    <span class=delta_class>
-                        <crate::components::ui::Icon name=arrow size=12/>
-                        {d}
-                    </span>
-                })}
+                <span class=value_class>{move || value.get()}</span>
+                <Show when=move || !unit.get().is_empty()><span class="stat-tile__unit">{move || unit.get()}</span></Show>
             </div>
+            {(!detail.is_empty()).then(|| view! { <span class=detail_class>{detail}</span> })}
             {spark.map(|pts| view! {
                 <div class="stat-tile__spark">
                     <Sparkline points=pts accent=accent.clone() height=30/>

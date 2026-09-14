@@ -11,6 +11,9 @@
 // localStorage and updates the signal, re-rendering consumers
 // client-side only.
 
+pub use crate::units::{
+    c_to_f, f_to_c, in_to_mm, inhg_to_hpa, kph_to_mph, mi_to_km, mm_to_in, mph_to_kph,
+};
 use leptos::prelude::*;
 
 /// Imperial baseline. All-false maps every helper to its imperial branch.
@@ -23,6 +26,7 @@ pub const IMPERIAL: UnitPrefs = UnitPrefs {
     pressure_metric: false,
     distance_metric: false,
     area_metric: false,
+    clock_12h: false,
 };
 
 /// Fully-metric preferences. What `Units::Metric` expands to.
@@ -33,15 +37,16 @@ pub const METRIC: UnitPrefs = UnitPrefs {
     pressure_metric: true,
     distance_metric: true,
     area_metric: true,
+    clock_12h: false,
 };
 
 /// Expand a household `Units` enum into the per-field `UnitPrefs` the display
 /// helpers consume. `Imperial -> IMPERIAL`, `Metric -> METRIC`. Used by
 /// `use_unit_prefs` when a device has not opted into its own override.
-pub fn prefs_from_units(units: crate::ha::snapshot::Units) -> UnitPrefs {
+pub fn prefs_from_units(units: crate::model::Units) -> UnitPrefs {
     match units {
-        crate::ha::snapshot::Units::Metric => METRIC,
-        crate::ha::snapshot::Units::Imperial => IMPERIAL,
+        crate::model::Units::Metric => METRIC,
+        crate::model::Units::Imperial => IMPERIAL,
     }
 }
 
@@ -59,6 +64,10 @@ pub struct UnitPrefs {
     pub distance_metric: bool,
     /// Show areas in m² (source values are square feet).
     pub area_metric: bool,
+    /// Render clock times as 12-hour with AM/PM (source epochs are
+    /// rendered 24-hour by default). A display preference beside the
+    /// units, per device.
+    pub clock_12h: bool,
 }
 
 /// Reactive per-device unit preferences. Call once at component scope;
@@ -91,7 +100,7 @@ pub fn use_unit_prefs() -> Signal<UnitPrefs> {
         // configured units) re-runs this Effect and re-resolves the device.
         let household_units = household
             .map(|h| h.0.get())
-            .unwrap_or(crate::ha::snapshot::Units::Imperial);
+            .unwrap_or(crate::model::Units::Imperial);
 
         let Some(win) = web_sys::window() else {
             return;
@@ -108,7 +117,9 @@ pub fn use_unit_prefs() -> Signal<UnitPrefs> {
             read("units_system").as_deref(),
             Some("imperial") | Some("metric") | Some("custom")
         );
-        let next = if opted_in {
+        // The clock is a per-device choice independent of the unit scope.
+        let clock_12h = read("time_clock").as_deref() == Some("12h");
+        let mut next = if opted_in {
             UnitPrefs {
                 temp_c: read("units_temp").as_deref() == Some("c"),
                 rain_mm: read("units_rain").as_deref() == Some("mm"),
@@ -116,10 +127,13 @@ pub fn use_unit_prefs() -> Signal<UnitPrefs> {
                 pressure_metric: read("units_pressure").as_deref() == Some("hpa"),
                 distance_metric: read("units_distance").as_deref() == Some("km"),
                 area_metric: read("units_area").as_deref() == Some("sqm"),
+                clock_12h,
             }
         } else {
             prefs_from_units(household_units)
         };
+        next.clock_12h = clock_12h;
+        crate::timefmt::set_clock_12h(clock_12h);
         if next != prefs.get_untracked() {
             prefs.set(next);
         }
@@ -127,12 +141,56 @@ pub fn use_unit_prefs() -> Signal<UnitPrefs> {
     prefs.into()
 }
 
-pub fn f_to_c(f: f64) -> f64 {
-    (f - 32.0) * 5.0 / 9.0
+/// A stored (imperial) figure as the viewer sees it, and back. The form
+/// keeps the engine's number and converts at its edge, so a metric
+/// viewer types millimeters into a field the engine reads in inches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dimension {
+    Depth,
+    Rate,
+    Temp,
+    Wind,
 }
 
-pub fn in_to_mm(inches: f64) -> f64 {
-    inches * 25.4
+impl Dimension {
+    pub fn to_display(self, stored: f64, p: UnitPrefs) -> f64 {
+        match self {
+            Dimension::Depth | Dimension::Rate if p.rain_mm => in_to_mm(stored),
+            Dimension::Temp if p.temp_c => f_to_c(stored),
+            Dimension::Wind if p.wind_metric => mph_to_kph(stored),
+            _ => stored,
+        }
+    }
+    pub fn to_stored(self, shown: f64, p: UnitPrefs) -> f64 {
+        match self {
+            Dimension::Depth | Dimension::Rate if p.rain_mm => mm_to_in(shown),
+            Dimension::Temp if p.temp_c => c_to_f(shown),
+            Dimension::Wind if p.wind_metric => kph_to_mph(shown),
+            _ => shown,
+        }
+    }
+    pub fn unit(self, p: UnitPrefs) -> &'static str {
+        match self {
+            Dimension::Depth => depth_unit(p),
+            Dimension::Rate => {
+                if p.rain_mm {
+                    "mm/hr"
+                } else {
+                    "in/hr"
+                }
+            }
+            Dimension::Temp => temp_unit(p),
+            Dimension::Wind => wind_unit(p),
+        }
+    }
+    /// Digits past the point that keep the stored precision visible.
+    pub fn precision(self, p: UnitPrefs) -> usize {
+        match self {
+            Dimension::Depth | Dimension::Rate if p.rain_mm => 1,
+            Dimension::Depth | Dimension::Rate => 2,
+            _ => 0,
+        }
+    }
 }
 
 /// Degree-glyph form without the scale letter: "72°" or "22°".
@@ -142,6 +200,20 @@ pub fn fmt_temp_short(temp_f: f64, p: UnitPrefs) -> String {
     } else {
         format!("{temp_f:.0}°")
     }
+}
+
+/// Daily providers may publish only one extreme. A real zero is a reading;
+/// an absent or invalid extreme stays visibly unknown.
+pub fn fmt_optional_temp_short(temp_f: Option<f64>, p: UnitPrefs) -> String {
+    temp_f
+        .filter(|v| v.is_finite())
+        .map_or_else(|| "—".into(), |v| fmt_temp_short(v, p))
+}
+
+pub fn optional_temp_value(temp_f: Option<f64>, p: UnitPrefs) -> String {
+    temp_f
+        .filter(|v| v.is_finite())
+        .map_or_else(|| "unknown".into(), |v| temp_value(v, p))
 }
 
 /// Bare numeric value for StatTile-style value/unit splits.
@@ -179,12 +251,25 @@ pub fn fmt_rain_amount(inches: f64, p: UnitPrefs) -> String {
     }
 }
 
+/// An absent forecast amount is unknown; a reported dry period remains zero.
+pub fn fmt_optional_rain_amount(inches: Option<f64>, p: UnitPrefs) -> String {
+    inches
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .map_or_else(|| "—".into(), |v| fmt_rain_amount(v, p))
+}
+
+pub fn optional_depth_value_in(inches: Option<f64>, p: UnitPrefs) -> String {
+    inches
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .map_or_else(|| "unknown".into(), |v| depth_value_in(v, p))
+}
+
 /// Rain amount from a MILLIMETER source: "0.25\"" or "6.4mm".
 pub fn fmt_rain_amount_mm(mm: f64, p: UnitPrefs) -> String {
     if p.rain_mm {
         format!("{mm:.1}mm")
     } else {
-        format!("{:.2}\"", mm / 25.4)
+        format!("{:.2}\"", mm_to_in(mm))
     }
 }
 
@@ -211,7 +296,7 @@ pub fn depth_value_mm(mm: f64, p: UnitPrefs) -> String {
     if p.rain_mm {
         format!("{mm:.1}")
     } else {
-        format!("{:.2}", mm / 25.4)
+        format!("{:.2}", mm_to_in(mm))
     }
 }
 
@@ -274,12 +359,8 @@ pub fn fmt_rain_rate_mm(mm_per_hr: f64, p: UnitPrefs) -> String {
     if p.rain_mm {
         format!("{mm_per_hr:.1}mm/h")
     } else {
-        format!("{:.2}in/h", mm_per_hr / 25.4)
+        format!("{:.2}in/h", mm_to_in(mm_per_hr))
     }
-}
-
-pub fn mph_to_kph(mph: f64) -> f64 {
-    mph * 1.609_344
 }
 
 /// Wind speed (source mph), whole numbers: "8 mph" or "13 km/h".
@@ -289,6 +370,12 @@ pub fn fmt_wind(mph: f64, p: UnitPrefs) -> String {
     } else {
         format!("{mph:.0} mph")
     }
+}
+
+/// Missing forecast wind is unknown, while a reported zero is real calm wind.
+pub fn fmt_optional_wind(mph: Option<f64>, p: UnitPrefs) -> String {
+    mph.filter(|v| v.is_finite() && *v >= 0.0)
+        .map_or_else(|| "—".into(), |v| fmt_wind(v, p))
 }
 
 /// Bare wind value for value/unit splits, whole numbers.
@@ -306,10 +393,6 @@ pub fn wind_unit(p: UnitPrefs) -> &'static str {
     } else {
         "mph"
     }
-}
-
-pub fn inhg_to_hpa(inhg: f64) -> f64 {
-    inhg * 33.863_886_67
 }
 
 /// Pressure (source inHg): "29.92 inHg" or "1013 hPa".
@@ -336,10 +419,6 @@ pub fn pressure_unit(p: UnitPrefs) -> &'static str {
     } else {
         "inHg"
     }
-}
-
-pub fn mi_to_km(mi: f64) -> f64 {
-    mi * 1.609_344
 }
 
 /// Distance (source miles): "5.0 mi" or "8.0 km".
@@ -401,7 +480,7 @@ pub fn area_unit(p: UnitPrefs) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ha::snapshot::Units;
+    use crate::model::Units;
 
     #[test]
     fn household_units_expand() {
@@ -471,11 +550,38 @@ mod tests {
     }
 
     #[test]
+    fn missing_temperature_is_unknown_in_visual_and_spoken_output() {
+        assert_eq!(fmt_optional_temp_short(None, IMPERIAL), "—");
+        assert_eq!(optional_temp_value(None, METRIC), "unknown");
+        assert_eq!(fmt_optional_temp_short(Some(0.0), IMPERIAL), "0°");
+        assert_eq!(optional_temp_value(Some(32.0), METRIC), "0");
+        assert_eq!(fmt_optional_temp_short(Some(f64::NAN), IMPERIAL), "—");
+    }
+
+    #[test]
+    fn missing_forecast_wind_is_unknown_while_reported_calm_keeps_its_units() {
+        for prefs in [IMPERIAL, METRIC] {
+            for unknown in [None, Some(f64::NAN), Some(f64::INFINITY), Some(-1.0)] {
+                assert_eq!(fmt_optional_wind(unknown, prefs), "—");
+            }
+        }
+        assert_eq!(fmt_optional_wind(Some(0.0), IMPERIAL), "0 mph");
+        assert_eq!(fmt_optional_wind(Some(0.0), METRIC), "0 km/h");
+        assert_eq!(fmt_optional_wind(Some(10.0), METRIC), "16 km/h");
+    }
+
+    #[test]
     fn rain_formatting_both_scales() {
         assert_eq!(fmt_rain_rate(0.5, IMPERIAL), "0.50in/h");
         assert_eq!(fmt_rain_rate(0.5, METRIC), "12.7mm/h");
         assert_eq!(fmt_rain_amount(0.5, IMPERIAL), "0.50\"");
         assert_eq!(fmt_rain_amount(0.5, METRIC), "12.7mm");
+        assert_eq!(fmt_optional_rain_amount(None, IMPERIAL), "—");
+        assert_eq!(optional_depth_value_in(None, METRIC), "unknown");
+        assert_eq!(fmt_optional_rain_amount(Some(0.0), IMPERIAL), "0.00\"");
+        assert_eq!(fmt_optional_rain_amount(Some(0.0), METRIC), "0.0mm");
+        assert_eq!(fmt_optional_rain_amount(Some(f64::NAN), IMPERIAL), "—");
+        assert_eq!(optional_depth_value_in(Some(-1.0), IMPERIAL), "unknown");
     }
 
     #[test]

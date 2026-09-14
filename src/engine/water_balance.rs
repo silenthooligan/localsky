@@ -242,10 +242,10 @@ mod tests {
         assert!((summary.taw_mm - 19.5).abs() < 0.1);
         // RAW = TAW * 0.50 (St Aug MAD) = 9.75 mm
         assert!((summary.raw_mm - 9.75).abs() < 0.1);
-        // Kc(July) ~ 1.00 for St. Aug
-        assert!((summary.kc - 1.00).abs() < 0.05);
-        // ETc = 6 * 1.0 * 1.10 = 6.6
-        assert!((summary.etc_today_mm - 6.6).abs() < 0.1);
+        // Kc(July) for St Augustine is the table's warm-season Kc_mid.
+        assert!((summary.kc - 0.85).abs() < 0.05);
+        // ETc = 6 * 0.85 * 1.10 = 5.61
+        assert!((summary.etc_today_mm - 5.61).abs() < 0.1);
         // Depletion 25mm > RAW 9.75 mm -> irrigate
         assert!(summary.needs_irrigation);
         assert!(summary.planned_runtime_s > 0);

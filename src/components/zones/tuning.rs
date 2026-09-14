@@ -419,7 +419,7 @@ pub fn ZoneTuningPanel(slug: Signal<String>) -> impl IntoView {
                             // not belong behind the disclosure the
                             // provenance rows live in.
                             let (compare, notes): (Vec<String>, Vec<String>) = lines.partition(|l| {
-                                l.starts_with(crate::ha::snapshot::SOIL_DIVERGENCE_PREFIX)
+                                l.starts_with(crate::model::SOIL_DIVERGENCE_PREFIX)
                             });
                             let window_days = rep.window_days;
                             let card = zt.recommendation.clone().map(|rec| {
@@ -537,7 +537,11 @@ fn DismissedNote(
         <p class="zone-tuning__line zone-tuning__line--muted zone-tuning__dismissed">
             {note}
             " "
-            <button class="zone-tuning__undo is-interactive" on:click=on_undo>"Undo"</button>
+            <crate::components::ui::Button
+    variant="secondary"
+    size="sm"
+    on_click=Callback::new(on_undo)
+    class="zone-tuning__undo is-interactive">"Undo"</crate::components::ui::Button>
         </p>
     }
 }
@@ -655,10 +659,8 @@ fn TuningRecommendationCard(
                                 "Applied. This change takes effect after the next restart.",
                             );
                         } else {
-                            crate::components::ui::use_toast().success(
-                                "Applied. The engine uses the new value from \
-                                                 its next evaluation.",
-                            );
+                            crate::components::ui::use_toast()
+                                .success("Applied. The new value is used from the next pass.");
                         }
                     }
                     Err((409, text)) => {
@@ -797,10 +799,11 @@ fn TuningRecommendationCard(
                     on_click=Callback::new(on_snooze)
                 >"Snooze 30 days"</Button>
             </div>
-            <button
-                class="zone-tuning__dismiss is-interactive"
-                on:click=on_dismiss_forever
-            >"Do not suggest this again"</button>
+            <crate::components::ui::Button
+    variant="ghost"
+    size="sm"
+    on_click=Callback::new(on_dismiss_forever)
+    class="zone-tuning__dismiss is-interactive">"Do not suggest this again"</crate::components::ui::Button>
             <ConfirmSheet
                 visible=confirm_open
                 title="Raise run limit?"

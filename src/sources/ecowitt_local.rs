@@ -135,8 +135,21 @@ impl EcowittLocal {
         if let Some(v) = num(form, "lightning_num") {
             fields.push((WeatherField::LightningCount, v));
         }
+        // `lightning` is the last strike's distance in KILOMETERS (the WH57 /
+        // DP60 head is an AS3935, which reports 1-40 km). The Ecowitt upload
+        // protocol carries each field's unit in the field NAME and is fixed
+        // regardless of the gateway's display-unit setting: every other field
+        // above is imperial because its name says so (tempf, windspeedmph,
+        // baromabsin, rainratein). `lightning` is the one field whose name
+        // does not, and it is metric, so it converts here -- the same
+        // km_to_mi the Tempest UDP/WS adapters apply to their own distance.
+        // Pushed raw it overstated every strike by 1.61x on the channel the
+        // storm-safety skip reads: a 27 km strike published as 27 MILES away.
+        // A quiet interval's bare 0 still means "no reading" downstream, and
+        // km_to_mi(0.0) == 0.0, so live_store's `(v > 0.0).then_some(v)`
+        // convention survives the conversion unchanged.
         if let Some(v) = num(form, "lightning") {
-            fields.push((WeatherField::LightningDistanceMi, v));
+            fields.push((WeatherField::LightningDistanceMi, crate::units::km_to_mi(v)));
         }
         if let Some(v) = num(form, "dewpointf") {
             fields.push((WeatherField::DewPointF, v));
@@ -387,6 +400,69 @@ mod tests {
             panic!("expected Observation");
         };
         assert_eq!(fields.len(), 1);
+    }
+
+    #[test]
+    fn lightning_distance_converts_km_to_miles() {
+        // The Ecowitt `lightning` field is the AS3935 head's last-strike
+        // distance in KILOMETERS; the destination WeatherField is
+        // LightningDistanceMi. Before the conversion the adapter pushed the
+        // km number straight into the miles field, so this asserted 27.0 and
+        // the storm-safety channel read every strike 1.61x further away than
+        // it was -- a 27 km strike (16.8 mi, close) published as 27 miles.
+        let (tx, mut rx) = broadcast::channel::<SourceEvent>(8);
+        let s = EcowittLocal::new(
+            "ecowitt_test",
+            EcowittLocalConfig {
+                path: "/ingest/ecowitt".into(),
+                shared_secret: None,
+            },
+            tx,
+        );
+
+        let mut form = HashMap::new();
+        form.insert("lightning".into(), "27".into());
+        form.insert("lightning_num".into(), "4".into());
+        assert!(s.handle_post(&form));
+
+        let SourceEvent::Observation { fields, .. } = rx.try_recv().unwrap() else {
+            panic!("expected Observation");
+        };
+        let by_field: HashMap<_, _> = fields.into_iter().collect();
+        let mi = *by_field.get(&WeatherField::LightningDistanceMi).unwrap();
+        assert!(
+            (mi - 16.777_022).abs() < 0.001,
+            "27 km must publish as 16.78 mi, got {mi}"
+        );
+        // The strike COUNT is a bare tally and must not be scaled with it.
+        assert_eq!(by_field.get(&WeatherField::LightningCount), Some(&4.0));
+    }
+
+    #[test]
+    fn lightning_distance_zero_survives_as_zero() {
+        // A quiet interval reports a bare 0, which live_store turns back into
+        // "no reading" via `(v > 0.0).then_some(v)`. The km->mi conversion is
+        // multiplicative, so 0 must stay exactly 0 and never become a small
+        // positive distance that would read as a strike overhead.
+        let (tx, mut rx) = broadcast::channel::<SourceEvent>(8);
+        let s = EcowittLocal::new(
+            "ecowitt_test",
+            EcowittLocalConfig {
+                path: "/ingest/ecowitt".into(),
+                shared_secret: None,
+            },
+            tx,
+        );
+
+        let mut form = HashMap::new();
+        form.insert("lightning".into(), "0".into());
+        assert!(s.handle_post(&form));
+
+        let SourceEvent::Observation { fields, .. } = rx.try_recv().unwrap() else {
+            panic!("expected Observation");
+        };
+        assert_eq!(fields[0].0, WeatherField::LightningDistanceMi);
+        assert_eq!(fields[0].1, 0.0, "0 km must stay exactly 0 mi");
     }
 
     #[test]

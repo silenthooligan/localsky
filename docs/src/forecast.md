@@ -21,10 +21,11 @@ over to the next source when one goes quiet.
 An install with no hardware uses Open-Meteo automatically (free, no API
 key), so you see a forecast immediately; it is the recommended
 zero-config pick. To drive the forecast pipeline with a different
-provider, open Settings > Devices > Data sources and use the forecast
-source picker. "Automatic" keeps Open-Meteo as the low-priority
-failover; selecting a provider (NWS, Pirate Weather, MET Norway,
-OpenWeather, or any enabled forecast-capable source) pins it to win
-regardless of the per-source priority ranking. If the pinned source
-goes offline the forecast still works by falling back to the next
-source, so a pin never blanks the forecast.
+provider, open Settings > Devices and use the forecast source picker in
+the section titled **Which source provides each reading**. "Automatic"
+keeps Open-Meteo as the low-priority failover; selecting a provider
+(NWS, Pirate Weather, MET Norway, OpenWeather, or any enabled
+forecast-capable source) pins it to win regardless of the per-source
+priority ranking. If the pinned source goes offline the forecast still
+works by falling back to the next source, so a pin never blanks the
+forecast.

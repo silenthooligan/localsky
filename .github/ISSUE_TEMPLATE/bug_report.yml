@@ -47,7 +47,7 @@ body:
     attributes:
       label: Relevant logs
       description: |
-        `docker logs --since 10m localsky` is usually enough. Trim secrets if any.
+        `GET /api/v1/diagnostics` (from the host: `curl -s http://localhost:8090/api/v1/diagnostics`) returns health, info, the last 300 log lines, your config with secrets redacted, and the current decision trace in one scrubbed bundle. Paste that, or `docker logs --since 10m localsky` if you prefer; trim secrets if any.
       render: shell
   - type: input
     id: deployment

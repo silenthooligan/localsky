@@ -12,12 +12,13 @@ use leptos::prelude::*;
 use crate::components::irrigation::anomaly_banner::AnomalyBanner;
 use crate::components::notice_center::NoticeCenter;
 use crate::components::ui::StatTile;
-use crate::ha::snapshot::IrrigationSnapshot;
+use crate::model::IrrigationSnapshot;
 use card::ZoneCard;
 pub use detail::{ZoneDetailPage, ZoneDetailView};
 
 #[component]
 pub fn ZonesPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
+    let override_confirmation = crate::components::irrigation::controls::provide_override_actions();
     let selected: RwSignal<Option<String>> = RwSignal::new(None);
     // The card list is rebuilt from scratch on every streamed snapshot, so
     // a Stop callback created inside a card is disposed while its own
@@ -151,9 +152,9 @@ pub fn ZonesPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             // The one-time notices pop once from the centralized popup
             // (soil opt-in offer first) and leave the page clear.
             <NoticeCenter snap/>
-            <header class="zones-page__header">
-                <p class="zones-page__eyebrow">"Irrigation"</p>
-                <h1 class="zones-page__title">"Zones"</h1>
+            <header class="page-head">
+                <p class="page-eyebrow">"Irrigation"</p>
+                <h1 class="page-title">"Zones"</h1>
                 <p class="zones-page__sub">"Every zone at a glance, click one for full detail and control."</p>
             </header>
 
@@ -164,7 +165,7 @@ pub fn ZonesPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             {move || {
                 let s = snap.get();
                 let total = s.zones.len();
-                let running = s.zones.iter().filter(|z| z.running).count();
+                let running = s.zones.iter().filter(|z| z.is_running_or_unconfirmed()).count();
                 // Due and Planned ride the shared skip-aware predicate
                 // (snapshot::zone_waters_next_run), the same one the hero
                 // and the cards use: a zone carrying a skip verdict with
@@ -173,7 +174,7 @@ pub fn ZonesPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 let due = s
                     .zones
                     .iter()
-                    .filter(|z| !z.running && s.zone_waters_next_run(z))
+                    .filter(|z| !z.is_running_or_unconfirmed() && s.zone_waters_next_run(z))
                     .count();
                 let planned_min: u32 = s
                     .zones
@@ -216,8 +217,8 @@ pub fn ZonesPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                                 <crate::components::ui::EmptyState
                                     title="No zones yet"
                                     body="Add a controller, scan it for stations, and your zones show up here with live status."
-                                    cta_label="Set up zones"
-                                    cta_href="/settings/zones"
+                                    cta_label="Add a controller"
+                                    cta_href="/settings?section=devices"
                                     icon="zones"
                                 />
                             }.into_any();
@@ -237,7 +238,7 @@ pub fn ZonesPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                         // The allocator's per-zone row, joined by slug. It is the
                         // model that decides whether a zone waters, and its
                         // today_reason had no reader in the whole app.
-                        let budgets: std::collections::HashMap<String, crate::ha::snapshot::WaterBudget> = s
+                        let budgets: std::collections::HashMap<String, crate::model::WaterBudget> = s
                             .water_budgets
                             .iter()
                             .map(|b| (b.zone_slug.clone(), b.clone()))
@@ -264,6 +265,8 @@ pub fn ZonesPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                     <ZoneDetailView snap slug=detail_slug/>
                 </div>
             </div>
+            {override_confirmation}
+            <crate::components::settings::zones::ZoneEditorHost/>
         </div>
     }
 }

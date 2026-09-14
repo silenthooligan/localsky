@@ -53,7 +53,7 @@ password_md5 = "<md5 of plaintext password>"
 poll_interval_s = 10
 ```
 
-The first-run wizard or `/settings/controllers` does this for you. The `password_md5` is computed client-side at config time; the plaintext never leaves your browser.
+The first-run wizard or Settings > Devices does this for you. The `password_md5` is computed client-side at config time; the plaintext never leaves your browser.
 
 ### What LocalSky uses
 
@@ -117,15 +117,21 @@ An ESP32 with a relay board is a smart irrigation controller for ~$15-40 in part
 
 Four vendor controllers are driven natively through their own clouds; all ship in 0.7 and appear in the controller picker under "Cloud account". Each authenticates with your vendor account (an API token, or account email + password) and maps LocalSky zone slugs to that controller's zones/stations. Put secrets in env vars and interpolate them with `${...}` so they never sit in the config in cleartext.
 
+None of the four is ever found by a network scan. **Scan my network**, in the setup wizard's controller step, sweeps every private /24 your machine has an interface on and asks each address for `/jo` on ports 8080 and 80; the only controller it recognizes in that answer is an OpenSprinkler. A cloud controller sits behind the vendor's API rather than on your LAN, so nothing on the wire announces it and you add it by hand: pick the kind, paste the credentials, save. (The **Scan network** button on the [Devices](devices.md) page is a different sweep, and it looks for weather gateways only.)
+
 ### How a zone binds
 
 A zone's binding is the **Controller station** field on the zone itself: the controller's own id for the valve that zone fires. Everything else is a way of filling it in.
 
 - **Zone editor** (Settings, then Zones): pick the controller's zone from the list where the controller can be asked, or enter its id where it cannot. This is the field the binding lives in.
-- **Controller editor** (Settings, then Devices): **Scan zones** lists what the controller reports and gives each one a dropdown of your zones. Choosing there writes the same field on each zone you pick. It binds existing zones and never creates one.
+- **Controller editor** (Settings, then Devices): **Scan zones** lists what the controller reports and gives each one a dropdown of your zones. Choosing there and pressing **Bind zones** writes the same field on each zone you pick. It binds existing zones and never creates one.
 - **Setup wizard**: Scan zones and import. Imported zones are created with the controller's id already in **Controller station**.
 
 Names on the two sides are free to differ. A Rachio zone called "Front Lawn" can fire a LocalSky zone called "Front Yard", because what is stored is the id, not the name. LocalSky keeps the controller's name alongside it as a label so the zone card can say which valve it is wired to, but nothing dispatches on that label.
+
+A new binding is not live the moment you make it, but it is saved the moment you make it. **Bind zones** does the whole write in one press: it puts each chosen zone's **Controller station**, the controller's own name for that valve, and the controller id onto the zone, then saves the config to the server. Press it and navigate away and the binding is already persisted. **Save controller changes** is a separate press for the other half of the job, the controller entry's own edits: its id, its enabled and default flags, and the Advanced JSON, including a `zone_uuid_map` a Rachio scan just filled. Those edits stay in the form until you press it, so the bind's save does not carry them.
+
+Neither press makes the binding live, because each controller's zone-to-station map is built once, when the controller is constructed at start. So the bind reports that a restart is required and names that as the reason, and Settings > Devices shows a restart banner with a button that cycles LocalSky for you. The restart declines while a zone is watering unless you confirm it anyway, in which case the shut-off backstop closes the valves and boot reconciliation checks them again.
 
 ### The controller's own zone map, and why it is still there
 
@@ -138,6 +144,14 @@ On startup, LocalSky copies a map entry into any zone of that controller whose *
 **MQTT is the exception.** An MQTT zone's binding is a command topic plus its payloads, which is more than a single id can carry, so MQTT zones bind in `zone_command_map` only and **Controller station** is ignored for them.
 
 You do **not** need Home Assistant for any of the cloud controllers; the native adapter talks to the vendor cloud directly. (Driving one through HA with `ha_service_call` is still an option if you already do that.)
+
+### Advanced JSON (the controller config escape hatch)
+
+The controller editor's **Connection** panel is a labeled form for scalar keys of whichever kind you picked, and the list differs by kind: host and port, base URL, tokens, a poll interval on OpenSprinkler and the DIY HTTP board. Below it, folded shut, is **Advanced: raw config JSON**, which is the whole `config` object as text. It is there for the keys the Connection form has no field for: the nested per-zone maps above (`zone_command_map`, `zone_uuid_map`, `zone_relay_map`, `zone_station_map`, `zone_entity_map`), and any scalar that kind's panel leaves out, such as Rachio's `poll_interval_s`. Home Assistant's entity map is on that list for the same reason as the rest: the **Connection** panel for `ha_service_call` carries the URL, the token, and the start and stop services, and nothing else.
+
+The two stay in sync both ways. Typing in a labeled field rewrites that one key in the JSON and leaves every other key structurally untouched, so a hand-written zone map survives an edit to the poll interval. Editing the JSON re-seeds the labeled fields. Neither surface owns the config; they are two views of the same object.
+
+**Scan zones** is where they meet, and it is worth being exact about what lands where. On a Rachio, a scan writes what the cloud reported into `zone_uuid_map` in this box: slugs it reported are updated, slugs it did not report are left alone, so a hand edit survives a rescan. The scan also fills the bind table above, and the bind table is what actually binds, by writing each zone's **Controller station**. Hydrawise, B-hyve and Rain Bird use the same kind of map but have no zone-discovery endpoint, so nothing scans into them and you enter their numbers yourself. On OpenSprinkler, the DIY HTTP board and DryRun a scan leaves this box untouched, because those kinds hold no zone map in their config at all; the result line says so, and the bind table still appears. Home Assistant and MQTT keep their maps here and cannot be scanned at all, and for MQTT this box is the only place its zones can be bound.
 
 ### When a zone will not start
 
@@ -272,7 +286,13 @@ Per-zone `controller_id` in `ZoneConfig` picks which controller fires that zone.
 
 ## Editing and renaming controllers
 
+A controller's id is a short slug you pick, like `os_main` or `ha_backup`. It is what a zone points at (the zone's `controller_id`), and it is the only reference to a controller anywhere else in the config. The ID field normalizes what you type as you type it: capitals go lowercase and every character that is not an ASCII letter or digit becomes an underscore, so "OS Main" lands as `os_main`. Saving finishes the cleanup, collapsing runs of underscores and trimming them off both ends, so an id you type in the editor is stored as a clean snake_case slug.
+
 Controller IDs are editable, even after zones are linked. When you rename a controller (in Settings > Devices), every zone that points to it migrates to the new id automatically, so there are no dangling references and no manual fixup. The default controller flag migrates the same way: change which controller is the default and new unassigned zones inherit it.
+
+Two limits on that. A rename happens only when you actually edit the ID field, so saving an unrelated change on a controller whose stored id was hand-written and is not a slug leaves that id exactly as it was, rather than normalizing it behind your back and repointing every zone at an id you never asked for. And a rename onto an id another controller already holds is refused in the form before anything is written.
+
+Run history is not rewritten. Its rows are keyed by the controller id that fired them and are an audit log rather than config, so runs recorded before the rename still name the old id.
 
 ## Adding a new controller
 

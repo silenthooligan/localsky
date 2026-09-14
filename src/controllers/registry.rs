@@ -8,7 +8,7 @@
 // the persistence DB are available (build_controllers needs a RunsStore).
 // With no DB mounted the registry stays empty and ALL watering dispatch
 // (scheduled and manual) is dead: schedulers log "no default controller"
-// per attempt and POST /action answers 503. main.rs logs a boot-time
+// per attempt and POST /action answers 503. The boot logs a
 // tracing::error! when controllers are configured but the DB is missing,
 // so the gap is loud instead of a silent dry lawn.
 
@@ -22,6 +22,8 @@ use crate::ports::irrigation_controller::IrrigationController;
 #[derive(Clone)]
 pub struct ControllerRegistry {
     inner: Arc<ArcSwap<RegistryState>>,
+    /// The per-zone dispatch locks every path through this registry takes.
+    locks: crate::controllers::ZoneLocks,
 }
 
 #[derive(Default)]
@@ -34,7 +36,18 @@ impl ControllerRegistry {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(ArcSwap::from_pointee(RegistryState::default())),
+            locks: crate::controllers::ZoneLocks::default(),
         }
+    }
+
+    /// The per-zone dispatch locks. Cloning shares the table.
+    pub fn zone_locks(&self) -> crate::controllers::ZoneLocks {
+        self.locks.clone()
+    }
+
+    /// Process-lifetime configuration hold shared with every dispatcher.
+    pub fn restart_hold(&self) -> crate::controllers::restart::RestartHold {
+        self.locks.restart_hold()
     }
 
     /// Replace the registry contents atomically. Used by the hot-reload
@@ -46,7 +59,16 @@ impl ControllerRegistry {
             if is_default {
                 default_id = Some(c.id().to_string());
             }
-            by_id.insert(c.id().to_string(), c);
+            // Behind the run-length cap, so no path can hand hardware a
+            // command longer than RUN_SECONDS_MAX whatever it computed, and
+            // behind the status throttle, so a cloud adapter is polled at
+            // the interval it declares rather than on every tick.
+            by_id.insert(
+                c.id().to_string(),
+                crate::controllers::guard::Throttled::wrap(
+                    crate::controllers::guard::Capped::wrap(c),
+                ),
+            );
         }
         // If no explicit default, pick the first one (deterministic via sort).
         if default_id.is_none() {
@@ -72,11 +94,69 @@ impl ControllerRegistry {
     /// Pick `id` if provided, otherwise the default. Convenience for the
     /// /api/irrigation dispatch path which accepts an optional controller
     /// override in the request payload.
+    #[cfg(test)]
     pub fn default_or_named(&self, id: Option<&str>) -> Option<Arc<dyn IrrigationController>> {
         match id {
             Some(name) => self.get(name),
             None => self.default(),
         }
+    }
+
+    /// The controller a zone dispatches through: the one its config
+    /// names, else the default.
+    ///
+    /// Every dispatch path resolved the default only, while the schema
+    /// promised per-zone binding and the validator allowed more than one
+    /// controller, so a zone bound to the second controller was watered
+    /// by the first, on whatever station number happened to match. A
+    /// named id that is not registered (a typo, or a controller disabled
+    /// after the zone was bound) falls back to the default and says so:
+    /// refusing to water is the worse error, and the validator already
+    /// flags the binding.
+    pub fn for_zone(&self, configured: Option<&str>) -> Option<Arc<dyn IrrigationController>> {
+        match configured.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(id) => match self.get(id) {
+                Some(c) => Some(c),
+                None => {
+                    tracing::warn!(
+                        controller = id,
+                        "zone names a controller that is not registered; using the default"
+                    );
+                    self.default()
+                }
+            },
+            None => self.default(),
+        }
+    }
+
+    /// Stop every registered controller, and say which ones confirmed.
+    ///
+    /// A stop that reaches only the default controller leaves the others'
+    /// valves open, and clearing the whole deadline ledger afterwards
+    /// removes the one backstop that would have closed them. The caller
+    /// clears rows only for the ids in `confirmed`; the rest stay armed
+    /// for the reaper to retry.
+    pub async fn stop_everything(&self) -> StopReport {
+        let controllers: Vec<(String, Arc<dyn IrrigationController>)> = {
+            let s = self.inner.load();
+            let mut v: Vec<_> = s
+                .by_id
+                .iter()
+                .map(|(id, c)| (id.clone(), c.clone()))
+                .collect();
+            v.sort_by(|a, b| a.0.cmp(&b.0));
+            v
+        };
+        let mut report = StopReport::default();
+        for (id, c) in controllers {
+            match c.stop_all().await {
+                Ok(()) => report.confirmed.push(id),
+                // The caller (controllers::dispatch) reports the failures
+                // with what they mean for the deadline ledger.
+                Err(e) => report.failed.push((id, e.to_string())),
+            }
+        }
+        report
     }
 
     pub fn ids(&self) -> Vec<String> {
@@ -85,7 +165,7 @@ impl ControllerRegistry {
         ids
     }
 
-    /// Boot reconciliation (P0-1): close every zone on every registered
+    /// Boot reconciliation: close every zone on every registered
     /// controller. Called once at startup, before the first dispatch window, so a
     /// valve left open by a crash or redeploy (especially the MQTT path, whose
     /// shutoff is an in-process timer that dies with the process) is closed on the
@@ -123,11 +203,40 @@ impl Default for ControllerRegistry {
     }
 }
 
+/// What a stop-everything pass achieved, per controller.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StopReport {
+    pub confirmed: Vec<String>,
+    pub failed: Vec<(String, String)>,
+}
+
+impl StopReport {
+    pub fn none_confirmed(&self) -> bool {
+        self.confirmed.is_empty()
+    }
+    pub fn confirmed_ids(&self) -> Vec<&str> {
+        self.confirmed.iter().map(String::as_str).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::schema::DryRunConfig;
     use crate::controllers::dry_run::DryRunController;
+
+    /// Two controllers, the zone bound to the second: the second is what
+    /// it dispatches through. Unbound, or bound to a name nobody
+    /// registered, it takes the default.
+    #[test]
+    fn a_zone_dispatches_through_the_controller_it_names() {
+        let r = ControllerRegistry::new();
+        r.set(vec![(dry("a"), true), (dry("b"), false)]);
+        assert_eq!(r.for_zone(Some("b")).unwrap().id(), "b");
+        assert_eq!(r.for_zone(None).unwrap().id(), "a");
+        assert_eq!(r.for_zone(Some("")).unwrap().id(), "a");
+        assert_eq!(r.for_zone(Some("typo")).unwrap().id(), "a");
+    }
 
     fn dry(id: &str) -> Arc<dyn IrrigationController> {
         Arc::new(DryRunController::new(
@@ -187,7 +296,7 @@ mod tests {
         );
     }
 
-    // --- P0-1 boot reconciliation -------------------------------------------
+    // --- boot reconciliation -------------------------------------------
     use crate::ports::irrigation_controller::{
         ControllerCaps, ControllerError, ControllerResult, ControllerStatus, RunHandle, RunRecord,
     };
@@ -215,6 +324,7 @@ mod tests {
                 remote_program_upload: false,
                 water_level: false,
                 per_zone_stop: true,
+                duration_quantum_s: 1,
             }
         }
         async fn run_zone(&self, slug: &str, duration_s: u32) -> ControllerResult<RunHandle> {
@@ -239,6 +349,7 @@ mod tests {
         }
         async fn status(&self) -> ControllerResult<ControllerStatus> {
             Ok(ControllerStatus {
+                observed_epoch: None,
                 reachable: true,
                 master_enabled: None,
                 water_level_pct: None,

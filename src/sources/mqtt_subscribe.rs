@@ -111,6 +111,7 @@ impl WeatherSource for MqttSubscribe {
             opts.set_credentials(u, p);
         }
         let (client, mut eventloop) = AsyncClient::new(opts, 32);
+        let mut reachability = crate::sources::poll::ReachabilityLatch::new();
 
         // Subscriptions are issued on every ConnAck (initial connect AND
         // each automatic reconnect). rumqttc reconnects with a clean
@@ -151,9 +152,11 @@ impl WeatherSource for MqttSubscribe {
                                 total = self.config.subscriptions.len(),
                                 "mqtt source connected; subscriptions issued"
                             );
+                            reachability.report(&bus, &self.id, ok == self.config.subscriptions.len());
                         }
                         Ok(_) => {} // PingResp, SubAck, etc.
                         Err(e) => {
+                            reachability.report(&bus, &self.id, false);
                             warn!(source = self.id, error = %e, "mqtt eventloop error; reconnecting");
                             tokio::time::sleep(Duration::from_secs(2)).await;
                         }
@@ -162,6 +165,7 @@ impl WeatherSource for MqttSubscribe {
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
                         info!(source = self.id, "mqtt source shutting down");
+                        reachability.report(&bus, &self.id, false);
                         let _ = client.disconnect().await;
                         return Ok(());
                     }
@@ -289,29 +293,7 @@ fn walk_json<'a>(v: &'a serde_json::Value, path: &str) -> Option<&'a serde_json:
 ///
 /// Pub so the http_webhook adapter can reuse it.
 pub fn parse_weather_field(name: &str) -> Option<WeatherField> {
-    use WeatherField::*;
-    Some(match name {
-        "air_temp_f" => AirTempF,
-        "dew_point_f" => DewPointF,
-        "rh_pct" => RhPct,
-        "wind_mph" => WindMph,
-        "wind_gust_mph" => WindGustMph,
-        "wind_bearing_deg" => WindBearingDeg,
-        "solar_w_m2" => SolarWm2,
-        "uv_index" => UvIndex,
-        "illuminance" => Illuminance,
-        "pressure_in_hg" => PressureInHg,
-        "rain_today_in" => RainTodayIn,
-        "rain_intensity_in_hr" => RainIntensityInHr,
-        "rain_type_str" => RainTypeStr,
-        "lightning_count" => LightningCount,
-        "lightning_distance_mi" => LightningDistanceMi,
-        "et0_today" => Et0Today,
-        "flow_gpm" => FlowGpm,
-        "flow_total_gal_today" => FlowTotalGalToday,
-        "leaf_wetness_pct" => LeafWetness,
-        _ => return None,
-    })
+    WeatherField::parse(name)
 }
 
 fn now_epoch() -> i64 {

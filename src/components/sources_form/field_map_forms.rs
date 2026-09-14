@@ -26,9 +26,12 @@ pub const WEATHER_FIELD_OPTIONS: &[(&str, &str)] = &[
     ("wind_bearing_deg", "Wind direction (°)"),
     ("pressure_in_hg", "Pressure (inHg)"),
     ("solar_w_m2", "Solar (W/m²)"),
+    ("illuminance", "Illuminance (lux)"),
     ("uv_index", "UV index"),
     ("rain_today_in", "Rain today (in)"),
     ("rain_intensity_in_hr", "Rain rate (in/hr)"),
+    ("lightning_count", "Lightning count"),
+    ("lightning_distance_mi", "Lightning distance (mi)"),
     ("et0_today", "ET₀ today, full-day total (mm)"),
     ("flow_gpm", "Flow (gpm)"),
     ("flow_total_gal_today", "Flow total today (gal)"),
@@ -262,7 +265,7 @@ pub fn WeatherFieldMapEditor(
                             </FormField>
                             <FormField
                                 label="Bind to zone (optional)".to_string()
-                                helptext="Set this only for a soil probe. When bound, the value becomes that zone's own soil channel (not a global reading); pick it as the zone's soil sensor in the zone editor.".to_string()
+                                helptext="For a soil probe only: the value becomes that zone's soil channel. Pick it as the zone's soil sensor in the zone editor.".to_string()
                                 error=Signal::derive(|| None::<String>)
                             >
                                 <select class="ui-input" on:change=set_zone>
@@ -520,9 +523,7 @@ pub fn DeviceFieldMapEditor(
         <div class="soil-subs">
             <p class="sensors-section__hint">
                 {if is_tuya {
-                    "Each mapping reads one status code from a Tuya device. Get device ids from your \
-                     Tuya IoT project's Devices tab; the status code (DP) is the value's key. Bind to a \
-                     zone for a soil probe, or pick a weather reading."
+                    "Each mapping reads one status code from a Tuya device. Device ids come from your Tuya project's Devices tab. Bind to a zone for a soil probe."
                 } else {
                     "Each mapping reads one value from a YoLink device's state. Get the device id from \
                      Home.getDeviceList; device type composes the {Type}.getState call (e.g. THSensor). \
@@ -775,6 +776,13 @@ pub fn HaFieldMapEditor(config_text: RwSignal<String>) -> impl IntoView {
                 "\"Discovered from Home Assistant\" on the "<a href="/sensors">"Sensors hub"</a>". "
                 "Soil probes are bound per-zone in the zone editor, not here."
             </p>
+            <p class="sensors-section__hint">
+                "Use the original weather sensor entities, not LocalSky's own HA exports. "
+                "For HA WeatherFlow precipitation, choose Rain last minute. LocalSky adds each reported minute "
+                "once and restores recorded totals after restart. Rain today is for an existing daily total. "
+                "HA is checked every 30 seconds; readings retain their reported age. Keep a forecast source enabled. "
+                <a href=crate::docs::doc_url("migrating-from-ha#keeping-weatherflow-in-home-assistant")>"WeatherFlow setup guide"</a>
+            </p>
             {move || {
                 let rs = rows.get();
                 rs.into_iter().enumerate().map(|(i, row)| {
@@ -805,7 +813,7 @@ pub fn HaFieldMapEditor(config_text: RwSignal<String>) -> impl IntoView {
                                 error=Signal::derive(|| None::<String>)
                             >
                                 <select class="ui-input" on:change=set_field>
-                                    {WEATHER_FIELD_OPTIONS.iter().map(|(val, label)| {
+                                    {WEATHER_FIELD_OPTIONS.iter().chain([("RainLastMinIn", "Rain last minute (accumulate today)")].iter()).map(|(val, label)| {
                                         let val = val.to_string();
                                         let sel = field == val;
                                         view! { <option value=val.clone() selected=sel>{label.to_string()}</option> }

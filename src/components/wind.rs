@@ -1,8 +1,8 @@
 // Wind compass + speed gauges. The compass is an inline SVG with a
 // rotating two-tone needle driven by `rapid_wind_dir`; CSS handles
 // the smooth transition so the needle visibly drifts when the
-// 3-second sample updates. Beneath it sit lull / avg / gust as
-// horizontal bars scaled to the larger of (gust, 30) so a calm day
+// selected report updates. Beneath it sit lull / avg / gust as
+// horizontal bars scaled to the reported peak or 30 mph so a calm day
 // still has scale.
 //
 // The compass is theme-aware: the disc gradient, ticks, cardinal
@@ -14,35 +14,58 @@ use crate::tempest::state::Snapshot;
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
 
-/// True for a cloud-only (Open-Meteo) deployment. Keys on the canonical
-/// `has_live_station` signal (true for any live station: Tempest / Ecowitt /
-/// Davis / MQTT / ...), NOT the old Tempest-only serial + battery heuristic that
-/// misread a live non-Tempest station as cloud-only. Open-Meteo populates
-/// sustained wind speed / direction / gust, so the compass and the lull / avg /
-/// gust bars stay live; only the Tempest-exclusive 3-second "now" rapid-wind
-/// sample has no source, so it is hidden for cloud-only rather than shown as a
-/// permanent 0.
-fn is_cloud_only(s: &Snapshot) -> bool {
-    !s.has_live_station
-}
-
 #[component]
-pub fn WindPanel(snap: ReadSignal<Snapshot>) -> impl IntoView {
+pub fn WindPanel(
+    snap: ReadSignal<Snapshot>,
+    irrigation: ReadSignal<crate::model::IrrigationSnapshot>,
+) -> impl IntoView {
     let prefs = use_unit_prefs();
-    let cloud_only = move || is_cloud_only(&snap.get());
+    let evidence = Memo::new(move |_| {
+        irrigation
+            .get()
+            .current_weather
+            .as_ref()
+            .and_then(|samples| samples.get("wind_mph"))
+            .cloned()
+    });
+    // Older snapshots lack field evidence; retain their existing display.
+    // Current responses distinguish absent/stale wind metrics from measured zero.
+    let value = move |field: &str, legacy: f64| {
+        let snapshot = irrigation.get();
+        let Some(samples) = snapshot.current_weather else {
+            return (snapshot.last_refresh_epoch > 0 && snap.get().has_live_station)
+                .then_some(legacy);
+        };
+        samples
+            .get(field)
+            .filter(|s| {
+                s.observed_epoch > 0
+                    && s.observed_epoch <= snapshot.last_refresh_epoch
+                    && snapshot.last_refresh_epoch - s.observed_epoch <= s.max_age_s
+            })
+            .map(|s| s.value)
+    };
     let dir = move || {
         let s = snap.get();
-        // Prefer rapid_wind direction; fall back to obs_st avg when no rapid yet.
-        if s.rapid_wind_mph > 0.0 || s.last_packet_epoch == 0 {
-            s.rapid_wind_dir
-        } else {
-            s.wind_dir_deg
+        if irrigation.get().current_weather.is_none() {
+            return (irrigation.get().last_refresh_epoch > 0 && s.has_live_station).then_some(
+                if s.rapid_wind_mph > 0.0 || s.last_packet_epoch == 0 {
+                    s.rapid_wind_dir
+                } else {
+                    s.wind_dir_deg
+                },
+            );
         }
+        value("rapid_wind_bearing_deg", s.rapid_wind_dir)
+            .or_else(|| value("wind_bearing_deg", s.wind_dir_deg))
     };
-    let cardinal = move || cardinal_for(dir());
+    let cardinal = move || dir().map(cardinal_for).unwrap_or("—");
     let scale = move || {
         let s = snap.get();
-        s.wind_gust_mph.max(30.0)
+        s.wind_gust_mph
+            .max(s.wind_avg_mph)
+            .max(s.rapid_wind_mph)
+            .max(30.0)
     };
 
     // 16-tick rose: every 22.5° gets a tick mark; the four cardinal
@@ -84,8 +107,20 @@ pub fn WindPanel(snap: ReadSignal<Snapshot>) -> impl IntoView {
     view! {
         <section class="panel wind">
             <h2 class="panel-title">"Wind"</h2>
+            <Show when=move || evidence.get().is_some()>
+                <details class="wind-evidence">
+                    <summary>{move || evidence.get().map(|sample| format!("Average: {}", sample.summary_at(irrigation.get().last_refresh_epoch)))}</summary>
+                    <p>{move || evidence.get().map(|sample| sample.selection_reason)}
+                        " · "<a href="/settings?section=devices">"Change wind sources"</a>
+                    </p>
+                    {move || [ ("wind_gust_mph", "Gust"), ("wind_lull_mph", "Lull"), ("rapid_wind_mph", "Now"), ("wind_bearing_deg", "Direction"), ("rapid_wind_bearing_deg", "Direction now") ].into_iter().filter_map(|(field, label)| {
+                        let snapshot = irrigation.get();
+                        snapshot.current_weather.as_ref().and_then(|samples| samples.get(field)).map(|sample| view! { <p>{format!("{label}: {}", sample.summary_at(snapshot.last_refresh_epoch))}</p> })
+                    }).collect_view()}
+                </details>
+            </Show>
             <div class="wind-row">
-                <div class="compass" aria-label=move || format!("Wind from {}", cardinal())>
+                <div class="compass" aria-label=move || dir().map(|_| format!("Wind from {}", cardinal())).unwrap_or_else(|| "Wind direction unavailable".into())>
                     <svg viewBox="0 0 200 200" class="compass-svg" aria-hidden="true">
                         <defs>
                             <radialGradient id="compass-disc" cx="50%" cy="35%" r="70%">
@@ -126,7 +161,7 @@ pub fn WindPanel(snap: ReadSignal<Snapshot>) -> impl IntoView {
                         // (this is what the wind is "from"); south half is a
                         // muted ink so it reads as a tail, not an arrow.
                         <g class="compass-needle"
-                           style=move || format!("transform: rotate({}deg);", dir())>
+                           style=move || format!("transform: rotate({}deg); visibility: {};", dir().unwrap_or(0.0), if dir().is_some() { "visible" } else { "hidden" })>
                             <polygon
                                 class="compass-needle-n"
                                 fill="url(#compass-needle-n)"
@@ -144,18 +179,17 @@ pub fn WindPanel(snap: ReadSignal<Snapshot>) -> impl IntoView {
                     </svg>
                     <div class="compass-readout">
                         <div class="compass-card">{cardinal}</div>
-                        <div class="compass-deg">{move || format!("{:.0}°", dir())}</div>
+                        <div class="compass-deg">{move || dir().map(|d| format!("{d:.0}°")).unwrap_or_else(|| "—".into())}</div>
                     </div>
                 </div>
                 <div class="wind-bars">
-                    <WindBar label="lull" mph=move || snap.get().wind_lull_mph scale=scale color="cool" prefs=prefs/>
-                    <WindBar label="avg"  mph=move || snap.get().wind_avg_mph  scale=scale color="mid" prefs=prefs/>
-                    <WindBar label="gust" mph=move || snap.get().wind_gust_mph scale=scale color="hot" prefs=prefs/>
-                    // The "now" bar is the Tempest 3-second rapid-wind sample; a
-                    // cloud-only deployment has no such reading (Open-Meteo is an
-                    // hourly model), so hide it rather than pin a live-green 0.
-                    <Show when=move || !cloud_only()>
-                        <WindBar label="now"  mph=move || snap.get().rapid_wind_mph scale=scale color="live" prefs=prefs/>
+                    <WindBar label="lull" mph=move || value("wind_lull_mph", snap.get().wind_lull_mph) scale=scale color="cool" prefs=prefs/>
+                    <WindBar label="avg"  mph=move || value("wind_mph", snap.get().wind_avg_mph)  scale=scale color="mid" prefs=prefs/>
+                    <WindBar label="gust" mph=move || value("wind_gust_mph", snap.get().wind_gust_mph) scale=scale color="hot" prefs=prefs/>
+                    // Show rapid wind only while that field has a usable report.
+                    // HA average wind alone does not establish a native now value.
+                    <Show when=move || value("rapid_wind_mph", snap.get().rapid_wind_mph).is_some()>
+                        <WindBar label="now"  mph=move || value("rapid_wind_mph", snap.get().rapid_wind_mph) scale=scale color="live" prefs=prefs/>
                     </Show>
                 </div>
             </div>
@@ -172,19 +206,19 @@ fn WindBar<F, S>(
     prefs: Signal<UnitPrefs>,
 ) -> impl IntoView
 where
-    F: Fn() -> f64 + Copy + Send + Sync + 'static,
+    F: Fn() -> Option<f64> + Copy + Send + Sync + 'static,
     S: Fn() -> f64 + Copy + Send + Sync + 'static,
 {
     // Proportion math stays in mph (the stored/internal unit); only the
     // readout value+unit converts at the display boundary.
-    let pct = move || (mph() / scale().max(0.1)) * 100.0;
+    let pct = move || (mph().unwrap_or(0.0) / scale().max(0.1)) * 100.0;
     view! {
         <div class={format!("wind-bar wind-bar-{}", color)}>
             <span class="wind-bar-label">{label}</span>
             <div class="wind-bar-track">
                 <div class="wind-bar-fill" style=move || format!("width: {:.1}%;", pct())></div>
             </div>
-            <span class="wind-bar-value">{move || fmt_wind(mph(), prefs.get())}</span>
+            <span class="wind-bar-value">{move || mph().map(|v| fmt_wind(v, prefs.get())).unwrap_or_else(|| "—".into())}</span>
         </div>
     }
 }

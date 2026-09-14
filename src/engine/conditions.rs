@@ -19,7 +19,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::engine::skip_rules::{Inputs, ZoneSoil};
-use crate::ha::snapshot::RuleEval;
+use crate::model::RuleEval;
 
 fn default_true() -> bool {
     true
@@ -188,9 +188,9 @@ fn metric_value(m: Metric, i: &Inputs, zone: &ZoneSoil) -> Option<f64> {
         // Unreported probability evaluates as 100 (the engine's full-weight
         // treatment), so a rain-probability condition errs toward skipping.
         Metric::RainProbTomorrow => f64::from(i.rain_tomorrow_prob_pct.unwrap_or(100)),
-        Metric::RainNext4hIn => i.rain_next_4h_in,
+        Metric::RainNext4hIn => return i.rain_next_4h_in,
         Metric::RainTodayIn => i.rain_today_in,
-        Metric::Rain3dayWeightedIn => i.rain_3day_weighted_in,
+        Metric::Rain3dayWeightedIn => return i.rain_3day_weighted_in,
         Metric::WindNowMph => i.wind_now_mph,
         Metric::WindMaxTodayMph => i.wind_max_today_mph,
         Metric::TempNowF => i.temp_now_f,
@@ -370,6 +370,10 @@ mod tests {
             pct,
             saturation_pct: 70.0,
             target_min_pct: 30.0,
+            probe_configured: false,
+            governed_by_soil_model: false,
+            planning_forecast_unavailable: false,
+            sprinkler_type: Default::default(),
         }
     }
 

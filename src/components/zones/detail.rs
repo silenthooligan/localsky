@@ -6,20 +6,19 @@
 // Reads the live IrrigationSnapshot + the existing /api/irrigation/history
 // endpoint, no new backend.
 
-use chrono::{Local, TimeZone};
 use leptos::prelude::*;
 use serde_json::json;
 
 use crate::components::irrigation::controls::post_action_body_then;
 use crate::components::ui::{
-    use_toast, Button, Icon, LineChart, Series, Sparkline, StatTile, Stepper,
+    use_toast, Button, HelpHint, Icon, LineChart, Series, Sparkline, StatTile, Stepper,
 };
 use crate::components::units_fmt::{
     deficit_amount_mm, deficit_value_mm, depth_phrase_mm, depth_unit, fmt_rain_rate_mm, temp_unit,
     temp_value, use_unit_prefs, UnitPrefs,
 };
-use crate::ha::snapshot::{IrrigationSnapshot, ZoneMath, ZoneState};
 use crate::history::types::HistoryWindow;
+use crate::model::{IrrigationSnapshot, ZoneMath, ZoneState};
 use leptos_router::hooks::use_params_map;
 
 /// How long the optimistic pending flag waits for the streamed snapshot to
@@ -34,7 +33,7 @@ const CONFIRM_DEADLINE_S: u32 = 25;
 /// Current UTC epoch in seconds. The instant is timezone-independent; the
 /// deployment-TZ rendering happens later in `timefmt::format_md`.
 fn now_epoch_secs() -> i64 {
-    Local::now().timestamp()
+    crate::timefmt::now_epoch()
 }
 
 /// A controller's status-readback interval in plain words, for the message
@@ -56,14 +55,11 @@ fn poll_interval_phrase(seconds: u32) -> String {
 /// Minutes are the union-clustered watering evidence (the shared
 /// history::rollup rule, same filter + clustering the water balance
 /// credits), so this chart and the balance can never disagree.
-fn zone_day_buckets(window: &HistoryWindow, slug: &str, days: i64) -> Vec<f64> {
-    let now = Local::now();
-    let today_mid = now
-        .date_naive()
-        .and_hms_opt(0, 0, 0)
-        .and_then(|nd| Local.from_local_datetime(&nd).single())
-        .unwrap_or(now)
-        .timestamp();
+fn zone_day_buckets(window: &HistoryWindow, slug: &str, days: i64, tz: &str) -> Vec<f64> {
+    // Calendar days in the deployment's timezone, the same rule the
+    // History page and the water balance use, so this chart cannot put a
+    // 04:00 run on a different day than they do.
+    let now_epoch = now_epoch_secs();
     let n = days.max(1) as usize;
     let mut b = vec![0f64; n];
     let zone_rows: Vec<crate::history::types::RunRecord> = window
@@ -72,10 +68,13 @@ fn zone_day_buckets(window: &HistoryWindow, slug: &str, days: i64) -> Vec<f64> {
         .filter(|r| r.zone == slug)
         .cloned()
         .collect();
-    for events in crate::history::rollup::watering_events_per_zone(&zone_rows).values() {
+    for events in crate::history::rollup::watering_intervals_per_zone(&zone_rows).values() {
         for e in events {
-            let back = crate::components::time_bucket::days_back(today_mid, e.start_epoch).max(0);
-            if (back as usize) < n {
+            let Some(back) = crate::timefmt::days_between_in_tz(now_epoch, e.start_epoch, tz)
+            else {
+                continue;
+            };
+            if back >= 0 && (back as usize) < n {
                 b[back as usize] += e.valve_open_s as f64 / 60.0;
             }
         }
@@ -142,11 +141,30 @@ pub fn ZoneDetailView(
             .zones
             .iter()
             .find(|z| z.slug == slug.get_untracked())
-            .map(|z| z.running == expect_running)
+            .map(|z| {
+                // A controller with no readback never confirms; the ledger
+                // (LocalSky's own record of the command) stands in for it.
+                if z.running_known {
+                    z.running == expect_running
+                } else {
+                    z.ledger_running == expect_running
+                }
+            })
             .unwrap_or(false);
         if confirmed {
             pending.set(None);
         }
+    });
+    // Whether the zone's controller reports state at all. The "has not
+    // reported the change" warning is for a controller that CAN report
+    // and did not; one that cannot is not late, it is silent by design.
+    #[cfg_attr(not(feature = "hydrate"), allow(unused_variables))]
+    let readback_known = Signal::derive(move || {
+        snap.get()
+            .zones
+            .iter()
+            .find(|z| z.slug == slug.get_untracked())
+            .is_none_or(|z| z.running_known)
     });
     // Generation guard so a stale deadline timer can't clear a newer
     // request: each pending set bumps the generation, and a timer only
@@ -227,6 +245,11 @@ pub fn ZoneDetailView(
                 let still_current = cur_gen == gen;
                 if still_current && pending.try_get_untracked().flatten().is_some() {
                     let _ = pending.try_set(None);
+                    // No readback to wait for: the command went out and
+                    // LocalSky's own record already shows it. Nothing to warn about.
+                    if !readback_known.try_get_untracked().unwrap_or(true) {
+                        return;
+                    }
                     match confirm_within_s.try_get_untracked().flatten() {
                         // The controller took the change; its own status poll
                         // is simply slower than this window. Saying it failed
@@ -307,7 +330,8 @@ pub fn ZoneDetailView(
             // Deployment IANA timezone for every user-facing time render below
             // (24-hour, deployment-local, not the viewer's browser TZ).
             let tz = snap.get().timezone;
-            let running = z.running;
+            let running = z.is_running_or_unconfirmed();
+            let unconfirmed = z.run_state() == crate::model::RunState::Unconfirmed;
             // A zone the engine will SKIP waters 0 minutes tonight regardless of
             // any leftover planned duration on the snapshot, so the "Planned"
             // tile and the status pill both reflect the skip (T4).
@@ -317,11 +341,9 @@ pub fn ZoneDetailView(
             } else {
                 ((z.planned_run_seconds + 30) / 60).to_string()
             };
-            // No producer on either path: a dash, not a fabricated zero.
-            let (today, today_unit) = match z.today_run_minutes {
-                Some(v) => (format!("{v:.0}"), "min"),
-                None => ("-".to_string(), ""),
-            };
+            // No producer on either path (the v1 field is deprecated): a
+            // dash, not a fabricated zero.
+            let (today, today_unit) = ("-".to_string(), "");
             // Bucket deficit is stored in mm; convert at the display boundary
             // through the shared deficit formatter (magnitude; the label
             // carries the direction, matching the soil panel's positive
@@ -407,6 +429,7 @@ pub fn ZoneDetailView(
             let status_label = match pending_now {
                 Some(true) if !running => "STARTING…",
                 Some(false) if running => "STOPPING…",
+                _ if unconfirmed => "RUNNING, UNCONFIRMED",
                 _ if running => "RUNNING",
                 _ if zone_skipping => "SKIPPING",
                 _ if z.planned_run_seconds > 0 => "SCHEDULED",
@@ -441,7 +464,7 @@ pub fn ZoneDetailView(
                 && budget
                     .as_ref()
                     .is_some_and(|b| b.soil_depletion_mm.is_some());
-            let budget_note = (budget_held && !(soil_panel_renders && !suppressed_today)).then(
+            let budget_note = ((suppressed_today || !soil_panel_renders) && budget_held).then(
                 || {
                     // A schedule covering today outranks the allocator's
                     // sentence: the suppression overwrote the allocator's
@@ -542,9 +565,9 @@ pub fn ZoneDetailView(
                                     </h2>
                                     <p class="zone-detail__reason">
                                         "The soil model governs this zone and is still \
-                                         gathering evidence: the weekly plan sizes the \
-                                         minutes until a few measured days of water use, \
-                                         rain, or completed runs land."
+                                         establishing its initial water balance: the weekly plan sizes the \
+                                         minutes until enough water use, \
+                                         rain, and completed runs resolve the soil estimate."
                                     </p>
                                 </section>
                             }
@@ -555,10 +578,8 @@ pub fn ZoneDetailView(
                 };
                 // Today's crop water use for the next-watering estimate,
                 // through the ENGINE's own ETc: ET0 times this zone's Kc
-                // times the heat multiplier. The multiplier used to be
-                // dropped here, which understated demand by up to 30% on
-                // exactly the days it matters and stretched the "waters
-                // next in N days" estimate past what the engine planned.
+                // with no additional weather multiplier: the reference ET
+                // already accounts for the atmosphere's demand.
                 // Absent ET0 omits the estimate rather than fabricating
                 // one.
                 let etc_today_mm = snap.get().forecast.eto_today_mm.map(|e| {
@@ -697,7 +718,7 @@ pub fn ZoneDetailView(
                         {verdict_pill}
                         <a
                             class="zone-detail__edit"
-                            href=format!("/settings/zones?zone={zslug}")
+                            href=format!("?edit={zslug}")
                             title="Species, soil, sprinkler, sensor assignment, budgets"
                         >
                             <Icon name="settings" size=14/>
@@ -746,35 +767,24 @@ pub fn ZoneDetailView(
                                                 _ => "var(--verdict-run)",
                                             };
                                             view! {
-                                                <div class="zone-soil__stat" style=format!("--sc:{tone}")>
-                                                    <span class="zone-soil__k">"Moisture"</span>
-                                                    <span class="zone-soil__v">{format!("{pct:.0}")}<small>"%"</small></span>
-                                                    <span class="zone-soil__band">{band_label}</span>
-                                                </div>
+                                                <crate::components::ui::StatTile layout="compact" label="Moisture" value=format!("{pct:.0}") unit="%" detail=band_label accent=tone/>
                                             }
                                         })}
                                         {z.soil_temp_f.map(|t| view! {
-                                            <div class="zone-soil__stat">
-                                                <span class="zone-soil__k">"Soil temp"</span>
-                                                <span class="zone-soil__v">{temp_value(t, p)}<small>{temp_unit(p)}</small></span>
-                                                <span class="zone-soil__band">"frost gate input"</span>
-                                            </div>
+                                            <crate::components::ui::StatTile layout="compact" label="Soil temp" value=temp_value(t, p) unit=temp_unit(p) detail="frost gate input"/>
                                         })}
                                         {z.soil_ec.map(|ec| view! {
-                                            <div class="zone-soil__stat">
-                                                <span class="zone-soil__k">"Conductivity"</span>
-                                                <span class="zone-soil__v">{format!("{ec:.0}")}<small>" µS/cm"</small></span>
-                                                <span class="zone-soil__band">"salinity / fertility"</span>
-                                            </div>
+                                            <crate::components::ui::StatTile layout="compact" label="Conductivity" value=format!("{ec:.0}") unit="µS/cm" detail="salinity / fertility"/>
                                         })}
                                         {z.soil_battery_pct.map(|b| view! {
-                                            <div class="zone-soil__stat" style=format!("--sc:{}", if b <= 20.0 { "var(--verdict-skip)" } else { "var(--verdict-run)" })>
-                                                <span class="zone-soil__k">"Probe battery"</span>
-                                                <span class="zone-soil__v">{format!("{b:.0}")}<small>"%"</small></span>
-                                                <span class="zone-soil__band">{if b <= 20.0 { "replace soon" } else { "healthy" }}</span>
-                                            </div>
+                                            <crate::components::ui::StatTile layout="compact" label="Probe battery" value=format!("{b:.0}") unit="%"
+                                                detail=if b <= 20.0 { "replace soon" } else { "healthy" }
+                                                accent=if b <= 20.0 { "var(--verdict-skip)" } else { "var(--verdict-run)" }/>
                                         })}
                                     </div>
+                                    {soil_fc.as_ref().is_some_and(|f| f.status == "uncalibrated").then(|| view! {
+                                        <p class="muted">"Relative probe reading: percentage forecasts need a water-volume calibration."</p>
+                                    })}
                                     {predicted.map(|p| view! {
                                         <div class="zone-soil__forecast">
                                             <span class="zone-soil__forecast-label">"7-day moisture projection (no watering)"</span>
@@ -789,7 +799,7 @@ pub fn ZoneDetailView(
                     <section class="zone-detail__panel">
                         <h2 class="zone-detail__panel-title">"Watered minutes, last 30 days"</h2>
                         {move || {
-                            let b = zone_day_buckets(&history.get(), &chart_slug, 30);
+                            let b = zone_day_buckets(&history.get(), &chart_slug, 30, &snap.get().timezone);
                             let pts: Vec<(f64, f64)> = b.iter().enumerate().map(|(i, m)| (i as f64, *m)).collect();
                             let n = b.len();
                             // Buckets run oldest -> newest; bucket i is (n-1-i) days
@@ -940,8 +950,8 @@ pub(crate) fn soil_preview_lines(
         // holds today" explains nothing with.
         let Some(reason) = deferred_reason
             .map(|r| {
-                let r = r.strip_prefix("deferred: ").unwrap_or(r);
-                r.strip_prefix("waits for tomorrow: ")
+                let r = r.strip_prefix(crate::voice::REASON_DEFERRED).unwrap_or(r);
+                r.strip_prefix(crate::voice::REASON_WAITS_FOR_TOMORROW)
                     .unwrap_or(r)
                     .to_string()
             })
@@ -1015,30 +1025,18 @@ fn ZoneMathPanel(m: ZoneMath, model: String, prefs: UnitPrefs) -> impl IntoView 
     let soil_governed = model == "soil" && m.bucket_mm.is_some();
     let soil_starved = model == "soil" && m.bucket_mm.is_none();
     let note = if soil_governed {
-        "The minutes above refill the soil deficit: the deficit divided by the capture \
-         efficiency and the throughput, then the seasonal adjustment and any condition \
-         rule's multiplier apply, held to the zone's cap. A forced run waters a bounded \
-         default even when the plan is zero. The crop coefficient and heat multiplier \
-         feed the ETc figure and the soil projection."
+        "These minutes refill the soil deficit above, adjusted for the season and \
+         held to this zone's cap."
     } else if soil_starved {
-        "The soil model governs this zone and is still gathering evidence, so the weekly \
-         plan sized these minutes: the weekly target divided by the throughput, then the \
-         seasonal adjustment and any condition rule's multiplier, held to the zone's cap. \
-         A forced run waters a bounded default even when the target is zero. The soil \
-         arithmetic takes over once a few measured days of water use, rain, or completed \
-         runs land."
+        "This zone is on the soil model but has no measured days yet, so the weekly \
+         plan sized these minutes. Soil takes over once a few days of evidence land."
     } else {
-        "The soil deficit comes from the soil model's replay of measured water use, rain \
-         and completed runs; it is shown for reference while the weekly plan governs this \
-         zone. The minutes above start from the weekly target divided by the throughput, \
-         then take the seasonal adjustment and any condition rule's multiplier, and are \
-         held to the zone's cap. A forced run waters a bounded default even when the \
-         target is zero. The crop coefficient, heat multiplier and capture efficiency \
-         feed the ETc figure and the soil projection."
+        "The weekly plan sized these minutes, adjusted for the season and held to \
+         this zone's cap. The soil deficit is shown for reference."
     };
     view! {
         <section class="zone-detail__panel">
-            <h2 class="zone-detail__panel-title">"Why this duration?"</h2>
+            <h2 class="zone-detail__panel-title">"Why this duration?"<HelpHint topic="zone-math"/></h2>
             <dl class="zone-detail__math">
                 <div><dt>"Throughput"</dt><dd>{throughput}</dd></div>
                 {soil_governed.then(|| view! {
@@ -1054,7 +1052,7 @@ fn ZoneMathPanel(m: ZoneMath, model: String, prefs: UnitPrefs) -> impl IntoView 
                     <div><dt>"Soil deficit"</dt><dd>{deficit.clone()}</dd></div>
                 })}
                 <div><dt>"Crop coefficient"</dt><dd>{format!("{:.2}", m.kc)}</dd></div>
-                <div><dt>"Heat multiplier"</dt><dd>{format!("{:.2}", m.heat_mult)}</dd></div>
+                <div><dt>"Additional ET adjustment"</dt><dd>{format!("{:.2}", m.heat_mult)}</dd></div>
                 {(!soil_governed).then(|| view! {
                     <div><dt>"Capture efficiency"</dt><dd>{format!("{:.2}", m.capture_eff)}</dd></div>
                 })}
@@ -1075,7 +1073,10 @@ pub fn ZoneDetailPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             .map(|s| s.to_string())
             .unwrap_or_default()
     });
-    view! { <ZoneDetailView snap slug back=true/> }
+    view! {
+        <ZoneDetailView snap slug back=true/>
+        <crate::components::settings::zones::ZoneEditorHost/>
+    }
 }
 
 #[cfg(test)]

@@ -5,34 +5,7 @@
 use leptos::prelude::*;
 
 use crate::components::setup::shell::{next_step_href, SetupFooter};
-use crate::components::ui::{Icon, Toggle};
-
-#[cfg(feature = "hydrate")]
-async fn fetch_draft() -> Option<serde_json::Value> {
-    let resp = gloo_net::http::Request::get("/api/wizard/draft")
-        .send()
-        .await
-        .ok()?;
-    resp.json::<serde_json::Value>().await.ok()
-}
-
-#[cfg(feature = "hydrate")]
-async fn save_draft(draft: serde_json::Value) -> Result<(), String> {
-    let resp = gloo_net::http::Request::put("/api/wizard/draft")
-        .json(&draft)
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::save_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    Ok(())
-}
+use crate::components::ui::Icon;
 
 #[component]
 pub fn WelcomeStep() -> impl IntoView {
@@ -48,14 +21,15 @@ pub fn WelcomeStep() -> impl IntoView {
     #[cfg(feature = "hydrate")]
     Effect::new(move |_| {
         leptos::task::spawn_local(async move {
-            if let Some(d) = fetch_draft().await {
-                license_accepted.set(
-                    d.get("license_accepted")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false),
-                );
+            if let Some(d) = crate::components::setup::draft::fetch().await {
                 draft.set(d);
                 loaded.set(true);
+                // The license is a note, not a gate: reaching this step is
+                // the acceptance, and it is recorded in the draft now, after
+                // the load, so the persist effect below actually saves it.
+                // (Setting it before the load let the loaded draft's `false`
+                // overwrite it, and apply then refused the whole wizard.)
+                license_accepted.set(true);
             }
         });
     });
@@ -83,20 +57,13 @@ pub fn WelcomeStep() -> impl IntoView {
         let candidate = draft.get_untracked();
         #[cfg(feature = "hydrate")]
         leptos::task::spawn_local(async move {
-            let _ = save_draft(candidate).await;
+            let _ = crate::components::setup::draft::save(&candidate).await;
         });
         #[cfg(not(feature = "hydrate"))]
         let _ = candidate;
     });
 
-    let can_advance = move || license_accepted.get();
-    let next_href = move || {
-        if can_advance() {
-            next_step_href("welcome")
-        } else {
-            None
-        }
-    };
+    let next_href = move || next_step_href("welcome");
 
     view! {
         <div class="setup-step">
@@ -136,21 +103,14 @@ pub fn WelcomeStep() -> impl IntoView {
                 </ul>
             </div>
 
-            <Toggle
-                checked=license_accepted
-                label="I accept the Apache-2.0 license".to_string()
-                helptext="Free and open source. The full text lives in LICENSE.".to_string()
-            />
-
             <p class="setup-step__hint" style="opacity:0.8">
-                "No telemetry, no analytics, no account requirement, no email signup. "
-                "If that ever changes it will be opt-in and disclosed right here."
+                "LocalSky is free and open source under the Apache 2.0 license; "
+                "continuing means you are fine with that. No telemetry, no "
+                "analytics, no account, no email signup. If that ever changes "
+                "it will be opt-in and disclosed right here."
             </p>
 
             <SetupFooter prev={None::<String>} next=Signal::derive(next_href)/>
-            <p class="setup-step__hint" class:setup-step__hint--visible=move || !can_advance()>
-                "Accept the license to continue."
-            </p>
         </div>
     }
 }

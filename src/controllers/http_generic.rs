@@ -30,7 +30,6 @@
 // channel. RFC1918/ULA stays allowed because DIY boards live on the LAN.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -39,6 +38,7 @@ use serde_json::json;
 use tracing::warn;
 
 use crate::config::schema::HttpGenericConfig;
+use crate::controllers::zone_map::ZoneMap;
 use crate::ports::irrigation_controller::{
     ControllerCaps, ControllerError, ControllerResult, ControllerStatus, DiscoveredZone,
     IrrigationController, RunHandle, RunRecord, ZoneRuntimeStatus,
@@ -47,32 +47,15 @@ use crate::ports::irrigation_controller::{
 /// Per-request HTTP timeout. DIY boards are on the LAN; keep it tight.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Hard cap on a single zone run (2h), matching the API's RUN_SECONDS_MAX.
-const MAX_RUN_SECONDS: u32 = 7200;
-
-/// Percent-encode a station id for safe use as a single URL path segment.
-/// Station ids come from operator config (`controller_station`), so encoding
-/// stops a stray `/`, `?`, `#`, or space from injecting path/query structure
-/// into the request. Unreserved chars (RFC 3986) pass through untouched.
-fn encode_segment(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
+use crate::controllers::guard::RUN_SECONDS_MAX;
 
 pub struct HttpGeneric {
     id: String,
     config: HttpGenericConfig,
-    /// zone_slug -> board station id. Built from config.zones before
-    /// construction (mirrors OpenSprinklerDirect).
-    zone_to_station: Arc<HashMap<String, String>>,
+    /// Zone slug <-> board station id (the `id` the board uses in /status,
+    /// /zones and the run/stop URLs). Built from config.zones before
+    /// construction; the wizard test controller passes an empty map.
+    zones: ZoneMap<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -118,7 +101,7 @@ impl HttpGeneric {
         Ok(Self {
             id: id.into(),
             config,
-            zone_to_station: Arc::new(zone_to_station),
+            zones: ZoneMap::new(zone_to_station),
         })
     }
 
@@ -126,19 +109,14 @@ impl HttpGeneric {
         self.config.base_url.trim_end_matches('/')
     }
 
-    fn station_for(&self, slug: &str) -> Result<String, ControllerError> {
-        self.zone_to_station
-            .get(slug)
-            .cloned()
-            .ok_or_else(|| ControllerError::ZoneUnknown(slug.to_string()))
-    }
-
     /// Reverse-map a board station id back to a LocalSky zone slug for
-    /// status/discovery readback. Falls back to a synthetic slug.
+    /// status readback. A station the map does not know still gets a row,
+    /// under a synthetic `station_<id>` slug, so an unmapped valve the board
+    /// reports as running is visible rather than dropped.
     fn slug_for_station(&self, station: &str) -> String {
-        self.zone_to_station
-            .iter()
-            .find_map(|(slug, sid)| (sid == station).then(|| slug.clone()))
+        self.zones
+            .slug_for(&station.to_string())
+            .map(str::to_string)
             .unwrap_or_else(|| format!("station_{station}"))
     }
 
@@ -216,15 +194,16 @@ impl IrrigationController for HttpGeneric {
             remote_program_upload: false,
             water_level: false,
             per_zone_stop: true,
+            duration_quantum_s: 1,
         }
     }
 
     async fn run_zone(&self, slug: &str, duration_s: u32) -> ControllerResult<RunHandle> {
-        let station = self.station_for(slug)?;
+        let station = self.zones.station_for(slug)?;
         // Defensive cap, matching the API's RUN_SECONDS_MAX (7200s = 2h). A DIY
         // board should also enforce its own max-runtime watchdog, but never
         // trust the caller to do so: a stuck-open valve is the worst case.
-        let clamped = duration_s.min(MAX_RUN_SECONDS).max(1);
+        let clamped = duration_s.min(RUN_SECONDS_MAX).max(1);
         if clamped != duration_s {
             warn!(
                 controller = %self.id,
@@ -235,7 +214,7 @@ impl IrrigationController for HttpGeneric {
             );
         }
         self.post(
-            &format!("/zone/{}/run", encode_segment(&station)),
+            &format!("/zone/{}/run", crate::text::path_segment(&station)),
             json!({ "seconds": clamped }),
         )
         .await?;
@@ -249,9 +228,9 @@ impl IrrigationController for HttpGeneric {
     }
 
     async fn stop_zone(&self, slug: &str) -> ControllerResult<()> {
-        let station = self.station_for(slug)?;
+        let station = self.zones.station_for(slug)?;
         self.post(
-            &format!("/zone/{}/stop", encode_segment(&station)),
+            &format!("/zone/{}/stop", crate::text::path_segment(&station)),
             json!({}),
         )
         .await
@@ -267,14 +246,14 @@ impl IrrigationController for HttpGeneric {
         }
         // Nothing to fall back to (e.g. the wizard test controller has no zone
         // map): surface the original error rather than a false success.
-        if self.zone_to_station.is_empty() {
+        if self.zones.is_empty() {
             return primary;
         }
         let mut last_err: Option<ControllerError> = None;
-        for station in self.zone_to_station.values() {
+        for station in self.zones.as_map().values() {
             if let Err(e) = self
                 .post(
-                    &format!("/zone/{}/stop", encode_segment(station)),
+                    &format!("/zone/{}/stop", crate::text::path_segment(station)),
                     json!({}),
                 )
                 .await
@@ -308,6 +287,7 @@ impl IrrigationController for HttpGeneric {
             })
             .collect();
         Ok(ControllerStatus {
+            observed_epoch: None,
             reachable: true,
             master_enabled: None,
             water_level_pct: None,
@@ -380,15 +360,16 @@ mod tests {
     #[test]
     fn station_resolution() {
         let h = ctl();
-        assert_eq!(h.station_for("back_yard").unwrap(), "1");
+        assert_eq!(h.zones.station_for("back_yard").unwrap(), "1");
         assert!(matches!(
-            h.station_for("nope").unwrap_err(),
+            h.zones.station_for("nope").unwrap_err(),
             ControllerError::ZoneUnknown(_)
         ));
     }
 
     #[test]
     fn encode_segment_passes_unreserved_and_escapes_the_rest() {
+        use crate::text::path_segment as encode_segment;
         assert_eq!(encode_segment("back_yard"), "back_yard");
         assert_eq!(encode_segment("1"), "1");
         assert_eq!(encode_segment("a.b-c~d"), "a.b-c~d");

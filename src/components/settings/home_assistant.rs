@@ -9,8 +9,11 @@
 use leptos::prelude::*;
 
 #[cfg(feature = "hydrate")]
+use crate::components::config_client::{get_config, put_config};
+use crate::components::settings_ui::SettingsResult;
+#[cfg(feature = "hydrate")]
 use crate::components::ui::use_toast;
-use crate::components::ui::{Icon, SkeletonRows};
+use crate::components::ui::{Button, ConfirmSheet, FormField, Icon, SkeletonRows};
 use crate::docs::doc_url;
 
 /// One integration capability card: icon, name, plain-language meaning,
@@ -50,6 +53,118 @@ fn HaCard(
     }
 }
 
+/// The legacy HA readback prefix is explicit configuration, never discovery.
+#[component]
+fn HaEntityPrefix() -> impl IntoView {
+    let prefix = RwSignal::new(String::new());
+    let saved_prefix = RwSignal::new(String::new());
+    let example_zone = RwSignal::new("zone_slug".to_string());
+    let loaded = RwSignal::new(false);
+    let saving = RwSignal::new(false);
+    let result_msg = RwSignal::new(String::new());
+    let result_ok = RwSignal::new(false);
+    let restart_reasons = RwSignal::new(Vec::<String>::new());
+    let dismissed = RwSignal::new(false);
+    let invalid = Signal::derive(move || {
+        let value = prefix.get();
+        value.is_empty()
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    });
+
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        leptos::task::spawn_local(async move {
+            match get_config().await {
+                Ok(cfg) => {
+                    let value = cfg["deployment"]["ha_sprinkler_prefix"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("opensprinkler")
+                        .to_string();
+                    prefix.set(value.clone());
+                    saved_prefix.set(value);
+                    if let Some(zone) = cfg["zones"].as_object().and_then(|z| z.keys().next()) {
+                        example_zone.set(zone.clone());
+                    }
+                    loaded.set(true);
+                }
+                Err(e) => result_msg.set(format!("Could not load the HA entity prefix: {e}")),
+            }
+        });
+    });
+
+    let save = Callback::new(move |_: leptos::ev::MouseEvent| {
+        #[cfg(feature = "hydrate")]
+        {
+            if !loaded.get_untracked() || saving.get_untracked() || invalid.get_untracked() {
+                return;
+            }
+            let value = prefix.get_untracked();
+            saving.set(true);
+            result_msg.set(String::new());
+            leptos::task::spawn_local(async move {
+                let result = async {
+                    let mut cfg = get_config().await?;
+                    cfg["deployment"]["ha_sprinkler_prefix"] = value.clone().into();
+                    put_config(&cfg).await
+                }
+                .await;
+                match result {
+                    Ok(outcome) => {
+                        saved_prefix.set(value);
+                        result_ok.set(true);
+                        result_msg.set(if outcome.restart_required() {
+                            crate::voice::SAVED_NEEDS_RESTART.into()
+                        } else {
+                            crate::voice::SAVED_LIVE.into()
+                        });
+                        restart_reasons.set(outcome.restart_reasons);
+                        dismissed.set(false);
+                    }
+                    Err(e) => {
+                        result_ok.set(false);
+                        result_msg.set(format!("Could not save the HA entity prefix: {e}"));
+                    }
+                }
+                saving.set(false);
+            });
+        }
+    });
+
+    view! {
+        <HaCard icon="controllers" title="HA controller entity names"
+            meaning="Used when LocalSky reads irrigation state from Home Assistant. Match the controller's entity names in HA. The existing opensprinkler default is kept until you change it. Saving a different prefix holds watering until LocalSky restarts."
+            chip="HA mode only" tone="off"
+        >
+            <div>
+                <FormField label="HA controller entity prefix"
+                    helptext="The part after the entity domain and before _enabled. Use lowercase letters, numbers, and underscores."
+                    error=Signal::derive(move || (loaded.get() && invalid.get()).then(|| "Enter a prefix using lowercase letters, numbers, and underscores.".to_string()))
+                >
+                    <input type="text" class="settings-input" autocomplete="off"
+                        prop:value=move || prefix.get()
+                        prop:disabled=move || !loaded.get() || saving.get()
+                        on:input=move |ev| prefix.set(event_target_value(&ev))/>
+                </FormField>
+                <Show when=move || loaded.get() && !invalid.get()>
+                    <p class="settings-help">"Expected HA entities for this prefix:"</p>
+                    <ul>
+                        <li><code>{move || format!("switch.{}_enabled", prefix.get())}</code></li>
+                        <li><code>{move || format!("sensor.{}_water_level", prefix.get())}</code></li>
+                        <li><code>{move || format!("binary_sensor.{}_{}_station_running", prefix.get(), example_zone.get())}</code></li>
+                    </ul>
+                </Show>
+                <Button disabled=Signal::derive(move || !loaded.get() || saving.get() || invalid.get() || prefix.get() == saved_prefix.get())
+                    on_click=save>"Save HA entity prefix"</Button>
+                <SettingsResult result_msg result_ok/>
+                <super::data_sources::RestartBanner reasons=restart_reasons dismissed/>
+            </div>
+        </HaCard>
+    }
+}
+
 #[component]
 pub fn SettingsHomeAssistant() -> impl IntoView {
     let ha: RwSignal<Option<serde_json::Value>> = RwSignal::new(None);
@@ -72,57 +187,35 @@ pub fn SettingsHomeAssistant() -> impl IntoView {
     #[cfg(not(feature = "hydrate"))]
     let _ = (ha, loaded, reload, busy);
 
+    // Two-step confirms. A click only asks; the work runs from the
+    // sheet's on_confirm. The signals live here, in the page component,
+    // because the handlers are built inside per-row closures while the
+    // sheets mount once at the bottom of the page view.
+    let pending_remove: RwSignal<Option<String>> = RwSignal::new(None);
+    let remove_open = RwSignal::new(false);
+    let switch_native_open = RwSignal::new(false);
+    let switch_ha_open = RwSignal::new(false);
+
     // Remove a passthrough source by id (read-modify-write the config).
-    let remove_source = move |id: String| {
+    let do_remove_source = move |id: String| {
         #[cfg(feature = "hydrate")]
         {
             if busy.get_untracked() {
                 return;
             }
-            if let Some(win) = web_sys::window() {
-                let ok = win
-                    .confirm_with_message(&format!(
-                        "Remove the '{id}' bridge? It currently feeds nothing, so no data is lost. A config snapshot is kept for rollback."
-                    ))
-                    .unwrap_or(false);
-                if !ok {
-                    return;
-                }
-            }
             busy.set(true);
             leptos::task::spawn_local(async move {
                 let result = async {
-                    let resp = gloo_net::http::Request::get("/api/config")
-                        .send()
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    let mut cfg = resp
-                        .json::<serde_json::Value>()
-                        .await
-                        .map_err(|e| e.to_string())?;
+                    let mut cfg = get_config().await?;
                     if let Some(arr) = cfg.get_mut("sources").and_then(|v| v.as_array_mut()) {
                         arr.retain(|s| s.get("id").and_then(|v| v.as_str()) != Some(id.as_str()));
                     }
-                    let resp = gloo_net::http::Request::put("/api/config")
-                        .json(&cfg)
-                        .map_err(|e| e.to_string())?
-                        .send()
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    if resp.ok() {
-                        Ok(())
-                    } else {
-                        let body = resp.text().await.unwrap_or_default();
-                        Err(crate::components::settings_ui::save_error_message(
-                            resp.status(),
-                            &body,
-                        ))
-                    }
+                    put_config(&cfg).await.map(|_| ())
                 }
                 .await;
                 match result {
                     Ok(()) => {
-                        use_toast().success("Bridge removed. The engine reloads on the next tick.");
+                        use_toast().success("Bridge removed. It takes effect on the next pass.");
                         reload.update(|n| *n += 1);
                     }
                     Err(e) => use_toast().error(format!("Remove failed: {e}")),
@@ -133,36 +226,24 @@ pub fn SettingsHomeAssistant() -> impl IntoView {
         #[cfg(not(feature = "hydrate"))]
         let _ = id;
     };
+    let confirm_remove = Callback::new(move |()| {
+        if let Some(id) = pending_remove.get_untracked() {
+            do_remove_source(id);
+        }
+        pending_remove.set(None);
+    });
 
     // Switch the irrigation engine's data source (deployment.mode).
-    let switch_mode = move |to_standalone: bool| {
+    let do_switch_mode = move |to_standalone: bool| {
         #[cfg(feature = "hydrate")]
         {
             if busy.get_untracked() {
                 return;
             }
-            if let Some(win) = web_sys::window() {
-                let msg = if to_standalone {
-                    "Switch watering decisions to LocalSky's native engine?\n\nLocalSky will compute everything from its own sources (station, gateway, forecast). Home Assistant keeps receiving live data through the integration. You can switch back any time."
-                } else {
-                    "Make Home Assistant the engine's data source again?\n\nWatering decisions will be computed from the entities LocalSky reads out of HA."
-                };
-                let ok = win.confirm_with_message(msg).unwrap_or(false);
-                if !ok {
-                    return;
-                }
-            }
             busy.set(true);
             leptos::task::spawn_local(async move {
                 let result = async {
-                    let resp = gloo_net::http::Request::get("/api/config")
-                        .send()
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    let mut cfg = resp
-                        .json::<serde_json::Value>()
-                        .await
-                        .map_err(|e| e.to_string())?;
+                    let mut cfg = get_config().await?;
                     if let Some(dep) = cfg.get_mut("deployment").and_then(|d| d.as_object_mut()) {
                         dep.insert(
                             "mode".into(),
@@ -173,28 +254,12 @@ pub fn SettingsHomeAssistant() -> impl IntoView {
                             },
                         );
                     }
-                    let resp = gloo_net::http::Request::put("/api/config")
-                        .json(&cfg)
-                        .map_err(|e| e.to_string())?
-                        .send()
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    if resp.ok() {
-                        Ok(())
-                    } else {
-                        let body = resp.text().await.unwrap_or_default();
-                        Err(crate::components::settings_ui::save_error_message(
-                            resp.status(),
-                            &body,
-                        ))
-                    }
+                    put_config(&cfg).await.map(|_| ())
                 }
                 .await;
                 match result {
                     Ok(()) => {
-                        use_toast().success(
-                            "Engine source updated. Takes effect after the next restart of LocalSky.",
-                        );
+                        use_toast().success(crate::voice::SAVED_NEEDS_RESTART);
                         reload.update(|n| *n += 1);
                     }
                     Err(e) => use_toast().error(format!("Switch failed: {e}")),
@@ -205,6 +270,8 @@ pub fn SettingsHomeAssistant() -> impl IntoView {
         #[cfg(not(feature = "hydrate"))]
         let _ = to_standalone;
     };
+    let confirm_switch_native = Callback::new(move |()| do_switch_mode(true));
+    let confirm_switch_ha = Callback::new(move |()| do_switch_mode(false));
 
     view! {
         <div class="settings-page">
@@ -294,7 +361,7 @@ pub fn SettingsHomeAssistant() -> impl IntoView {
                                     " Settings > Devices & services: Home Assistant finds this LocalSky on your network by itself; click through and you're done."
                                 </li>
                             </ol>
-                            <a class="ha-btn ha-btn--primary" href=doc_url("hacs") target="_blank" rel="noopener">"Open the setup guide"</a>
+                            <crate::components::ui::Button variant="primary" size="sm"  class="ha-btn ha-btn--primary" href=doc_url("hacs") target="_blank" >"Open the setup guide"</crate::components::ui::Button>
                         </div>
                     })}
 
@@ -324,11 +391,10 @@ pub fn SettingsHomeAssistant() -> impl IntoView {
                                 chip="Mirroring HA (migration)".to_string()
                                 tone="warn".to_string()
                             >
-                                <button type="button" class="ha-btn ha-btn--primary"
-                                    prop:disabled=move || busy.get()
-                                    on:click=move |_| switch_mode(true)
-                                >"Switch to native engine"</button>
-                                <a class="ha-btn" href=doc_url("migrating-from-ha") target="_blank" rel="noopener">"Migration guide"</a>
+                                <crate::components::ui::Button variant="primary" size="sm"   class="ha-btn ha-btn--primary"
+                                    disabled=Signal::derive(move || busy.get())
+                                    on_click=Callback::new(move |_| switch_native_open.set(true))>"Switch to native engine"</crate::components::ui::Button>
+                                <crate::components::ui::Button class="ha-btn" variant="secondary" size="sm" href=doc_url("migrating-from-ha") target="_blank">"Migration guide"</crate::components::ui::Button>
                             </HaCard>
                         </div>
                     })}
@@ -340,6 +406,7 @@ pub fn SettingsHomeAssistant() -> impl IntoView {
                             <span class="ha-advanced__hint">"most people never need these"</span>
                         </summary>
                     <div class="ha-cards">
+                        {(ha_mode || env_configured).then(|| view! { <HaEntityPrefix/> })}
                         {(!ha_mode && env_configured).then(|| view! {
                             <HaCard
                                 icon="gauge"
@@ -348,10 +415,9 @@ pub fn SettingsHomeAssistant() -> impl IntoView {
                                 chip="LocalSky engine".to_string()
                                 tone="on".to_string()
                             >
-                                <button type="button" class="ha-btn"
-                                    prop:disabled=move || busy.get()
-                                    on:click=move |_| switch_mode(false)
-                                >"Use Home Assistant data instead"</button>
+                                <crate::components::ui::Button variant="secondary" size="sm"   class="ha-btn"
+                                    disabled=Signal::derive(move || busy.get())
+                                    on_click=Callback::new(move |_| switch_ha_open.set(true))>"Use Home Assistant data instead"</crate::components::ui::Button>
                             </HaCard>
                         })}
 
@@ -364,7 +430,7 @@ pub fn SettingsHomeAssistant() -> impl IntoView {
                                     chip="Available".to_string()
                                     tone="off".to_string()
                                 >
-                                    <a class="ha-btn" href="/sensors?add=1">"Bring in HA sensors"</a>
+                                    <crate::components::ui::Button variant="secondary" size="sm"  class="ha-btn" href="/sensors?add=1">"Bring in HA sensors"</crate::components::ui::Button>
                                 </HaCard>
                             }.into_any()
                         } else {
@@ -377,19 +443,21 @@ pub fn SettingsHomeAssistant() -> impl IntoView {
                                         icon="sources"
                                         title="Use sensors you already have in HA"
                                         meaning={if feeds > 0 {
-                                            format!("'{label}' feeds {feeds} HA reading{} into the engine live (soil probes, rain gauges, anything HA can see), no rewiring needed.", if feeds == 1 { "" } else { "s" })
+                                            format!("'{label}' feeds {feeds} HA reading{} in live (soil probes, rain gauges, anything HA can see), no rewiring needed.", if feeds == 1 { "" } else { "s" })
                                         } else {
-                                            format!("'{label}' is connected but no HA entities are mapped yet. Pick the sensors it should bring in, and they'll flow into the engine live.")
+                                            format!("'{label}' is connected but no HA entities are mapped yet. Pick the sensors it should bring in, and they'll flow in live.")
                                         }}
                                         chip={if feeds > 0 { format!("Feeding {feeds}") } else { "Nothing mapped yet".to_string() }}
                                         tone={if feeds > 0 { "on" } else { "warn" }}
                                     >
-                                        <a class="ha-btn ha-btn--primary" href=format!("/sensors?source={label}")>"Choose sensors"</a>
+                                        <crate::components::ui::Button variant="primary" size="sm"  class="ha-btn ha-btn--primary" href=format!("/sensors?source={label}")>"Choose sensors"</crate::components::ui::Button>
                                         {(feeds == 0).then(|| view! {
-                                            <button type="button" class="ha-btn ha-btn--danger"
-                                                prop:disabled=move || busy.get()
-                                                on:click=move |_| remove_source(id_for_remove.clone())
-                                            >"Remove"</button>
+                                            <crate::components::ui::Button variant="danger" size="sm"   class="ha-btn ha-btn--danger"
+                                                disabled=Signal::derive(move || busy.get())
+                                                on_click=Callback::new(move |_| {
+                                                    pending_remove.set(Some(id_for_remove.clone()));
+                                                    remove_open.set(true);
+                                                })>"Remove"</crate::components::ui::Button>
                                         })}
                                     </HaCard>
                                 }
@@ -407,7 +475,7 @@ pub fn SettingsHomeAssistant() -> impl IntoView {
                             chip={if service_controllers.is_empty() { "Direct control".to_string() } else { format!("{} via HA", service_controllers.len()) }}
                             tone="on".to_string()
                         >
-                            <a class="ha-btn" href="/settings/controllers">"Controllers"</a>
+                            <crate::components::ui::Button variant="secondary" size="sm"  class="ha-btn" href="/settings?section=devices">"Controllers"</crate::components::ui::Button>
                         </HaCard>
 
                         <HaCard
@@ -417,12 +485,56 @@ pub fn SettingsHomeAssistant() -> impl IntoView {
                             chip={if mqtt { "Publishing".to_string() } else { "Off".to_string() }}
                             tone={if mqtt { "warn" } else { "off" }}
                         >
-                            <a class="ha-btn" href="/settings/notifications">"Configure"</a>
+                            <crate::components::ui::Button variant="secondary" size="sm"  class="ha-btn" href="/settings/notifications">"Configure"</crate::components::ui::Button>
                         </HaCard>
                     </div>
                     </details>
                 }.into_any()
             }}
+
+            // Confirms. Mounted unconditionally, outside the loaded
+            // branch and the per-bridge loop; each one hides itself.
+            <ConfirmSheet
+                visible=remove_open
+                title="Remove this bridge?"
+                body=Signal::derive(move || match pending_remove.get() {
+                    Some(id) => format!(
+                        "'{id}' currently feeds nothing, so no data is lost. \
+                         A config snapshot is kept for rollback."
+                    ),
+                    None => "This bridge currently feeds nothing, so no data is lost. \
+                             A config snapshot is kept for rollback."
+                        .to_string(),
+                })
+                confirm_label=Signal::derive(|| "Remove".to_string())
+                danger=true
+                on_confirm=confirm_remove
+            />
+
+            <ConfirmSheet
+                visible=switch_native_open
+                title="Switch watering decisions to LocalSky's native engine?"
+                body=Signal::derive(|| {
+                    "LocalSky will compute everything from its own sources (station, \
+                     gateway, forecast). Home Assistant keeps receiving live data \
+                     through the integration. You can switch back any time."
+                        .to_string()
+                })
+                confirm_label=Signal::derive(|| "Switch to native engine".to_string())
+                on_confirm=confirm_switch_native
+            />
+
+            <ConfirmSheet
+                visible=switch_ha_open
+                title="Read weather from Home Assistant again?"
+                body=Signal::derive(|| {
+                    "Watering decisions will be computed from the entities LocalSky \
+                     reads out of HA."
+                        .to_string()
+                })
+                confirm_label=Signal::derive(|| "Use Home Assistant data".to_string())
+                on_confirm=confirm_switch_ha
+            />
         </div>
     }
 }

@@ -91,6 +91,30 @@ pub enum PushEvent {
     /// nothing before 0.7.22, and an owner who never opens the UI has no
     /// other way to hear that the valves are about to open.
     InferredTargetsPlanned { zones: Vec<String> },
+    /// A valve command was refused or failed at the controller.
+    DispatchFailed {
+        zone_name: String,
+        zone_slug: String,
+        controller_id: String,
+        error: String,
+    },
+    /// A controller could not be reached when it was needed.
+    ControllerOffline {
+        controller_id: String,
+        error: String,
+    },
+    /// A valve is past its shutoff deadline and LocalSky could not
+    /// confirm it closed. The most dangerous state the product has.
+    ValveUnclosed {
+        zone_name: String,
+        zone_slug: String,
+        controller_id: String,
+        overdue_s: i64,
+    },
+    /// The flow meter reads water moving while no zone is commanded on.
+    FlowWithoutCommand { gpm: f64 },
+    /// A configured weather source has stopped reporting.
+    SourceOffline { source_id: String, silent_s: i64 },
 }
 
 #[derive(Clone, Serialize)]
@@ -110,6 +134,14 @@ pub struct PushDispatcher {
 }
 
 impl PushDispatcher {
+    /// A dispatcher whose events land in the returned receiver instead of
+    /// a browser, for tests that need to see what was pushed.
+    #[cfg(test)]
+    pub fn capturing() -> (Self, mpsc::Receiver<PushEvent>) {
+        let (sender, rx) = mpsc::channel(64);
+        (Self { sender }, rx)
+    }
+
     /// Best-effort emit. Drops the event if the channel is full or
     /// closed (push is fire-and-forget). Cheap; safe to call from the
     /// HA refresher's hot loop.
@@ -143,7 +175,7 @@ pub fn spawn_dispatcher(conn: Option<Arc<Mutex<Connection>>>) -> PushDispatcher 
             );
         }
 
-        // P0-8: restart-on-panic supervisor. A panic while handling one event
+        // Restart-on-panic supervisor. A panic while handling one event
         // (payload serialization, webpush internals) would otherwise kill the
         // dispatcher for the whole process lifetime, silently dropping every
         // later notification. catch_unwind turns a panic into a logged restart
@@ -152,6 +184,18 @@ pub fn spawn_dispatcher(conn: Option<Arc<Mutex<Connection>>>) -> PushDispatcher 
         loop {
             let outcome = std::panic::AssertUnwindSafe(async {
                 while let Some(ev) = rx.recv().await {
+                    // Every enabled sink first, read from the on-disk config
+                    // at delivery so a saved ntfy topic or Slack webhook
+                    // takes effect without a restart. Events are rare; the
+                    // read is cheap.
+                    if let Some(sink_event) =
+                        crate::notifications::from_push_event(&ev, chrono::Utc::now().timestamp())
+                    {
+                        let fanout = crate::notifications::Fanout::from_config(&sinks_config());
+                        if !fanout.is_empty() {
+                            fanout.deliver(&sink_event).await;
+                        }
+                    }
                     let Some(conn) = conn.as_ref() else {
                         tracing::debug!("push: history db not configured; dropping event");
                         continue;
@@ -220,8 +264,70 @@ pub fn spawn_dispatcher(conn: Option<Arc<Mutex<Connection>>>) -> PushDispatcher 
     PushDispatcher { sender: tx }
 }
 
+/// The notifications block of the on-disk config, the same way the VAPID
+/// keypair is read: the dispatcher is spawned before the boot config is
+/// loaded and a saved change should apply without a restart.
+fn sinks_config() -> crate::config::schema::Notifications {
+    let config_path =
+        std::env::var("CONFIG_PATH").unwrap_or_else(|_| "/data/localsky.toml".to_string());
+    crate::config::loader::load_from_path(std::path::Path::new(&config_path))
+        .map(|c| c.notifications)
+        .unwrap_or_default()
+}
+
 fn render_payload(ev: &PushEvent) -> PushPayload {
     match ev {
+        PushEvent::DispatchFailed {
+            zone_name,
+            zone_slug,
+            controller_id,
+            error,
+        } => PushPayload {
+            title: format!("{zone_name} did not start"),
+            body: format!("{controller_id} refused the command: {error}. Nothing watered."),
+            tag: format!("dispatch-{zone_slug}"),
+            url: format!("/zones/{zone_slug}"),
+        },
+        PushEvent::ControllerOffline {
+            controller_id,
+            error,
+        } => PushPayload {
+            title: format!("{controller_id} is not answering"),
+            body: format!("{error}. Watering that needs it is on hold until it answers."),
+            tag: format!("controller-{controller_id}"),
+            url: "/settings/devices".to_string(),
+        },
+        PushEvent::ValveUnclosed {
+            zone_name,
+            zone_slug,
+            controller_id,
+            overdue_s,
+        } => PushPayload {
+            title: format!("{zone_name} may still be open"),
+            body: format!(
+                "Its shutoff was due {} min ago and {controller_id} has not confirmed closing it. LocalSky keeps retrying; check the valve.",
+                (overdue_s / 60).max(1)
+            ),
+            tag: format!("unclosed-{zone_slug}"),
+            url: format!("/zones/{zone_slug}"),
+        },
+        PushEvent::SourceOffline { source_id, silent_s } => PushPayload {
+            title: format!("{source_id} went quiet"),
+            body: format!(
+                "No observations for {} min. The engine falls back to the next source in priority until it returns.",
+                silent_s / 60
+            ),
+            tag: format!("source-{source_id}"),
+            url: "/settings/devices".to_string(),
+        },
+        PushEvent::FlowWithoutCommand { gpm } => PushPayload {
+            title: "Water is flowing with nothing running".to_string(),
+            body: format!(
+                "The flow meter reads {gpm:.1} gal/min while no zone is commanded on. A stuck valve or a leak."
+            ),
+            tag: "flow-without-command".to_string(),
+            url: "/".to_string(),
+        },
         PushEvent::ZoneStarted { name, slug } => PushPayload {
             title: format!("{name} started"),
             body: "Watering in progress.".to_string(),
@@ -557,13 +663,10 @@ pub fn generate_vapid_keypair(
     Ok(public_b64u)
 }
 
-/// Read-only public-key access for the API handler. Cached in a OnceLock
-/// because the resolved keypair (config or env) does not change at runtime.
+/// The public key browsers subscribe against, resolved once at boot for
+/// the push API's state (the keypair does not change at runtime).
 pub fn vapid_public_key() -> Option<String> {
-    use std::sync::OnceLock;
-    static CELL: OnceLock<Option<String>> = OnceLock::new();
-    CELL.get_or_init(|| VapidConfig::from_config_or_env().map(|c| c.public_key_b64u.clone()))
-        .clone()
+    VapidConfig::from_config_or_env().map(|c| c.public_key_b64u.clone())
 }
 
 fn mask_endpoint(endpoint: &str) -> String {

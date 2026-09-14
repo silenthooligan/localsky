@@ -42,21 +42,31 @@ use crate::ports::irrigation_controller::{
     RunHandle, RunRecord, ZoneRuntimeStatus,
 };
 
-/// Hard cap on a single zone run (2h), matching the API's RUN_SECONDS_MAX.
-const MAX_RUN_SECONDS: u32 = 7200;
+use crate::controllers::guard::RUN_SECONDS_MAX;
 
 // ----- pure payload classifiers (unit-tested; no I/O) -----
 
-/// Whether a state-topic payload means "running". Whole-payload, trimmed,
-/// case-insensitive compare against the zone's on-match. (JSON state bodies
+/// Whether a state-topic payload means running, stopped, or unknown.
+/// Whole-payload, trimmed, case-insensitive compares. (JSON state bodies
 /// like Tasmota's `{"POWER":"ON"}` are not destructured yet; see the DIY docs.)
-fn payload_is_on(payload: &str, on_match: &str) -> bool {
-    payload.trim().eq_ignore_ascii_case(on_match)
+fn classify_running(payload: &str, on_match: &str, off_match: &str) -> Option<bool> {
+    let payload = payload.trim();
+    if payload.eq_ignore_ascii_case(on_match) {
+        Some(true)
+    } else if payload.eq_ignore_ascii_case(off_match) {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 /// Parse a flow-topic payload as gallons/min. Whole-payload, trimmed.
 fn parse_flow(payload: &str) -> Option<f64> {
-    payload.trim().parse::<f64>().ok()
+    payload
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite() && *v >= 0.0)
 }
 
 /// Classify an availability-topic payload. `Some(true)` = online, `Some(false)`
@@ -76,11 +86,11 @@ fn classify_availability(payload: &str, online: &str, offline: &str) -> Option<b
 /// Topics the adapter subscribes to and how to interpret them. Built once
 /// from config and shared (read-only) with the event-loop task.
 struct SubMeta {
-    /// state_topic -> list of (zone_slug, payload meaning "running"). A Vec so
+    /// state_topic -> list of (zone_slug, running payload, stopped payload). A Vec so
     /// several zones can legitimately share one state topic (a multi-relay
     /// board that reports all zones on one topic, or two slugs mapped to the
     /// same physical relay); every mapped zone updates on a message.
-    state: HashMap<String, Vec<(String, String)>>,
+    state: HashMap<String, Vec<(String, String, String)>>,
     availability_topic: Option<String>,
     /// payload meaning "online" on availability_topic.
     payload_available: String,
@@ -107,10 +117,28 @@ impl SubMeta {
 #[derive(Default)]
 struct SharedState {
     /// zone_slug -> running. Only populated for zones with a state_topic.
-    running: Mutex<HashMap<String, bool>>,
+    running: Mutex<HashMap<String, ReportedRunning>>,
     /// Last availability value; None when no availability_topic is configured.
     available: Mutex<Option<bool>>,
     flow_gpm: Mutex<Option<f64>>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ReportedRunning {
+    running: bool,
+    known: bool,
+}
+
+impl ReportedRunning {
+    fn observe(&mut self, payload: &str, on: &str, off: &str) {
+        let reported = classify_running(payload, on, off);
+        if let Some(running) = reported {
+            self.running = running;
+        }
+        // An unrecognized message is evidence that we cannot interpret the
+        // board's state. Preserve the last value, but never certify it idle.
+        self.known = reported.is_some();
+    }
 }
 
 pub struct MqttCommand {
@@ -145,17 +173,18 @@ impl MqttCommand {
         // Build the subscription map from config. A zone's "running" payload
         // is its state_on_payload, falling back to its command on_payload.
         // Multiple zones may map to the same state topic, so accumulate.
-        let mut state: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        let mut state: HashMap<String, Vec<(String, String, String)>> = HashMap::new();
         for (slug, cmd) in &config.zone_command_map {
             if let Some(topic) = &cmd.state_topic {
                 let on_match = cmd
                     .state_on_payload
                     .clone()
                     .unwrap_or_else(|| cmd.on_payload.clone());
-                state
-                    .entry(topic.clone())
-                    .or_default()
-                    .push((slug.clone(), on_match));
+                state.entry(topic.clone()).or_default().push((
+                    slug.clone(),
+                    on_match,
+                    cmd.off_payload.clone(),
+                ));
             }
         }
         let sub_meta = Arc::new(SubMeta {
@@ -194,15 +223,44 @@ impl MqttCommand {
             .ok_or_else(|| ControllerError::ZoneUnknown(slug.to_string()))
     }
 
+    /// Refuse to claim delivery when nothing can deliver.
+    ///
+    /// `AsyncClient::publish` returns Ok on enqueue into rumqttc's request
+    /// channel whether or not a broker is on the other end. A stop that
+    /// "succeeded" into a dead channel disarmed the shutoff deadline and
+    /// left the valve open with no backstop. Disconnected from the broker,
+    /// or told by the availability topic that the device itself is
+    /// offline, the answer is a transport error: the row stays armed and
+    /// the reaper retries every tick until the command can land.
+    async fn deliverable(&self) -> ControllerResult<()> {
+        if !*self.connected.lock().await {
+            return Err(ControllerError::Transport(
+                "mqtt broker disconnected; command not delivered".into(),
+            ));
+        }
+        if *self.shared.available.lock().await == Some(false) {
+            return Err(ControllerError::Transport(
+                "device reports offline on its availability topic; command not delivered".into(),
+            ));
+        }
+        Ok(())
+    }
+
     async fn publish_zone(&self, slug: &str, on: bool) -> ControllerResult<()> {
         let cmd = self.zone_command(slug)?;
+        self.deliverable().await?;
         let payload = if on {
             cmd.on_payload.as_bytes()
         } else {
             cmd.off_payload.as_bytes()
         };
+        // OFF is always retained. A device that drops off the broker and
+        // reconnects receives the last retained command, and the safe
+        // command to receive is the one that closes the valve; a retained
+        // ON would be the opposite. ON follows the operator's setting.
+        let retain = if on { cmd.retain } else { true };
         self.client
-            .publish(&cmd.topic, QoS::AtLeastOnce, cmd.retain, payload.to_vec())
+            .publish(&cmd.topic, QoS::AtLeastOnce, retain, payload.to_vec())
             .await
             .map_err(|e| ControllerError::Transport(format!("mqtt publish failed: {e}")))?;
         debug!(
@@ -244,10 +302,10 @@ async fn drive_eventloop(
                 if let Some(subs) = sub_meta.state.get(&p.topic) {
                     // Every zone mapped to this state topic updates.
                     let mut running = shared.running.lock().await;
-                    for (slug, on_match) in subs {
-                        let on = payload_is_on(&payload, on_match);
-                        running.insert(slug.clone(), on);
-                        debug!(controller = %id, zone = %slug, running = on, "mqtt state update");
+                    for (slug, on_match, off_match) in subs {
+                        let state = running.entry(slug.clone()).or_default();
+                        state.observe(&payload, on_match, off_match);
+                        debug!(controller = %id, zone = %slug, running = state.running, known = state.known, "mqtt state update");
                     }
                 } else if sub_meta.availability_topic.as_deref() == Some(p.topic.as_str()) {
                     // Online/offline only; an unrecognized payload is
@@ -260,9 +318,7 @@ async fn drive_eventloop(
                         *shared.available.lock().await = Some(online);
                     }
                 } else if sub_meta.flow_topic.as_deref() == Some(p.topic.as_str()) {
-                    if let Some(v) = parse_flow(&payload) {
-                        *shared.flow_gpm.lock().await = Some(v);
-                    }
+                    *shared.flow_gpm.lock().await = parse_flow(&payload);
                 }
             }
             Ok(Event::Incoming(Packet::Disconnect)) => {
@@ -285,6 +341,9 @@ async fn drive_eventloop(
 /// the dashboard never shows a stale "live" flow or a phantom availability. A
 /// reconnect re-reads retained topics and re-populates these.
 async fn clear_stale_telemetry(shared: &SharedState) {
+    for state in shared.running.lock().await.values_mut() {
+        state.known = false;
+    }
     *shared.available.lock().await = None;
     *shared.flow_gpm.lock().await = None;
 }
@@ -308,6 +367,7 @@ impl IrrigationController for MqttCommand {
             remote_program_upload: false,
             water_level: false,
             per_zone_stop: true,
+            duration_quantum_s: 1,
         }
     }
 
@@ -316,7 +376,7 @@ impl IrrigationController for MqttCommand {
         // fire-and-forget path the in-process shutoff timer below is the ONLY
         // thing that closes the valve, so an unbounded duration is a
         // stuck-valve risk for exactly this (DIY) audience.
-        let capped = duration_s.min(MAX_RUN_SECONDS).max(1);
+        let capped = duration_s.min(RUN_SECONDS_MAX).max(1);
         if capped != duration_s {
             warn!(
                 controller = %self.id,
@@ -339,7 +399,10 @@ impl IrrigationController for MqttCommand {
                 let client = self.client.clone();
                 let topic = cmd.topic.clone();
                 let off_payload = cmd.off_payload.clone().into_bytes();
-                let retain = cmd.retain;
+                // The timer's OFF is retained for the same reason the
+                // explicit one is: the closing command is the one a
+                // reconnecting device should find waiting.
+                let retain = true;
                 let controller_id = self.id.clone();
                 let zone = slug.to_string();
                 tokio::spawn(async move {
@@ -427,14 +490,23 @@ impl IrrigationController for MqttCommand {
             .filter(|(_, cmd)| cmd.state_topic.is_some())
             .map(|(slug, _)| ZoneRuntimeStatus {
                 slug: slug.clone(),
-                running: running.get(slug).copied().unwrap_or(false),
+                running: running
+                    .get(slug)
+                    .map(|state| state.running)
+                    .unwrap_or(false),
                 remaining_s: None,
                 last_run_epoch: None,
-                running_known: true,
+                running_known: reachable && running.get(slug).is_some_and(|state| state.known),
             })
             .collect();
 
+        let flow_gpm = if reachable {
+            *self.shared.flow_gpm.lock().await
+        } else {
+            None
+        };
         Ok(ControllerStatus {
+            observed_epoch: None,
             reachable,
             master_enabled: None,
             water_level_pct: None,
@@ -444,12 +516,8 @@ impl IrrigationController for MqttCommand {
             // Only surface flow while the broker link is up; a disconnect
             // clears it, but gate here too so a value can never read as "live"
             // when we can't be receiving updates.
-            flow_gpm: if reachable {
-                *self.shared.flow_gpm.lock().await
-            } else {
-                None
-            },
-            flow_connected: self.config.flow_topic.is_some(),
+            flow_gpm,
+            flow_connected: flow_gpm.is_some(),
             firmware: None,
         })
     }
@@ -530,6 +598,44 @@ mod tests {
             .any(|z| z.state_topic.is_some()));
     }
 
+    /// With no broker on the other end, a stop is not a success: the
+    /// reaper keeps the deadline row and retries. A run is refused for
+    /// the same reason; a valve nobody can reach must not be "started".
+    #[tokio::test]
+    async fn a_stop_into_a_disconnected_broker_is_a_transport_error() {
+        let c = MqttCommand::new("mq", cfg());
+        let zone = c.config.zone_command_map.keys().next().unwrap().clone();
+        let err = c.stop_zone(&zone).await.unwrap_err();
+        assert!(
+            matches!(err, ControllerError::Transport(ref m) if m.contains("disconnected")),
+            "{err:?}"
+        );
+        let err = c.stop_all().await.unwrap_err();
+        assert!(matches!(err, ControllerError::Transport(_)), "{err:?}");
+        let err = c.run_zone(&zone, 60).await.unwrap_err();
+        assert!(matches!(err, ControllerError::Transport(_)), "{err:?}");
+    }
+
+    /// The device saying "offline" on its availability topic is the same
+    /// answer, even with the broker connected.
+    #[tokio::test]
+    async fn a_device_reporting_offline_refuses_the_command() {
+        let c = MqttCommand::new("mq", cfg_stateful());
+        let zone = c.config.zone_command_map.keys().next().unwrap().clone();
+        *c.connected.lock().await = true;
+        *c.shared.available.lock().await = Some(false);
+        let err = c.stop_zone(&zone).await.unwrap_err();
+        assert!(
+            matches!(err, ControllerError::Transport(ref m) if m.contains("offline")),
+            "{err:?}"
+        );
+        *c.shared.available.lock().await = Some(true);
+        // Connected and available: the publish enqueues (no broker in
+        // tests, but the channel accepts it), which is the pre-existing
+        // behavior for a reachable device.
+        assert!(c.stop_zone(&zone).await.is_ok());
+    }
+
     #[tokio::test]
     async fn unknown_zone_errors() {
         let c = MqttCommand::new("mq", cfg());
@@ -543,6 +649,8 @@ mod tests {
         // channel and succeed locally. This verifies the on-publish +
         // shutoff-timer spawn path doesn't error or panic.
         let c = MqttCommand::new("mq", cfg());
+        // A connected broker, as far as the delivery check is concerned.
+        *c.connected.lock().await = true;
         let handle = c.run_zone("back_yard", 1).await.unwrap();
         assert_eq!(handle.planned_duration_s, 1);
         assert_eq!(
@@ -575,23 +683,27 @@ mod tests {
         let s = c.status().await.unwrap();
         let slugs: Vec<_> = s.zone_states.iter().map(|z| z.slug.clone()).collect();
         assert_eq!(slugs, vec!["back_yard".to_string()]);
-        // flow_topic configured -> flow_connected even before any message.
-        assert!(s.flow_connected);
+        assert!(!s.zone_states[0].running_known, "a topic is not a reading");
+        assert!(
+            !s.flow_connected,
+            "a configured topic is not meter evidence"
+        );
     }
 
     fn build_sub_meta(cfg: &MqttCommandConfig) -> SubMeta {
         // Mirror new()'s SubMeta construction without a broker.
-        let mut state: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        let mut state: HashMap<String, Vec<(String, String, String)>> = HashMap::new();
         for (slug, cmd) in &cfg.zone_command_map {
             if let Some(topic) = &cmd.state_topic {
                 let on_match = cmd
                     .state_on_payload
                     .clone()
                     .unwrap_or_else(|| cmd.on_payload.clone());
-                state
-                    .entry(topic.clone())
-                    .or_default()
-                    .push((slug.clone(), on_match));
+                state.entry(topic.clone()).or_default().push((
+                    slug.clone(),
+                    on_match,
+                    cmd.off_payload.clone(),
+                ));
             }
         }
         SubMeta {
@@ -634,18 +746,20 @@ mod tests {
         let meta = build_sub_meta(&cfg);
         let subs = meta.state.get(shared_topic).unwrap();
         assert_eq!(subs.len(), 2, "both zones map to the shared state topic");
-        let slugs: std::collections::BTreeSet<_> = subs.iter().map(|(s, _)| s.as_str()).collect();
+        let slugs: std::collections::BTreeSet<_> =
+            subs.iter().map(|(s, _, _)| s.as_str()).collect();
         assert!(slugs.contains("back_yard") && slugs.contains("front_lawn"));
     }
 
     #[test]
-    fn payload_is_on_is_trimmed_and_case_insensitive() {
-        assert!(payload_is_on("ON", "ON"));
-        assert!(payload_is_on(" on ", "ON"));
-        assert!(payload_is_on("on", "on"));
-        assert!(!payload_is_on("OFF", "ON"));
-        // Tasmota JSON state body is NOT destructured (documented limitation).
-        assert!(!payload_is_on("{\"POWER\":\"ON\"}", "ON"));
+    fn state_payloads_distinguish_idle_from_uninterpretable() {
+        for payload in ["ON", " on ", "on"] {
+            assert_eq!(classify_running(payload, "ON", "OFF"), Some(true));
+        }
+        assert_eq!(classify_running(" off ", "ON", "OFF"), Some(false));
+        for payload in ["", "unknown", "{\"POWER\":\"ON\"}"] {
+            assert_eq!(classify_running(payload, "ON", "OFF"), None);
+        }
     }
 
     #[test]
@@ -654,6 +768,44 @@ mod tests {
         assert_eq!(parse_flow("0"), Some(0.0));
         assert_eq!(parse_flow("nan-ish"), None);
         assert_eq!(parse_flow("{\"gpm\":3.5}"), None);
+        for payload in ["NaN", "inf", "-1"] {
+            assert_eq!(parse_flow(payload), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn reported_state_requires_a_parseable_message_on_the_current_connection() {
+        let c = MqttCommand::new("mq", cfg_stateful());
+        c._eventloop_handle.abort();
+        *c.connected.lock().await = true;
+        assert!(!c.status().await.unwrap().zone_states[0].running_known);
+        let mut reading = ReportedRunning::default();
+        reading.observe("ON", "ON", "OFF");
+        c.shared
+            .running
+            .lock()
+            .await
+            .insert("back_yard".into(), reading);
+        let state = c.status().await.unwrap().zone_states.remove(0);
+        assert!(state.running && state.running_known);
+        reading.observe("malformed", "ON", "OFF");
+        c.shared
+            .running
+            .lock()
+            .await
+            .insert("back_yard".into(), reading);
+        let state = c.status().await.unwrap().zone_states.remove(0);
+        assert!(state.running && !state.running_known);
+        reading.observe("OFF", "ON", "OFF");
+        c.shared
+            .running
+            .lock()
+            .await
+            .insert("back_yard".into(), reading);
+        let state = c.status().await.unwrap().zone_states.remove(0);
+        assert!(!state.running && state.running_known);
+        clear_stale_telemetry(&c.shared).await;
+        assert!(!c.status().await.unwrap().zone_states[0].running_known);
     }
 
     #[test]

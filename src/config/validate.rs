@@ -108,6 +108,43 @@ pub fn validate(cfg: &Config) -> ValidationReport {
         }
     }
 
+    // Two zones bound to one station on one controller. OpenSprinkler's
+    // status attributes the station to whichever slug the adapter meets
+    // first, so the second zone would be commanded on its own and never
+    // seen running: it waters twice and History shows once.
+    {
+        let default_id = cfg
+            .controllers
+            .iter()
+            .find(|c| c.default)
+            .or_else(|| cfg.controllers.first())
+            .map(|c| c.id.clone())
+            .unwrap_or_default();
+        let mut seen: std::collections::HashMap<(String, String), String> =
+            std::collections::HashMap::new();
+        for (slug, z) in &cfg.zones {
+            let station = z.controller_station.trim();
+            if station.is_empty() {
+                continue;
+            }
+            let controller = if z.controller_id.trim().is_empty() {
+                default_id.clone()
+            } else {
+                z.controller_id.trim().to_string()
+            };
+            if let Some(first) =
+                seen.insert((controller.clone(), station.to_string()), slug.clone())
+            {
+                r.error(
+                    "zone_station_duplicate",
+                    format!(
+                        "zones '{first}' and '{slug}' both bind station {station} on controller '{controller}'; the second would water on its own and never be seen running"
+                    ),
+                );
+            }
+        }
+    }
+
     // Exactly one default controller when two or more exist. The save gate
     // (loader::validate) hard-rejects a zero-default fleet, so Review must
     // surface the same field-level error instead of letting "Save and finish"
@@ -565,6 +602,26 @@ pub fn validate(cfg: &Config) -> ValidationReport {
         }
     }
 
+    // Two rainfall contracts cannot compete under the same source identity.
+    for source in &cfg.sources {
+        if let SourceKind::HaPassthrough(ha) = &source.source {
+            let keys: Vec<_> = ha
+                .field_map
+                .keys()
+                .map(|k| k.replace('_', "").to_ascii_lowercase())
+                .collect();
+            if keys
+                .iter()
+                .any(|k| matches!(k.as_str(), "rainlastminin" | "raininlastmin"))
+                && keys
+                    .iter()
+                    .any(|k| matches!(k.as_str(), "raintodayin" | "dailyrainin"))
+            {
+                r.error("ha_rain_mapping_conflict", format!("source '{}': choose Rain last minute OR Rain today; both supply the daily rain total", source.id));
+            }
+        }
+    }
+
     // WeatherKit is a multi-field credential, so it is NOT covered by the
     // single-secret block above. Its JWT is signed from FOUR pieces (key_id ->
     // `kid`, team_id -> `iss`, service_id -> `sub`, and the .p8 private key);
@@ -911,6 +968,27 @@ mod tests {
     }
 
     #[test]
+    fn ha_daily_and_minute_rain_mappings_are_mutually_exclusive() {
+        let mut cfg = base();
+        cfg.sources.push(serde_json::from_value(serde_json::json!({
+            "id": "ha", "kind": "ha_passthrough", "enabled": true, "priority": 50,
+            "config": {"base_url": "http://192.0.2.1:8123", "bearer_token": "fixture",
+                "field_map": {"rain_today_in": "sensor.daily", "RainLastMinIn": "sensor.minute"}}
+        })).unwrap());
+        assert!(validate(&cfg)
+            .errors
+            .iter()
+            .any(|e| e.code == "ha_rain_mapping_conflict"));
+        if let SourceKind::HaPassthrough(ha) = &mut cfg.sources[0].source {
+            ha.field_map.remove("rain_today_in");
+        }
+        assert!(!validate(&cfg)
+            .errors
+            .iter()
+            .any(|e| e.code == "ha_rain_mapping_conflict"));
+    }
+
+    #[test]
     fn default_config_fails_on_location() {
         let r = validate(&Config::default());
         assert!(!r.ok());
@@ -1156,6 +1234,31 @@ mod tests {
             .errors
             .iter()
             .any(|i| i.code == "controller_default_multiple"));
+    }
+
+    /// Two zones on one station of one controller are refused; the same
+    /// station on two controllers is fine.
+    #[test]
+    fn a_station_bound_twice_on_one_controller_is_an_error() {
+        let mut cfg = base();
+        cfg.controllers.push(dry_run_controller("a", true));
+        cfg.controllers.push(dry_run_controller("b", false));
+        cfg.zones.insert("front".into(), zone_json("a", "3"));
+        // Unbound resolves to the default, a.
+        cfg.zones.insert("side".into(), zone_json("", "3"));
+        cfg.zones.insert("back".into(), zone_json("b", "3"));
+        let r = validate(&cfg);
+        let dups: Vec<&str> = r
+            .errors
+            .iter()
+            .filter(|i| i.code == "zone_station_duplicate")
+            .map(|i| i.detail.as_str())
+            .collect();
+        assert_eq!(dups.len(), 1, "{dups:?}");
+        assert!(
+            dups[0].contains("'front'") && dups[0].contains("'side'"),
+            "{dups:?}"
+        );
     }
 
     fn dry_run_controller(id: &str, default: bool) -> ControllerEntry {

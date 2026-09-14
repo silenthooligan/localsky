@@ -77,15 +77,13 @@ somewhere else or it will stop having an effect with nothing to show for it:**
   [api.md](api.md#irrigation-control-endpoints)).
 
 Once you have repointed anything that wrote them, deleting the helpers is safe
-and changes nothing. Two exceptions. On a deployment with no persistence
-database mounted, the four control helpers were never taken over and are still
-deciding; the migration notice names them if that is your install, and you
-should not delete those until `/data` is mounted and LocalSky has restarted.
-And on a deployment with no `localsky.toml`, one zoned by `LOCALSKY_ZONES`
-alone, the migration has nowhere to record itself and does not run: all seven
-helpers are still deciding exactly as before, LocalSky logs that once at
-start, and the notice says so on screen. Finishing the setup wizard writes the
-file, and the migration runs on its own after that.
+and changes nothing. As of 0.9.0 LocalSky reads none of the seven on any
+install: the one-time migration pass that copied their values across is gone
+along with the reads it gated. If your install never ran that pass (it
+upgraded straight from a release before 0.7.22, or ran without a persistence
+database), the values those helpers held did not carry over. Set the pause,
+the one-day override, dry run and the three thresholds in LocalSky; the
+migration notice names any control that was never recorded.
 
 Some specifics worth knowing:
 
@@ -158,7 +156,8 @@ Some specifics worth knowing:
   backup restore is where that would have been worst, because the restored
   config takes effect immediately while the restored database only loads at
   the next restart.
-- The record of what happened is in `localsky.toml` under `[[ha_adoption]]`,
+- The record of what happened is in `localsky.ledger.toml` beside the
+  config (0.9.0 moved it there from `[[ha_adoption]]` in `localsky.toml`),
   permanently: entity, the value taken, the value it replaced, what the helper
   held if it had to be moved into range, and when.
 - **A power cut in the middle of the migration cannot lose a value.** The
@@ -173,22 +172,14 @@ Some specifics worth knowing:
 - **A zone's soil sensor.** A zone you pointed at a Home Assistant entity
   still reads that entity. That is a sensor you named, not a decision being
   outsourced.
-- **On one install shape only, the four legacy soil names.** An install
-  whose zones come from `LOCALSKY_ZONES` with no `localsky.toml` still reads
-  `sensor.<zone>_soil_moisture` and
-  `input_number.irrigation_<zone>_saturation_pct` for the zone names
-  `back_yard`, `front_yard`, `side_yard` and `back_yard_shrubs`, exactly as
-  the previous release did there, and for no other zone. An install with
-  zones in `localsky.toml` never made those reads.
-- **Nine legacy `sensor.open_meteo_*` REST sensors**, at the bottom of the
-  forecast ladder, used only when no configured source owns the field:
-  `rain_today`, `rain_tomorrow`, `rain_3day`, `eto_today`, `eto_tomorrow`,
-  `eto_3day_avg`, `temp_max_today`, `temp_min_today`, `humidity_mean_today`.
-  If you have them and no rain gauge, keep `sensor.open_meteo_rain_today` in
-  particular: nothing in LocalSky reads today's modelled rain from its own
-  forecast yet, so deleting it drops today's rain to 0.00 and stops firing the
-  rain skip. Retiring these needs a new native reading rather than a
-  migration.
+
+That is the whole list. Two reads that older releases documented here are
+gone in 0.9.0: the four legacy soil names (`sensor.<zone>_soil_moisture` for
+`back_yard`, `front_yard`, `side_yard` and `back_yard_shrubs`) went with the
+environment-variable zone list they served, and the nine
+`sensor.open_meteo_*` REST sensors are not consulted because every forecast
+figure, today's modelled rain included, now comes from LocalSky's own
+forecast. You can delete all of them.
 
 ## Upgrading to 0.7.22: your zones may start watering
 
@@ -240,9 +231,6 @@ every zone carries a target you set. On a Home Assistant deployment LocalSky
 also logs a warning naming those zones the first time after a start that it
 plans a run for one, and sends one push notification to subscribed devices.
 
-This applies the same way to an install zoned by the `LOCALSKY_ZONES`
-environment variable with no `localsky.toml`: those zones now plan from the
-same inferred defaults rather than publishing zero planned minutes.
 
 ## Phase 1: Stand LocalSky up next to what you have
 
@@ -255,9 +243,10 @@ Nothing breaks in this phase; you're adding, not replacing.
    hardware; both can watch it at once.
 3. **Sensors:** if some sensors only exist in HA (a Zigbee soil probe, a
    Z-Wave rain gauge), add an HA passthrough source (kind =
-   `"ha_passthrough"`) and map those entities. Everything else (Tempest,
-   Ecowitt, forecast models) comes in natively. See
-   [sensors.md](sensors.md) for a worked example.
+   `"ha_passthrough"`) and map those entities. Supported hardware can also be
+   read directly. If HA already reads your Tempest, choose the
+   [HA WeatherFlow path below](#keeping-weatherflow-in-home-assistant), especially
+   when both applications share a host. See [sensors.md](sensors.md) for mappings.
 4. Install the **LocalSky integration** in HA, following
    [hacs.md](hacs.md): search for LocalSky in HACS and install it. One
    gotcha: if your LocalSky has an owner account, create an API token in
@@ -265,6 +254,64 @@ Nothing breaks in this phase; you're adding, not replacing.
    because the config flow asks for it.
    After that, it discovers the instance on your network; entities
    appear immediately.
+
+### Keeping WeatherFlow in Home Assistant
+
+LocalSky can use HA's WeatherFlow sensor readings while HA keeps receiving
+Tempest broadcasts. The WeatherFlow integration reads the station; LocalSky's
+**HA passthrough** source reads its sensor entities through HA's REST API.
+The optional LocalSky integration in HA exports LocalSky's results in the
+opposite direction. Do not map those LocalSky exports back into its inputs.
+
+1. In **Settings > Devices**, disable or remove LocalSky's Tempest UDP source.
+   Its socket closes on the next configuration check, normally within 15 seconds.
+   This also persists across restart; LocalSky does not require a direct listener.
+2. If HA's WeatherFlow integration failed because the port was occupied, reload
+   that integration after LocalSky releases it. Confirm HA's station sensors update.
+3. Add an **HA passthrough** source in LocalSky. Enter the HA base URL and a
+   long-lived token. Use **Field mappings** to select each reading and enter
+   the corresponding WeatherFlow sensor entity ID. HA's declared units are
+   converted automatically; do not convert them a second time.
+4. In **Settings > Devices**, find **Which source provides each reading** and
+   choose that HA source for the desired readings.
+   Per-reading preferences and ordered fallbacks express your intent directly.
+   The configured source priority controls automatic ordering among eligible
+   sources. The generic add-source form starts at **50**; legacy environment
+   synthesis uses **30** for HA. Existing priorities are preserved. A particular
+   number is not required to enable HA, and a forecast fill cannot displace a
+   fresh live reading just because its numeric priority is higher.
+5. Restart LocalSky after saving the changed sources. A newly added HA connection
+   starts at boot; the restart also clears the source-change watering hold.
+6. Keep a forecast provider enabled. HA passthrough polls current sensor states
+   every **30 seconds** and does not import forecasts or the full native event stream.
+
+HA being reachable does not make an old sensor reading fresh. LocalSky preserves
+each entity's `last_reported` timestamp, including unchanged values that HA reports
+again. If an older HA version omits that field, it uses `last_updated` conservatively.
+Missing, invalid, future-dated or restored states are not current observations.
+The configured source age limit determines when another source or a watering hold
+takes over. A new temperature report cannot refresh an old rain or soil reading.
+
+**Map WeatherFlow precipitation to Rain last minute.** HA's local WeatherFlow
+sensor reports the preceding minute's accumulation. LocalSky converts its units,
+adds each observation once and restores today's recorded minutes after restart.
+WeatherFlow's `last_reset` identifies the physical report; repeated HA polls or
+republishing that state cannot count it again. Totals stay separate for each
+source and reset at midnight in LocalSky's configured timezone.
+[HA documents the precipitation interval](https://www.home-assistant.io/integrations/weatherflow/).
+
+Use **Rain today** only for an entity that already supplies a daily total; choose
+one rain mapping per source. LocalSky cannot reconstruct minute reports missed
+while it or HA was offline. Accumulation starts with reports actually received,
+so an existing daily-total entity remains useful when upstream outage recovery
+is needed. Predicted rain stays separate from measured rain. For sustained wind,
+map WeatherFlow's wind average; its wind speed entity also receives rapid samples.
+
+Illuminance, lightning count and lightning distance can also be selected in
+Field mappings. These are sampled sensor values, not individual lightning events.
+Disabling LocalSky's native listener trades its direct update cadence and event
+coverage for the readings HA exposes; the engine uses the resulting evidence
+and freshness normally.
 
 ## Phase 2: Watch them disagree
 
@@ -316,7 +363,7 @@ LocalSky pieces still touch HA:
 | Piece | Behavior while HA is down |
 |---|---|
 | Direct controllers (OpenSprinkler, Rachio, Hydrawise, B-hyve, Rain Bird, MQTT) | Unaffected. LocalSky talks to the hardware itself; schedules run normally. |
-| HA passthrough source (kind = `"ha_passthrough"`) | LocalSky polls HA's `/api/states` every 30 seconds. When HA stops answering, the source is flagged unreachable and stops producing readings: the mapped fields simply stop updating, and the engine keeps computing from its remaining sources (your station and forecast models). A zone whose soil probe is an HA entity reads as probe offline until HA returns; run sizing is unaffected, because the weekly water balance never reads a probe. |
+| HA passthrough source (kind = `"ha_passthrough"`) | LocalSky polls HA's `/api/states` every 30 seconds. A request failure marks the source unreachable. Sensor report times remain independent of HTTP success, so frozen values expire under the source's age limit. Other configured sources can supply the missing fields. Missing required weather or an unavailable configured soil probe can hold watering; the displayed reason explains which evidence is missing. |
 | `ha_service_call` controller | Every valve command is an HTTP call into HA. With HA down the dispatch fails: LocalSky logs the failure, abandons that zone's remaining cycle segments, moves on to the next zone, and does not retry until the next scheduled window. Nothing waters through this controller during the outage, which is exactly why this guide moves you onto a direct controller. |
 
 ## Phase 4: Clean up Home Assistant

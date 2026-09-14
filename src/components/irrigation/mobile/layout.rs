@@ -7,8 +7,8 @@
 // carries the same tuning strip as desktop.
 
 use crate::components::irrigation::mobile::now::MobileNow;
-use crate::ha::snapshot::IrrigationSnapshot;
 use crate::history::types::TuningReport;
+use crate::model::IrrigationSnapshot;
 use leptos::prelude::*;
 
 #[component]

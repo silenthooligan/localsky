@@ -35,8 +35,13 @@ pub mod validate;
 
 // The disk. TOML reads and atomic writes, and the first-run draft state
 // machine that persists one. Server only.
+pub mod ledger;
 #[cfg(feature = "ssr")]
 pub mod loader;
+#[cfg(feature = "ssr")]
+pub mod migrate;
+#[cfg(feature = "ssr")]
+pub mod restore;
 #[cfg(feature = "ssr")]
 pub mod store;
 #[cfg(feature = "ssr")]

@@ -1,77 +1,12 @@
-// Interactive control surfaces for the irrigation page. All buttons,
-// sliders, toggles, and number inputs POST to /api/irrigation/action
-// with a {"kind":"...", ...} JSON body. The Axum handler turns that
-// into an HA service call.
-//
-// Each editable control owns a local signal initialised from the
-// first SSR snapshot. The display reads from local, NOT from snap,
-// so dragging a slider or typing in a number input feels instant.
-// On commit (slider release / input blur / toggle click), local is
-// already the source of truth and the action POST tells HA to catch
-// up. The 10s refresher cycle's eventual snap arrival is a no-op
-// (same value). External-to-the-dashboard HA changes won't reflect
-// until page refresh, acceptable for thresholds set once a season.
+// Control surfaces for the irrigation page: Stop all, the rain delay,
+// and the sticky overrides. Each POSTs to /api/irrigation/action with a
+// {"kind": ...} body; the server writes LocalSky's own control store
+// and the next snapshot reflects it. Thresholds are edited under
+// Settings > Skip rules, nowhere else.
 
-use crate::components::units_fmt::{
-    depth_unit, f_to_c, in_to_mm, mph_to_kph, temp_unit, use_unit_prefs, wind_unit, UnitPrefs,
-};
-use crate::ha::snapshot::IrrigationSnapshot;
+use crate::model::IrrigationSnapshot;
 use leptos::prelude::*;
 use serde_json::json;
-
-/// Which physical quantity a threshold row measures, so the editable
-/// control can convert its value + bounds to the user's display unit
-/// while still committing the engine's internal (imperial) value.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ThresholdKind {
-    /// Internal unit mph (`max_wind_mph`).
-    Wind,
-    /// Internal unit °F (`min_temp_f`).
-    Temp,
-    /// Internal unit inches (`rain_skip_in`).
-    Depth,
-}
-
-impl ThresholdKind {
-    /// Stored (internal) value -> display value for the current prefs.
-    fn to_display(self, stored: f64, p: UnitPrefs) -> f64 {
-        match self {
-            ThresholdKind::Wind if p.wind_metric => mph_to_kph(stored),
-            ThresholdKind::Temp if p.temp_c => f_to_c(stored),
-            ThresholdKind::Depth if p.rain_mm => in_to_mm(stored),
-            _ => stored,
-        }
-    }
-
-    /// Display (edited) value -> stored (internal) value for the current prefs.
-    fn to_stored(self, display: f64, p: UnitPrefs) -> f64 {
-        match self {
-            ThresholdKind::Wind if p.wind_metric => display / 1.609_344,
-            ThresholdKind::Temp if p.temp_c => display * 9.0 / 5.0 + 32.0,
-            ThresholdKind::Depth if p.rain_mm => display / 25.4,
-            _ => display,
-        }
-    }
-
-    /// Display-unit label for the current prefs.
-    fn unit_label(self, p: UnitPrefs) -> &'static str {
-        match self {
-            ThresholdKind::Wind => wind_unit(p),
-            ThresholdKind::Temp => temp_unit(p),
-            ThresholdKind::Depth => depth_unit(p),
-        }
-    }
-
-    /// Whether the display unit is the metric one (used to widen the
-    /// edit decimals so a converted depth like 1.27mm isn't truncated).
-    fn is_metric(self, p: UnitPrefs) -> bool {
-        match self {
-            ThresholdKind::Wind => p.wind_metric,
-            ThresholdKind::Temp => p.temp_c,
-            ThresholdKind::Depth => p.rain_mm,
-        }
-    }
-}
 
 /// Big "Stop All Zones" panel. Hot-red claymorphic surface so it's
 /// unmistakable. Desktop: single-tap. Mobile (is_mobile context = true):
@@ -82,9 +17,30 @@ pub fn StopAllPanel(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     use crate::components::irrigation::mobile::stop_confirm::StopAllConfirm;
 
     let is_mobile = use_context::<RwSignal<bool>>();
-    let any_running = move || snap.get().zones.iter().any(|z| z.running);
-    let running_count =
-        Signal::derive(move || snap.get().zones.iter().filter(|z| z.running).count());
+    // Confirmed running, or commanded on by LocalSky with no readback to
+    // confirm it. A controller that cannot report state must not make
+    // the UI claim water is moving on its own; a valve LocalSky opened
+    // on one is a different matter, and Stop must reach it.
+    let any_running = move || {
+        snap.get()
+            .zones
+            .iter()
+            .any(|z| z.is_running_or_unconfirmed())
+    };
+    let running_count = Signal::derive(move || {
+        snap.get()
+            .zones
+            .iter()
+            .filter(|z| z.is_running_or_unconfirmed())
+            .count()
+    });
+    let unconfirmed_count = Signal::derive(move || {
+        snap.get()
+            .zones
+            .iter()
+            .filter(|z| z.run_state() == crate::model::RunState::Unconfirmed)
+            .count()
+    });
 
     let confirm_open: RwSignal<bool> = RwSignal::new(false);
 
@@ -111,28 +67,37 @@ pub fn StopAllPanel(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                     <p class="stop-all-help">
                         {move || {
                             let n = running_count.get();
+                            let u = unconfirmed_count.get();
+                            let note = if u > 0 {
+                                format!(
+                                    " {u} of them on a controller that cannot confirm; LocalSky commanded it on and this closes it."
+                                )
+                            } else {
+                                String::new()
+                            };
                             match n {
                                 0 => "All zones idle. Arms by itself the moment anything runs.".to_string(),
-                                1 => "1 zone is running. Stops it instantly.".to_string(),
-                                n => format!("{n} zones are running. Stops every active station instantly."),
+                                1 => format!("1 zone is running. Stops it instantly.{note}"),
+                                n => format!("{n} zones are running. Stops every active station instantly.{note}"),
                             }
                         }}
                     </p>
                 </div>
             </div>
-            <button
-                class="stop-all-btn"
-                on:click=on_click
-                disabled=move || !any_running()
-            >
+            <crate::components::ui::Button
+    variant="danger-solid"
+    size="md"
+    on_click=Callback::new(on_click)
+    disabled=Signal::derive(move || !any_running())
+    class="stop-all-btn">
                 "STOP ALL ZONES"
-            </button>
+            </crate::components::ui::Button>
             <StopAllConfirm visible=confirm_open running_count/>
         </section>
     }
 }
 
-/// P2-7: Rain Delay one-tap. The category's most-used control: pause ALL
+/// Rain Delay one-tap. The category's most-used control: pause ALL
 /// watering for a preset (or custom) number of hours, then resume automatically.
 /// Wraps the existing timed vacation pause (`set_pause_until` / `clear_pause_until`),
 /// and when a delay is active shows a live countdown chip + Cancel instead of the
@@ -197,22 +162,34 @@ pub fn RainDelayPanel(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                     view! {
                         <div class="rain-delay__row">
                             <span class="rain-delay__chip">{time_left}</span>
-                            <button
-                                type="button"
-                                class="rain-delay__cancel"
-                                on:click=cancel
-                            >
+                            <crate::components::ui::Button
+    variant="ghost"
+    size="sm"
+    on_click=Callback::new(cancel)
+    class="rain-delay__cancel">
                                 "Cancel"
-                            </button>
+                            </crate::components::ui::Button>
                         </div>
                     }
                     .into_any()
                 } else {
                     view! {
                         <div class="rain-delay__row">
-                            <button type="button" class="rain-delay__btn" on:click=move |_| set_hours(24)>"24h"</button>
-                            <button type="button" class="rain-delay__btn" on:click=move |_| set_hours(48)>"48h"</button>
-                            <button type="button" class="rain-delay__btn" on:click=move |_| set_hours(72)>"72h"</button>
+                            <crate::components::ui::Button
+    variant="secondary"
+    size="sm"
+    on_click=Callback::new(move |_| set_hours(24))
+    class="rain-delay__btn">"24h"</crate::components::ui::Button>
+                            <crate::components::ui::Button
+    variant="secondary"
+    size="sm"
+    on_click=Callback::new(move |_| set_hours(48))
+    class="rain-delay__btn">"48h"</crate::components::ui::Button>
+                            <crate::components::ui::Button
+    variant="secondary"
+    size="sm"
+    on_click=Callback::new(move |_| set_hours(72))
+    class="rain-delay__btn">"72h"</crate::components::ui::Button>
                             <input
                                 type="number"
                                 class="rain-delay__custom"
@@ -223,7 +200,11 @@ pub fn RainDelayPanel(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                                 prop:value=move || custom.get()
                                 on:input=move |ev| custom.set(event_target_value(&ev))
                             />
-                            <button type="button" class="rain-delay__btn" on:click=apply_custom>"Set"</button>
+                            <crate::components::ui::Button
+    variant="secondary"
+    size="sm"
+    on_click=Callback::new(apply_custom)
+    class="rain-delay__btn">"Set"</crate::components::ui::Button>
                         </div>
                     }
                     .into_any()
@@ -242,12 +223,73 @@ fn override_action(zone: &Option<String>, mode: &str) -> serde_json::Value {
     }
 }
 
+/// The page owns override requests and their confirmation, because zone cards
+/// are replaced on each snapshot. An open confirmation and an in-flight action
+/// must outlive those cards. The dialog also sits outside their clipped bounds.
+#[derive(Clone, Copy)]
+struct OverrideActions {
+    saving: RwSignal<bool>,
+    choice: RwSignal<Option<(Option<String>, String)>>,
+    force_target: RwSignal<Option<String>>,
+    force_open: RwSignal<bool>,
+    request: Callback<(Option<String>, String)>,
+}
+
+pub(crate) fn provide_override_actions() -> impl IntoView {
+    let saving = RwSignal::new(false);
+    let choice = RwSignal::new(None::<(Option<String>, String)>);
+    let force_target = RwSignal::new(None::<String>);
+    let force_open = RwSignal::new(false);
+    let toast = crate::components::ui::use_toast();
+    let done = Callback::new(move |result: Result<(), String>| {
+        saving.set(false);
+        if let Err(e) = result {
+            choice.set(None);
+            toast.error(format!("Couldn't set override: {e}"));
+        }
+    });
+    let request = Callback::new(move |(zone, mode): (Option<String>, String)| {
+        if saving.get_untracked() {
+            return;
+        }
+        saving.set(true);
+        choice.set(Some((zone.clone(), mode.clone())));
+        post_action_then(override_action(&zone, &mode), done);
+    });
+    provide_context(OverrideActions {
+        saving,
+        choice,
+        force_target,
+        force_open,
+        request,
+    });
+    view! {
+        <crate::components::ui::ConfirmSheet
+            visible=force_open
+            title="Force scheduled watering?"
+            body=Signal::derive(move || {
+                let scope = force_target.get().map(|slug| format!("zone {slug}"))
+                    .unwrap_or_else(|| "the yard".to_string());
+                format!(
+                    "Force scheduled watering for {scope} despite rain, soil, and condition-rule recommendations. \
+                     This can overwater plants and waste water. Safety checks, watering restrictions, \
+                     active holds, and script rules still apply. It stays on until you choose Auto; no valve starts now."
+                )
+            })
+            confirm_label=Signal::derive(|| "Enable Force".to_string())
+            danger=true
+            on_confirm=Callback::new(move |()| request.run((force_target.get_untracked(), "run".to_string())))
+        />
+    }
+}
+
 /// Sticky override segmented control: Auto / Skip / Force. Drives the global
 /// override (`zone = None`, rendered as a titled panel on the irrigation page)
 /// or a single zone's override (`zone = Some(slug)`, rendered compact inside a
-/// zone card). Sticky: the choice persists until changed. "Force" overrides
-/// every skip condition for the next scheduled run; the schedule still decides
-/// WHEN. A zone override beats the global one.
+/// zone card). Sticky until changed: Force bypasses rain/soil/condition
+/// recommendations, while safety gates, restrictions, operator holds, and
+/// scripts remain binding.
+/// The schedule still decides when to run; arming Force does not start a valve.
 #[component]
 pub fn OverrideControl(
     /// Current mode from the snapshot ("auto" | "skip" | "run"); the control
@@ -260,82 +302,95 @@ pub fn OverrideControl(
     // Normalize the empty default-snapshot value (pre-SSE hydrate frame) to
     // "auto" so a segment is always highlighted, never a blank control.
     let norm = |s: String| if s.is_empty() { "auto".to_string() } else { s };
-    let (mode, set_mode) = signal(norm(current.get_untracked()));
-    let user_touched = RwSignal::new(false);
     let compact = zone.is_some();
-
-    // Follow the server value until first interaction, then stop fighting.
+    let actions = expect_context::<OverrideActions>();
+    let target = StoredValue::new(zone);
+    let mode = Signal::derive(move || {
+        actions
+            .choice
+            .get()
+            .filter(|(zone, _)| *zone == target.get_value())
+            .map(|(_, mode)| mode)
+            .unwrap_or_else(|| norm(current.get()))
+    });
+    // After the request finishes, the next snapshot owns the display again.
+    // Do not wait for an exact echo: another device may already have changed
+    // it back before we receive that echo.
     Effect::new(move |_| {
-        let server = current.get();
-        if !user_touched.get_untracked() {
-            set_mode.set(norm(server));
+        let _ = current.get();
+        if !actions.saving.get_untracked()
+            && actions
+                .choice
+                .get_untracked()
+                .is_some_and(|(zone, _)| zone == target.get_value())
+        {
+            actions.choice.set(None);
         }
     });
-
-    let toast = crate::components::ui::use_toast();
-    let save_done = Callback::new(move |result: Result<(), String>| {
-        if let Err(e) = result {
-            // Optimistic choice didn't stick: roll back + re-arm the follow.
-            user_touched.set(false);
-            set_mode.set(current.get_untracked());
-            toast.error(format!("Couldn't set override: {e}"));
-        }
-    });
-
-    let z_skip = zone.clone();
-    let z_run = zone.clone();
-    let z_auto = zone.clone();
     let choose_auto = move |_| {
-        user_touched.set(true);
-        set_mode.set("auto".to_string());
-        post_action_then(override_action(&z_auto, "auto"), save_done);
+        actions
+            .request
+            .run((target.get_value(), "auto".to_string()));
     };
     let choose_skip = move |_| {
-        user_touched.set(true);
-        set_mode.set("skip".to_string());
-        post_action_then(override_action(&z_skip, "skip"), save_done);
-    };
-    let choose_run = move |_| {
-        user_touched.set(true);
-        set_mode.set("run".to_string());
-        post_action_then(override_action(&z_run, "run"), save_done);
+        actions
+            .request
+            .run((target.get_value(), "skip".to_string()));
     };
 
     let is = move |m: &'static str| mode.get() == m;
     let seg = view! {
         <div class="override-seg" role="group" aria-label="Irrigation override">
-            <button
-                type="button"
-                class="override-seg__btn"
-                class:is-active=move || is("auto")
-                on:click=choose_auto
-            >"Auto"</button>
-            <button
-                type="button"
-                class="override-seg__btn override-seg__btn--skip"
-                class:is-active=move || is("skip")
-                on:click=choose_skip
-            >"Skip"</button>
-            <button
-                type="button"
-                class="override-seg__btn override-seg__btn--run"
-                class:is-active=move || is("run")
-                on:click=choose_run
-            >"Force"</button>
+            <crate::components::ui::Button
+    variant="secondary"
+    size="sm"
+    aria_pressed=Signal::derive(move || is("auto").to_string())
+    disabled=Signal::derive(move || actions.saving.get())
+    on_click=Callback::new(choose_auto)
+    class=Signal::derive(move || format!("override-seg__btn{}", if is("auto") { " is-active" } else { "" }))>"Auto"</crate::components::ui::Button>
+            <crate::components::ui::Button
+    variant="secondary"
+    size="sm"
+    aria_pressed=Signal::derive(move || is("skip").to_string())
+    disabled=Signal::derive(move || actions.saving.get())
+    on_click=Callback::new(choose_skip)
+    class=Signal::derive(move || format!("override-seg__btn override-seg__btn--skip{}", if is("skip") { " is-active" } else { "" }))>"Skip"</crate::components::ui::Button>
+            <crate::components::ui::Button
+    variant="secondary"
+    size="sm"
+    aria_pressed=Signal::derive(move || is("run").to_string())
+    disabled=Signal::derive(move || actions.saving.get())
+    on_click=Callback::new(move |_| {
+                    actions.force_target.set(target.get_value());
+                    actions.force_open.set(true);
+                })
+    class=Signal::derive(move || format!("override-seg__btn override-seg__btn--run{}", if is("run") { " is-active" } else { "" }))>"Force"</crate::components::ui::Button>
         </div>
     };
 
     if compact {
         // Zone card: just the segmented buttons (the card already names the zone).
-        view! { <div class="override-ctl override-ctl--compact">{seg}</div> }.into_any()
+        view! {
+            <div class="override-ctl override-ctl--compact">
+                {seg}
+                {move || is("run").then(|| view! {
+                    <p class="override-panel__help" role="status">
+                        "Force stays on until Auto. Safety checks and holds still apply."
+                    </p>
+                })}
+            </div>
+        }
+        .into_any()
     } else {
         // Irrigation page: a titled panel with a live explainer so the
         // override is unmistakable when active.
-        let status = move || match mode.get().as_str() {
+        let status = move || {
+            match mode.get().as_str() {
             "skip" => "Skipping every zone until you switch back to Auto.".to_string(),
-            "run" => "Forcing the next run past all skip conditions. Zones can still override."
+            "run" => "Force stays on until Auto, bypassing rain, soil, and condition-rule recommendations. Safety checks, restrictions, holds, and script rules still apply."
                 .to_string(),
-            _ => "Following the engine. Set Skip or Force to take manual control.".to_string(),
+            _ => "Following the schedule. Set Skip or Force to take manual control.".to_string(),
+        }
         };
         view! {
             <section class="override-panel" class:override-panel--active=move || !is("auto")>
@@ -352,272 +407,6 @@ pub fn OverrideControl(
             </section>
         }
         .into_any()
-    }
-}
-
-/// Skip-threshold tuners + vacation/dry-run toggles. Each control
-/// follows the server-side value (via snap) until the user first
-/// interacts with it; from that point on, local is authoritative.
-/// Page refresh re-arms the follow.
-#[component]
-pub fn ThresholdsPanel(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
-    // Per-device display-unit preference. Read inside the rows so the
-    // threshold value, bounds, and unit label all re-render when the
-    // pref changes (or when localStorage loads post-hydration).
-    let prefs = use_unit_prefs();
-    view! {
-        <section class="thresholds">
-            <h3 class="thresholds-title">"Skip thresholds"</h3>
-
-            {view! {
-                <ThresholdControl
-                    label="Max wind"
-                    key="max_wind_mph"
-                    kind=ThresholdKind::Wind
-                    min=0.0
-                    max=30.0
-                    step=1.0
-                    decimals=0
-                    prefs
-                    current=Signal::derive(move || snap.get().skip_check.max_wind_mph)
-                />
-            }}
-            {view! {
-                <ThresholdControl
-                    label="Min temp"
-                    key="min_temp_f"
-                    kind=ThresholdKind::Temp
-                    min=20.0
-                    max=60.0
-                    step=1.0
-                    decimals=0
-                    prefs
-                    current=Signal::derive(move || snap.get().skip_check.min_temp_f)
-                />
-            }}
-            {view! {
-                <ThresholdControl
-                    label="Rain skip"
-                    key="rain_skip_in"
-                    kind=ThresholdKind::Depth
-                    min=0.0
-                    max=1.0
-                    step=0.05
-                    decimals=2
-                    prefs
-                    current=Signal::derive(move || snap.get().skip_check.rain_skip_in)
-                />
-            }}
-
-            <div class="toggle-row">
-                <ToggleControl
-                    key="irrigation_pause"
-                    label="Vacation pause"
-                    current=Signal::derive(move || snap.get().skip_check.is_paused)
-                />
-                <ToggleControl
-                    key="irrigation_dry_run"
-                    label="Dry-run"
-                    current=Signal::derive(move || snap.get().skip_check.is_dry_run)
-                />
-            </div>
-        </section>
-    }
-}
-
-/// One threshold row. Local signal mirrors `current` (the snap-
-/// derived server value) until the user first interacts; after
-/// that, local is authoritative and the snap-driven Effect early-
-/// exits. This handles the SSR-vs-hydrate gap where the WASM
-/// client's first read of snap returns `IrrigationSnapshot::default()`
-/// (all zeros) before SSE has populated the real values.
-#[component]
-fn ThresholdControl(
-    label: &'static str,
-    key: &'static str,
-    /// Physical quantity this row measures; drives display-unit
-    /// conversion of the value, bounds, and unit label.
-    kind: ThresholdKind,
-    min: f64,
-    max: f64,
-    step: f64,
-    decimals: usize,
-    /// Per-device display-unit preference (read from component scope).
-    prefs: Signal<UnitPrefs>,
-    current: Signal<f64>,
-) -> impl IntoView {
-    // `val` is always the engine's INTERNAL (imperial) value: the
-    // snapshot feeds it, the clamp uses the imperial min/max, and the
-    // set_threshold POST sends it as-stored. Conversion happens only at
-    // the input/slider display boundary below.
-    let (val, set_val) = signal(current.get_untracked());
-    let user_touched = RwSignal::new(false);
-
-    // Follow the server value until the user first touches the control.
-    Effect::new(move |_| {
-        let server = current.get();
-        if !user_touched.get_untracked() {
-            set_val.set(server);
-        }
-    });
-
-    // Format a DISPLAY-unit value for the number field. Metric units get
-    // an extra decimal so a converted bound (e.g. 0.05in -> 1.27mm) isn't
-    // rounded to nothing; imperial keeps the caller's decimals.
-    let fmt_value = move |v: f64, metric: bool| {
-        let d = if metric { decimals.max(1) } else { decimals };
-        match d {
-            0 => format!("{v:.0}"),
-            1 => format!("{v:.1}"),
-            2 => format!("{v:.2}"),
-            _ => format!("{v}"),
-        }
-    };
-
-    let toast = crate::components::ui::use_toast();
-    let save_done = Callback::new(move |result: Result<(), String>| {
-        if let Err(e) = result {
-            // Re-arm the server follow so the next snapshot restores the
-            // real value; the optimistic local edit didn't stick.
-            user_touched.set(false);
-            toast.error(format!("Couldn't save {label}: {e}"));
-        }
-    });
-    // `v` arrives in DISPLAY units from the input/slider; convert back to
-    // the internal unit, clamp against the internal bounds, then POST.
-    let commit = move |v: f64| {
-        let p = prefs.get_untracked();
-        let stored = kind.to_stored(v, p).clamp(min, max);
-        user_touched.set(true);
-        set_val.set(stored);
-        post_action_then(
-            json!({
-                "kind": "set_threshold",
-                "key": key,
-                "value": stored,
-            }),
-            save_done,
-        );
-    };
-    // Drag-in-progress (slider on:input): keep the local value live in
-    // the internal unit so the bound display tracks the thumb.
-    let drag = move |v: f64| {
-        let p = prefs.get_untracked();
-        user_touched.set(true);
-        set_val.set(kind.to_stored(v, p));
-    };
-
-    // Display-unit bounds + step, reactive to the unit preference.
-    let disp_min = move || kind.to_display(min, prefs.get());
-    let disp_max = move || kind.to_display(max, prefs.get());
-    // Convert the imperial step to the display unit so the slider keeps a
-    // proportional granularity; floor a metric depth step (e.g. ~1.27mm)
-    // to a clean 0.1 so the number spinner is usable.
-    let disp_step = move || {
-        let p = prefs.get();
-        if kind.is_metric(p) {
-            match kind {
-                ThresholdKind::Depth => 0.1,
-                _ => 1.0,
-            }
-        } else {
-            step
-        }
-    };
-    let disp_val = move || {
-        let p = prefs.get();
-        kind.to_display(val.get(), p)
-    };
-
-    view! {
-        <div class="threshold-row">
-            <label class="threshold-label">{label}</label>
-            <div class="threshold-input-pair">
-                <input
-                    type="number"
-                    class="num-clay"
-                    min=disp_min
-                    max=disp_max
-                    step=disp_step
-                    inputmode="decimal"
-                    prop:value=move || fmt_value(disp_val(), kind.is_metric(prefs.get()))
-                    on:change=move |ev| {
-                        if let Ok(v) = event_target_value(&ev).parse::<f64>() {
-                            commit(v);
-                        }
-                    }
-                />
-                <span class="threshold-unit">{move || kind.unit_label(prefs.get())}</span>
-            </div>
-            <input
-                type="range"
-                class="slider-clay"
-                min=disp_min
-                max=disp_max
-                step=disp_step
-                aria-label=move || format!("{label} ({})", kind.unit_label(prefs.get()))
-                prop:value=move || disp_val().to_string()
-                on:input=move |ev| {
-                    if let Ok(v) = event_target_value(&ev).parse::<f64>() {
-                        drag(v);
-                    }
-                }
-                on:change=move |ev| {
-                    if let Ok(v) = event_target_value(&ev).parse::<f64>() {
-                        commit(v);
-                    }
-                }
-            />
-        </div>
-    }
-}
-
-#[component]
-fn ToggleControl(key: &'static str, label: &'static str, current: Signal<bool>) -> impl IntoView {
-    let (is_on, set_is_on) = signal(current.get_untracked());
-    let user_touched = RwSignal::new(false);
-
-    // Same follow-until-touched pattern as the threshold sliders so
-    // the toggle reflects the real HA value once SSE arrives, then
-    // stops fighting the user once clicked.
-    Effect::new(move |_| {
-        let server = current.get();
-        if !user_touched.get_untracked() {
-            set_is_on.set(server);
-        }
-    });
-
-    let toast = crate::components::ui::use_toast();
-    let save_done = Callback::new(move |result: Result<(), String>| {
-        if let Err(e) = result {
-            // Roll the switch back to the server value and re-arm the
-            // follow; the optimistic flip didn't stick.
-            user_touched.set(false);
-            set_is_on.set(current.get_untracked());
-            toast.error(format!("Couldn't switch {label}: {e}"));
-        }
-    });
-    let on_click = move |_| {
-        let next = !is_on.get();
-        user_touched.set(true);
-        set_is_on.set(next);
-        post_action_then(json!({"kind":"toggle","key":key,"on":next}), save_done);
-    };
-    // A real <button role="switch"> so the toggle is reachable and
-    // operable from the keyboard (the old span had tabindex but no
-    // key handling, so Space/Enter did nothing). Matches ui::Toggle.
-    view! {
-        <div class="toggle-pair">
-            <label class="toggle-label">{label}</label>
-            <button
-                type="button"
-                role="switch"
-                aria-checked=move || if is_on.get() { "true" } else { "false" }
-                aria-label=label
-                class=move || if is_on.get() { "toggle-clay is-on" } else { "toggle-clay" }
-                on:click=on_click
-            ></button>
-        </div>
     }
 }
 

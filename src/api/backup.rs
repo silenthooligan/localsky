@@ -1,15 +1,24 @@
 // Backup and restore.
 //
-//   GET  /api/v1/backup            -> tar.gz: localsky.toml + irrigation.db
+//   GET  /api/v1/backup            -> tar.gz: localsky.toml +
+//                                     localsky.ledger.toml + irrigation.db
 //                                     (VACUUM INTO consistent copy) +
 //                                     manifest.json (version/schema/created)
 //   POST /api/v1/backup/restore    -> multipart upload of a bundle (or a
-//                                     bare localsky.toml). Config applies
-//                                     immediately through the normal
-//                                     snapshot machinery; a DB stages to
-//                                     <db>.restore and swaps at next boot.
-//   GET  /api/v1/backup/snapshots  -> the config_snapshots history (id +
-//                                     stamp) driving POST /config/rollback.
+//                                     bare localsky.toml). A config-only
+//                                     upload applies immediately through
+//                                     the normal snapshot machinery. A
+//                                     bundle with a database stages ALL of
+//                                     it (config, ledger, db) as
+//                                     <file>.restore with a durable marker.
+//                                     One boot coordinator verifies the full
+//                                     set before activating it; interrupted
+//                                     publication or activation refuses boot.
+//   GET  /api/v1/backup/snapshots  -> the config snapshot history, the
+//                                     same rows and the same `ts` keys as
+//                                     GET /config/snapshots, because it is
+//                                     the same on-disk history POST
+//                                     /config/rollback restores from.
 //
 // The bundle deliberately EXCLUDES /data/keys (VAPID private key) and
 // instance-id: restoring a config onto new hardware should mint a new
@@ -39,7 +48,7 @@ use tokio::sync::Mutex;
 use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::config::FileConfigStore;
-use crate::persistence::ConfigSnapshotStore;
+use crate::persistence::restore_probe::probe_localsky_db;
 use crate::ports::config_store::ConfigStore;
 
 /// Boot-time swap of a staged restore (<db>.restore) into place. Called
@@ -53,7 +62,10 @@ use crate::ports::config_store::ConfigStore;
 /// would be replayed into the freshly restored .db on first open,
 /// corrupting it. The staged file came from VACUUM INTO (or an upload
 /// of one), which is self-contained, so nothing is lost by deleting.
-pub fn apply_staged_restore(db_path: &str) -> std::io::Result<Option<String>> {
+// Legacy file-layout primitive used only by the tests below. Production boot
+// must use config::restore::activate_at_boot so all files share one marker.
+#[cfg(test)]
+fn apply_staged_restore(db_path: &str) -> std::io::Result<Option<String>> {
     let stage = format!("{db_path}.restore");
     if !std::path::Path::new(&stage).exists() {
         return Ok(None);
@@ -77,7 +89,6 @@ pub struct BackupApiState {
     pub cfg_store: Arc<FileConfigStore>,
     pub db: Option<Arc<Mutex<Connection>>>,
     pub db_path: String,
-    pub snapshots: Option<ConfigSnapshotStore>,
     /// Live runtime handles so a config-only restore HOT-APPLIES to the running
     /// engine (matching PUT /api/config), instead of only rewriting the file
     /// while the live WateringPolicy / schedules keep the pre-restore values.
@@ -109,6 +120,7 @@ const RESTORE_DECOMPRESSED_LIMIT: u64 = 1024 * 1024 * 1024;
 #[derive(Debug, Default)]
 struct BundleParts {
     config: Option<Vec<u8>>,
+    ledger: Option<Vec<u8>>,
     db: Option<Vec<u8>>,
     manifest: Option<Vec<u8>>,
 }
@@ -119,8 +131,8 @@ struct BundleParts {
 /// is checked against the budget via its header size FIRST (the declared
 /// size is attacker-controlled but tar reads never exceed it, so an oversized
 /// declaration fails fast with nothing inflated), and the actual read is
-/// clamped with take() as the belt-and-braces backstop. Unreadable entries
-/// are skipped, matching the old loop.
+/// clamped with take() as the belt-and-braces backstop. A truncated or
+/// duplicate part rejects the whole upload, never a partial restore.
 fn unpack_bundle(data: &[u8], remaining: &mut u64) -> Result<BundleParts, (StatusCode, String)> {
     use std::io::Read;
     let gz = flate2::read::GzDecoder::new(data);
@@ -142,7 +154,8 @@ fn unpack_bundle(data: &[u8], remaining: &mut u64) -> Result<BundleParts, (Statu
         )
     };
     let mut parts = BundleParts::default();
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.map_err(|e| (StatusCode::BAD_REQUEST, format!("bundle entry: {e}")))?;
         let path = entry
             .path()
             .map(|p| p.to_string_lossy().to_string())
@@ -152,52 +165,28 @@ fn unpack_bundle(data: &[u8], remaining: &mut u64) -> Result<BundleParts, (Statu
         }
         let mut buf = Vec::new();
         let mut limited = entry.take(remaining.saturating_add(1));
-        if limited.read_to_end(&mut buf).is_err() {
-            continue;
-        }
+        limited
+            .read_to_end(&mut buf)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("bundle read: {e}")))?;
         if buf.len() as u64 > *remaining {
             return Err(too_big());
         }
         *remaining -= buf.len() as u64;
-        match path.as_str() {
-            "localsky.toml" => parts.config = Some(buf),
-            "irrigation.db" => parts.db = Some(buf),
-            "manifest.json" => parts.manifest = Some(buf),
-            _ => {}
+        let slot = match path.as_str() {
+            "localsky.toml" => &mut parts.config,
+            "localsky.ledger.toml" => &mut parts.ledger,
+            "irrigation.db" => &mut parts.db,
+            "manifest.json" => &mut parts.manifest,
+            _ => continue,
+        };
+        if slot.replace(buf).is_some() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("duplicate bundle part: {path}"),
+            ));
         }
     }
     Ok(parts)
-}
-
-/// Schema probe for an uploaded database file: open it READ-ONLY and require
-/// the LocalSky migrations ledger (`schema_migrations`, created by M0001 in
-/// persistence::runner) to exist. The 16-byte magic only proves "some SQLite
-/// file"; without this probe any foreign .db swaps in at boot, HistoryDb::
-/// open then fails, and the instance comes up without persistence and with
-/// an EMPTY controller registry (no watering dispatches). Read-only open of
-/// a freshly written, sibling-less copy is safe for both delete-journal and
-/// WAL files and creates no -wal/-shm side files.
-fn probe_localsky_db(path: &str) -> Result<(), String> {
-    let conn = Connection::open_with_flags(
-        path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|e| format!("db is not readable as a SQLite database: {e}"))?;
-    let migrations: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schema_migrations'",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("db is not readable as a SQLite database: {e}"))?;
-    if migrations == 0 {
-        return Err(
-            "db is a SQLite file but not a LocalSky database (it has no schema_migrations \
-             table); upload the irrigation.db from a LocalSky backup bundle"
-                .into(),
-        );
-    }
-    Ok(())
 }
 
 pub fn router(state: BackupApiState) -> Router {
@@ -306,6 +295,12 @@ async fn get_backup(State(s): State<BackupApiState>) -> Response {
         Ok(raw) => Some(raw.into_bytes()),
         Err(_) => None,
     };
+    // The server-owned record beside it, so a restore onto new hardware
+    // carries the migration state and the seeding record with the config.
+    let ledger_toml: Option<Vec<u8>> = tokio::fs::read_to_string(s.cfg_store.ledger_path())
+        .await
+        .ok()
+        .map(String::into_bytes);
 
     let manifest = serde_json::json!({
         "service": "localsky",
@@ -346,6 +341,9 @@ async fn get_backup(State(s): State<BackupApiState>) -> Response {
             )?;
             if let Some(cfg) = &config_toml {
                 add("localsky.toml", cfg)?;
+            }
+            if let Some(l) = &ledger_toml {
+                add("localsky.ledger.toml", l)?;
             }
             if let Some(path) = &db_copy {
                 let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
@@ -430,63 +428,74 @@ async fn get_backup(State(s): State<BackupApiState>) -> Response {
         .into_response()
 }
 
-async fn post_restore(State(s): State<BackupApiState>, mut multipart: Multipart) -> Response {
-    let mut config_bytes: Option<Vec<u8>> = None;
-    let mut db_bytes: Option<Vec<u8>> = None;
-    let mut manifest_bytes: Option<Vec<u8>> = None;
-    // Request-wide decompression budget shared by every bundle field (see
-    // RESTORE_DECOMPRESSED_LIMIT): repeating the bundle field cannot mint a
-    // fresh budget per field.
-    let mut decompressed_budget: u64 = RESTORE_DECOMPRESSED_LIMIT;
-
-    while let Ok(Some(field)) = multipart.next_field().await {
-        let name = field.name().unwrap_or("").to_string();
-        let fname = field.file_name().unwrap_or("").to_string();
-        let Ok(data) = field.bytes().await else {
-            return err(StatusCode::BAD_REQUEST, "upload read failed");
-        };
-        match name.as_str() {
-            "bundle" => {
-                // tar.gz from GET /backup: unpack in memory, capped against
-                // gzip bombs (unpack_bundle).
-                match unpack_bundle(data.as_ref(), &mut decompressed_budget) {
-                    Ok(parts) => {
-                        if parts.config.is_some() {
-                            config_bytes = parts.config;
-                        }
-                        if parts.db.is_some() {
-                            db_bytes = parts.db;
-                        }
-                        if parts.manifest.is_some() {
-                            manifest_bytes = parts.manifest;
-                        }
-                    }
-                    Err((status, msg)) => return err(status, msg),
-                }
-            }
-            "config" => config_bytes = Some(data.to_vec()),
-            "db" => db_bytes = Some(data.to_vec()),
-            other => {
-                tracing::debug!(field = other, file = fname, "restore: ignoring field");
+fn merge_bundle_parts(target: &mut BundleParts, incoming: BundleParts) -> Result<(), String> {
+    for (name, slot, value) in [
+        ("config", &mut target.config, incoming.config),
+        ("ledger", &mut target.ledger, incoming.ledger),
+        ("db", &mut target.db, incoming.db),
+        ("manifest", &mut target.manifest, incoming.manifest),
+    ] {
+        if let Some(value) = value {
+            if slot.replace(value).is_some() {
+                return Err(format!("duplicate restore part: {name}"));
             }
         }
     }
+    Ok(())
+}
 
-    if config_bytes.is_none() && db_bytes.is_none() {
+async fn post_restore(State(s): State<BackupApiState>, mut multipart: Multipart) -> Response {
+    let mut parts = BundleParts::default();
+    let mut decompressed_budget = RESTORE_DECOMPRESSED_LIMIT;
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(e) => return err(StatusCode::BAD_REQUEST, format!("upload read: {e}")),
+        };
+        let name = field.name().unwrap_or("").to_string();
+        let Ok(data) = field.bytes().await else {
+            return err(StatusCode::BAD_REQUEST, "upload read failed");
+        };
+        let incoming = match name.as_str() {
+            "bundle" => match unpack_bundle(data.as_ref(), &mut decompressed_budget) {
+                Ok(parts) => parts,
+                Err((status, msg)) => return err(status, msg),
+            },
+            "config" => BundleParts {
+                config: Some(data.to_vec()),
+                ..Default::default()
+            },
+            "db" => BundleParts {
+                db: Some(data.to_vec()),
+                ..Default::default()
+            },
+            _ => continue,
+        };
+        if let Err(msg) = merge_bundle_parts(&mut parts, incoming) {
+            return err(StatusCode::BAD_REQUEST, msg);
+        }
+    }
+    if parts.config.is_none() && parts.db.is_none() {
         return err(
             StatusCode::BAD_REQUEST,
             "nothing to restore; send bundle=, config=, or db=",
         );
     }
 
-    let mut applied_config = false;
-    let mut config_restart: Option<crate::runtime::ConfigApplyOutcome> = None;
-    if let Some(bytes) = config_bytes {
-        let Ok(text) = String::from_utf8(bytes) else {
-            return err(StatusCode::UNPROCESSABLE_ENTITY, "config is not UTF-8");
-        };
-        let mut cfg: crate::config::schema::Config = match toml::from_str(&text) {
-            Ok(c) => c,
+    // Validate the ENTIRE upload before taking a writer lock or touching any
+    // live/staged file. Scratch probe files have unique names and drop guards;
+    // rejected uploads cannot replace an earlier accepted restore.
+    let config_text = match parts.config.as_deref() {
+        Some(bytes) => match std::str::from_utf8(bytes) {
+            Ok(text) => Some(text),
+            Err(_) => return err(StatusCode::UNPROCESSABLE_ENTITY, "config is not UTF-8"),
+        },
+        None => None,
+    };
+    let config = if let Some(text) = config_text {
+        let cfg: crate::config::schema::Config = match toml::from_str(text) {
+            Ok(cfg) => cfg,
             Err(e) => {
                 return err(
                     StatusCode::UNPROCESSABLE_ENTITY,
@@ -494,176 +503,265 @@ async fn post_restore(State(s): State<BackupApiState>, mut multipart: Multipart)
                 )
             }
         };
+        if cfg.schema_version > crate::config::schema::CURRENT_SCHEMA_VERSION {
+            return err(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "config schema is newer than this LocalSky supports",
+            );
+        }
         let report = crate::config::validate::validate(&cfg);
         if !report.ok() {
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(serde_json::json!({
-                    "error": "config_invalid",
-                    "validation": report,
+                    "error": "config_invalid", "validation": report,
                 })),
             )
                 .into_response();
         }
-        // Hold the read-modify-write guard the way PUT /api/config and the
-        // adoption commit do: without it this load/save can interleave with a
-        // concurrent whole-config writer and lose what that writer just wrote.
-        let _write_guard = s.cfg_store.begin_write().await;
-        // Snapshot the running config BEFORE overwrite so the hot-apply diff +
-        // restart-required set are computed against the pre-restore state.
-        let prev_cfg = s.cfg_store.load().await.ok();
-        // `ha_adoption` is SERVER-OWNED on this path too, and this is the path
-        // where losing it hurts most: the config HOT-APPLIES here, arc-swapping
-        // a rebuilt WateringPolicy, while the database is only STAGED for the
-        // next boot. Config and controls do NOT move together, so the correct
-        // control values sit unread in SQLite while the config decides.
-        //
-        // A pre-0.7.22 bundle carries no `[[ha_adoption]]`, and a config-only
-        // upload need not carry one either. Persisting that would un-retire all
-        // seven reads on the very next tick, against helpers the migration
-        // notice invited the owner to delete: the vacation pause falls to
-        // `.unwrap_or(0)`, both toggles to false, the one-day override to
-        // "none". The adoption pass is disarmed for the life of the process, so
-        // nothing re-marks them until a restart.
-        //
-        // Straight overwrite from the running config, matching `put_config`: a
-        // union would let an uploaded bundle inject a marker retiring a read no
-        // pass on THIS instance ever handled. `None` means there is no running
-        // config at all, a fresh instance being restored onto new hardware,
-        // where the bundle's own ledger is the only record of what happened and
-        // is kept.
-        //
-        // `seeded_source_ids` is the same class of ledger and rides across as a
-        // union, matching `post_rollback`: it records which forecast
-        // authorities were auto-seeded so a source the owner deleted is not
-        // re-added at the next boot, and dropping an id costs them that
-        // deletion rather than a watering decision.
-        //
-        // The carry-forward is conditional on this request NOT also staging a
-        // database. When it does, config and controls DO move together out of
-        // one bundle, and carrying the running ledger over a database that
-        // predates it is the mirror of the hazard above: the reads stay
-        // retired while `pause_until_epoch`, both toggles and the one-day
-        // override come back at their pre-migration defaults from the older
-        // database, so an adopted vacation pause is gone with nothing on
-        // screen and the helper still holding it is never read again. Letting
-        // the bundle's own ledger stand means the install reverts to its
-        // pre-migration state and migrates again from the helpers.
-        let staging_db = db_bytes.is_some();
-        if let Some(prev) = prev_cfg.as_ref() {
-            if !staging_db {
-                cfg.ha_adoption = prev.ha_adoption.clone();
-            }
-            for id in &prev.seeded_source_ids {
-                if !cfg.seeded_source_ids.contains(id) {
-                    cfg.seeded_source_ids.push(id.clone());
-                }
-            }
-        }
-        if let Err(e) = s.cfg_store.save(&cfg).await {
+        Some(cfg)
+    } else {
+        None
+    };
+    let ledger_text = match parts.ledger.as_deref() {
+        Some(bytes) => match std::str::from_utf8(bytes) {
+            Ok(text) => Some(text),
+            Err(_) => return err(StatusCode::UNPROCESSABLE_ENTITY, "ledger is not UTF-8"),
+        },
+        None => None,
+    };
+    let ledger = if let Some(text) = ledger_text {
+        let ledger = match toml::from_str::<crate::config::ledger::Ledger>(text) {
+            Ok(ledger) => ledger,
+            Err(_) => return err(StatusCode::UNPROCESSABLE_ENTITY, "ledger does not parse"),
+        };
+        if config.is_none() {
             return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("config save: {e}"),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "a bundled ledger requires its config",
             );
         }
-        applied_config = true;
-        // Hot-apply to the LIVE engine (matches PUT /api/config). Without this
-        // the file changed but the running WateringPolicy / skip thresholds /
-        // schedules / priorities / chains kept their pre-restore values until a
-        // manual restart, so a restored stricter-restriction or different-schedule
-        // config silently kept watering on the OLD rules while the settings UI
-        // showed the new ones. The returned outcome tells the caller which
-        // boot-bound parts (connections, zones, mode) still need a restart.
-        if let Some(h) = &s.runtime {
-            config_restart = Some(crate::runtime::apply_runtime_config(
-                h,
-                prev_cfg.as_ref(),
-                &cfg,
-            ));
-        }
-    }
-
-    let mut staged_db = false;
-    if let Some(bytes) = db_bytes {
-        // Cheap first gate: SQLite magic.
+        Some(ledger)
+    } else {
+        None
+    };
+    let probe_guard = if let Some(bytes) = parts.db.as_ref() {
         if !bytes.starts_with(b"SQLite format 3\0") {
             return err(StatusCode::UNPROCESSABLE_ENTITY, "db is not a SQLite file");
         }
-        // Schema probe: the magic only proves "some SQLite file", and
-        // apply_staged_restore swaps unconditionally at boot, so a wrong .db
-        // upload would boot the instance without persistence (and an empty
-        // controller registry). Write to a probe temp, verify it is a
-        // LocalSky database (probe_localsky_db), and only then rename into
-        // the boot-swap slot; a failed probe can never leave a foreign db
-        // staged.
-        let stage = format!("{}.restore", s.db_path);
-        let probe = format!("{}.restore-probe", s.db_path);
-        if let Err(e) = tokio::fs::write(&probe, &bytes).await {
-            return err(StatusCode::INTERNAL_SERVER_ERROR, format!("db stage: {e}"));
+        let probe = format!(
+            "{}.restore-probe-{}-{}",
+            s.db_path,
+            std::process::id(),
+            BACKUP_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let guard = TempFileGuard(probe.clone());
+        if let Err(e) = tokio::fs::write(&probe, bytes).await {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db probe write: {e}"),
+            );
         }
-        let probe_clone = probe.clone();
-        let verdict = tokio::task::spawn_blocking(move || probe_localsky_db(&probe_clone)).await;
+        let verdict = tokio::task::spawn_blocking(move || probe_localsky_db(&probe)).await;
         match verdict {
-            Ok(Ok(())) => {}
-            Ok(Err(msg)) => {
-                let _ = tokio::fs::remove_file(&probe).await;
-                return err(StatusCode::UNPROCESSABLE_ENTITY, msg);
-            }
-            Err(e) => {
-                let _ = tokio::fs::remove_file(&probe).await;
-                return err(StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}"));
-            }
+            Ok(Ok(())) => Some(guard),
+            Ok(Err(msg)) => return err(StatusCode::UNPROCESSABLE_ENTITY, msg),
+            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("db probe: {e}")),
         }
-        if let Err(e) = tokio::fs::rename(&probe, &stage).await {
-            let _ = tokio::fs::remove_file(&probe).await;
-            return err(StatusCode::INTERNAL_SERVER_ERROR, format!("db stage: {e}"));
-        }
-        staged_db = true;
-    }
-
-    // Surface the bundle's manifest (version / created_at / flags) so the
-    // caller sees exactly which backup it just restored and a UI can warn
-    // about a version skew against this binary. Best-effort: a hand-rolled
-    // bundle without one (or with junk) yields null, never an error.
-    let bundle_manifest: Option<serde_json::Value> = manifest_bytes
-        .as_deref()
-        .and_then(|b| serde_json::from_slice(b).ok());
-
-    let cfg_needs_restart = config_restart
-        .as_ref()
-        .map(|o| o.restart_required)
-        .unwrap_or(false);
-    let cfg_restart_reasons: Vec<String> = config_restart
-        .map(|o| o.restart_reasons)
-        .unwrap_or_default();
-    let restart_required = staged_db || cfg_needs_restart;
-    let note = if staged_db {
-        "restart the container to swap in the restored database"
-    } else if cfg_needs_restart {
-        "config restored and hot-applied; some changes (connections, zones, or mode) still need a restart"
-    } else if applied_config {
-        "config restored and hot-applied to the running engine"
     } else {
-        "nothing to restore"
+        None
+    };
+
+    let accepted = AcceptedRestore {
+        config,
+        config_text: config_text.map(str::to_owned),
+        ledger,
+        ledger_text: ledger_text.map(str::to_owned),
+        probe_guard,
+        bundle_manifest: parts
+            .manifest
+            .as_deref()
+            .and_then(|bytes| serde_json::from_slice(bytes).ok()),
+    };
+    // An accepted restore owns its scratch file and both writer guards until
+    // commit/rollback and runtime publication finish. Dropping the HTTP future
+    // only detaches this task; it cannot cancel an already-started file write.
+    match tokio::spawn(commit_restore(s, accepted)).await {
+        Ok(response) => response,
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("restore transaction: {e}"),
+        ),
+    }
+}
+
+struct AcceptedRestore {
+    config: Option<crate::config::schema::Config>,
+    config_text: Option<String>,
+    ledger: Option<crate::config::ledger::Ledger>,
+    ledger_text: Option<String>,
+    probe_guard: Option<TempFileGuard>,
+    bundle_manifest: Option<serde_json::Value>,
+}
+
+async fn commit_restore(s: BackupApiState, accepted: AcceptedRestore) -> Response {
+    let AcceptedRestore {
+        config,
+        config_text,
+        ledger,
+        ledger_text,
+        probe_guard,
+        bundle_manifest,
+    } = accepted;
+    // Config-only and database-bearing restores use the same read-modify-write
+    // serialization as settings/wizard/rollback writers, including publication
+    // of the resulting runtime hold before another writer can enter.
+    let _write_guard = s.cfg_store.begin_write().await;
+    let staged_db = probe_guard.is_some();
+    let staged_config = staged_db && config.is_some();
+    let mut applied_config = false;
+    let mut restart_reasons = Vec::new();
+    if let Some(probe) = probe_guard.as_ref() {
+        // Finish entered commands, then latch the hold before any stage can
+        // change. Both the hold and command barrier protect the mutation phase.
+        let order = s
+            .runtime
+            .as_ref()
+            .map(|h| h.dispatch_context.command_order());
+        let _commands = match order.as_ref() {
+            Some(order) => Some(order.write().await),
+            None => None,
+        };
+        if let Some(h) = &s.runtime {
+            h.dispatch_context.restart_hold().latch([
+                "An accepted database restore requires LocalSky to restart before new watering can start.".to_string(),
+            ]);
+        }
+        if let Err(e) = s
+            .cfg_store
+            .stage_restore_bundle(
+                config_text.as_deref(),
+                ledger_text.as_deref(),
+                &s.db_path,
+                &probe.0,
+            )
+            .await
+        {
+            if let Some(h) = &s.runtime {
+                h.dispatch_context.restart_hold().latch([
+                    "A restore staging write failed. Check recovery files and restart LocalSky before starting new watering.".to_string(),
+                ]);
+            }
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("restore stage: {e}"),
+            );
+        }
+        restart_reasons.push(if staged_config {
+            "A restored configuration and History database are staged. Restart LocalSky to apply the backup."
+        } else {
+            "A restored History database is staged. Restart LocalSky to apply the backup."
+        }.to_string());
+        if let Some(h) = &s.runtime {
+            h.dispatch_context.restart_hold().latch(restart_reasons);
+            restart_reasons = h.dispatch_context.restart_hold().reasons();
+        }
+    } else if let Some(cfg) = config.as_ref() {
+        let prev_cfg = s.cfg_store.load().await.ok();
+        let hot_restore = match s
+            .cfg_store
+            .restore_config_pair(cfg, ledger, &s.db_path)
+            .await
+        {
+            Ok(restore) => restore,
+            Err(e) => {
+                hold_failed_config_restore(&s).await;
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("config restore: {e}"),
+                );
+            }
+        };
+        applied_config = true;
+        if let Some(h) = &s.runtime {
+            restart_reasons = crate::runtime::apply_runtime_config(h, prev_cfg.as_ref(), cfg)
+                .await
+                .restart_reasons;
+        }
+        match tokio::task::spawn_blocking(move || hot_restore.complete()).await {
+            Ok(Ok(())) => {}
+            result => {
+                hold_failed_config_restore(&s).await;
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("config restore completion: {result:?}"),
+                );
+            }
+        }
+    }
+    let restart_required = staged_db || !restart_reasons.is_empty();
+    let note = if staged_db {
+        "backup staged; new watering is held until restart applies the restore"
+    } else if restart_required {
+        "config restored and hot-applied; new watering is held until restart applies pending connections"
+    } else {
+        "config restored and hot-applied to the running engine"
     };
     Json(serde_json::json!({
         "ok": true,
         "config_applied": applied_config,
+        "config_staged": staged_config,
         "db_staged": staged_db,
         "restart_required": restart_required,
-        "restart_reasons": cfg_restart_reasons,
+        "restart_reasons": restart_reasons,
         "bundle_manifest": bundle_manifest,
         "note": note,
     }))
     .into_response()
 }
 
+async fn hold_failed_config_restore(s: &BackupApiState) {
+    if let Some(h) = &s.runtime {
+        let order = h.dispatch_context.command_order();
+        let _commands = order.write().await;
+        h.dispatch_context.restart_hold().latch([
+            "Configuration restore did not finish. Restart LocalSky to resume its verified recovery journal before starting new watering.".to_string(),
+        ]);
+    }
+}
+
+/// GET /api/v1/backup/snapshots -> the config snapshot history.
+///
+/// Proxies the ConfigStore, so this is byte-for-byte the response
+/// GET /api/v1/config/snapshots gives: the on-disk
+/// <config_dir>/snapshots/<ts>.toml files every save writes and
+/// POST /api/v1/config/rollback restores from. That is the ONLY config
+/// history the product has.
+///
+/// It used to list the `config_snapshots` SQLite table instead. Nothing
+/// ever inserted into that table, so this route answered an empty list on
+/// installs with twenty restore points. See src/persistence/
+/// config_snapshots.rs for why that store is retired rather than fed.
+///
+/// The `ts` key is load-bearing, not cosmetic: it is the id
+/// POST /config/rollback takes, so a caller can pipe a row from here
+/// straight back into a rollback.
 async fn get_snapshots(State(s): State<BackupApiState>) -> Response {
-    let Some(snaps) = &s.snapshots else {
-        return Json(serde_json::json!({ "snapshots": [] })).into_response();
-    };
-    match snaps.list().await {
-        Ok(list) => Json(serde_json::json!({ "snapshots": list })).into_response(),
+    match s.cfg_store.list_snapshots().await {
+        Ok(list) => {
+            let snapshots: Vec<_> = list
+                .into_iter()
+                .map(|v| {
+                    serde_json::json!({
+                        "ts": v.version,
+                        "applied_at_epoch": v.applied_at_epoch,
+                        "schema_version": v.schema_version,
+                        "note": v.note,
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({ "snapshots": snapshots })).into_response()
+        }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -767,14 +865,10 @@ mod tests {
                 poll_interval_s: 10,
             }),
         });
-        cfg.notifications.email = Some(EmailConfig {
-            smtp_host: "smtp.example.com".into(),
-            smtp_port: 587,
-            username: "smtp_user_secret".into(),
-            password: "smtp_pass_secret".into(),
-            from_address: "a@example.com".into(),
-            to_address: "b@example.com".into(),
-            starttls: true,
+        cfg.notifications.ntfy = Some(NtfyConfig {
+            base_url: "https://ntfy.example.com".into(),
+            topic: "lawn".into(),
+            auth_token: Some("tk_ntfy_secret".into()),
         });
         std::fs::write(&src_cfg_path, toml::to_string_pretty(&cfg).unwrap()).unwrap();
 
@@ -785,7 +879,6 @@ mod tests {
                 .join("source/irrigation.db")
                 .to_string_lossy()
                 .to_string(),
-            snapshots: None,
             runtime: None,
         };
 
@@ -817,12 +910,8 @@ mod tests {
             "backup must contain the real OpenSprinkler password_md5"
         );
         assert!(
-            bundled.contains("smtp_pass_secret"),
-            "backup must contain the real SMTP password"
-        );
-        assert!(
-            bundled.contains("smtp_user_secret"),
-            "backup must contain the real SMTP username"
+            bundled.contains("tk_ntfy_secret"),
+            "backup must contain the real ntfy token"
         );
         assert!(
             !bundled.contains(crate::api::config::SECRET_REDACTED_SENTINEL),
@@ -855,14 +944,11 @@ mod tests {
             os.password_md5, "abc123md5hash",
             "restored OpenSprinkler secret must be the REAL value, not a sentinel"
         );
-        let email = loaded.notifications.email.as_ref().expect("email config");
+        let ntfy = loaded.notifications.ntfy.as_ref().expect("ntfy config");
         assert_eq!(
-            email.password, "smtp_pass_secret",
-            "restored SMTP password must be the REAL value"
-        );
-        assert_eq!(
-            email.username, "smtp_user_secret",
-            "restored SMTP username must be the REAL value"
+            ntfy.auth_token.as_deref(),
+            Some("tk_ntfy_secret"),
+            "restored ntfy token must be the REAL value"
         );
         // And nothing on the restored instance is a redaction sentinel.
         let on_disk = std::fs::read_to_string(&fresh_cfg_path).unwrap();
@@ -889,21 +975,31 @@ mod tests {
             cfg_store: Arc::new(FileConfigStore::new(dir.join("localsky.toml"))),
             db: None,
             db_path: dir.join("irrigation.db").to_string_lossy().to_string(),
-            snapshots: None,
             runtime: None,
         }
     }
 
-    /// Bytes of a minimal LocalSky-shaped SQLite database (has the
-    /// schema_migrations ledger the restore probe requires).
+    fn runtime_for(cfg: &crate::config::schema::Config) -> crate::runtime::RuntimeHandles {
+        use arc_swap::ArcSwap;
+        crate::runtime::RuntimeHandles {
+            dispatch_context: crate::controllers::ZoneLocks::default(),
+            tempest_store: Arc::new(crate::tempest::state::TempestStore::new()),
+            forecast_priority: Arc::new(ArcSwap::from_pointee(std::collections::HashMap::new())),
+            watering_policy: Arc::new(ArcSwap::from_pointee(
+                crate::refresher::WateringPolicy::from_config(cfg),
+            )),
+            manual_schedules: Arc::new(ArcSwap::from_pointee(Vec::new())),
+            source_reachable: crate::sources::SourceReachability::default(),
+            source_last_seen: Some(crate::sources::SourceLastSeen::default()),
+            push: None,
+        }
+    }
+
+    /// A real current-schema database, created by the same runner as boot.
     fn localsky_db_bytes(dir: &std::path::Path) -> Vec<u8> {
         let p = dir.join("donor.db");
-        let conn = Connection::open(&p).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE schema_migrations(version TEXT PRIMARY KEY, name TEXT, applied_at TEXT);
-             INSERT INTO schema_migrations VALUES('M0001','baseline schema','2026-01-01');",
-        )
-        .unwrap();
+        let mut conn = Connection::open(&p).unwrap();
+        crate::persistence::run_migrations(&mut conn).unwrap();
         drop(conn);
         std::fs::read(&p).unwrap()
     }
@@ -1017,19 +1113,35 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn duplicate_bundle_config_rejects_the_whole_upload_without_staging() {
+        let dir = test_dir("duplicate-config");
+        let state = state_for(&dir);
+        let config = toml::to_string_pretty(&sited_config()).unwrap();
+        let bundle = build_bundle(&[
+            ("localsky.toml", config.as_bytes()),
+            ("localsky.toml", b"invalid later config"),
+        ]);
+        let resp = post_restore(
+            State(state.clone()),
+            multipart_with("bundle", "backup.tar.gz", &bundle).await,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(!state.cfg_store.path().exists());
+        assert!(!crate::config::store::staged_path(state.cfg_store.path()).exists());
+    }
+
     // ---- restore schema probe ----
 
     #[test]
     fn db_probe_accepts_localsky_and_rejects_foreign_or_corrupt() {
         let dir = test_dir("probe");
 
-        // LocalSky-shaped db passes.
+        // A real fully migrated LocalSky database passes.
         let ok = dir.join("ok.db");
-        let conn = Connection::open(&ok).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE schema_migrations(version TEXT PRIMARY KEY, name TEXT, applied_at TEXT);",
-        )
-        .unwrap();
+        let mut conn = Connection::open(&ok).unwrap();
+        crate::persistence::run_migrations(&mut conn).unwrap();
         drop(conn);
         assert!(probe_localsky_db(ok.to_str().unwrap()).is_ok());
 
@@ -1093,6 +1205,166 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restore_rejects_malformed_future_or_inconsistent_migration_history() {
+        for (name, mutation) in [
+            (
+                "ledger-columns",
+                "DROP TABLE schema_migrations; CREATE TABLE schema_migrations(version TEXT);",
+            ),
+            (
+                "future-version",
+                "INSERT INTO schema_migrations VALUES ('M9999', 'future', 1);",
+            ),
+            (
+                "history-gap",
+                "DELETE FROM schema_migrations WHERE version = 'M0004';",
+            ),
+            (
+                "false-name",
+                "UPDATE schema_migrations SET name = 'forged' WHERE version = 'M0003';",
+            ),
+            (
+                "bad-timestamp",
+                "UPDATE schema_migrations SET applied_at = 'not an epoch' WHERE version = 'M0003';",
+            ),
+            ("empty-history", "DELETE FROM schema_migrations;"),
+            ("missing-table", "DROP TABLE runs;"),
+            ("missing-index", "DROP INDEX uq_runs_zone_start_ctrl;"),
+            // The claimed prefix has all its required columns, but a later
+            // unrecorded ALTER makes the normal pending migration fail.
+            (
+                "unrecorded-alter",
+                "DELETE FROM schema_migrations WHERE version IN ('M0019', 'M0020');",
+            ),
+        ] {
+            let dir = test_dir(&format!("reject-{name}"));
+            let donor = dir.join("donor.db");
+            let mut conn = Connection::open(&donor).unwrap();
+            crate::persistence::run_migrations(&mut conn).unwrap();
+            conn.execute_batch(mutation).unwrap();
+            drop(conn);
+            let original = std::fs::read(&donor).unwrap();
+            let state = state_for(&dir);
+            let stage = format!("{}.restore", state.db_path);
+            std::fs::write(&stage, b"previous accepted stage").unwrap();
+            let resp = post_restore(
+                State(state),
+                multipart_with("db", "irrigation.db", &original).await,
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "{name}");
+            assert_eq!(
+                std::fs::read(&stage).unwrap(),
+                b"previous accepted stage",
+                "{name}"
+            );
+            assert_eq!(
+                std::fs::read(&donor).unwrap(),
+                original,
+                "probe changed uploaded bytes: {name}"
+            );
+            assert!(
+                !std::fs::read_dir(&dir).unwrap().flatten().any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("restore-probe"))
+            );
+        }
+    }
+
+    #[test]
+    fn a_one_table_fixture_or_forged_complete_ledger_is_not_a_valid_database() {
+        let dir = test_dir("forged-ledger");
+        let path = dir.join("fake.db");
+        let conn = Connection::open(&path).unwrap();
+        // This was the old positive fixture; it proves neither real ledger
+        // column types nor a usable LocalSky schema.
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations(version TEXT PRIMARY KEY, name TEXT, applied_at TEXT);
+            INSERT INTO schema_migrations VALUES('M0001', 'baseline schema', '2026-01-01');",
+        )
+        .unwrap();
+        assert!(probe_localsky_db(path.to_str().unwrap()).is_err());
+        conn.execute_batch("DROP TABLE schema_migrations;").unwrap();
+        conn.execute_batch(crate::persistence::MIGRATIONS[0].sql)
+            .unwrap();
+        for migration in crate::persistence::MIGRATIONS {
+            conn.execute(
+                "INSERT INTO schema_migrations VALUES (?1, ?2, 1)",
+                [migration.version, migration.name],
+            )
+            .unwrap();
+        }
+        drop(conn);
+        let err = probe_localsky_db(path.to_str().unwrap()).unwrap_err();
+        assert!(
+            err.contains("does not match its migration history"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn legitimate_old_database_migrates_on_probe_but_stages_original_bytes() {
+        let dir = test_dir("old-schema-probe");
+        let donor = dir.join("old.db");
+        let mut conn = Connection::open(&donor).unwrap();
+        let older_count = crate::persistence::MIGRATIONS.len() - 2;
+        for migration in crate::persistence::MIGRATIONS.iter().take(older_count) {
+            let tx = conn.transaction().unwrap();
+            tx.execute_batch(migration.sql).unwrap();
+            tx.execute(
+                "INSERT INTO schema_migrations VALUES (?1, ?2, 1)",
+                [migration.version, migration.name],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+        conn.execute(
+            "INSERT INTO runs(zone_slug, start_epoch) VALUES ('fixture_yard', 123)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO schema_migrations VALUES ('M0007_legacy', 'push_subscriptions (legacy store)', 1)", []).unwrap();
+        drop(conn);
+        let original = std::fs::read(&donor).unwrap();
+        let state = state_for(&dir);
+        let stage = format!("{}.restore", state.db_path);
+        let resp = post_restore(
+            State(state),
+            multipart_with("db", "irrigation.db", &original).await,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(std::fs::read(&stage).unwrap(), original);
+        assert_eq!(std::fs::read(&donor).unwrap(), original);
+        let uploaded = Connection::open(&stage).unwrap();
+        let count: i64 = uploaded
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            count,
+            (older_count + 1) as i64,
+            "only the disposable proof was upgraded; the historical legacy marker is retained"
+        );
+        let zone: String = uploaded
+            .query_row(
+                "SELECT zone_slug FROM runs WHERE start_epoch = 123",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(zone, "fixture_yard");
+        assert!(
+            !std::fs::read_dir(&dir).unwrap().flatten().any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .contains("migration-proof"))
+        );
+    }
+
+    #[tokio::test]
     async fn restore_bundle_stages_localsky_db_and_surfaces_manifest() {
         let dir = test_dir("bundlerestore");
         let db_bytes = localsky_db_bytes(&dir);
@@ -1136,44 +1408,335 @@ mod tests {
         cfg
     }
 
-    // The blocker this carry-forward exists for. The config HOT-APPLIES on
-    // restore while the database only STAGES for the next boot, so a bundle
-    // taken before 0.7.22 (or a config-only upload) would un-retire all seven
-    // helper reads on the very next tick, against helpers the migration notice
-    // invited the owner to delete, with the adoption pass disarmed for the
-    // life of the process.
     #[tokio::test]
-    async fn restoring_a_config_without_the_migration_ledger_keeps_it() {
+    async fn invalid_restore_parts_preserve_live_files_and_every_existing_stage() {
+        let dir = test_dir("invalid-all-parts");
+        let mut state = state_for(&dir);
+        let cfg = sited_config();
+        state.cfg_store.save(&cfg).await.unwrap();
+        state
+            .cfg_store
+            .update_ledger(|l| l.seeded_source_ids.push("current".into()))
+            .await
+            .unwrap();
+        state.runtime = Some(runtime_for(&cfg));
+        let paths = [
+            state.cfg_store.path().to_path_buf(),
+            state.cfg_store.ledger_path().to_path_buf(),
+            std::path::PathBuf::from(&state.db_path),
+            crate::config::store::staged_path(state.cfg_store.path()),
+            crate::config::store::staged_path(state.cfg_store.ledger_path()),
+            std::path::PathBuf::from(format!("{}.restore", state.db_path)),
+        ];
+        for (index, path) in paths.iter().enumerate().skip(2) {
+            std::fs::write(path, format!("previous bytes {index}")).unwrap();
+        }
+        let before: Vec<_> = paths
+            .iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect();
+        let config = toml::to_string_pretty(&cfg).unwrap();
+        let db = localsky_db_bytes(&dir);
+        let foreign_path = dir.join("foreign.db");
+        Connection::open(&foreign_path)
+            .unwrap()
+            .execute_batch("CREATE TABLE unrelated(id INTEGER);")
+            .unwrap();
+        let foreign = std::fs::read(foreign_path).unwrap();
+        let mut future = cfg.clone();
+        future.schema_version = crate::config::schema::CURRENT_SCHEMA_VERSION + 1;
+        let future = toml::to_string_pretty(&future).unwrap();
+        let cases = [
+            (
+                config.as_bytes(),
+                b"seeded_source_ids = []".as_slice(),
+                b"not sqlite".as_slice(),
+            ),
+            (
+                config.as_bytes(),
+                b"seeded_source_ids = []".as_slice(),
+                b"SQLite format 3\0broken".as_slice(),
+            ),
+            (
+                config.as_bytes(),
+                b"seeded_source_ids = []".as_slice(),
+                foreign.as_slice(),
+            ),
+            (
+                config.as_bytes(),
+                b"seeded_source_ids = [".as_slice(),
+                db.as_slice(),
+            ),
+            (
+                b"not = [".as_slice(),
+                b"seeded_source_ids = []".as_slice(),
+                db.as_slice(),
+            ),
+            (
+                future.as_bytes(),
+                b"seeded_source_ids = []".as_slice(),
+                db.as_slice(),
+            ),
+        ];
+        for (config, ledger, db) in cases {
+            let bundle = build_bundle(&[
+                ("localsky.toml", config),
+                ("localsky.ledger.toml", ledger),
+                ("irrigation.db", db),
+            ]);
+            let resp = post_restore(
+                State(state.clone()),
+                multipart_with("bundle", "backup.tar.gz", &bundle).await,
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            for (path, expected) in paths.iter().zip(&before) {
+                assert_eq!(
+                    &std::fs::read(path).unwrap(),
+                    expected,
+                    "{} changed after rejected upload",
+                    path.display()
+                );
+            }
+            assert!(!state
+                .runtime
+                .as_ref()
+                .unwrap()
+                .dispatch_context
+                .restart_hold()
+                .is_pending());
+            assert!(!std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().contains("restore-probe")));
+        }
+    }
+
+    #[tokio::test]
+    async fn restore_stage_io_failure_rolls_back_earlier_slots_and_holds_new_watering() {
+        let dir = test_dir("stage-rollback");
+        let mut state = state_for(&dir);
+        let cfg = sited_config();
+        state.cfg_store.save(&cfg).await.unwrap();
+        state.runtime = Some(runtime_for(&cfg));
+        let config_stage = crate::config::store::staged_path(state.cfg_store.path());
+        let ledger_stage = crate::config::store::staged_path(state.cfg_store.ledger_path());
+        let db_stage = format!("{}.restore", state.db_path);
+        std::fs::write(&config_stage, b"previous config stage").unwrap();
+        std::fs::write(&db_stage, b"previous database stage").unwrap();
+        // Config publishes first; this later non-file destination forces the
+        // real handler's ordinary-I/O rollback after the first replacement.
+        std::fs::create_dir(&ledger_stage).unwrap();
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        let db = localsky_db_bytes(&dir);
+        let bundle = build_bundle(&[
+            ("localsky.toml", text.as_bytes()),
+            ("localsky.ledger.toml", b"seeded_source_ids = []"),
+            ("irrigation.db", &db),
+        ]);
+        let resp = post_restore(
+            State(state.clone()),
+            multipart_with("bundle", "backup.tar.gz", &bundle).await,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            std::fs::read(&config_stage).unwrap(),
+            b"previous config stage"
+        );
+        assert_eq!(
+            std::fs::read(&db_stage).unwrap(),
+            b"previous database stage"
+        );
+        assert!(ledger_stage.is_dir());
+        assert!(state
+            .runtime
+            .as_ref()
+            .unwrap()
+            .dispatch_context
+            .restart_hold()
+            .is_pending());
+    }
+
+    #[tokio::test]
+    async fn db_only_restore_uses_writer_and_command_order_then_latches_shared_restart_hold() {
+        let dir = test_dir("restore-order-hold");
+        let mut state = state_for(&dir);
+        let cfg = sited_config();
+        state.cfg_store.save(&cfg).await.unwrap();
+        state.runtime = Some(runtime_for(&cfg));
+        let runtime = state.runtime.as_ref().unwrap();
+        let order = runtime.dispatch_context.command_order();
+        let entered_command = order.read().await;
+        let writer = state.cfg_store.begin_write().await;
+        let db = localsky_db_bytes(&dir);
+        let mp = multipart_with("db", "irrigation.db", &db).await;
+        let restore = post_restore(State(state.clone()), mp);
+        tokio::pin!(restore);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut restore)
+                .await
+                .is_err()
+        );
+        assert!(!std::path::Path::new(&format!("{}.restore", state.db_path)).exists());
+        drop(writer);
+        // Once the config writer releases, an entered valve command still
+        // finishes before the restore can publish stages or latch the hold.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut restore)
+                .await
+                .is_err()
+        );
+        assert!(!runtime.dispatch_context.restart_hold().is_pending());
+        drop(entered_command);
+        let resp = restore.await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["db_staged"], true);
+        assert_eq!(body["restart_required"], true);
+        let reasons = runtime.dispatch_context.restart_hold().reasons();
+        assert!(!reasons.is_empty());
+        assert_eq!(body["restart_reasons"], serde_json::json!(reasons));
+        let later = crate::runtime::apply_runtime_config(runtime, Some(&cfg), &cfg).await;
+        assert_eq!(
+            later.restart_reasons, reasons,
+            "later saves preserve the staged restore hold"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_restore_request_keeps_accepted_transaction_and_probe_alive() {
+        let dir = test_dir("restore-request-cancel");
+        let mut state = state_for(&dir);
+        let cfg = sited_config();
+        state.cfg_store.save(&cfg).await.unwrap();
+        state.runtime = Some(runtime_for(&cfg));
+        let runtime = state.runtime.as_ref().unwrap();
+        let order = runtime.dispatch_context.command_order();
+        let entered_command = order.read().await;
+        let db = localsky_db_bytes(&dir);
+        let mp = multipart_with("db", "irrigation.db", &db).await;
+        let request = tokio::spawn(post_restore(State(state.clone()), mp));
+
+        // Wait until the accepted transaction owns the config writer and is
+        // waiting for the already-entered controller command to finish.
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(20),
+                    state.cfg_store.begin_write(),
+                )
+                .await
+                {
+                    Err(_) => break,
+                    Ok(guard) => drop(guard),
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("accepted transaction takes the writer lock");
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(30),
+                state.cfg_store.begin_write(),
+            )
+            .await
+            .is_err(),
+            "HTTP cancellation must not release the accepted transaction's writer"
+        );
+        assert!(std::fs::read_dir(&dir).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".restore-probe-")));
+        assert!(!runtime.dispatch_context.restart_hold().is_pending());
+        let db_stage = format!("{}.restore", state.db_path);
+        assert!(!std::path::Path::new(&db_stage).exists());
+
+        drop(entered_command);
+        // Taking this writer proves the detached transaction has finished its
+        // stage/hold publication, without needing its discarded HTTP response.
+        let _finished = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            state.cfg_store.begin_write(),
+        )
+        .await
+        .expect("accepted restore finishes after the entered command");
+        assert_eq!(std::fs::read(&db_stage).unwrap(), db);
+        assert!(runtime.dispatch_context.restart_hold().is_pending());
+        assert!(!std::fs::read_dir(&dir).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".restore-probe-")));
+        assert_eq!(
+            state
+                .cfg_store
+                .load()
+                .await
+                .unwrap()
+                .deployment
+                .display_name,
+            cfg.deployment.display_name,
+            "a DB-only restore leaves the live configuration unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_db_only_restore_replaces_prior_request_without_inheriting_its_config() {
+        let dir = test_dir("replace-stage-set");
+        let state = state_for(&dir);
+        let config_stage = crate::config::store::staged_path(state.cfg_store.path());
+        let ledger_stage = crate::config::store::staged_path(state.cfg_store.ledger_path());
+        std::fs::write(&config_stage, b"earlier config").unwrap();
+        std::fs::write(&ledger_stage, b"earlier ledger").unwrap();
+        let db = localsky_db_bytes(&dir);
+        let resp = post_restore(
+            State(state.clone()),
+            multipart_with("db", "irrigation.db", &db).await,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(!config_stage.exists());
+        assert!(!ledger_stage.exists());
+        assert_eq!(
+            std::fs::read(format!("{}.restore", state.db_path)).unwrap(),
+            db
+        );
+    }
+
+    // The ledger is a separate file: a config-only restore of a document
+    // with no records in it cannot drop the running install's records.
+    #[tokio::test]
+    async fn restoring_a_config_cannot_drop_the_ledger() {
         let dir = test_dir("ledger-survives-restore");
         let state = state_for(&dir);
+        state.cfg_store.save(&sited_config()).await.unwrap();
+        state
+            .cfg_store
+            .update_ledger(|l| {
+                for id in crate::ha_adopt::ENTITIES {
+                    l.ha_adoption.push(crate::model::HaAdoptedHelper {
+                        entity: id.to_string(),
+                        outcome: crate::ha_adopt::OUTCOME_NOT_FOUND.to_string(),
+                        target: crate::ha_adopt::target_of(id).to_string(),
+                        adopted_value: None,
+                        observed_value: None,
+                        previous_value: None,
+                        epoch: 1,
+                    });
+                }
+                l.seeded_source_ids.push("nws".into());
+            })
+            .await
+            .unwrap();
 
-        // A migrated install: every helper read retired, plus a seeded id.
-        let mut migrated = sited_config();
-        for id in crate::ha_adopt::ENTITIES {
-            migrated
-                .ha_adoption
-                .push(crate::ha::snapshot::HaAdoptedHelper {
-                    entity: id.to_string(),
-                    outcome: crate::ha_adopt::OUTCOME_NOT_FOUND.to_string(),
-                    target: crate::ha_adopt::target_of(id).to_string(),
-                    adopted_value: None,
-                    observed_value: None,
-                    previous_value: None,
-                    epoch: 1,
-                });
-        }
-        migrated.seeded_source_ids.push("nws".into());
-        state.cfg_store.save(&migrated).await.unwrap();
-
-        // A pre-0.7.22 bundle: valid config, no [[ha_adoption]], no seeded ids.
         let mut old = sited_config();
         old.engine.skip_rules.max_wind_mph = 22.0;
         let body = toml::to_string_pretty(&old).unwrap();
-        assert!(
-            !body.contains("ha_adoption"),
-            "the fixture must have no ledger"
-        );
-
         let cfg_store = state.cfg_store.clone();
         let mp = multipart_with("config", "localsky.toml", body.as_bytes()).await;
         let resp = post_restore(State(state), mp).await;
@@ -1181,58 +1744,163 @@ mod tests {
         assert_eq!(json_body(resp).await["config_applied"], true);
 
         let after = cfg_store.load().await.unwrap();
-        assert_eq!(
-            after.engine.skip_rules.max_wind_mph, 22.0,
-            "the restore still applies the values it was asked for"
-        );
-        assert_eq!(
-            after.ha_adoption.len(),
-            crate::ha_adopt::ENTITIES.len(),
-            "and every migration marker survives it"
-        );
-        let policy = crate::refresher::WateringPolicy::from_config(&after);
-        for id in crate::ha_adopt::ENTITIES {
-            assert!(
-                policy.ha_read_retired(id),
-                "{id} must not go back to reading a helper the owner was told to delete"
-            );
-        }
-        assert!(after.seeded_source_ids.contains(&"nws".to_string()));
-
+        assert_eq!(after.engine.skip_rules.max_wind_mph, 22.0);
+        let ledger = cfg_store.ledger();
+        assert_eq!(ledger.ha_adoption.len(), crate::ha_adopt::ENTITIES.len());
+        assert!(ledger.seeded_source_ids.contains(&"nws".to_string()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // Disaster recovery onto new hardware: no running config at all, so the
-    // bundle's own ledger is the only record of what happened and it stands.
+    // A bundle with a database stages everything it carries; nothing is
+    // applied until the boot that swaps all of it in.
     #[tokio::test]
-    async fn restoring_onto_a_fresh_instance_keeps_the_bundles_own_ledger() {
-        let dir = test_dir("ledger-fresh-instance");
+    async fn successful_threshold_only_restore_clears_fence_without_requiring_restart() {
+        let dir = test_dir("hot-restore-success");
+        let mut state = state_for(&dir);
+        let cfg = sited_config();
+        state.cfg_store.save(&cfg).await.unwrap();
+        state.runtime = Some(runtime_for(&cfg));
+        let mut restored = cfg;
+        restored.engine.skip_rules.max_wind_mph = 24.0;
+        let text = toml::to_string_pretty(&restored).unwrap();
+        let response = post_restore(
+            State(state.clone()),
+            multipart_with("config", "localsky.toml", text.as_bytes()).await,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["restart_required"], false);
+        assert!(!state
+            .runtime
+            .as_ref()
+            .unwrap()
+            .dispatch_context
+            .restart_hold()
+            .is_pending());
+        assert!(crate::config::restore::activate_at_boot(
+            state.cfg_store.path(),
+            std::path::Path::new(&state.db_path),
+        )
+        .unwrap()
+        .is_none());
+        assert_eq!(
+            state
+                .cfg_store
+                .load()
+                .await
+                .unwrap()
+                .engine
+                .skip_rules
+                .max_wind_mph,
+            24.0
+        );
+    }
+
+    #[tokio::test]
+    async fn config_only_ledger_error_is_detected_before_either_live_file_changes() {
+        let dir = test_dir("hot-restore-ledger-failure");
+        let mut state = state_for(&dir);
+        let cfg = sited_config();
+        state.cfg_store.save(&cfg).await.unwrap();
+        state.runtime = Some(runtime_for(&cfg));
+        // An invalid ledger target must be found before the first config write.
+        std::fs::create_dir(state.cfg_store.ledger_path()).unwrap();
+        let mut restored = cfg;
+        restored.engine.skip_rules.max_wind_mph = 31.0;
+        let text = toml::to_string_pretty(&restored).unwrap();
+        let bundle = build_bundle(&[
+            ("localsky.toml", text.as_bytes()),
+            (
+                "localsky.ledger.toml",
+                b"seeded_source_ids = ['restored']\n",
+            ),
+        ]);
+        let response = post_restore(
+            State(state.clone()),
+            multipart_with("bundle", "backup.tar.gz", &bundle).await,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            crate::config::loader::load_from_path(state.cfg_store.path())
+                .unwrap()
+                .engine
+                .skip_rules
+                .max_wind_mph,
+            10.0,
+        );
+        assert!(state
+            .runtime
+            .as_ref()
+            .unwrap()
+            .dispatch_context
+            .restart_hold()
+            .is_pending());
+        assert!(crate::config::restore::activate_at_boot(
+            state.cfg_store.path(),
+            std::path::Path::new(&state.db_path),
+        )
+        .unwrap()
+        .is_none());
+        assert!(
+            !std::path::Path::new(&state.db_path).exists(),
+            "refusing boot must not create an empty history DB"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bundle_with_a_database_stages_config_and_ledger_for_the_boot() {
+        let dir = test_dir("stage-together");
         let state = state_for(&dir);
-        assert!(!state.cfg_store.is_initialized());
+        let running = sited_config();
+        state.cfg_store.save(&running).await.unwrap();
 
-        let mut migrated = sited_config();
-        migrated
-            .ha_adoption
-            .push(crate::ha::snapshot::HaAdoptedHelper {
-                entity: crate::ha_adopt::PAUSE_UNTIL.to_string(),
-                outcome: crate::ha_adopt::OUTCOME_ADOPTED.to_string(),
-                target: crate::ha_adopt::target_of(crate::ha_adopt::PAUSE_UNTIL).to_string(),
-                adopted_value: Some("0".into()),
-                observed_value: None,
-                previous_value: Some("0".into()),
-                epoch: 1,
-            });
-        let body = toml::to_string_pretty(&migrated).unwrap();
-
+        let mut restored = sited_config();
+        restored.engine.skip_rules.max_wind_mph = 33.0;
+        let cfg_text = toml::to_string_pretty(&restored).unwrap();
+        let ledger_text = "seeded_source_ids = [\"met_no\"]\n";
+        let db = localsky_db_bytes(&dir);
+        let bundle = build_bundle(&[
+            ("localsky.toml", cfg_text.as_bytes()),
+            ("localsky.ledger.toml", ledger_text.as_bytes()),
+            ("irrigation.db", &db),
+        ]);
         let cfg_store = state.cfg_store.clone();
-        let mp = multipart_with("config", "localsky.toml", body.as_bytes()).await;
+        let db_path = state.db_path.clone();
+        let mp = multipart_with("bundle", "backup.tar.gz", &bundle).await;
         let resp = post_restore(State(state), mp).await;
         assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["config_applied"], false);
+        assert_eq!(body["config_staged"], true);
+        assert_eq!(body["db_staged"], true);
+        assert_eq!(body["restart_required"], true);
 
+        // Nothing moved yet.
+        let live = cfg_store.load().await.unwrap();
+        assert_eq!(
+            live.engine.skip_rules.max_wind_mph,
+            running.engine.skip_rules.max_wind_mph
+        );
+        assert!(cfg_store.ledger().seeded_source_ids.is_empty());
+        assert!(crate::config::store::staged_path(cfg_store.path()).exists());
+        assert!(std::path::Path::new(&format!("{db_path}.restore")).exists());
+
+        // Production boot verifies/activates the complete marked set before
+        // opening either configuration or history, then completes the marker.
+        let activated = crate::config::restore::activate_at_boot(
+            cfg_store.path(),
+            std::path::Path::new(&db_path),
+        )
+        .unwrap()
+        .unwrap();
+        let restored_db = crate::persistence::HistoryDb::open(db_path.clone().into()).unwrap();
         let after = cfg_store.load().await.unwrap();
-        assert_eq!(after.ha_adoption.len(), 1);
-        assert_eq!(after.ha_adoption[0].entity, crate::ha_adopt::PAUSE_UNTIL);
-
+        assert_eq!(after.engine.skip_rules.max_wind_mph, 33.0);
+        assert_eq!(cfg_store.ledger().seeded_source_ids, vec!["met_no"]);
+        assert!(std::path::Path::new(&db_path).exists());
+        activated.complete().unwrap();
+        drop(restored_db);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1245,18 +1913,13 @@ mod tests {
         let dir = test_dir("stream");
         std::fs::write(dir.join("localsky.toml"), "schema_version = 1\n").unwrap();
         let db_path = dir.join("irrigation.db");
-        let conn = Connection::open(&db_path).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE schema_migrations(version TEXT PRIMARY KEY, name TEXT, applied_at TEXT);
-             INSERT INTO schema_migrations VALUES('M0001','baseline schema','2026-01-01');",
-        )
-        .unwrap();
+        let mut conn = Connection::open(&db_path).unwrap();
+        crate::persistence::run_migrations(&mut conn).unwrap();
 
         let state = BackupApiState {
             cfg_store: Arc::new(FileConfigStore::new(dir.join("localsky.toml"))),
             db: Some(Arc::new(Mutex::new(conn))),
             db_path: db_path.to_string_lossy().to_string(),
-            snapshots: None,
             runtime: None,
         };
 
@@ -1347,6 +2010,72 @@ mod tests {
         assert!(
             leftovers.is_empty(),
             "temp files left after early drop: {leftovers:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- the documented config history is the on-disk one ----
+
+    /// The endpoint must report the restore points that EXIST. It used to
+    /// list the `config_snapshots` SQLite table, which no production code
+    /// has ever inserted into, so it answered `{"snapshots": []}` on an
+    /// install with twenty restore points while docs and its own header
+    /// promised the history behind POST /config/rollback. This drives the
+    /// route against a store that has one real snapshot on disk: against
+    /// the old table-backed reader the list comes back empty and the
+    /// length assertion fails.
+    #[tokio::test]
+    async fn backup_snapshots_lists_the_on_disk_config_history() {
+        use crate::config::schema::Config;
+
+        let dir = test_dir("snapshots");
+        let store = FileConfigStore::new(dir.join("localsky.toml"));
+
+        // Two saves through the same ConfigStore::save the settings PUT
+        // uses: the first lands the file, the second snapshots it. That is
+        // exactly how a restore point comes into existence.
+        let mut cfg = Config::default();
+        cfg.deployment.location.lat = 28.5;
+        cfg.deployment.location.lon = -81.4;
+        cfg.deployment.display_name = "before".into();
+        store.save(&cfg).await.unwrap();
+        cfg.deployment.display_name = "after".into();
+        store.save(&cfg).await.unwrap();
+
+        let on_disk = store.list_snapshots().await.unwrap();
+        assert_eq!(on_disk.len(), 1, "the second save snapshotted the first");
+
+        let state = BackupApiState {
+            cfg_store: Arc::new(store),
+            db: None,
+            db_path: dir.join("irrigation.db").to_string_lossy().to_string(),
+            runtime: None,
+        };
+        let resp = get_snapshots(State(state)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let rows = v["snapshots"].as_array().expect("snapshots array");
+
+        assert_eq!(
+            rows.len(),
+            on_disk.len(),
+            "the endpoint must report the restore points that exist, not an empty list"
+        );
+        // Same `ts` key GET /config/snapshots emits, because it is the id
+        // POST /config/rollback accepts. A row from here must be pipeable
+        // straight back into a rollback.
+        assert_eq!(
+            rows[0]["ts"].as_u64().unwrap(),
+            on_disk[0].version as u64,
+            "ts must be the snapshot id rollback takes"
+        );
+        assert_eq!(
+            rows[0]["applied_at_epoch"].as_i64().unwrap(),
+            on_disk[0].applied_at_epoch
         );
 
         let _ = std::fs::remove_dir_all(&dir);

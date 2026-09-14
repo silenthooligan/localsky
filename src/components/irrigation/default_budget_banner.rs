@@ -38,7 +38,7 @@
 // then still holds.
 
 use crate::components::units_fmt::{fmt_rain_amount, UnitPrefs};
-use crate::ha::snapshot::IrrigationSnapshot;
+use crate::model::IrrigationSnapshot;
 
 /// localStorage key holding the zone-set the operator dismissed.
 #[cfg(feature = "hydrate")]
@@ -80,7 +80,7 @@ pub(crate) fn store_dismissed(key: &str) {
 /// arm exists to catch; and on a fresh install, which lands
 /// soil-governed on day one, every listed zone was wrong. An empty
 /// `scheduling_model` (older producer) reads as weekly.
-fn weekly_inferred(b: &crate::ha::snapshot::WaterBudget) -> bool {
+fn weekly_inferred(b: &crate::model::WaterBudget) -> bool {
     b.on_inferred_weekly_target()
 }
 
@@ -99,10 +99,7 @@ pub(crate) fn lines(s: &IrrigationSnapshot, p: UnitPrefs) -> Vec<String> {
         return Vec::new();
     }
     let mut lines = vec![
-        "These zones water on a starting target taken from what each one is \
-         planted with. Nobody set a target, so the engine used the species. \
-         Below is what they run on today. Set your own under Settings, then \
-         Zones, if you want different."
+        "These zones water on a starting target taken from what each one is planted with, because nobody set one. Change that under Settings, Zones."
             .to_string(),
     ];
     lines.extend(rows);
@@ -146,7 +143,7 @@ pub(crate) fn inferred_key(s: &IrrigationSnapshot) -> String {
 mod tests {
     use super::*;
     use crate::components::units_fmt::UnitPrefs;
-    use crate::ha::snapshot::WaterBudget;
+    use crate::model::WaterBudget;
 
     fn budget(slug: &str, inferred: bool) -> WaterBudget {
         WaterBudget {
@@ -238,10 +235,7 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "These zones water on a starting target taken from what each one is \
-                 planted with. Nobody set a target, so the engine used the species. \
-                 Below is what they run on today. Set your own under Settings, then \
-                 Zones, if you want different."
+                "These zones water on a starting target taken from what each one is planted with, because nobody set one. Change that under Settings, Zones."
                     .to_string(),
                 "Back Yard: 1.00\" a week over 2 sessions".to_string(),
             ]

@@ -341,12 +341,10 @@ impl ForecastObservationsStore {
     /// Sum measured (gauge) daily rainfall over the last `window_days`,
     /// EXCLUDING today. The engine's observed-rain backstop already counts
     /// today's measured rain separately (`rain_today_in`), so this covers the
-    /// preceding days only. It exists because the live ladder's observed-rain
-    /// gate otherwise reads Open-Meteo's regional `past_daily` archive, which
-    /// misses hyperlocal convection: a pop-up storm the gauge measured but the
-    /// model never saw would not suppress the next morning's run. The caller
-    /// max()es this against the model archive so neither source alone can hide
-    /// real rain. Returns 0.0 when there are no rows in range.
+    /// preceding days only. Only explicit gauge/radar provenance certifies a
+    /// measurement; historical model and unknown legacy rows may inform the
+    /// separate balance-credit ladder but cannot trigger this hard wet gate.
+    /// Returns 0.0 when there are no measured rows in range.
     pub async fn observed_rain_last_n_days(
         &self,
         window_days: i64,
@@ -365,7 +363,7 @@ impl ForecastObservationsStore {
             conn.query_row(
                 "SELECT COALESCE(SUM(observed_in), 0.0)
                  FROM forecast_observations
-                 WHERE date >= ?1 AND date < ?2 AND observed_source != 'none'",
+                 WHERE date >= ?1 AND date < ?2 AND observed_source IN ('gauge', 'radar')",
                 params![start, today],
                 |r| r.get::<_, f64>(0),
             )
@@ -693,6 +691,40 @@ mod tests {
         let win = s.observed_rain_window_by_source(7).await.unwrap();
         assert!((win.gauge_in - 0.35).abs() < 1e-9);
         assert_eq!(win.model_in, 0.0);
+    }
+
+    #[tokio::test]
+    async fn hard_wet_history_accepts_measurements_only_and_missing_prediction_is_repairable() {
+        let s = fresh_store().await;
+        let today = crate::timeutil::now_local().date_naive();
+        for (days, source, amount) in [
+            (1, "gauge", 0.2),
+            (2, "radar", 0.3),
+            (3, "model", 4.0),
+            (4, "legacy", 5.0),
+        ] {
+            s.upsert(today - chrono::Duration::days(days), 0.0, amount, source)
+                .await
+                .unwrap();
+        }
+        assert!((s.observed_rain_last_n_days(7).await.unwrap() - 0.5).abs() < 1e-9);
+        s.upsert(today, -1.0, 0.42, "gauge").await.unwrap();
+        let pending = s.range(today, today).await.unwrap();
+        assert_eq!(pending[0].predicted_in, -1.0);
+        assert_eq!(
+            pending[0].observed_in, 0.42,
+            "actual rain survives a forecast outage"
+        );
+        s.upsert(today, 0.0, 0.0, "gauge").await.unwrap();
+        let repaired = s.range(today, today).await.unwrap();
+        assert_eq!(
+            repaired[0].predicted_in, 0.0,
+            "a later real zero repairs the absent prediction"
+        );
+        assert_eq!(
+            repaired[0].observed_in, 0.42,
+            "repair does not erase measured rain"
+        );
     }
 
     /// The per-source window includes TODAY (the live day-max row) and

@@ -1,22 +1,10 @@
-// Hero card for the irrigation page. Mirrors the Tempest hero in
-// visual weight: huge mono headline, status tag, glyph. Says one of:
-//
-//   - "TOMORROW · 06:06" / scheduled total / each zone duration
-//   - "SKIPPED" with the reason that tripped the morning skip-check
-//   - "RUNNING NOW" if a zone is currently active
-//   - "HA UNREACHABLE" if the refresher hasn't connected yet
-//
-// The detail row below the headline always carries the live skip-check
-// inputs so the user can see why the system is making the call it is,
-// not just the verdict.
+// Irrigation overview: a recorded normal morning beside tomorrow's forecast.
+// Shared next-slot helpers below also serve the Weather page. Live trace
+// details remain separate from the persisted outcome and forecast projection.
 
 use crate::components::irrigation::advisor::AdvisorExplanation;
-use crate::components::units_fmt::{
-    deficit_value_mm, depth_unit, fmt_rain_amount, fmt_wind, temp_unit, temp_value, use_unit_prefs,
-    wind_unit, wind_value,
-};
-use crate::ha::snapshot::IrrigationSnapshot;
-use crate::reason_render::render_skip_reason;
+use crate::components::units_fmt::{deficit_value_mm, depth_unit, use_unit_prefs};
+use crate::model::IrrigationSnapshot;
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
 
@@ -72,18 +60,51 @@ mod test_support {
 /// "HH:MM" strings lexically is equivalent to comparing the wall clocks: the run
 /// has passed today only if its clock-time is at or before the deployment's
 /// current clock-time.
+/// The three no-run states, told apart on screen. One blank
+/// "NO RUNS SCHEDULED" used to cover a yard with no location, a polar
+/// night and a fortnight the district refuses, and each needs a
+/// different next step from the person reading it.
+pub fn no_run_eyebrow(state: crate::model::NextRunState) -> &'static str {
+    use crate::model::NextRunState::*;
+    match state {
+        NoLocation => "SETUP NEEDED",
+        NoWaterPlanned => "NO WATERING PLANNED",
+        NoLegalDay => "NOT A WATERING DAY",
+        NoSunrise => "POLAR NIGHT",
+        At => "NO RUNS SCHEDULED",
+    }
+}
+
+pub fn no_run_headline(state: crate::model::NextRunState) -> &'static str {
+    use crate::model::NextRunState::*;
+    match state {
+        NoLocation => "No location set",
+        NoWaterPlanned => "No watering in the current outlook",
+        NoLegalDay => "None in 14 days",
+        NoSunrise => "No morning to aim at",
+        At => "No run scheduled",
+    }
+}
+
+/// The tag under the headline for a no-run state: the voice module's
+/// sentence for it, so the hero, the home card and the week page say
+/// the same thing. None for the legacy blank.
+pub fn no_run_tag(state: crate::model::NextRunState) -> Option<&'static str> {
+    use crate::model::NextRunState::*;
+    match state {
+        NoLocation => Some(crate::voice::next_run::NO_LOCATION),
+        NoWaterPlanned => Some("The current water balance and forecast do not call for a watering run. Conditions are evaluated continuously."),
+        NoLegalDay => Some(crate::voice::next_run::NO_LEGAL_DAY),
+        NoSunrise => Some(crate::voice::next_run::NO_SUNRISE),
+        At => None,
+    }
+}
+
 pub fn today_run_passed(s: &IrrigationSnapshot) -> bool {
-    if s.next_run_epoch <= 0 {
-        return false;
-    }
-    let run_hm = crate::timefmt::format_hm(s.next_run_epoch, &s.timezone);
-    let now_hm = crate::timefmt::format_hm(now_epoch_secs(), &s.timezone);
-    if run_hm.is_empty() || now_hm.is_empty() {
-        return false;
-    }
-    // Zero-padded "HH:MM" sorts chronologically, so lexical >= is "now is at or
-    // past the run's clock-time today".
-    now_hm >= run_hm
+    // An instant compare. This used to compare "HH:MM" strings, which
+    // ignores the date: a run planned for tomorrow at 05:30, looked at
+    // today at 06:00, read as already passed.
+    s.next_run_epoch > 0 && now_epoch_secs() >= s.next_run_epoch
 }
 
 /// What the next scheduled slot will actually DO, reconciled across the three
@@ -122,6 +143,52 @@ pub struct NextRunStatus {
     pub all_week_skips: bool,
 }
 
+/// The one phase ladder the hero (eyebrow, glyph, headline, tag, theme)
+/// and the home page's watering verdict all read. Priority order: an
+/// offline refresher outranks everything; a running zone outranks a
+/// pause; a pause outranks the next slot; then the next slot itself
+/// (predicted to run or to skip); then an open-ended skip with nothing
+/// scheduled; then nothing to time at all. Six copies of this ladder had
+/// drifted on the running predicate; there is one now, and it counts a
+/// zone the controller has not yet confirmed as running, the way the
+/// WATERING NOW eyebrow always did.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HeroPhase {
+    Offline,
+    Running,
+    Paused,
+    /// A slot is scheduled and the engine predicts it waters.
+    SlotRuns(NextRunStatus),
+    /// A slot is scheduled and the engine predicts it skips.
+    SlotSkips(NextRunStatus),
+    /// Skipping, with no slot scheduled.
+    OpenSkip,
+    /// Nothing scheduled and nothing skipping: a setup step, a polar
+    /// night, a fortnight the district refuses.
+    NoRun,
+}
+
+pub fn resolve_phase(s: &IrrigationSnapshot) -> HeroPhase {
+    if !s.ha_reachable {
+        HeroPhase::Offline
+    } else if s.zones.iter().any(|z| z.is_running_or_unconfirmed()) {
+        HeroPhase::Running
+    } else if s.skip_check.will_skip && crate::model::is_pause_code(&s.skip_check.reason_code) {
+        HeroPhase::Paused
+    } else if s.next_run_epoch > 0 {
+        let nr = resolve_next_run(s);
+        if nr.slot_skips {
+            HeroPhase::SlotSkips(nr)
+        } else {
+            HeroPhase::SlotRuns(nr)
+        }
+    } else if s.skip_check.will_skip {
+        HeroPhase::OpenSkip
+    } else {
+        HeroPhase::NoRun
+    }
+}
+
 /// Reconcile `next_run_epoch`, `skip_check`, and `seven_day_verdicts` into a
 /// single honest answer for "what does the next slot actually do, and when can I
 /// next expect water". The three fields describe the SAME upcoming decision only
@@ -153,36 +220,20 @@ pub fn resolve_next_run(s: &IrrigationSnapshot) -> NextRunStatus {
         };
     }
 
-    let slot_md = crate::timefmt::format_md(slot_epoch, tz);
-    // The 7-day cell that describes this slot, matched by calendar date.
-    let slot_day = (!slot_md.is_empty())
-        .then(|| {
-            s.seven_day_verdicts
-                .iter()
-                .find(|d| crate::timefmt::format_md(d.time_epoch, tz) == slot_md)
-        })
-        .flatten();
+    // The strip cell for the slot, by the day offset the refresher
+    // computed from the same calendar the engine used. It used to be
+    // found by matching rendered "Jun 28" strings, which depends on the
+    // renderer agreeing with itself across a midnight.
+    let slot_day = s
+        .next_run_day_offset
+        .and_then(|off| s.seven_day_verdicts.iter().find(|d| d.day_offset == off));
+    let _ = tz;
 
     // Is the slot TODAY's still-pending window? For that one slot the LIVE
-    // skip_check is authoritative, NOT the projected day-0 strip cell. The day-0
-    // cell is a synthetic projection that zeroes the live rain_now/wind_now
-    // inputs, forces forecast_stale=false, and defaults live_readings=Station, so
-    // it can show NEXT RUN while it is actually raining (live rain skip), or
-    // SKIPPING when a stale forecast made the projection run. skip_check is the
-    // exact decision the dispatcher will act on at the slot, so the hero must
-    // match it. (W6 regression guard, fix #6/T2.) Anchored on the slot's calendar
-    // date EQUALLING today (in the deployment tz) and the morning still being
-    // ahead, NOT the stored day_offset: in real data day_offset==0 is today, but
-    // keying on the live calendar date keeps a passed morning or a later day on
-    // the cell path and stays correct as the day rolls over.
-    let now_md = crate::timefmt::format_md(now_epoch_secs(), tz);
-    let slot_is_today_pending = !slot_md.is_empty() && slot_md == now_md && !today_run_passed(s);
+    // skip_check is authoritative, NOT the projected day-0 strip cell, which
+    // is a synthetic projection that zeroes the live inputs.
+    let slot_is_today_pending = s.next_run_day_offset == Some(0) && !today_run_passed(s);
 
-    // Does the slot skip? For today's still-pending window prefer the live
-    // skip_check. Otherwise prefer the matched 7-day cell; failing a match, defer
-    // to skip_check only when the slot is today's still-pending window (same run).
-    // A passed morning with no matching cell falls through to "runs" (no evidence
-    // of skip).
     let (slot_skips, slot_reason, slot_reason_code) = if slot_is_today_pending {
         (
             s.skip_check.will_skip,
@@ -246,41 +297,10 @@ pub fn resolve_next_run(s: &IrrigationSnapshot) -> NextRunStatus {
     }
 }
 
-/// Condense a skip reason to a short, plain-language noun phrase for the hero tag
-/// ("recent rain", "soil still moist", "rain forecast"). Keys on the structured
-/// `reason_code` first (unit-independent, P1 architecture), falling back to a
-/// substring match on the baked reason so legacy rows still read. Mirrors the
-/// vocabulary the Week tab and `explain::skip_phrase` use so the surfaces agree.
+/// Condense a skip reason to the shared short noun phrase (gates_catalog
+/// owns the vocabulary, so the hero, the Week tab and the explainer agree).
 fn plain_skip_phrase(reason_code: &str, reason: &str) -> String {
-    match reason_code {
-        "already_wet" | "observed_rain" | "rain_now" => return "recent rain".to_string(),
-        "soil_saturation" => return "soil still moist".to_string(),
-        "rain_next_4h" | "tomorrow_rain" | "rain_3day" => return "rain forecast".to_string(),
-        "wind_now" | "wind_forecast" => return "high wind".to_string(),
-        "freeze_now" | "overnight_freeze" | "soil_frost" => return "freeze risk".to_string(),
-        "restrictions" => return "watering restrictions".to_string(),
-        "paused" | "pause_until" => return "paused".to_string(),
-        _ => {}
-    }
-    let r = reason.to_ascii_lowercase();
-    if r.contains("saturat") || r.contains("moist") {
-        "soil still moist".to_string()
-    } else if r.contains("already wet") || r.contains("currently raining") || r.contains("observed")
-    {
-        "recent rain".to_string()
-    } else if r.contains("rain") {
-        "rain forecast".to_string()
-    } else if r.contains("wind") {
-        "high wind".to_string()
-    } else if r.contains("freez") || r.contains("frost") {
-        "freeze risk".to_string()
-    } else if r.contains("restrict") {
-        "watering restrictions".to_string()
-    } else if r.contains("paus") || r.contains("vacation") {
-        "paused".to_string()
-    } else {
-        "current conditions".to_string()
-    }
+    crate::gates_catalog::skip_phrase(reason_code, reason).to_string()
 }
 
 /// The HONEST hero tag for a skipping next slot. Structure: WHY it is skipping,
@@ -294,6 +314,33 @@ fn plain_skip_phrase(reason_code: &str, reason: &str) -> String {
 /// (app.rs HomeWateringVerdict) renders the SAME honest skip copy as the hero
 /// instead of a second, divergent implementation.
 pub fn skip_tag_string(nr: &NextRunStatus, tz: &str) -> String {
+    skip_tag_string_with_rules(nr, tz, None)
+}
+
+/// A restricted slot is a calendar fact, not a condition to re-check:
+/// "Re-checks 05:42" on it promised a check that cannot change the
+/// answer. It names the allowed days and the next run instead.
+pub fn skip_tag_string_with_rules(
+    nr: &NextRunStatus,
+    tz: &str,
+    allowed_days: Option<&str>,
+) -> String {
+    if nr.skip_reason_code == "restrictions" {
+        let rule = match allowed_days {
+            Some(days) => format!("Your watering rules allow {days}."),
+            None => "Your watering rules do not allow this day.".to_string(),
+        };
+        let next = if nr.next_likely_run_epoch > 0 {
+            format!(
+                " Next run {} {}.",
+                crate::timefmt::format_wday_full(nr.next_likely_run_epoch, tz),
+                crate::timefmt::format_hm(nr.next_likely_run_epoch, tz)
+            )
+        } else {
+            String::new()
+        };
+        return format!("{rule}{next}");
+    }
     let reason = if nr.skip_reason_short.is_empty() {
         "current conditions".to_string()
     } else {
@@ -301,7 +348,7 @@ pub fn skip_tag_string(nr: &NextRunStatus, tz: &str) -> String {
     };
     let recheck = format!("Re-checks {}", crate::timefmt::format_hm(nr.slot_epoch, tz));
     let plan = if nr.all_week_skips {
-        "no watering planned this week".to_string()
+        crate::voice::idle::WEEK_OF_RAIN.to_string()
     } else if nr.next_likely_run_epoch > 0 {
         format!(
             "next likely run {}",
@@ -317,400 +364,68 @@ pub fn skip_tag_string(nr: &NextRunStatus, tz: &str) -> String {
     }
 }
 
-/// Condense the snapshot's per-zone verdicts into the plain `ZoneLine`s the
-/// explainer's `zone_run_summary` consumes. Reads each zone's back-filled
-/// `verdict` first (the canonical per-zone path), falling back to the
-/// snapshot-level `zone_verdicts` list by slug, mirroring the engine's own
-/// `zone_skip_verdict` lookup. Zones with no verdict yet are dropped so the
-/// summary only counts zones the engine has actually decided.
-fn zone_lines(s: &IrrigationSnapshot) -> Vec<crate::explain::ZoneLine> {
-    s.zones
-        .iter()
-        .filter_map(|z| {
-            let v = z
-                .verdict
-                .as_ref()
-                .or_else(|| s.zone_verdicts.iter().find(|v| v.zone_slug == z.slug))?;
-            Some(crate::explain::ZoneLine {
-                name: z.name.clone(),
-                verdict: v.verdict.clone(),
-                reason: v.reason.clone(),
-                source: v.source.clone(),
-                waters: s.zone_waters_next_run(z),
-            })
-        })
-        .collect()
+#[component]
+pub fn NextRunHero(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
+    view! { <super::overview::IrrigationOverview snap/> }
 }
 
 #[component]
-pub fn NextRunHero(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
-    // The hero answers ONE question consistently: what's the watering status,
-    // and when does it run next. Three lines that must always agree and never
-    // duplicate each other:
-    //   EYEBROW  = a short, tense-aware VERDICT word (colored by --hero-verdict).
-    //   HEADLINE = the big WHEN (next run time) or a status word.
-    //   TAG      = the supporting detail (skip reason / run plan / running zone).
-    // The phase ladder below is in priority order; each closure resolves to the
-    // same phase, so the three lines stay in lockstep.
-
-    // EYEBROW: IDENTIFIES the headline so the big time is never non-descript.
-    // It labels what the headline is (the next run / skipping / running / paused),
-    // while the tense-aware VERDICT detail lives in the tag below. Colored by
-    // --hero-verdict. Honest about skips: when the next scheduled slot is predicted
-    // to skip, the eyebrow says so ("SKIPPING") instead of "NEXT RUN", so the big
-    // headline time below reads as a re-check, never a promise to water.
-    let eyebrow = move || {
-        let s = snap.get();
-        if !s.ha_reachable {
-            "OFFLINE"
-        } else if s.zones.iter().any(|z| z.running) {
-            "WATERING NOW"
-        } else if s.skip_check.will_skip
-            && crate::ha::snapshot::is_pause_code(&s.skip_check.reason_code)
-        {
-            "PAUSED"
-        } else if s.next_run_epoch > 0 {
-            if resolve_next_run(&s).slot_skips {
-                "SKIPPING"
-            } else {
-                "NEXT RUN"
-            }
-        } else {
-            "NO RUNS SCHEDULED"
-        }
-    };
-
-    let glyph = move || {
-        let s = snap.get();
-        if !s.ha_reachable {
-            "x"
-        } else if s.zones.iter().any(|z| z.running) {
-            "droplet"
-        } else if s.skip_check.will_skip
-            && crate::ha::snapshot::is_pause_code(&s.skip_check.reason_code)
-        {
-            "pause"
-        } else if resolve_next_run(&s).slot_skips
-            || (s.skip_check.will_skip && s.next_run_epoch <= 0)
-        {
-            // The next scheduled slot is predicted to SKIP (or there is an
-            // open-ended skip with no scheduled run). Glyph the reason, not a
-            // droplet, so the icon never implies water is coming. Keys on the
-            // structured reason_code that DESCRIBES THE SLOT (P2 units
-            // architecture) so the glyph is correct regardless of rendered unit;
-            // legacy rows with an empty code fall back to the baked reason.
-            let nr = resolve_next_run(&s);
-            // The SLOT's own structured code, not an empty string. This
-            // passed "" deliberately to force the prose fallback below,
-            // discarding a populated code that describes the very slot
-            // being glyphed, so the icon was chosen by searching an
-            // already-condensed sentence for the word "rain".
-            let (code, reason) = if s.next_run_epoch > 0 && nr.slot_skips {
-                (nr.skip_reason_code.clone(), nr.skip_reason_short.clone())
-            } else {
-                (
-                    s.skip_check.reason_code.clone(),
-                    s.skip_check.reason.clone(),
-                )
-            };
-            use crate::gates_catalog::GateFamily;
-            match crate::gates_catalog::gate_family(&code) {
-                GateFamily::Water => "cloud-rain",
-                GateFamily::Wind => "wind",
-                GateFamily::Freeze => "snowflake",
-                _ => {
-                    let r = reason.to_ascii_lowercase();
-                    if r.contains("rain") || r.contains("wet") || r.contains("moist") {
-                        "cloud-rain"
-                    } else if r.contains("wind") {
-                        "wind"
-                    } else if r.contains("freez") || r.contains("frost") {
-                        "snowflake"
-                    } else {
-                        "cloud-sun"
-                    }
-                }
-            }
-        } else {
-            "droplet"
-        }
-    };
-
-    // HEADLINE: the big WHEN, or the truthful STATUS when there is nothing to time
-    // (running now / offline / no run scheduled) OR when the next scheduled slot is
-    // predicted to SKIP. A skip headline must NOT show a time as if it were a run:
-    // the slot time moves to the tag below as an explicit re-check.
-    let headline = move || {
-        let s = snap.get();
-        if !s.ha_reachable {
-            "HA unreachable".to_string()
-        } else if s.zones.iter().any(|z| z.running) {
-            "Running now".to_string()
-        } else if s.skip_check.will_skip
-            && crate::ha::snapshot::is_pause_code(&s.skip_check.reason_code)
-        {
-            if s.next_run_epoch > 0 {
-                format_relative_time(s.next_run_epoch, &s.timezone)
-            } else {
-                "Paused".to_string()
-            }
-        } else if s.next_run_epoch > 0 {
-            if resolve_next_run(&s).slot_skips {
-                // Truthful: the engine is not going to water at the next slot.
-                "Not watering".to_string()
-            } else {
-                format_relative_time(s.next_run_epoch, &s.timezone)
-            }
-        } else {
-            "No run scheduled".to_string()
-        }
-    };
-
-    // Per-device unit preference; the skip reason re-renders unit-aware from the
-    // structured SkipCheck (P2 units architecture). Read prefs.get() inside the
-    // tag closure so a units change re-renders.
-    let prefs = use_unit_prefs();
-
-    // TAG: the supporting detail. For a real upcoming run it leads with WHY it
-    // will run and WHICH zones (the owner's #1 ask). For a skipping slot it tells
-    // the truth: the plain reason, the slot time as an explicit RE-CHECK (never a
-    // "next run"), and the next likely run so a water-conscious user can plan.
-    let tag = move || {
-        let s = snap.get();
-        if !s.ha_reachable {
-            "Refresher offline".to_string()
-        } else if let Some(z) = s.zones.iter().find(|z| z.running) {
-            let running_count = s.zones.iter().filter(|z| z.running).count();
-            if running_count > 1 {
-                format!(
-                    "{} running, {} of {} zones active",
-                    z.name,
-                    running_count,
-                    s.zones.len()
-                )
-            } else {
-                format!("{} running", z.name)
-            }
-        } else if s.skip_check.will_skip
-            && crate::ha::snapshot::is_pause_code(&s.skip_check.reason_code)
-        {
-            // Eyebrow says PAUSED; the tag is the live reason ("Paused until ...").
-            render_skip_reason(&s.skip_check, prefs.get())
-        } else if s.skip_check.will_skip && s.next_run_epoch <= 0 {
-            // Open-ended skip with no scheduled run: the only thing to say is the
-            // skip and why. Tense-aware (Skipped/Skipping today).
-            let verb = if today_run_passed(&s) {
-                "Skipped"
-            } else {
-                "Skipping"
-            };
-            format!(
-                "{verb} today · {}",
-                render_skip_reason(&s.skip_check, prefs.get())
-            )
-        } else {
-            let nr = resolve_next_run(&s);
-            if nr.slot_skips {
-                skip_tag_string(&nr, &s.timezone)
-            } else {
-                // A real run is scheduled: lead with the upcoming run in FUTURE
-                // tense and name the zones, so the user sees what is coming BEFORE
-                // it runs. The per-zone summary is the substance; fall back to the
-                // zone count + minutes.
-                let summary = crate::explain::zone_run_summary(&zone_lines(&s), false);
-                if !summary.is_empty() {
-                    return summary;
-                }
-                // Count only zones that will actually WATER (verdict != "skip"),
-                // matching the HeroStats "Zones watering" tile and the per-zone
-                // summary; counting s.zones.len() here would promise water for
-                // zones the engine is going to skip. Before any zone has a verdict
-                // (the fall-through reason this branch exists), default to all
-                // zones so a pre-decision frame still reads sensibly.
-                let any_decided = s.zones.iter().any(|z| {
-                    z.verdict.is_some() || s.zone_verdicts.iter().any(|v| v.zone_slug == z.slug)
-                });
-                // The shared skip-aware predicate, so this count can never
-                // disagree with the HeroStats tile beside it. The predicate
-                // already handles the no-verdict case (planned seconds
-                // decide), so the all-zones default is reserved for the one
-                // frame where NOTHING is decided and nothing carries planned
-                // seconds yet.
-                let skip_aware_n = s.zones.iter().filter(|z| s.zone_waters_next_run(z)).count();
-                let watering_n = if any_decided || skip_aware_n > 0 {
-                    skip_aware_n
-                } else {
-                    s.zones.len()
-                };
-                format!(
-                    "Will water {} zones for {:.0} min total",
-                    watering_n, s.next_run_total_minutes
-                )
-            }
-        }
-    };
-
-    // Quiet caption beneath the next-run line so the user understands the
-    // morning call is re-evaluated at run time and CAN change overnight: the
-    // owner was blindsided when a "skipped" card ran at 3:40 AM. One honest line,
-    // only when a real future RUN is scheduled. Suppressed on a skipping slot,
-    // whose tag already carries the explicit "Re-checks HH:MM" (no double note).
-    let recheck_note = move || {
-        let s = snap.get();
-        s.ha_reachable
-            && !s.zones.iter().any(|z| z.running)
-            && s.next_run_epoch > 0
-            && !resolve_next_run(&s).slot_skips
-    };
-
-    // P1-1: honest confidence. When the decision ran on substituted inputs (a
-    // stale station and/or an aged forecast, both folded into the trace's degraded
-    // flag in P0-2), say so on the main hero, not only in the Rule Lab.
-    let degraded = move || {
-        snap.get()
-            .decision_trace
-            .as_ref()
-            .map(|t| t.degraded)
-            .unwrap_or(false)
-    };
-
-    // Forced-run warning: when a sticky Force override is watering THROUGH a hard
-    // guard (freeze / restriction / raining-now / dry-run), the engine surfaces
-    // the would-be guard in `force_overrode_guard`. Name it on the hero so the
-    // operator KNOWS what they are running past. Worded so it never implies the
-    // override won't run: the run still happens, this only flags the protection
-    // it is bypassing. None when there is no force-run or it overrides nothing.
-    let forced_guard = move || snap.get().force_overrode_guard.clone();
-
-    // #1: state-aware hero. One verdict state drives a CSS custom-property
-    // cascade (--hero-verdict) so the glyph glow, a subtle surface tint, and the
-    // top-edge stripe all match the decision: teal = watering/scheduled, blue =
-    // skip, amber = paused, neutral = offline. The hero stops looking identical
-    // whether it is watering tonight, skipping for a week, or paused.
-    let hero_state = move || {
-        let s = snap.get();
-        if !s.ha_reachable {
-            "off"
-        } else if s.zones.iter().any(|z| z.running) {
-            "run"
-        } else if s.skip_check.will_skip
-            && crate::ha::snapshot::is_pause_code(&s.skip_check.reason_code)
-        {
-            "paused"
-        } else if s.next_run_epoch > 0 {
-            // Theme by what the NEXT SLOT actually does. A slot the engine will
-            // water is teal ("run"); a slot it will skip is blue ("skip"), so the
-            // surface tint matches the honest headline instead of always reading
-            // teal when a later run exists.
-            if resolve_next_run(&s).slot_skips {
-                "skip"
-            } else {
-                "run"
-            }
-        } else if s.skip_check.will_skip {
-            // Open-ended skip with no scheduled run stays blue.
-            "skip"
-        } else {
-            "run"
-        }
-    };
-
+pub fn WateringDecisions(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     view! {
-        <section
-            class="next-run-hero"
-            class:hero-run=move || hero_state() == "run"
-            class:hero-skip=move || hero_state() == "skip"
-            class:hero-paused=move || hero_state() == "paused"
-            class:hero-off=move || hero_state() == "off"
-        >
-            <div class="next-run-glyph" aria-hidden="true">
-                {move || view! { <crate::components::ui::Icon name=glyph() size=44/> }}
-            </div>
-            <div class="next-run-body">
-                // #4 (design): the deterministic verdict is the LEAD. Eyebrow
-                // (verdict word) + headline (WHEN) + tag (plain-English reason /
-                // run plan) sit at the very top, and the "Explain this decision"
-                // expander follows immediately, BEFORE the agronomy stats, so the
-                // product's differentiator ("will it water tonight, and why") is
-                // the first thing read, not buried under four numbers.
-                <div class="next-run-eyebrow">{eyebrow}</div>
-                <h1 class="next-run-headline">{headline}</h1>
-                <div
-                    class="next-run-tag"
-                    class:next-run-tag-skip=move || {
-                        let s = snap.get();
-                        // Style as a skip when the NEXT SLOT skips, or an
-                        // open-ended skip with no scheduled run, matching the
-                        // honest headline rather than today's morning verdict.
-                        (s.next_run_epoch > 0 && resolve_next_run(&s).slot_skips)
-                            || (s.skip_check.will_skip && s.next_run_epoch <= 0)
-                    }
-                >
-                    {tag}
-                </div>
-                {move || forced_guard().map(|guard| view! {
-                    // Forced-run warning. Names the hard guard the Force override
-                    // is watering THROUGH, without implying the run won't happen
-                    // (it will). Amber caution, keyed off the same wind/caution
-                    // token the degraded chip uses; inline-styled to avoid a new
-                    // stylesheet rule (this refactor is scoped to .rs).
-                    <div
-                        class="hero-forced-warn"
-                        role="status"
-                        style="display:inline-flex;align-items:center;gap:0.4rem;\
-                               margin-top:var(--space-2);padding:0.32rem 0.7rem;\
-                               border-radius:999px;font-size:var(--text-body-sm);\
-                               font-weight:600;line-height:1.3;color:var(--verdict-wind);\
-                               background:color-mix(in oklab, var(--verdict-wind) 12%, transparent);\
-                               border:1px solid color-mix(in oklab, var(--verdict-wind) 40%, transparent);"
-                        title="A Force override is active, so this run WILL water. It is running past a safety guard that would otherwise skip; this names that guard so the call is intentional."
-                    >
-                        <crate::components::ui::Icon name="alert-triangle" size=14/>
-                        <span>{format!("Force will water through {}", guard)}</span>
-                    </div>
+        <div class="watering-decisions">
+                <super::plan::WateringPlan snap/>
+                {move || snap.get().force_overrode_guard.map(|guard| view! {
+                    <p class="hero-forced-warn" role="status">{format!("Force bypasses {guard}. Safety checks, watering restrictions, and active holds still apply.")}</p>
                 })}
-                {move || recheck_note().then(|| view! {
-                    // Subtle, honest caption: the morning call is re-evaluated at
-                    // run time and can change if overnight conditions change.
-                    // Inline-styled (this refactor is scoped to .rs only) to read
-                    // quiet without a new stylesheet rule.
-                    <div
-                        class="next-run-recheck"
-                        style="margin-top:0.35rem;font-size:var(--text-meta);\
-                               letter-spacing:0.04em;color:var(--text-faint);"
-                    >
-                        "Re-checked at run time"
-                    </div>
-                })}
-                {move || degraded().then(|| view! {
-                    <div
-                        class="hero-confidence hero-confidence--degraded"
-                        title="The live station was stale or the forecast was aged when this was decided, so it used substituted or backup data. The deterministic rules still applied; treat the verdict as lower-confidence until live data returns."
-                    >
-                        <crate::components::ui::Icon name="alert-triangle" size=14/>
-                        <span>"Decided on backup data"</span>
-                    </div>
-                })}
-                // #4 (design) + nesting nit: the deterministic, no-LLM
-                // plain-English "why" leads, directly under the verdict and
-                // BEFORE the agronomy stats. The LLM Advisor is nested INSIDE
-                // this explainer (it omits itself when offline/disabled), so the
-                // two "why" surfaces read as primary + supplement, never as two
-                // unrelated siblings where an offline advisor looks like a fault.
-                {view! { <DecisionExplainer snap/> }.into_any()}
-                {view! { <HeroStats snap/> }.into_any()}
-                {view! { <SkipBreakdown snap/> }.into_any()}
-            </div>
-        </section>
+                <section class="decision-live">
+                    <header class="decision-section-heading"><h2>"Current decision and zone needs"</h2><span class="decision-live__badge">"Live"</span><p>"Conditions now · today’s recorded outcome is above."</p></header>
+                    <CurrentZoneNeeds snap/>
+                    {view! { <DecisionExplainer snap/> }.into_any()}
+                </section>
+        </div>
     }
 }
 
-/// P2-3: a one-tap, deterministic plain-English "why" for the morning decision,
+#[component]
+fn CurrentZoneNeeds(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
+    view! {
+        <div class="decision-zone-list">
+            <For each=move || snap.get().zones key=|z| z.slug.clone() children=move |initial| {
+                let zone = Memo::new(move |_| snap.get().zones.into_iter().find(|z| z.slug == initial.slug).unwrap_or_else(|| initial.clone()));
+                let status = Memo::new(move |_| {
+                    let z = zone.get();
+                    let s = snap.get();
+                    if !z.running_known || z.ledger_running && !z.running { return ("off", "alert-triangle", "Checking valves", "Waiting for controller confirmation".to_string()); }
+                    if z.running { return ("run", "sprinkler", "Watering now", "Controller reports watering".into()); }
+                    let verdict = z.verdict.as_ref().or_else(|| s.zone_verdicts.iter().find(|v| v.zone_slug == z.slug));
+                    let Some(verdict) = verdict else { return ("off", "info", "Awaiting decision", "No zone decision available".into()); };
+                    if s.zone_waters_next_run(&z) { return ("run", "sprinkler", "Watering planned", "Water balance calls for a run".into()); }
+                    let (code, reason) = if verdict.verdict == "skip" { (verdict.reason_code.as_str(), verdict.reason.as_str()) }
+                        else { ("water_balance", s.water_budgets.iter().find(|b| b.zone_slug == z.slug).map(|b| b.today_reason.as_str()).unwrap_or("Water need unavailable")) };
+                    if crate::gates_catalog::GateFamily::of(code, reason) == crate::gates_catalog::GateFamily::NoData {
+                        return ("off", "alert-triangle", "Awaiting data", super::overview::short_reasons(std::iter::once((code, reason))));
+                    }
+                    ("skip", "sprinkler-off", "Not watering", super::overview::short_reasons(std::iter::once((code, reason))))
+                });
+                view! {
+                    <article class="decision-zone" data-watering=move || status.get().0>
+                        <div><h3>{move || zone.get().name}</h3><p>{move || status.get().3}</p></div>
+                        <span class="watering-state">{move || view! { <crate::components::ui::Icon name=status.get().1 size=22/> }}{move || status.get().2}</span>
+                        <a href=move || crate::base::url(&format!("/zones/{}", zone.get().slug)) aria-label=move || format!("View {} zone details", zone.get().name)>"Zone details →"</a>
+                    </article>
+                }
+            }/>
+        </div>
+    }
+}
+
+/// A one-tap, deterministic plain-English "why" for the morning decision,
 /// rendered from the decision trace with no LLM. Collapsed by default; expanding
 /// shows the verdict in plain language, the deciding factor, the key checks that
 /// passed, and a lower-confidence note when the inputs were degraded.
 #[component]
 fn DecisionExplainer(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
+    let prefs = use_unit_prefs();
     // Gate the whole expander on trace presence via a coarse boolean that flips
     // at most once (None -> Some after the first refresh, then stays). The outer
     // closure reads ONLY this boolean, so it does not re-run on every snapshot
@@ -727,33 +442,10 @@ fn DecisionExplainer(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         let Some(trace) = s.decision_trace.clone() else {
             return ().into_any();
         };
-        // The reconciled next-slot preview: once this morning has passed, the
-        // explainer leads with THIS (the same source as the hero headline), so
-        // "next run" and the headline above it can never name different reasons.
-        let nr = resolve_next_run(&s);
-        let preview = crate::explain::NextSlotPreview {
-            skips: nr.slot_skips,
-            reason_code: nr.skip_reason_code.clone(),
-            reason: nr.skip_reason_full.clone(),
-        };
-        let e = crate::explain::explain_decision_with_zones(
-            &trace,
-            today_run_passed(&s),
-            &zone_lines(&s),
-            Some(&preview),
-        );
-        // WHICH zones the run touches, the primary "what to expect".
-        let zones_line = (!e.zones_summary.is_empty()).then(|| {
-            view! {
-                <p
-                    class="decision-explainer__zones"
-                    style="margin:0 0 var(--space-2);line-height:1.5;\
-                           color:var(--text-bright);"
-                >
-                    {e.zones_summary}
-                </p>
-            }
-        });
+        // This panel explains live evidence only. Stored dispatch records own
+        // completed outcomes; a trace captured by a refresh cannot prove one.
+        let e = crate::explain::explain_decision_with_zones(&trace, false, &[], None);
+        let reason = crate::reason_render::render_trace_reason(&trace, prefs.get());
         let checks = if e.considered.is_empty() {
             ().into_any()
         } else {
@@ -767,19 +459,6 @@ fn DecisionExplainer(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             }
             .into_any()
         };
-        // Secondary, past-tense context: what already happened this morning. Sits
-        // BELOW the upcoming-run lead so the card leads with the actionable.
-        let outcome = e.outcome.map(|o| {
-            view! {
-                <p
-                    class="decision-explainer__outcome"
-                    style="margin:var(--space-2) 0 0;font-size:var(--text-body-sm);\
-                           color:var(--text-dim);"
-                >
-                    {o}
-                </p>
-            }
-        });
         let degraded = e.degraded.then(|| {
             view! {
                 <p class="decision-explainer__degraded">
@@ -789,12 +468,10 @@ fn DecisionExplainer(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         });
         view! {
             <p class="decision-explainer__why">
-                <strong>{e.headline}". "</strong>
-                {e.why}
+                <strong>"Current checks: "</strong>
+                {reason}
             </p>
-            {zones_line}
             {checks}
-            {outcome}
             {degraded}
         }
         .into_any()
@@ -809,9 +486,11 @@ fn DecisionExplainer(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             class="decision-explainer"
             style=move || if has_trace() { "" } else { "display:none" }
         >
-            <summary class="decision-explainer__summary">"Explain this decision"</summary>
+            <summary class="decision-explainer__summary"><span>"System checks & calculations"</span><crate::components::ui::Icon name="chevron-down" size=20/></summary>
             <div class="decision-explainer__body">
                 {explanation}
+                <HeroStats snap/>
+                <SkipBreakdown snap/>
                 // LLM Advisor nested UNDER the deterministic why: the rule-based
                 // explanation above is the primary, always-correct answer; the
                 // advisor is an optional plain-language gloss. It omits its own
@@ -841,7 +520,7 @@ fn HeroStats(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         // Zones-page KPI strip and the cards: a zone the engine will skip
         // must NOT contribute, and a zone holding at zero planned seconds
         // (the normal soil-model state most mornings) is not "watering".
-        let waters_tonight = |z: &crate::ha::snapshot::ZoneState| s.zone_waters_next_run(z);
+        let waters_tonight = |z: &crate::model::ZoneState| s.zone_waters_next_run(z);
         // Tonight's minutes EXCLUDING skip zones, so it agrees with the
         // Zones-watering count beside it: a 4-zone schedule where 3 are
         // soil-saturated shows only the one running zone's minutes, not the
@@ -875,15 +554,11 @@ fn HeroStats(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             .count()
             .to_string();
         // Water level is None when the controller does not report one
-        // (every adapter except OpenSprinkler-class hardware): render the
-        // same dash treatment as the Soil-deficit stat below, never a
-        // fabricated 0%/100% readback.
-        let water_empty = s.water_level_pct.is_none();
-        let water = match s.water_level_pct {
-            Some(v) => format!("{v:.0}"),
-            None => "-".to_string(),
-        };
-        let water_unit = if water_empty { "" } else { "%" };
+        // (every adapter except OpenSprinkler-class hardware). A dash in
+        // a tile is a question nobody can answer, so the tile turns into
+        // the days since the last real rain, which every install knows
+        // once it has a forecast; before that it stays out.
+        let (water, water_unit, water_label) = water_tile(&s);
         // Soil deficit is the mean of the zones that HAVE one, in
         // MILLIMETERS. The soil model's evidence replay fills it for every
         // zone with agronomy config, so this tile carries a live figure on
@@ -906,238 +581,137 @@ fn HeroStats(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         let deficit_unit = if deficit_empty { "" } else { depth_unit(p) };
         view! {
             <div class="ir-hero-stats">
-                <div class="ir-hero-stat">
-                    <span class="ir-hero-stat__v">{tonight}<span class="ir-hero-stat__u">"min"</span></span>
-                    <span class="ir-hero-stat__k">"This morning"</span>
-                </div>
-                <div class="ir-hero-stat">
-                    <span class="ir-hero-stat__v">{watering}</span>
-                    <span class="ir-hero-stat__k">"Zones watering"</span>
-                </div>
-                <div class="ir-hero-stat">
-                    <span class="ir-hero-stat__v">{water}<span class="ir-hero-stat__u">{water_unit}</span></span>
-                    <span class="ir-hero-stat__k">"Water level"</span>
-                </div>
-                <div class="ir-hero-stat">
-                    <span class="ir-hero-stat__v">{deficit}<span class="ir-hero-stat__u">{deficit_unit}</span></span>
-                    <span class="ir-hero-stat__k">"Soil deficit"</span>
-                </div>
+                <crate::components::ui::StatTile layout="hero" label="Next run" value=tonight unit="min"/>
+                <crate::components::ui::StatTile layout="hero" label="Zones watering" value=watering/>
+                {water_label.map(|label| view! {
+                    <crate::components::ui::StatTile layout="hero" label=label value=water unit=water_unit/>
+                })}
+                <crate::components::ui::StatTile layout="hero" label="Soil deficit" value=deficit unit=deficit_unit/>
             </div>
         }
     }
 }
 
+/// The third hero tile: the controller's water level when it reports
+/// one, otherwise the days since significant rain, otherwise nothing
+/// (a `None` label hides the tile).
+pub fn water_tile(s: &IrrigationSnapshot) -> (String, &'static str, Option<&'static str>) {
+    if let Some(v) = s.water_level_pct {
+        return (format!("{v:.0}"), "%", Some("Water level"));
+    }
+    // The figure is model-derived; with no forecast rows it is a
+    // placeholder, so the tile waits for the seven-day strip.
+    if s.last_refresh_epoch == 0 || s.seven_day_verdicts.is_empty() {
+        return (String::new(), "", None);
+    }
+    (
+        s.skip_check.days_since_significant_rain.to_string(),
+        "d",
+        Some("Since rain"),
+    )
+}
+
+/// One tile of the breakdown: a rule the engine evaluated, rendered from
+/// the decision trace. The hero used to re-derive the ladder here with
+/// schema defaults typed in by hand (0.05, 0.10, 95 F, 1.5 x), so a
+/// yard whose already-wet threshold was raised to 0.10 saw a tile that
+/// tripped at 0.05 while the engine, correctly, ran; and a rule the
+/// operator disabled still drew a tile. The tile is a projection of the
+/// RuleEval now, and the numbers are the engine's, in the viewer's units.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BreakdownRow {
+    pub id: String,
+    pub label: String,
+    /// "value vs threshold", unit-aware.
+    pub detail: String,
+    /// The distance to the line, when the gate has one.
+    pub margin: Option<String>,
+    /// The rule fired (or met its line and was overridden).
+    pub tripped: bool,
+    /// An earlier rule decided before this one was reached.
+    pub not_reached: bool,
+}
+
+/// The rows the breakdown shows for a trace: fired, passed and
+/// not-reached rules, in ladder order. A rule the operator disabled, or
+/// one that had nothing to judge, draws no tile: the breakdown shows
+/// what was checked, and those were not.
+pub fn breakdown_rows(
+    trace: &crate::model::DecisionTrace,
+    p: crate::components::units_fmt::UnitPrefs,
+) -> Vec<BreakdownRow> {
+    trace
+        .rules
+        .iter()
+        .filter(|r| matches!(r.outcome.as_str(), "fired" | "passed" | "not_reached"))
+        .map(|r| BreakdownRow {
+            id: r.id.clone(),
+            label: r.label.clone(),
+            detail: if r.outcome == "not_reached" {
+                "not checked; an earlier rule decided".to_string()
+            } else {
+                crate::reason_render::render_rule_detail(r, p)
+            },
+            margin: if r.outcome == "not_reached" {
+                None
+            } else {
+                crate::reason_render::render_rule_margin(r, p)
+            },
+            tripped: r.outcome == "fired" || r.over_line,
+            not_reached: r.outcome == "not_reached",
+        })
+        .collect()
+}
+
 #[component]
 fn SkipBreakdown(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
-    // Each row pairs an input with its threshold and a tripped-or-not
-    // marker. Always rendered so the user can see what was checked and
-    // why it passed (or didn't), not just the final verdict.
-    // Each row is type-erased so the breakdown's monomorphized type
-    // stays flat (5 AnyViews under one div, vs. 5 deeply-nested
-    // 4-span tuples that explode rustc's query-depth budget).
     let prefs = use_unit_prefs();
+    let rows = Signal::derive(move || {
+        snap.get()
+            .decision_trace
+            .as_ref()
+            .map(|t| breakdown_rows(t, prefs.get()))
+            .unwrap_or_default()
+    });
     view! {
         <div class="skip-breakdown" role="list">
-            {view! {
-                <SkipRow
-                    label="Paused"
-                    value=Signal::derive(move || if snap.get().skip_check.is_paused { "on".into() } else { "off".into() })
-                    threshold=Signal::derive(|| "off".to_string())
-                    tripped=Signal::derive(move || snap.get().skip_check.is_paused)
-                />
-            }.into_any()}
-            {view! {
-                <SkipRow
-                    label="Freeze"
-                    value=Signal::derive(move || {
-                        let p = prefs.get();
-                        // temp_value + temp_unit (fmt_temp_short carries its own
-                        // degree sign; composing it with temp_unit doubles it).
-                        format!("{}{}", temp_value(snap.get().skip_check.temp_now_f, p), temp_unit(p))
-                    })
-                    threshold=Signal::derive(move || {
-                        let p = prefs.get();
-                        format!("≥ {}{}", temp_value(snap.get().skip_check.min_temp_f, p), temp_unit(p))
-                    })
-                    tripped=Signal::derive(move || {
-                        let s = snap.get();
-                        s.skip_check.temp_now_f < s.skip_check.min_temp_f
-                    })
-                />
-            }.into_any()}
-            {view! {
-                <SkipRow
-                    label="Wind"
-                    value=Signal::derive(move || fmt_wind(snap.get().skip_check.wind_now_mph, prefs.get()))
-                    threshold=Signal::derive(move || {
-                        let p = prefs.get();
-                        format!("≤ {} {}", wind_value(snap.get().skip_check.max_wind_mph, p), wind_unit(p))
-                    })
-                    tripped=Signal::derive(move || {
-                        let s = snap.get();
-                        s.skip_check.wind_now_mph > s.skip_check.max_wind_mph
-                    })
-                />
-            }.into_any()}
-            {view! {
-                <SkipRow
-                    label="Wet today"
-                    value=Signal::derive(move || fmt_rain_amount(snap.get().skip_check.rain_today_in, prefs.get()))
-                    threshold=Signal::derive(move || format!("< {}", fmt_rain_amount(0.05, prefs.get())))
-                    tripped=Signal::derive(move || snap.get().skip_check.rain_today_in >= 0.05)
-                />
-            }.into_any()}
-            {view! {
-                <SkipRow
-                    label="Forecast (×prob)"
-                    value=Signal::derive(move || {
-                        let s = snap.get().skip_check;
-                        // No probability reported: show the bare amount (the
-                        // engine weights it at full value), never a phantom
-                        // "× 0%".
-                        match s.rain_tomorrow_prob_pct {
-                            Some(prob) => format!(
-                                "{} × {prob}%",
-                                fmt_rain_amount(s.forecast_in, prefs.get())
-                            ),
-                            None => fmt_rain_amount(s.forecast_in, prefs.get()),
-                        }
-                    })
-                    threshold=Signal::derive(move || format!("< {}", fmt_rain_amount(snap.get().skip_check.rain_skip_in, prefs.get())))
-                    tripped=Signal::derive(move || {
-                        let s = snap.get().skip_check;
-                        // Full weight when no probability was reported,
-                        // matching the engine's tomorrow_prob_weight.
-                        let weight = s
-                            .rain_tomorrow_prob_pct
-                            .map(|prob| prob as f64 / 100.0)
-                            .unwrap_or(1.0);
-                        s.forecast_in * weight >= s.rain_skip_in
-                    })
-                />
-            }.into_any()}
-            {view! {
-                <SkipRow
-                    label="Rain next 4h"
-                    value=Signal::derive(move || fmt_rain_amount(snap.get().skip_check.rain_next_4h_in, prefs.get()))
-                    threshold=Signal::derive(move || format!("< {}", fmt_rain_amount(0.10, prefs.get())))
-                    tripped=Signal::derive(move || snap.get().skip_check.rain_next_4h_in >= 0.10)
-                />
-            }.into_any()}
-            {view! {
-                <SkipRow
-                    label="Rain forecast 3d"
-                    value=Signal::derive(move || fmt_rain_amount(snap.get().skip_check.rain_3day_weighted_in, prefs.get()))
-                    threshold=Signal::derive(move || format!("< {}", fmt_rain_amount(snap.get().skip_check.rain_skip_in * 1.5, prefs.get())))
-                    tripped=Signal::derive(move || {
-                        let s = snap.get().skip_check;
-                        s.rain_3day_weighted_in >= 1.5 * s.rain_skip_in
-                    })
-                />
-            }.into_any()}
-            {view! {
-                <SkipRow
-                    label="Overnight low"
-                    value=Signal::derive(move || {
-                        let p = prefs.get();
-                        // temp_value (bare number) + temp_unit: fmt_temp_short already
-                        // carries the degree sign, so composing IT with temp_unit
-                        // rendered a doubled symbol ("34°°F").
-                        format!("{}{}", temp_value(snap.get().skip_check.temp_min_24h_f, p), temp_unit(p))
-                    })
-                    threshold=Signal::derive(move || {
-                        let p = prefs.get();
-                        format!("≥ {}{}", temp_value(snap.get().skip_check.min_temp_f, p), temp_unit(p))
-                    })
-                    tripped=Signal::derive(move || {
-                        // Validity flag (not the old 0.0 sentinel) so a real
-                        // sub-zero forecast low still trips the row.
-                        let s = snap.get().skip_check;
-                        s.temp_min_24h_valid && s.temp_min_24h_f < s.min_temp_f
-                    })
-                />
-            }.into_any()}
-            {view! {
-                <SkipRow
-                    label="Heat index 3d"
-                    value=Signal::derive(move || {
-                        let p = prefs.get();
-                        format!("{}{}", temp_value(snap.get().skip_check.heat_index_max_3day_f, p), temp_unit(p))
-                    })
-                    threshold=Signal::derive(move || {
-                        let p = prefs.get();
-                        format!("< {}{}", temp_value(95.0, p), temp_unit(p))
-                    })
-                    tripped=Signal::derive(move || snap.get().skip_check.heat_index_max_3day_f >= 95.0)
-                />
-            }.into_any()}
+            {move || {
+                let rows = rows.get();
+                if rows.is_empty() {
+                    return view! {
+                        <p class="sk-empty">"No decision yet. The first check lands within a minute of the forecast."</p>
+                    }
+                    .into_any();
+                }
+                rows.into_iter()
+                    .map(|r| view! { <SkipRow row=r/> })
+                    .collect_view()
+                    .into_any()
+            }}
         </div>
     }
 }
 
 #[component]
-fn SkipRow(
-    label: &'static str,
-    value: Signal<String>,
-    threshold: Signal<String>,
-    tripped: Signal<bool>,
-) -> impl IntoView {
+fn SkipRow(row: BreakdownRow) -> impl IntoView {
+    let tripped = row.tripped;
+    let muted = row.not_reached;
     view! {
-        <div class="sk-row" class:sk-row-tripped=move || tripped.get()>
+        <div class="sk-row" class:sk-row-tripped=tripped class:sk-row-muted=muted role="listitem">
             <span class="sk-mark" aria-hidden="true">
-                {move || {
-                    let name = if tripped.get() { "x" } else { "check" };
+                {
+                    let name = if tripped { "x" } else if muted { "minus" } else { "check" };
                     view! { <crate::components::ui::Icon name=name size=13 stroke=2.5/> }
-                }}
+                }
             </span>
-            <span class="sk-label">{label}</span>
-            <span class="sk-value">{move || value.get()}</span>
-            <span class="sk-threshold">{move || threshold.get()}</span>
+            <span class="sk-label">{row.label}</span>
+            <span class="sk-value">{row.detail}</span>
+            <span class="sk-threshold">{row.margin.unwrap_or_default()}</span>
         </div>
     }
 }
 
-/// Format an epoch as "TODAY · HH:MM" / "TOMORROW · HH:MM" / "WED · HH:MM" /
-/// "JUN 28 · HH:MM", in 24-hour LOCAL time rendered in the deployment's IANA
-/// `tz` (not the viewer's browser zone), so the hero matches the deployment's
-/// wall clock and the HA mobile notification. Empty `tz` falls back to
-/// browser-local (hydrate) / UTC (ssr) via `crate::timefmt`.
-///
-/// The day label is derived by comparing the deployment-tz calendar date of the
-/// target against today (and tomorrow), using `format_md` for the date identity
-/// so the TODAY/TOMORROW determination is itself in the deployment timezone. The
-/// "within a week -> weekday" bucket uses coarse epoch arithmetic (a DST day is
-/// off by an hour, which never crosses the 7-day bucket boundary in practice).
-fn format_relative_time(epoch: i64, tz: &str) -> String {
-    use crate::timefmt::{format_hm, format_md, format_wday_full};
-    if epoch <= 0 {
-        return "-".to_string();
-    }
-    let hhmm = format_hm(epoch, tz);
-    let now = chrono::Utc::now().timestamp();
-    // Calendar-date identity in the deployment tz (e.g. "Jun 28"). Comparing the
-    // rendered md strings keeps the TODAY/TOMORROW call in the deployment zone.
-    let target_md = format_md(epoch, tz);
-    let today_md = format_md(now, tz);
-    let tomorrow_md = format_md(now + 86_400, tz);
-    if !target_md.is_empty() && target_md == today_md {
-        format!("TODAY · {hhmm}")
-    } else if !target_md.is_empty() && target_md == tomorrow_md {
-        format!("TOMORROW · {hhmm}")
-    } else if epoch - now < 7 * 86_400 {
-        // FULL day name: "SUN" in run prose reads as sunshine (a weather
-        // reason), not a day. "SUNDAY · 03:41" is unambiguous.
-        format!("{} · {hhmm}", format_wday_full(epoch, tz).to_uppercase())
-    } else {
-        format!("{} · {hhmm}", target_md.to_uppercase())
-    }
-}
-
-/// Day-form of [`format_relative_time`] for STRIP DAY-CELL epochs. The 7-day
-/// verdict cells carry local-midnight day buckets, not real slot times, so
-/// rendering their clock ("Sun · 00:00") read as a promise to water at
-/// midnight. A day is all we honestly know about a future likely run; the
-/// actual slot time is sunrise-relative and computed on that morning.
+/// Label a future forecast date in the deployment timezone.
 fn format_relative_day(epoch: i64, tz: &str) -> String {
     use crate::timefmt::{format_md, format_wday_full};
     if epoch <= 0 {
@@ -1160,9 +734,312 @@ fn format_relative_day(epoch: i64, tz: &str) -> String {
 }
 
 #[cfg(test)]
+mod next_run_state_tests {
+    use super::*;
+    use crate::model::NextRunState;
+
+    /// Each no-run state renders its own eyebrow, headline and the voice
+    /// module's tag, so the three are told apart on screen.
+    #[test]
+    fn no_location_reads_as_setup() {
+        assert_eq!(no_run_eyebrow(NextRunState::NoLocation), "SETUP NEEDED");
+        assert_eq!(no_run_headline(NextRunState::NoLocation), "No location set");
+        assert_eq!(
+            no_run_tag(NextRunState::NoLocation),
+            Some(crate::voice::next_run::NO_LOCATION)
+        );
+    }
+
+    #[test]
+    fn no_legal_day_reads_as_a_rule() {
+        assert_eq!(
+            no_run_eyebrow(NextRunState::NoLegalDay),
+            "NOT A WATERING DAY"
+        );
+        assert_eq!(no_run_headline(NextRunState::NoLegalDay), "None in 14 days");
+        assert_eq!(
+            no_run_tag(NextRunState::NoLegalDay),
+            Some(crate::voice::next_run::NO_LEGAL_DAY)
+        );
+    }
+
+    #[test]
+    fn no_sunrise_reads_as_the_season() {
+        assert_eq!(no_run_eyebrow(NextRunState::NoSunrise), "POLAR NIGHT");
+        assert_eq!(
+            no_run_headline(NextRunState::NoSunrise),
+            "No morning to aim at"
+        );
+        assert_eq!(
+            no_run_tag(NextRunState::NoSunrise),
+            Some(crate::voice::next_run::NO_SUNRISE)
+        );
+    }
+
+    /// A run planned for tomorrow at 05:30, looked at today at 06:00,
+    /// is pending. The old clock-string compare said it had passed.
+    #[test]
+    fn tomorrows_run_is_pending_this_evening() {
+        let mut s = IrrigationSnapshot::default();
+        s.next_run_epoch = now_epoch_secs() + 23 * 3600 + 1800;
+        s.next_run_day_offset = Some(1);
+        assert!(!today_run_passed(&s));
+        let nr = resolve_next_run(&s);
+        assert!(!nr.slot_skips);
+        // And a run whose instant is behind us has passed, whatever the clock reads.
+        s.next_run_epoch = now_epoch_secs() - 60;
+        s.next_run_day_offset = Some(0);
+        assert!(today_run_passed(&s));
+    }
+
+    /// Every voice constant for next-run and idle states is referenced
+    /// by a component, so none of them is prose nobody can see.
+    #[test]
+    fn every_next_run_voice_constant_is_rendered_somewhere() {
+        let voice =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/voice.rs")).unwrap();
+        let mut consts = Vec::new();
+        for module in ["pub mod next_run", "pub mod idle"] {
+            let start = voice.find(module).expect(module);
+            let end = voice[start..].find("\n}\n").unwrap() + start;
+            for line in voice[start..end].lines() {
+                if let Some(rest) = line.trim().strip_prefix("pub const ") {
+                    consts.push((
+                        module.trim_start_matches("pub mod ").to_string(),
+                        rest.split(':').next().unwrap().trim().to_string(),
+                    ));
+                }
+            }
+        }
+        assert!(!consts.is_empty());
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/components");
+        let mut sources = String::new();
+        for path in crate::engine::clock::rust_sources(&root) {
+            sources.push_str(&std::fs::read_to_string(path).unwrap());
+        }
+        for (module, name) in consts {
+            let needle = format!("voice::{module}::{name}");
+            assert!(
+                sources.contains(&needle),
+                "{needle} is referenced by no component"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod restricted_slot_tests {
+    use super::*;
+
+    /// A restricted slot reads as a rule: the tag names the allowed days
+    /// and the next run, and never promises a re-check the calendar
+    /// cannot change.
+    #[test]
+    fn a_restricted_slot_names_the_rule_not_a_recheck() {
+        let nr = NextRunStatus {
+            slot_skips: true,
+            slot_epoch: 1_788_600_000,
+            skip_reason_short: "watering restrictions".into(),
+            skip_reason_code: "restrictions".into(),
+            skip_reason_full: "Watering restriction (HOA): today is not an allowed watering day"
+                .into(),
+            next_likely_run_epoch: 1_788_600_000 + 2 * 86_400,
+            all_week_skips: false,
+        };
+        let tag = skip_tag_string_with_rules(&nr, "UTC", Some("Thu and Sun"));
+        assert!(!tag.contains("Re-checks"), "{tag}");
+        assert!(
+            tag.contains("Your watering rules allow Thu and Sun."),
+            "{tag}"
+        );
+        assert!(tag.contains("Next run"), "{tag}");
+        // A weather skip keeps its re-check.
+        let mut weather = nr.clone();
+        weather.skip_reason_code = "wind_forecast".into();
+        weather.skip_reason_short = "high wind".into();
+        assert!(skip_tag_string_with_rules(&weather, "UTC", None).contains("Re-checks"));
+    }
+
+    #[test]
+    fn allowed_days_read_as_words() {
+        let mut s = IrrigationSnapshot::default();
+        assert_eq!(s.allowed_days_phrase(), None);
+        s.restriction_allowed_days = Some(vec![4, 0]);
+        assert_eq!(s.allowed_days_phrase().as_deref(), Some("Sun and Thu"));
+        s.restriction_allowed_days = Some(vec![1, 3, 5]);
+        assert_eq!(s.allowed_days_phrase().as_deref(), Some("Mon, Wed and Fri"));
+        s.restriction_allowed_days = Some((0..7).collect());
+        assert_eq!(
+            s.allowed_days_phrase(),
+            None,
+            "every day allowed is no rule to name"
+        );
+    }
+}
+
+#[cfg(test)]
+mod breakdown_tests {
+    use super::*;
+    use crate::components::units_fmt::UnitPrefs;
+    use crate::config::schema::SkipRuleParams;
+    use crate::engine::skip_rules::{decide_traced, Inputs};
+
+    fn base() -> Inputs {
+        Inputs {
+            calendar: crate::engine::calendar::Calendar::utc(),
+            rain_intensity_now_in_hr: Some(0.0),
+            rain_today_forecast_in: Some(0.0),
+            rain_next_4h_in: Some(0.0),
+            forecast_in: Some(0.0),
+            rain_3day_weighted_in: Some(0.0),
+            temp_now_f: 70.0,
+            wind_now_mph: 3.0,
+            humidity_now_pct: 55.0,
+            max_wind_mph: 10.0,
+            min_temp_f: 38.0,
+            rain_skip_in: 0.25,
+            temp_min_24h_f: Some(60.0),
+            temp_max_3day_f: 80.0,
+            live_readings: Default::default(),
+            ..Default::default()
+        }
+    }
+
+    /// Every tile is its RuleEval: same id, the renderer's detail, the
+    /// renderer's margin, tripped exactly when the engine says fired.
+    #[test]
+    fn each_tile_equals_its_rule_eval() {
+        let trace = decide_traced(&base(), &SkipRuleParams::default());
+        let rows = breakdown_rows(&trace, UnitPrefs::default());
+        let shown: Vec<&crate::model::RuleEval> = trace
+            .rules
+            .iter()
+            .filter(|r| matches!(r.outcome.as_str(), "fired" | "passed" | "not_reached"))
+            .collect();
+        assert_eq!(rows.len(), shown.len());
+        for (row, rule) in rows.iter().zip(shown) {
+            assert_eq!(row.id, rule.id);
+            assert_eq!(row.label, rule.label);
+            assert_eq!(
+                row.tripped,
+                rule.outcome == "fired" || rule.over_line,
+                "{}",
+                rule.id
+            );
+            if rule.outcome != "not_reached" {
+                assert_eq!(
+                    row.detail,
+                    crate::reason_render::render_rule_detail(rule, UnitPrefs::default()),
+                    "{}",
+                    rule.id
+                );
+                assert_eq!(
+                    row.margin,
+                    crate::reason_render::render_rule_margin(rule, UnitPrefs::default())
+                );
+            }
+        }
+    }
+
+    /// A raised already-wet threshold: 0.07 in of rain against 0.10 is
+    /// passed on the tile, as it is in the engine. The old tile compared
+    /// against a typed-in 0.05 and tripped.
+    #[test]
+    fn a_raised_threshold_renders_passed() {
+        let mut i = base();
+        i.rain_today_in = 0.07;
+        let mut p = SkipRuleParams::default();
+        p.already_wet_in = 0.10;
+        let trace = decide_traced(&i, &p);
+        let rows = breakdown_rows(&trace, UnitPrefs::default());
+        let wet = rows
+            .iter()
+            .find(|r| r.id == "already_wet")
+            .expect("an already_wet tile");
+        assert!(!wet.tripped, "{wet:?}");
+        assert!(
+            wet.detail.contains("0.07") && wet.detail.contains("0.10"),
+            "{wet:?}"
+        );
+    }
+
+    /// A rule the operator disabled draws no tile at all.
+    #[test]
+    fn a_disabled_rule_renders_neither() {
+        let mut i = base();
+        i.temp_now_f = 30.0;
+        let mut p = SkipRuleParams::default();
+        p.disabled_rules = vec!["freeze_now".into()];
+        let trace = decide_traced(&i, &p);
+        let rows = breakdown_rows(&trace, UnitPrefs::default());
+        assert!(rows.iter().all(|r| r.id != "freeze_now"), "{rows:?}");
+    }
+
+    /// No component re-derives a skip rule by comparing a skip_check
+    /// input against a typed-in number. The tiles read the trace and the
+    /// forms read the defaults by name; a literal beside `skip_check.` in
+    /// a comparison is the old hero, and it is banned from the components
+    /// tree.
+    #[test]
+    fn no_component_compares_a_skip_check_input_to_a_literal() {
+        fn offends(line: &str) -> bool {
+            // `skip_check.<field> <op> <digit>`: an input compared to a number.
+            let mut from = 0;
+            while let Some(i) = line[from..].find("skip_check.") {
+                let after = &line[from + i + "skip_check.".len()..];
+                let field_len = after
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .unwrap_or(after.len());
+                let rest = after[field_len..].trim_start();
+                let op_len = if rest.starts_with(">=") || rest.starts_with("<=") {
+                    2
+                } else if rest.starts_with('>') || rest.starts_with('<') {
+                    1
+                } else {
+                    0
+                };
+                if op_len > 0
+                    && rest[op_len..]
+                        .trim_start()
+                        .starts_with(|c: char| c.is_ascii_digit())
+                {
+                    return true;
+                }
+                from += i + 1;
+            }
+            // `1.5 * s.rain_skip_in`: a factor typed in front of an input.
+            line.contains("* s.")
+                && line
+                    .split("* s.")
+                    .next()
+                    .is_some_and(|before| before.trim_end().ends_with(|c: char| c.is_ascii_digit()))
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/components");
+        let mut hits = Vec::new();
+        for path in crate::engine::clock::rust_sources(&root) {
+            let src = std::fs::read_to_string(&path).unwrap();
+            for (n, line) in crate::engine::clock::code_only(&src).lines().enumerate() {
+                if offends(line) {
+                    hits.push(format!("{}:{}: {}", path.display(), n + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            hits.is_empty(),
+            "components compare skip_check inputs to typed-in numbers:
+{}",
+            hits.join(
+                "
+"
+            )
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ha::snapshot::{DayVerdict, IrrigationSnapshot, SkipCheck};
+    use crate::model::{DayVerdict, IrrigationSnapshot, SkipCheck};
 
     const TZ: &str = "America/New_York";
     // 00:00 America/New_York on 2026-06-25 (a fixed, deterministic anchor).
@@ -1191,6 +1068,9 @@ mod tests {
         // Slot = 03:25 local on the chosen day (well after that day's midnight, so
         // format_md(slot) == format_md(that day's cell)).
         s.next_run_epoch = DAY0_MIDNIGHT + slot_day_idx as i64 * DAY_S + 3 * 3600 + 25 * 60;
+        // The refresher computes the day offset from the same calendar the
+        // engine used; the fixture states it outright.
+        s.next_run_day_offset = Some(slot_day_idx as u32);
         s.next_run_total_minutes = 75.0;
         s.seven_day_verdicts = verdicts
             .iter()
@@ -1278,7 +1158,10 @@ mod tests {
         assert_eq!(nr.skip_reason_short, "rain forecast");
 
         let tag = skip_tag_string(&nr, TZ);
-        assert!(tag.contains("no watering planned this week"), "tag={tag:?}");
+        assert!(
+            tag.contains(crate::voice::idle::WEEK_OF_RAIN),
+            "tag={tag:?}"
+        );
         assert!(tag.contains("Re-checks 03:25"), "tag={tag:?}");
         assert!(!tag.contains('\u{2014}'), "no em dashes, tag={tag:?}");
     }
@@ -1308,7 +1191,7 @@ mod tests {
 
     #[test]
     fn today_pending_slot_prefers_live_skip_check_over_day0_cell() {
-        // W6 regression guard (fix #6/T2): for TODAY's still-pending slot the
+        // Regression guard: for TODAY's still-pending slot the
         // live skip_check is authoritative, NOT the projected day-0 strip cell
         // (which zeroes rain_now/wind_now and can disagree with the live call).
         //
@@ -1386,5 +1269,27 @@ mod tests {
             plain_skip_phrase("", "Tomorrow rain (0.40\" x 85%)"),
             "rain forecast"
         );
+    }
+}
+
+#[cfg(test)]
+mod water_tile_tests {
+    use super::*;
+
+    /// A controller that reports a level shows it; one that does not
+    /// gives the tile to days since rain; before any forecast the tile
+    /// stays out rather than showing a dash.
+    #[test]
+    fn the_water_tile_never_shows_a_dash() {
+        let mut s = IrrigationSnapshot::default();
+        assert_eq!(water_tile(&s).2, None, "no data: no tile");
+
+        s.last_refresh_epoch = 1_700_000_000;
+        s.seven_day_verdicts = vec![Default::default()];
+        s.skip_check.days_since_significant_rain = 4;
+        assert_eq!(water_tile(&s), ("4".to_string(), "d", Some("Since rain")));
+
+        s.water_level_pct = Some(72.4);
+        assert_eq!(water_tile(&s), ("72".to_string(), "%", Some("Water level")));
     }
 }

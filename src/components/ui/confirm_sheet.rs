@@ -18,9 +18,11 @@ pub fn ConfirmSheet(
     /// opens it with visible.set(true); either button closes it (Escape
     /// and backdrop dismiss come from the Sheet).
     visible: RwSignal<bool>,
-    /// Sheet title, e.g. "Raise run limit?".
+    /// Sheet title, e.g. "Raise run limit?". Reactive, so a confirm about
+    /// one row of a list can name that row in the question rather than
+    /// burying it in the body.
     #[prop(into)]
-    title: String,
+    title: Signal<String>,
     /// Body copy. Reactive so per-open values (a minute count, a zone
     /// name) render current.
     #[prop(into)]
@@ -42,7 +44,7 @@ pub fn ConfirmSheet(
     };
     let variant = if danger { "danger" } else { "primary" };
     view! {
-        <Sheet open=visible title=title.clone() aria_label=title>
+        <Sheet open=visible title=title aria_label="">
             <p class="bottom-sheet-body">{move || body.get()}</p>
             <div class="bottom-sheet-actions">
                 <Button variant="secondary" on_click=Callback::new(close)>"Cancel"</Button>

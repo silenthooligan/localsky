@@ -18,13 +18,15 @@ use leptos::tachys::view::any_view::IntoAny;
 use leptos_router::hooks::use_query_map;
 use serde::Deserialize;
 
+#[cfg(feature = "hydrate")]
+use crate::components::config_client::{get_config, put_config};
 use crate::components::controllers_form::{
     apply_zone_binds, bind_message, BindOutcome, ControllerEditorPanel, ZoneBind,
 };
 use crate::components::settings::cloud_weather::{cloud_status_word_for_entry, CloudCatalog};
 use crate::components::settings_ui::{BadgeTone, EntityKind, SettingsBadge, SettingsCard};
 use crate::components::sources_form::SourceEditorPanel;
-use crate::components::ui::{Button, HelpHint, Panel, Toggle};
+use crate::components::ui::{Button, ConfirmSheet, HelpHint, Panel, Toggle};
 
 /// Frontend mirror of `crate::devices::Device`. `kind` and `origin` arrive as
 /// the snake_case strings the API serializes; `source_id` backlinks a native
@@ -131,28 +133,6 @@ async fn fetch_discover() -> Result<Vec<DiscoveredGateway>, String> {
         .map_err(|e| e.to_string())
 }
 
-#[cfg(feature = "hydrate")]
-async fn fetch_config() -> Result<serde_json::Value, String> {
-    use gloo_net::http::Request;
-    let resp = Request::get("/api/config")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    // Reject non-2xx BEFORE decoding: an auth/error body is valid JSON, and
-    // without this check it would poison the config signal (the failure-path
-    // refetch would then "restore" garbage instead of truth).
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::load_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    resp.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
-}
-
 /// GET the cloud source catalog, so a configured cloud weather-source CARD can
 /// reuse the panel's exact calm status word (looked up by `source_kind`). A miss
 /// (older payload / network error) reads as an empty catalog: the card then falls
@@ -172,50 +152,6 @@ async fn fetch_catalog() -> Result<CloudCatalog, String> {
         ));
     }
     resp.json::<CloudCatalog>().await.map_err(|e| e.to_string())
-}
-
-/// PUT the merged config. Returns the restart_reasons the PUT response carried
-/// (empty when the change hot-reloaded). Adding a brand-new source/controller
-/// that needs a boot-wired connection (a Tempest listener, an OpenSprinkler
-/// poll loop, an Open-Meteo refresher) flags restart_required=true with the
-/// reasons; the caller raises the shared RestartBanner. A missing/old field
-/// reads as "no restart", the safe default.
-#[cfg(feature = "hydrate")]
-async fn save_config(cfg: serde_json::Value) -> Result<Vec<String>, String> {
-    use gloo_net::http::Request;
-    let resp = Request::put("/api/config")
-        .json(&cfg)
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::save_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    let reasons = resp
-        .json::<serde_json::Value>()
-        .await
-        .ok()
-        .filter(|v| {
-            v.get("restart_required")
-                .and_then(|r| r.as_bool())
-                .unwrap_or(false)
-        })
-        .and_then(|v| {
-            v.get("restart_reasons")
-                .and_then(|r| r.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(str::to_string))
-                        .collect()
-                })
-        })
-        .unwrap_or_default();
-    Ok(reasons)
 }
 
 /// Glyph for a device kind.
@@ -323,7 +259,7 @@ pub fn SettingsDevices() -> impl IntoView {
                 Ok(list) => devices.set(list),
                 Err(e) => error.set(e),
             }
-            if let Ok(cfg) = fetch_config().await {
+            if let Ok(cfg) = get_config().await {
                 config.set(cfg);
             }
             if let Ok(cat) = fetch_catalog().await {
@@ -457,18 +393,18 @@ pub fn SettingsDevices() -> impl IntoView {
         }
         #[cfg(feature = "hydrate")]
         wasm_bindgen_futures::spawn_local(async move {
-            match save_config(put_body).await {
-                Ok(reasons) => {
+            match put_config(&put_body).await {
+                Ok(outcome) => {
                     crate::components::settings_ui::toast_saved(
                         result_msg,
                         result_ok,
-                        "Saved. Registry hot-reloads shortly.",
+                        outcome.save_confirmation(),
                     );
                     // A newly added source/controller that needs a boot-wired
                     // connection raises the dismissible banner with the server's
                     // reasons; an empty list (the hot-reload path) clears it.
                     restart_dismissed.set(false);
-                    restart_reasons.set(reasons);
+                    restart_reasons.set(outcome.restart_reasons);
                     sel.set(Sel::List);
                     // give the registry a beat to reload, then refresh the list
                     match fetch_devices().await {
@@ -484,7 +420,7 @@ pub fn SettingsDevices() -> impl IntoView {
                     // re-fetch the authoritative config + device list so the local
                     // signal is not left dirty for the next save attempt (which
                     // would otherwise miss the old slot and pile on more entries).
-                    if let Ok(cfg) = fetch_config().await {
+                    if let Ok(cfg) = get_config().await {
                         config.set(cfg);
                     }
                     if let Ok(list) = fetch_devices().await {
@@ -514,22 +450,24 @@ pub fn SettingsDevices() -> impl IntoView {
             config.set(cfg.clone());
             #[cfg(feature = "hydrate")]
             wasm_bindgen_futures::spawn_local(async move {
-                match save_config(cfg).await {
-                    Ok(reasons) => {
+                match put_config(&cfg).await {
+                    // `saved`, not `outcome`: the enclosing closure's `outcome`
+                    // is the BindOutcome from apply_zone_binds above.
+                    Ok(saved) => {
                         crate::components::settings_ui::toast_saved(
                             result_msg,
                             result_ok,
-                            "Zones bound. The engine wires a new binding at its next start.",
+                            "Zones bound. A new binding takes effect on the next start.",
                         );
                         restart_dismissed.set(false);
-                        restart_reasons.set(reasons);
+                        restart_reasons.set(saved.restart_reasons);
                     }
                     Err(e) => {
                         result_ok.set(false);
                         result_msg.set(e);
                         // Re-pull the authoritative config so a rejected bind
                         // does not leave the local signal dirty.
-                        if let Ok(fresh) = fetch_config().await {
+                        if let Ok(fresh) = get_config().await {
                             config.set(fresh);
                         }
                     }
@@ -578,7 +516,7 @@ pub fn SettingsDevices() -> impl IntoView {
     #[cfg(feature = "hydrate")]
     let refetch_after_mutation = move || {
         wasm_bindgen_futures::spawn_local(async move {
-            if let Ok(cfg) = fetch_config().await {
+            if let Ok(cfg) = get_config().await {
                 config.set(cfg);
             }
             match fetch_devices().await {
@@ -618,19 +556,19 @@ pub fn SettingsDevices() -> impl IntoView {
         result_msg.set(String::new());
         #[cfg(feature = "hydrate")]
         wasm_bindgen_futures::spawn_local(async move {
-            match save_config(cfg).await {
-                Ok(reasons) => {
+            match put_config(&cfg).await {
+                Ok(outcome) => {
                     crate::components::settings_ui::toast_saved(
                         result_msg,
                         result_ok,
-                        if on {
-                            "Source turned on. Registry hot-reloads shortly."
+                        &outcome.confirmation(if on {
+                            "Source turned on."
                         } else {
-                            "Source turned off. Registry hot-reloads shortly."
-                        },
+                            "Source turned off."
+                        }),
                     );
                     restart_dismissed.set(false);
-                    restart_reasons.set(reasons);
+                    restart_reasons.set(outcome.restart_reasons);
                     if let Ok(list) = fetch_devices().await {
                         devices.set(list);
                     }
@@ -652,35 +590,30 @@ pub fn SettingsDevices() -> impl IntoView {
     // REMOVE a native source from its device card. REFERENCE-SAFE: before the PUT
     // it drops the source from config.sources AND clears every reference to that id
     // (per-reading picks, the forecast pin, zone soil bindings) via
-    // `clear_source_id_refs`, so nothing dangles on a gone source. The confirm()
+    // `clear_source_id_refs`, so nothing dangles on a gone source. The confirm sheet
     // names the FRIENDLY source (the device name), never the raw id/slug. On success
     // it refetches devices + catalog (so the removed source stops rendering in the
     // card list AND reappears in the panel's discovery list).
-    #[allow(unused_variables)]
+    //
+    // Two-step, on the shared ConfirmSheet idiom: a sheet does not block and hand
+    // back a bool the way the old native confirm() did, so the handler splits. The
+    // card's Remove only STAGES the source id and opens the sheet (mounted once in
+    // the page view below); `do_remove_source` runs from its on_confirm.
+    let pending_remove_source: RwSignal<Option<String>> = RwSignal::new(None);
+    let remove_source_open = RwSignal::new(false);
     let on_remove = Callback::new(move |source_id: String| {
-        // The friendly name for the confirm: the device whose backlink is this id.
-        let friendly = devices
-            .get()
-            .into_iter()
-            .find(|d| d.source_id.as_deref() == Some(source_id.as_str()))
-            .map(|d| d.name)
-            .unwrap_or_else(|| source_id.clone());
-        #[cfg(feature = "hydrate")]
-        {
-            let confirmed = web_sys::window()
-                .map(|w| {
-                    w.confirm_with_message(&format!(
-                        "Remove \u{201c}{friendly}\u{201d}? This deletes the source and \
-                         clears every reading pick, forecast pin, and zone soil sensor \
-                         that used it. This cannot be undone."
-                    ))
-                    .unwrap_or(false)
-                })
-                .unwrap_or(false);
-            if !confirmed {
-                return;
-            }
-        }
+        pending_remove_source.set(Some(source_id));
+        remove_source_open.set(true);
+    });
+    // Runs from the sheet's on_confirm, after it has closed. The staged id is
+    // deliberately NOT cleared here: the sheet fades out over ~180ms and keeps
+    // painting its body (which reads this signal for the source name) the whole
+    // time, so clearing it would blank the name mid-exit. Every open overwrites
+    // it, so a stale value is inert.
+    let do_remove_source = Callback::new(move |()| {
+        let Some(source_id) = pending_remove_source.get_untracked() else {
+            return;
+        };
         let mut cfg = config.get();
         // Drop the source entry.
         if let Some(arr) = cfg.get_mut("sources").and_then(|v| v.as_array_mut()) {
@@ -692,15 +625,15 @@ pub fn SettingsDevices() -> impl IntoView {
         result_msg.set(String::new());
         #[cfg(feature = "hydrate")]
         wasm_bindgen_futures::spawn_local(async move {
-            match save_config(cfg).await {
-                Ok(reasons) => {
+            match put_config(&cfg).await {
+                Ok(outcome) => {
                     crate::components::settings_ui::toast_saved(
                         result_msg,
                         result_ok,
-                        "Source removed. Registry hot-reloads shortly.",
+                        &outcome.confirmation("Source removed."),
                     );
                     restart_dismissed.set(false);
-                    restart_reasons.set(reasons);
+                    restart_reasons.set(outcome.restart_reasons);
                     sel.set(Sel::List);
                     if let Ok(list) = fetch_devices().await {
                         devices.set(list);
@@ -724,7 +657,7 @@ pub fn SettingsDevices() -> impl IntoView {
     // BIND a soil probe to a zone (or unbind: empty slug) straight from its
     // device card. One binding per probe: any zone currently holding this
     // probe id is cleared first, then the chosen zone (if any) takes it. Same
-    // read-modify-write + save_config path as every other card mutation.
+    // read-modify-write + put_config path as every other card mutation.
     let on_bind_soil = Callback::new(move |(probe_id, zone_slug): (String, String)| {
         let mut cfg = config.get();
         if let Some(zones) = cfg.get_mut("zones").and_then(|v| v.as_object_mut()) {
@@ -748,8 +681,8 @@ pub fn SettingsDevices() -> impl IntoView {
         result_msg.set(String::new());
         #[cfg(feature = "hydrate")]
         wasm_bindgen_futures::spawn_local(async move {
-            match save_config(cfg).await {
-                Ok(reasons) => {
+            match put_config(&cfg).await {
+                Ok(outcome) => {
                     crate::components::settings_ui::toast_saved(
                         result_msg,
                         result_ok,
@@ -760,7 +693,7 @@ pub fn SettingsDevices() -> impl IntoView {
                         },
                     );
                     restart_dismissed.set(false);
-                    restart_reasons.set(reasons);
+                    restart_reasons.set(outcome.restart_reasons);
                     // No device-list refetch here on purpose: rebuilding the
                     // card list collapses the expanded card the user is
                     // binding probes on, and a bind only mutates zone config
@@ -783,22 +716,23 @@ pub fn SettingsDevices() -> impl IntoView {
     // configured on the source, unregisters the sensor on the gateway too. Same
     // endpoint the soil-probe manager uses; the result toast reports each side
     // honestly.
+    //
+    // Same two-step as the source removal above: the card's Remove stages the
+    // probe id and opens its own ConfirmSheet (a separate question, so a separate
+    // sheet); `do_remove_soil` runs from that sheet's on_confirm.
+    let pending_remove_probe: RwSignal<Option<String>> = RwSignal::new(None);
+    let remove_probe_open = RwSignal::new(false);
     let on_remove_soil = Callback::new(move |probe_id: String| {
+        pending_remove_probe.set(Some(probe_id));
+        remove_probe_open.set(true);
+    });
+    let do_remove_soil = Callback::new(move |()| {
+        let Some(probe_id) = pending_remove_probe.get_untracked() else {
+            return;
+        };
+        pending_remove_probe.set(None);
         #[cfg(feature = "hydrate")]
         {
-            let confirmed = web_sys::window()
-                .map(|w| {
-                    w.confirm_with_message(
-                        "Remove this soil probe? Its zone binding is cleared, and if the \
-                         gateway login is set on the source it is unregistered from the \
-                         gateway as well.",
-                    )
-                    .unwrap_or(false)
-                })
-                .unwrap_or(false);
-            if !confirmed {
-                return;
-            }
             result_msg.set(String::new());
             wasm_bindgen_futures::spawn_local(async move {
                 match crate::components::settings::sensors::remove_soil_probe(probe_id, true).await
@@ -817,7 +751,7 @@ pub fn SettingsDevices() -> impl IntoView {
                         if let Ok(list) = fetch_devices().await {
                             devices.set(list);
                         }
-                        if let Ok(cfg) = fetch_config().await {
+                        if let Ok(cfg) = get_config().await {
                             config.set(cfg);
                         }
                     }
@@ -1136,10 +1070,10 @@ pub fn SettingsDevices() -> impl IntoView {
                         <span class="entity-badge entity-badge--source">"Source"</span>
                         <span class="entity-pipeline__rel">"carries \u{2192}"</span>
                         <span class="entity-badge entity-badge--sensor">"Sensors"</span>
-                        <span class="entity-pipeline__rel" style="opacity:0.5">"bind to \u{2192}"</span>
-                        <span class="entity-badge entity-badge--zone" style="opacity:0.5">"Zones"</span>
-                        <span class="entity-pipeline__rel" style="opacity:0.5">"\u{2190} run by"</span>
-                        <span class="entity-badge entity-badge--controller" style="opacity:0.5">"Controller"</span>
+                        <span class="entity-pipeline__rel" class:u-muted=true>"bind to \u{2192}"</span>
+                        <span class="entity-badge entity-badge--zone" class:u-muted=true>"Zones"</span>
+                        <span class="entity-pipeline__rel" class:u-muted=true>"\u{2190} run by"</span>
+                        <span class="entity-badge entity-badge--controller" class:u-muted=true>"Controller"</span>
                     </div>
                 })}
                 <div class="device-add-bar">
@@ -1204,6 +1138,44 @@ pub fn SettingsDevices() -> impl IntoView {
         <div class="settings-page">
             <crate::components::settings::RestartBanner reasons=restart_reasons dismissed=restart_dismissed/>
             {detail}
+            // Both removal confirms are mounted here, once and
+            // unconditionally: a card's Remove only stages what the question is
+            // about and opens the matching sheet. One sheet per question.
+            <ConfirmSheet
+                visible=remove_source_open
+                title="Remove this source?"
+                body=Signal::derive(move || {
+                    // Names the FRIENDLY source, resolved the same way the old
+                    // confirm() did: the device whose backlink is the staged id.
+                    let id = pending_remove_source.get().unwrap_or_default();
+                    let friendly = devices
+                        .get()
+                        .into_iter()
+                        .find(|d| d.source_id.as_deref() == Some(id.as_str()))
+                        .map(|d| d.name)
+                        .unwrap_or_else(|| id.clone());
+                    format!(
+                        "This deletes \u{201c}{friendly}\u{201d} and clears every reading \
+                         pick, forecast pin, and zone soil sensor that used it. This \
+                         cannot be undone."
+                    )
+                })
+                confirm_label=Signal::derive(|| "Remove source".to_string())
+                danger=true
+                on_confirm=do_remove_source
+            />
+            <ConfirmSheet
+                visible=remove_probe_open
+                title="Remove this soil probe?"
+                body=Signal::derive(|| {
+                    "Its zone binding is cleared, and if the gateway login is set on the \
+                     source it is unregistered from the gateway as well."
+                        .to_string()
+                })
+                confirm_label=Signal::derive(|| "Remove probe".to_string())
+                danger=true
+                on_confirm=do_remove_soil
+            />
         </div>
     }
 }
@@ -1705,23 +1677,17 @@ fn device_card(
                 actions=Box::new(move || {
                     // The on/off TOGGLE for a native weather source (a cloud source
                     // MUST have one; a local station gets one too). Its `checked`
-                    // seeds from the current enabled state; on flip it calls the host
-                    // on_toggle with the REAL source id. An Effect fires the callback
-                    // only when the value DIVERGES from the persisted state, so a
-                    // refetch-driven re-seed does not re-PUT.
+                    // seeds from the current enabled state. Submit directly from
+                    // the user action, not an Effect owned by this transient card
+                    // view. Refetch-driven reseeding must never submit another PUT.
                     let toggle = toggleable.then(|| {
                         let checked = RwSignal::new(enabled_now);
                         let sid = toggle_source_id.clone().unwrap_or_default();
-                        Effect::new(move |_| {
-                            let on = checked.get();
-                            if on != enabled_now {
-                                on_toggle.run((sid.clone(), on));
-                            }
-                        });
                         view! {
                             <Toggle
                                 checked=checked
                                 label=if enabled_now { "On".to_string() } else { "Off".to_string() }
+                                on_change=Callback::new(move |on| on_toggle.run((sid.clone(), on)))
                             />
                         }
                     });

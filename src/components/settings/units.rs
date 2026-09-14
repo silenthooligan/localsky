@@ -27,6 +27,7 @@ pub fn SettingsUnits() -> impl IntoView {
     // Default "household" so a fresh device follows the deployment, which keeps
     // the imperial-default install byte-identical to before this control
     // existed (no units_system key -> use_unit_prefs expands the household).
+    let clock = RwSignal::new("24h".to_string());
     let scope = RwSignal::new("household".to_string());
 
     // Per-device per-field selectors (only meaningful when scope == "device").
@@ -118,6 +119,29 @@ pub fn SettingsUnits() -> impl IntoView {
     // gated by the scope (the household-scope branch clears units_system below).
     #[cfg(feature = "hydrate")]
     {
+        // The clock choice is per device and outside the units scope:
+        // it persists on every change and applies at once.
+        Effect::new(move |_| {
+            if let Some(win) = web_sys::window() {
+                if let Ok(Some(storage)) = win.local_storage() {
+                    if let Ok(Some(v)) = storage.get_item("time_clock") {
+                        clock.set(v);
+                    }
+                }
+            }
+        });
+        Effect::new(move |prev: Option<String>| {
+            let val = clock.get();
+            if prev.is_some() {
+                if let Some(win) = web_sys::window() {
+                    if let Ok(Some(storage)) = win.local_storage() {
+                        let _ = storage.set_item("time_clock", &val);
+                    }
+                }
+                crate::timefmt::set_clock_12h(val == "12h");
+            }
+            val
+        });
         let persist = move |key: &'static str, sig: RwSignal<String>| {
             Effect::new(move |prev: Option<String>| {
                 let val = sig.get();
@@ -228,7 +252,7 @@ pub fn SettingsUnits() -> impl IntoView {
                         crate::components::settings_ui::toast_saved(
                             result_msg,
                             result_ok,
-                            "Saved. Devices on the household default update on the next snapshot.",
+                            crate::voice::SAVED_LIVE,
                         );
                     }
                     Err(e) => {
@@ -286,6 +310,26 @@ pub fn SettingsUnits() -> impl IntoView {
                         format!("The units below apply to this browser/device only; every other device keeps following the household default ({}).", household_label())
                     }}
                 </p>
+            </Panel>
+
+            <Panel title="Clock".to_string()>
+                <p class="sensors-section__hint">
+                    "How times read on this device. Applies to this browser only and takes effect on the next refresh of each page."
+                </p>
+                <FormField
+                    label="Clock".to_string()
+                    helptext="24-hour (05:30) or 12-hour (5:30 AM).".to_string()
+                    error=Signal::derive(|| None::<String>)
+                >
+                    <SegmentedControl
+                        value=clock
+                        options=vec![
+                            ("24h".into(), "24-hour".into()),
+                            ("12h".into(), "12-hour".into()),
+                        ]
+                        aria_label="Clock format".to_string()
+                    />
+                </FormField>
             </Panel>
 
             <Panel title="Household default".to_string() help_topic="units">
@@ -358,9 +402,9 @@ pub fn SettingsUnits() -> impl IntoView {
                         <p
                             class="setup-result setup-result--ok"
                             role="status"
-                            style="margin-top: 0.75rem;"
+                            class:u-mt3=true
                         >
-                            "Saved on this device"
+                            {crate::voice::SAVED_ON_THIS_DEVICE}
                         </p>
                     </Show>
                 </Panel>
@@ -479,22 +523,12 @@ fn flash_device_saved(device_saved: RwSignal<bool>) {
     });
 }
 
-/// GET the household units default from /api/config -> "imperial" | "metric".
+/// GET the household units default off the shared config document ->
+/// "imperial" | "metric". The GET goes through the shared client; only the
+/// deployment.units read lives here.
 #[cfg(feature = "hydrate")]
 async fn fetch_household() -> Result<String, String> {
-    use gloo_net::http::Request;
-    let resp = Request::get("/api/config")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::load_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    let val: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let val = crate::components::config_client::get_config().await?;
     Ok(val
         .get("deployment")
         .and_then(|d| d.get("units"))
@@ -503,41 +537,27 @@ async fn fetch_household() -> Result<String, String> {
         .to_string())
 }
 
-/// Read-modify-write the household units default into /api/config, mirroring
-/// settings/location.rs::patch_location (GET current, splice, PUT).
+/// Read-modify-write the household units default through the shared config
+/// client, mirroring settings/location.rs::patch_location (GET current,
+/// splice, PUT). A failed re-read is an error, never a PUT of whatever body
+/// came back. Units hot-reload (they travel on the snapshot), so the PUT's
+/// restart reasons are not surfaced.
 #[cfg(feature = "hydrate")]
 async fn patch_household(units: String) -> Result<(), String> {
-    use gloo_net::http::Request;
-    let cur = Request::get("/api/config")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut cfg: serde_json::Value = cur.json().await.map_err(|e| e.to_string())?;
+    use crate::components::config_client::{get_config, put_config};
+    let mut cfg = get_config().await?;
     if let Some(dep) = cfg.get_mut("deployment") {
         if let Some(obj) = dep.as_object_mut() {
             // Serde rename_all = "snake_case": "imperial" | "metric".
             obj.insert("units".into(), serde_json::json!(units));
         }
     }
-    let resp = Request::put("/api/config")
-        .json(&cfg)
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::save_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    Ok(())
+    put_config(&cfg).await.map(|_| ())
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::ha::snapshot::Units;
+    use crate::model::Units;
 
     /// The household PUT round-trips deployment.units: splicing "metric" into a
     /// config value and deserializing it back yields Units::Metric (and the

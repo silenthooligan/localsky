@@ -7,6 +7,19 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::watch;
 
+// A legacy bare snapshot cannot distinguish a reported 0°F from the old
+// provider parser's missing-value placeholder (or WeatherKit's 32°F), nor
+// actual calm/dry air from absent wind/humidity. Schema 2 still fabricated
+// zero precipitation when QPF was missing, so it is also rejected. Snapshots
+// written after the complete nullable critical-weather contract may rehydrate.
+const CACHE_SCHEMA_VERSION: u32 = 3;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedForecast {
+    schema_version: u32,
+    snapshot: ForecastSnapshot,
+}
+
 pub struct ForecastStore {
     current: ArcSwap<ForecastSnapshot>,
     tx: watch::Sender<Arc<ForecastSnapshot>>,
@@ -41,8 +54,15 @@ impl ForecastStore {
     /// from the last known forecast instead of empty.
     pub fn with_persistence(mut self, path: PathBuf) -> Self {
         match std::fs::read(&path) {
-            Ok(bytes) => match serde_json::from_slice::<ForecastSnapshot>(&bytes) {
-                Ok(mut snap) if !snap.daily.is_empty() || !snap.hourly.is_empty() => {
+            Ok(bytes) => match serde_json::from_slice::<PersistedForecast>(&bytes) {
+                Ok(cache) if cache.schema_version != CACHE_SCHEMA_VERSION => {
+                    tracing::warn!(path = %path.display(), version = cache.schema_version,
+                        "forecast cache schema unsupported; awaiting fresh provider evidence");
+                }
+                Ok(cache)
+                    if !cache.snapshot.daily.is_empty() || !cache.snapshot.hourly.is_empty() =>
+                {
+                    let mut snap = cache.snapshot;
                     // Reachability describes the LIVE connection, and this
                     // process hasn't heard from the provider yet. The first
                     // successful fetch flips it back via the normal path.
@@ -60,7 +80,7 @@ impl ForecastStore {
                 Ok(_) => {}
                 Err(e) => {
                     tracing::warn!(path = %path.display(), error = %e,
-                        "persisted forecast unreadable; starting empty");
+                        "persisted forecast legacy or unreadable; awaiting fresh provider evidence");
                 }
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -108,8 +128,11 @@ impl ForecastStore {
             }
             let tmp = path.with_extension("json.tmp");
             let write = || -> std::io::Result<()> {
-                let bytes = serde_json::to_vec(&*new)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                let bytes = serde_json::to_vec(&PersistedForecast {
+                    schema_version: CACHE_SCHEMA_VERSION,
+                    snapshot: (*new).clone(),
+                })
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
                 std::fs::write(&tmp, bytes)?;
                 std::fs::rename(&tmp, path)
             };
@@ -184,6 +207,48 @@ mod tests {
         let reborn = ForecastStore::new().with_persistence(path.clone());
         assert_eq!(reborn.snapshot().daily.len(), 3);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_temperature_placeholders_cannot_rehydrate_but_fresh_zero_can() {
+        let dir = std::env::temp_dir().join(format!(
+            "localsky-fcache-test-{}-temperature-schema",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("forecast-cache.json");
+        let mut fresh = snap_with_days(1_750_000_000, 1);
+        fresh.daily[0].temp_max_f = Some(0.0);
+        fresh.daily[0].temp_min_f = Some(-5.0);
+        fresh.daily[0].wind_max_mph = Some(0.0);
+        fresh.daily[0].humidity_pct = Some(0);
+        // These exact numbers on the old wire could mean a placeholder
+        // high. Even a recent, otherwise valid bare cache cannot prove it.
+        std::fs::write(&path, serde_json::to_vec(&fresh).unwrap()).unwrap();
+        let store = ForecastStore::new().with_persistence(path.clone());
+        assert!(store.snapshot().daily.is_empty());
+
+        // New provider evidence records provenance through the cache
+        // version. True zero survives the next process restart unchanged.
+        store.store(fresh);
+        let reborn = ForecastStore::new().with_persistence(path.clone());
+        assert_eq!(reborn.snapshot().daily[0].temp_max_f, Some(0.0));
+        assert_eq!(reborn.snapshot().daily[0].temp_min_f, Some(-5.0));
+        assert_eq!(reborn.snapshot().daily[0].wind_max_mph, Some(0.0));
+        assert_eq!(reborn.snapshot().daily[0].humidity_pct, Some(0));
+
+        let mut cache: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        for incompatible_version in [1, 2, CACHE_SCHEMA_VERSION + 1] {
+            cache["schema_version"] = serde_json::json!(incompatible_version);
+            std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+            assert!(ForecastStore::new()
+                .with_persistence(path.clone())
+                .snapshot()
+                .daily
+                .is_empty());
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

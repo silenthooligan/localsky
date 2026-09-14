@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use crate::devices::DeviceRegistry;
-use crate::ha::ws::{fetch_ha_devices, HaWsConfig};
+use crate::integrations::home_assistant::ws::{fetch_ha_devices, HaWsConfig};
 
 /// Spawn the import loop. Refreshes every `interval_s` (floored at 30s).
 /// Returns immediately; does nothing if HA env isn't configured.

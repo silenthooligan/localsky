@@ -14,13 +14,14 @@
 // Zone -> station mapping comes from config.zones[*].controller_station
 // (we accept any string for portability; OS uses 1-based integers).
 
-use std::sync::Arc;
+use std::collections::HashMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::config::schema::OpenSprinklerDirectConfig;
+use crate::controllers::zone_map::ZoneMap;
 use crate::ports::irrigation_controller::{
     ControllerCaps, ControllerError, ControllerResult, ControllerStatus, IrrigationController,
     RunHandle, RunRecord, ZoneRuntimeStatus,
@@ -29,9 +30,11 @@ use crate::ports::irrigation_controller::{
 pub struct OpenSprinklerDirect {
     id: String,
     config: OpenSprinklerDirectConfig,
-    /// Map of zone_slug -> station number (1-based). Populated from
+    /// Zone slug -> station number (1-based). Populated from
     /// config.zones[*].controller_station before adapter construction.
-    zone_to_station: Arc<std::collections::HashMap<String, u32>>,
+    /// Commands look up the station for a slug; status() and
+    /// run_history() walk it the other way (station -> slug).
+    zones: ZoneMap<u32>,
 }
 
 /// Per-request HTTP timeout for OS calls. Matches the old persistent
@@ -43,12 +46,12 @@ impl OpenSprinklerDirect {
     pub fn new(
         id: impl Into<String>,
         config: OpenSprinklerDirectConfig,
-        zone_to_station: std::collections::HashMap<String, u32>,
+        zone_to_station: HashMap<String, u32>,
     ) -> Result<Self, ControllerError> {
         Ok(Self {
             id: id.into(),
             config,
-            zone_to_station: Arc::new(zone_to_station),
+            zones: ZoneMap::new(zone_to_station),
         })
     }
 
@@ -56,11 +59,14 @@ impl OpenSprinklerDirect {
         format!("http://{}:{}", self.config.host, self.config.port)
     }
 
-    fn station_for(&self, slug: &str) -> Result<u32, ControllerError> {
-        self.zone_to_station
-            .get(slug)
-            .copied()
-            .ok_or_else(|| ControllerError::ZoneUnknown(slug.to_string()))
+    /// The zone bound to a station, or the `station_N` placeholder for a
+    /// station the config never bound (status() and run_history() report
+    /// every station the board knows, not only the mapped ones).
+    fn slug_for_station(&self, station: u32) -> String {
+        self.zones
+            .slug_for(&station)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("station_{station}"))
     }
 
     async fn get_json<T: for<'de> Deserialize<'de>>(
@@ -221,6 +227,10 @@ impl IrrigationController for OpenSprinklerDirect {
         &self.id
     }
 
+    fn mapped_zone_slugs(&self) -> Vec<String> {
+        self.zones.slugs()
+    }
+
     fn supports(&self) -> ControllerCaps {
         ControllerCaps {
             flow_meter: true,
@@ -231,11 +241,12 @@ impl IrrigationController for OpenSprinklerDirect {
             remote_program_upload: false,
             water_level: true,
             per_zone_stop: true,
+            duration_quantum_s: 1,
         }
     }
 
     async fn run_zone(&self, slug: &str, duration_s: u32) -> ControllerResult<RunHandle> {
-        let sid = self.station_for(slug)?;
+        let sid = self.zones.station_for(slug)?;
         // OS stations are 0-indexed in /cm despite UI numbering from 1.
         let zero_indexed = sid.saturating_sub(1);
         let r: CmResponse = self
@@ -264,7 +275,7 @@ impl IrrigationController for OpenSprinklerDirect {
     }
 
     async fn stop_zone(&self, slug: &str) -> ControllerResult<()> {
-        let sid = self.station_for(slug)?;
+        let sid = self.zones.station_for(slug)?;
         let zero_indexed = sid.saturating_sub(1);
         let r: CmResponse = self
             .get_json(
@@ -302,11 +313,7 @@ impl IrrigationController for OpenSprinklerDirect {
         let mut zone_states = Vec::new();
         for (i, ps) in r.ps.iter().enumerate() {
             let station = (i + 1) as u32;
-            let slug = self
-                .zone_to_station
-                .iter()
-                .find_map(|(k, v)| (*v == station).then(|| k.clone()))
-                .unwrap_or_else(|| format!("station_{station}"));
+            let slug = self.slug_for_station(station);
             let remaining = ps.get(1).copied().unwrap_or(0);
             zone_states.push(ZoneRuntimeStatus {
                 slug,
@@ -350,6 +357,7 @@ impl IrrigationController for OpenSprinklerDirect {
             .map(|jo| jo.flow_connected(r.flcrt))
             .unwrap_or(false);
         Ok(ControllerStatus {
+            observed_epoch: None,
             reachable: true,
             master_enabled: Some(r.en == 1),
             water_level_pct: Some(r.wl as f64),
@@ -380,11 +388,7 @@ impl IrrigationController for OpenSprinklerDirect {
             if start < since_epoch {
                 continue;
             }
-            let slug = self
-                .zone_to_station
-                .iter()
-                .find_map(|(k, v)| (*v == sid).then(|| k.clone()))
-                .unwrap_or_else(|| format!("station_{sid}"));
+            let slug = self.slug_for_station(sid);
             out.push(RunRecord {
                 zone_slug: slug,
                 start_epoch: start,
@@ -445,7 +449,7 @@ mod tests {
 
     #[test]
     fn station_resolution_succeeds_for_mapped_zones() {
-        let mut map = std::collections::HashMap::new();
+        let mut map = HashMap::new();
         map.insert("back_yard".to_string(), 1);
         map.insert("front_yard".to_string(), 2);
         let c = OpenSprinklerDirect::new(
@@ -459,8 +463,15 @@ mod tests {
             map,
         )
         .unwrap();
-        assert_eq!(c.station_for("back_yard").unwrap(), 1);
-        assert_eq!(c.station_for("front_yard").unwrap(), 2);
+        assert_eq!(c.zones.station_for("back_yard").unwrap(), 1);
+        assert_eq!(c.zones.station_for("front_yard").unwrap(), 2);
+        // status() and run_history() resolve stations back to slugs
+        // through the same map; an unbound station keeps its placeholder.
+        assert_eq!(c.slug_for_station(1), "back_yard");
+        assert_eq!(c.slug_for_station(2), "front_yard");
+        assert_eq!(c.slug_for_station(9), "station_9");
+        // The unknown-zone error body lists what IS bound, sorted.
+        assert_eq!(c.mapped_zone_slugs(), vec!["back_yard", "front_yard"]);
     }
 
     #[test]
@@ -473,11 +484,13 @@ mod tests {
                 password_md5: "abc".into(),
                 poll_interval_s: 10,
             },
-            std::collections::HashMap::new(),
+            HashMap::new(),
         )
         .unwrap();
-        let err = c.station_for("nope").unwrap_err();
+        let err = c.zones.station_for("nope").unwrap_err();
         assert!(matches!(err, ControllerError::ZoneUnknown(_)));
+        assert!(c.mapped_zone_slugs().is_empty());
+        assert_eq!(c.slug_for_station(1), "station_1");
     }
 
     #[test]
@@ -545,7 +558,7 @@ mod tests {
                 password_md5: "abc".into(),
                 poll_interval_s: 10,
             },
-            std::collections::HashMap::new(),
+            HashMap::new(),
         )
         .unwrap();
         assert_eq!(c.base_url(), "http://192.0.2.5:8080");

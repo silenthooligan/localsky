@@ -76,11 +76,13 @@ COPY docs ./docs
 # same cache mounts the release build uses, so the whole gate runs warm. One
 # RUN so a failure stops the build with that step's output.
 FROM src AS gate
+COPY tests ./tests
+COPY README.md ./
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
     cargo fmt --check \
     && cargo clippy --no-default-features --features ssr --all-targets -- -D warnings \
-    && INSTA_UPDATE=no cargo test --no-default-features --features ssr --lib \
+    && INSTA_UPDATE=no cargo test --no-default-features --features ssr --tests \
     && cargo check --no-default-features --features hydrate --target wasm32-unknown-unknown \
     && echo gate-ok > /gate-ok
 
@@ -129,8 +131,15 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # first, so the docs banner always tracks the exact version being built
 # (introduction.md used to carry a hand-bumped literal that went stale).
 RUN VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2) \
-    && grep -rl '{{LOCALSKY_VERSION}}' docs/src \
-       | xargs -r sed -i "s/{{LOCALSKY_VERSION}}/${VERSION}/g" \
+    && API_VERSION=$(grep -m1 'pub const API_VERSION' src/api/info.rs | cut -d'"' -f2) \
+    && DB_MIGRATIONS=$(ls src/persistence/migrations/M*.sql | wc -l | tr -d ' ') \
+    && SKIP_RULES=$(grep -c '^        ($' src/gates_catalog.rs) \
+    && grep -rl '{{LOCALSKY_' docs/src \
+       | xargs -r sed -i \
+           -e "s/{{LOCALSKY_VERSION}}/${VERSION}/g" \
+           -e "s/{{LOCALSKY_API_VERSION}}/${API_VERSION}/g" \
+           -e "s/{{LOCALSKY_DB_MIGRATIONS}}/${DB_MIGRATIONS}/g" \
+           -e "s/{{LOCALSKY_SKIP_RULES}}/${SKIP_RULES}/g" \
     && mdbook build docs
 
 # ── Runtime ──

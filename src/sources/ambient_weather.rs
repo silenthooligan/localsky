@@ -14,6 +14,10 @@
 // the most recent. We poll every 60s, well within the 1 req/sec rate
 // limit. Fields include tempf, humidity, baromrelin, windspeedmph,
 // windgustmph, winddir, uv, solarradiation, hourlyrainin, dailyrainin.
+//
+// The poll loop itself (tick, missed-tick policy, fetch metric,
+// reachability edges, shutdown) is `sources::poll::run_polling`; this
+// file only owns the request and the field mapping.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,16 +26,17 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashSet;
-use tokio::time::{interval, MissedTickBehavior};
-use tracing::{debug, info, warn};
+use tracing::warn;
 
 use crate::config::schema::AmbientWeatherConfig;
 use crate::ports::weather_source::{
-    ShutdownSignal, SourceBus, SourceCaps, SourceEvent, WeatherField, WeatherSource,
+    ShutdownSignal, SourceBus, SourceCaps, WeatherField, WeatherSource,
 };
+use crate::sources::poll::{run_polling, Poll};
 
 const API_BASE: &str = "https://api.ambientweather.net/v1";
 const POLL_INTERVAL: Duration = Duration::from_secs(60);
+const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct AmbientWeather {
     id: String,
@@ -58,16 +63,36 @@ struct Observation {
     dailyrainin: Option<f64>,
 }
 
+impl Observation {
+    /// The engine fields this observation carries, in emit order. A key the
+    /// station omits (no rain gauge, no solar sensor) is simply absent, never
+    /// a fabricated 0.0.
+    fn fields(self) -> Vec<(WeatherField, f64)> {
+        [
+            (WeatherField::AirTempF, self.tempf),
+            (WeatherField::DewPointF, self.dewpoint),
+            (WeatherField::RhPct, self.humidity),
+            (WeatherField::PressureInHg, self.baromrelin),
+            (WeatherField::WindMph, self.windspeedmph),
+            (WeatherField::WindGustMph, self.windgustmph),
+            (WeatherField::WindBearingDeg, self.winddir),
+            (WeatherField::UvIndex, self.uv),
+            (WeatherField::SolarWm2, self.solarradiation),
+            (WeatherField::RainTodayIn, self.dailyrainin),
+            (WeatherField::RainIntensityInHr, self.hourlyrainin),
+        ]
+        .into_iter()
+        .filter_map(|(field, v)| v.map(|v| (field, v)))
+        .collect()
+    }
+}
+
 impl AmbientWeather {
     pub fn new(id: impl Into<String>, config: AmbientWeatherConfig) -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .expect("reqwest client construction");
         Self {
             id: id.into(),
             config,
-            client,
+            client: crate::net::client(HTTP_TIMEOUT),
         }
     }
 
@@ -84,6 +109,27 @@ impl AmbientWeather {
         let resp = self.client.get(&url).send().await?.error_for_status()?;
         let body: Vec<Observation> = resp.json().await?;
         Ok(body.into_iter().next())
+    }
+
+    /// One poll: the latest observation as engine fields. A 200 with an
+    /// empty device array means the cloud answered but this MAC has nothing
+    /// to read (brand-new station, or a wrong mac_address), which the poll
+    /// reports as unreachable rather than as an online-but-silent station.
+    async fn poll_once(self: Arc<Self>) -> anyhow::Result<Poll> {
+        match self.fetch_latest().await? {
+            Some(o) => Ok(Poll::observation(
+                &self.id,
+                o.fields(),
+                chrono::Utc::now().timestamp(),
+            )),
+            None => {
+                warn!(
+                    source_id = %self.id,
+                    "AmbientWeather returned 0 observations; check mac_address"
+                );
+                Ok(Poll::none().unreachable())
+            }
+        }
     }
 }
 
@@ -137,73 +183,18 @@ impl WeatherSource for AmbientWeather {
         }
     }
 
-    async fn run(
-        self: Arc<Self>,
-        bus: SourceBus,
-        mut shutdown: ShutdownSignal,
-    ) -> anyhow::Result<()> {
-        info!(source_id = %self.id, "AmbientWeather source started");
-        let mut tick = interval(POLL_INTERVAL);
-        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut last_reachable: Option<bool> = None;
-        loop {
-            tokio::select! {
-                _ = tick.tick() => {
-                    match self.fetch_latest().await {
-                        Ok(Some(o)) => {
-                            if last_reachable != Some(true) {
-                                let _ = bus.send(SourceEvent::Reachability {
-                                    source_id: self.id.clone(),
-                                    reachable: true,
-                                });
-                                last_reachable = Some(true);
-                            }
-                            let mut fields = Vec::new();
-                            if let Some(v) = o.tempf { fields.push((WeatherField::AirTempF, v)); }
-                            if let Some(v) = o.dewpoint { fields.push((WeatherField::DewPointF, v)); }
-                            if let Some(v) = o.humidity { fields.push((WeatherField::RhPct, v)); }
-                            if let Some(v) = o.baromrelin { fields.push((WeatherField::PressureInHg, v)); }
-                            if let Some(v) = o.windspeedmph { fields.push((WeatherField::WindMph, v)); }
-                            if let Some(v) = o.windgustmph { fields.push((WeatherField::WindGustMph, v)); }
-                            if let Some(v) = o.winddir { fields.push((WeatherField::WindBearingDeg, v)); }
-                            if let Some(v) = o.uv { fields.push((WeatherField::UvIndex, v)); }
-                            if let Some(v) = o.solarradiation { fields.push((WeatherField::SolarWm2, v)); }
-                            if let Some(v) = o.dailyrainin { fields.push((WeatherField::RainTodayIn, v)); }
-                            if let Some(v) = o.hourlyrainin { fields.push((WeatherField::RainIntensityInHr, v)); }
-                            if !fields.is_empty() {
-                                debug!(source_id = %self.id, fields_n = fields.len(), "AmbientWeather updated");
-                                let _ = bus.send(SourceEvent::Observation {
-                                    source_id: self.id.clone(),
-                                    fields,
-                                    at_epoch: chrono::Utc::now().timestamp(),
-                                });
-                            }
-                        }
-                        Ok(None) => {
-                            // Successful API call, no observations yet, station
-                            // is online but new (or device MAC is wrong).
-                            warn!(source_id = %self.id, "AmbientWeather returned 0 observations; check mac_address");
-                        }
-                        Err(e) => {
-                            warn!(source_id = %self.id, error = %e, "AmbientWeather fetch failed");
-                            if last_reachable != Some(false) {
-                                let _ = bus.send(SourceEvent::Reachability {
-                                    source_id: self.id.clone(),
-                                    reachable: false,
-                                });
-                                last_reachable = Some(false);
-                            }
-                        }
-                    }
-                }
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        info!(source_id = %self.id, "AmbientWeather shutdown");
-                        return Ok(());
-                    }
-                }
-            }
-        }
+    async fn run(self: Arc<Self>, bus: SourceBus, shutdown: ShutdownSignal) -> anyhow::Result<()> {
+        let id = self.id.clone();
+        run_polling(
+            self,
+            &id,
+            "AmbientWeather",
+            POLL_INTERVAL,
+            bus,
+            shutdown,
+            Self::poll_once,
+        )
+        .await
     }
 }
 
@@ -307,6 +298,22 @@ mod tests {
         assert_eq!(o.hourlyrainin, Some(0.118));
     }
 
+    /// The field mapping the poll publishes: every advertised field comes
+    /// out of the realistic payload under the right WeatherField, with the
+    /// two rain keys landing on accumulation vs rate and not swapped.
+    #[test]
+    fn realistic_payload_maps_to_all_advertised_fields() {
+        let body: Vec<Observation> =
+            serde_json::from_str(REALISTIC_DEVICE_PAYLOAD).expect("realistic payload parses");
+        let o = body.into_iter().next().expect("one observation");
+        let fields = o.fields();
+        assert_eq!(fields.len(), 11, "every advertised field is carried");
+        assert!(fields.contains(&(WeatherField::RainTodayIn, 0.36)));
+        assert!(fields.contains(&(WeatherField::RainIntensityInHr, 0.118)));
+        assert!(fields.contains(&(WeatherField::PressureInHg, 29.921)));
+        assert!(fields.contains(&(WeatherField::DewPointF, 67.3)));
+    }
+
     /// ambientweather.net serves the calculated dew point as camelCase
     /// "dewPoint" (see the API docs' device-data example); the `#[serde(rename)]`
     /// maps it so DewPointF is actually emitted (capabilities() advertises it).
@@ -339,6 +346,10 @@ mod tests {
         assert_eq!(o.baromrelin, None);
         assert_eq!(o.windspeedmph, None);
         assert_eq!(o.solarradiation, None);
+        // The mapping drops the absent keys instead of inventing zeros.
+        let fields = o.fields();
+        assert_eq!(fields.len(), 2);
+        assert!(!fields.iter().any(|(f, _)| *f == WeatherField::RainTodayIn));
 
         // Empty response array: fetch_latest's `.into_iter().next()` view.
         let body: Vec<Observation> = serde_json::from_str("[]").expect("empty array parses");

@@ -1,208 +1,43 @@
-// Runtime composition root. The single place where all the modules
-// are assembled into a running system. main.rs calls Runtime::boot()
-// unconditionally and receives a fully-wired Runtime that exposes the
-// Axum router state plus a handle to the spawned background tasks.
+// Runtime assembly helpers: the functions the boot (`src/boot/`) calls
+// to build the source, controller, device and LLM registries from a
+// Config, plus the RuntimeHandles bundle the config hot-reload path
+// swaps live handles through.
 //
-// Boot sequence:
-//   1. Load Config: try /data/localsky.toml first, fall back to
-//      env_compat synthesis from legacy env vars.
-//   2. Open SQLite, run migrations.
-//   3. Build the SourceRegistry from cfg.sources and spawn each
-//      adapter's run() task.
-//   4. Build the ControllerRegistry from cfg.controllers (no spawn;
-//      controllers respond on dispatch).
-//   5. Build the LlmProvider via Auto/Ollama/OpenaiCompat.
-//   6. Connect to MQTT if cfg.notifications.mqtt is set; publish
-//      discovery for every configured zone + the verdict sensor.
-//   7. Start the engine ticker (60s default).
-//   8. Hand back to main.rs to mount the Axum router.
-//
-// Shutdown is cooperative via tokio::sync::watch<bool>; tasks observe
-// the channel and drop within 5s.
+// There is one boot sequence and it lives in `src/boot/`. This module
+// used to carry a second one, Runtime::boot, that its own header claimed
+// main.rs called unconditionally. Nothing called it but two of its own
+// tests. It reconciled in-flight runs in a way the live path never did,
+// never ran the boot reconcile the live path always does, and drifted
+// from the real boot with every release. A second boot sequence is a
+// second truth; it is gone.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context;
 use arc_swap::ArcSwap;
-use rusqlite::Connection;
-use tokio::sync::{broadcast, watch, Mutex};
-use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::warn;
 
-use crate::config::env_compat;
 use crate::config::schema::{Config, ControllerKind, LlmProviderKind, SourceEntry, SourceKind};
-use crate::config::FileConfigStore;
 use crate::controllers::{
-    Bhyve, ControllerRegistry, DryRunController, HaServiceCall, HttpGeneric, Hydrawise,
-    MqttCommand, OpenSprinklerDirect, Rachio, Rainbird,
+    Bhyve, DryRunController, HaServiceCall, HttpGeneric, Hydrawise, MqttCommand,
+    OpenSprinklerDirect, Rachio, Rainbird,
 };
 use crate::llm::providers::{
     auto_detect::{default_probe_targets, detect, ProbeKind, ProbeTarget},
     OllamaProvider, OpenaiCompatProvider,
 };
-use crate::persistence::{
-    runner as migration_runner, ConfigSnapshotStore, RunsStore, SensorHistoryStore,
-    VerdictHistoryStore,
-};
-use crate::ports::config_store::ConfigStore;
+use crate::persistence::RunsStore;
 use crate::ports::irrigation_controller::IrrigationController;
 use crate::ports::llm_provider::LlmProvider;
 use crate::ports::weather_source::{SourceEvent, WeatherSource};
 use crate::sources::{
     AmbientWeather, DavisWll, DemoReplay, EcowittLocal, HaPassthrough, HttpWebhook, Lacrosse,
-    MetNorway, MqttSubscribe, Netatmo, Nws, OpenWeather, PirateWeather, SourceRegistry, Synoptic,
-    TempestWs, TuyaCloud, Yolink,
+    MetNorway, MqttSubscribe, Netatmo, Nws, OpenWeather, PirateWeather, Synoptic, TempestWs,
+    TuyaCloud, Yolink,
 };
 
-pub struct Runtime {
-    pub config: Arc<ArcSwap<Config>>,
-    pub config_store: Arc<FileConfigStore>,
-    pub config_snapshots: ConfigSnapshotStore,
-    pub sources: SourceRegistry,
-    pub controllers: ControllerRegistry,
-    pub llm: Option<Arc<dyn LlmProvider>>,
-    pub runs: RunsStore,
-    pub sensor_history: SensorHistoryStore,
-    pub verdict_history: VerdictHistoryStore,
-    /// Broadcast bus for source observations. Engine + MQTT publisher
-    /// subscribe.
-    pub source_bus: broadcast::Sender<SourceEvent>,
-    pub shutdown_tx: watch::Sender<bool>,
-    /// Shared DB connection wrapped for spawn_blocking callers.
-    pub db: Arc<Mutex<Connection>>,
-}
-
-impl Runtime {
-    /// Compose every module from config + persistence. Returns a Runtime
-    /// ready to spawn background tasks against. Does not block on
-    /// network probes for the LLM (auto-detect runs in a spawn).
-    pub async fn boot(config_path: PathBuf, db_path: PathBuf) -> anyhow::Result<Self> {
-        // ----- Step 1: persistence -----
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-        let mut conn =
-            Connection::open(&db_path).with_context(|| format!("open sqlite at {db_path:?}"))?;
-        conn.pragma_update(None, "journal_mode", "WAL").ok();
-        conn.pragma_update(None, "synchronous", "NORMAL").ok();
-        let applied = migration_runner::run(&mut conn).with_context(|| "run migrations")?;
-        if !applied.is_empty() {
-            info!(applied = ?applied, "applied schema migrations");
-        }
-        let db: Arc<Mutex<Connection>> = Arc::new(Mutex::new(conn));
-
-        // ----- Step 2: config -----
-        let config_store = Arc::new(FileConfigStore::new(&config_path));
-        let cfg = if config_store.is_initialized() {
-            match config_store.load().await {
-                Ok(c) => {
-                    info!("loaded /data/localsky.toml");
-                    c
-                }
-                Err(e) => {
-                    warn!(error = %e, "failed to load config; falling back to env_compat");
-                    env_compat::synthesize()
-                }
-            }
-        } else {
-            info!("no config file; synthesizing from environment");
-            env_compat::synthesize()
-        };
-        let config = Arc::new(ArcSwap::from_pointee(cfg));
-
-        // ----- Step 3: stores -----
-        let runs = RunsStore::new(db.clone());
-        let sensor_history = SensorHistoryStore::new(db.clone());
-        let verdict_history = VerdictHistoryStore::new(db.clone());
-        let config_snapshots = ConfigSnapshotStore::new(db.clone());
-
-        // ----- Step 3a: reconcile interrupted runs -----
-        // Any row still marked 'running' or 'intended' represents an
-        // irrigation that was in flight when the process previously
-        // exited (kill -9, deploy, OOM, host reboot). Mark them aborted
-        // before anything else reads the runs table, otherwise the
-        // dashboard renders zombie active runs and history shows runs
-        // that never ended.
-        let now_epoch = chrono::Utc::now().timestamp();
-        match runs.reconcile_in_flight(now_epoch).await {
-            Ok(0) => {}
-            Ok(n) => info!(reconciled = n, "marked interrupted runs as aborted"),
-            Err(e) => warn!(error = %e, "in-flight run reconciliation failed"),
-        }
-
-        // ----- Step 4: registries -----
-        let sources = SourceRegistry::new();
-        sources.set(build_sources(&config.load()));
-        let controllers = ControllerRegistry::new();
-        controllers.set(build_controllers(&config.load(), Some(runs.clone())));
-
-        // ----- Step 5: LLM provider -----
-        let llm = build_llm(&config.load()).await;
-
-        // ----- Step 6: source bus + shutdown -----
-        let (source_bus, _rx0) = broadcast::channel::<SourceEvent>(256);
-        let (shutdown_tx, _) = watch::channel(false);
-
-        Ok(Self {
-            config,
-            config_store,
-            config_snapshots,
-            sources,
-            controllers,
-            llm,
-            runs,
-            sensor_history,
-            verdict_history,
-            source_bus,
-            shutdown_tx,
-            db,
-        })
-    }
-
-    /// Spawn every background task: each weather source's run() loop,
-    /// the engine tick (60s default), and the MQTT publish loop when
-    /// configured. Returns the JoinHandles so main can await them on
-    /// shutdown.
-    pub fn spawn_background_tasks(&self) -> Vec<JoinHandle<()>> {
-        let mut handles = Vec::new();
-        let shutdown_rx = self.shutdown_tx.subscribe();
-
-        // One task per WeatherSource.
-        for source in self.sources.all() {
-            let bus = self.source_bus.clone();
-            let shut = shutdown_rx.clone();
-            handles.push(tokio::spawn(async move {
-                let id = source.id().to_string();
-                if let Err(e) = source.run(bus, shut).await {
-                    warn!(source = %id, error = %e, "source task exited with error");
-                }
-            }));
-        }
-
-        // Engine tick. Every 60s recompute the merged snapshot ->
-        // engine verdict + budgets + soil. Persist verdict_history at
-        // sunset; deferred for now.
-        let _ = shutdown_rx.clone();
-        // Full engine tick wiring follows when the snapshot adapter
-        // bridges MergedSnapshot -> IrrigationSnapshot for the UI.
-        // Until then the dashboard still consumes the v0.1 refresher
-        // output.
-
-        handles
-    }
-
-    /// Cooperative shutdown. Drops the watch sender so every spawned
-    /// task with a receiver observes the close. Caller awaits the join
-    /// handles afterward.
-    pub fn signal_shutdown(&self) {
-        let _ = self.shutdown_tx.send(true);
-    }
-}
-
 /// Construct the HTTP-receiver-style sources (Ecowitt local + HTTP
-/// webhook). main.rs mounts Axum routes against the returned adapters
+/// webhook). The boot mounts /ingest against the returned adapters
 /// because their POST handlers emit observations on each request
 /// rather than through a poll loop.
 pub fn build_receiver_sources(
@@ -240,10 +75,26 @@ pub fn build_receiver_sources(
 /// main.rs spawns each returned adapter's run() loop against the shared
 /// source bus at boot (receiver-POST kinds come from
 /// build_receiver_sources instead; legacy v0.1 paths are skipped below).
-pub fn build_sources(cfg: &Config) -> Vec<Arc<dyn WeatherSource>> {
+pub fn build_sources(
+    cfg: &Config,
+    // The Tempest UDP source re-reads this so removing the source in the
+    // UI releases the hub's broadcast port without a restart. `None` in
+    // tests, where the boot copy of the config stands.
+    config_store: Option<Arc<dyn crate::ports::config_store::ConfigStore>>,
+) -> Vec<Arc<dyn WeatherSource>> {
     let mut out: Vec<Arc<dyn WeatherSource>> = Vec::new();
+    // No location, no forecast fetch. Every location-bound source is left
+    // unbuilt rather than pointed at (0, 0); /api/v1/health names each one
+    // with the reason, and the next boot after the wizard saves a place
+    // wires them.
+    let located = cfg.deployment.location.is_set();
+    let mut unlocated: Vec<&str> = Vec::new();
     for entry in &cfg.sources {
         if !entry.enabled {
+            continue;
+        }
+        if !located && entry.source.needs_location() {
+            unlocated.push(&entry.id);
             continue;
         }
         let constructed: Option<Arc<dyn WeatherSource>> = match &entry.source {
@@ -318,24 +169,97 @@ pub fn build_sources(cfg: &Config) -> Vec<Arc<dyn WeatherSource>> {
             // through the run-loop pattern. main.rs mounts the Axum
             // routes against those instances.
             SourceKind::EcowittLocal(_) | SourceKind::HttpWebhook(_) => None,
-            // EcowittGwPoll is a standalone sensor_history poller (not a
-            // WeatherSource); main.rs spawns it directly. Skip here.
-            SourceKind::EcowittGwPoll(_) => None,
-            // Blitzortung is a standalone display-only feed into the
-            // TempestStore lightning buffer (never the merge bus, never
-            // irrigation input); main.rs spawns it directly. Skip here.
-            SourceKind::Blitzortung(_) => None,
-            // Already-wired v0.1 paths: TempestUdp + OpenMeteo run as
-            // their own tasks in main.rs; they are not yet expressed
-            // via WeatherSource. Silent skip is correct.
-            SourceKind::TempestUdp(_) | SourceKind::OpenMeteo(_) => None,
+            // The gateway poll carries the per-zone soil probes as keyed
+            // readings and its outdoor weather as ordinary fields.
+            SourceKind::EcowittGwPoll(c) => Some(Arc::new(
+                crate::sources::ecowitt_gw_poll::EcowittGwPoll::new(
+                    entry.id.clone(),
+                    c.clone(),
+                    entry.priority,
+                ),
+            )),
+            // Community lightning: strikes only, never a merged field and
+            // never an irrigation input.
+            SourceKind::Blitzortung(c) => {
+                Some(Arc::new(crate::sources::blitzortung::Blitzortung::new(
+                    entry.id.clone(),
+                    c.clone(),
+                    (cfg.deployment.location.lat, cfg.deployment.location.lon),
+                )))
+            }
+            // The hub's LAN broadcast. It re-reads the config so removing
+            // the source releases the port without a restart.
+            SourceKind::TempestUdp(c) => {
+                Some(Arc::new(crate::sources::tempest_udp::TempestUdp::new(
+                    entry.id.clone(),
+                    c.clone(),
+                    entry.priority,
+                    config_store.clone(),
+                )))
+            }
+            // Open-Meteo runs as its own refresher, which re-reads the
+            // location from the live config; the boot spawns it whether or
+            // not an entry exists, so it is not built here.
+            SourceKind::OpenMeteo(_) => None,
             // All schema source kinds now have implementations.
         };
         if let Some(s) = constructed {
             out.push(s);
         }
     }
+    if !unlocated.is_empty() {
+        tracing::warn!(
+            sources = %unlocated.join(", "),
+            "no location configured; these sources are not polled until one is set"
+        );
+    }
     out
+}
+
+#[cfg(test)]
+mod unlocated_tests {
+    use super::*;
+    use crate::config::schema::{MetNorwayConfig, NwsConfig, SourceEntry};
+
+    fn entry(id: &str, source: SourceKind) -> SourceEntry {
+        SourceEntry {
+            id: id.into(),
+            priority: 50,
+            enabled: true,
+            max_age_s: None,
+            source,
+        }
+    }
+
+    /// A config at (0, 0) builds no location-bound source; the same
+    /// config with a real place builds all of them.
+    #[test]
+    fn nothing_polls_the_gulf_of_guinea() {
+        let mut cfg = Config::default();
+        cfg.sources = vec![
+            entry(
+                "nws",
+                SourceKind::Nws(NwsConfig {
+                    user_agent: String::new(),
+                }),
+            ),
+            entry(
+                "met",
+                SourceKind::MetNorway(MetNorwayConfig {
+                    user_agent: String::new(),
+                }),
+            ),
+        ];
+        assert!(!cfg.deployment.location.is_set());
+        assert!(
+            build_sources(&cfg, None).is_empty(),
+            "unlocated: no fetcher gets built"
+        );
+
+        cfg.deployment.location.lat = 29.65;
+        cfg.deployment.location.lon = -82.32;
+        assert_eq!(build_sources(&cfg, None).len(), 2);
+    }
 }
 
 /// Canonical WeatherField names a single configured source PROVIDES, for the
@@ -365,7 +289,7 @@ pub fn source_field_names(cfg: &Config, entry: &SourceEntry) -> Vec<&'static str
     let from_caps = || -> Vec<F> {
         let mut single = cfg.clone();
         single.sources = vec![entry.clone()];
-        build_sources(&single)
+        build_sources(&single, None)
             .first()
             .map(|s| s.capabilities().fields.into_iter().collect())
             .unwrap_or_default()
@@ -427,11 +351,11 @@ pub fn source_field_names(cfg: &Config, entry: &SourceEntry) -> Vec<&'static str
         // carries live_current=false in the picker and a sensibly LOW priority:
         // a real station outranks it by default, but the owner can pin a field
         // (e.g. a wind-shadowed Tempest -> WIND = Open-Meteo) to it. The exact set
-        // is OWNED by the refresher (A2): the const it emits is returned verbatim
+        // is OWNED by the refresher: the const it emits is returned verbatim
         // here so the picker can never drift from what `current_fields` actually
         // emits (cross-agent contract).
         SourceKind::OpenMeteo(_) => {
-            return field_set_names(crate::forecast::refresher::OPEN_METEO_CURRENT_FIELDS.to_vec())
+            return field_set_names(crate::forecast::open_meteo::OPEN_METEO_CURRENT_FIELDS.to_vec())
         }
         // NWS/OpenWeather/Pirate/Met.no/WeatherKit are ALL selectable per-field
         // current-conditions sources now: each emits real current scalars (A4
@@ -439,7 +363,7 @@ pub fn source_field_names(cfg: &Config, entry: &SourceEntry) -> Vec<&'static str
         // capabilities()), so they fall through to the `_` arm below and the
         // picker offers exactly each one's `capabilities().fields`. This is the
         // CLOUD-ONLY tier the owner ranks + pins fields to; the per-field merge
-        // demotes through it (fix #3/#4) and never reverts to an un-chosen live
+        // demotes through it and never reverts to an un-chosen live
         // station. They remain selectable in the FORECAST-source picker too.
         //
         // HttpWebhook + the mapping kinds (MQTT/HA/Yolink/Tuya/REST/Prom/Influx)
@@ -479,26 +403,23 @@ pub fn forecast_priority_map(cfg: &Config) -> std::collections::HashMap<String, 
     map
 }
 
-/// The writer LABEL a source's observations carry on the merge bus, the single
-/// key every merge-layer map (priorities, max-ages, field overrides) uses so
-/// "config id == writer label" is a true invariant for ALL sources. The Tempest
-/// UDP path is the lone special case: its `apply_obs` writer stamps the shared
-/// `TEMPEST_LABEL` constant rather than the config id, so this returns that same
-/// constant for the UDP kind. EVERY other source writes under its config `id`
-/// (the bus `source_id`), so this returns `entry.id`. Centralizing it here fixes
-/// `source_priority_map` (and friends) silently defaulting any source whose id
-/// happened to differ from a hand-written label.
+/// The writer LABEL a source's observations carry on the merge bus: its
+/// config `id`, for every source without exception.
 ///
-/// Public so the honest-status taxonomy (api::health + api::config) tests THIS
-/// label (the one the merge actually stamps into `field_provenance`) against the
-/// snapshot's complete owner-label set, instead of a friendly display name that
-/// never matches the writer's label.
+/// It was not always without exception. The Tempest UDP path wrote the
+/// store directly and stamped a shared "Tempest" constant instead of its
+/// id, so every merge-layer map (priorities, max-ages, field overrides,
+/// the per-field chains) carried one entry keyed differently from all the
+/// others, and a surface that looked a source up by id found nothing.
+/// That path is an ordinary bus source now.
+///
+/// Kept as a named function rather than inlined because it is the place
+/// the invariant is written down, and because the honest-status taxonomy
+/// (api::health + api::config) matches ownership on THIS label rather
+/// than on a friendly display name that never equals what the merge
+/// stamped.
 pub fn writer_label(entry: &SourceEntry) -> String {
-    if matches!(entry.source, SourceKind::TempestUdp(_)) {
-        crate::tempest::state::TEMPEST_LABEL.to_string()
-    } else {
-        entry.id.clone()
-    }
+    entry.id.clone()
 }
 
 /// Build the CURRENT-conditions arbitration priority map for the merge layer:
@@ -523,7 +444,7 @@ pub fn source_priority_map(cfg: &Config) -> std::collections::HashMap<String, i3
 /// to `TempestStore::set_max_ages`. Mirrors `source_priority_map` so a hot-reload
 /// of the freshness windows re-ranks the live merge identically to a restart.
 ///
-/// This is what fixes the owner's wind-pin bug (fix #2): A3 sets ~2100 on the
+/// This is what fixes the owner's wind-pin bug: A3 sets ~2100 on the
 /// 1800s-cadence cloud sources (Open-Meteo / NWS / Met.no), so a pinned cloud
 /// stays fresh through its full refresh interval instead of being judged stale at
 /// the hardcoded 600s mark and demoted out from under the pin. `max_age_s` is
@@ -585,7 +506,7 @@ pub fn field_override_map(cfg: &Config) -> std::collections::HashMap<&'static st
 /// `cfg.field_source_chains` (WeatherField name -> ORDERED list of source ids)
 /// into the merge layer's (snapshot-field key -> ORDERED list of writer LABELs)
 /// map. The ordered-list generalization of `field_override_map`: each source id
-/// in a chain is resolved to its writer LABEL (`writer_label`, "Tempest" for the
+/// in a chain is resolved to its writer LABEL (`writer_label`, the id for every
 /// UDP path, the source id otherwise) preserving order; a chain entry whose
 /// source id resolves to a disabled/unknown source is dropped from the chain
 /// (never an error), a chain whose field name has no scalar owner key is skipped,
@@ -639,6 +560,9 @@ pub fn field_chain_map(cfg: &Config) -> std::collections::HashMap<&'static str, 
 ///                            dial, manual schedules, soil/budget zones).
 #[derive(Clone)]
 pub struct RuntimeHandles {
+    /// The SAME dispatch context the controller registry gives every run path.
+    /// Config apply and dispatch share its command barrier and restart latch.
+    pub dispatch_context: crate::controllers::ZoneLocks,
     pub tempest_store: Arc<crate::tempest::state::TempestStore>,
     pub forecast_priority: Arc<ArcSwap<std::collections::HashMap<String, i32>>>,
     pub watering_policy: Arc<ArcSwap<crate::refresher::WateringPolicy>>,
@@ -680,13 +604,13 @@ pub struct RuntimeHandles {
 /// the caller can tell the UI a restart is still required for those parts.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct ConfigApplyOutcome {
-    /// True when the new config differs from the previous on a field that ONLY
+    /// True once a config change touches a field that ONLY
     /// the boot path wires (a new/removed/re-kinded source connection or
     /// controller, the zone set, listen address, auth mode, MQTT publisher
     /// gating, ...). The Wave-2 UI shows a "restart required" banner when true.
     /// The hot-reloadable tunables (priorities, per-field overrides, forecast
     /// provider, watering policy) are ALWAYS applied live regardless of this
-    /// flag; it reports only the residue that a live apply cannot reach.
+    /// flag; it reports the accumulated residue until process restart.
     pub restart_required: bool,
     /// Human-readable reasons restart_required is true, for the UI banner +
     /// logs. Empty when restart_required is false.
@@ -704,61 +628,41 @@ pub struct ConfigApplyOutcome {
 ///
 /// `prev` is the config as it was BEFORE this apply (the on-disk config the
 /// caller loaded to round-trip redacted secrets). `None` on a fresh install
-/// (no prior config), in which case the connection/zone diff is skipped and
-/// only the live re-apply runs.
-pub fn apply_runtime_config(
+/// (no prior config), in which case anything startup would have wired is
+/// held until restart, just as on later connection changes.
+pub async fn apply_runtime_config(
     handles: &RuntimeHandles,
     prev: Option<&Config>,
     new_cfg: &Config,
 ) -> ConfigApplyOutcome {
-    // --- Hot-reload the tunables that drive the LIVE engine/merge. ---
-    // 1. Source priorities + per-field overrides: mutate the SHARED TempestStore
-    //    so the current-conditions merge re-ranks on the next packet.
-    handles
-        .tempest_store
-        .set_priorities(source_priority_map(new_cfg));
-    // Per-source freshness windows (fix #2): re-rank max-ages alongside priorities
-    // so a hot-reload of a source's max_age_s takes effect on the next packet,
-    // identically to a restart. Without this a pinned cloud's max_age change would
-    // need a container restart and the wind-pin demote could resurface live.
-    handles
-        .tempest_store
-        .set_max_ages(source_max_age_map(new_cfg));
-    handles
-        .tempest_store
-        .set_field_overrides(field_override_map(new_cfg));
-    // Per-field PRIORITY CHAINS (the ordered-failover generalization of the
-    // single pin): install alongside the overrides so a hot-reload of a chain
-    // takes effect on the next packet identically to a restart. An empty chain map
-    // leaves the priority merge unchanged; a chain and a legacy pin coexist (the
-    // merge treats a lone pin as a 1-element chain).
-    handles
-        .tempest_store
-        .set_field_chains(field_chain_map(new_cfg));
-    // 2. Forecast provider / ranking: swap the bridge's priority handle.
-    handles
-        .forecast_priority
-        .store(Arc::new(forecast_priority_map(new_cfg)));
-    // 3. Watering policy (skip-rule thresholds, restrictions, seasonal dial,
-    //    manual schedules, soil/budget zones, units): swap the handle the
-    //    refresher loads each tick.
-    handles
-        .watering_policy
-        .store(Arc::new(crate::refresher::WateringPolicy::from_config(
-            new_cfg,
-        )));
-    // 4. Manual schedules: swap the handle the manual dispatcher loads at the top
-    //    of each tick. Editing or adding a schedule (including the FIRST one on a
-    //    previously-empty config) is picked up on the next tick with no restart;
-    //    the dispatcher is spawned unconditionally at boot so a first schedule can
-    //    actuate. This is why manual_schedules is NOT a restart_required field.
-    handles
-        .manual_schedules
-        .store(Arc::new(new_cfg.manual_schedules.clone()));
+    // Finish already-entered commands before changing live wiring assumptions.
+    // New commands wait here, then see the latched hold before hardware I/O.
+    let order = handles.dispatch_context.command_order();
+    let _guard = order.write().await;
+    apply_runtime_config_locked(handles, prev, new_cfg)
+}
 
+fn apply_runtime_config_locked(
+    handles: &RuntimeHandles,
+    prev: Option<&Config>,
+    new_cfg: &Config,
+) -> ConfigApplyOutcome {
+    let active_policy = handles.watering_policy.load_full();
+    let requested_location = (
+        new_cfg.deployment.location.lat,
+        new_cfg.deployment.location.lon,
+    );
+    let requested_timezone = crate::timeutil::resolve_tz(new_cfg).map(|tz| tz.name().to_string());
+    let location_changed = prev.is_some() && active_policy.location != requested_location;
+    let timezone_changed = prev.is_some() && active_policy.timezone_name != requested_timezone;
     // --- Compute the boot-only residue for the restart-required contract. ---
     let mut reasons: Vec<String> = Vec::new();
     if let Some(prev) = prev {
+        if location_changed || timezone_changed {
+            reasons.push(
+                "the deployment location or timezone changed (weather connections and the calendar are resolved at boot)".to_string(),
+            );
+        }
         // Source CONNECTIONS are spawned once at boot (one task per adapter).
         // Re-ranking an existing source hot-reloads above, but adding/removing
         // a source, toggling enabled, or changing a source's kind needs a boot
@@ -810,6 +714,13 @@ pub fn apply_runtime_config(
                     .to_string(),
             );
         }
+        // HA action entity ids are captured by the API router at boot. Keep
+        // readback and actuation on one prefix until both can be rebuilt.
+        if prev.deployment.ha_sprinkler_prefix != new_cfg.deployment.ha_sprinkler_prefix {
+            reasons.push(
+                "the Home Assistant controller entity prefix changed (HA action bindings are resolved at boot)".to_string(),
+            );
+        }
         // MQTT discovery publisher is spawned (or not) once at boot.
         if mqtt_publish_fingerprint(prev) != mqtt_publish_fingerprint(new_cfg) {
             reasons.push(
@@ -834,6 +745,15 @@ pub fn apply_runtime_config(
                     .to_string(),
             );
         }
+        // Rhai rules are compiled into the refresher at boot. A changed,
+        // added, removed or disabled rule must not silently leave the old
+        // rule set active while the API claims the save is already applied.
+        if scripting_fingerprint(prev) != scripting_fingerprint(new_cfg) {
+            reasons.push(
+                "the user watering scripts changed (scripts are compiled when LocalSky starts)"
+                    .to_string(),
+            );
+        }
         // soak_minutes + interleave_cycles are NOT here: they ride the
         // watering policy swapped above, and both the smart-morning tick and
         // the refresher's next-run estimate read the live policy each
@@ -855,10 +775,100 @@ pub fn apply_runtime_config(
             }
         }
     }
+    if prev.is_none() {
+        reasons.extend(first_apply_boot_residue(new_cfg));
+    }
+    handles.dispatch_context.restart_hold().latch(reasons);
+    let reasons = handles.dispatch_context.restart_hold().reasons();
+
+    // --- Hot-reload the tunables that drive the LIVE engine/merge. ---
+    // 1. Source priorities + per-field overrides: mutate the SHARED TempestStore
+    //    so the current-conditions merge re-ranks on the next packet.
+    handles
+        .tempest_store
+        .set_priorities(source_priority_map(new_cfg));
+    // Per-source freshness windows: re-rank max-ages alongside priorities
+    // so a hot-reload of a source's max_age_s takes effect on the next packet,
+    // identically to a restart. Without this a pinned cloud's max_age change would
+    // need a container restart and the wind-pin demote could resurface live.
+    handles
+        .tempest_store
+        .set_max_ages(source_max_age_map(new_cfg));
+    handles
+        .tempest_store
+        .set_field_overrides(field_override_map(new_cfg));
+    // Per-field PRIORITY CHAINS (the ordered-failover generalization of the
+    // single pin): install alongside the overrides so a hot-reload of a chain
+    // takes effect on the next packet identically to a restart. An empty chain map
+    // leaves the priority merge unchanged; a chain and a legacy pin coexist (the
+    // merge treats a lone pin as a 1-element chain).
+    handles
+        .tempest_store
+        .set_field_chains(field_chain_map(new_cfg));
+    // 2. Forecast provider / ranking: swap the bridge's priority handle.
+    handles
+        .forecast_priority
+        .store(Arc::new(forecast_priority_map(new_cfg)));
+    // 3. Watering policy (skip-rule thresholds, restrictions, seasonal dial,
+    //    manual schedules, soil/budget zones, units): swap the handle the
+    //    refresher loads each tick.
+    handles.watering_policy.store(Arc::new(
+        crate::refresher::WateringPolicy::from_config(new_cfg)
+            .with_ledger(&active_policy.ledger_view()),
+    ));
+    // 4. Manual schedules: swap the handle the manual dispatcher loads at the top
+    //    of each tick. Editing or adding a schedule (including the FIRST one on a
+    //    previously-empty config) is picked up on the next tick with no restart;
+    //    the dispatcher is spawned unconditionally at boot so a first schedule can
+    //    actuate. This is why manual_schedules is NOT a restart_required field.
+    handles
+        .manual_schedules
+        .store(Arc::new(new_cfg.manual_schedules.clone()));
+
     ConfigApplyOutcome {
         restart_required: !reasons.is_empty(),
         restart_reasons: reasons,
     }
+}
+
+/// The boot-only residue of the FIRST apply on a process that came up with
+/// no config: everything boot would have wired and did not, because at boot
+/// there was nothing to wire it from. One line per mechanism, in the same
+/// voice as the diff-based reasons `runtime::apply_runtime_config` produces,
+/// because both land in the same restart banner.
+///
+/// Only what boot ACTUALLY builds counts: `build_controllers` and
+/// `build_sources` each skip a disabled entry, so a config carrying nothing
+/// but disabled hardware owes no restart for it. An empty list means this
+/// install has nothing a boot would have wired, and the wizard is free to
+/// walk straight to the dashboard.
+pub(crate) fn first_apply_boot_residue(cfg: &crate::config::schema::Config) -> Vec<String> {
+    let mut reasons: Vec<String> = Vec::new();
+    if cfg.controllers.iter().any(|c| c.enabled) {
+        reasons.push(
+            "your irrigation controllers are not connected yet (LocalSky connects \
+             them when it starts, and it started before this setup existed)"
+                .to_string(),
+        );
+    }
+    if !cfg.zones.is_empty() {
+        reasons.push(
+            "your zones are not on the watering schedule yet (the watering loop \
+             reads its zone list when LocalSky starts)"
+                .to_string(),
+        );
+    }
+    if cfg.scripting.skip_rules.iter().any(|rule| rule.enabled) {
+        reasons.push("your user watering scripts are not active yet (scripts are compiled when LocalSky starts)".to_string());
+    }
+    if cfg.sources.iter().any(|src| src.enabled) {
+        reasons.push(
+            "your weather sources are not connected yet (each connection is \
+             opened when LocalSky starts)"
+                .to_string(),
+        );
+    }
+    reasons
 }
 
 /// Zones whose per-run limit this write raised ABOVE the 60 minute
@@ -964,6 +974,16 @@ fn llm_fingerprint(cfg: &Config) -> Option<String> {
     cfg.llm
         .as_ref()
         .map(|l| serde_json::to_string(l).unwrap_or_default())
+}
+
+/// Ordered identity of the boot-compiled rule set. Order matters: the first
+/// hold supplies the reason. Labels remain part of the active audit wording.
+fn scripting_fingerprint(cfg: &Config) -> Vec<(&str, &str, bool, &str)> {
+    cfg.scripting
+        .skip_rules
+        .iter()
+        .map(|r| (r.id.as_str(), r.name.as_str(), r.enabled, r.script.as_str()))
+        .collect()
 }
 
 /// The Web Push (VAPID) identity, so enabling or changing notifications.web_push
@@ -1321,12 +1341,8 @@ pub fn build_test_controller(
     Ok(c)
 }
 
-async fn build_llm(cfg: &Config) -> Option<Arc<dyn LlmProvider>> {
-    build_llm_from(cfg.llm.as_ref()?).await
-}
-
 /// Build a provider straight from an `LlmConfig`, independent of a full
-/// `Config`. Used by `build_llm` at boot and by the wizard's test_llm
+/// `Config`. Used by the wizard's test_llm
 /// endpoint to probe a draft provider before it is applied.
 pub async fn build_llm_from(
     llm_cfg: &crate::config::schema::LlmConfig,
@@ -1377,75 +1393,9 @@ pub async fn build_llm_from(
 
 #[cfg(test)]
 mod tests {
+    use super::apply_runtime_config_locked as apply_runtime_config;
     use super::*;
     use crate::config::schema::DryRunConfig;
-
-    #[tokio::test]
-    async fn boot_with_demo_only_config() {
-        let dir = std::env::temp_dir().join(format!("ls-runtime-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let cfg_path = dir.join("localsky.toml");
-        let db_path = dir.join("test.db");
-
-        // Pre-create a minimal config so boot doesn't have to synthesize
-        // from env.
-        let mut cfg = Config::default();
-        cfg.features.demo_mode = true;
-        cfg.deployment.location.lat = 28.5;
-        cfg.deployment.location.lon = -81.4;
-        cfg.sources.push(crate::config::schema::SourceEntry {
-            id: "demo".into(),
-            priority: 100,
-            max_age_s: None,
-            enabled: true,
-            source: crate::config::schema::SourceKind::DemoReplay(Default::default()),
-        });
-        cfg.controllers
-            .push(crate::config::schema::ControllerEntry {
-                id: "dry".into(),
-                default: true,
-                enabled: true,
-                controller: crate::config::schema::ControllerKind::DryRun(DryRunConfig {
-                    simulate_runs: false,
-                }),
-            });
-        let store = FileConfigStore::new(&cfg_path);
-        store.save(&cfg).await.unwrap();
-
-        let rt = Runtime::boot(cfg_path, db_path).await.unwrap();
-        assert_eq!(rt.controllers.ids(), vec!["dry".to_string()]);
-        assert_eq!(rt.sources.ids(), vec!["demo".to_string()]);
-        rt.signal_shutdown();
-    }
-
-    #[tokio::test]
-    async fn boot_falls_back_to_env_compat_when_no_config() {
-        let dir = std::env::temp_dir().join(format!("ls-runtime-env-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let cfg_path = dir.join("doesnotexist.toml");
-        let db_path = dir.join("env.db");
-        let rt = Runtime::boot(cfg_path, db_path).await.unwrap();
-        // env_compat synthesizes tempest_lan + open_meteo SourceEntries
-        // into the Config, but build_sources only constructs the v2-
-        // ready adapters (DemoReplay today). The legacy paths continue
-        // to serve weather data into the UI until the remaining
-        // adapters are promoted to WeatherSource.
-        let cfg = rt.config.load();
-        // With no config file and no TEMPEST_* env, env_compat now synthesizes a
-        // cloud-first default (Open-Meteo) and does NOT synthesize a passive
-        // tempest_lan listener (which would otherwise report offline on a
-        // no-hardware install). A Tempest source is only synthesized when
-        // TEMPEST_BIND_ADDR / TEMPEST_HUB_SERIAL is set.
-        assert!(
-            cfg.sources.iter().any(|s| s.id == "open_meteo"),
-            "env_compat should synthesize a cloud-first open_meteo source"
-        );
-        assert!(
-            !cfg.sources.iter().any(|s| s.id == "tempest_lan"),
-            "no-hardware env_compat must not synthesize a phantom tempest_lan"
-        );
-        rt.signal_shutdown();
-    }
 
     #[test]
     fn build_test_controller_dispatches_probeable_vs_unsupported() {
@@ -1590,7 +1540,7 @@ mod tests {
         assert_eq!(map.get("open_meteo"), Some(&50), "unknown pin is a no-op");
     }
 
-    // ── source_max_age_map (fix #2 freshness contract) ──
+    // ── source_max_age_map, the freshness contract ──
 
     #[test]
     fn max_age_map_keys_by_writer_label_and_skips_unset() {
@@ -1679,7 +1629,7 @@ mod tests {
             "a configured cloud max_age is keyed by its id"
         );
         assert_eq!(
-            ages.get(crate::tempest::state::TEMPEST_LABEL),
+            ages.get("tempest"),
             None,
             "an unset max_age leaves the source absent (store falls back to 600)"
         );
@@ -1784,10 +1734,11 @@ mod tests {
 
     fn handles_with(cfg: &Config) -> RuntimeHandles {
         let h = RuntimeHandles {
+            dispatch_context: crate::controllers::ZoneLocks::default(),
             tempest_store: Arc::new(crate::tempest::state::TempestStore::new()),
             forecast_priority: Arc::new(ArcSwap::from_pointee(std::collections::HashMap::new())),
             watering_policy: Arc::new(ArcSwap::from_pointee(
-                crate::refresher::WateringPolicy::default(),
+                crate::refresher::WateringPolicy::from_config(cfg),
             )),
             manual_schedules: Arc::new(ArcSwap::from_pointee(Vec::new())),
             source_reachable: crate::sources::SourceReachability::default(),
@@ -1796,7 +1747,7 @@ mod tests {
         };
         // Seed the boot state, as main.rs does, so the test starts from a
         // realistic "booted" baseline before the hot-reload.
-        apply_runtime_config(&h, None, cfg);
+        apply_runtime_config(&h, Some(cfg), cfg);
         h
     }
 
@@ -1813,9 +1764,9 @@ mod tests {
         let store = h.tempest_store.clone();
 
         // Both sources report wind. With no override, the higher-priority Ecowitt
-        // owns wind. The Tempest UDP source's writer label is "Tempest" (capital),
+        // owns wind. Every source writes under its config id.
         // which is how source_priority_map + field_override_map key it.
-        store.apply_source_fields(&[(F::WindMph, 5.0)], 1_000, true, "Tempest");
+        store.apply_source_fields(&[(F::WindMph, 5.0)], 1_000, true, "tempest");
         store.apply_source_fields(&[(F::WindMph, 22.0)], 1_010, true, "ecowitt");
         assert_eq!(
             store.snapshot().wind_avg_mph,
@@ -1835,7 +1786,7 @@ mod tests {
 
         // The override is installed on the live store: the next ticks have
         // Tempest reclaim wind and Ecowitt must no longer seize it.
-        store.apply_source_fields(&[(F::WindMph, 7.0)], 1_020, true, "Tempest");
+        store.apply_source_fields(&[(F::WindMph, 7.0)], 1_020, true, "tempest");
         store.apply_source_fields(&[(F::WindMph, 30.0)], 1_030, true, "ecowitt");
         let s = store.snapshot();
         assert_eq!(
@@ -1846,7 +1797,7 @@ mod tests {
         // attributes wind to Tempest, proving live ownership changed in place.
         assert_eq!(
             store.field_source_map().get("wind_mph").map(String::as_str),
-            Some("Tempest"),
+            Some("tempest"),
             "live field ownership reflects the hot-reloaded override"
         );
 
@@ -1854,7 +1805,7 @@ mod tests {
         // priority on the SAME store -- still no restart.
         let cfg2 = cfg_two_live_sources(60, 90, &[]);
         apply_runtime_config(&h, Some(&cfg1), &cfg2);
-        store.apply_source_fields(&[(F::WindMph, 8.0)], 1_040, true, "Tempest");
+        store.apply_source_fields(&[(F::WindMph, 8.0)], 1_040, true, "tempest");
         store.apply_source_fields(&[(F::WindMph, 40.0)], 1_050, true, "ecowitt");
         assert_eq!(
             store.snapshot().wind_avg_mph,
@@ -1913,7 +1864,7 @@ mod tests {
     #[test]
     fn field_chain_map_resolves_tempest_id_to_its_writer_label() {
         // A Tempest UDP source writes under the TEMPEST_LABEL constant, not its id,
-        // so a chain entry naming the Tempest id must translate to "Tempest"
+        // so a chain entry naming a source id is the label the merge stamps
         // (mirrors field_override_map).
         let mut cfg = cfg_two_live_sources(60, 90, &[]);
         cfg.field_source_chains.insert(
@@ -1923,11 +1874,8 @@ mod tests {
         let map = field_chain_map(&cfg);
         assert_eq!(
             map.get("wind_avg_mph"),
-            Some(&vec![
-                crate::tempest::state::TEMPEST_LABEL.to_string(),
-                "ecowitt".to_string(),
-            ]),
-            "the Tempest id resolves to its writer label; order is preserved"
+            Some(&vec!["tempest".to_string(), "ecowitt".to_string()]),
+            "every source is keyed by its id; order is preserved"
         );
     }
 
@@ -1986,7 +1934,7 @@ mod tests {
         let h = handles_with(&cfg0);
         let store = h.tempest_store.clone();
         // Baseline: no chain -> higher-priority Ecowitt owns wind.
-        store.apply_source_fields(&[(F::WindMph, 5.0)], 1_000, true, "Tempest");
+        store.apply_source_fields(&[(F::WindMph, 5.0)], 1_000, true, "tempest");
         store.apply_source_fields(&[(F::WindMph, 22.0)], 1_010, true, "ecowitt");
         assert_eq!(store.snapshot().wind_avg_mph, 22.0);
 
@@ -2003,7 +1951,7 @@ mod tests {
             outcome.restart_reasons
         );
         // The primary (Tempest) now owns wind on the live merge.
-        store.apply_source_fields(&[(F::WindMph, 7.0)], 1_020, true, "Tempest");
+        store.apply_source_fields(&[(F::WindMph, 7.0)], 1_020, true, "tempest");
         store.apply_source_fields(&[(F::WindMph, 30.0)], 1_030, true, "ecowitt");
         assert_eq!(
             store.snapshot().wind_avg_mph,
@@ -2098,7 +2046,7 @@ mod tests {
             },
         );
         let h = handles_with(&cfg0);
-        let zones = vec![crate::ha::snapshot::ZoneState {
+        let zones = vec![crate::model::ZoneState {
             slug: "front".into(),
             planned_run_seconds: 1800,
             ..Default::default()
@@ -2109,6 +2057,7 @@ mod tests {
                 &zones,
                 p.soak_minutes,
                 p.interleave_cycles,
+                p.duration_quantum_s,
             )
         };
         let boot = h.watering_policy.load();
@@ -2383,6 +2332,7 @@ mod tests {
         use crate::config::schema::{ManualMode, ManualSchedule};
 
         let sched = |id: &str, zone: &str| ManualSchedule {
+            ignore_weather_safety: false,
             id: id.into(),
             name: id.into(),
             zone_slug: zone.into(),
@@ -2430,6 +2380,61 @@ mod tests {
     }
 
     #[test]
+    fn script_changes_require_restart_and_keep_new_watering_held() {
+        use crate::config::schema::ScriptRule;
+        let mut initial = cfg_two_live_sources(60, 90, &[]);
+        initial.scripting.skip_rules = vec![ScriptRule {
+            id: "owner".into(),
+            name: "Owner rule".into(),
+            enabled: true,
+            script: "false".into(),
+        }];
+        for change in ["add", "edit", "disable", "remove", "rename"] {
+            let h = handles_with(&initial);
+            let mut edited = initial.clone();
+            match change {
+                "add" => edited.scripting.skip_rules.push(ScriptRule {
+                    id: "new_rule".into(),
+                    name: "New rule".into(),
+                    enabled: true,
+                    script: "bad syntax (".into(),
+                }),
+                "edit" => edited.scripting.skip_rules[0].script = "true".into(),
+                "disable" => edited.scripting.skip_rules[0].enabled = false,
+                "remove" => edited.scripting.skip_rules.clear(),
+                "rename" => edited.scripting.skip_rules[0].name = "Renamed owner rule".into(),
+                _ => unreachable!(),
+            }
+            let outcome = apply_runtime_config(&h, Some(&initial), &edited);
+            assert!(outcome.restart_required, "{change}");
+            assert!(outcome
+                .restart_reasons
+                .iter()
+                .any(|r| r.contains("scripts")));
+            assert!(h.dispatch_context.restart_hold().is_pending());
+            assert_eq!(
+                h.watering_policy.load().script_rules_enabled,
+                edited.scripting.skip_rules.iter().any(|r| r.enabled)
+            );
+            let repeated = apply_runtime_config(&h, Some(&edited), &edited);
+            assert_eq!(
+                repeated.restart_reasons, outcome.restart_reasons,
+                "later saves cannot clear it"
+            );
+            assert!(
+                !handles_with(&edited)
+                    .dispatch_context
+                    .restart_hold()
+                    .is_pending(),
+                "a fresh boot accepts the compiled set"
+            );
+        }
+        assert!(first_apply_boot_residue(&initial)
+            .iter()
+            .any(|r| r.contains("scripts")));
+    }
+
+    #[test]
     fn restart_required_true_when_a_source_connection_is_added() {
         // Adding a brand-new source connection cannot hot-reload (its adapter
         // task is spawned at boot): the apply re-loads the tunables AND flags
@@ -2466,6 +2471,158 @@ mod tests {
             !outcome.restart_required,
             "re-ranking + pinning existing sources is a pure hot-reload: {:?}",
             outcome.restart_reasons
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_hold_survives_unrelated_saves_and_clears_only_on_new_runtime() {
+        let cfg0 = cfg_two_live_sources(60, 90, &[]);
+        let mut h = handles_with(&cfg0);
+        let registry = crate::controllers::ControllerRegistry::new();
+        h.dispatch_context = registry.zone_locks();
+        let mut cfg1 = cfg0.clone();
+        cfg1.sources.push(forecast_entry("nws", 70, true));
+        let first = super::apply_runtime_config(&h, Some(&cfg0), &cfg1).await;
+        assert!(first.restart_required);
+        assert_eq!(registry.restart_hold().reasons(), first.restart_reasons);
+
+        let mut cfg2 = cfg1.clone();
+        cfg2.engine.skip_rules.rain_skip_in = 0.81;
+        let later = super::apply_runtime_config(&h, Some(&cfg1), &cfg2).await;
+        assert!(
+            later.restart_required,
+            "an unrelated save cannot clear startup residue"
+        );
+        assert_eq!(later.restart_reasons, first.restart_reasons);
+        assert_eq!(h.watering_policy.load().skip_rules.rain_skip_in, 0.81);
+        // Reverting the edited wiring still requires restart: a live adapter
+        // may already have consumed part of the intermediate configuration.
+        assert!(
+            super::apply_runtime_config(&h, Some(&cfg2), &cfg0)
+                .await
+                .restart_required
+        );
+
+        let booted = handles_with(&cfg2);
+        assert!(!booted.dispatch_context.restart_hold().is_pending());
+        let mut threshold_only = cfg2.clone();
+        threshold_only.engine.skip_rules.rain_skip_in = 0.82;
+        assert!(
+            !super::apply_runtime_config(&booted, Some(&cfg2), &threshold_only)
+                .await
+                .restart_required
+        );
+        assert_eq!(booted.watering_policy.load().skip_rules.rain_skip_in, 0.82);
+    }
+
+    #[tokio::test]
+    async fn first_config_apply_latches_the_same_startup_hold() {
+        let cfg = cfg_two_live_sources(60, 90, &[]);
+        let h = handles_with(&Config::default());
+        let first = super::apply_runtime_config(&h, None, &cfg).await;
+        assert!(first.restart_required);
+        assert!(h.dispatch_context.restart_hold().is_pending());
+        assert!(first
+            .restart_reasons
+            .iter()
+            .any(|r| r.contains("weather sources")));
+        assert_eq!(
+            super::apply_runtime_config(&h, Some(&cfg), &cfg)
+                .await
+                .restart_reasons,
+            first.restart_reasons,
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_apply_waits_for_entered_commands_before_latching_and_swapping() {
+        let cfg0 = cfg_two_live_sources(60, 90, &[]);
+        let h = handles_with(&cfg0);
+        let mut cfg1 = cfg0.clone();
+        cfg1.deployment.location.lat += 1.0;
+        cfg1.engine.skip_rules.rain_skip_in = 0.81;
+        let order = h.dispatch_context.command_order();
+        let entered_run = order.read().await;
+        let apply = super::apply_runtime_config(&h, Some(&cfg0), &cfg1);
+        tokio::pin!(apply);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut apply)
+                .await
+                .is_err()
+        );
+        assert!(!h.dispatch_context.restart_hold().is_pending());
+        assert_eq!(
+            h.watering_policy.load().location.0,
+            cfg0.deployment.location.lat
+        );
+        drop(entered_run);
+        assert!(apply.await.restart_required);
+        assert!(h.dispatch_context.restart_hold().is_pending());
+        assert_eq!(h.watering_policy.load().skip_rules.rain_skip_in, 0.81);
+    }
+
+    #[test]
+    fn location_and_timezone_edits_require_restart() {
+        let mut cfg0 = cfg_two_live_sources(60, 90, &[]);
+        cfg0.deployment.location.lat = 40.7;
+        cfg0.deployment.location.lon = -74.0;
+        cfg0.deployment.timezone = Some("America/New_York".into());
+        let h = handles_with(&cfg0);
+        let mut cfg1 = cfg0.clone();
+        cfg1.deployment.location.lat = -33.87;
+        cfg1.deployment.location.lon = 151.2;
+        cfg1.deployment.timezone = Some("Australia/Sydney".into());
+        let outcome = apply_runtime_config(&h, Some(&cfg0), &cfg1);
+        assert!(outcome.restart_required);
+        assert!(outcome
+            .restart_reasons
+            .iter()
+            .any(|r| r.contains("location or timezone")));
+        assert_eq!(h.watering_policy.load().location, (-33.87, 151.2));
+        assert_eq!(
+            h.watering_policy.load().timezone_name.as_deref(),
+            Some("Australia/Sydney")
+        );
+    }
+
+    #[test]
+    fn ha_entity_prefix_change_requires_restart_and_later_saves_cannot_clear_it() {
+        let cfg0 = cfg_two_live_sources(60, 90, &[]);
+        let h = handles_with(&cfg0);
+        assert!(!apply_runtime_config(&h, Some(&cfg0), &cfg0).restart_required);
+        let mut cfg1 = cfg0.clone();
+        cfg1.deployment.ha_sprinkler_prefix = "yard_controller".into();
+        let changed = apply_runtime_config(&h, Some(&cfg0), &cfg1);
+        assert!(changed.restart_required);
+        assert!(changed
+            .restart_reasons
+            .iter()
+            .any(|r| r.contains("controller entity prefix")));
+        let mut cfg2 = cfg1.clone();
+        cfg2.engine.skip_rules.rain_skip_in = 0.81;
+        let later = apply_runtime_config(&h, Some(&cfg1), &cfg2);
+        assert_eq!(later.restart_reasons, changed.restart_reasons);
+        let rebooted = handles_with(&cfg2);
+        assert!(!apply_runtime_config(&rebooted, Some(&cfg2), &cfg2).restart_required);
+    }
+
+    #[test]
+    fn timezone_only_change_requires_restart_but_elevation_applies_live() {
+        let mut cfg0 = cfg_two_live_sources(60, 90, &[]);
+        cfg0.deployment.location.lat = 40.7;
+        cfg0.deployment.location.lon = -74.0;
+        cfg0.deployment.timezone = Some("America/New_York".into());
+        let h = handles_with(&cfg0);
+        let mut cfg1 = cfg0.clone();
+        cfg1.deployment.location.elevation_m = Some(120.0);
+        assert!(!apply_runtime_config(&h, Some(&cfg0), &cfg1).restart_required);
+        assert_eq!(h.watering_policy.load().elevation_m, 120.0);
+        let mut cfg2 = cfg1.clone();
+        cfg2.deployment.timezone = Some("Asia/Kolkata".into());
+        assert!(apply_runtime_config(&h, Some(&cfg1), &cfg2).restart_required);
+        assert_eq!(
+            h.watering_policy.load().timezone_name.as_deref(),
+            Some("Asia/Kolkata")
         );
     }
 

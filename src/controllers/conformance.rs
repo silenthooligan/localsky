@@ -1,4 +1,4 @@
-//! P1-3 controller conformance harness.
+//! The controller conformance harness.
 //!
 //! Offline-only by necessity: `safe_fetch::build_safe_client` forbids loopback,
 //! so the HTTP adapters (OpenSprinkler direct / Rachio / RainBird / B-hyve /

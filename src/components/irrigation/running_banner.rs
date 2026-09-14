@@ -13,7 +13,7 @@
 // hint. The stop button always invokes stop_all in that case to be safe.
 
 use crate::components::ui::Button;
-use crate::ha::snapshot::IrrigationSnapshot;
+use crate::model::IrrigationSnapshot;
 use leptos::prelude::*;
 use serde_json::json;
 
@@ -36,7 +36,12 @@ pub fn RunningBanner(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     });
     move || {
         let s = snap.get();
-        let running: Vec<_> = s.zones.iter().filter(|z| z.running).cloned().collect();
+        let running: Vec<_> = s
+            .zones
+            .iter()
+            .filter(|z| z.is_running_or_unconfirmed())
+            .cloned()
+            .collect();
         let count = running.len();
 
         if count == 0 {
@@ -67,19 +72,16 @@ pub fn RunningBanner(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
             }
         };
 
-        let planned_label = if first_planned > 0 {
-            format!("{} min planned", (first_planned + 30) / 60)
-        } else {
-            "running".to_string()
+        let unconfirmed = first.run_state() == crate::model::RunState::Unconfirmed;
+        let planned_label = match (first_planned > 0, unconfirmed) {
+            (true, false) => format!("{} min planned", (first_planned + 30) / 60),
+            (true, true) => format!("{} min planned, unconfirmed", (first_planned + 30) / 60),
+            (false, false) => "running".to_string(),
+            (false, true) => "running, unconfirmed".to_string(),
         };
 
-        // Live measured flow from the controller's own flow sensor. Only
-        // shown when the controller advertises a meter AND reports a value,
-        // so non-flow setups render nothing here.
-        let flow_label = (s.flow_meter)
-            .then_some(s.flow_gpm)
-            .flatten()
-            .map(|gpm| format!("Flow: {gpm:.1} gpm"));
+        // The same selected actual meter reading the API and HA consume.
+        let flow_label = s.flow.rate_gpm.map(|gpm| format!("Flow: {gpm:.1} gpm"));
 
         view! {
             <div class="running-banner" role="status" aria-live="polite">

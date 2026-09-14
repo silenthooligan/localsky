@@ -51,8 +51,8 @@ expression: report
     "scored_days": 4,
     "confirmed_days": 3,
     "min_scored_days": 3,
-    "line": "Skipped 4 days for forecast rain in the last 30; rain came 3 of 4.",
+    "line": "Forecast rain prompted hold verdicts on 4 days in the last 30; rain followed on 3 of 4.",
     "reactive_days": 2,
-    "reactive_line": "Skipped 2 day(s) for rain already falling or on the ground in the last 30."
+    "reactive_line": "Hold verdicts for rain already falling or on the ground: 2 days in the last 30."
   }
 }

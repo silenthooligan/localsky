@@ -8,7 +8,7 @@
 // same SQLite file. If the history db wasn't openable at startup, the
 // endpoints respond 503; the rest of the app stays up.
 //
-// GATING (LS-REC-05): the state-changing subscribe/unsubscribe POSTs are in
+// GATING: the state-changing subscribe/unsubscribe POSTs are in
 // the PRIVILEGED set (auth::middleware::is_privileged_path), so in the
 // shipped Disabled default an anonymous internet caller cannot seed
 // subscriptions; an IP-vouched LAN/loopback caller (or an authenticated
@@ -16,7 +16,6 @@
 // needs it before any subscription exists). The gate runs in the middleware
 // layer, not here, mirroring how POST /irrigation/action is gated.
 
-use crate::push::dispatcher::vapid_public_key;
 use crate::push::store::{self, StoredSubscription};
 use axum::{
     extract::State,
@@ -28,12 +27,24 @@ use axum::{
 use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::json;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
 
 #[derive(Clone)]
 pub struct PushState {
     pub history_conn: Option<Arc<Mutex<Connection>>>,
+    /// The VAPID public key (base64url) browsers subscribe against,
+    /// resolved the first time one is asked for and kept after that.
+    ///
+    /// Lazily, because the keypair is written DURING a boot: turning Web
+    /// Push on in the wizard or in Settings generates it
+    /// (`config::wizard`), and the Subscribe button on that same page
+    /// asks for the key immediately afterwards. Resolving at boot instead
+    /// answered 503 until the operator restarted, which reads as the
+    /// feature being broken. Sending still needs the restart (the
+    /// dispatcher holds its own keypair from boot), but subscribing does
+    /// not have to.
+    pub vapid_public_key: Arc<OnceLock<Option<String>>>,
 }
 
 pub fn router(state: PushState) -> Router {
@@ -44,8 +55,12 @@ pub fn router(state: PushState) -> Router {
         .with_state(state)
 }
 
-async fn get_vapid_key() -> impl IntoResponse {
-    match vapid_public_key() {
+async fn get_vapid_key(State(state): State<PushState>) -> impl IntoResponse {
+    let key = state
+        .vapid_public_key
+        .get_or_init(crate::push::dispatcher::vapid_public_key)
+        .clone();
+    match key {
         Some(k) => (StatusCode::OK, Json(json!({ "public_key": k }))),
         None => (
             StatusCode::SERVICE_UNAVAILABLE,

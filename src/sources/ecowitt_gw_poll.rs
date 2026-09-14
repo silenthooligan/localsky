@@ -16,22 +16,20 @@
 // `source:<id>:soilmoisture1` resolves identically whether the gateway is
 // pushed or polled.
 //
-// This is intentionally NOT a `WeatherSource`: that trait's run loop only
-// gets the merge bus, and the value here is the soil channels, which flow
-// through sensor_history + `resolve_soil_pct`, not the (not-yet-live) merge
-// engine. It's spawned directly from main.rs like the Tempest/forecast
-// refreshers.
+// Both channel readings and outdoor weather publish through SourceBus.
+// The bus recorder persists the native keys used by zone bindings, while
+// the snapshot bridge arbitrates the outdoor weather fields.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
-use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
 use crate::config::schema::EcowittGwPollConfig;
 use crate::persistence::sensor_history::Reading;
-use crate::persistence::SensorHistoryStore;
-use crate::ports::weather_source::{SourceEvent, WeatherField};
+use crate::ports::weather_source::{SourceBus, SourceEvent, WeatherField};
+use crate::sources::poll::ReachabilityLatch;
 
 /// Parse the leading numeric portion of an Ecowitt `val` string. The gateway
 /// appends units and symbols ("56%", "3.13 mph", "0.0 in", "71.6"); we take
@@ -309,9 +307,6 @@ pub fn parse_livedata(body: &Value, source_id: &str, epoch: i64) -> Vec<Reading>
     out
 }
 
-/// Spawn the poll loop. Runs until the process exits (no per-source shutdown
-/// signal, same contract as the Tempest/forecast refreshers in main.rs).
-/// A `None` history store makes this a no-op (nothing to write to).
 /// Parse /get_cli_soilad into calibrated `soilmoistureN` readings using the
 /// per-channel dry/wet AD endpoints. Channels with no calibration entry are
 /// skipped (their livedata humidity value is kept). moisture% is clamped 0..100.
@@ -347,132 +342,224 @@ pub fn parse_soilad(
     out
 }
 
-pub fn spawn(
+/// Replace only channels actually returned by the calibration endpoint.
+/// Partial calibration must preserve uncalibrated probes and probes whose
+/// raw AD was absent from this response.
+fn apply_calibrated_readings(readings: &mut Vec<Reading>, calibrated: Vec<Reading>) {
+    readings.retain(|r| !calibrated.iter().any(|c| c.key == r.key));
+    readings.extend(calibrated);
+}
+
+/// Spawn the poll loop. Runs until the process exits: `spawn` receives no
+/// `ShutdownSignal` (main.rs creates the source shutdown watch after these
+/// spawns, same contract as the Tempest/forecast refreshers), so there is
+/// nothing to select on. A `None` history store makes this a no-op (nothing
+/// to write to).
+///
+/// This is a hand-rolled loop rather than `sources::poll::run_polling` for
+/// one reason the primitive cannot spell: the gateway's embedded HTTP server
+/// has brief busy windows (its own periodic cloud uploads), so a lone failed
+/// cycle must keep the PRIOR reachability verdict, neither online nor
+/// offline, and `Poll` only knows true/false. The pieces the primitive owns
+/// are still shared: the reachability edges go through `ReachabilityLatch`
+/// (transitions only, both directions, first verdict always reported) and
+/// the per-cycle fetch is wrapped in `metrics::observe_fetch`.
+/// The gateway's own HTTP endpoint, polled on the LAN. It carries the
+/// per-zone soil probes, which is why it exists: those ride the bus as
+/// keyed readings under the channel names a zone binds to
+/// (`source:<id>:soilmoisture<N>`), and its outdoor weather rides as
+/// ordinary fields.
+pub struct EcowittGwPoll {
     id: String,
     config: EcowittGwPollConfig,
-    history: Option<SensorHistoryStore>,
-    bus: Option<broadcast::Sender<SourceEvent>>,
-) {
-    let Some(history) = history else {
-        warn!(source_id = %id, "ecowitt_gw_poll: no sensor_history store; poller disabled");
-        return;
-    };
-    let url = format!("http://{}/get_livedata_info", config.host);
-    let soilad_url = format!("http://{}/get_cli_soilad", config.host);
-    let interval = Duration::from_secs(config.poll_interval_s.max(5) as u64);
+    priority: i32,
+}
 
-    tokio::spawn(async move {
-        info!(source_id = %id, host = %config.host, interval_s = config.poll_interval_s,
-              "ecowitt_gw_poll started");
-        let mut tick = tokio::time::interval(interval);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut last_ok: Option<bool> = None;
-        let mut failed_cycles: u32 = 0;
-        loop {
-            tick.tick().await;
-            // The gateway's embedded HTTP server has brief busy windows (its
-            // own periodic cloud uploads), so a single failed attempt usually
-            // succeeds 2s later. Retry once in-cycle, and treat only TWO
-            // consecutive failed cycles as a real outage: a lone blip neither
-            // warns nor flips source health (it used to flap
-            // unreachable/reachable pairs into the log every few minutes).
-            let result = match fetch(&url).await {
-                Ok(body) => Ok(body),
-                Err(_) => {
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    fetch(&url).await
+impl EcowittGwPoll {
+    pub fn new(id: String, config: EcowittGwPollConfig, priority: i32) -> Self {
+        Self {
+            id,
+            config,
+            priority,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::ports::weather_source::WeatherSource for EcowittGwPoll {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn capabilities(&self) -> crate::ports::weather_source::SourceCaps {
+        crate::ports::weather_source::SourceCaps {
+            // A live poll of a real station on the LAN.
+            live_current: true,
+            // What `parse_livedata` actually produces. The per-zone soil
+            // channels are not WeatherFields; they ride as keyed readings.
+            fields: [
+                WeatherField::AirTempF,
+                WeatherField::DewPointF,
+                WeatherField::RhPct,
+                WeatherField::WindMph,
+                WeatherField::WindGustMph,
+                WeatherField::PressureInHg,
+                WeatherField::RainTodayIn,
+                WeatherField::RainIntensityInHr,
+                WeatherField::SolarWm2,
+                WeatherField::UvIndex,
+                WeatherField::Illuminance,
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn priority(&self, _field: WeatherField) -> i32 {
+        self.priority
+    }
+
+    async fn run(
+        self: Arc<Self>,
+        bus: SourceBus,
+        mut shutdown: crate::ports::weather_source::ShutdownSignal,
+    ) -> anyhow::Result<()> {
+        let id = self.id.clone();
+        let config = self.config.clone();
+        let url = format!("http://{}/get_livedata_info", config.host);
+        let soilad_url = format!("http://{}/get_cli_soilad", config.host);
+        let interval = Duration::from_secs(config.poll_interval_s.max(5) as u64);
+        let bus = Some(bus);
+        {
+            info!(source_id = %id, host = %config.host, interval_s = config.poll_interval_s,
+                  "ecowitt_gw_poll started");
+            let mut tick = tokio::time::interval(interval);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut latch = ReachabilityLatch::new();
+            let mut failed_cycles: u32 = 0;
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    _ = shutdown.changed() => return Ok(()),
                 }
-            };
-            match result {
-                Ok(body) => {
-                    failed_cycles = 0;
-                    if last_ok != Some(true) {
-                        info!(source_id = %id, "ecowitt_gw_poll reachable");
-                        if let Some(bus) = &bus {
-                            let _ = bus.send(SourceEvent::Reachability {
-                                source_id: id.clone(),
-                                reachable: true,
-                            });
+                // Retry once in-cycle (a busy-window blip usually clears in 2s),
+                // and treat only TWO consecutive failed cycles as a real outage:
+                // a lone blip neither warns nor flips source health (it used to
+                // flap unreachable/reachable pairs into the log every few
+                // minutes). One fetch metric per cycle, after the retry.
+                match crate::metrics::observe_fetch(&id, fetch_with_retry(&url)).await {
+                    Ok(body) => {
+                        failed_cycles = 0;
+                        if report(&mut latch, bus.as_ref(), &id, true) {
+                            info!(source_id = %id, "ecowitt_gw_poll reachable");
                         }
-                        last_ok = Some(true);
-                    }
-                    let epoch = chrono::Utc::now().timestamp();
-                    let mut readings = parse_livedata(&body, &id, epoch);
-                    // Native calibrated soil: when dry/wet endpoints are
-                    // configured, read the raw AD and recompute moisture so it
-                    // matches a calibrated source-of-truth, replacing the
-                    // gateway's own % from livedata.
-                    if !config.soil_calibration.is_empty() {
-                        if let Ok(soilad) = fetch(&soilad_url).await {
-                            let cal = parse_soilad(&soilad, &id, epoch, &config.soil_calibration);
-                            if !cal.is_empty() {
-                                readings.retain(|r| !r.key.starts_with("soilmoisture"));
-                                readings.extend(cal);
+                        let epoch = chrono::Utc::now().timestamp();
+                        let mut readings = parse_livedata(&body, &id, epoch);
+                        // Native calibrated soil: when dry/wet endpoints are
+                        // configured, read the raw AD and recompute moisture so it
+                        // matches a calibrated source-of-truth, replacing the
+                        // gateway's own % from livedata.
+                        if !config.soil_calibration.is_empty() {
+                            if let Ok(soilad) = fetch(&soilad_url).await {
+                                let cal =
+                                    parse_soilad(&soilad, &id, epoch, &config.soil_calibration);
+                                apply_calibrated_readings(&mut readings, cal);
                             }
                         }
-                    }
-                    if readings.is_empty() {
-                        debug!(source_id = %id, "ecowitt_gw_poll: no parseable readings");
-                        continue;
-                    }
-                    // Publish the outdoor weather subset onto the merge bus so
-                    // the snapshot bridge populates the dashboard + HA weather
-                    // entities (soil/channel keys stay history-only). Values are
-                    // already canonical imperial. live_current=true: it's a live
-                    // local poll of a real station.
-                    if let Some(bus) = &bus {
-                        let fields: Vec<(WeatherField, f64)> = readings
-                            .iter()
-                            .filter_map(|r| weather_field_for_key(&r.key).map(|f| (f, r.value)))
-                            .collect();
-                        if !fields.is_empty() {
-                            let _ = bus.send(SourceEvent::Observation {
-                                source_id: id.clone(),
-                                fields,
-                                at_epoch: epoch,
-                            });
+                        if readings.is_empty() {
+                            debug!(source_id = %id, "ecowitt_gw_poll: no parseable readings");
+                            continue;
                         }
-                    }
-                    let n = readings.len();
-                    if let Err(e) = history.insert_many(readings).await {
-                        warn!(source_id = %id, error = %e, "ecowitt_gw_poll sensor_history write failed");
-                    } else {
-                        debug!(source_id = %id, readings = n, "ecowitt_gw_poll recorded");
-                    }
-                }
-                Err(e) => {
-                    failed_cycles = failed_cycles.saturating_add(1);
-                    if failed_cycles == 1 {
-                        // One failed cycle (after the retry): quiet. The next
-                        // poll decides whether this is real.
-                        debug!(source_id = %id, error = %e,
-                               "ecowitt_gw_poll: poll cycle failed once; retrying next tick");
-                    } else if last_ok != Some(false) {
-                        warn!(source_id = %id, error = %e, failed_cycles,
-                              "ecowitt_gw_poll unreachable");
+                        // Publish the outdoor weather subset onto the merge bus so
+                        // the snapshot bridge populates the dashboard + HA weather
+                        // entities (soil/channel keys stay history-only). Values are
+                        // already canonical imperial. live_current=true: it's a live
+                        // local poll of a real station.
                         if let Some(bus) = &bus {
-                            let _ = bus.send(SourceEvent::Reachability {
-                                source_id: id.clone(),
-                                reachable: false,
-                            });
+                            let fields: Vec<(WeatherField, f64)> = readings
+                                .iter()
+                                .filter_map(|r| weather_field_for_key(&r.key).map(|f| (f, r.value)))
+                                .collect();
+                            if !fields.is_empty() {
+                                let _ = bus.send(SourceEvent::Observation {
+                                    source_id: id.clone(),
+                                    fields,
+                                    at_epoch: epoch,
+                                });
+                            }
                         }
-                        last_ok = Some(false);
+                        // Every reading, under the gateway's own channel name, so
+                        // a zone bound to `source:<id>:soilmoisture2` keeps the
+                        // key it was bound to. The bus recorder persists them.
+                        if let Some(bus) = &bus {
+                            for r in &readings {
+                                let _ = bus.send(SourceEvent::KeyedReading {
+                                    source_id: id.clone(),
+                                    key: r.key.clone(),
+                                    value: r.value,
+                                    at_epoch: r.epoch,
+                                });
+                            }
+                        }
+                        debug!(source_id = %id, readings = readings.len(), "ecowitt_gw_poll published");
+                    }
+                    Err(e) => {
+                        failed_cycles = failed_cycles.saturating_add(1);
+                        if failed_cycles == 1 {
+                            // One failed cycle (after the retry): quiet. The next
+                            // poll decides whether this is real.
+                            debug!(source_id = %id, error = %e,
+                               "ecowitt_gw_poll: poll cycle failed once; retrying next tick");
+                        } else if report(&mut latch, bus.as_ref(), &id, false) {
+                            warn!(source_id = %id, error = %e, failed_cycles,
+                              "ecowitt_gw_poll unreachable");
+                        }
                     }
                 }
             }
         }
-    });
+    }
+}
+
+/// One reachability verdict through the shared latch, which publishes only
+/// the edges: a gateway that answers every poll says so once, not every
+/// thirty seconds. Returns whether this verdict was an edge, so the caller
+/// logs on the same terms.
+fn report(
+    latch: &mut ReachabilityLatch,
+    bus: Option<&SourceBus>,
+    source_id: &str,
+    reachable: bool,
+) -> bool {
+    match bus {
+        Some(bus) => latch.report(bus, source_id, reachable),
+        None => latch.observe(reachable),
+    }
+}
+
+/// `fetch`, retried once after a 2s pause. The gateway's embedded HTTP
+/// server has brief busy windows, so a single failed attempt usually
+/// succeeds on the second try.
+async fn fetch_with_retry(url: &str) -> anyhow::Result<Value> {
+    match fetch(url).await {
+        Ok(body) => Ok(body),
+        Err(_) => {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            fetch(url).await
+        }
+    }
 }
 
 /// Fetch the gateway's local-API JSON through an SSRF-hardened client.
 ///
-/// The gateway host comes from config (`config.host`) and this poller runs
-/// always-on in the background, so it routes outbound through net::safe_fetch
-/// (defense in depth): the forbidden-target filter rejects
-/// loopback/metadata/link-local/multicast, the resolved IP is pinned (anti
-/// DNS-rebinding) and redirects are disabled. RFC1918/ULA stay allowed because
-/// the GW1100/GW2000 lives on the LAN, so legitimate Ecowitt polling is
-/// unaffected. The 8s budget matches the previous persistent client.
+/// Not `net::client`: the gateway host comes from config (`config.host`) and
+/// this poller runs always-on in the background, so it routes outbound
+/// through net::safe_fetch (defense in depth): the forbidden-target filter
+/// rejects loopback/metadata/link-local/multicast, the resolved IP is pinned
+/// (anti DNS-rebinding) and redirects are disabled. RFC1918/ULA stay allowed
+/// because the GW1100/GW2000 lives on the LAN, so legitimate Ecowitt polling
+/// is unaffected. The 8s budget matches the previous persistent client.
 async fn fetch(url: &str) -> anyhow::Result<Value> {
     let (client, safe_url) =
         crate::net::safe_fetch::build_safe_client(url, Duration::from_secs(8)).await?;
@@ -510,6 +597,27 @@ mod tests {
             "expected ~23.6%, got {}",
             out[0].value
         );
+    }
+
+    #[test]
+    fn partial_calibration_keeps_every_other_probe() {
+        let mut readings = parse_livedata(&sample(), "gw", 100);
+        let calibrated = vec![Reading {
+            source_id: "gw".into(),
+            key: "soilmoisture1".into(),
+            epoch: 100,
+            value: 23.6,
+        }];
+        apply_calibrated_readings(&mut readings, calibrated);
+        assert_eq!(val(&readings, "soilmoisture1"), Some(23.6));
+        assert_eq!(val(&readings, "soilmoisture2"), Some(38.0));
+        assert_eq!(
+            readings.iter().filter(|r| r.key == "soilmoisture1").count(),
+            1
+        );
+        let before = readings.len();
+        apply_calibrated_readings(&mut readings, Vec::new());
+        assert_eq!(readings.len(), before);
     }
 
     fn sample() -> Value {

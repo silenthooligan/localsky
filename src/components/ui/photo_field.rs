@@ -93,14 +93,14 @@ pub fn PhotoField(value: RwSignal<String>) -> impl IntoView {
                 {move || if !value.get().is_empty() {
                     view! {
                         <img class="photo-field__preview" src=move || value.get() alt="zone photo"/>
-                        <button
-                            type="button"
-                            class="photo-field__clear"
-                            aria-label="Remove photo"
-                            on:click=on_clear
-                        >
+                        <crate::components::ui::Button
+    variant="danger"
+    size="sm"
+    aria_label="Remove photo"
+    on_click=Callback::new(on_clear)
+    class="photo-field__clear">
                             "×"
-                        </button>
+                        </crate::components::ui::Button>
                     }.into_any()
                 } else {
                     view! {
@@ -108,9 +108,13 @@ pub fn PhotoField(value: RwSignal<String>) -> impl IntoView {
                             <span class="photo-field__hint-icon" aria-hidden="true">"+"</span>
                             <span class="photo-field__hint-text">
                                 "Drop an image here or "
-                                <button type="button" class="photo-field__browse-link" on:click=trigger_browse>
+                                <crate::components::ui::Button
+    variant="ghost"
+    size="sm"
+    on_click=Callback::new(trigger_browse)
+    class="photo-field__browse-link">
                                     "browse"
-                                </button>
+                                </crate::components::ui::Button>
                             </span>
                             <span class="photo-field__hint-meta">"JPG, PNG, GIF, WebP up to 10 MB"</span>
                         </div>
@@ -120,7 +124,7 @@ pub fn PhotoField(value: RwSignal<String>) -> impl IntoView {
             <input
                 type="file"
                 accept="image/jpeg,image/png,image/gif,image/webp"
-                style="display:none"
+                hidden=true
                 node_ref=file_input_ref
                 on:change=on_file_change
             />

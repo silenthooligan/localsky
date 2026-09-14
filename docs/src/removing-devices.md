@@ -15,6 +15,25 @@ into the upstream device on your behalf.
   zone clears (a zone with no soil sensor simply waters on schedule and
   forecast).
 
+## Releasing Tempest for another application
+
+Open **Settings > Devices**, expand the Tempest source, and turn it off or use
+**Remove**. Disabling keeps its configuration; removing also clears source
+selections and zone bindings that reference it. Neither action changes the hub.
+
+The Tempest listener checks saved configuration every 15 seconds. Disabling or
+removing its source closes the UDP socket on that check, so another application
+can use port **50222** before LocalSky restarts. Complete any requested LocalSky
+restart to finish updating source connections and clear the watering hold.
+Adding a new source, including HA passthrough, needs that restart to start reading.
+
+The hub broadcasts to the local network. Separate hosts can receive the same
+broadcasts independently; two applications sharing the same host network can
+conflict over the listening address and port. If HA's WeatherFlow integration
+failed during that conflict, reload its integration entry after LocalSky releases
+its socket. You can then [feed WeatherFlow readings through HA](migrating-from-ha.md#keeping-weatherflow-in-home-assistant)
+without changing Docker networking or editing TOML.
+
 ## Removing a soil probe
 
 Soil probes are managed wherever you see them:

@@ -1,14 +1,12 @@
 // User-defined skip rules via embedded Rhai. AUGMENT-ONLY: the engine
-// consults these only when the built-in deterministic ladder already
-// returned "run", so a script can ADD a skip but can never clear a
-// freeze / wind / restriction / rain-now gate. That boundary is enforced
-// by the caller (it doesn't call this on a "skip" verdict); this module
-// just evaluates rules and reports the first one that asks to skip.
+// evaluates these once even when a built-in gate already holds watering.
+// A script can ADD a hold but can never clear a freeze / wind / restriction /
+// rain-now gate. The independent result reaches every scheduled watering path,
+// including schedules that explicitly waive a weather gate.
 //
-// Fail-safe by construction: a script that errors, times out, has invalid
-// syntax, or returns anything other than `true` / a non-empty string is a
-// no-op (no skip). The worst a buggy script can do is withhold watering
-// (recoverable), never water during a freeze (unrecoverable).
+// An enabled script that cannot be evaluated holds watering with a named
+// reason. Only a valid false or empty-string result means no added hold;
+// an error cannot silently discard the owner's rule.
 //
 // Sandboxed: full stdlib minus `eval`, no module imports, bounded
 // operation count + call depth + string size, so a pathological script
@@ -29,16 +27,11 @@ pub struct CompiledScripts {
 struct CompiledRule {
     id: String,
     name: String,
-    ast: AST,
+    ast: Option<AST>,
 }
 
-/// The outcome when a user rule asks to skip.
-#[derive(Debug, Clone, PartialEq)]
-pub struct UserSkip {
-    pub id: String,
-    pub name: String,
-    pub reason: String,
-}
+/// The shared, serializable script decision carried by snapshots.
+pub use crate::model::ScriptHold as UserSkip;
 
 impl Default for CompiledScripts {
     fn default() -> Self {
@@ -64,26 +57,28 @@ fn sandboxed_engine() -> Engine {
 }
 
 impl CompiledScripts {
-    /// Compile every enabled rule. Rules that fail to compile are logged
-    /// and dropped (fail-safe); valid rules are kept.
+    /// Retain every enabled rule, including a failed compilation, so an
+    /// invalid owner rule cannot disappear from the watering decision.
     pub fn compile(rules: &[ScriptRule]) -> Self {
         let engine = sandboxed_engine();
         let mut compiled = Vec::new();
         for r in rules.iter().filter(|r| r.enabled) {
-            match engine.compile(&r.script) {
-                Ok(ast) => compiled.push(CompiledRule {
-                    id: r.id.clone(),
-                    name: if r.name.is_empty() {
-                        r.id.clone()
-                    } else {
-                        r.name.clone()
-                    },
-                    ast,
-                }),
+            let ast = match engine.compile(&r.script) {
+                Ok(ast) => Some(ast),
                 Err(e) => {
-                    tracing::warn!(rule = %r.id, error = %e, "skip-rule script failed to compile; ignoring");
+                    tracing::warn!(rule = %r.id, error = %e, "skip-rule script failed to compile; watering held");
+                    None
                 }
-            }
+            };
+            compiled.push(CompiledRule {
+                id: r.id.clone(),
+                name: if r.name.is_empty() {
+                    r.id.clone()
+                } else {
+                    r.name.clone()
+                },
+                ast,
+            });
         }
         Self {
             engine,
@@ -97,14 +92,14 @@ impl CompiledScripts {
 
     /// Run the rules against the current inputs. Returns the FIRST rule
     /// that asks to skip (true, or a non-empty reason string), or None.
-    /// Errors are logged and treated as no-skip.
+    /// Evaluation errors and unsupported result types add a named hold.
     pub fn apply_user_skip(&self, i: &Inputs) -> Option<UserSkip> {
         for rule in &self.rules {
+            let Some(ast) = &rule.ast else {
+                return Some(rule.unavailable());
+            };
             let mut scope = build_scope(i);
-            match self
-                .engine
-                .eval_ast_with_scope::<Dynamic>(&mut scope, &rule.ast)
-            {
+            match self.engine.eval_ast_with_scope::<Dynamic>(&mut scope, ast) {
                 Ok(d) => {
                     if let Ok(b) = d.as_bool() {
                         if b {
@@ -123,10 +118,13 @@ impl CompiledScripts {
                                 reason: s,
                             });
                         }
+                    } else {
+                        return Some(rule.unavailable());
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(rule = %rule.id, error = %e, "skip-rule script errored; ignoring");
+                    tracing::warn!(rule = %rule.id, error = %e, "skip-rule script errored; watering held");
+                    return Some(rule.unavailable());
                 }
             }
         }
@@ -134,15 +132,39 @@ impl CompiledScripts {
     }
 }
 
-/// Expose the decision inputs to the script as plain float/int variables.
+impl CompiledRule {
+    fn unavailable(&self) -> UserSkip {
+        UserSkip {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            reason: format!(
+                "Watering held: rule '{}' could not be evaluated; fix or disable it",
+                self.name
+            ),
+        }
+    }
+}
+
+/// Expose known decision inputs as numbers. Missing forecast rain is Rhai unit
+/// (`()`), so an unguarded numeric expression fails closed instead of seeing zero.
 fn build_scope(i: &Inputs) -> Scope<'static> {
     let mut s = Scope::new();
     s.push("temp_now_f", i.temp_now_f);
     s.push("wind_now_mph", i.wind_now_mph);
     s.push("rain_today_in", i.rain_today_in);
-    s.push("rain_intensity_now_in_hr", i.rain_intensity_now_in_hr);
+    s.push_dynamic(
+        "rain_intensity_now_in_hr",
+        i.rain_intensity_now_in_hr
+            .map(rhai::Dynamic::from)
+            .unwrap_or(rhai::Dynamic::UNIT),
+    );
     s.push("humidity_now_pct", i.humidity_now_pct);
-    s.push("forecast_in", i.forecast_in);
+    s.push_dynamic(
+        "forecast_in",
+        i.forecast_in
+            .map(rhai::Dynamic::from)
+            .unwrap_or(rhai::Dynamic::UNIT),
+    );
     // Scripts see a plain number; an unreported probability scripts as 100
     // to match the engine's full-weight treatment (a "skip if prob > X"
     // rule then errs toward holding water, the same safe direction).
@@ -150,12 +172,19 @@ fn build_scope(i: &Inputs) -> Scope<'static> {
         "rain_tomorrow_prob_pct",
         i64::from(i.rain_tomorrow_prob_pct.unwrap_or(100)),
     );
-    s.push("rain_next_4h_in", i.rain_next_4h_in);
+    s.push_dynamic(
+        "rain_next_4h_in",
+        i.rain_next_4h_in
+            .map(rhai::Dynamic::from)
+            .unwrap_or(rhai::Dynamic::UNIT),
+    );
     s.push("wind_max_today_mph", i.wind_max_today_mph);
-    // Rhai surface keeps the historical scalar shape: 0.0 stands in when
-    // the 24h forecast low is unavailable (user scripts predate the
-    // Option-ization and treat 0.0 as "no data").
-    s.push("temp_min_24h_f", i.temp_min_24h_f.unwrap_or(0.0));
+    s.push_dynamic(
+        "temp_min_24h_f",
+        i.temp_min_24h_f
+            .map(rhai::Dynamic::from)
+            .unwrap_or(rhai::Dynamic::UNIT),
+    );
     s.push("temp_max_3day_f", i.temp_max_3day_f);
     s.push(
         "days_since_significant_rain",
@@ -200,6 +229,43 @@ mod tests {
     }
 
     #[test]
+    fn script_can_distinguish_missing_rain_from_real_zero() {
+        let numeric = CompiledScripts::compile(&[rule("rain", "forecast_in + 0.0 > 0.2")]);
+        let mut input = inputs();
+        input.forecast_in = None;
+        assert!(numeric
+            .apply_user_skip(&input)
+            .unwrap()
+            .reason
+            .contains("could not be evaluated"));
+        let explicit = CompiledScripts::compile(&[rule("missing", "forecast_in == ()")]);
+        assert!(explicit.apply_user_skip(&input).is_some());
+        input.forecast_in = Some(0.0);
+        assert!(numeric.apply_user_skip(&input).is_none());
+        assert!(explicit.apply_user_skip(&input).is_none());
+    }
+
+    #[test]
+    fn script_forecast_low_distinguishes_missing_from_real_freezing_zero() {
+        let numeric = CompiledScripts::compile(&[rule("freeze", "temp_min_24h_f + 0.0 < 32.0")]);
+        let explicit = CompiledScripts::compile(&[rule("missing", "temp_min_24h_f == ()")]);
+        let mut input = inputs();
+        input.temp_min_24h_f = None;
+        assert!(numeric
+            .apply_user_skip(&input)
+            .unwrap()
+            .reason
+            .contains("could not be evaluated"));
+        assert!(explicit.apply_user_skip(&input).is_some());
+        input.temp_min_24h_f = Some(0.0);
+        assert_eq!(
+            numeric.apply_user_skip(&input).unwrap().reason,
+            "freeze rule"
+        );
+        assert!(explicit.apply_user_skip(&input).is_none());
+    }
+
+    #[test]
     fn string_return_is_custom_reason() {
         let s = CompiledScripts::compile(&[rule(
             "custom",
@@ -216,18 +282,18 @@ mod tests {
     }
 
     #[test]
-    fn invalid_syntax_is_dropped_at_compile() {
-        // Garbage compiles to nothing; no rules, no skip, no panic.
+    fn invalid_syntax_retains_the_owner_rule_as_a_hold() {
         let s = CompiledScripts::compile(&[rule("bad", "this is not (valid rhai")]);
-        assert!(s.is_empty());
-        assert!(s.apply_user_skip(&inputs()).is_none());
+        assert!(!s.is_empty());
+        let hold = s.apply_user_skip(&inputs()).unwrap();
+        assert_eq!(hold.id, "bad");
+        assert!(hold.reason.contains("fix or disable"));
     }
 
     #[test]
-    fn runtime_error_is_ignored() {
-        // Calls an unknown function -> eval error -> treated as no-skip.
+    fn runtime_error_holds_watering() {
         let s = CompiledScripts::compile(&[rule("oops", "no_such_fn(wind_now_mph)")]);
-        assert!(s.apply_user_skip(&inputs()).is_none());
+        assert_eq!(s.apply_user_skip(&inputs()).unwrap().id, "oops");
     }
 
     #[test]
@@ -252,8 +318,14 @@ mod tests {
     #[test]
     fn operation_limit_caps_runaway_scripts() {
         // An infinite loop must hit the operation cap and error out
-        // (ignored), not hang the test.
+        // and hold watering, not hang the test or discard the rule.
         let s = CompiledScripts::compile(&[rule("loop", "let x = 0; while true { x += 1; } x")]);
-        assert!(s.apply_user_skip(&inputs()).is_none());
+        assert_eq!(s.apply_user_skip(&inputs()).unwrap().id, "loop");
+    }
+
+    #[test]
+    fn unsupported_return_type_holds_watering() {
+        let s = CompiledScripts::compile(&[rule("number", "42")]);
+        assert_eq!(s.apply_user_skip(&inputs()).unwrap().id, "number");
     }
 }

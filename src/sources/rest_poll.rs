@@ -14,13 +14,14 @@
 // scale=1.8, offset=32), matching the webhook receiver. Outbound requests go
 // through net::safe_fetch (SSRF-hardened: forbidden-target filter, resolved-IP
 // pin, no redirects), so a misconfigured URL can't reach loopback/metadata.
+// That is why this adapter does NOT use net::client: the URL is operator
+// supplied, and safe_fetch is the sanctioned client for that case.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use std::collections::HashSet;
-use tokio::time::{interval, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
 use crate::config::schema::RestPollConfig;
@@ -28,6 +29,7 @@ use crate::ports::weather_source::{
     ShutdownSignal, SourceBus, SourceCaps, SourceEvent, WeatherField, WeatherSource,
 };
 use crate::sources::mqtt_subscribe::{extract_numeric, parse_weather_field};
+use crate::sources::poll::{run_polling, Poll};
 
 const REST_TIMEOUT: Duration = Duration::from_secs(10);
 /// Floor on the poll interval, to stay friendly to rate-limited APIs.
@@ -113,95 +115,75 @@ impl WeatherSource for RestPoll {
         }
     }
 
-    async fn run(
-        self: Arc<Self>,
-        bus: SourceBus,
-        mut shutdown: ShutdownSignal,
-    ) -> anyhow::Result<()> {
+    async fn run(self: Arc<Self>, bus: SourceBus, shutdown: ShutdownSignal) -> anyhow::Result<()> {
         let interval_s = self.config.poll_interval_s.max(MIN_INTERVAL_S);
         info!(
             source_id = %self.id,
             url = %self.config.url,
             interval_s,
             fields = self.config.fields.len(),
-            "RestPoll source started"
+            "RestPoll target"
         );
         if self.config.fields.is_empty() {
             warn!(source_id = %self.id, "RestPoll has no field mappings; idle");
         }
-        let mut tick = interval(Duration::from_secs(interval_s));
-        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut last_reachable: Option<bool> = None;
-        loop {
-            tokio::select! {
-                _ = tick.tick() => {
-                    match self.fetch().await {
-                        Ok(body) => {
-                            if last_reachable != Some(true) {
-                                let _ = bus.send(SourceEvent::Reachability {
-                                    source_id: self.id.clone(),
-                                    reachable: true,
-                                });
-                                last_reachable = Some(true);
-                            }
-                            let now = chrono::Utc::now().timestamp();
-                            let mut fields: Vec<(WeatherField, f64)> = Vec::new();
-                            for m in &self.config.fields {
-                                let Some(raw) = extract_numeric(&body, m.json_path.as_deref())
-                                else {
-                                    debug!(source_id = %self.id, field = m.field, "no numeric value at configured path");
-                                    continue;
-                                };
-                                let value = raw * m.scale + m.offset;
-                                // Per-zone soil channel -> KeyedReading.
-                                if let Some(zone) = m
-                                    .zone_slug
-                                    .as_deref()
-                                    .map(str::trim)
-                                    .filter(|z| !z.is_empty())
-                                {
-                                    let _ = bus.send(SourceEvent::KeyedReading {
-                                        source_id: self.id.clone(),
-                                        key: crate::sources::bus_recorder::zone_soil_key(zone),
-                                        value,
-                                        at_epoch: now,
-                                    });
-                                    continue;
-                                }
-                                let Some(wf) = parse_weather_field(&m.field) else {
-                                    debug!(source_id = %self.id, field = m.field, "unknown field name");
-                                    continue;
-                                };
-                                fields.push((wf, value));
-                            }
-                            if !fields.is_empty() {
-                                let _ = bus.send(SourceEvent::Observation {
-                                    source_id: self.id.clone(),
-                                    fields,
-                                    at_epoch: now,
-                                });
-                            }
-                        }
-                        Err(e) => {
-                            warn!(source_id = %self.id, error = %e, "RestPoll fetch failed");
-                            if last_reachable != Some(false) {
-                                let _ = bus.send(SourceEvent::Reachability {
-                                    source_id: self.id.clone(),
-                                    reachable: false,
-                                });
-                                last_reachable = Some(false);
-                            }
-                        }
+        let id = self.id.clone();
+        run_polling(
+            self,
+            &id,
+            "RestPoll",
+            Duration::from_secs(interval_s),
+            bus,
+            shutdown,
+            |s: Arc<Self>| async move {
+                let body = s.fetch().await?;
+                let now = chrono::Utc::now().timestamp();
+                // Per-zone soil channels go out as KeyedReadings in mapping
+                // order, then one Observation carrying every weather field.
+                let mut poll = Poll::none();
+                let mut fields: Vec<(WeatherField, f64)> = Vec::new();
+                for m in &s.config.fields {
+                    let Some(raw) = extract_numeric(&body, m.json_path.as_deref()) else {
+                        debug!(
+                            source_id = %s.id,
+                            field = m.field,
+                            "no numeric value at configured path"
+                        );
+                        continue;
+                    };
+                    let value = raw * m.scale + m.offset;
+                    // Per-zone soil channel -> KeyedReading.
+                    if let Some(zone) = m
+                        .zone_slug
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|z| !z.is_empty())
+                    {
+                        poll = poll.with(SourceEvent::KeyedReading {
+                            source_id: s.id.clone(),
+                            key: crate::sources::bus_recorder::zone_soil_key(zone),
+                            value,
+                            at_epoch: now,
+                        });
+                        continue;
                     }
+                    let Some(wf) = parse_weather_field(&m.field) else {
+                        debug!(source_id = %s.id, field = m.field, "unknown field name");
+                        continue;
+                    };
+                    fields.push((wf, value));
                 }
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        info!(source_id = %self.id, "RestPoll shutdown");
-                        return Ok(());
-                    }
+                if !fields.is_empty() {
+                    poll = poll.with(SourceEvent::Observation {
+                        source_id: s.id.clone(),
+                        fields,
+                        at_epoch: now,
+                    });
                 }
-            }
-        }
+                Ok(poll)
+            },
+        )
+        .await
     }
 }
 

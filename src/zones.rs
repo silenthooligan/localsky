@@ -1,20 +1,10 @@
 // Single source of truth for the irrigation zone list.
 //
-// The runtime learns the zones at boot from one of three sources, in
-// priority order (resolved in main.rs, passed into spawn_refresher):
-//
-//   1. The config file (config.zones) when /data/localsky.toml exists.
-//      The wizard writes this on first-run; `from_pairs` normalizes the
-//      keys (hyphens -> underscores) so the list matches the snapshot
-//      and scheduler slugs.
-//   2. The LOCALSKY_ZONES env var. CSV of either bare slugs
-//      ("back_yard,front_yard") or "slug:Display Name" pairs
-//      ("back_yard:Back Yard,front_yard:Front Yard"). Lets operators
-//      override without a recompile.
-//   3. Nothing. A fresh unconfigured install resolves zero zones; the
-//      UI shows empty states until the wizard writes the config.
-
-use std::env;
+// The runtime learns the zones at boot from the config file
+// (config.zones) when /data/localsky.toml exists. The wizard writes it on
+// first run; `from_pairs` normalizes the keys (hyphens -> underscores) so
+// the list matches the snapshot and scheduler slugs. A fresh unconfigured
+// install resolves zero zones and the UI shows empty states until then.
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ZoneIdent {
@@ -68,68 +58,9 @@ fn humanize(slug: &str) -> String {
         .join(" ")
 }
 
-fn parse_env(raw: &str) -> Vec<ZoneIdent> {
-    raw.split(',')
-        .map(|entry| entry.trim())
-        .filter(|entry| !entry.is_empty())
-        .map(|entry| {
-            if let Some((slug, name)) = entry.split_once(':') {
-                ZoneIdent::new(slug.trim(), name.trim())
-            } else {
-                ZoneIdent::new(entry, humanize(entry))
-            }
-        })
-        .collect()
-}
-
-/// Resolve the active zone list from the environment. Reads LOCALSKY_ZONES;
-/// returns an empty list when unset (fresh unconfigured install). Callers
-/// with a parsed config should prefer `from_pairs(config.zones)`.
-pub fn configured() -> Vec<ZoneIdent> {
-    match env::var("LOCALSKY_ZONES") {
-        Ok(s) => parse_env(&s),
-        Err(_) => Vec::new(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_env_handles_bare_slugs() {
-        let zs = parse_env("back_yard,front_yard");
-        assert_eq!(zs.len(), 2);
-        assert_eq!(zs[0].slug, "back_yard");
-        assert_eq!(zs[0].display_name, "Back Yard");
-        assert_eq!(zs[1].slug, "front_yard");
-        assert_eq!(zs[1].display_name, "Front Yard");
-    }
-
-    #[test]
-    fn parse_env_handles_slug_name_pairs() {
-        let zs = parse_env("back:Backyard,drip_xeri:Drip / Xeriscape");
-        assert_eq!(zs.len(), 2);
-        assert_eq!(zs[0].slug, "back");
-        assert_eq!(zs[0].display_name, "Backyard");
-        assert_eq!(zs[1].slug, "drip_xeri");
-        assert_eq!(zs[1].display_name, "Drip / Xeriscape");
-    }
-
-    #[test]
-    fn parse_env_trims_whitespace() {
-        let zs = parse_env("  back_yard  ,  front_yard:Front Yard  ");
-        assert_eq!(zs.len(), 2);
-        assert_eq!(zs[0].slug, "back_yard");
-        assert_eq!(zs[1].slug, "front_yard");
-        assert_eq!(zs[1].display_name, "Front Yard");
-    }
-
-    #[test]
-    fn parse_env_skips_empty_entries() {
-        let zs = parse_env(",back_yard,,front_yard,");
-        assert_eq!(zs.len(), 2);
-    }
 
     #[test]
     fn humanize_handles_underscores() {

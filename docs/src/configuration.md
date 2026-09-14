@@ -7,7 +7,7 @@ This document is the field-by-field reference. The wizard ([docs/getting-started
 ## Top-level structure
 
 ```toml
-schema_version = 1
+schema_version = 2
 
 [deployment]
 [features]
@@ -57,6 +57,7 @@ display_name = "My Yard"
 - `units`: `"metric"` or `"imperial"`. The setup wizard pre-selects this from your location; existing configs keep their value. Configs written without the field fall back to `"imperial"` for backward compatibility. Per-field overrides live in browser localStorage, not here
 - `timezone`: optional IANA name. Null derives from lat/lon at boot
 - `display_name`: surfaces in the MQTT discovery node_id (slugified) and the dashboard title
+- `ha_sprinkler_prefix`: HA-mode controller entity prefix, default `"opensprinkler"` for existing installs. Settings > Home Assistant > Advanced shows an editable prefix and previews the exact enabled, water-level, and per-zone running entities. A changed prefix requires restart so readback and action bindings use the same names. Missing or unavailable running entities remain unknown; they never certify an idle valve.
 
 ## `[features]`
 
@@ -70,7 +71,7 @@ nerd_mode_default     = false
 telemetry             = false
 ```
 
-All defaults shown. `demo_mode` swaps every controller for DryRun and uses the synthetic DemoReplay source.
+All defaults shown. `demo_mode` is a readout: `LOCALSKY_DEMO=1` seeds a demo config (four zones, a dry-run controller, synthetic weather) and sets it. Setting it by hand changes nothing; the `demo_replay` source kind is the synthetic weather feed a demo uses and can be added to any config.
 
 ## `[[sources]]`
 
@@ -297,15 +298,6 @@ auth_token = null
 
 [notifications.slack]
 webhook_url = "https://hooks.slack.com/services/..."
-
-[notifications.email]
-smtp_host    = "smtp.example.com"
-smtp_port    = 587
-username     = "..."
-password     = "..."
-from_address = "localsky@example.com"
-to_address   = "you@example.com"
-starttls     = true
 ```
 
 Each section is optional. Omit to disable that channel.
@@ -314,10 +306,10 @@ Each section is optional. Omit to disable that channel.
 
 ```toml
 [engine]
-scheduling_model         = "weekly" # weekly | soil; the wizard writes soil for new installs
+scheduling_model         = "soil"   # weekly | soil; the wizard writes soil for new installs
 capture_efficiency       = 0.70     # read by the soil model (see below)
 session_rain_defer_in    = 0.10     # weekly-model zones only; soil zones defer by deficit
-soak_minutes             = 30
+soak_minutes             = 5        # floor under the derived per-zone soak, not the soak itself
 interleave_cycles        = true     # water other zones during soak pauses; turn off for well/low-recovery supplies
 et0_method               = "auto"   # not read at all (see below)
 
@@ -338,7 +330,7 @@ frost_skip_soil_f           = 35.0   # 1.7 C
 
 All values match v0.1 hardcoded constants, with two exceptions. See [skip-rules.md](skip-rules.md) for what each skip threshold does.
 
-`scheduling_model` picks which model sizes and schedules smart-morning runs for every zone without a per-zone pin: the weekly water balance (`weekly`, the default) or the [soil model](irrigation-engine.md#the-soil-model) (`soil`). The Engine settings page carries it, it hot-reloads like the rest of the watering policy, and the setup wizard writes `soil` for new installs at apply time; an upgraded config keeps whatever it holds. A config that never chose carries no key at all and follows the shipped default (`weekly` today), and saves of unrelated settings keep it that way: only choosing a model on the Engine page (or writing the key yourself) makes the choice explicit.
+`scheduling_model` picks which model sizes and schedules smart-morning runs for every zone without a per-zone pin: the weekly water balance (`weekly`) or the [soil model](irrigation-engine.md#the-soil-model) (`soil`, the default). The Engine settings page carries it, it hot-reloads like the rest of the watering policy, and the setup wizard writes `soil` for new installs at apply time; an upgraded config keeps whatever it holds. A config that never chose carries no key at all and follows the shipped default (`soil` today), and saves of unrelated settings keep it that way: only choosing a model on the Engine page (or writing the key yourself) makes the choice explicit.
 
 `capture_efficiency` is read by the soil model: the replay credits rain and applied water through it and each refill divides by it, so on soil-governed zones editing it changes run length, and the zone math panel there shows the configured value. Weekly-governed sizing does not read it (the weekly target is gross), and the soil projection plus the math panel on weekly zones keep the fixed 0.70. Its other reader is the tuning report's measured-sprinkler-rate check, which divides a probe's rise by it. `et0_method` is accepted and validated but not read: the ET0 path always runs the automatic method (Penman-Monteith when the inputs are there, otherwise ASCE-simplified, otherwise Hargreaves-Samani).
 
@@ -393,12 +385,15 @@ start_hour = 5                 # local time, 0..23
 start_minute = 30              # 0..59
 duration_minutes = 20
 mode = "override"              # override (default) | floor
+ignore_weather_safety = false   # explicit per-schedule weather waiver; off by default
 ```
 
 - `override` (default): while an enabled override schedule applies to a zone that day, smart-irrigation dispatch for that zone is suppressed. The zone's smart plan for that day is zero and the detail panel reads "Scheduled 0 min"; the engine's other figures still show.
 - `floor`: the schedule fires AND the smart engine may add more runs that week if the weekly water balance says the zone still needs water. The scheduled run's water counts against the weekly target like any other run, and it resets the session-spacing clock, so a schedule firing as often as the zone's own `sessions_per_week` cadence leaves the engine no day to add on. See [Manual schedules](schedules.md).
 
 Manual schedules respect watering restrictions exactly like smart runs do: a blocked dispatch is skipped with the reason logged to run history.
+
+Rain delay, vacation pause, hold-all, and active Skip overrides also stop a manual schedule. `ignore_weather_safety = true` is a separate deliberate waiver: the UI requires a confirmation naming the physical risks, marks the saved schedule **Ignores weather**, and records the bypassed gate when it dispatches. The waiver never defeats an operator hold or a watering restriction. The dashboard's Force control has narrower scope: it bypasses rain and soil recommendations while enabled safety checks remain binding.
 
 ## `[auth]`
 
@@ -488,14 +483,14 @@ Bad PUTs return 422 with the specific failure; on-disk file is untouched.
 
 ## Migrations
 
-On boot, the migration runner replays any database migrations the file has not seen yet. Schema bumps live in [src/persistence/migrations/](../src/persistence/migrations/) as numbered SQL files, each applied in its own transaction and recorded in the `schema_migrations` table. The config file's own `schema_version` is currently `1`; older configs gain new fields via defaults, and a config newer than the binary is refused at load. Details: [Upgrading LocalSky](upgrading.md#what-happens-on-first-boot-after-an-upgrade).
+There are two migration chains. Config migrations (`schema_version` in `localsky.toml`) are an ordered list applied exactly once on load and recorded in `localsky.ledger.toml` beside the config; that ledger also holds the server-owned records (seeded forecast authorities, the 0.7.22 helper migration) that no config write can touch, and it travels inside a backup bundle. On boot, the database migration runner replays any database migrations the file has not seen yet. Schema bumps live in [src/persistence/migrations/](../src/persistence/migrations/) as numbered SQL files, each applied in its own transaction and recorded in the `schema_migrations` table. The config file's own `schema_version` is currently `2`; older configs gain new fields via defaults, and a config newer than the binary is refused at load. Details: [Upgrading LocalSky](upgrading.md#what-happens-on-first-boot-after-an-upgrade).
 
 LocalSky records a config snapshot on every save. Each successful write (a settings `PUT`, a raw-TOML save, or the wizard apply) first copies the previous on-disk `localsky.toml` to `<config_dir>/snapshots/<unix_ts>.toml`, keeping the newest 20 and pruning older ones. To list and restore them:
 
 ```bash
 # List available snapshots (newest first).
 curl http://localhost:8090/api/v1/config/snapshots
-# -> {"snapshots":[{"ts":1765400000,"applied_at_epoch":1765400000,"schema_version":1,"note":null}, ...]}
+# -> {"snapshots":[{"ts":1765400000,"applied_at_epoch":1765400000,"schema_version":2,"note":null}, ...]}
 
 # Roll back to one. The snapshot is validated before the swap, and the
 # current config is snapshotted first so the rollback is itself reversible.

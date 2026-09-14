@@ -12,7 +12,6 @@
 // they tint with the active state across themes (emoji could not).
 
 use crate::components::ui::{Icon, Sheet};
-use crate::nav_log::log_nav;
 use leptos::prelude::*;
 use leptos_router::hooks::{use_location, use_navigate};
 use leptos_router::NavigateOptions;
@@ -90,7 +89,6 @@ fn Tab(
     };
     let navigate = use_navigate();
     let on_click = move |ev: leptos::ev::MouseEvent| {
-        log_nav(format!("mobile-tab click: {tab}"));
         if ev.ctrl_key() || ev.meta_key() || ev.shift_key() || ev.button() != 0 {
             return;
         }
@@ -164,7 +162,6 @@ fn MoreLink(
 ) -> impl IntoView {
     let navigate = use_navigate();
     let on_click = move |ev: leptos::ev::MouseEvent| {
-        log_nav(format!("mobile-more click: {href}"));
         if ev.ctrl_key() || ev.meta_key() || ev.shift_key() || ev.button() != 0 {
             return;
         }

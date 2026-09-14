@@ -39,33 +39,6 @@ const CLOUD_KINDS: &[&str] = &[
     "met_norway",
 ];
 
-#[cfg(feature = "hydrate")]
-async fn fetch_draft() -> Option<serde_json::Value> {
-    let resp = gloo_net::http::Request::get("/api/wizard/draft")
-        .send()
-        .await
-        .ok()?;
-    resp.json::<serde_json::Value>().await.ok()
-}
-
-#[cfg(feature = "hydrate")]
-async fn save_draft(draft: serde_json::Value) -> Result<(), String> {
-    let resp = gloo_net::http::Request::put("/api/wizard/draft")
-        .json(&draft)
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::save_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    Ok(())
-}
-
 #[component]
 pub fn SourcesStep() -> impl IntoView {
     let draft = RwSignal::new(serde_json::Value::Null);
@@ -74,7 +47,7 @@ pub fn SourcesStep() -> impl IntoView {
     #[cfg(feature = "hydrate")]
     Effect::new(move |_| {
         leptos::task::spawn_local(async move {
-            if let Some(d) = fetch_draft().await {
+            if let Some(d) = crate::components::setup::draft::fetch().await {
                 draft.set(d);
             }
         });
@@ -107,7 +80,7 @@ pub fn SourcesStep() -> impl IntoView {
         let candidate = draft.get_untracked();
         #[cfg(feature = "hydrate")]
         leptos::task::spawn_local(async move {
-            let _ = save_draft(candidate).await;
+            let _ = crate::components::setup::draft::save(&candidate).await;
         });
         #[cfg(not(feature = "hydrate"))]
         let _ = candidate;
@@ -143,7 +116,7 @@ pub fn SourcesStep() -> impl IntoView {
         let sources = local_sources();
         if sources.is_empty() {
             return view! {
-                <p class="setup-step__body" style="margin:0">"No weather station added yet."</p>
+                <p class="setup-step__body" class:u-m0=true>"No weather station added yet."</p>
             }
             .into_any();
         }
@@ -228,20 +201,13 @@ pub fn SourcesStep() -> impl IntoView {
         <div class="setup-step">
             <h2 class="setup-step__title">"Where should LocalSky get its weather?"<HelpHint topic="forecast"/></h2>
             <p class="setup-step__sub">
-                "LocalSky has two first-class sources of weather, and you can run either or both. A "
-                "cloud weather service covers your location with no hardware (free options need no "
-                "key). A weather station on your network is the strongest signal for the readings it "
-                "carries. Below you have full control of both: turn on cloud providers, and add your "
-                "station if you have one."
+                "LocalSky can read a weather station on your network, a cloud service, or both. "
+                "Turn on what you have."
             </p>
 
             <p class="setup-step__body">
-                "How they fit together: a live LAN station (Tempest, Ecowitt) always outranks cloud "
-                "for the readings it covers; cloud fills the readings it does not, and backs it up if "
-                "it goes quiet. So a no-hardware setup runs entirely on cloud, and a hardware setup "
-                "uses cloud as a complement and a safety net. Cloud current conditions are model "
-                "based, not a sensor in your yard, so they are not perfectly hyperlocal, but they are "
-                "a legitimate source. Each option below states exactly what it provides."
+                "A station on your network wins for the readings it carries; cloud fills the rest "
+                "and covers it if the station goes quiet. No hardware is fine: cloud alone works."
             </p>
 
             // Local-first IA (spec 4a/4b). One unified Sources view, two
@@ -261,7 +227,7 @@ pub fn SourcesStep() -> impl IntoView {
                 view! { {cloud_block()} {local_block()} }.into_any()
             }}
 
-            <p class="sensors-section__hint" style="margin-top: var(--space-3)">
+            <p class="sensors-section__hint" class:u-mt3=true>
                 "Everything you set here goes live when you finish setup: the cloud providers you "
                 "turned on, and any station you added. To confirm a source is actually ingesting "
                 "(and see its live readings), open the "<a href="/sensors">"Sensors hub"</a>

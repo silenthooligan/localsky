@@ -81,13 +81,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::Client;
-use tokio::time::{interval, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
 use crate::config::schema::{Location, NoaaMrmsConfig};
 use crate::ports::weather_source::{
     ShutdownSignal, SourceBus, SourceCaps, SourceEvent, WeatherField, WeatherSource,
 };
+use crate::sources::poll::{run_polling, Poll};
 
 /// NCEP public HTTP directory that fronts the live MRMS 2D grids. Each product
 /// lives at `{MRMS_BASE}/{product}/` with a `.latest.grib2.gz` symlink.
@@ -214,11 +214,11 @@ pub struct NoaaMrms {
 
 impl NoaaMrms {
     pub fn new(id: impl Into<String>, config: NoaaMrmsConfig, location: Location) -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .user_agent("LocalSky (https://localsky.io)")
-            .build()
-            .expect("reqwest client construction");
+        // The shared client: a 30 s timeout (a ~0.5 MB grid on a slow link)
+        // and the derived per-install User-Agent. NCEP's MRMS directory has
+        // no UA policy of its own and `NoaaMrmsConfig` carries no operator
+        // contact string, so the derived identity is the one to send.
+        let client = crate::net::client(Duration::from_secs(30));
         Self {
             id: id.into(),
             config,
@@ -642,16 +642,12 @@ impl WeatherSource for NoaaMrms {
         }
     }
 
-    async fn run(
-        self: Arc<Self>,
-        bus: SourceBus,
-        mut shutdown: ShutdownSignal,
-    ) -> anyhow::Result<()> {
+    async fn run(self: Arc<Self>, bus: SourceBus, shutdown: ShutdownSignal) -> anyhow::Result<()> {
         info!(
             source_id = %self.id,
             rate_product = %self.rate_product(),
             accum_product = %self.accum_product(),
-            "NOAA MRMS source started (two products per cycle)"
+            "NOAA MRMS polls two products per cycle"
         );
         // A non-hourly accumulation product (a trailing multi-hour window,
         // e.g. _QPE_24H_) carries yesterday's rain for hours after local
@@ -672,97 +668,102 @@ impl WeatherSource for NoaaMrms {
                  product (MultiSensor_QPE_01H_Pass2) for the hourly rate."
             );
         }
-        let mut tick = interval(POLL_INTERVAL);
-        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut last_reachable: Option<bool> = None;
-        loop {
-            tokio::select! {
-                _ = tick.tick() => {
-                    // Fetch + decode + emit BOTH products this cycle. Each is an
-                    // independent product with its own grid, valid time, field,
-                    // and staleness window, so each emits a SEPARATE observation
-                    // stamped with ITS OWN valid time: the fresh PrecipRate rate
-                    // and the lagged hourly accumulation never share a timestamp,
-                    // and the merge ages each field on its own clock. A None
-                    // decode (no coverage / missing / decode error / a grid past
-                    // that product's staleness window) emits NOTHING for that
-                    // product: MRMS never claims a dry 0 it did not measure. We
-                    // stamp the GRIB's own VALID time (not Utc::now), so a stuck
-                    // `.latest` grid cannot read as fresh downstream.
-                    let now_epoch = chrono::Utc::now().timestamp();
-                    let rate_ok = self
-                        .poll_product(&bus, self.rate_product(), now_epoch)
-                        .await;
-                    let accum_ok = self
-                        .poll_product(&bus, self.accum_product(), now_epoch)
-                        .await;
-
-                    // Reachable if EITHER product fetched ok (a single product's
-                    // transient gap does not mark the whole source unreachable).
-                    let reachable = rate_ok || accum_ok;
-                    // Belt-and-suspenders reachability freshness: send a
-                    // Reachability event on EVERY successful poll (not only on a
-                    // state CHANGE), so a stably-reachable MRMS keeps a FRESH
-                    // reachability epoch in the bus recorder. The bug this guards:
-                    // change-only sends left a stably-reachable source with a stale
-                    // last-reachable epoch, which read `offline` in the catalog
-                    // (>30 min stale) even though it was fetching fine every few
-                    // minutes. The observation-liveness proof in /api/config now
-                    // covers this too, but keeping the reachability epoch fresh is
-                    // cheap (one bounded-channel send every 3 min) and makes the
-                    // reachability surface honest on its own. The false EDGE still
-                    // fires once on the transition so a real outage is recorded
-                    // promptly without then re-sending `false` every cycle.
-                    if reachable || last_reachable != Some(reachable) {
-                        let _ = bus.send(SourceEvent::Reachability {
-                            source_id: self.id.clone(),
-                            reachable,
-                        });
-                        last_reachable = Some(reachable);
-                    }
-                }
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        info!(source_id = %self.id, "NOAA MRMS source shutting down");
-                        return Ok(());
-                    }
-                }
-            }
-        }
+        // The shared poll loop owns the tick (missed ticks delay, never
+        // burst), the fetch metric, the warn on a failed cycle, the
+        // reachability edges (both directions, transitions only, the first
+        // poll always reports) and the shutdown. This adapter only supplies
+        // what one cycle produces.
+        let id = self.id.clone();
+        run_polling(
+            self,
+            &id,
+            "NOAA MRMS",
+            POLL_INTERVAL,
+            bus,
+            shutdown,
+            |s: Arc<NoaaMrms>| async move {
+                // Fetch + decode + emit BOTH products this cycle. Each is an
+                // independent product with its own grid, valid time, field,
+                // and staleness window, so each emits a SEPARATE observation
+                // stamped with ITS OWN valid time: the fresh PrecipRate rate
+                // and the lagged hourly accumulation never share a timestamp,
+                // and the merge ages each field on its own clock. A None
+                // decode (no coverage / missing / decode error / a grid past
+                // that product's staleness window) emits NOTHING for that
+                // product: MRMS never claims a dry 0 it did not measure. We
+                // stamp the GRIB's own VALID time (not Utc::now), so a stuck
+                // `.latest` grid cannot read as fresh downstream.
+                let now_epoch = chrono::Utc::now().timestamp();
+                let rate = s.poll_product(s.rate_product(), now_epoch).await;
+                let accum = s.poll_product(s.accum_product(), now_epoch).await;
+                s.cycle_poll(rate, accum)
+            },
+        )
+        .await
     }
 }
 
 impl NoaaMrms {
     /// Fetch one MRMS product grid, decode the deployment cell, and (on a real
-    /// in-window reading) emit a single `Observation` stamped with that grid's
-    /// own valid time. Returns whether the FETCH succeeded (the reachability
-    /// signal), independent of whether a value was emitted: a successful fetch
-    /// whose cell is no-coverage / missing / stale still counts as reachable
+    /// in-window reading) build the `Observation` stamped with that grid's own
+    /// valid time. `Ok(None)` is a successful fetch with nothing to emit: a
+    /// cell that is no-coverage / missing / stale still counts as reachable
     /// (the server answered; there was simply nothing to emit this cycle).
-    async fn poll_product(&self, bus: &SourceBus, product: &str, now_epoch: i64) -> bool {
-        match self.fetch_grib(product).await {
-            Ok(grib) => {
-                if let Some(obs) = self.fields_from_grib(product, &grib, now_epoch) {
-                    debug!(
-                        source_id = %self.id,
-                        product = %product,
-                        fields_n = obs.fields.len(),
-                        valid_epoch = obs.valid_epoch,
-                        "MRMS cell decoded; emitting rain observation"
-                    );
-                    let _ = bus.send(SourceEvent::Observation {
-                        source_id: self.id.clone(),
-                        fields: obs.fields,
-                        at_epoch: obs.valid_epoch,
-                    });
-                }
-                true
+    /// `Err` is the fetch itself failing after the bounded retries.
+    async fn poll_product(
+        &self,
+        product: &str,
+        now_epoch: i64,
+    ) -> anyhow::Result<Option<SourceEvent>> {
+        let grib = self.fetch_grib(product).await?;
+        Ok(self.fields_from_grib(product, &grib, now_epoch).map(|obs| {
+            debug!(
+                source_id = %self.id,
+                product = %product,
+                fields_n = obs.fields.len(),
+                valid_epoch = obs.valid_epoch,
+                "MRMS cell decoded; emitting rain observation"
+            );
+            SourceEvent::Observation {
+                source_id: self.id.clone(),
+                fields: obs.fields,
+                at_epoch: obs.valid_epoch,
             }
-            Err(e) => {
-                warn!(source_id = %self.id, product = %product, error = %e, "MRMS GRIB fetch failed");
-                false
+        }))
+    }
+
+    /// Fold the two per-product results into the cycle's verdict. The source
+    /// is reachable when EITHER product fetched (a single product's transient
+    /// gap never marks the whole source unreachable): a partial failure is
+    /// logged per product here and the cycle stays Ok, carrying whatever the
+    /// other product decoded. Only BOTH failing is the cycle's error, which the
+    /// poll loop logs once and reports as the offline edge.
+    fn cycle_poll(
+        &self,
+        rate: anyhow::Result<Option<SourceEvent>>,
+        accum: anyhow::Result<Option<SourceEvent>>,
+    ) -> anyhow::Result<Poll> {
+        if let (Err(rate_err), Err(accum_err)) = (&rate, &accum) {
+            anyhow::bail!(
+                "{} ({rate_err:#}); {} ({accum_err:#})",
+                self.rate_product(),
+                self.accum_product()
+            );
+        }
+        let mut poll = Poll::none();
+        for (product, result) in [(self.rate_product(), rate), (self.accum_product(), accum)] {
+            match result {
+                Ok(Some(event)) => poll = poll.with(event),
+                Ok(None) => {}
+                Err(e) => warn!(
+                    source_id = %self.id,
+                    product = %product,
+                    error = %e,
+                    "MRMS GRIB fetch failed; the other product answered, source stays reachable"
+                ),
             }
         }
+        Ok(poll)
     }
 }
 
@@ -1309,6 +1310,87 @@ mod tests {
             classify_product("MultiSensor_QPE_01H_Pass2"),
             RainKind::Accumulation { .. }
         ));
+    }
+
+    // ---------------------------------------------------------------------
+    // Two-product reachability contract, as folded into the shared poll loop:
+    // the cycle is Ok (reachable) when EITHER product fetched, carries every
+    // decoded observation in rate-then-accumulation order, and is Err
+    // (unreachable) only when BOTH fetches failed.
+    // ---------------------------------------------------------------------
+
+    fn observation(at_epoch: i64) -> SourceEvent {
+        SourceEvent::Observation {
+            source_id: "mrms".into(),
+            fields: vec![(WeatherField::RainIntensityInHr, 0.0)],
+            at_epoch,
+        }
+    }
+
+    #[test]
+    fn cycle_stays_reachable_when_either_product_fetched() {
+        let src = test_source();
+        // Rate dropped, accumulation answered: Ok, one event, verdict left to
+        // the loop (reachable).
+        let poll = src
+            .cycle_poll(
+                Err(anyhow::anyhow!("dropped body")),
+                Ok(Some(observation(1))),
+            )
+            .expect("one product answering keeps the source reachable");
+        assert_eq!(poll.events.len(), 1);
+        assert_eq!(poll.reachable, None, "the loop's Ok verdict stands");
+        // Both answered, one with nothing to emit (no-coverage / stale cell).
+        let poll = src
+            .cycle_poll(Ok(Some(observation(1))), Ok(None))
+            .expect("a quiet product is still a successful fetch");
+        assert_eq!(poll.events.len(), 1);
+        // Both answered, nothing to emit: an empty Ok poll, still reachable.
+        let poll = src.cycle_poll(Ok(None), Ok(None)).unwrap();
+        assert!(poll.events.is_empty());
+        assert_eq!(poll.reachable, None);
+    }
+
+    #[test]
+    fn cycle_is_unreachable_only_when_both_products_fail() {
+        let src = test_source();
+        let err = src
+            .cycle_poll(
+                Err(anyhow::anyhow!("rate down")),
+                Err(anyhow::anyhow!("accum down")),
+            )
+            .expect_err("both products failing is the cycle's error");
+        // The one warn the loop logs names both products and both causes.
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("PrecipRate") && msg.contains("rate down"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("MultiSensor_QPE_01H_Pass2") && msg.contains("accum down"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn cycle_events_keep_rate_then_accumulation_order() {
+        let src = test_source();
+        let poll = src
+            .cycle_poll(Ok(Some(observation(10))), Ok(Some(observation(20))))
+            .unwrap();
+        let stamps: Vec<i64> = poll
+            .events
+            .iter()
+            .map(|ev| match ev {
+                SourceEvent::Observation { at_epoch, .. } => *at_epoch,
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            stamps,
+            vec![10, 20],
+            "rate first, then the accumulation, each stamped with its own valid time"
+        );
     }
 
     // ---------------------------------------------------------------------

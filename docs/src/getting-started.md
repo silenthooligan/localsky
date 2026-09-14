@@ -105,7 +105,7 @@ volumes:
   localsky-data:
 ```
 
-Once the container is up, open http://localhost:8090/setup to start the first-run wizard. A fresh install does not redirect automatically, so go to `/setup` directly.
+Once the container is up, open http://localhost:8090 and you land in the first-run wizard: every page of an unconfigured install goes to `/setup` until the wizard saves a config. Until a location is saved, LocalSky fetches no forecast at all (there is no default city).
 
 ### First-run wizard
 
@@ -162,7 +162,7 @@ Full walkthrough: [docs/hacs.md](hacs.md).
 LocalSky talks to your controller directly, AND publishes its state via MQTT discovery so HA dashboards see `sensor.localsky_*` entities automatically. An alternative to the HACS integration when you already run a broker; do not enable both, or you get duplicate entities.
 
 Setup:
-1. Same install command; configure your controller under `/settings/controllers`.
+1. Same install command; add your controller under Settings > Devices.
 2. Under Settings > Notifications, set the MQTT broker host, port, credentials, and discovery prefix, and leave publishing enabled.
 3. Settings > Home Assistant shows whether discovery is currently publishing.
 4. HA auto-discovers the entities once its MQTT integration is connected to the same broker.
@@ -172,7 +172,7 @@ Setup:
 LocalSky's controller dispatches through HA service calls instead of directly. Useful when you already run an HA-driven irrigation integration (opensprinkler HACS, irrigation_unlimited, and similar) and don't want to re-plumb, or when only HA can reach the valves.
 
 Setup:
-1. In the wizard's Controller step (or `/settings/controllers`), pick the `ha_service_call` controller type.
+1. In the wizard's Controller step (or Settings > Devices), pick the `ha_service_call` controller type.
 2. Give it your HA base URL and a long-lived access token, and map your LocalSky zone slugs to HA entity ids. The start and stop services are configurable (defaults target an OpenSprinkler-style setup).
 3. LocalSky dispatches runs via HA's `/api/services/<domain>/<service>` API.
 
@@ -262,8 +262,8 @@ LocalSky's advisor produces plain-English explanations of why today's verdict is
 ## Troubleshooting
 
 - **Dashboard says "no zones"**: the wizard hasn't been run, or the zone editor was skipped. Visit `/setup` or `/settings/zones`.
-- **Verdict shows "(weather rules only; soil rules offline)"**: a soil moisture probe isn't reporting. Check the source under `/settings/sources`.
-- **LLM advisor is grayed out**: provider is unreachable. Visit `/settings/llm`.
+- **Verdict shows "(weather rules only; soil rules offline)"**: a soil moisture probe isn't reporting. Check the source under Settings, then Devices (`/settings?section=devices`).
+- **LLM advisor is grayed out**: provider is unreachable. Check it under Settings, then AI advisor (`/settings/llm`).
 - **MQTT discovery isn't creating entities in HA**: HA's MQTT integration needs the broker connected (Settings → Devices & Services → MQTT → Configure). Discovery topics live under `homeassistant/<component>/<your-deployment-slug>/...`.
 - **Container won't start on Raspberry Pi**: confirm 64-bit OS (`uname -m` should report `aarch64`). 32-bit Pi OS is not supported.
 

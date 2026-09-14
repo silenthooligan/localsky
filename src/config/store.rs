@@ -12,10 +12,12 @@
 // the snapshot parses, snapshots the current config, then swaps.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
 
+use crate::config::ledger::Ledger;
 use crate::config::loader::{self, LoadError};
 use crate::config::schema::Config;
 use crate::ports::config_store::{ConfigStore, ConfigStoreError, ConfigVersion};
@@ -25,13 +27,15 @@ const SNAPSHOT_KEEP: usize = 20;
 
 pub struct FileConfigStore {
     path: PathBuf,
+    /// `localsky.ledger.toml`, the server-owned record beside the config.
+    ledger_path: PathBuf,
     /// Serializes WRITERS (save / save_raw_toml / rollback all funnel through
     /// here). Without it two concurrent saves (a settings PUT racing a wizard
     /// apply or a backup restore) interleave on the SHARED <path>.toml.tmp:
     /// writer B's File::create truncates the tmp mid-write of A, and A's
     /// rename can then commit B's torn bytes over localsky.toml. Readers are
     /// unaffected (the rename stays atomic); this only queues writers.
-    save_lock: tokio::sync::Mutex<()>,
+    save_lock: Arc<tokio::sync::Mutex<()>>,
     /// Serializes whole READ-MODIFY-WRITE sequences, one level above
     /// save_lock (which only queues the final file writes and cannot stop
     /// two handlers from loading the same base config and silently
@@ -46,11 +50,255 @@ pub struct FileConfigStore {
 
 impl FileConfigStore {
     pub fn new(path: impl Into<PathBuf>) -> Self {
+        let path: PathBuf = path.into();
         Self {
-            path: path.into(),
-            save_lock: tokio::sync::Mutex::new(()),
+            ledger_path: Ledger::path_for(&path),
+            path,
+            save_lock: Arc::new(tokio::sync::Mutex::new(())),
             write_lock: tokio::sync::Mutex::new(()),
         }
+    }
+
+    pub fn ledger_path(&self) -> &Path {
+        &self.ledger_path
+    }
+
+    /// The ledger as it stands on disk (empty when there is none).
+    pub fn ledger(&self) -> Ledger {
+        Ledger::load(&self.ledger_path)
+    }
+
+    /// Read-modify-write the ledger under the save lock. The closure's
+    /// return value is handed back.
+    pub async fn update_ledger<T>(
+        &self,
+        f: impl FnOnce(&mut Ledger) -> T,
+    ) -> Result<T, ConfigStoreError> {
+        let _guard = self.save_lock.lock().await;
+        let mut ledger = Ledger::load(&self.ledger_path);
+        let out = f(&mut ledger);
+        let path = self.ledger_path.clone();
+        tokio::task::spawn_blocking(move || ledger.save(&path))
+            .await
+            .map_err(|e| ConfigStoreError::Io(format!("join error: {e}")))?
+            .map_err(|e| ConfigStoreError::Io(format!("ledger write: {e}")))?;
+        Ok(out)
+    }
+
+    /// Run the recorded config migrations against the raw document. Writes
+    /// the document and the ledger back only when something changed, and
+    /// says which migrations ran. Pure I/O on the raw TOML: `${VAR}`
+    /// references are never expanded here, so nothing secret is written.
+    fn migrate_on_disk(path: &Path, ledger_path: &Path) -> Result<Vec<&'static str>, LoadError> {
+        let raw = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(LoadError::NotFound(path.display().to_string()))
+            }
+            Err(e) => return Err(LoadError::Io(path.display().to_string(), e)),
+        };
+        let mut doc: toml::Table = toml::from_str(&raw)?;
+        let version = crate::config::migrate::document_version(&doc);
+        if version > crate::config::schema::CURRENT_SCHEMA_VERSION {
+            return Err(LoadError::SchemaTooNew {
+                found: version,
+                known: crate::config::schema::CURRENT_SCHEMA_VERSION,
+            });
+        }
+        let mut ledger = Ledger::load(ledger_path);
+        let applied =
+            crate::config::migrate::migrate(&mut doc, &mut ledger, Utc::now().timestamp());
+        if applied.is_empty() {
+            return Ok(applied);
+        }
+        let text = toml::to_string_pretty(&doc)
+            .map_err(|e| LoadError::Validation(format!("toml serialize: {e}")))?;
+        snapshot_current_blocking(path)
+            .map_err(|e| LoadError::Io(path.display().to_string(), e))?;
+        // The ledger first: a crash between the two leaves a document that
+        // still carries its records and a ledger that already has them,
+        // which the next load unions harmlessly. The other order could
+        // lose the records.
+        ledger
+            .save(ledger_path)
+            .map_err(|e| LoadError::Io(ledger_path.display().to_string(), e))?;
+        write_atomic_durable(path, text.as_bytes())
+            .map_err(|e| LoadError::Io(path.display().to_string(), e))?;
+        tracing::info!(
+            migrations = %applied.join(", "),
+            config = %path.display(),
+            ledger = %ledger_path.display(),
+            "config migrated and written back"
+        );
+        Ok(applied)
+    }
+
+    /// Legacy file-layout test primitive. Production boot must activate the
+    /// complete marked set through config::restore::activate_at_boot.
+    #[cfg(test)]
+    fn apply_staged_restore(&self) -> std::io::Result<Vec<PathBuf>> {
+        let mut swapped = Vec::new();
+        for live in [self.path.clone(), self.ledger_path.clone()] {
+            let stage = staged_path(&live);
+            if !stage.exists() {
+                continue;
+            }
+            if live.exists() {
+                snapshot_current_blocking(&live)?;
+            }
+            std::fs::rename(&stage, &live)?;
+            swapped.push(live);
+        }
+        Ok(swapped)
+    }
+
+    /// Stage a document (and a ledger) to swap in at the next boot, the
+    /// same way a restored database is staged, so the two move together.
+    #[cfg(test)]
+    async fn stage_restore(
+        &self,
+        config_text: &str,
+        ledger_text: Option<&str>,
+    ) -> Result<(), ConfigStoreError> {
+        let _guard = self.save_lock.lock().await;
+        let cfg_stage = staged_path(&self.path);
+        let ledger_stage = staged_path(&self.ledger_path);
+        let (cfg_bytes, ledger_bytes) = (
+            config_text.as_bytes().to_vec(),
+            ledger_text.map(|t| t.as_bytes().to_vec()),
+        );
+        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            write_atomic_durable(&cfg_stage, &cfg_bytes)?;
+            match ledger_bytes {
+                Some(b) => write_atomic_durable(&ledger_stage, &b)?,
+                None => {
+                    let _ = std::fs::remove_file(&ledger_stage);
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| ConfigStoreError::Io(format!("join error: {e}")))?
+        .map_err(|e| ConfigStoreError::Io(format!("stage: {e}")))
+    }
+
+    /// Publish a fully validated database-bearing restore under the file writer
+    /// lock and a durable fail-closed marker. The caller holds begin_write
+    /// across staging and the runtime hold.
+    /// Prepare every file first, then replace the three stage slots; ordinary
+    /// rename failures roll back earlier slots. These are separate renames, not
+    /// a crash-atomic transaction. Boot verifies and activates the marked set
+    /// before opening any live state, refusing interrupted sets.
+    pub async fn stage_restore_bundle(
+        &self,
+        config_text: Option<&str>,
+        ledger_text: Option<&str>,
+        db_path: &str,
+        db_probe: &str,
+    ) -> Result<(), ConfigStoreError> {
+        let config_live = self.path.clone();
+        let db_live = PathBuf::from(db_path);
+        let config_stage = staged_path(&self.path);
+        let ledger_stage = staged_path(&self.ledger_path);
+        let db_stage = staged_path(Path::new(db_path));
+        let db_probe = PathBuf::from(db_probe);
+        let config = config_text.map(str::to_owned);
+        let ledger = ledger_text.map(str::to_owned);
+        self.run_restore_stage(move || -> std::io::Result<()> {
+            let token = format!("{:032x}", rand::random::<u128>());
+            let mut prepared = PreparedRestoreFiles(Vec::new());
+            let mut entries = Vec::new();
+            for (stage, text) in [(config_stage, config), (ledger_stage, ledger)] {
+                let candidate = if let Some(text) = text {
+                    let candidate = restore_sibling(&stage, &format!("new-{token}"));
+                    prepared.0.push(candidate.clone());
+                    write_atomic_durable(&candidate, text.as_bytes())?;
+                    Some(candidate)
+                } else {
+                    None
+                };
+                // Missing parts replace any previous request's staged part;
+                // a DB-only upload must never inherit an older staged config.
+                entries.push((stage, candidate));
+            }
+            std::fs::File::open(&db_probe)?.sync_all()?;
+            entries.push((db_stage, Some(db_probe)));
+            let candidates = std::array::from_fn(|n| entries[n].1.clone());
+            let publication = super::restore::Publication::begin(
+                &config_live,
+                &db_live,
+                &candidates,
+                token.clone(),
+            )?;
+            publication.finish()
+        })
+        .await
+    }
+
+    /// Restore config and ledger under the same disk-writer lock. The worker
+    /// retains that lock through its actual completion even if its waiter drops.
+    pub(crate) async fn restore_config_pair(
+        &self,
+        cfg: &Config,
+        bundled: Option<Ledger>,
+        db_path: &str,
+    ) -> Result<super::restore::HotRestore, ConfigStoreError> {
+        loader::validate(cfg).map_err(map_load_err)?;
+        let config_text =
+            toml::to_string_pretty(cfg).map_err(|e| ConfigStoreError::Io(e.to_string()))?;
+        let config_path = self.path.clone();
+        let ledger_path = self.ledger_path.clone();
+        let database_path = PathBuf::from(db_path);
+        let guard = self.save_lock.clone().lock_owned().await;
+        tokio::task::spawn_blocking(move || -> std::io::Result<_> {
+            let _guard = guard;
+            let original = match std::fs::read_to_string(&ledger_path) {
+                Ok(text) => Some(text),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e),
+            };
+            let ledger_text = if let Some(mut bundled) = bundled {
+                let current = original
+                    .as_deref()
+                    .map(toml::from_str::<Ledger>)
+                    .transpose()
+                    .map_err(std::io::Error::other)?
+                    .unwrap_or_default();
+                bundled.absorb_seeded(current.seeded_source_ids);
+                Some(toml::to_string_pretty(&bundled).map_err(std::io::Error::other)?)
+            } else {
+                original
+            };
+            snapshot_current_blocking(&config_path)?;
+            let mut restore = super::restore::HotRestore::begin(
+                &config_path,
+                &database_path,
+                config_text,
+                ledger_text,
+            )?;
+            restore.install()?;
+            Ok(restore)
+        })
+        .await
+        .map_err(|e| ConfigStoreError::Io(format!("join error: {e}")))?
+        .map_err(|e| ConfigStoreError::Io(format!("config restore: {e}")))
+    }
+
+    /// Once the blocking stage writer starts, cancellation of its awaiting
+    /// task must not let another writer enter before it has finished rollback
+    /// or publication. The worker owns this guard through its actual return.
+    async fn run_restore_stage(
+        &self,
+        stage: impl FnOnce() -> std::io::Result<()> + Send + 'static,
+    ) -> Result<(), ConfigStoreError> {
+        let guard = self.save_lock.clone().lock_owned().await;
+        tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            stage()
+        })
+        .await
+        .map_err(|e| ConfigStoreError::Io(format!("join error: {e}")))?
+        .map_err(|e| ConfigStoreError::Io(format!("restore staging: {e}")))
     }
 
     /// Take the config read-modify-write guard. Hold the returned guard
@@ -104,11 +352,39 @@ impl FileConfigStore {
     }
 }
 
+fn restore_sibling(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(format!(".{suffix}"));
+    PathBuf::from(name)
+}
+
+struct PreparedRestoreFiles(Vec<PathBuf>);
+impl Drop for PreparedRestoreFiles {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(restore_sibling(path, "tmp"));
+        }
+    }
+}
+
+/// `<file>.restore`: where a restore waits for the next boot.
+pub fn staged_path(live: &Path) -> PathBuf {
+    let name = live
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("localsky.toml");
+    live.with_file_name(format!("{name}.restore"))
+}
+
 /// Atomic + durable file replace: tmp write, fsync, rename, dir fsync.
-fn write_atomic_durable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_atomic_durable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
-    let tmp_path = path.with_extension("toml.tmp");
+    let tmp_path = {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+        path.with_file_name(format!("{name}.tmp"))
+    };
     {
         use std::io::Write;
         let mut f = std::fs::File::create(&tmp_path)?;
@@ -193,11 +469,18 @@ fn map_load_err(e: LoadError) -> ConfigStoreError {
 #[async_trait]
 impl ConfigStore for FileConfigStore {
     async fn load(&self) -> Result<Config, ConfigStoreError> {
+        // Loads may migrate both files. Serialize with saves and ledger
+        // updates so a read cannot overwrite a concurrently saved config.
+        let _guard = self.save_lock.lock().await;
         let path = self.path.clone();
-        tokio::task::spawn_blocking(move || loader::load_from_path(&path))
-            .await
-            .map_err(|e| ConfigStoreError::Io(format!("join error: {e}")))?
-            .map_err(map_load_err)
+        let ledger_path = self.ledger_path.clone();
+        tokio::task::spawn_blocking(move || {
+            Self::migrate_on_disk(&path, &ledger_path)?;
+            loader::load_from_path(&path)
+        })
+        .await
+        .map_err(|e| ConfigStoreError::Io(format!("join error: {e}")))?
+        .map_err(map_load_err)
     }
 
     async fn save(&self, cfg: &Config) -> Result<ConfigVersion, ConfigStoreError> {
@@ -258,6 +541,7 @@ impl ConfigStore for FileConfigStore {
     }
 
     async fn rollback(&self, version: u32) -> Result<Config, ConfigStoreError> {
+        let _guard = self.save_lock.lock().await;
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || -> Result<Config, ConfigStoreError> {
             let snap_path = FileConfigStore::snapshots_dir(&path).join(format!("{version}.toml"));
@@ -293,6 +577,102 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn future_schema_load_refuses_without_rewriting_config_or_ledger() {
+        let dir = tempfile_dir("future-schema");
+        let path = dir.join("localsky.toml");
+        let store = FileConfigStore::new(&path);
+        let original = format!(
+            "schema_version = {}\nfuture_setting = 'preserve me'\n",
+            crate::config::schema::CURRENT_SCHEMA_VERSION + 1
+        );
+        std::fs::write(&path, &original).unwrap();
+        let ledger = "seeded_source_ids = ['owner-choice']\n";
+        std::fs::write(&store.ledger_path, ledger).unwrap();
+        assert!(matches!(
+            store.load().await,
+            Err(ConfigStoreError::Migration(_))
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert_eq!(std::fs::read_to_string(&store.ledger_path).unwrap(), ledger);
+        assert!(store.list_snapshots().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn migration_load_waits_for_the_current_writer() {
+        let dir = tempfile_dir("migration-serialization");
+        let path = dir.join("localsky.toml");
+        let store = FileConfigStore::new(&path);
+        std::fs::write(&path, "schema_version = 1\n").unwrap();
+        let guard = store.save_lock.lock().await;
+        let load = store.load();
+        tokio::pin!(load);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut load)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "schema_version = 1\n"
+        );
+        drop(guard);
+        assert_eq!(
+            load.await.unwrap().schema_version,
+            crate::config::schema::CURRENT_SCHEMA_VERSION
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_restore_waiter_keeps_file_writers_queued_until_worker_finishes() {
+        let dir = tempfile_dir("restore-cancel-writer");
+        let path = dir.join("localsky.toml");
+        let store = Arc::new(FileConfigStore::new(&path));
+        let worker_store = store.clone();
+        let stage_path = staged_path(&path);
+        let worker_stage = stage_path.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let waiter = tokio::spawn(async move {
+            worker_store
+                .run_restore_stage(move || {
+                    let _ = started_tx.send(());
+                    // A real blocking stage operation is in progress when its
+                    // awaiting task is cancelled. The worker cannot be aborted.
+                    release_rx.recv().unwrap();
+                    std::fs::write(worker_stage, b"finished restore stage")
+                })
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
+            .await
+            .expect("stage worker starts")
+            .unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+
+        let cfg = Config::default();
+        let next_save = store.save(&cfg);
+        tokio::pin!(next_save);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), &mut next_save)
+                .await
+                .is_err(),
+            "cancelling the waiter must not release the worker's save lock"
+        );
+        assert!(!path.exists());
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), &mut next_save)
+            .await
+            .expect("next save resumes after stage completion")
+            .unwrap();
+        assert_eq!(
+            std::fs::read(stage_path).unwrap(),
+            b"finished restore stage"
+        );
+        assert!(path.exists());
+    }
+
+    #[tokio::test]
     async fn save_then_load_roundtrip() {
         let dir = tempfile_dir("roundtrip");
         let path = dir.join("localsky.toml");
@@ -309,69 +689,6 @@ mod tests {
         let loaded = store.load().await.unwrap();
         assert_eq!(loaded.deployment.location.lat, 30.07);
         assert_eq!(loaded.deployment.display_name, "Test");
-    }
-
-    // The marker list is the whole idempotency mechanism, and it only works
-    // if it survives the two round trips a real install puts it through: the
-    // TOML file itself, and the GET /api/config -> mutate -> PUT round trip
-    // every settings page performs. `seeded_source_ids` already survives
-    // both in production; this pins it for the adoption record too, including
-    // the serialization hazard of putting an array of tables on Config (it
-    // has to serialize after every scalar, or the document does not parse).
-    #[tokio::test]
-    async fn adoption_markers_survive_the_toml_and_json_round_trips() {
-        let dir = tempfile_dir("ha-adoption-roundtrip");
-        let path = dir.join("localsky.toml");
-        let store = FileConfigStore::new(&path);
-
-        let mut cfg = Config::default();
-        cfg.deployment.location.lat = 30.07;
-        cfg.deployment.location.lon = -81.47;
-        cfg.engine.skip_rules.max_wind_mph = 12.0;
-        cfg.ha_adoption.push(crate::ha::snapshot::HaAdoptedHelper {
-            entity: "input_number.irrigation_max_wind_mph".into(),
-            outcome: "adopted".into(),
-            target: "engine.skip_rules.max_wind_mph".into(),
-            adopted_value: Some("12".into()),
-            observed_value: None,
-            previous_value: Some("10".into()),
-            epoch: 1_780_000_000,
-        });
-
-        store.save(&cfg).await.unwrap();
-        let loaded = store.load().await.unwrap();
-        assert_eq!(loaded.ha_adoption.len(), 1);
-        assert_eq!(loaded.ha_adoption[0].adopted_value.as_deref(), Some("12"));
-        assert_eq!(loaded.engine.skip_rules.max_wind_mph, 12.0);
-
-        // The settings-page shape: serialize to JSON, deserialize, save the
-        // whole document back, reload.
-        let json = serde_json::to_string(&loaded).unwrap();
-        let back: Config = serde_json::from_str(&json).unwrap();
-        store.save(&back).await.unwrap();
-        let again = store.load().await.unwrap();
-        assert_eq!(
-            again.ha_adoption.len(),
-            1,
-            "a settings save must not drop the adoption record"
-        );
-        assert_eq!(again.ha_adoption[0].entity, back.ha_adoption[0].entity);
-    }
-
-    // Additive: a config that has never been through the pass must not gain
-    // the key at all, so no existing file changes shape on upgrade.
-    #[tokio::test]
-    async fn an_unadopted_config_writes_no_adoption_key() {
-        let dir = tempfile_dir("ha-adoption-absent");
-        let path = dir.join("localsky.toml");
-        let store = FileConfigStore::new(&path);
-        let cfg = Config::default();
-        store.save(&cfg).await.unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            !text.contains("ha_adoption"),
-            "empty marker list must stay out of the TOML: {text}"
-        );
     }
 
     #[tokio::test]
@@ -477,5 +794,113 @@ mod tests {
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+    use crate::ports::config_store::ConfigStore;
+
+    fn dir(tag: &str) -> PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("localsky-store-mig-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    const V1: &str = r#"
+schema_version = 1
+seeded_source_ids = ["nws"]
+
+[deployment.location]
+lat = 29.65
+lon = -82.32
+
+[[sources]]
+id = "open_meteo"
+priority = 40
+enabled = true
+kind = "open_meteo"
+[sources.config]
+past_days = 1
+
+[[ha_adoption]]
+entity = "input_boolean.irrigation_pause"
+outcome = "adopted"
+target = "irrigation_control.is_paused"
+epoch = 5
+"#;
+
+    /// The plan's criterion: a v1 file migrates to v2 on the first load
+    /// and re-saves byte-identically on the second; the records are in the
+    /// ledger and out of the document, where no config write can drop them.
+    #[tokio::test]
+    async fn a_v1_file_migrates_to_v2_and_resaves_byte_identically() {
+        let d = dir("v1");
+        let path = d.join("localsky.toml");
+        std::fs::write(&path, V1).unwrap();
+        let store = FileConfigStore::new(&path);
+
+        let cfg = store.load().await.unwrap();
+        assert_eq!(cfg.schema_version, 2);
+        let first = std::fs::read_to_string(&path).unwrap();
+        assert!(first.contains("schema_version = 2"), "{first}");
+        for gone in ["seeded_source_ids", "ha_adoption"] {
+            assert!(
+                !first.contains(gone),
+                "{gone} still in the document:\n{first}"
+            );
+        }
+        assert!(first.contains("past_days = 3"), "{first}");
+        let ledger = store.ledger();
+        assert_eq!(ledger.seeded_source_ids, vec!["nws"]);
+        assert_eq!(ledger.ha_adoption.len(), 1);
+        assert_eq!(ledger.migrations.len(), 2);
+
+        // Second load: nothing to migrate, nothing rewritten.
+        let again = store.load().await.unwrap();
+        assert_eq!(again.schema_version, 2);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
+        assert_eq!(store.ledger(), ledger);
+
+        // A whole-config save of the loaded config cannot touch the ledger:
+        // the records are not in the document it writes.
+        store.save(&again).await.unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("ha_adoption"));
+        assert_eq!(store.ledger(), ledger);
+        // And a save is a fixed point: saving what was just saved changes
+        // no byte.
+        let reloaded = store.load().await.unwrap();
+        store.save(&reloaded).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A staged restore of both files swaps both in, before anything reads
+    /// them, and keeps the previous document as a snapshot.
+    #[tokio::test]
+    async fn a_staged_restore_swaps_config_and_ledger_together() {
+        let d = dir("stage");
+        let path = d.join("localsky.toml");
+        let store = FileConfigStore::new(&path);
+        std::fs::write(&path, "schema_version = 2\n").unwrap();
+        store
+            .stage_restore(
+                "schema_version = 2\n[deployment]\ndisplay_name = \"Restored\"\n",
+                Some("seeded_source_ids = [\"met_no\"]\n"),
+            )
+            .await
+            .unwrap();
+        assert!(staged_path(&path).exists());
+        let swapped = store.apply_staged_restore().unwrap();
+        assert_eq!(swapped.len(), 2);
+        assert!(!staged_path(&path).exists());
+        assert!(std::fs::read_to_string(&path).unwrap().contains("Restored"));
+        assert_eq!(store.ledger().seeded_source_ids, vec!["met_no"]);
+        assert!(store.apply_staged_restore().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

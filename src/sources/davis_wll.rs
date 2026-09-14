@@ -25,14 +25,19 @@
 //
 // We poll every 10s, well within the WLL's documented 10s sampling
 // cadence. Fast enough for irrigation decisions, slow enough that one
-// LocalSky tick doesn't crowd out wakeups from other adapters.
+// LocalSky tick doesn't crowd out wakeups from other adapters. The loop
+// itself is the shared one (sources::poll::run_polling): it owns the tick,
+// the fetch metric, the shutdown, and the reachability edges; this file
+// only builds the client and turns one response into one Poll.
 //
 // data_structure_type values: 1 = ISS, 2 = leaf/soil sensors, 3 =
-// barometer, 4 = indoor temp/hum. We read 1 (ISS, txid-filtered), 2
-// (soil moisture -> per-zone KeyedReading via soil_zone_map; leaf wetness
-// -> global LeafWetness), and 3 (barometer). Type 4 (indoor) is ignored.
-// Davis soil is centibars of tension and leaf wetness is a 0-15 index, so
-// both are converted to a monotonic percent on the way out (see `extract`).
+// barometer, 4 = indoor temp/hum. We read 1 (ISS, txid-filtered), 2 (leaf
+// wetness -> global LeafWetness), and 3 (barometer). Type 4 (indoor) is
+// ignored. Leaf wetness is a bounded 0-15 index and scales to a percent
+// cleanly. Davis `moist_soil_N` is soil water TENSION in centibars, which
+// is a different physical quantity from the volumetric water content the
+// per-zone soil channel carries, so it is NOT published at all: see the
+// tension note above `extract`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,13 +45,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::collections::HashSet;
-use tokio::time::{interval, MissedTickBehavior};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::config::schema::DavisWllConfig;
 use crate::ports::weather_source::{
     ShutdownSignal, SourceBus, SourceCaps, SourceEvent, WeatherField, WeatherSource,
 };
+use crate::sources::poll::{run_polling, Poll};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
 /// Per-request budget for the WLL LAN poll. Matches the previous persistent
@@ -109,11 +114,13 @@ struct Condition {
     bar_sea_level: Option<f64>, // inHg already
     // Soil/leaf (type 2) fields. Field names match the WeatherLink Live local
     // API (weatherlink.github.io/weatherlink-live-local-api, data_structure_type
-    // 2). Davis reports soil moisture in CENTIBARS of tension (low = wet) and
-    // leaf wetness on a 0-15 index (davisinstruments 6420), so both are
-    // converted on the way out (see `extract`). Soil/leaf stations have their
-    // OWN txid (separate from the ISS), so type-2 records are NOT filtered by
-    // the configured ISS txid.
+    // 2). `moist_soil_N` is CENTIBARS of tension (low = wet), which is not a
+    // moisture percent and is deliberately not published -- see the tension
+    // note above `extract`. It is still deserialized so the poll can say which
+    // channel it is withholding. Leaf wetness is a bounded 0-15 index
+    // (davisinstruments 6420) and does scale to a percent. Soil/leaf stations
+    // have their OWN txid (separate from the ISS), so type-2 records are NOT
+    // filtered by the configured ISS txid.
     #[serde(default)]
     moist_soil_1: Option<f64>,
     #[serde(default)]
@@ -129,14 +136,36 @@ struct Condition {
     // Indoor (type 4), currently unused, kept for documentation.
 }
 
-/// Davis soil moisture is reported in centibars of tension (0 = saturated,
-/// rising as the soil dries). Convert to a monotonic "percent available" so it
-/// reads like every other soil source (wet = high) for the zone soil gate. This
-/// is a coarse linear map over the 0-200 cb working range, NOT a soil-texture
-/// calibration; the operator sets their zone threshold against it.
-fn soil_cb_to_pct(cb: f64) -> f64 {
-    (100.0 * (1.0 - cb / 200.0)).clamp(0.0, 100.0)
-}
+// WHY DAVIS SOIL IS NOT PUBLISHED.
+//
+// `moist_soil_N` from a WLL soil station (the Davis 6440 / Watermark granular
+// matrix head) is soil water TENSION in centibars: the suction a root has to
+// pull against. The per-zone soil channel on the bus is a MOISTURE percent,
+// which the saturation and dry-floor gates read as volumetric water content.
+// Those are not the same quantity, and one is not a linear rescale of the
+// other: tension maps to water content through the soil water retention
+// curve, which is steeply non-linear and specific to the soil's texture and
+// structure. No constant here can turn one into the other.
+//
+// This adapter used to ship `100 * (1 - cb / 200)`, clamped to 0-100. That map
+// runs the right DIRECTION (wet = high), which is what made it survive review,
+// but its scale is fabricated, and the shipped default band reads the result
+// exactly backwards. `saturation_pct_soil` defaults to 70 and skips at or
+// above it, so every tension at or below 60 cb published >= 70% and skipped
+// the zone: 30 cb -> 85%, 50 cb -> 75%, 60 cb -> 70%. For most soils 30-60 cb
+// is the standard BEGIN IRRIGATING band, so the whole "this zone is dry, water
+// it" range was reported as saturated and the zone was held dry, with a
+// confident number on the card explaining why.
+//
+// A missing reading is reported as missing. With no soil channel the gates see
+// `None`, every ZoneSoilPct comparison is Unknown and can never fire a rule
+// (`engine::conditions`), and the zone falls back to the modeled soil bucket,
+// which is the documented behavior for a zone with no probe. That is a
+// well-founded fallback; a number pointing the wrong way is not.
+//
+// Publishing tension honestly needs a channel that is typed as tension, plus
+// gates that know high = dry. That work lands outside this file; until then
+// this adapter stays silent rather than guessing.
 
 /// Davis leaf wetness is a 0-15 index; scale to 0-100%.
 fn leaf_index_to_pct(idx: f64) -> f64 {
@@ -150,8 +179,8 @@ fn leaf_index_to_pct(idx: f64) -> f64 {
 fn davis_rain_size_in(rain_size: u8) -> f64 {
     match rain_size {
         1 => 0.01,
-        2 => 0.2 / 25.4,
-        3 => 0.1 / 25.4,
+        2 => crate::units::mm_to_in(0.2),
+        3 => crate::units::mm_to_in(0.1),
         4 => 0.001,
         _ => 0.01,
     }
@@ -160,6 +189,11 @@ fn davis_rain_size_in(rain_size: u8) -> f64 {
 /// What one poll yields: global weather fields (Observation) plus per-zone soil
 /// channels (KeyedReading). Kept separate because soil is zone-qualified and
 /// rides the bus as a KeyedReading, not a global WeatherField.
+///
+/// `soil` is currently always EMPTY: a WLL's only soil channel is tension in
+/// centibars, which this adapter does not publish (see the tension note above
+/// `extract`). The field and its plumbing stay so a correctly-typed soil
+/// reading has somewhere to land without reshaping the poll.
 #[derive(Debug, Default, PartialEq)]
 struct Extracted {
     fields: Vec<(WeatherField, f64)>,
@@ -240,10 +274,12 @@ fn extract(
             }
             2 => {
                 // Soil/leaf station. NOT filtered by the ISS txid: the soil/leaf
-                // station is a separate transmitter. Soil moisture maps per
-                // channel to a zone (centibars -> %); leaf wetness is global
-                // (0-15 index -> %). Unmapped soil channels are dropped (zone
-                // binding is required for soil).
+                // station is a separate transmitter. Leaf wetness is global
+                // (0-15 index -> %). Soil tension is NOT published in any
+                // form -- see the tension note above this function. We still
+                // walk the mapped channels so the log names the zone whose
+                // reading is being withheld, instead of the channel just going
+                // quiet with no explanation.
                 for (ch, cb) in [
                     (1u32, c.moist_soil_1),
                     (2, c.moist_soil_2),
@@ -251,10 +287,14 @@ fn extract(
                     (4, c.moist_soil_4),
                 ] {
                     if let (Some(cb), Some(zone)) = (cb, soil_zone_map.get(&ch)) {
-                        out.soil.push((
-                            crate::sources::bus_recorder::zone_soil_key(zone),
-                            soil_cb_to_pct(cb),
-                        ));
+                        debug!(
+                            channel = ch,
+                            zone = %zone,
+                            tension_cb = cb,
+                            "Davis soil channel withheld: tension in centibars is \
+                             not a moisture percent and does not convert to one; \
+                             the zone uses its modeled soil bucket instead"
+                        );
                     }
                 }
                 // Up to two leaf sensors; take the WETTER of the two present
@@ -299,8 +339,10 @@ impl WeatherSource for DavisWll {
         fields.insert(WeatherField::PressureInHg);
         fields.insert(WeatherField::RainTodayIn);
         fields.insert(WeatherField::RainIntensityInHr);
-        // A WLL may carry a soil/leaf station; advertise leaf wetness (soil is a
-        // per-zone KeyedReading, not a global field, so it isn't listed here).
+        // A WLL may carry a soil/leaf station; advertise leaf wetness only.
+        // Soil would be a per-zone KeyedReading rather than a global field, so
+        // it would not be listed here either way -- and this adapter publishes
+        // no soil at all (see the tension note above `extract`).
         fields.insert(WeatherField::LeafWetness);
         SourceCaps {
             live_current: true,
@@ -335,66 +377,47 @@ impl WeatherSource for DavisWll {
         }
     }
 
-    async fn run(
-        self: Arc<Self>,
-        bus: SourceBus,
-        mut shutdown: ShutdownSignal,
-    ) -> anyhow::Result<()> {
-        info!(source_id = %self.id, host = self.config.host, "DavisWll source started");
-        let mut tick = interval(POLL_INTERVAL);
-        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut last_reachable: Option<bool> = None;
-        loop {
-            tokio::select! {
-                _ = tick.tick() => {
-                    match self.fetch().await {
-                        Ok(resp) => {
-                            if last_reachable != Some(true) {
-                                let _ = bus.send(SourceEvent::Reachability {
-                                    source_id: self.id.clone(),
-                                    reachable: true,
-                                });
-                                last_reachable = Some(true);
-                            }
-                            let ex = extract(&resp, self.config.txid, &self.config.soil_zone_map);
-                            let at_epoch = chrono::Utc::now().timestamp();
-                            if !ex.fields.is_empty() {
-                                debug!(source_id = %self.id, fields_n = ex.fields.len(), soil_n = ex.soil.len(), "DavisWll updated");
-                                let _ = bus.send(SourceEvent::Observation {
-                                    source_id: self.id.clone(),
-                                    fields: ex.fields,
-                                    at_epoch,
-                                });
-                            }
-                            for (key, value) in ex.soil {
-                                let _ = bus.send(SourceEvent::KeyedReading {
-                                    source_id: self.id.clone(),
-                                    key,
-                                    value,
-                                    at_epoch,
-                                });
-                            }
-                        }
-                        Err(e) => {
-                            warn!(source_id = %self.id, error = %e, "DavisWll fetch failed");
-                            if last_reachable != Some(false) {
-                                let _ = bus.send(SourceEvent::Reachability {
-                                    source_id: self.id.clone(),
-                                    reachable: false,
-                                });
-                                last_reachable = Some(false);
-                            }
-                        }
-                    }
+    async fn run(self: Arc<Self>, bus: SourceBus, shutdown: ShutdownSignal) -> anyhow::Result<()> {
+        // The LAN host is the first thing an operator needs when this source
+        // goes quiet; the shared loop logs the start, this line names the
+        // target it will poll.
+        info!(source_id = %self.id, host = %self.config.host, "DavisWll polling LAN host");
+        let id = self.id.clone();
+        run_polling(
+            self,
+            &id,
+            "DavisWll",
+            POLL_INTERVAL,
+            bus,
+            shutdown,
+            |s: Arc<Self>| async move {
+                let resp = s.fetch().await?;
+                let ex = extract(&resp, s.config.txid, &s.config.soil_zone_map);
+                let at_epoch = chrono::Utc::now().timestamp();
+                if !ex.fields.is_empty() {
+                    debug!(
+                        source_id = %s.id,
+                        fields_n = ex.fields.len(),
+                        soil_n = ex.soil.len(),
+                        "DavisWll conditions parsed"
+                    );
                 }
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        info!(source_id = %self.id, "DavisWll shutdown");
-                        return Ok(());
-                    }
+                // Global fields ride as one Observation (none when empty);
+                // each mapped soil channel is its own zone-keyed reading,
+                // published after it in the same poll.
+                let mut poll = Poll::observation(&s.id, ex.fields, at_epoch);
+                for (key, value) in ex.soil {
+                    poll = poll.with(SourceEvent::KeyedReading {
+                        source_id: s.id.clone(),
+                        key,
+                        value,
+                        at_epoch,
+                    });
                 }
-            }
-        }
+                anyhow::Ok(poll)
+            },
+        )
+        .await
     }
 }
 
@@ -532,16 +555,19 @@ mod tests {
     }
 
     #[test]
-    fn type2_soil_maps_to_zone_channels_and_converts_centibars() {
+    fn type2_soil_tension_is_not_published_as_a_moisture_percent() {
         // Soil/leaf station on its OWN txid (3), so it must NOT be filtered by
-        // the configured ISS txid (1). Channels 1+2 are mapped to zones; 3 is
-        // not, so it must be dropped.
+        // the configured ISS txid (1). Both channels are bound to zones, so
+        // under the old `100 * (1 - cb / 200)` map this emitted two readings
+        // (0 cb -> 100%, 100 cb -> 50%). Centibars of tension are not a
+        // moisture percent, so the correct output is NO soil reading at all,
+        // and the zones fall back to the modeled soil bucket.
         let body: CurrentConditionsResponse = serde_json::from_value(json!({
             "data": { "conditions": [ {
                 "data_structure_type": 2, "txid": 3,
-                "moist_soil_1": 0.0,    // saturated -> 100%
-                "moist_soil_2": 100.0,  // 100 cb -> 50%
-                "moist_soil_3": 20.0,   // unmapped channel -> dropped
+                "moist_soil_1": 0.0,
+                "moist_soil_2": 100.0,
+                "moist_soil_3": 20.0,
                 "wet_leaf_1": 15.0      // full index -> 100%
             } ] }
         }))
@@ -550,27 +576,56 @@ mod tests {
         map.insert(1u32, "back_yard".to_string());
         map.insert(2u32, "front_yard".to_string());
         let ex = extract(&body, 1, &map);
-        // Two soil channels (1, 2); channel 3 dropped (unmapped).
-        assert_eq!(ex.soil.len(), 2);
-        let back = ex
-            .soil
-            .iter()
-            .find(|(k, _)| k.ends_with("back_yard"))
-            .unwrap();
-        let front = ex
-            .soil
-            .iter()
-            .find(|(k, _)| k.ends_with("front_yard"))
-            .unwrap();
-        assert!((back.1 - 100.0).abs() < 0.001, "0 cb -> 100% (saturated)");
-        assert!((front.1 - 50.0).abs() < 0.001, "100 cb -> 50%");
-        // Leaf wetness 15/15 -> 100%, a global LeafWetness field.
+        assert!(
+            ex.soil.is_empty(),
+            "tension in centibars must publish no soil percent, got {:?}",
+            ex.soil
+        );
+        // The rest of the type-2 record is unaffected: leaf wetness is a
+        // bounded 0-15 index and still scales, 15/15 -> 100%.
         let leaf = ex
             .fields
             .iter()
             .find(|(k, _)| *k == WeatherField::LeafWetness)
             .unwrap();
         assert!((leaf.1 - 100.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn dry_soil_tension_never_reads_as_saturated() {
+        // The regression this file existed to create. `saturation_pct_soil`
+        // ships at DEFAULT_SATURATION_PCT (70.0) and skips the zone at or
+        // above it. The old map published `100 * (1 - cb / 200)`, so every
+        // tension at or below 60 cb cleared that bar: 30 cb -> 85%,
+        // 50 cb -> 75%, 60 cb -> 70.0%. For most soils 30-60 cb is the band
+        // where irrigation should START, so a dry zone was reported saturated
+        // and held dry. Each of these would have emitted a >= 70 reading
+        // before; now each emits nothing.
+        let sat = crate::config::schema::DEFAULT_SATURATION_PCT;
+        for cb in [30.0_f64, 50.0, 60.0] {
+            let body: CurrentConditionsResponse = serde_json::from_value(json!({
+                "data": { "conditions": [ {
+                    "data_structure_type": 2, "txid": 3, "moist_soil_1": cb
+                } ] }
+            }))
+            .unwrap();
+            let mut map = std::collections::BTreeMap::new();
+            map.insert(1u32, "back_yard".to_string());
+            let ex = extract(&body, 1, &map);
+            // The old value, recomputed here so the assertion names what it
+            // is guarding against rather than a bare magic number.
+            let fabricated = 100.0 * (1.0 - cb / 200.0);
+            assert!(
+                fabricated >= sat,
+                "{cb} cb used to publish {fabricated}%, at or above the \
+                 {sat}% saturation skip; if that stops holding, this test drifted"
+            );
+            assert!(
+                ex.soil.is_empty(),
+                "{cb} cb (dry, water it) must publish no soil reading, not \
+                 {fabricated}%, which the default band reads as saturated"
+            );
+        }
     }
 
     #[test]
@@ -601,9 +656,13 @@ mod tests {
         }))
         .unwrap();
         let ex = extract(&body, 1, &no_soil());
+        // Unbound channels emitted nothing even under the old conversion, and
+        // now no channel emits soil at all -- bound or not. This still pins
+        // the unbound path so a future correctly-typed soil reading cannot
+        // start leaking out of a channel with no zone behind it.
         assert!(
             ex.soil.is_empty(),
-            "soil needs a zone binding to be emitted"
+            "an unmapped soil channel must never be emitted"
         );
     }
 }

@@ -103,9 +103,9 @@ pub struct MapCenter {
 }
 
 /// Resolve the map center once for every consumer (the radar panel's SSR
-/// attributes and GET /api/v1/location): config location first, then the
-/// legacy WEATHER_APP_LAT/LON env vars (an explicit operator choice, so it
-/// counts as located), else a continental-US overview.
+/// attributes and GET /api/v1/location): the config location, else a
+/// continental-US overview. The environment is not consulted; an install
+/// described by WEATHER_APP_LAT/LON had its config written at first boot.
 ///
 /// The old fallback was (40.0, -75.0) at zoom 8: a neighborhood-scale view
 /// of the Delaware Valley, station marker included, on every install with no
@@ -115,20 +115,12 @@ pub struct MapCenter {
 /// `located=false` so the client suppresses the marker and says what is
 /// going on.
 pub fn resolve_map_center(cfg_loc: Option<(f64, f64)>) -> MapCenter {
-    let env_loc = || {
-        let lat: f64 = std::env::var("WEATHER_APP_LAT").ok()?.parse().ok()?;
-        let lon: f64 = std::env::var("WEATHER_APP_LON").ok()?.parse().ok()?;
-        Some((lat, lon))
-    };
     let located = cfg_loc.filter(|(lat, lon)| !(*lat == 0.0 && *lon == 0.0));
-    let (lat, lon, located) = match located.or_else(env_loc) {
+    let (lat, lon, located) = match located {
         Some((lat, lon)) => (lat, lon, true),
         None => (39.8, -98.6, false),
     };
-    let zoom: u32 = std::env::var("WEATHER_APP_ZOOM")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(if located { 8 } else { 4 });
+    let zoom: u32 = if located { 8 } else { 4 };
     MapCenter {
         lat,
         lon,
@@ -154,9 +146,7 @@ mod center_tests {
     #[test]
     fn unlocated_installs_get_an_honest_continental_view() {
         // No config location (or the 0,0 sentinel): continent-scale center,
-        // flagged unlocated so the client can say so. (Assumes the test env
-        // does not set the legacy WEATHER_APP_* vars, which nothing in the
-        // suite does.)
+        // flagged unlocated so the client can say so.
         for loc in [None, Some((0.0, 0.0))] {
             let c = resolve_map_center(loc);
             assert!(!c.located);

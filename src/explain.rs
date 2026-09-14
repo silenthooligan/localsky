@@ -1,4 +1,4 @@
-//! Deterministic, no-LLM plain-English explanation of a decision (P2-3).
+//! Deterministic, no-LLM plain-English explanation of a decision.
 //!
 //! Turns a `DecisionTrace` into a short narrative a non-savvy user can read:
 //! the verdict, the deciding factor in plain language, and a few reassurance
@@ -7,7 +7,7 @@
 //! compile it. The LLM advisor stays subordinate to this (AI summary; the
 //! decision is rule-based).
 
-use crate::ha::snapshot::{DecisionTrace, RuleEval};
+use crate::model::{DecisionTrace, RuleEval};
 
 /// A rendered plain-English explanation of one morning's decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,7 +222,14 @@ fn outcome_for_today(trace: &DecisionTrace) -> String {
 fn why_for_next_slot(reason_code: &str, reason: &str) -> String {
     match reason_code {
         "restrictions" => {
-            "Local watering restrictions do not allow watering on that day.".to_string()
+            // The reason sentence carries the allowed days when the caller
+            // composed it (the hero's preview does); the engine's own
+            // sentence is the fallback and never names "today" here.
+            if reason.contains("allow") {
+                reason.to_string()
+            } else {
+                "Your watering rules do not allow that day.".to_string()
+            }
         }
         "already_wet" | "observed_rain" => {
             "Recent rain already covers it, so that run is not needed.".to_string()
@@ -373,26 +380,19 @@ fn dominant_skip_reason(skipping: &[&ZoneLine]) -> &'static str {
 /// Condense one zone's skip into a short plain-language noun phrase, keyed off
 /// the decision source first (most specific) then the reason text.
 fn skip_phrase(z: &ZoneLine) -> &'static str {
+    use crate::gates_catalog::{GateFamily, WaterKind};
     match z.source.as_str() {
         "soil_saturation" => return "soil saturated",
         "condition" => return "a custom rule",
         _ => {}
     }
-    let r = z.reason.to_ascii_lowercase();
-    if r.contains("saturat") {
-        "soil saturated"
-    } else if r.contains("rain") {
-        "recent rain"
-    } else if r.contains("wind") {
-        "high wind"
-    } else if r.contains("freez") || r.contains("frost") {
-        "freeze risk"
-    } else if r.contains("paus") || r.contains("vacation") {
-        "paused"
-    } else if r.contains("restrict") {
-        "watering restrictions"
-    } else {
-        "skipping"
+    match GateFamily::from_prose(&z.reason) {
+        GateFamily::Water => match crate::gates_catalog::water_kind("", &z.reason) {
+            WaterKind::Soil => "soil saturated",
+            _ => "recent rain",
+        },
+        GateFamily::Other => "skipping",
+        f => f.short_phrase(),
     }
 }
 
@@ -424,7 +424,7 @@ fn why_for_fired(r: &RuleEval) -> String {
              the plants and pipes."
         }
         "overnight_freeze" => {
-            "A freeze is forecast tonight, so watering is held to avoid ice damage."
+            "A freeze is forecast overnight, so watering is held to avoid ice damage."
         }
         "soil_frost" => "The soil is at frost temperature, so watering is held.",
         "wind_now" => {
@@ -665,7 +665,7 @@ mod tests {
         let e = explain_decision_with_zones(&t, true, &[], Some(&next));
         assert_eq!(e.headline, "Skipping next run");
         assert!(
-            e.why.contains("restrictions do not allow"),
+            e.why.contains("rules do not allow"),
             "lead should explain the NEXT slot (restrictions), got: {}",
             e.why
         );

@@ -4,10 +4,12 @@
 //   GET    /api/wizard/draft           -> current draft (or default)
 //   PUT    /api/wizard/draft           -> save draft
 //   DELETE /api/wizard/draft           -> clear draft (cancel + restart)
-//   POST   /api/wizard/apply           -> validate + write /data/localsky.toml
-//   POST   /api/wizard/test_source     -> dispatch through source adapter (Phase 6)
-//   POST   /api/wizard/test_controller -> dispatch through controller adapter (Phase 5)
-//   POST   /api/wizard/scan_zones      -> controller zone probe (Phase 5)
+//   POST   /api/wizard/apply           -> validate + write /data/localsky.toml,
+//                                         answering { saved, restart_required,
+//                                         restart_reasons } (see post_apply)
+//   POST   /api/wizard/test_source     -> structural check only (deprecated, see api.md)
+//   POST   /api/wizard/test_controller -> live probe through the controller adapter
+//   POST   /api/wizard/scan_zones      -> controller zone probe
 //   POST   /api/wizard/test_llm        -> probe an LLM endpoint
 //   POST   /api/wizard/probe_soil      -> live Ecowitt soil enumeration
 //   GET    /api/wizard/discover        -> LAN device sweep
@@ -26,7 +28,8 @@
 //          ControllerEditorPanel, which calls POST /test_controller +
 //          /scan_zones to test/list a controller's stations live without
 //          saving first. Settings -> Sources / the Sensors page reuse
-//          /test_source, /probe_soil, /discover, /geocode the same way.
+//          /probe_soil, /discover, /geocode the same way (nothing calls
+//          /test_source; it answers ok for any well-formed entry).
 //        - The wizard is re-enterable as an EDITOR over the live config
 //          ("Modify current setup"): GET /state -> POST /seed_current ->
 //          draft GET/PUT -> POST /apply. So /apply + the draft + /state +
@@ -85,11 +88,13 @@ pub struct WizardApiState {
     /// up here without any probe).
     pub tempest_store: Option<Arc<crate::tempest::state::TempestStore>>,
     /// Live runtime handles for config hot-reload. Present when a live engine
-    /// is wired (main.rs boot); `None` in unit tests with no running engine. On
+    /// is wired (`boot::api`); `None` in unit tests with no running engine. On
     /// apply, the engine-tunable subset of the new config is re-applied here so
     /// re-entering the wizard as an editor takes effect without a restart, the
     /// same as PUT /api/config.
     pub runtime: Option<crate::runtime::RuntimeHandles>,
+    /// The geocode relay's per-IP fixed-window limiter.
+    pub geocode_limiter: GeocodeLimiter,
 }
 
 /// Upper bound on a wizard body (LS-API-09). The largest is the draft
@@ -420,38 +425,23 @@ async fn post_apply(State(s): State<WizardApiState>) -> impl IntoResponse {
             draft.config.auth.mode = crate::config::schema::AuthMode::Required;
         }
     }
-    // `ha_adoption` and `seeded_source_ids` are migration LEDGERS, not
-    // tunables: they describe what happened on THIS instance, not what the
-    // draft holds. The wizard is re-enterable as an editor, and its "start
-    // fresh" branch builds from `WizardDraft::default()` rather than a copy of
-    // the live config, so both are empty on that branch. Persisting that would
-    // un-retire all seven helper reads against helpers the migration notice
-    // invited the owner to delete, and `apply_runtime_config` below arc-swaps
-    // the rebuilt policy immediately, so the vacation pause reads
-    // `.unwrap_or(0)` on the next tick with nothing to re-mark it until a
-    // restart. Same carry-forward as `post_rollback` and `post_restore`: the
-    // running config's adoption record wins outright, and its seeded ids are
-    // unioned in so a source the owner deleted is not re-added at the next
-    // boot. `prev_cfg` is `None` on a true first install, which correctly
-    // carries nothing.
-    if let Some(prev) = prev_cfg.as_ref() {
-        draft.config.ha_adoption = prev.ha_adoption.clone();
-        for id in &prev.seeded_source_ids {
-            if !draft.config.seeded_source_ids.contains(id) {
-                draft.config.seeded_source_ids.push(id.clone());
-            }
-        }
-    }
-    // Write the config atomically.
+    // Write the config atomically, then the tombstones for anything
+    // finalize_sources seeded into the ledger beside it.
     match s.config_store.save(&draft.config).await {
         Ok(v) => {
+            if !draft.seeded_source_ids.is_empty() {
+                let ids = draft.seeded_source_ids.clone();
+                if let Err(e) = s.config_store.update_ledger(|l| l.absorb_seeded(ids)).await {
+                    tracing::warn!(error = %e, "wizard apply: could not record the seeded authorities");
+                }
+            }
             // Genuine hot-reload: re-apply the engine-tunable subset of the new
             // config (source priorities, per-field overrides, forecast provider,
             // watering policy) to the LIVE running system so a wizard edit takes
             // effect now, not at the next restart. Mirrors PUT /api/config.
             let apply_outcome = match &s.runtime {
                 Some(h) => {
-                    crate::runtime::apply_runtime_config(h, prev_cfg.as_ref(), &draft.config)
+                    crate::runtime::apply_runtime_config(h, prev_cfg.as_ref(), &draft.config).await
                 }
                 None => crate::runtime::ConfigApplyOutcome::default(),
             };
@@ -490,10 +480,9 @@ async fn post_apply(State(s): State<WizardApiState>) -> impl IntoResponse {
     }
 }
 
-// ---- Adapter test endpoints. Real impls land alongside Phase 5/6. ----
+// ---- Adapter test endpoints. ----
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct TestSourceBody {
     pub source: crate::config::schema::SourceEntry,
 }
@@ -502,10 +491,11 @@ async fn post_test_source(
     State(_s): State<WizardApiState>,
     Json(body): Json<TestSourceBody>,
 ) -> impl IntoResponse {
-    // The config deserialized into a typed SourceEntry, so it's structurally
-    // valid. Receiver sources (Ecowitt LAN, webhook) confirm by live readings
-    // on the Sensors hub once the device posts; polled sources confirm within
-    // one cycle after apply. A live probe per kind is a follow-up.
+    // DEPRECATED (0.9.0): the config deserialized into a typed SourceEntry,
+    // so it is structurally valid, and that is all this answers. No UI
+    // calls it; it stays on v1 for anyone who does and goes with v2.
+    // Receiver sources confirm by live readings on the Sensors hub once the
+    // device posts; polled sources confirm within one cycle after apply.
     serde_json::json!({
         "ok": true,
         "id": body.source.id,
@@ -820,6 +810,7 @@ async fn test_rachio_controller(id: &str, rc: &crate::config::schema::RachioConf
 fn controller_error_detail(e: &crate::ports::irrigation_controller::ControllerError) -> String {
     use crate::ports::irrigation_controller::ControllerError as CE;
     match e {
+        CE::Held(reason) => reason.clone(),
         CE::Offline => "controller offline".into(),
         CE::ZoneUnknown(z) => format!("zone unknown: {z}"),
         CE::RateLimited => "rate limited".into(),
@@ -1197,6 +1188,7 @@ async fn post_seed_current(State(s): State<WizardApiState>) -> impl IntoResponse
         // own interleave_cycles value carries the earlier decision.
         water_supply: None,
         last_updated_epoch: chrono::Utc::now().timestamp(),
+        seeded_source_ids: Vec::new(),
     };
     let store = s.draft_store.clone();
     match tokio::task::spawn_blocking(move || store.save(&draft)).await {
@@ -1292,30 +1284,34 @@ struct GeocodeResult {
 /// Nominatim's absolute 1 req/s ceiling.
 const GEOCODE_MAX_PER_MIN: u32 = 10;
 
-/// Geocode limiter state: ip -> (attempts, window_start_epoch). Mirrors
+/// Geocode limiter: ip -> (attempts, window_start_epoch). Mirrors
 /// AuthRuntime::login_attempts but is deliberately its OWN bucket: sharing
 /// the login map would let address searches consume login attempts (and
 /// failed logins block address search), coupling two unrelated surfaces.
-static GEOCODE_ATTEMPTS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, (u32, i64)>>,
-> = std::sync::LazyLock::new(Default::default);
+/// Cloning shares the map.
+#[derive(Clone, Default)]
+pub struct GeocodeLimiter {
+    attempts: Arc<std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, (u32, i64)>>>,
+}
 
-/// Fixed-window limiter for the geocode relay, same shape as
-/// AuthRuntime::allow_login_attempt (count per IP, window reset after 60s,
-/// opportunistic shrink so the map cannot grow unbounded).
-fn allow_geocode_attempt(ip: std::net::IpAddr) -> bool {
-    let now = chrono::Utc::now().timestamp();
-    let mut map = GEOCODE_ATTEMPTS.lock().expect("geocode limiter lock");
-    let entry = map.entry(ip).or_insert((0, now));
-    if now - entry.1 >= 60 {
-        *entry = (0, now);
+impl GeocodeLimiter {
+    /// Fixed-window limiter for the geocode relay, same shape as
+    /// AuthRuntime::allow_login_attempt (count per IP, window reset after
+    /// 60s, opportunistic shrink so the map cannot grow unbounded).
+    fn allow(&self, ip: std::net::IpAddr) -> bool {
+        let now = chrono::Utc::now().timestamp();
+        let mut map = self.attempts.lock().expect("geocode limiter lock");
+        let entry = map.entry(ip).or_insert((0, now));
+        if now - entry.1 >= 60 {
+            *entry = (0, now);
+        }
+        entry.0 += 1;
+        let allowed = entry.0 <= GEOCODE_MAX_PER_MIN;
+        if map.len() > 4096 {
+            map.retain(|_, (_, start)| now - *start < 60);
+        }
+        allowed
     }
-    entry.0 += 1;
-    let allowed = entry.0 <= GEOCODE_MAX_PER_MIN;
-    if map.len() > 4096 {
-        map.retain(|_, (_, start)| now - *start < 60);
-    }
-    allowed
 }
 
 /// GET /api/wizard/geocode?q= -> Nominatim search relay. ProbeGuard-gated
@@ -1343,7 +1339,7 @@ async fn get_geocode(
         .map(|p| p.trusted_proxies.as_slice())
         .unwrap_or(&[]);
     if let Some(ip) = crate::auth::middleware::client_ip(&req, trusted_proxies) {
-        if !allow_geocode_attempt(ip) {
+        if !s.geocode_limiter.allow(ip) {
             return (
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(ApiError {
@@ -1357,34 +1353,16 @@ async fn get_geocode(
 
     let url = format!(
         "https://nominatim.openstreetmap.org/search?q={}&format=json&limit=5",
-        urlencode(&q.q)
+        crate::text::query_value(&q.q)
     );
-    // Bounded budget: Client::new() has NO total timeout, so a stalled
-    // upstream would pin handler tasks for as long as it likes.
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(ApiError {
-                    error: "geocode_transport_error".into(),
-                    detail: Some("client build failed".into()),
-                }),
-            )
-                .into_response()
-        }
-    };
-    let res = client
-        .get(&url)
-        // Nominatim ToS requires a meaningful User-Agent identifying the
-        // operator. The deployment name + URL is reasonable; users can
-        // override via wizard customization.
-        .header("User-Agent", "LocalSky setup wizard")
-        .send()
-        .await;
+    // Bounded budget: a client with no total timeout would let a stalled
+    // upstream pin handler tasks for as long as it likes. Nominatim ToS
+    // requires a meaningful User-Agent identifying the operator, so this is
+    // the keyless-authority form (`client_with`) carrying the wizard's own
+    // identity rather than the derived per-install one.
+    let client =
+        crate::net::client_with(std::time::Duration::from_secs(10), "LocalSky setup wizard");
+    let res = client.get(&url).send().await;
     // Trimmed categories, not the raw upstream/transport string, consistent
     // with the other probe handlers (Nominatim is a fixed cloud host so the
     // SSRF-oracle risk is low, but keep the no-raw-upstream-text rule uniform).
@@ -1413,22 +1391,6 @@ async fn get_geocode(
     }
 }
 
-fn urlencode(s: &str) -> String {
-    // Lightweight encoder for query string values. Nominatim accepts most
-    // punctuation as-is so we only escape the obvious offenders.
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b' ' => out.push('+'),
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            other => out.push_str(&format!("%{other:02X}")),
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod draft_redaction_tests {
     use super::*;
@@ -1441,6 +1403,7 @@ mod draft_redaction_tests {
             auth_rt: None,
             tempest_store: None,
             runtime: None,
+            geocode_limiter: GeocodeLimiter::default(),
         }
     }
 
@@ -1465,6 +1428,7 @@ mod draft_redaction_tests {
             telemetry_choice: Some(false),
             water_supply: None,
             last_updated_epoch: 0,
+            seeded_source_ids: Vec::new(),
         }
     }
 
@@ -1623,6 +1587,7 @@ mod draft_cloud_apply_tests {
             auth_rt: None,
             tempest_store: None,
             runtime: None,
+            geocode_limiter: GeocodeLimiter::default(),
         }
     }
 
@@ -1716,70 +1681,235 @@ mod draft_cloud_apply_tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
 
-    // Re-entering the wizard as an editor and taking the "start fresh" branch
-    // builds from WizardDraft::default(), which carries no .
-    // Saving that verbatim would un-retire all seven helper reads against
-    // helpers the migration notice invited the owner to delete, and apply
-    // hot-swaps the rebuilt policy, so it lands on the next tick with nothing
-    // to re-mark it until a restart.
+#[cfg(test)]
+mod first_apply_restart_tests {
+    use super::*;
+
+    fn state_in(dir: &std::path::Path) -> WizardApiState {
+        let config_store = Arc::new(FileConfigStore::new(dir.join("localsky.toml")));
+        let cfg = config_store.load_blocking().unwrap_or_default();
+        WizardApiState {
+            draft_store: Arc::new(WizardStore::new(dir.join("wizard-draft.json"))),
+            config_store,
+            auth_rt: None,
+            tempest_store: None,
+            runtime: Some(crate::runtime::RuntimeHandles {
+                dispatch_context: crate::controllers::ZoneLocks::default(),
+                tempest_store: Arc::new(crate::tempest::state::TempestStore::new()),
+                forecast_priority: Arc::new(arc_swap::ArcSwap::from_pointee(
+                    std::collections::HashMap::new(),
+                )),
+                watering_policy: Arc::new(arc_swap::ArcSwap::from_pointee(
+                    crate::refresher::WateringPolicy::from_config(&cfg),
+                )),
+                manual_schedules: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
+                source_reachable: crate::sources::SourceReachability::default(),
+                source_last_seen: Some(crate::sources::SourceLastSeen::default()),
+                push: None,
+            }),
+            geocode_limiter: GeocodeLimiter::default(),
+        }
+    }
+
+    async fn body_json(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// The wizard's happy path, as the e2e walk builds it: a location, one
+    /// simulated controller, one zone on it, and no sources of its own (the
+    /// apply seeds the region's forecast authorities).
+    fn happy_path_draft() -> serde_json::Value {
+        let mut draft = WizardDraft::default();
+        draft.license_accepted = true;
+        draft.telemetry_choice = Some(false);
+        draft.config.deployment.location.lat = 29.65;
+        draft.config.deployment.location.lon = -82.32;
+        let mut candidate = serde_json::to_value(&draft).unwrap();
+        candidate["config"]["controllers"] = serde_json::json!([{
+            "id": "sim",
+            "default": true,
+            "enabled": true,
+            "kind": "dry_run",
+            "config": { "simulate_runs": false },
+        }]);
+        candidate["config"]["zones"] = serde_json::json!({
+            "front_lawn": {
+                "display_name": "Front Lawn",
+                "area_sqft": 1000.0,
+                "species": "st_augustine",
+                "soil_texture": "sand",
+                "sprinkler_type": "spray",
+                "controller_id": "sim",
+                "controller_station": "1",
+            }
+        });
+        candidate
+    }
+
+    async fn put_and_apply(s: &WizardApiState, candidate: serde_json::Value) -> serde_json::Value {
+        let put = put_draft(State(s.clone()), Json(candidate))
+            .await
+            .into_response();
+        assert_eq!(put.status(), StatusCode::NO_CONTENT, "the draft must save");
+        let apply = post_apply(State(s.clone())).await.into_response();
+        assert_eq!(apply.status(), StatusCode::OK, "the apply must succeed");
+        body_json(apply).await
+    }
+
+    /// The defect this closes: a genuine first install answered
+    /// restart_required=false, so the wizard redirected to a dashboard that
+    /// read "configured" while the running process had wired NOTHING. It
+    /// booted with no config, so the controller registry is empty
+    /// (boot/control.rs fills it only on the (Some(cfg), Some(runs)) arm) and
+    /// no source adapter was spawned (boot/sources.rs is gated the same way),
+    /// and neither is rebuilt after boot. The apply must say so. Against the
+    /// old handler every assertion below fails: the body carried
+    /// restart_required=false and an empty reason list, because the residue
+    /// diff in apply_runtime_config had no previous config to compare against
+    /// and was skipped whole.
     #[tokio::test]
-    async fn apply_keeps_the_migration_ledger_the_draft_does_not_carry() {
+    async fn a_first_install_apply_reports_the_wiring_the_process_does_not_have() {
         let dir = std::env::temp_dir().join(format!(
-            "localsky-wizard-test-{}-ledger",
+            "localsky-wizard-test-{}-firstapply",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = state_in(&dir);
+        assert!(
+            !s.config_store.is_initialized(),
+            "the fixture must start with no config on disk"
+        );
+
+        let body = put_and_apply(&s, happy_path_draft()).await;
+        assert_eq!(
+            body["restart_required"],
+            serde_json::json!(true),
+            "a first install cannot actuate anything until the process restarts: {body}"
+        );
+        let reasons: Vec<String> = body["restart_reasons"]
+            .as_array()
+            .expect("restart_reasons is a list")
+            .iter()
+            .filter_map(|r| r.as_str().map(str::to_string))
+            .collect();
+        assert!(
+            reasons.iter().any(|r| r.contains("controllers")),
+            "the controller registry is empty until boot: {reasons:?}"
+        );
+        assert!(
+            reasons.iter().any(|r| r.contains("zones")),
+            "the watering loop resolves its zone list at boot: {reasons:?}"
+        );
+        assert!(
+            reasons.iter().any(|r| r.contains("weather sources")),
+            "the sources the apply just seeded have no adapter running: {reasons:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Reapplying the same saved file does not create its missing runtime
+    /// wiring. Only a new process, booted with that file, clears the hold.
+    #[tokio::test]
+    async fn a_rerun_preserves_the_hold_until_the_config_has_booted() {
+        let dir = std::env::temp_dir().join(format!(
+            "localsky-wizard-test-{}-rerunapply",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let s = state_in(&dir);
 
-        // A migrated install already on disk.
-        let mut stored = crate::config::schema::Config::default();
-        stored.deployment.location.lat = 29.9;
-        stored.deployment.location.lon = -81.3;
-        for id in crate::ha_adopt::ENTITIES {
-            stored
-                .ha_adoption
-                .push(crate::ha::snapshot::HaAdoptedHelper {
-                    entity: id.to_string(),
-                    outcome: crate::ha_adopt::OUTCOME_ADOPTED.to_string(),
-                    target: crate::ha_adopt::target_of(id).to_string(),
-                    adopted_value: Some("0".into()),
-                    observed_value: None,
-                    previous_value: Some("0".into()),
-                    epoch: 1,
-                });
-        }
-        stored.seeded_source_ids.push("nws".into());
-        s.config_store.save(&stored).await.unwrap();
-
-        // "Start fresh": a default draft with only what the wizard collects.
-        let mut draft = WizardDraft::default();
-        draft.license_accepted = true;
-        draft.telemetry_choice = Some(false);
-        draft.config.deployment.location.lat = 29.9;
-        draft.config.deployment.location.lon = -81.3;
-        assert!(draft.config.ha_adoption.is_empty());
-        s.draft_store.save(&draft).unwrap();
-
-        let apply = post_apply(State(s.clone())).await.into_response();
-        assert_eq!(apply.status(), StatusCode::OK);
-
-        let after = s.config_store.load().await.unwrap();
-        assert_eq!(
-            after.ha_adoption.len(),
-            crate::ha_adopt::ENTITIES.len(),
-            "every migration marker survives a start-fresh apply"
+        let first = put_and_apply(&s, happy_path_draft()).await;
+        assert_eq!(first["restart_required"], serde_json::json!(true));
+        assert!(
+            s.config_store.is_initialized(),
+            "the first apply wrote the config"
         );
-        for id in crate::ha_adopt::ENTITIES {
-            assert!(
-                crate::refresher::WateringPolicy::from_config(&after).ha_read_retired(id),
-                "{id} must not go back to reading a helper the owner was told to delete"
-            );
-        }
-        assert!(after.seeded_source_ids.contains(&"nws".to_string()));
+
+        // The same yard, applied again. The apply consumed the draft, so the
+        // re-run PUTs it back the way "Modify current setup" does.
+        let second = put_and_apply(&s, happy_path_draft()).await;
+        assert_eq!(
+            second["restart_required"],
+            serde_json::json!(true),
+            "reapplying the file cannot wire the running process: {second}"
+        );
+        assert_eq!(
+            second["restart_reasons"], first["restart_reasons"],
+            "the original reasons remain until restart: {second}"
+        );
+
+        // Model a new boot with the saved config and new process-scoped handles.
+        let rebooted = state_in(&dir);
+        let cfg = rebooted.config_store.load().await.unwrap();
+        let boot_apply = crate::runtime::apply_runtime_config(
+            rebooted.runtime.as_ref().unwrap(),
+            Some(&cfg),
+            &cfg,
+        )
+        .await;
+        assert!(
+            !boot_apply.restart_required,
+            "boot uses the saved location and timezone: {boot_apply:?}"
+        );
+        let third = put_and_apply(&rebooted, happy_path_draft()).await;
+        assert_eq!(
+            third["restart_required"],
+            serde_json::json!(false),
+            "{third}"
+        );
+        assert_eq!(third["restart_reasons"], serde_json::json!([]));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The residue is what BOOT would have built, not whatever the file
+    /// happens to contain: build_controllers and build_sources each skip a
+    /// disabled entry, so an install whose only hardware is switched off owes
+    /// nothing, and a genuinely empty yard still redirects.
+    #[test]
+    fn disabled_hardware_and_an_empty_yard_owe_no_restart() {
+        let mut cfg = crate::config::schema::Config::default();
+        assert!(
+            crate::runtime::first_apply_boot_residue(&cfg).is_empty(),
+            "an empty config has nothing a boot would have wired"
+        );
+
+        cfg.controllers.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "sim",
+                "default": true,
+                "enabled": false,
+                "kind": "dry_run",
+                "config": { "simulate_runs": false },
+            }))
+            .unwrap(),
+        );
+        cfg.sources.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "open_meteo",
+                "kind": "open_meteo",
+                "enabled": false,
+                "config": {},
+            }))
+            .unwrap(),
+        );
+        assert!(
+            crate::runtime::first_apply_boot_residue(&cfg).is_empty(),
+            "boot skips a disabled controller and a disabled source, so neither is owed"
+        );
+
+        cfg.controllers[0].enabled = true;
+        let reasons = crate::runtime::first_apply_boot_residue(&cfg);
+        assert_eq!(reasons.len(), 1, "{reasons:?}");
+        assert!(reasons[0].contains("controllers"), "{reasons:?}");
     }
 }
 
@@ -1818,6 +1948,7 @@ mod probe_guard_tests {
             auth_rt: Some(Arc::new(rt)),
             tempest_store: None,
             runtime: None,
+            geocode_limiter: GeocodeLimiter::default(),
         }
     }
 
@@ -1985,22 +2116,21 @@ mod geocode_rate_limit_tests {
 
     #[test]
     fn fixed_window_allows_then_refuses_per_ip() {
-        // Unique TEST-NET IPs so parallel tests sharing the static map
-        // cannot collide; the limiter buckets strictly per IP.
+        let limiter = GeocodeLimiter::default();
         let hot: std::net::IpAddr = "198.51.100.77".parse().unwrap();
         let cold: std::net::IpAddr = "198.51.100.78".parse().unwrap();
         for i in 0..GEOCODE_MAX_PER_MIN {
             assert!(
-                allow_geocode_attempt(hot),
+                limiter.allow(hot),
                 "attempt {i} within the budget must be allowed"
             );
         }
         assert!(
-            !allow_geocode_attempt(hot),
+            !limiter.allow(hot),
             "the attempt past the budget must be refused"
         );
         // Another client is unaffected (per-IP buckets, not global).
-        assert!(allow_geocode_attempt(cold));
+        assert!(limiter.allow(cold));
     }
 }
 
@@ -2102,6 +2232,7 @@ mod scan_zones_tests {
             auth_rt: None,
             tempest_store: None,
             runtime: None,
+            geocode_limiter: GeocodeLimiter::default(),
         }
     }
 

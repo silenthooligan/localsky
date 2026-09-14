@@ -30,7 +30,7 @@ and is never demoted this way.
 
 A bad or offline soil probe cannot block or force a run on its own.
 When a probe looks untrustworthy, its value is inferred from its
-trustworthy neighbours (quarantine), so one flaky sensor never vetoes a
+trustworthy neighbors (quarantine), so one flaky sensor never vetoes a
 zone or falsely triggers one.
 
 Heat advisory is the one rule that extends instead of vetoes: when the

@@ -171,8 +171,8 @@ pub fn controller_fields(kind: &str) -> Vec<FieldSpec> {
         ],
         "dry_run" => vec![FieldSpec::boolean(
             "simulate_runs",
-            "Simulate runs",
-            "Write synthetic run rows so the dashboard shows activity (demo).",
+            "Show pretend runs on the dashboard",
+            "Off is what you want. LocalSky still notices water your own system puts down, \n             so the dashboard stays true to your yard. Turn this on only to fill the \n             history with made-up runs for a demo.",
             false,
         )],
         _ => vec![],

@@ -9,7 +9,7 @@
 use leptos::prelude::*;
 use serde::Deserialize;
 
-#[allow(dead_code)] // used only in the hydrate-feature fetch path
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
 #[derive(Debug, Clone, Default, Deserialize)]
 struct ExplanationEnvelope {
     status: String,
@@ -58,7 +58,7 @@ pub fn AdvisorExplanation(verdict: Signal<String>) -> impl IntoView {
     }
 
     // The advisor is now nested UNDER the deterministic explainer (the primary,
-    // always-correct "why"). It is supplementary colour, so when it has nothing
+    // always-correct "why"). It is supplementary color, so when it has nothing
     // to add (disabled or offline) it OMITS its tile entirely rather than
     // rendering a faint "offline"/"disabled" badge: an advisor fault sitting
     // beside a clear deterministic verdict reads as if the WHOLE decision is
@@ -89,7 +89,7 @@ pub fn AdvisorExplanation(verdict: Signal<String>) -> impl IntoView {
     }
 }
 
-#[allow(dead_code)] // Ready/Offline/Disabled/Empty constructed only on hydrate
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
 #[derive(Clone, Debug)]
 enum AdvisorState {
     Loading,

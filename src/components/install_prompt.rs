@@ -32,7 +32,7 @@ use crate::components::ui::Button;
 use leptos::prelude::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // Native/Ios are only set in cfg(feature="hydrate") code
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
 enum Mode {
     Hidden,
     Native, // beforeinstallprompt available

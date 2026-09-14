@@ -209,9 +209,12 @@ mod tests {
             jul > jan,
             "expected summer Kc > winter Kc, got {jul} vs {jan}"
         );
+        // FAO-56 Table 12 warm-season turf: Kc_mid 0.85. This pinned
+        // 1.00, which is the cool-season neighbourhood and above even
+        // that, for a grass the table puts at the LOW end.
         assert!(
-            (jul - 1.00).abs() < 0.01,
-            "St. Aug Jul peak ~1.00, got {jul}"
+            (jul - 0.85).abs() < 0.01,
+            "St. Aug Jul peak is the table's warm-season Kc_mid 0.85, got {jul}"
         );
         assert!(
             (jan - 0.55).abs() < 0.01,

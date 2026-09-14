@@ -39,8 +39,8 @@ pub fn to_canonical(field: WeatherField, value: f64, unit: Option<&str>) -> f64 
             "k" | "kelvin" => (value - 273.15) * 9.0 / 5.0 + 32.0,
             _ => value, // f / fahrenheit / unknown
         },
-        WindMph | WindGustMph => match u.as_str() {
-            "km/h" | "kph" | "kmh" | "kmph" => value * 0.621_371,
+        WindMph | WindGustMph | WindLullMph | RapidWindMph => match u.as_str() {
+            "km/h" | "kph" | "kmh" | "kmph" => crate::units::kph_to_mph(value),
             "m/s" | "mps" | "ms" => value * 2.236_936,
             "kn" | "kt" | "kts" | "knot" | "knots" => value * 1.150_779,
             "ft/s" | "fps" => value * 0.681_818,
@@ -55,13 +55,13 @@ pub fn to_canonical(field: WeatherField, value: f64, unit: Option<&str>) -> f64 
             "psi" => value * 2.036_020_375,
             _ => value, // inhg / unknown
         },
-        RainTodayIn | RainIntensityInHr => match u.as_str() {
-            "mm" | "mm/h" | "mm/hr" | "millimeter" | "millimeters" => value / 25.4,
+        RainTodayIn | RainIntensityInHr | RainLastMinIn => match u.as_str() {
+            "mm" | "mm/h" | "mm/hr" | "millimeter" | "millimeters" => crate::units::mm_to_in(value),
             "cm" => value / 2.54,
             _ => value, // in / unknown
         },
         LightningDistanceMi => match u.as_str() {
-            "km" => value * 0.621_371,
+            "km" => crate::units::km_to_mi(value),
             "m" => value * 0.000_621_371,
             _ => value, // mi / unknown
         },
@@ -79,12 +79,13 @@ pub fn to_canonical(field: WeatherField, value: f64, unit: Option<&str>) -> f64 
         // US-units HA install, mapped via `et0today`) must convert here, or
         // the mm bus reads 25.4x low (issue #4's missed-conversion half).
         Et0Today => match u.as_str() {
-            "in" | "inch" | "inches" => value * 25.4,
+            "in" | "inch" | "inches" => crate::units::in_to_mm(value),
             _ => value, // mm / unknown = already-canonical mm
         },
         // Unitless, already-canonical, or non-scalar fields: pass through.
         RhPct | SolarWm2 | UvIndex | Illuminance | WindBearingDeg | LightningCount | Pop
-        | LeafWetness | RainTypeStr | ForecastDaily | ForecastHourly => value,
+        | LeafWetness | RainTypeStr | ForecastDaily | ForecastHourly | RapidWindBearingDeg
+        | BatteryV | PrecipType => value,
     }
 }
 

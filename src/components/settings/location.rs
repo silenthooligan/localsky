@@ -44,8 +44,9 @@ pub fn SettingsLocation() -> impl IntoView {
         Effect::new(move |_| {
             let _ = load_retry.get();
             wasm_bindgen_futures::spawn_local(async move {
-                match fetch_config().await {
+                match crate::components::config_client::get_config().await {
                     Ok(cfg) => {
+                        let cfg = LocationDraft::from_config(&cfg);
                         lat.set(cfg.lat);
                         lon.set(cfg.lon);
                         elevation.set(cfg.elevation);
@@ -107,7 +108,7 @@ pub fn SettingsLocation() -> impl IntoView {
                         crate::components::settings_ui::toast_saved(
                             result_msg,
                             result_ok,
-                            "Saved. Engine picks up on next tick.",
+                            crate::voice::SAVED_LIVE,
                         );
                     }
                     Err(e) => {
@@ -185,7 +186,7 @@ pub fn SettingsLocation() -> impl IntoView {
         results.set(Vec::new());
         #[cfg(feature = "hydrate")]
         wasm_bindgen_futures::spawn_local(async move {
-            let url = format!("/api/wizard/geocode?q={}", urlencoding_lite(&q));
+            let url = format!("/api/wizard/geocode?q={}", crate::text::query_value(&q));
             if let Ok(resp) = gloo_net::http::Request::get(&url).send().await {
                 if let Ok(v) = resp.json::<serde_json::Value>().await {
                     let list = v
@@ -277,7 +278,7 @@ pub fn SettingsLocation() -> impl IntoView {
                         <input
                             type="text"
                             class="ui-input"
-                            placeholder="e.g. Springfield, Sydney, or 51.5, -0.1"
+                            placeholder=crate::voice::LOCATION_SEARCH_EXAMPLE
                             prop:value=move || query.get()
                             on:input=move |ev| query.set(event_target_value(&ev))
                             on:keydown=move |ev| if ev.key() == "Enter" { on_search(()) }
@@ -406,7 +407,7 @@ pub fn SettingsLocation() -> impl IntoView {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
 struct LocationDraft {
     lat: f64,
     lon: f64,
@@ -416,57 +417,48 @@ struct LocationDraft {
 }
 
 #[cfg(feature = "hydrate")]
-async fn fetch_config() -> Result<LocationDraft, String> {
-    use gloo_net::http::Request;
-    let resp = Request::get("/api/config")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::load_error_message(
-            resp.status(),
-            &body,
-        ));
+impl LocationDraft {
+    /// Pull the location fields out of a config document (as returned by
+    /// `config_client::get_config`). Missing fields read as 0.0 / empty,
+    /// matching the form's initial state.
+    fn from_config(val: &serde_json::Value) -> Self {
+        let loc = val.get("deployment").and_then(|d| d.get("location"));
+        LocationDraft {
+            lat: loc
+                .and_then(|l| l.get("lat"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0),
+            lon: loc
+                .and_then(|l| l.get("lon"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0),
+            elevation: loc
+                .and_then(|l| l.get("elevation_m"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0),
+            tz: val
+                .get("deployment")
+                .and_then(|d| d.get("timezone"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            display_name: val
+                .get("deployment")
+                .and_then(|d| d.get("display_name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        }
     }
-    let val: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    let loc = val.get("deployment").and_then(|d| d.get("location"));
-    Ok(LocationDraft {
-        lat: loc
-            .and_then(|l| l.get("lat"))
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0),
-        lon: loc
-            .and_then(|l| l.get("lon"))
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0),
-        elevation: loc
-            .and_then(|l| l.get("elevation_m"))
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0),
-        tz: val
-            .get("deployment")
-            .and_then(|d| d.get("timezone"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        display_name: val
-            .get("deployment")
-            .and_then(|d| d.get("display_name"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-    })
 }
 
+/// Read-modify-write of deployment.location (+ timezone / display_name)
+/// through the shared config client. A failed re-read is an error, never
+/// a PUT of whatever body came back.
 #[cfg(feature = "hydrate")]
 async fn patch_location(d: LocationDraft) -> Result<(), String> {
-    use gloo_net::http::Request;
-    let cur = Request::get("/api/config")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut cfg: serde_json::Value = cur.json().await.map_err(|e| e.to_string())?;
+    use crate::components::config_client::{get_config, put_config};
+    let mut cfg = get_config().await?;
     if let Some(dep) = cfg.get_mut("deployment") {
         if let Some(loc) = dep.get_mut("location") {
             if let Some(obj) = loc.as_object_mut() {
@@ -489,34 +481,5 @@ async fn patch_location(d: LocationDraft) -> Result<(), String> {
             }
         }
     }
-    let resp = Request::put("/api/config")
-        .json(&cfg)
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::save_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    Ok(())
-}
-
-/// Tiny query encoder for the geocode call (space + reserved chars).
-#[cfg(feature = "hydrate")]
-fn urlencoding_lite(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b' ' => out.push('+'),
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b',' => {
-                out.push(b as char)
-            }
-            other => out.push_str(&format!("%{other:02X}")),
-        }
-    }
-    out
+    put_config(&cfg).await.map(|_| ())
 }

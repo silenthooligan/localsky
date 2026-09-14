@@ -1,6 +1,5 @@
 ---
 source: src/api/snapshot_tests.rs
-assertion_line: 57
 expression: "TempestSnapshot::default()"
 ---
 {
@@ -46,5 +45,6 @@ expression: "TempestSnapshot::default()"
   "wind_live_epoch": 0,
   "rh_live_epoch": 0,
   "rain_live_epoch": 0,
-  "has_live_station": false
+  "has_live_station": false,
+  "rain_today_suspect_source": null
 }

@@ -5,8 +5,10 @@ expression: health
 {
   "status": "ok",
   "config_present": true,
+  "location_configured": true,
   "version": "0.0.0-test",
   "schema_version": 0,
+  "valves_unclosed": [],
   "uptime_s": 0,
   "subsystems": {
     "config_store": "ok",
@@ -48,6 +50,9 @@ expression: health
         0
       ]
     ],
+    "tempest_listener": {
+      "state": "not_configured"
+    },
     "service_call_controllers": [
       "ha_valves"
     ],

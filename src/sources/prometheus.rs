@@ -9,9 +9,11 @@
 //
 // Like every bus source it rides the merge bus, so it inherits the snapshot,
 // sensor_history, HA entities, source-health, and current-conditions
-// arbitration for free. Outbound requests go through net::safe_fetch
-// (SSRF-hardened), and optional HTTP basic-auth covers a reverse-proxied
-// Prometheus.
+// arbitration for free. The poll loop (tick, missed-tick policy, fetch metric,
+// reachability edges in both directions, shutdown) is sources::poll::run_polling;
+// one poll evaluates every configured query. Outbound requests go through
+// net::safe_fetch (SSRF-hardened, per-query DNS pinning), and optional HTTP
+// basic-auth covers a reverse-proxied Prometheus.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +21,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::collections::HashSet;
-use tokio::time::{interval, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
 use crate::config::schema::PrometheusConfig;
@@ -27,6 +28,7 @@ use crate::ports::weather_source::{
     ShutdownSignal, SourceBus, SourceCaps, SourceEvent, WeatherField, WeatherSource,
 };
 use crate::sources::mqtt_subscribe::parse_weather_field;
+use crate::sources::poll::{run_polling, Poll};
 
 const PROM_TIMEOUT: Duration = Duration::from_secs(10);
 /// Floor on the poll interval, to stay friendly to the Prometheus server.
@@ -147,89 +149,86 @@ impl WeatherSource for Prometheus {
         }
     }
 
-    async fn run(
-        self: Arc<Self>,
-        bus: SourceBus,
-        mut shutdown: ShutdownSignal,
-    ) -> anyhow::Result<()> {
+    async fn run(self: Arc<Self>, bus: SourceBus, shutdown: ShutdownSignal) -> anyhow::Result<()> {
         let interval_s = self.config.poll_interval_s.max(MIN_INTERVAL_S);
         info!(
             source_id = %self.id,
             url = %self.config.url,
             interval_s,
             queries = self.config.queries.len(),
-            "Prometheus source started"
+            "Prometheus source configured"
         );
         if self.config.queries.is_empty() {
             warn!(source_id = %self.id, "Prometheus has no queries; idle");
         }
-        let mut tick = interval(Duration::from_secs(interval_s));
-        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut last_reachable: Option<bool> = None;
-        loop {
-            tokio::select! {
-                _ = tick.tick() => {
-                    let now = chrono::Utc::now().timestamp();
-                    let mut fields: Vec<(WeatherField, f64)> = Vec::new();
-                    // One transport failure marks the source unreachable; a parse
-                    // miss on a single query is logged but not a reachability flip.
-                    let mut any_transport_ok = false;
-                    let mut any_transport_err = false;
-                    for q in &self.config.queries {
-                        match self.query(&q.query).await {
-                            Ok(raw) => {
-                                any_transport_ok = true;
-                                let value = raw * q.scale + q.offset;
-                                if let Some(zone) = q
-                                    .zone_slug
-                                    .as_deref()
-                                    .map(str::trim)
-                                    .filter(|z| !z.is_empty())
-                                {
-                                    let _ = bus.send(SourceEvent::KeyedReading {
-                                        source_id: self.id.clone(),
-                                        key: crate::sources::bus_recorder::zone_soil_key(zone),
-                                        value,
-                                        at_epoch: now,
-                                    });
-                                } else if let Some(wf) = parse_weather_field(&q.field) {
-                                    fields.push((wf, value));
-                                } else {
-                                    debug!(source_id = %self.id, field = q.field, "unknown field name");
-                                }
-                            }
-                            Err(e) => {
-                                any_transport_err = true;
-                                warn!(source_id = %self.id, query = q.query, error = %e, "Prometheus query failed");
+        let id = self.id.clone();
+        // The loop (tick, missed-tick policy, fetch metric, both reachability
+        // edges, shutdown) is `run_polling`'s. This closure is one poll: every
+        // configured query in turn. One failed query is warned and skipped;
+        // the poll is an Err (offline edge) only when every query failed, so
+        // the source stays reachable while at least one query still answers.
+        // No queries is a legitimate idle poll: reachable, nothing published.
+        run_polling(
+            self,
+            &id,
+            "Prometheus",
+            Duration::from_secs(interval_s),
+            bus,
+            shutdown,
+            |s: Arc<Self>| async move {
+                let now = chrono::Utc::now().timestamp();
+                let mut poll = Poll::none();
+                let mut fields: Vec<(WeatherField, f64)> = Vec::new();
+                let mut ok_n = 0usize;
+                let mut err_n = 0usize;
+                for q in &s.config.queries {
+                    match s.query(&q.query).await {
+                        Ok(raw) => {
+                            ok_n += 1;
+                            let value = raw * q.scale + q.offset;
+                            if let Some(zone) = q
+                                .zone_slug
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|z| !z.is_empty())
+                            {
+                                poll = poll.with(SourceEvent::KeyedReading {
+                                    source_id: s.id.clone(),
+                                    key: crate::sources::bus_recorder::zone_soil_key(zone),
+                                    value,
+                                    at_epoch: now,
+                                });
+                            } else if let Some(wf) = parse_weather_field(&q.field) {
+                                fields.push((wf, value));
+                            } else {
+                                debug!(source_id = %s.id, field = q.field, "unknown field name");
                             }
                         }
-                    }
-                    if !fields.is_empty() {
-                        let _ = bus.send(SourceEvent::Observation {
-                            source_id: self.id.clone(),
-                            fields,
-                            at_epoch: now,
-                        });
-                    }
-                    // Reachable when at least one query's transport succeeded;
-                    // unreachable only when every query failed at transport.
-                    let reachable = any_transport_ok || !any_transport_err;
-                    if last_reachable != Some(reachable) {
-                        let _ = bus.send(SourceEvent::Reachability {
-                            source_id: self.id.clone(),
-                            reachable,
-                        });
-                        last_reachable = Some(reachable);
+                        Err(e) => {
+                            err_n += 1;
+                            warn!(
+                                source_id = %s.id,
+                                query = q.query,
+                                error = %e,
+                                "Prometheus query failed"
+                            );
+                        }
                     }
                 }
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        info!(source_id = %self.id, "Prometheus shutdown");
-                        return Ok(());
-                    }
+                if ok_n == 0 && err_n > 0 {
+                    anyhow::bail!("all {err_n} queries failed");
                 }
-            }
-        }
+                if !fields.is_empty() {
+                    poll = poll.with(SourceEvent::Observation {
+                        source_id: s.id.clone(),
+                        fields,
+                        at_epoch: now,
+                    });
+                }
+                Ok(poll)
+            },
+        )
+        .await
     }
 }
 

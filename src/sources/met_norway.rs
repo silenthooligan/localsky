@@ -34,14 +34,16 @@ use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashSet;
-use tokio::time::{interval, MissedTickBehavior};
-use tracing::{debug, info, warn};
+use tracing::debug;
 
 use crate::config::schema::{Location, MetNorwayConfig};
 use crate::forecast::snapshot::{DailyEntry, ForecastSnapshot, HourlyEntry};
 use crate::ports::weather_source::{
     ShutdownSignal, SourceBus, SourceCaps, SourceEvent, WeatherField, WeatherSource,
 };
+use crate::sources::poll::{run_polling, Poll};
+use crate::units::{c_to_f, ms_to_mph};
+use crate::units::{hpa_to_inhg, mm_to_in};
 
 const API_BASE: &str = "https://api.met.no/weatherapi/locationforecast/2.0";
 const POLL_INTERVAL: Duration = Duration::from_secs(30 * 60); // 30 min
@@ -236,6 +238,20 @@ fn local_noon_epoch(key: (i32, u32), tz: Option<chrono_tz::Tz>, fallback: i64) -
     }
 }
 
+fn rain_day_bounds(key: (i32, u32), tz: Option<chrono_tz::Tz>) -> Option<(i64, i64)> {
+    use chrono::TimeZone;
+    let day = chrono::NaiveDate::from_yo_opt(key.0, key.1)?;
+    let start = day.and_hms_opt(0, 0, 0)?;
+    let end = day.succ_opt()?.and_hms_opt(0, 0, 0)?;
+    match tz {
+        Some(tz) => Some((
+            tz.from_local_datetime(&start).earliest()?.timestamp(),
+            tz.from_local_datetime(&end).earliest()?.timestamp(),
+        )),
+        None => Some((start.and_utc().timestamp(), end.and_utc().timestamp())),
+    }
+}
+
 /// Convert a timeseries (already-deserialized compact response) into a
 /// canonical-imperial ForecastSnapshot. Pure + deterministic given
 /// `now_epoch`, so the unit test can exercise it without a clock or
@@ -262,34 +278,61 @@ fn build_snapshot(resp: &ForecastResponse, lat: f64, lon: f64, now_epoch: i64) -
         let weather_code = symbol.map(symbol_to_wmo).unwrap_or(0);
         let precip_in = next
             .and_then(|n| n.details.precipitation_amount)
-            .map(|mm| mm / 25.4) // mm -> in
-            .unwrap_or(0.0);
+            .filter(|v| crate::forecast::precip::valid_amount(*v))
+            .map(mm_to_in);
         hourly.push(HourlyEntry {
             time_epoch,
             weather_code,
-            temp_f: d.air_temperature.map(c_to_f).unwrap_or(0.0),
+            temp_f: d.air_temperature.map(c_to_f).filter(|t| t.is_finite()),
             // Compact has no apparent/"feels-like" temperature.
             apparent_temp_f: 0.0,
             precip_in,
             // Synthesized from precip presence (compact has no real POP).
             // Synthesized, but a real estimate: Some, never a provider gap.
-            precip_probability: Some(synth_pop(precip_in, symbol)),
-            wind_mph: d.wind_speed.map(ms_to_mph).unwrap_or(0.0),
+            precip_probability: precip_in.map(|amount| synth_pop(amount, symbol)),
+            wind_mph: d
+                .wind_speed
+                .map(ms_to_mph)
+                .filter(|w| w.is_finite() && *w >= 0.0),
             wind_dir_deg: d.wind_from_direction.map(|x| x.round() as u32).unwrap_or(0),
-            humidity_pct: d.relative_humidity.map(|x| x.round() as u32).unwrap_or(0),
+            humidity_pct: d
+                .relative_humidity
+                .filter(|rh| rh.is_finite() && (0.0..=100.0).contains(rh))
+                .map(|rh| rh.round() as u32),
             cloud_cover_pct: d.cloud_area_fraction.map(|x| x.round() as u32).unwrap_or(0),
             ..Default::default()
         });
     }
+
+    // Choose the finest declared interval once. A 6h/12h accumulation can
+    // establish a daily total without pretending to be a one-hour dry value.
+    let rain_intervals: Vec<_> = steps
+        .iter()
+        .filter_map(|step| {
+            let start = iso8601_to_epoch(&step.time)?;
+            let (hours, period) = step
+                .data
+                .next_1_hours
+                .as_ref()
+                .map(|p| (1, p))
+                .or_else(|| step.data.next_6_hours.as_ref().map(|p| (6, p)))
+                .or_else(|| step.data.next_12_hours.as_ref().map(|p| (12, p)))?;
+            let amount = period
+                .details
+                .precipitation_amount
+                .filter(|v| crate::forecast::precip::valid_amount(*v))
+                .map(mm_to_in);
+            Some((start, start.checked_add(hours * 3600)?, amount))
+        })
+        .collect();
 
     // ---- DAILY: group steps by LOCAL calendar day, aggregate. ----
     // Accumulator keyed by local (year, ordinal-day), preserving first-seen order.
     struct DayAgg {
         temp_max_f: f64,
         temp_min_f: f64,
-        precip_sum_in: f64,
         pop_max: u32,
-        wind_max_mph: f64,
+        wind_max_mph: Option<f64>,
         // Dominant weather: take the worst (highest WMO) seen that day, a
         // crude "most significant condition" proxy since compact has no
         // daily summary.
@@ -325,21 +368,31 @@ fn build_snapshot(resp: &ForecastResponse, lat: f64, lon: f64, now_epoch: i64) -
             .and_then(|s| s.symbol_code.as_deref());
         let precip_in = next
             .and_then(|n| n.details.precipitation_amount)
-            .map(|mm| mm / 25.4)
-            .unwrap_or(0.0);
+            .filter(|v| crate::forecast::precip::valid_amount(*v))
+            .map(mm_to_in);
         let step_code = symbol.map(symbol_to_wmo).unwrap_or(0);
-        let step_pop = synth_pop(precip_in, symbol);
-        let temp_f = d.air_temperature.map(c_to_f);
-        let wind_mph = d.wind_speed.map(ms_to_mph).unwrap_or(0.0);
+        let step_pop = precip_in
+            .map(|amount| synth_pop(amount, symbol))
+            .unwrap_or_else(|| {
+                if symbol.is_some_and(symbol_is_precip) {
+                    50
+                } else {
+                    0
+                }
+            });
+        let temp_f = d.air_temperature.map(c_to_f).filter(|t| t.is_finite());
+        let wind_mph = d
+            .wind_speed
+            .map(ms_to_mph)
+            .filter(|w| w.is_finite() && *w >= 0.0);
 
         let agg = days.entry(key).or_insert_with(|| {
             order.push(key);
             DayAgg {
                 temp_max_f: f64::MIN,
                 temp_min_f: f64::MAX,
-                precip_sum_in: 0.0,
                 pop_max: 0,
-                wind_max_mph: 0.0,
+                wind_max_mph: Some(0.0),
                 weather_code: 0,
                 seen_temp: false,
             }
@@ -349,9 +402,13 @@ fn build_snapshot(resp: &ForecastResponse, lat: f64, lon: f64, now_epoch: i64) -
             agg.temp_min_f = agg.temp_min_f.min(t);
             agg.seen_temp = true;
         }
-        agg.precip_sum_in += precip_in;
         agg.pop_max = agg.pop_max.max(step_pop);
-        agg.wind_max_mph = agg.wind_max_mph.max(wind_mph);
+        // An incomplete series cannot claim a calm/safe daily maximum.
+        // Once a contributing step lacks wind, the daily peak is unknown.
+        agg.wind_max_mph = agg
+            .wind_max_mph
+            .zip(wind_mph)
+            .map(|(peak, wind)| peak.max(wind));
         agg.weather_code = agg.weather_code.max(step_code);
     }
 
@@ -362,14 +419,25 @@ fn build_snapshot(resp: &ForecastResponse, lat: f64, lon: f64, now_epoch: i64) -
         // the user's wall clock (fallback: the day's first step epoch).
         let anchor = local_noon_epoch(key, tz, now_epoch);
         daily.push(DailyEntry {
-            time_epoch: anchor,
+            // met.no is anchored on local noon.
+            day_marker: crate::engine::clock::DayMarker::inside_local_day(anchor),
             weather_code: agg.weather_code,
-            temp_max_f: if agg.seen_temp { agg.temp_max_f } else { 0.0 },
-            temp_min_f: if agg.seen_temp { agg.temp_min_f } else { 0.0 },
+            temp_max_f: agg.seen_temp.then_some(agg.temp_max_f),
+            temp_min_f: agg.seen_temp.then_some(agg.temp_min_f),
             // Aggregated daily has no RH; filled from hourly by
             // backfill_daily_humidity below.
-            humidity_pct: 0,
-            precip_sum_in: agg.precip_sum_in,
+            humidity_pct: None,
+            precip_sum_in: rain_day_bounds(key, tz).and_then(|(start, end)| {
+                (end > now_epoch)
+                    .then(|| {
+                        crate::forecast::precip::total_over(
+                            rain_intervals.iter().copied(),
+                            start.max(now_epoch),
+                            end,
+                        )
+                    })
+                    .flatten()
+            }),
             precip_probability_max: Some(agg.pop_max),
             wind_max_mph: agg.wind_max_mph,
             // Compact has no gust field.
@@ -394,33 +462,22 @@ fn build_snapshot(resp: &ForecastResponse, lat: f64, lon: f64, now_epoch: i64) -
         ..Default::default()
     };
     // Pair each day's high temp with THAT day's afternoon humidity (hourly).
-    snap.backfill_daily_humidity();
+    snap.backfill_daily_humidity(crate::timeutil::deployment_calendar());
     snap
-}
-
-#[inline]
-fn c_to_f(c: f64) -> f64 {
-    c * 9.0 / 5.0 + 32.0
-}
-
-#[inline]
-fn ms_to_mph(ms: f64) -> f64 {
-    ms * 2.236_936
 }
 
 impl MetNorway {
     pub fn new(id: impl Into<String>, config: MetNorwayConfig, location: Location) -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(15))
-            // api.met.no's terms require an identifying UA. An empty or
-            // historical-placeholder value derives the real instance identity
-            // at request time; the config is never rewritten (see
-            // sources::resolve_outbound_user_agent).
-            .user_agent(crate::sources::resolve_outbound_user_agent(
-                &config.user_agent,
-            ))
-            .build()
-            .expect("reqwest client construction");
+        // api.met.no's terms require an identifying UA. An empty or
+        // historical-placeholder value derives the real instance identity
+        // at request time; the config is never rewritten (see
+        // sources::resolve_outbound_user_agent). A keyless authority that
+        // carries the operator's own contact string is the `client_with`
+        // case, not the plain derived-identity `client`.
+        let client = crate::net::client_with(
+            Duration::from_secs(15),
+            &crate::sources::resolve_outbound_user_agent(&config.user_agent),
+        );
         Self {
             id: id.into(),
             config,
@@ -492,111 +549,79 @@ impl WeatherSource for MetNorway {
         }
     }
 
-    async fn run(
-        self: Arc<Self>,
-        bus: SourceBus,
-        mut shutdown: ShutdownSignal,
-    ) -> anyhow::Result<()> {
-        info!(source_id = %self.id, "MetNorway source started");
-        let mut tick = interval(POLL_INTERVAL);
-        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut last_reachable: Option<bool> = None;
-        loop {
-            tokio::select! {
-                _ = tick.tick() => {
-                    match self.fetch_forecast().await {
-                        Ok(forecast) => {
-                            if last_reachable != Some(true) {
-                                let _ = bus.send(SourceEvent::Reachability {
-                                    source_id: self.id.clone(),
-                                    reachable: true,
-                                });
-                                last_reachable = Some(true);
-                            }
-                            // First timestep = "now" (instant). This is NOT an
-                            // observation: it is the model forecast valued at the
-                            // current hour, the same deterministic run that drives
-                            // the hourly/daily snapshot below. We publish it as a
-                            // current scalar (cloud tier, live_current=false) so a
-                            // no-hardware user still gets honest current values, but
-                            // any real LAN station always outranks it (priority 20)
-                            // and the UI badges it Forecast. Cloud cover here is
-                            // likewise a forecast quantity, not a sky-camera/ceilometer
-                            // reading.
-                            if let Some(step) = forecast.properties.timeseries.first() {
-                                let d = &step.data.instant.details;
-                                let mut fields = Vec::new();
-                                if let Some(t_c) = d.air_temperature {
-                                    fields.push((WeatherField::AirTempF, c_to_f(t_c)));
-                                }
-                                if let Some(rh) = d.relative_humidity {
-                                    fields.push((WeatherField::RhPct, rh));
-                                }
-                                if let Some(p_hpa) = d.air_pressure_at_sea_level {
-                                    // hPa -> inHg
-                                    fields.push((WeatherField::PressureInHg, p_hpa * 0.02953));
-                                }
-                                if let Some(ws_ms) = d.wind_speed {
-                                    // m/s -> mph
-                                    fields.push((WeatherField::WindMph, ms_to_mph(ws_ms)));
-                                }
-                                if let Some(wd) = d.wind_from_direction {
-                                    fields.push((WeatherField::WindBearingDeg, wd));
-                                }
-                                if !fields.is_empty() {
-                                    debug!(
-                                        source_id = %self.id,
-                                        fields_n = fields.len(),
-                                        "MetNorway forecast updated"
-                                    );
-                                    let _ = bus.send(SourceEvent::Observation {
-                                        source_id: self.id.clone(),
-                                        fields,
-                                        at_epoch: chrono::Utc::now().timestamp(),
-                                    });
-                                }
-                            }
+    async fn run(self: Arc<Self>, bus: SourceBus, shutdown: ShutdownSignal) -> anyhow::Result<()> {
+        // The loop (tick, missed-tick policy, fetch metric, reachability
+        // edges in both directions, shutdown) is `run_polling`'s; this
+        // closure is one poll: fetch the compact response, publish its
+        // first timestep as the current scalar, build the forecast
+        // snapshot from the SAME response.
+        let id = self.id.clone();
+        run_polling(
+            self,
+            &id,
+            "MetNorway",
+            POLL_INTERVAL,
+            bus,
+            shutdown,
+            |s: Arc<Self>| async move {
+                let forecast = s.fetch_forecast().await?;
+                let now = chrono::Utc::now().timestamp();
 
-                            // Forecast snapshot: daily + hourly built from the
-                            // SAME compact response, published to the forecast
-                            // bridge by source priority.
-                            let now = chrono::Utc::now().timestamp();
-                            let snapshot =
-                                build_snapshot(&forecast, self.location.lat, self.location.lon, now);
-                            if !snapshot.hourly.is_empty() || !snapshot.daily.is_empty() {
-                                debug!(
-                                    source_id = %self.id,
-                                    daily_n = snapshot.daily.len(),
-                                    hourly_n = snapshot.hourly.len(),
-                                    "MetNorway forecast snapshot built"
-                                );
-                                let _ = bus.send(SourceEvent::Forecast {
-                                    source_id: self.id.clone(),
-                                    snapshot,
-                                    at_epoch: now,
-                                });
-                            }
-                        }
-                        Err(e) => {
-                            warn!(source_id = %self.id, error = %e, "MetNorway forecast fetch failed");
-                            if last_reachable != Some(false) {
-                                let _ = bus.send(SourceEvent::Reachability {
-                                    source_id: self.id.clone(),
-                                    reachable: false,
-                                });
-                                last_reachable = Some(false);
-                            }
-                        }
+                // First timestep = "now" (instant). This is NOT an
+                // observation: it is the model forecast valued at the
+                // current hour, the same deterministic run that drives
+                // the hourly/daily snapshot below. We publish it as a
+                // current scalar (cloud tier, live_current=false) so a
+                // no-hardware user still gets honest current values, but
+                // any real LAN station always outranks it (priority 20)
+                // and the UI badges it Forecast. Cloud cover here is
+                // likewise a forecast quantity, not a sky-camera/ceilometer
+                // reading.
+                let mut fields = Vec::new();
+                if let Some(step) = forecast.properties.timeseries.first() {
+                    let d = &step.data.instant.details;
+                    if let Some(t_c) = d.air_temperature {
+                        fields.push((WeatherField::AirTempF, c_to_f(t_c)));
+                    }
+                    if let Some(rh) = d.relative_humidity {
+                        fields.push((WeatherField::RhPct, rh));
+                    }
+                    if let Some(p_hpa) = d.air_pressure_at_sea_level {
+                        // hPa -> inHg
+                        fields.push((WeatherField::PressureInHg, hpa_to_inhg(p_hpa)));
+                    }
+                    if let Some(ws_ms) = d.wind_speed {
+                        // m/s -> mph
+                        fields.push((WeatherField::WindMph, ms_to_mph(ws_ms)));
+                    }
+                    if let Some(wd) = d.wind_from_direction {
+                        fields.push((WeatherField::WindBearingDeg, wd));
                     }
                 }
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        info!(source_id = %self.id, "MetNorway source shutdown");
-                        return Ok(());
-                    }
+                // Poll::observation publishes nothing when `fields` is empty.
+                let mut poll = Poll::observation(&s.id, fields, now);
+
+                // Forecast snapshot: daily + hourly built from the SAME
+                // compact response, published to the forecast bridge by
+                // source priority.
+                let snapshot = build_snapshot(&forecast, s.location.lat, s.location.lon, now);
+                if !snapshot.hourly.is_empty() || !snapshot.daily.is_empty() {
+                    debug!(
+                        source_id = %s.id,
+                        daily_n = snapshot.daily.len(),
+                        hourly_n = snapshot.hourly.len(),
+                        "MetNorway forecast snapshot built"
+                    );
+                    poll = poll.with(SourceEvent::Forecast {
+                        source_id: s.id.clone(),
+                        snapshot,
+                        at_epoch: now,
+                    });
                 }
-            }
-        }
+                Ok(poll)
+            },
+        )
+        .await
     }
 }
 
@@ -726,6 +751,76 @@ mod tests {
     }
 
     #[test]
+    fn daily_aggregation_needs_real_finite_temperature_samples() {
+        let mut resp: ForecastResponse = serde_json::from_str(SAMPLE).unwrap();
+        for invalid in [None, Some(f64::NAN), Some(f64::INFINITY), Some(f64::MAX)] {
+            for step in &mut resp.properties.timeseries {
+                step.data.instant.details.air_temperature = invalid;
+            }
+            let snapshot = build_snapshot(&resp, 0.0, 0.0, 1_700_000_000);
+            assert!(!snapshot.daily.is_empty());
+            assert!(snapshot
+                .daily
+                .iter()
+                .all(|d| d.temp_max_f.is_none() && d.temp_min_f.is_none()));
+            assert!(snapshot.hourly.iter().all(|h| h.temp_f.is_none()));
+            assert!(
+                snapshot
+                    .hourly
+                    .iter()
+                    .any(|h| h.precip_in.is_some_and(|v| v > 0.0)),
+                "missing temperature leaves real hourly rain evidence intact"
+            );
+        }
+        resp.properties.timeseries[0]
+            .data
+            .instant
+            .details
+            .air_temperature = Some(0.0);
+        let snapshot = build_snapshot(&resp, 0.0, 0.0, 1_700_000_000);
+        assert_eq!(snapshot.daily[0].temp_max_f, Some(32.0));
+        assert_eq!(snapshot.daily[0].temp_min_f, Some(32.0));
+        assert_eq!(snapshot.hourly[0].temp_f, Some(32.0));
+        assert_eq!(snapshot.daily[1].temp_max_f, None);
+    }
+
+    #[test]
+    fn partial_wind_day_is_unknown_while_reported_zero_survives() {
+        let mut resp: ForecastResponse = serde_json::from_str(SAMPLE).unwrap();
+        for invalid in [None, Some(-1.0), Some(f64::NAN), Some(f64::INFINITY)] {
+            let details = &mut resp.properties.timeseries[0].data.instant.details;
+            details.wind_speed = invalid;
+            details.relative_humidity = invalid;
+            let snapshot = build_snapshot(&resp, 0.0, 0.0, 1_700_000_000);
+            assert_eq!(snapshot.hourly[0].wind_mph, None);
+            assert_eq!(snapshot.hourly[0].humidity_pct, None);
+            assert_eq!(
+                snapshot.daily[0].wind_max_mph, None,
+                "valid later wind cannot establish the whole daily peak"
+            );
+        }
+        resp.properties.timeseries[0]
+            .data
+            .instant
+            .details
+            .relative_humidity = Some(101.0);
+        assert_eq!(
+            build_snapshot(&resp, 0.0, 0.0, 1).hourly[0].humidity_pct,
+            None
+        );
+        for step in &mut resp.properties.timeseries {
+            step.data.instant.details.wind_speed = Some(0.0);
+            step.data.instant.details.relative_humidity = Some(0.0);
+        }
+        let snapshot = build_snapshot(&resp, 0.0, 0.0, 1);
+        assert!(snapshot.daily.iter().all(|d| d.wind_max_mph == Some(0.0)));
+        assert!(snapshot
+            .hourly
+            .iter()
+            .all(|h| h.wind_mph == Some(0.0) && h.humidity_pct == Some(0)));
+    }
+
+    #[test]
     fn parse_maps_hourly_and_daily() {
         let resp: ForecastResponse = serde_json::from_str(SAMPLE).expect("sample parses");
         // (0,0) -> tz None -> UTC bucketing + empty tz, keeping epochs deterministic.
@@ -743,21 +838,25 @@ mod tests {
         assert_eq!(h0.time_epoch, 1_782_302_400);
         assert!(h0.time_epoch > 1_700_000_000); // sane future epoch
                                                 // 20C -> 68F
-        assert!((h0.temp_f - 68.0).abs() < 0.01, "temp {}", h0.temp_f);
+        assert!(
+            (h0.temp_f.unwrap() - 68.0).abs() < 0.01,
+            "temp {:?}",
+            h0.temp_f
+        );
         // 5 m/s -> ~11.18 mph
         assert!(
-            (h0.wind_mph - 11.184_68).abs() < 0.01,
-            "wind {}",
+            (h0.wind_mph.unwrap() - 11.184_68).abs() < 0.01,
+            "wind {:?}",
             h0.wind_mph
         );
         assert_eq!(h0.wind_dir_deg, 180);
-        assert_eq!(h0.humidity_pct, 55);
+        assert_eq!(h0.humidity_pct, Some(55));
         assert_eq!(h0.cloud_cover_pct, 40);
         // 25.4mm -> 1.0 in
         assert!(
-            (h0.precip_in - 1.0).abs() < 0.001,
+            (h0.precip_in.unwrap() - 1.0).abs() < 0.001,
             "precip {}",
-            h0.precip_in
+            h0.precip_in.unwrap()
         );
         assert_eq!(h0.weather_code, 61); // "rain"
         assert_eq!(h0.precip_probability, Some(100)); // synthesized: precip present
@@ -768,20 +867,30 @@ mod tests {
         let d0 = &snap.daily[0];
         // Anchored at UTC noon of 2026-06-24 (tz None), which equals the first
         // step here since it lands at 12:00:00Z.
-        assert_eq!(d0.time_epoch, 1_782_302_400);
+        assert_eq!(
+            d0.day_marker,
+            crate::engine::clock::DayMarker::inside_local_day(1_782_302_400)
+        );
         // Day 0 temps: 20C(68F) and 25C(77F)
-        assert!((d0.temp_max_f - 77.0).abs() < 0.01, "max {}", d0.temp_max_f);
-        assert!((d0.temp_min_f - 68.0).abs() < 0.01, "min {}", d0.temp_min_f);
-        // Day 0 precip sum: 25.4mm + 0mm -> 1.0 in
         assert!(
-            (d0.precip_sum_in - 1.0).abs() < 0.001,
-            "sum {}",
-            d0.precip_sum_in
+            (d0.temp_max_f.unwrap() - 77.0).abs() < 0.01,
+            "max {:?}",
+            d0.temp_max_f
+        );
+        assert!(
+            (d0.temp_min_f.unwrap() - 68.0).abs() < 0.01,
+            "min {:?}",
+            d0.temp_min_f
+        );
+        // Two known hours are not the full-day accumulation.
+        assert_eq!(
+            d0.precip_sum_in, None,
+            "a short sample does not cover a full day"
         );
         // Day 0 wind max: max(5,10) m/s -> ~22.37 mph
         assert!(
-            (d0.wind_max_mph - 22.369_36).abs() < 0.01,
-            "wmax {}",
+            (d0.wind_max_mph.unwrap() - 22.369_36).abs() < 0.01,
+            "wmax {:?}",
             d0.wind_max_mph
         );
         // Worst-condition proxy: max(61 rain, 0 clear) = 61
@@ -795,8 +904,11 @@ mod tests {
 
         let d1 = &snap.daily[1];
         // Anchored at UTC noon of 2026-06-25 = 1782345600 + 12h = 1782388800.
-        assert_eq!(d1.time_epoch, 1_782_388_800);
-        assert!((d1.temp_max_f - 59.0).abs() < 0.01); // 15C -> 59F
+        assert_eq!(
+            d1.day_marker,
+            crate::engine::clock::DayMarker::inside_local_day(1_782_388_800)
+        );
+        assert!((d1.temp_max_f.unwrap() - 59.0).abs() < 0.01); // 15C -> 59F
         assert_eq!(d1.weather_code, 3); // "cloudy"
     }
 
@@ -888,37 +1000,43 @@ mod tests {
         let snap = build_snapshot(&resp, 0.0, 0.0, 1_700_000_000);
         assert_eq!(snap.daily.len(), 3);
 
-        // Day 0 (hourly steps carrying BOTH blocks): only the finest 1h
-        // amounts sum (2 x 2.54mm = 0.2 in). The co-present 6h blocks
-        // (25.4 + 22.86 mm) must NOT be counted on top.
-        let d0 = &snap.daily[0];
-        assert!(
-            (d0.precip_sum_in - 0.2).abs() < 0.001,
-            "hourly day must sum 1h windows only, got {}",
-            d0.precip_sum_in
-        );
-
-        // Day 1 (6-hourly steps, next_6_hours only): the fallback keeps the
-        // far-day total NONZERO and exact: 12.7 + 12.7 + 0 mm = 1.0 in, each
-        // step contributing its own non-overlapping window once.
+        // These abbreviated samples do not cover whole calendar days. Do
+        // not advertise their known partial sums as complete dry/wet days.
+        assert_eq!(snap.daily[0].precip_sum_in, None);
         let d1 = &snap.daily[1];
-        assert!(
-            (d1.precip_sum_in - 1.0).abs() < 0.001,
-            "6-hourly day must sum to 1.0 in, got {}",
-            d1.precip_sum_in
-        );
+        assert_eq!(d1.precip_sum_in, None);
         assert_eq!(d1.precip_probability_max, Some(100)); // synth: amount present
         assert_eq!(d1.weather_code, 61); // "rain" from the 6h summary
 
         // Day 2 (summary-only next_12_hours tail): nothing to sum, but the
         // precip-class symbol still drives the synthesized POP + condition.
         let d2 = &snap.daily[2];
-        assert_eq!(d2.precip_sum_in, 0.0);
+        assert_eq!(d2.precip_sum_in, None);
         assert_eq!(d2.precip_probability_max, Some(50));
         assert_eq!(d2.weather_code, 61);
 
         // Hourly rows keep the 1h-only read: a 6-hourly step (no
         // next_1_hours) contributes no hourly precip.
-        assert_eq!(snap.hourly[2].precip_in, 0.0);
+        assert_eq!(snap.hourly[2].precip_in, None);
+    }
+    #[test]
+    fn six_hour_rain_tiles_a_day_without_inventing_hourly_coverage() {
+        let start = iso8601_to_epoch("2026-06-24T00:00:00Z").unwrap();
+        let steps: Vec<_> = (0..4).map(|i| serde_json::json!({
+            "time": chrono::DateTime::from_timestamp(start + i * 6 * 3600, 0).unwrap().to_rfc3339(),
+            "data": {"instant":{"details":{}}, "next_6_hours":{"details":{"precipitation_amount":6.35}}}
+        })).collect();
+        let mut json = serde_json::json!({"properties":{"timeseries":steps}});
+        let resp: ForecastResponse = serde_json::from_value(json.clone()).unwrap();
+        let snapshot = build_snapshot(&resp, 0.0, 0.0, start);
+        assert!((snapshot.daily[0].precip_sum_in.unwrap() - 1.0).abs() < 1e-9);
+        assert!(snapshot.hourly.iter().all(|h| h.precip_in.is_none()));
+        json["properties"]["timeseries"][2]["data"]["next_6_hours"]["details"]
+            ["precipitation_amount"] = serde_json::Value::Null;
+        let resp: ForecastResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            build_snapshot(&resp, 0.0, 0.0, start).daily[0].precip_sum_in,
+            None
+        );
     }
 }

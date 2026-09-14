@@ -70,8 +70,8 @@ A read-only status line showing whether the deployment is running in demo
 mode. When active, all controller actions are recorded but never fired
 and the weather data is simulated. This is not a toggle on this page:
 demo mode is enabled with the `LOCALSKY_DEMO=1` container environment
-variable or `features.demo_mode = true` in `/data/localsky.toml`. The
-line just tells you which mode you are in.
+variable, which seeds a demo config with `features.demo_mode = true`.
+The line just tells you which mode you are in.
 
 ## Configuration history and rollback
 

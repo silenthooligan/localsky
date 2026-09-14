@@ -8,38 +8,11 @@ use leptos::prelude::*;
 
 use crate::components::settings::zones::ZoneForm;
 use crate::components::setup::shell::{next_step_href, prev_step_href, SetupFooter};
-use crate::components::ui::{Button, Panel};
-
-#[cfg(feature = "hydrate")]
-async fn fetch_draft() -> Option<serde_json::Value> {
-    let resp = gloo_net::http::Request::get("/api/wizard/draft")
-        .send()
-        .await
-        .ok()?;
-    resp.json::<serde_json::Value>().await.ok()
-}
-
-#[cfg(feature = "hydrate")]
-async fn save_draft(draft: serde_json::Value) -> Result<(), String> {
-    let resp = gloo_net::http::Request::put("/api/wizard/draft")
-        .json(&draft)
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::save_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    Ok(())
-}
+use crate::components::ui::{Button, Panel, Sheet, SheetVariant};
 
 #[component]
 pub fn ZonesStep() -> impl IntoView {
-    // P2-1: create real zones in the wizard by reusing the settings ZoneForm,
+    // Create real zones in the wizard by reusing the settings ZoneForm,
     // wired to the wizard draft instead of the live config. `config_json` is the
     // draft's `config` object (the form mutates config["zones"] and reads
     // config["controllers"] for its picker); `persist` folds it back into the
@@ -87,7 +60,7 @@ pub fn ZonesStep() -> impl IntoView {
     #[cfg(feature = "hydrate")]
     Effect::new(move |_| {
         leptos::task::spawn_local(async move {
-            if let Some(d) = fetch_draft().await {
+            if let Some(d) = crate::components::setup::draft::fetch().await {
                 let cfg = d
                     .get("config")
                     .cloned()
@@ -140,7 +113,7 @@ pub fn ZonesStep() -> impl IntoView {
         let candidate = draft.get_untracked();
         #[cfg(feature = "hydrate")]
         leptos::task::spawn_local(async move {
-            let _ = save_draft(candidate).await;
+            let _ = crate::components::setup::draft::save(&candidate).await;
         });
         #[cfg(not(feature = "hydrate"))]
         let _ = candidate;
@@ -208,7 +181,7 @@ pub fn ZonesStep() -> impl IntoView {
                 "mornings the zone's session spacing allows."
             </p>
 
-            // P2-1: the actual zone-creation surface (reuses the settings form).
+            // The actual zone-creation surface (reuses the settings form).
             <Panel title="Your zones".to_string()>
                 {move || {
                     let zones = zone_list();
@@ -277,9 +250,13 @@ pub fn ZonesStep() -> impl IntoView {
                 }}
             </Panel>
 
-            <Show when=move || add_open.get()>
+            <Sheet
+                open=add_open
+                title=Signal::derive(|| "Zone details".to_string())
+                variant=SheetVariant::Drawer
+            >
                 <ZoneForm
-                    panel_title="Zone details".to_string()
+                    panel_title=String::new()
                     config_json=config_json
                     new_slug=new_slug
                     new_display_name=new_display_name
@@ -305,11 +282,33 @@ pub fn ZonesStep() -> impl IntoView {
                     result_msg=result_msg
                     result_ok=result_ok
                     persist=persist
+                    // Closing the drawer leaves a clean draft behind, which
+                    // is what the form's Cancel used to do.
+                    on_close=Callback::new(move |()| {
+                        crate::components::settings::zones::reset_zone_draft(
+                            editing_slug,
+                            new_slug,
+                            new_display_name,
+                            new_area,
+                            new_precip,
+                            new_max_run,
+                            new_weekly_budget,
+                            new_sessions,
+                            new_rain_cap,
+                            new_sched_model,
+                            new_station,
+                            new_photo_url,
+                            new_soil_sensor,
+                            new_soil_min,
+                            new_soil_sat,
+                        );
+                        add_open.set(false);
+                    })
                 />
-            </Show>
+            </Sheet>
 
             <Panel title="Water supply".to_string()>
-                <p class="setup-step__body" style="margin-bottom: 0.85rem">
+                <p class="setup-step__body" class:u-mb3-only=true>
                     "When a zone needs cycle-and-soak treatment, LocalSky "
                     "normally waters other zones during the soak pauses so "
                     "the morning sequence finishes sooner. A well or other "
@@ -344,12 +343,12 @@ pub fn ZonesStep() -> impl IntoView {
             </Panel>
 
             <Panel title="Grass species catalog".to_string()>
-                <p class="setup-step__body" style="margin-bottom: 0.85rem">
+                <p class="setup-step__body" class:u-mb3-only=true>
                     "Each species has its own seasonal Kc curve, root depth, "
                     "and management allowable depletion. Pick the closest "
                     "match; per-zone overrides for root depth and MAD are "
                     "available under "
-                    <a href="/settings/zones" style="color: var(--accent)">"/settings/zones"</a>
+                    <a href="/settings/zones" class:u-accent=true>"/settings/zones"</a>
                     "."
                 </p>
                 {species_groups().into_iter().map(|(title, hint, cards)| view! {
@@ -393,7 +392,7 @@ pub fn ZonesStep() -> impl IntoView {
                     <li>
                         <strong>"Photo (optional)"</strong>
                         " - drop an image URL under "
-                        <a href="/settings/zones" style="color: var(--accent)">"/settings/zones"</a>
+                        <a href="/settings/zones" class:u-accent=true>"/settings/zones"</a>
                         " and the zone card renders it. Useful when you have "
                         "more than a handful of zones."
                     </li>
@@ -401,9 +400,9 @@ pub fn ZonesStep() -> impl IntoView {
             </Panel>
 
             <Panel title="What happens if I skip this".to_string()>
-                <p class="setup-step__body" style="margin-bottom: 0">
+                <p class="setup-step__body" class:u-mb0=true>
                     "Zones can be added after the wizard via "
-                    <a href="/settings/zones" style="color: var(--accent)">"/settings/zones"</a>
+                    <a href="/settings/zones" class:u-accent=true>"/settings/zones"</a>
                     ". The dashboard renders empty until at least one zone is "
                     "configured."
                 </p>
@@ -484,7 +483,7 @@ fn species_meta(slug: &str) -> String {
         "Kc {:.2}-{:.2} · root {:.0}\" ({:.0} cm) · MAD {:.0}%",
         kc_low,
         kc_high,
-        p.root_depth_mm / 25.4,
+        crate::units::mm_to_in(p.root_depth_mm),
         p.root_depth_mm / 10.0,
         p.mad_pct * 100.0
     )

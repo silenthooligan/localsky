@@ -86,7 +86,7 @@ pub fn SettingsLlm() -> impl IntoView {
                         crate::components::settings_ui::toast_saved(
                             result_msg,
                             result_ok,
-                            "Saved. Advisor reconnects on next call.",
+                            crate::voice::SAVED_LIVE,
                         );
                     }
                     Err(e) => {
@@ -202,7 +202,7 @@ pub fn SettingsLlm() -> impl IntoView {
 }
 
 #[derive(Clone, Default)]
-#[allow(dead_code)]
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
 struct LlmDraft {
     provider: String,
     base_url: String,
@@ -213,12 +213,8 @@ struct LlmDraft {
 
 #[cfg(feature = "hydrate")]
 async fn fetch_llm() -> Result<LlmDraft, String> {
-    use gloo_net::http::Request;
-    let resp = Request::get("/api/config")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    let val: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    use crate::components::config_client::get_config;
+    let val = get_config().await?;
     let llm = val.get("llm").cloned().unwrap_or(serde_json::Value::Null);
     let provider = llm
         .get("provider")
@@ -252,12 +248,8 @@ async fn fetch_llm() -> Result<LlmDraft, String> {
 
 #[cfg(feature = "hydrate")]
 async fn save_llm(d: LlmDraft) -> Result<(), String> {
-    use gloo_net::http::Request;
-    let cur = Request::get("/api/config")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut cfg: serde_json::Value = cur.json().await.map_err(|e| e.to_string())?;
+    use crate::components::config_client::{get_config, put_config};
+    let mut cfg = get_config().await?;
     let config_block = match d.provider.as_str() {
         "auto" => serde_json::json!({ "probe_order": [] }),
         "ollama" => serde_json::json!({
@@ -286,18 +278,5 @@ async fn save_llm(d: LlmDraft) -> Result<(), String> {
             "anomaly_ttl_s": 3600,
         });
     }
-    let resp = Request::put("/api/config")
-        .json(&cfg)
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::save_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    Ok(())
+    put_config(&cfg).await.map(|_| ())
 }

@@ -1,4 +1,4 @@
-// Shared client-side time formatter (fix #5 / review #7+#8).
+// Shared client-side time formatter.
 //
 // Every epoch the irrigation + forecast UI renders must read out in the
 // DEPLOYMENT's timezone (the IANA name carried on the snapshot), in 24-hour
@@ -27,6 +27,94 @@
 //   format_md(epoch_secs: i64, tz_iana: &str) -> String         // "Jun 28"
 
 // ── hydrate (WASM): browser Intl.DateTimeFormat ───────────────────────────────
+/// The calendar day an epoch falls on in `tz`, as sortable ISO
+/// "YYYY-MM-DD". Empty on an unrepresentable instant. Browser `Intl` on
+/// hydrate, chrono-tz on the server, UTC otherwise, so the History page
+/// and the zone page bucket a run under the day it happened where the
+/// controller lives rather than where the page is rendered.
+/// The current instant as UNIX seconds. The one clock read the views make;
+/// every "today" and "how long ago" derives from it plus the deployment
+/// timezone, never from the browser's or the server's local zone.
+pub fn now_epoch() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+pub fn day_key_in_tz(epoch_secs: i64, tz_iana: &str) -> String {
+    imp::day_key_in_tz(epoch_secs, tz_iana)
+}
+
+/// The day key parsed, for arithmetic on days.
+pub fn day_in_tz(epoch_secs: i64, tz_iana: &str) -> Option<chrono::NaiveDate> {
+    chrono::NaiveDate::parse_from_str(&day_key_in_tz(epoch_secs, tz_iana), "%Y-%m-%d").ok()
+}
+
+/// Whole days from the day `epoch` falls on to the day `now` falls on,
+/// both in `tz`. Negative for a later day. Judged on calendar days, so a
+/// clock change between them cannot shift a run into the wrong bucket.
+pub fn days_between_in_tz(now_epoch: i64, epoch: i64, tz_iana: &str) -> Option<i64> {
+    let today = day_in_tz(now_epoch, tz_iana)?;
+    let day = day_in_tz(epoch, tz_iana)?;
+    Some(today.signed_duration_since(day).num_days())
+}
+
+/// The epoch of local midnight for the day `now_epoch` falls on in
+/// `tz`. Server: chrono-tz's own resolution (the earlier of two on a
+/// repeated hour). Browser: the day's key and the local clock reading
+/// from `Intl`, subtracted; an hour off on the one day a year the clock
+/// changes at midnight, and nothing reads this for that precision.
+pub fn local_midnight_epoch(now_epoch: i64, tz_iana: &str) -> i64 {
+    imp::local_midnight_epoch(now_epoch, tz_iana)
+}
+
+/// Split a physical interval at the deployment's actual date boundaries.
+/// Uses the same IANA date conversion on server and browser, including DST
+/// and midnight clock changes, without assuming that a day lasts 86,400 s.
+pub fn split_local_days(start: i64, end: i64, tz: &str) -> Vec<(i64, i64)> {
+    let mut pieces = Vec::new();
+    let mut cursor = start;
+    while cursor < end {
+        let day = day_key_in_tz(cursor, tz);
+        if day.is_empty() {
+            break;
+        }
+        let mut boundary = end;
+        if day_key_in_tz(end - 1, tz) != day {
+            // First instant whose local date differs. Binary search avoids
+            // approximating a midnight from a possibly different UTC offset.
+            let mut low = cursor;
+            let mut high = end - 1;
+            while high - low > 1 {
+                let middle = low + (high - low) / 2;
+                if day_key_in_tz(middle, tz) == day {
+                    low = middle;
+                } else {
+                    high = middle;
+                }
+            }
+            boundary = high;
+        }
+        pieces.push((cursor, boundary));
+        cursor = boundary;
+    }
+    pieces
+}
+
+/// The viewer's clock preference. Set by the units preference loader on
+/// hydrate; false (24-hour) on the server, which renders the first frame,
+/// and until the preference is read. Thread-local: wasm is one thread,
+/// and a server thread renders for one request at a time in the default.
+pub fn set_clock_12h(on: bool) {
+    CLOCK_12H.with(|c| c.set(on));
+}
+
+pub fn clock_12h() -> bool {
+    CLOCK_12H.with(|c| c.get())
+}
+
+thread_local! {
+    static CLOCK_12H: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 #[cfg(feature = "hydrate")]
 mod imp {
     use wasm_bindgen::JsValue;
@@ -53,12 +141,13 @@ mod imp {
     }
 
     pub fn format_hm(epoch_secs: i64, tz_iana: &str) -> String {
+        let twelve = super::clock_12h();
         let opts = options(tz_iana);
-        // 24-hour clock, two-digit hour + minute -> "14:05".
+        // 24-hour by default, "14:05"; 12-hour with AM/PM when the viewer chose it.
         let _ = js_sys::Reflect::set(
             &opts,
             &JsValue::from_str("hour12"),
-            &JsValue::from_bool(false),
+            &JsValue::from_bool(twelve),
         );
         let _ = js_sys::Reflect::set(
             &opts,
@@ -73,7 +162,10 @@ mod imp {
         // `to_locale_time_string_with_options` is the stable js-sys binding that
         // takes an options object (the plain variant takes only a locale).
         date(epoch_secs)
-            .to_locale_time_string_with_options("en-GB", opts.as_ref())
+            .to_locale_time_string_with_options(
+                if twelve { "en-US" } else { "en-GB" },
+                opts.as_ref(),
+            )
             .as_string()
             .unwrap_or_default()
     }
@@ -104,6 +196,43 @@ mod imp {
             .to_locale_date_string("en-US", opts.as_ref())
             .as_string()
             .unwrap_or_default()
+    }
+
+    pub fn day_key_in_tz(epoch_secs: i64, tz_iana: &str) -> String {
+        let opts = options(tz_iana);
+        // en-CA renders dates as ISO 8601 "YYYY-MM-DD", which sorts lexically.
+        date(epoch_secs)
+            .to_locale_date_string("en-CA", opts.as_ref())
+            .as_string()
+            .unwrap_or_default()
+    }
+
+    pub fn local_midnight_epoch(now_epoch: i64, tz_iana: &str) -> i64 {
+        // The local clock reading, then subtracted from the instant.
+        let opts = options(tz_iana);
+        for (k, v) in [
+            ("hour", "2-digit"),
+            ("minute", "2-digit"),
+            ("second", "2-digit"),
+        ] {
+            let _ = js_sys::Reflect::set(&opts, &JsValue::from_str(k), &JsValue::from_str(v));
+        }
+        let _ = js_sys::Reflect::set(
+            &opts,
+            &JsValue::from_str("hour12"),
+            &JsValue::from_bool(false),
+        );
+        let hms = date(now_epoch)
+            .to_locale_time_string_with_options("en-GB", opts.as_ref())
+            .as_string()
+            .unwrap_or_default();
+        let mut parts = hms.split(':').filter_map(|p| p.trim().parse::<i64>().ok());
+        let (h, m, s) = (
+            parts.next().unwrap_or(0) % 24,
+            parts.next().unwrap_or(0),
+            parts.next().unwrap_or(0),
+        );
+        now_epoch - (h * 3600 + m * 60 + s)
     }
 
     pub fn format_md(epoch_secs: i64, tz_iana: &str) -> String {
@@ -145,7 +274,11 @@ mod imp {
     }
 
     pub fn format_hm(epoch_secs: i64, tz_iana: &str) -> String {
-        fmt(epoch_secs, tz_iana, "%H:%M")
+        if super::clock_12h() {
+            fmt(epoch_secs, tz_iana, "%-I:%M %p")
+        } else {
+            fmt(epoch_secs, tz_iana, "%H:%M")
+        }
     }
 
     pub fn format_wday_short(epoch_secs: i64, tz_iana: &str) -> String {
@@ -158,6 +291,22 @@ mod imp {
 
     pub fn format_md(epoch_secs: i64, tz_iana: &str) -> String {
         fmt(epoch_secs, tz_iana, "%b %-d")
+    }
+
+    pub fn day_key_in_tz(epoch_secs: i64, tz_iana: &str) -> String {
+        fmt(epoch_secs, tz_iana, "%Y-%m-%d")
+    }
+
+    pub fn local_midnight_epoch(now_epoch: i64, tz_iana: &str) -> i64 {
+        let z = zone(tz_iana);
+        let Some(now) = z.timestamp_opt(now_epoch, 0).single() else {
+            return now_epoch - now_epoch.rem_euclid(86_400);
+        };
+        let midnight = now.date_naive().and_hms_opt(0, 0, 0).expect("midnight");
+        match z.from_local_datetime(&midnight).earliest() {
+            Some(dt) => dt.timestamp(),
+            None => now_epoch - now_epoch.rem_euclid(86_400),
+        }
     }
 }
 
@@ -176,7 +325,11 @@ mod imp {
     }
 
     pub fn format_hm(epoch_secs: i64, tz_iana: &str) -> String {
-        fmt(epoch_secs, tz_iana, "%H:%M")
+        if super::clock_12h() {
+            fmt(epoch_secs, tz_iana, "%-I:%M %p")
+        } else {
+            fmt(epoch_secs, tz_iana, "%H:%M")
+        }
     }
 
     pub fn format_wday_short(epoch_secs: i64, tz_iana: &str) -> String {
@@ -189,6 +342,14 @@ mod imp {
 
     pub fn format_md(epoch_secs: i64, tz_iana: &str) -> String {
         fmt(epoch_secs, tz_iana, "%b %-d")
+    }
+
+    pub fn day_key_in_tz(epoch_secs: i64, tz_iana: &str) -> String {
+        fmt(epoch_secs, tz_iana, "%Y-%m-%d")
+    }
+
+    pub fn local_midnight_epoch(now_epoch: i64, _tz_iana: &str) -> i64 {
+        now_epoch - now_epoch.rem_euclid(86_400)
     }
 }
 

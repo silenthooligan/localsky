@@ -5,7 +5,15 @@ use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
 
 use crate::app::NerdMode;
-use crate::components::ui::{HelpHint, Panel, Toggle};
+use crate::components::ui::{ConfirmSheet, HelpHint, Panel, Toggle};
+
+// The bundle waiting on the restore confirm, between the file pick and
+// the answer. Only the wasm build ever holds one; the SSR build compiles
+// the same shape with nothing in it.
+#[cfg(feature = "hydrate")]
+type PendingBundle = Option<web_sys::File>;
+#[cfg(not(feature = "hydrate"))]
+type PendingBundle = Option<()>;
 
 #[component]
 pub fn SettingsAdvanced() -> impl IntoView {
@@ -24,9 +32,17 @@ pub fn SettingsAdvanced() -> impl IntoView {
     let demo_mode_active = RwSignal::new(false);
     let snapshots = RwSignal::new(Vec::<SnapshotRow>::new());
     let restore_msg = RwSignal::new(String::new());
+    let restore_input = NodeRef::<leptos::html::Input>::new();
+    // A restore is destructive, so the file pick asks before it uploads.
+    // The picked bundle waits here between the pick and the answer: a
+    // StoredValue rather than a signal because nothing renders it, and
+    // new_local because a web_sys::File is a JS handle the default
+    // (Send) arena will not take.
+    let restore_confirm = RwSignal::new(false);
+    let pending_bundle: StoredValue<PendingBundle, LocalStorage> = StoredValue::new_local(None);
 
-    // Restore upload: POST the picked bundle as multipart to
-    // /api/v1/backup/restore and surface the server's note.
+    // Restore upload, step one: the pick stages the bundle and opens the
+    // confirm sheet. It uploads nothing on its own.
     let on_restore_file = move |ev: leptos::ev::Event| {
         #[cfg(feature = "hydrate")]
         {
@@ -40,25 +56,28 @@ pub fn SettingsAdvanced() -> impl IntoView {
             let Some(file) = input.files().and_then(|f| f.item(0)) else {
                 return;
             };
-            // Destructive: a restore replaces the configuration and the
-            // full history database at the next container restart, so the
-            // file pick alone must not trigger it.
-            let confirmed = web_sys::window()
-                .map(|w| {
-                    w.confirm_with_message(
-                        "Restore from this bundle? It replaces the current \
-                         configuration and history database at the next \
-                         container restart.",
-                    )
-                    .unwrap_or(false)
-                })
-                .unwrap_or(false);
-            if !confirmed {
-                // Clear the picker so re-selecting the same file fires
-                // another change event.
-                input.set_value("");
+            // Clear the picker now rather than on the answer: re-selecting
+            // the same file has to fire another change event whether the
+            // confirm was taken or dismissed, and the File handle taken
+            // above stays valid once the input is emptied.
+            input.set_value("");
+            pending_bundle.set_value(Some(file));
+            restore_confirm.set(true);
+        }
+        #[cfg(not(feature = "hydrate"))]
+        let _ = ev;
+    };
+
+    // Restore upload, step two: POST the staged bundle as multipart to
+    // /api/v1/backup/restore and surface the server's note. Only the
+    // confirm sheet reaches this.
+    let do_restore = Callback::new(move |()| {
+        #[cfg(feature = "hydrate")]
+        {
+            let Some(file) = pending_bundle.get_value() else {
                 return;
-            }
+            };
+            pending_bundle.set_value(None);
             restore_msg.set("Uploading…".into());
             wasm_bindgen_futures::spawn_local(async move {
                 let form = web_sys::FormData::new().ok();
@@ -99,8 +118,8 @@ pub fn SettingsAdvanced() -> impl IntoView {
             });
         }
         #[cfg(not(feature = "hydrate"))]
-        let _ = ev;
-    };
+        let _ = pending_bundle;
+    });
 
     #[cfg(feature = "hydrate")]
     {
@@ -191,7 +210,7 @@ pub fn SettingsAdvanced() -> impl IntoView {
                 <Toggle
                     checked=nerd_mode
                     label="Show raw engine math everywhere".to_string()
-                    helptext="When on, the irrigation page shows the raw inputs behind the verdict: the forecast intelligence block, ET0 and rain for today and tomorrow with the heat multiplier, the advisory soil model, today's temperature, wind and humidity, and the full skip-check breakdown. Per-device, persisted to localStorage.".to_string()
+                    helptext="Shows the numbers behind the verdict: ET0, rain, the heat multiplier, the soil model and the whole skip check. This device only.".to_string()
                 />
             </Panel>
 
@@ -199,7 +218,7 @@ pub fn SettingsAdvanced() -> impl IntoView {
                 <Toggle
                     checked=readonly
                     label="Hide destructive controls on this device".to_string()
-                    helptext="When on, this device cannot trigger irrigation actions (run zone, stop all, threshold edits, pause toggles). Status and history stay fully visible. Useful for shared iPads, public dashboards, and family devices. Per-device, persisted to localStorage.".to_string()
+                    helptext="This device can watch but not act: no runs, no stops, no edits. History stays visible. For shared screens. This device only.".to_string()
                 />
             </Panel>
 
@@ -211,7 +230,7 @@ pub fn SettingsAdvanced() -> impl IntoView {
                 <Toggle
                     checked=update_check
                     label="Check for new LocalSky releases".to_string()
-                    helptext="Off by default. When on, this device checks https://localsky.io/latest.json at most once per 24 hours and shows the latest version below. Disclosure: that request reveals this device's IP to the localsky.io server; no other data is sent. Per-device, persisted to localStorage.".to_string()
+                    helptext="Checks localsky.io once a day for a newer version. That request shows this device's IP to that server and sends nothing else. This device only.".to_string()
                 />
                 <UpdateStatusLine status=update_status/>
             </Panel>
@@ -227,7 +246,7 @@ pub fn SettingsAdvanced() -> impl IntoView {
                 </header>
 
             <Panel title="Demo mode".to_string()>
-                <p class="settings-page__subtitle" style="margin: 0">
+                <p class="settings-page__subtitle" class:u-m0=true>
                     {move || if demo_mode_active.get() {
                         "Active. All controller actions are recorded but not fired; weather data is simulated."
                     } else {
@@ -237,14 +256,14 @@ pub fn SettingsAdvanced() -> impl IntoView {
             </Panel>
 
             <Panel title="Configuration history".to_string()>
-                <p class="settings-page__subtitle" style="margin: 0 0 1rem">
+                <p class="settings-page__subtitle" class:u-mb4=true>
                     "Every saved change snapshots the previous config first. "
                     "Roll back to any of the last 20 versions using the list below."
                 </p>
                 <Show
                     when=move || !snapshots.get().is_empty()
                     fallback=|| view! {
-                        <p class="settings-page__subtitle" style="margin: 0">
+                        <p class="settings-page__subtitle" class:u-m0=true>
                             "No snapshots yet. The first save records version 1."
                         </p>
                     }
@@ -263,7 +282,7 @@ pub fn SettingsAdvanced() -> impl IntoView {
             </Panel>
 
             <Panel title="Backup and restore".to_string()>
-                <p class="settings-page__subtitle" style="margin: 0 0 0.75rem">
+                <p class="settings-page__subtitle" class:u-mb3=true>
                     "One bundle holds the config and the full history database "
                     "(runs, sensor readings, decisions). The VAPID push key and "
                     "instance identity stay out of it on purpose. Restoring a "
@@ -271,18 +290,17 @@ pub fn SettingsAdvanced() -> impl IntoView {
                     "applies on the next engine tick."
                 </p>
                 <div class="settings-form-actions" style="justify-content:flex-start; gap: var(--space-2)">
-                    <a class="setup-footer__btn setup-footer__btn--primary" href="/api/v1/backup" download>
+                    <crate::components::ui::Button variant="primary" size="sm"  class="setup-footer__btn setup-footer__btn--primary" href="/api/v1/backup" download=true>
                         "Download backup"
-                    </a>
-                    <label class="setup-footer__btn setup-footer__btn--ghost" style="cursor:pointer">
-                        "Restore from bundle…"
-                        <input
-                            type="file"
-                            accept=".tar.gz,.tgz,application/gzip"
-                            style="display:none"
-                            on:change=on_restore_file
-                        />
-                    </label>
+                    </crate::components::ui::Button>
+                    <crate::components::ui::Button variant="secondary" size="sm"
+                        on_click=Callback::new(move |_| {
+                            #[cfg(feature = "hydrate")]
+                            if let Some(input) = restore_input.get() { input.click(); }
+                        })>"Restore from bundle…"</crate::components::ui::Button>
+                    <input node_ref=restore_input type="file" accept=".tar.gz,.tgz,application/gzip"
+                        hidden=true on:change=on_restore_file/>
+
                 </div>
                 {move || {
                     let m = restore_msg.get();
@@ -293,7 +311,7 @@ pub fn SettingsAdvanced() -> impl IntoView {
             </Panel>
 
             <Panel title="Raw TOML editor".to_string()>
-                <p class="settings-page__subtitle" style="margin: 0 0 0.75rem">
+                <p class="settings-page__subtitle" class:u-mb3=true>
                     "Direct edit of "
                     <code>"/data/localsky.toml"</code>
                     ". Validates on save (TOML parse + schema invariants). "
@@ -304,6 +322,21 @@ pub fn SettingsAdvanced() -> impl IntoView {
                 <RawTomlEditor/>
             </Panel>
             </section>
+
+            // Always mounted; hidden until the file picker stages a bundle.
+            // Its Restore button is the only path to the upload.
+            <ConfirmSheet
+                visible=restore_confirm
+                title="Restore from this bundle?"
+                body=Signal::derive(|| {
+                    "It replaces the current configuration and history database \
+                     at the next container restart."
+                        .to_string()
+                })
+                confirm_label=Signal::derive(|| "Restore".to_string())
+                danger=true
+                on_confirm=do_restore
+            />
         </div>
     }
 }
@@ -366,7 +399,7 @@ fn SourceStatusList() -> impl IntoView {
                 } else {
                     "Loading source freshness…"
                 };
-                view! { <p class="settings-page__subtitle" style="margin: 0">{msg}</p> }
+                view! { <p class="settings-page__subtitle" class:u-m0=true>{msg}</p> }
             }
         >
             <ul class="source-status-list">
@@ -414,7 +447,7 @@ fn SourceStatusRowView(row: SourceStatusRow) -> impl IntoView {
 }
 
 #[derive(Clone, Default)]
-#[allow(dead_code)] // non-Idle variants are constructed only under feature = "hydrate"
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
 enum UpdateStatus {
     #[default]
     Idle,
@@ -437,28 +470,28 @@ fn UpdateStatusLine(status: RwSignal<UpdateStatus>) -> impl IntoView {
         <div>
             {move || match status.get() {
                 UpdateStatus::Idle => view! {
-                    <p class="settings-page__subtitle" style="margin: 0">
+                    <p class="settings-page__subtitle" class:u-m0=true>
                         "Enable the toggle above to check for updates."
                     </p>
                 }.into_any(),
                 UpdateStatus::Checking => view! {
-                    <p class="settings-page__subtitle" style="margin: 0">
+                    <p class="settings-page__subtitle" class:u-m0=true>
                         "Checking GitHub..."
                     </p>
                 }.into_any(),
                 UpdateStatus::UpToDate { current, latest } => view! {
-                    <p class="settings-page__subtitle" style="margin: 0">
+                    <p class="settings-page__subtitle" class:u-m0=true>
                         {format!("LocalSky v{current} is the latest release (GitHub: v{latest}).")}
                     </p>
                 }.into_any(),
                 UpdateStatus::Available { current, latest, url } => view! {
-                    <p class="settings-page__subtitle" style="margin: 0">
+                    <p class="settings-page__subtitle" class:u-m0=true>
                         {format!("Update available: v{latest} (running v{current}). ")}
                         <a href=url target="_blank" rel="noopener">"Release notes ->"</a>
                     </p>
                 }.into_any(),
                 UpdateStatus::Error(e) => view! {
-                    <p class="settings-page__subtitle" style="margin: 0">
+                    <p class="settings-page__subtitle" class:u-m0=true>
                         {format!("Update check failed: {e}")}
                     </p>
                 }.into_any(),
@@ -597,7 +630,7 @@ fn version_newer(candidate: &str, baseline: &str) -> bool {
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
-#[allow(dead_code)] // only used under feature = "hydrate"
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
 struct CachedUpdate {
     kind: String,
     current: String,
@@ -605,7 +638,7 @@ struct CachedUpdate {
     url: String,
 }
 
-#[allow(dead_code)] // only used under feature = "hydrate"
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
 impl CachedUpdate {
     fn from_status(s: &UpdateStatus) -> Self {
         match s {
@@ -709,14 +742,12 @@ async fn fetch_source_status() -> Option<Vec<SourceStatusRow>> {
     Some(rows)
 }
 
+/// Read `features.demo_mode` off the shared config client. A non-2xx
+/// answer is an Err (the caller keeps the "inactive" default) rather than
+/// an error body decoded as if it were the config.
 #[cfg(feature = "hydrate")]
 async fn fetch_demo_mode() -> Result<bool, String> {
-    use gloo_net::http::Request;
-    let resp = Request::get("/api/config")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    let val: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let val = crate::components::config_client::get_config().await?;
     Ok(val
         .get("features")
         .and_then(|f| f.get("demo_mode"))
@@ -831,9 +862,7 @@ fn RawTomlEditor() -> impl IntoView {
         RawSaveState::Idle => String::new(),
         RawSaveState::Loading => "loading…".to_string(),
         RawSaveState::Saving => "saving…".to_string(),
-        RawSaveState::Saved => {
-            "saved. Container will load the new config on next restart.".to_string()
-        }
+        RawSaveState::Saved => crate::voice::SAVED_NEEDS_RESTART.to_string(),
         RawSaveState::Error(e) => format!("error: {e}"),
         // The server's own prose, which already explains what a zone slug
         // holds and why renaming one is not recoverable.
@@ -852,13 +881,13 @@ fn RawTomlEditor() -> impl IntoView {
             prop:value=move || text.get()
         />
         <div class="raw-toml-actions">
-            <button
-                class="btn btn-primary"
-                on:click=on_save
-                disabled=move || matches!(state.get(), RawSaveState::Saving | RawSaveState::Loading)
-            >
+            <crate::components::ui::Button
+    variant="primary"
+    size="md"
+    on_click=Callback::new(on_save)
+    disabled=Signal::derive(move || matches!(state.get(), RawSaveState::Saving | RawSaveState::Loading))>
                 "Save"
-            </button>
+            </crate::components::ui::Button>
             // Only rendered on the one refusal an operator can legitimately
             // answer. Keeps the guard's friction (they still have to affirm)
             // while making it answerable from the editor that was refused.

@@ -1,0 +1,608 @@
+@use "mixins" as *;
+
+// stop-all, mobile nav, mobile irrigation views
+//
+// Split out of main.scss, which had grown to 11,330 lines.
+// Load order is the cascade: see the @use list in main.scss.
+
+// ─────────────────────────────────────────────────────────────────────
+// Emergency Stop: compact inline pill, NOT a full-width glass panel.
+// Sits directly under the hero, anchored left so it doesn't span the
+// page. Uses solid danger red when armed (any zone running) so it's
+// genuinely unmistakable. When no zones are running it grays out.
+// ─────────────────────────────────────────────────────────────────────
+
+// Emergency stop. A quiet card while idle; a danger-tinted, glowing
+// card while anything runs. Lead row (icon + title + state line) with
+// the action right-aligned, wrapping to full-width on narrow screens.
+.stop-all {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  background: var(--elev-1);
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
+  isolation: isolate;
+  transition: border-color var(--motion-base) ease, background var(--motion-base) ease, box-shadow var(--motion-base) ease;
+}
+.stop-all--armed {
+  background: color-mix(in oklab, var(--accent-danger) 10%, var(--elev-1));
+  border-color: color-mix(in oklab, var(--accent-danger) 45%, transparent);
+  box-shadow: 0 4px 22px color-mix(in oklab, var(--accent-danger) 22%, transparent);
+}
+
+.stop-all__lead {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: 1;
+  min-width: 220px;
+}
+.stop-all__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  flex: none;
+  border-radius: 50%;
+  color: var(--text-faint);
+  background: var(--elev-2);
+  border: 1px solid var(--elev-border);
+}
+.stop-all--armed .stop-all__icon {
+  color: var(--on-danger);
+  background: var(--accent-danger);
+  border-color: color-mix(in oklab, var(--accent-danger) 70%, #000);
+  animation: pulse-fade 1.6s ease-in-out infinite;
+}
+@include reduced-motion {
+  .stop-all--armed .stop-all__icon { animation: none; }
+}
+.stop-all__text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+
+// The mono caps title used by the two control panels.
+.override-panel__title,
+.stop-all-title {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  font-weight: 700;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.stop-all--armed .stop-all-title { color: var(--accent-danger); }
+
+.stop-all-help {
+  margin: 0;
+  font-size: var(--text-body-sm);
+  color: var(--text-dim);
+  line-height: var(--leading-snug);
+  min-width: 0;
+}
+
+@include phone {
+  .stop-all-btn { flex: 1 1 100%; }
+}
+
+// Actually-red button. Solid danger fill (not the faint clay tint the
+// .btn-clay-hot variant was producing). White text, sharp red glow on
+// hover, scales-down press feedback.
+.stop-all-btn { flex-shrink: 0; margin: 0; }
+
+// Disarmed: the base card styling above IS the quiet state; nothing
+// extra needed (armed styling is gated on .stop-all--armed).
+
+.radar-time {
+  flex: 1;
+  text-align: left;
+  color: var(--accent);
+}
+
+.radar-attr {
+  font-size: 0.7rem;
+  color: var(--text-faint);
+  text-decoration: none;
+  &:hover { color: var(--text-dim); }
+}
+
+.leaflet-control-attribution {
+  background: rgba(0, 0, 0, 0.55) !important;
+  color: var(--text-faint) !important;
+  font-size: 0.65rem !important;
+  a { color: var(--text-dim) !important; }
+}
+
+// ---------------- Footer ----------------
+
+.site-footer {
+  margin-top: 1.5rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--text-faint);
+  letter-spacing: 0.05em;
+}
+
+.footer-battery {
+  &.bat-good { color: var(--accent-good); }
+  &.bat-mid  { color: var(--accent-warm); }
+  &.bat-bad  { color: var(--accent-hot); }
+}
+
+.not-found {
+  padding: 4rem 1rem;
+  text-align: center;
+  color: var(--text-dim);
+}
+
+@include phone {
+  .hero { grid-template-columns: 1fr; text-align: center; }
+  .wind-row { grid-template-columns: 1fr; justify-items: center; }
+  .lightning-row { grid-template-columns: 1fr; justify-items: center; }
+  .solar-row { grid-template-columns: 1fr; }
+  .radar-map { height: 320px; }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Mobile bottom-tab nav. Always rendered in the DOM; CSS gates its
+// visibility. The .page container is wider than 760px on desktop, so the
+// bar stays hidden via `display: none` and only appears at phone widths.
+// ─────────────────────────────────────────────────────────────────────────
+.mobile-tab-bar {
+  display: none;
+}
+
+@include phone {
+  .mobile-tab-bar {
+    display: flex;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: var(--z-nav);
+    justify-content: space-around;
+    align-items: stretch;
+    padding: 0.4rem 0.5rem;
+    // env(safe-area-inset-bottom) is non-zero only when viewport-fit=cover
+    // (set in shell()). On notched iPhones this lifts the bar off the home
+    // indicator so it doesn't sit half-occluded.
+    padding-bottom: calc(0.4rem + env(safe-area-inset-bottom));
+    background: rgba(8, 12, 20, 0.78);
+    -webkit-backdrop-filter: var(--blur-chrome);
+    backdrop-filter: var(--blur-chrome);
+    border-top: 1px solid var(--glass-border);
+    box-shadow:
+      0 -4px 20px rgba(0, 0, 0, 0.5),
+      var(--specular);
+  }
+
+  .mobile-tab {
+    position: relative; // anchors .mobile-tab-badge
+    flex: 1 1 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.15rem;
+    padding: 0.4rem 0.25rem;
+    min-height: 44px; // HIG/Material touch-target floor
+    color: var(--text-dim);
+    text-decoration: none;
+    border-radius: 10px;
+    transition: color 0.15s ease, transform 0.08s ease, background 0.15s ease;
+  }
+
+  .mobile-tab.is-on {
+    color: var(--text-bright);
+    background: rgba(255, 255, 255, 0.05);
+  }
+
+  .mobile-tab-glyph {
+    font-size: 1.2rem;
+    line-height: 1;
+  }
+
+  .mobile-tab-label {
+    font-size: 0.65rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    font-family: var(--font-display);
+  }
+
+  // Suggestions count on the Zones tab: the desktop sidebar badge's
+  // geometry and --attention tint, riding the glyph's upper corner. The
+  // component renders no element at zero.
+  .mobile-tab-badge {
+    position: absolute;
+    top: 2px;
+    right: calc(50% - 1.6rem);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 0.95rem;
+    padding: 0 4px;
+    border-radius: 999px;
+    font-size: var(--text-micro);
+    font-weight: 700;
+    line-height: 1.3;
+    color: var(--attention);
+    background: color-mix(in oklab, var(--attention) 16%, transparent);
+    border: 1px solid color-mix(in oklab, var(--attention) 40%, transparent);
+    white-space: nowrap;
+  }
+
+  // Tactile press feedback. Disabled when the user prefers reduced motion.
+  @media (prefers-reduced-motion: no-preference) {
+    .mobile-tab:active {
+      transform: scale(0.94);
+    }
+  }
+
+  // Lift body content above the bar so the last bento cell isn't covered.
+  // 64px bar + safe-area + a bit of breathing room.
+  body {
+    padding-bottom: calc(72px + env(safe-area-inset-bottom));
+  }
+
+  // The pre-existing .page already had bottom padding (~4rem) for the iOS
+  // home indicator; under the bottom-tab bar that's no longer enough. Push
+  // .page bottom past the bar entirely.
+  .page {
+    padding-bottom: calc(4rem + env(safe-area-inset-bottom));
+  }
+
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// "Now running" banner. Always present in the irrigation page DOM; renders
+// only when at least one zone is running (the component returns ().into_any()
+// when none are). Sticky to the top of /irrigation so a running zone is
+// always one tap from being stopped, regardless of scroll position.
+// ─────────────────────────────────────────────────────────────────────────
+.running-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 0.7rem 0.95rem;
+  margin: 0 0 1rem 0;
+  @include surface($background: (linear-gradient(
+      180deg,
+      color-mix(in oklab, var(--verdict-run) 18%, transparent),
+      color-mix(in oklab, var(--verdict-run) 5%, transparent)
+    ),
+    var(--glass-bg)), $border: (1px solid color-mix(in oklab, var(--verdict-run) 35%, transparent)), $radius: (var(--radius)), $shadow: (0 6px 24px color-mix(in oklab, var(--verdict-run) 18%, transparent),
+    var(--specular)));
+  // Watering NOW is a positive, working state -> verdict-run teal, not red. Red
+  // is the STOP semantic (kept on the stop button); a red banner + red stop
+  // button destroyed the signal. (S4 verdict-color discipline.)
+
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+
+}
+
+.running-banner-pulse {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--verdict-run);
+  box-shadow: 0 0 12px color-mix(in oklab, var(--verdict-run) 90%, transparent);
+  --pulse-min: 0.45;
+  animation: pulse-scale 1.6s ease-in-out infinite;
+}
+
+@include reduced-motion {
+  .running-banner-pulse {
+    animation: none;
+    opacity: 0.85;
+  }
+}
+
+.running-banner-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.running-banner-zone {
+  font-family: var(--font-display);
+  font-size: 1rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-bright);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.running-banner-meta {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  margin-top: 0.1rem;
+}
+
+// Live measured flow from the controller's flow meter, shown only while a
+// zone runs and the controller reports flow. Slightly brighter than meta
+// so the live reading reads as the active number.
+.running-banner-flow {
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent, var(--text-bright));
+  margin-top: 0.1rem;
+}
+
+.running-banner-stop {
+  flex: 0 0 auto;
+  padding: 0.55rem 1.1rem;
+  font-size: 0.85rem;
+  letter-spacing: 0.06em;
+}
+
+@include phone {
+  // On mobile, stick to the top of the scroll container so the banner stays
+  // visible while the user scrolls through bento cells.
+  .running-banner {
+    position: sticky;
+    top: 0;
+    z-index: var(--z-nav);
+    margin: -0.25rem -0.25rem 1rem -0.25rem;
+    border-radius: var(--radius-md);
+  }
+}
+
+// Soil-anomaly banner. Mirrors the running-banner layout but uses the warn
+// token (amber) instead of the verdict-run teal: a suspect/offline probe is a
+// "needs attention" state, not a positive working one. Quiet by default
+// (the component renders nothing when there are no anomalies).
+.anomaly-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 0.7rem 0.95rem;
+  margin: 0 0 1rem 0;
+  @include surface($background: (linear-gradient(
+      180deg,
+      color-mix(in oklab, var(--accent-warn) 16%, transparent),
+      color-mix(in oklab, var(--accent-warn) 5%, transparent)
+    ),
+    var(--glass-bg)), $border: (1px solid color-mix(in oklab, var(--accent-warn) 35%, transparent)), $radius: (var(--radius)), $shadow: (0 6px 24px color-mix(in oklab, var(--accent-warn) 14%, transparent),
+    var(--specular)));
+
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+
+  // contain:inline-size severs a mobile LAYOUT-VIEWPORT blowout: .anomaly-banner-line
+  // is white-space:nowrap, and its min-content width otherwise propagates to the
+  // document preferred width, so mobile Chrome expands the layout viewport to fit
+  // it (an active anomaly blew /irrigation + /zones out to ~637px on a 390px
+  // phone). The line already carries overflow:hidden + text-overflow:ellipsis;
+  // they only engage once this flex parent is contained. Same fix as .hourly-scroll.
+  contain: inline-size;
+}
+
+.anomaly-banner-icon {
+  flex: 0 0 auto;
+  width: 1.5rem;
+  height: 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-family: var(--font-display);
+  font-weight: 700;
+  color: var(--accent-warn);
+  background: color-mix(in oklab, var(--accent-warn) 16%, transparent);
+}
+
+.anomaly-banner-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.anomaly-banner-line {
+  font-size: 0.85rem;
+  color: var(--text-bright);
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.anomaly-banner-link {
+  flex: 0 0 auto;
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent-warn);
+  text-decoration: none;
+  border: 1px solid color-mix(in oklab, var(--accent-warn) 40%, transparent);
+  border-radius: 999px;
+  padding: 0.35rem 0.8rem;
+
+  &:hover {
+    background: color-mix(in oklab, var(--accent-warn) 12%, transparent);
+  }
+}
+
+@include phone {
+  .anomaly-banner {
+    margin: -0.25rem -0.25rem 1rem -0.25rem;
+    border-radius: var(--radius-md);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Phase 3: mobile irrigation views (Now / Zones / Schedule / Zone detail).
+// All driven by an is_mobile RwSignal<bool> in App() context; the SCSS here
+// styles the mobile-only nodes. They're hidden on desktop because the
+// dispatcher in IrrigationPage doesn't render them when is_mobile=false.
+// ─────────────────────────────────────────────────────────────────────────
+
+.mobile-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  width: 100%;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Bottom sheets (custom duration picker, stop-all confirm). Slide up from
+// the bottom over a backdrop. Animated; respects prefers-reduced-motion.
+// ─────────────────────────────────────────────────────────────────────────
+
+.bottom-sheet-body {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+}
+
+.bottom-sheet-actions {
+  display: grid;
+  grid-template-columns: 1fr 2fr;
+  gap: 0.55rem;
+  margin-top: 0.25rem;
+}
+
+.bottom-sheet-actions .btn {
+  flex: 1;
+  min-height: 48px;
+  font-size: 0.95rem;
+  letter-spacing: 0.04em;
+}
+
+// The centralized notice popup (notice_center). Copy lines wrap like the
+// long-form banner lines used to (entity ids are one unbreakable token),
+// and the action row holds up to three affordances (navigate / snooze /
+// dismiss), so it is a wrapping flex row rather than the confirm sheet's
+// two-column grid.
+// Every notice line is one escaped sentence (the builders return plain
+// Strings), so this styles text and nothing else.
+.notice-popup__line {
+  margin: 0 0 0.6rem 0;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.notice-popup__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  margin-top: 0.5rem;
+
+  .btn {
+    flex: 1 1 auto;
+    min-height: 44px;
+    font-size: 0.9rem;
+    letter-spacing: 0.04em;
+  }
+}
+
+// (Removed the orphaned .duration-slider block: it had zero references in any
+// .rs/.html/.js source - every range input uses .slider-clay or
+// .ui-slider__input - so it was dead CSS with the same invisible-focus defect.)
+
+// ─────────────────────────────────────────────────────────────────────────
+// Install-PWA banner. Renders at the top of the page when the browser is
+// installable (Chrome beforeinstallprompt fired, or iOS Safari without
+// standalone display-mode). Two variants share the same shell; iOS skips
+// the CTA button because Apple gates the install behind the Share menu.
+// ─────────────────────────────────────────────────────────────────────────
+
+.install-prompt {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 0.65rem 0.9rem;
+  margin: 0 0 1rem 0;
+  border-radius: var(--radius);
+  border: 1px solid rgba(74, 200, 255, 0.35);
+  background:
+    linear-gradient(180deg, rgba(74, 200, 255, 0.16), rgba(74, 200, 255, 0.04)),
+    var(--glass-bg);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--specular);
+  position: relative;
+}
+
+.install-prompt-icon {
+  font-size: 1.45rem;
+  flex: 0 0 auto;
+  filter: drop-shadow(0 0 6px rgba(74, 200, 255, 0.45));
+}
+
+.install-prompt-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.install-prompt-title {
+  font-family: var(--font-display);
+  font-size: 0.85rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-bright);
+}
+
+.install-prompt-body {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  line-height: 1.4;
+  margin-top: 0.1rem;
+}
+
+.install-prompt-cta {
+  // Placement only; the <Button> primitive owns padding / font / touch target.
+  flex: 0 0 auto;
+}
+
+.install-prompt-close {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: 1.05rem;
+  line-height: 1;
+  padding: 0.35rem 0.45rem;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: background 0.12s ease, color 0.12s ease;
+  flex: 0 0 auto;
+}
+
+.install-prompt-close:hover,
+.install-prompt-close:active {
+  color: var(--text-bright);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.install-prompt-share {
+  display: inline-block;
+  padding: 0 0.2em;
+  color: #4ac8ff;
+  font-weight: 600;
+}
+
+@media (max-width: 540px) {
+  .install-prompt {
+    flex-wrap: wrap;
+    padding: 0.7rem 0.85rem;
+  }
+  .install-prompt-icon {
+    align-self: flex-start;
+  }
+  .install-prompt-cta {
+    flex-basis: 100%;
+    margin-top: 0.25rem;
+  }
+}

@@ -1,0 +1,1026 @@
+@use "mixins" as *;
+
+// panel variants and the verdict strip
+//
+// Split out of main.scss, which had grown to 11,330 lines.
+// Load order is the cascade: see the @use list in main.scss.
+
+// ─────────────────────────────────────────────────────────────────────
+// Panel variants (the "where does the eye land?" design language)
+// ─────────────────────────────────────────────────────────────────────
+// .panel is the default surface. Variants below tune density + accent:
+//
+//   .panel.is-tier-1   primary surface: brand gradient accent stripe
+//                      at the top, slightly larger inner spacing.
+//                      Use ONCE per route.
+//   .panel--metric     big-number focused; tight gap; big-number
+//                      always lives on top, supporting rows below.
+//   .panel--data       table-style dense data; smaller body-sm text,
+//                      compact gap between rows.
+//   .panel--control    interactive controls + forms; comfortable gap,
+//                      no accent treatment.
+//   .panel--compact    shrunk padding (use sparingly, for tertiary
+//                      sidebar-ish panels).
+//
+// All variants share the .panel base glass + radius. Variants only
+// modify padding, gap, type scale, and the optional accent stripe.
+
+// Tier-1: primary surface with the signature brand gradient accent.
+// The ::after stripe is a 3-pixel-tall blue→teal sweep at the top
+// edge, the visual signature that ties the panel to the brand mark.
+.panel.is-tier-1 {
+  padding: var(--space-5) var(--space-6) var(--space-6);
+}
+.panel.is-tier-1::after {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 3px;
+  background: var(--grad-flow);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  pointer-events: none;
+  z-index: var(--z-base);
+}
+
+// Tier-2: standard panel with a subtle accent on the title row.
+// (The .panel-title naturally gets the brand-faint eyebrow color.)
+
+// Standardized panel header row: title on the left, optional action
+// chip or eyebrow on the right. Replaces the inline-style of putting
+// the title in an h2 with no flex container.
+.panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+.panel__tools { display: flex; align-items: center; gap: var(--space-2); }
+.panel__tools:empty { display: none; }
+
+.kv {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-family: var(--font-mono);
+  .k {
+    text-transform: uppercase;
+    font-size: 0.7rem;
+    letter-spacing: 0.08em;
+    color: var(--text-faint);
+  }
+  .v {
+    font-weight: 600;
+    color: var(--text);
+  }
+  .v.big {
+    font-size: 1.6rem;
+  }
+}
+
+// Cloud-only empty state (Wave 2). A weather-only / cloud-forecast deployment
+// has no physical station, so the station-only panels (Sun illuminance,
+// Lightning, the live "now" wind sample) render a DELIBERATE empty state
+// instead of a permanently-zeroed reading. The treatment reads as "by design,
+// add hardware to unlock", never "broken / missing": a quiet centered message
+// with a source-tinted link to the data-sources page. Components inline-style
+// the copy color today; this rule owns the layout + the on-brand link so the
+// empty state matches the rest of the design language.
+.panel-empty {
+  margin: auto;
+  max-width: 24ch;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  line-height: 1.45;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+
+  a {
+    color: var(--entity-source);
+    text-decoration: none;
+    border-bottom: 1px dashed transparent;
+    transition: color var(--motion-fast) var(--ease-out),
+      border-color var(--motion-fast) var(--ease-out);
+    &:hover,
+    &:focus-visible {
+      color: var(--text-bright);
+      border-bottom-color: color-mix(in oklab, var(--entity-source) 55%, transparent);
+    }
+  }
+}
+
+// The "illuminance: station only" placeholder in the Sun panel: a muted kv row
+// whose value reads as an intentional not-applicable, not a missing number.
+.kv--muted .v {
+  color: var(--text-dim);
+  font-size: 0.8em;
+  font-weight: 500;
+}
+
+// ---------------- Wind ----------------
+
+.wind-evidence {
+  margin: -0.35rem 0 1rem;
+  color: var(--text-dim);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  summary { cursor: pointer; font-family: var(--font-mono); }
+  p { margin: 0.4rem 0 0; }
+  a { color: var(--text-bright); text-underline-offset: 0.2em; }
+}
+
+.wind-row {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 1.2rem;
+  align-items: center;
+}
+
+.compass {
+  position: relative;
+  width: 200px;
+  height: 200px;
+  filter: drop-shadow(0 8px 18px rgba(0, 0, 0, 0.32));
+}
+
+.compass-svg { width: 100%; height: 100%; overflow: visible; }
+
+// Disc backdrop. Outer border is the ring; inner ring + ticks paint
+// over it for depth.
+.compass-disc-border {
+  stroke: var(--border-strong);
+  stroke-width: 1;
+}
+.compass-inner-ring {
+  stroke: color-mix(in oklab, var(--text-bright) 8%, transparent);
+  stroke-width: 1;
+}
+
+// 16 rose-of-the-winds ticks. Cardinal four are thicker + brighter
+// so the orientation reads at a glance even when the needle is moving.
+.compass-tick {
+  stroke: var(--text-faint);
+  stroke-width: 1;
+  stroke-linecap: round;
+  opacity: 0.75;
+}
+.compass-tick--cardinal {
+  stroke: var(--text-dim);
+  stroke-width: 2;
+  opacity: 1;
+}
+
+.compass-mark {
+  text-anchor: middle;
+  dominant-baseline: central;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 700;
+  fill: var(--text);
+  letter-spacing: 0.04em;
+}
+.compass-mark--n {
+  fill: var(--accent);
+}
+
+// Needle. Two-tone: the N half is the brand accent (this is where the
+// wind is coming from), the S half is a muted ink tail so it reads as a
+// pointer, not a balanced compass needle.
+.compass-needle {
+  transform-origin: 100px 100px;
+  transition: transform 0.6s cubic-bezier(0.25, 1.5, 0.5, 1);
+}
+.compass-needle-n {
+  filter: drop-shadow(0 0 6px color-mix(in oklab, var(--accent) 55%, transparent));
+}
+.compass-needle-s {
+  opacity: 0.85;
+}
+
+// Hub. A jeweled center for visual depth: outer rim, mid disc with
+// a soft inset gradient, then a small jewel dot of the brand accent.
+.compass-hub-rim {
+  fill: var(--bg-deep);
+  stroke: color-mix(in oklab, var(--text-bright) 25%, transparent);
+  stroke-width: 1;
+}
+.compass-hub-jewel {
+  fill: var(--accent);
+  filter: drop-shadow(0 0 3px color-mix(in oklab, var(--accent) 70%, transparent));
+}
+
+.compass-readout {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  pointer-events: none;
+  .compass-card {
+    font-family: var(--font-mono);
+    font-size: 1.35rem;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .compass-deg {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--text-faint);
+  }
+}
+
+.wind-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.wind-bar {
+  display: grid;
+  grid-template-columns: 60px 1fr 90px;
+  gap: 0.6rem;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+}
+
+.wind-bar-label {
+  color: var(--text-faint);
+  text-transform: uppercase;
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+}
+
+.wind-bar-track {
+  height: 8px;
+  background: var(--bg-panel-soft);
+  border-radius: 999px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.wind-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.6s ease-out;
+}
+
+.wind-bar-cool .wind-bar-fill { background: var(--accent-cool); }
+.wind-bar-mid  .wind-bar-fill { background: var(--accent); }
+.wind-bar-hot  .wind-bar-fill { background: var(--accent-hot); }
+.wind-bar-live .wind-bar-fill {
+  background: linear-gradient(90deg, var(--accent-good), var(--accent-warm));
+  box-shadow: 0 0 8px color-mix(in oklab, var(--accent-good) 40%, transparent);
+}
+
+.wind-bar-value {
+  text-align: right;
+  color: var(--text);
+}
+
+// ---------------- Rain ----------------
+
+.rain-pill {
+  align-self: flex-start;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-panel-soft);
+  color: var(--text-dim);
+  &.kind-rain { color: var(--accent-rain); border-color: var(--accent-rain); }
+  &.kind-hail { color: var(--accent-warm); border-color: var(--accent-warm); }
+}
+
+.rain-rate {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.rain-meter {
+  height: 10px;
+  border-radius: 999px;
+  background: var(--bg-panel-soft);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.rain-meter-fill {
+  height: 100%;
+  // Water family -> blue, tracking the rain accent (was a bespoke cyan).
+  background: linear-gradient(90deg, var(--accent-rain), var(--brand-blue-700));
+  box-shadow: 0 0 8px color-mix(in oklab, var(--accent-rain) 40%, transparent);
+  transition: width 0.6s ease-out;
+}
+
+.rain-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.4rem 1rem;
+}
+
+// ---------------- Lightning ----------------
+
+.lightning-row {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 1rem;
+  align-items: center;
+}
+
+// Cloud-only Lightning panel (Wave 2): no station -> no strike buffer, so the
+// radar grid is replaced by a single centered empty state. Collapse the
+// two-column radar layout to one centered cell and hold the radar's height so
+// the panel doesn't jump between the live and empty states.
+.lightning-row.lightning-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 180px;
+}
+
+.strike-radar {
+  width: 180px;
+  height: 180px;
+  background: radial-gradient(circle, var(--bg-panel-soft) 0%, var(--bg-deep) 80%);
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  .ring { fill: none; stroke: color-mix(in oklab, var(--accent-lightning) 18%, transparent); stroke-width: 0.6; }
+  .ring.outer { stroke: color-mix(in oklab, var(--accent-lightning) 35%, transparent); stroke-width: 0.8; }
+  .ring.center { fill: var(--accent-lightning); stroke: none; }
+  .ring.axis { stroke: color-mix(in oklab, var(--accent-lightning) 8%, transparent); stroke-width: 0.4; }
+}
+
+.strike-dot {
+  fill: var(--accent-lightning);
+  filter: drop-shadow(0 0 4px color-mix(in oklab, var(--accent-lightning) 70%, transparent));
+  --pulse-max: 0.85;
+  --pulse-min: 0.45;
+  animation: pulse-fade 2.4s infinite ease-in-out;
+}
+
+.lightning-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+// Shown only while Blitzortung community strikes are in the buffer:
+// their CC BY-SA terms require the source be identified wherever the
+// data renders, and this panel shares the radar layer's strike buffer.
+.lightning-attribution {
+  margin: 0.6rem 0 0;
+  font-size: var(--text-meta);
+  color: var(--text-dim);
+
+  a {
+    color: inherit;
+    text-decoration: underline;
+  }
+}
+
+// ---------------- Pressure ----------------
+
+.pressure-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.trend {
+  font-family: var(--font-mono);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  &-rising  { color: var(--accent-good); border-color: color-mix(in oklab, var(--accent-good) 35%, transparent); }
+  &-falling { color: var(--accent-hot);  border-color: color-mix(in oklab, var(--accent-hot) 35%, transparent); }
+  &-flat,
+  &-steady { color: var(--text-dim); }
+  // The weather hero's pressure tendency uses the BEM modifiers.
+  &--up   { color: var(--accent-good); }
+  &--down { color: var(--accent-rain); }
+  &--flat { color: var(--text-faint); }
+  .trend-arrow { font-size: 1rem; line-height: 1; }
+}
+
+.sparkline {
+  width: 100%;
+  height: 60px;
+  display: block;
+}
+
+.sparkline-path {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  filter: drop-shadow(0 0 4px color-mix(in oklab, var(--accent) 40%, transparent));
+}
+
+.sparkline-axis {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-faint);
+}
+
+// ---------------- Solar ----------------
+
+.solar-row {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: 1rem;
+  align-items: center;
+}
+
+.uv-block {
+  text-align: center;
+  padding: 0.6rem 0.4rem;
+  border-radius: var(--radius-md);
+  background: var(--bg-panel-soft);
+  border: 1px solid var(--border);
+  &.uv-low       { color: var(--accent-good); }
+  &.uv-moderate  { color: var(--accent-warm); }
+  &.uv-high      { color: var(--accent-uv-high); }
+  &.uv-very-high { color: var(--accent-hot); }
+  &.uv-extreme   { color: var(--accent-uv-extreme); }
+}
+
+.uv-number {
+  font-family: var(--font-mono);
+  font-size: clamp(2rem, 4vw, 2.6rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1;
+}
+
+.uv-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 0.4rem;
+}
+
+.uv-bar {
+  height: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.uv-bar-fill {
+  height: 100%;
+  background: currentColor;
+  transition: width 0.6s ease-out;
+}
+
+.solar-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+// ---------------- Radar ----------------
+
+.radar {
+  margin-top: 0.5rem;
+}
+
+.radar-panel {
+  padding: 0;
+  overflow: hidden;
+}
+
+.radar-panel .panel-title {
+  padding: 1rem 1.2rem 0;
+}
+
+// Positioned wrapper around #radar-map. The JS-built Layers chip +
+// drawer (public/radar.js) are absolutely positioned against it: they
+// can't live inside the map div because its role="img" makes
+// descendants presentational to assistive tech.
+.radar-map-shell {
+  position: relative;
+}
+
+// "No location set" note over an unlocated install's placeholder map
+// (radar.js adds/removes it as `located` flips). Sits on the shell for
+// the same assistive-tech reason as the Layers chip.
+.radar-unlocated-note {
+  position: absolute;
+  top: var(--space-2);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: var(--z-raised); // over the map, which traps Leaflet in its own context
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--bg-deep) 82%, transparent);
+  color: var(--text-dim);
+  font-size: var(--text-caption);
+  white-space: nowrap;
+  a {
+    color: var(--accent);
+    font-weight: 600;
+  }
+}
+
+.radar-map {
+  width: 100%;
+  height: 480px;
+  background: var(--bg-deep);
+  position: relative;
+  z-index: var(--z-base); // traps every Leaflet pane in a child context
+}
+
+// Leaflet's bundled stylesheet sets .leaflet-container background to #ddd
+// (light gray) by default. On wide screens where the map is in a flex
+// column it can briefly paint that gray strip below the tiles before
+// invalidateSize() repaints. Force the deep-navy app background so any
+// transient gap is invisible.
+.leaflet-container {
+  background: var(--bg-deep);
+}
+
+.radar-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 1.2rem 0.9rem;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  border-top: 1px solid var(--border);
+}
+
+// ------------------------------------------------------------------
+// Claymorphism utilities. Used by the irrigation control surface,
+// available globally for any tactile button or pill. Soft pastel
+// surface, double-shadow (one inset light from top-left, one outset
+// dark from bottom-right). Press inverts the inner/outer shadows so
+// the button feels recessed under the finger.
+// ------------------------------------------------------------------
+
+.slider-clay {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 8px;
+  background: var(--clay-surface);
+  border-radius: 999px;
+  box-shadow: var(--clay-shadow-pressed);
+  // outline:none strips the UA focus ring; these sliders set real watering
+  // behavior (soil threshold + seasonal adjust), so keyboard focus MUST stay
+  // visible (WCAG 2.4.7). :focus-visible restores it: the ring + halo match the
+  // global :focus-visible / .btn pattern, and we KEEP the pressed clay track
+  // shadow alongside the halo so the track does not flatten while focused.
+  outline: none;
+
+  &:focus-visible {
+    @include focus-ring;
+    box-shadow: var(--clay-shadow-pressed), var(--focus-halo);
+  }
+
+  &::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--clay-surface-raised);
+    box-shadow:
+      2px 2px 6px var(--clay-shadow-dark),
+      -2px -2px 4px var(--clay-shadow-light);
+    cursor: grab;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+  }
+  &::-webkit-slider-thumb:active { cursor: grabbing; }
+
+  &::-moz-range-thumb {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--clay-surface-raised);
+    box-shadow:
+      2px 2px 6px var(--clay-shadow-dark),
+      -2px -2px 4px var(--clay-shadow-light);
+    cursor: grab;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+  }
+}
+
+// ------------------------------------------------------------------
+// Top nav. Two claymorphic pill tabs side-by-side; active tab brightens
+// and lifts. Sits inside the existing .header so the brand glyph stays
+// on the left and the tabs cluster on the right where the live
+// indicator used to live.
+// ------------------------------------------------------------------
+
+// Stack containers for the irrigation sub-routes. These replaced a dense
+// 11-cell bento grid with simple vertical flow per page; each sub-route
+// only renders 2-4 panels so the eye has room to land. The bento's own
+// scaffolding (.bento, .bento-irrigation, the .bento-area-* hooks) went
+// with it: no markup had referenced it since the split, so its wide-screen
+// area templates were reshaping a grid nothing rendered.
+.ir-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  // Use the full width rather than a centered narrow column. The extra
+  // horizontal real estate on wide screens goes toward laying the forecast
+  // blocks side-by-side (see .forecast-panel), which SHORTENS the page and
+  // cuts vertical scroll. Each component keeps its own correct size; nothing
+  // is stretched edge-to-edge.
+  width: 100%;
+}
+// The daily watering status anchors the dashboard. Give the hero enough width
+// for a prominent headline; forecast details remain the supporting column.
+.ir-two-col {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-5);
+}
+@media (min-width: 1024px) {
+  .ir-two-col {
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: var(--space-5);
+    align-items: start;
+  }
+  .ir-two-col > .ir-hero-col {
+    grid-column: span 3;
+  }
+  .ir-two-col > .forecast-panel {
+    grid-column: span 4;
+  }
+}
+
+// Stacked hero column: hero on top, Stop All pill underneath. Stop
+// All keeps its left alignment because it sits inside this flex
+// container, which lets the pill be narrower than the column.
+.ir-hero-col {
+  container: irrigation-hero / inline-size;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  align-items: stretch;
+}
+
+// Anchor jump targets sit inside the bento; offset the scroll landing
+// so the section's top edge clears the sticky toolbar plus a small
+// breathing gap. Applied to the cells that carry the chip IDs.
+#ir-today,
+#ir-zones,
+#ir-controls,
+#ir-history {
+  scroll-margin-top: 5rem;
+}
+
+// Smooth scroll project-wide is a one-line win for any anchor jump,
+// not just the toolbar. Safe to apply to html since no other surface
+// currently relies on instant-snap.
+html { scroll-behavior: smooth; }
+
+// Advisor explanation tile under the hero (Phase F). Lazy-fetched on
+// hydrate from /api/irrigation/explanation. Quiet states (offline /
+// disabled / running normally) render as a small inline badge so the
+// hero column doesn't grow when the LLM is down.
+
+.advisor-tile {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  // The advisor is nested supplementary colour UNDER the deterministic
+  // explainer, so it reads as an indented continuation, not a peer card: a
+  // gentle left inset + a quiet info-tinted rule on the left edge tie it to
+  // the explanation above it. Tokens only (was ad-hoc rgba literals); the
+  // tint lives in the water/info family so it never competes with a verdict.
+  margin-top: 0.45rem;
+  margin-left: 0.75rem;
+  padding: 0.55rem 0.75rem;
+  background: color-mix(in oklab, var(--accent-water) 5%, transparent);
+  border: 1px solid color-mix(in oklab, var(--accent-water) 14%, transparent);
+  border-left: 2px solid color-mix(in oklab, var(--accent-water) 35%, transparent);
+  border-radius: var(--radius);
+}
+
+.advisor-label {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent-water);
+  padding-top: 0.1rem;
+  flex-shrink: 0;
+}
+
+.advisor-body {
+  flex: 1;
+  font-size: 0.85rem;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.advisor-text {
+  font-style: italic;
+}
+
+.advisor-state {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: lowercase;
+  color: var(--text-faint);
+}
+
+.advisor-loading { opacity: 0.5; }
+.advisor-quiet { color: var(--text-faint); }
+
+// Front-door watering verdict strip on the Weather home (Wave 2). A compact,
+// persistent anchor into the full irrigation hero: a verdict-colored left
+// stripe (set inline per-snapshot), the verdict word, a one-line reason, and a
+// chevron. The component owns layout + the dynamic verdict color via inline
+// style; this rule layers the affordance the inline style cannot express. It
+// already carries .is-interactive (lift + focus-halo), so here we only add the
+// front-door polish: the trailing chevron nudges right on hover, signalling
+// "this opens the full page", consistent with the design language.
+.home-watering-verdict {
+  // contain:inline-size severs a mobile LAYOUT-VIEWPORT blowout: the reason span
+  // is white-space:nowrap (inline-styled in src/app.rs), and its min-content
+  // width otherwise propagates to the document preferred width, so mobile Chrome
+  // expands the layout viewport to fit it (the home verdict strip inflated the
+  // phone layout to ~1085px). Same fix as .hourly-scroll.
+  contain: inline-size;
+  // Trailing chevron is the last child; ease it on hover so the strip reads as
+  // a door into /irrigation, not a static banner.
+  > span:last-child {
+    transition: transform var(--motion-base) var(--ease-spring),
+      color var(--motion-fast) var(--ease-out);
+  }
+  &:hover > span:last-child,
+  &:focus-visible > span:last-child {
+    transform: translateX(2px);
+    color: var(--text-soft);
+  }
+}
+
+// ------------------------------------------------------------------
+// Per-zone history visualization (Phase E followup).
+//   - Summary tiles row (4 wide on desktop, stacked on mobile)
+//   - Daily-minutes mini bar-chart grid (2x2)
+//   - Recent-runs lists (2x2)
+// All share one /api/irrigation/history?days=30 fetch; aggregated client-side.
+// ------------------------------------------------------------------
+
+// (dead `.zone-card-grid` container removed, it fed the pre-v2 "unified
+// per-zone card" cluster below, which is gone; zero referents. The live
+// zones list uses `.zones-shell` master-detail.)
+
+// (dead `.zone-card__spark* / __toggle / __chev / __runs` removed, zero referents.)
+
+// ------------------------------------------------------------------
+// 7-Day Verdict Strip (Phase A). Full-width row of seven cells, each
+// pre-computed by the same skip-check engine the morning automation
+// uses. Cell border tint encodes the predicted verdict; tooltip
+// surfaces the full reason. Cells are equal-width on desktop, scroll
+// horizontally on narrow screens so glyphs/temps stay readable.
+// ------------------------------------------------------------------
+
+.verdict-strip {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  padding: 1rem 1.25rem 1.1rem;
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+}
+
+.verdict-strip-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  margin-bottom: 0.7rem;
+  flex-wrap: wrap;
+}
+
+.verdict-strip-title {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.verdict-strip-subtitle {
+  font-family: var(--font-mono);
+  font-size: var(--text-meta);
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+}
+
+.verdict-strip-freshness {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  cursor: help;
+  white-space: nowrap;
+}
+
+.verdict-strip-freshness-stale {
+  color: var(--accent-warn);
+  font-weight: 600;
+}
+
+.verdict-strip-cells {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 0.55rem;
+
+  @include phone {
+    grid-template-columns: repeat(7, minmax(86px, 1fr));
+    overflow-x: auto;
+    padding-bottom: 0.4rem;
+  }
+}
+
+.verdict-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.7rem 0.5rem 0.6rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--elev-line);
+  background: var(--surface-softer);
+  font-family: var(--font-mono);
+  text-align: center;
+  transition: background 240ms ease, border-color 240ms ease, box-shadow 240ms ease;
+  cursor: default;
+
+  &-day {
+    font-size: var(--text-meta);
+    letter-spacing: 0.12em;
+    color: var(--text-dim);
+    font-weight: 600;
+  }
+  &-glyph {
+    font-size: 1.7rem;
+    line-height: 1;
+  }
+  &-temp {
+    font-size: 0.95rem;
+    color: var(--text-bright);
+    font-weight: 700;
+  }
+  &-rain {
+    font-size: var(--text-meta);
+    letter-spacing: 0.02em;
+    color: var(--text-dim);
+  }
+  &-tag {
+    margin-top: 0.1rem;
+    font-size: var(--text-micro);
+    letter-spacing: 0.14em;
+    padding: 0.2rem 0.5rem;
+    border-radius: 999px;
+    background: var(--surface-soft);
+    color: var(--text-faint);
+    border: 1px solid var(--elev-line);
+  }
+
+  // Verdict tints. Each kind gets a colored border + matching tag glow, keyed
+  // off the canonical color FAMILIES (Task D): blue = water/rain skip, teal =
+  // satisfied/run, amber = heat-extend, red = alert/stop (freeze · wind ·
+  // restriction). Freeze + wind were previously blue + amber, which collided
+  // with the water + drying-out meanings; they are now both red so a single
+  // color always means the same thing. The cell's tag text ("FREEZE" / "WIND")
+  // carries the specific reason.
+  &-run {
+    border-color: color-mix(in oklab, var(--verdict-run) 30%, transparent);
+    .verdict-cell-tag {
+      color: var(--verdict-run);
+      background: color-mix(in oklab, var(--verdict-run) 12%, transparent);
+      border-color: color-mix(in oklab, var(--verdict-run) 35%, transparent);
+    }
+  }
+  &-extended {
+    border-color: color-mix(in oklab, var(--verdict-extend) 45%, transparent);
+    background: color-mix(in oklab, var(--verdict-extend) 7%, transparent);
+    box-shadow: 0 0 18px color-mix(in oklab, var(--verdict-extend) 12%, transparent);
+    .verdict-cell-tag {
+      color: var(--verdict-extend);
+      background: color-mix(in oklab, var(--verdict-extend) 15%, transparent);
+      border-color: color-mix(in oklab, var(--verdict-extend) 50%, transparent);
+    }
+  }
+  &-skip,
+  &-skip-rain {
+    border-color: color-mix(in oklab, var(--verdict-skip) 38%, transparent);
+    .verdict-cell-tag {
+      color: var(--verdict-skip);
+      background: color-mix(in oklab, var(--verdict-skip) 13%, transparent);
+      border-color: color-mix(in oklab, var(--verdict-skip) 45%, transparent);
+    }
+  }
+  &-skip-freeze {
+    // Alert/stop family (red): freeze gate. Was blue (--accent-cool), which
+    // read as "water"; freeze is a safety stop, not water.
+    border-color: color-mix(in oklab, var(--accent-danger) 50%, transparent);
+    background: color-mix(in oklab, var(--accent-danger) 6%, transparent);
+    .verdict-cell-tag {
+      color: var(--accent-danger);
+      background: color-mix(in oklab, var(--accent-danger) 15%, transparent);
+      border-color: color-mix(in oklab, var(--accent-danger) 55%, transparent);
+    }
+  }
+  &-skip-wind {
+    // Alert/stop family (red): wind gate. Was amber (--accent-warn), which
+    // collided with the "drying out / needs water" amber; wind is a safety
+    // stop. Uses --accent-hot so it stays inside the red family but reads a
+    // half-step apart from the freeze cell next to it.
+    border-color: color-mix(in oklab, var(--accent-hot) 45%, transparent);
+    .verdict-cell-tag {
+      color: var(--accent-hot);
+      background: color-mix(in oklab, var(--accent-hot) 13%, transparent);
+      border-color: color-mix(in oklab, var(--accent-hot) 50%, transparent);
+    }
+  }
+  &-skip-pause {
+    border-color: color-mix(in oklab, var(--verdict-off) 35%, transparent);
+    opacity: 0.85;
+    .verdict-cell-tag {
+      color: var(--text-faint);
+    }
+  }
+  &-skip-law {
+    // The law accent the Week page already uses for a district rule: a
+    // calendar fact, not a weather stop, so not the blue "skip" family.
+    border-color: color-mix(in oklab, var(--accent-danger) 40%, transparent);
+    .verdict-cell-tag {
+      color: var(--accent-danger);
+      background: color-mix(in oklab, var(--accent-danger) 12%, transparent);
+      border-color: color-mix(in oklab, var(--accent-danger) 45%, transparent);
+    }
+  }
+}
+
+// ------------------------------------------------------------------
+// Forecast & Weather panel: live raining-now badge, side-by-side
+// rain sources (Tempest + OpenMeteo), 3 horizontal rain bars
+// (today/tomorrow/3-day) with their skip thresholds marked, water
+// budget kv-grid (ET₀ vs rain), today's temp/wind/humidity row.
+// ------------------------------------------------------------------
+
+.forecast-panel {
+  position: relative;
+  padding: 1.5rem 1.5rem 1.6rem;
+  @include surface($background: (var(--glass-bg)), $border: (1px solid var(--glass-border)), $shadow: (var(--shadow),
+    var(--specular)));
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  isolation: isolate;
+  // Natural height (was height:100% to match the old equal-height 2-col): the
+  // blocks now reflow into columns, so let the panel be as short as its content.
+}
+
+// The forecast data blocks. On wide screens they spread into as many ~300px
+// columns as fit so the panel grows WIDER, not taller -- this is what kills the
+// vertical scroll on an ultrawide. Each block's inner content is width-capped
+// (below) so it stays legible instead of stretching across a wide column.
+.forecast-blocks {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+// On wide screens, pack the blocks into content-width (~330px) columns that fill
+// the panel left-to-right with no dead band down the middle. Each block stays
+// intact and sits at its natural width -- which is also where bars/cards read
+// best (value right next to its label). Masonry-style balance via CSS columns.
+@media (min-width: 1024px) {
+  .forecast-blocks {
+    display: block;
+    column-width: 330px;
+    column-gap: var(--space-6);
+  }
+  .forecast-blocks > .forecast-block {
+    break-inside: avoid;
+    margin-bottom: var(--space-5);
+  }
+}

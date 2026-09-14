@@ -27,7 +27,7 @@
 use leptos::prelude::*;
 
 use crate::components::settings_ui::{SettingsLoadError, SettingsResult};
-use crate::components::ui::{Button, Icon, Panel, SkeletonRows};
+use crate::components::ui::{Button, ConfirmSheet, Icon, Panel, SkeletonRows};
 
 /// One configured source the chain editor can rank for a field.
 #[derive(Clone, Debug, Default)]
@@ -126,6 +126,9 @@ pub fn SettingsDataSources(
     // field_name -> live owner label (from the irrigation snapshot).
     let live_owners: RwSignal<std::collections::BTreeMap<String, String>> =
         RwSignal::new(std::collections::BTreeMap::new());
+    let current_weather: RwSignal<
+        std::collections::BTreeMap<String, crate::weather::CurrentWeatherSample>,
+    > = RwSignal::new(Default::default());
     // The currently-PICKED forecast provider id ("" = Auto/priority).
     let forecast_pick: RwSignal<String> = RwSignal::new(String::new());
     // The live forecast-source label (from the irrigation snapshot's
@@ -171,7 +174,7 @@ pub fn SettingsDataSources(
             gloo_timers::future::TimeoutFuture::new(0).await;
             if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
                 use wasm_bindgen::JsCast;
-                let btn_q = format!("[data-frow=\"{sel}\"] [data-move=\"{btn}\"]");
+                let btn_q = format!("[data-frow=\"{sel}\"] .data-source-chain__move--{btn}");
                 if let Ok(Some(el)) = doc.query_selector(&btn_q) {
                     // A row moved to an end disables the pressed arrow, and a
                     // disabled button cannot take focus; fall through to the
@@ -231,6 +234,7 @@ pub fn SettingsDataSources(
                 }
                 let live = fetch_live_owners().await;
                 live_owners.set(live.owners);
+                current_weather.set(live.current_weather);
                 live_forecast.set(live.forecast_label);
                 live_refresh_epoch.set(live.refresh_epoch);
                 live_tz.set(live.tz);
@@ -317,11 +321,9 @@ pub fn SettingsDataSources(
                         // must wire (non-empty reasons), defer to the banner
                         // below instead of contradicting it.
                         let msg = if reasons.is_empty() {
-                            "Saved. Applied to the live engine; the new source order \
-                             takes effect on the next reading (no restart)."
+                            crate::voice::SAVED_LIVE
                         } else {
-                            "Saved. The source order applied to the live engine; one \
-                             change also needs a restart (see below)."
+                            crate::voice::SAVED_NEEDS_RESTART
                         };
                         crate::components::settings_ui::toast_saved(result_msg, result_ok, msg);
                         // A restart is needed only when the saved config also
@@ -334,6 +336,7 @@ pub fn SettingsDataSources(
                         // reflects the new ownership as it takes effect.
                         let live = fetch_live_owners().await;
                         live_owners.set(live.owners);
+                        current_weather.set(live.current_weather);
                         live_forecast.set(live.forecast_label);
                         live_refresh_epoch.set(live.refresh_epoch);
                         live_tz.set(live.tz);
@@ -506,10 +509,10 @@ pub fn SettingsDataSources(
                     }
                 };
                 // The live owner as its RAW writer label (the snapshot field_sources
-                // value: a config id for a cloud source, the "Tempest" constant for
-                // a Tempest station). chain_row matches this against each row's OWN
-                // writer label, so exactly the right row marks "reporting now" even
-                // for a station (whose display name differs from its label) or two
+                // value: the CONFIG ID of whichever source wrote the field, station
+                // and cloud alike). chain_row matches this against each row's OWN
+                // source id, so exactly the right row marks "reporting now" even for
+                // a station (whose display name differs from its id) or two
                 // same-kind cloud sources (whose display names collide).
                 let field_for_owner = field.clone();
                 let live_owner_raw = move || live_owners.get().get(&field_for_owner).cloned();
@@ -564,6 +567,10 @@ pub fn SettingsDataSources(
                         .collect();
                     view! { <ol class="data-source-chain">{rows}</ol> }.into_any()
                 };
+                let field_for_evidence = field.clone();
+                let evidence = move || current_weather.get().get(&field_for_evidence).map(|sample| {
+                    format!("{} · {}", sample.summary_at(live_refresh_epoch.get()), sample.selection_reason)
+                });
                 let field_for_reset = field.clone();
                 view! {
                     <div class="data-source-row data-source-row--chain">
@@ -581,19 +588,20 @@ pub fn SettingsDataSources(
                                 </span>
                             </div>
                             <Show when=move || is_custom(&field_for_reset_show)>
-                                <button
-                                    type="button"
-                                    class="data-source-chain__reset"
-                                    on:click={
+                                <crate::components::ui::Button
+    variant="secondary"
+    size="sm"
+    on_click=Callback::new({
                                         let field = field_for_reset.clone();
                                         move |_| reset_field(field.clone())
-                                    }
-                                >
+                                    })
+    class="data-source-chain__reset">
                                     "Reset to automatic"
-                                </button>
+                                </crate::components::ui::Button>
                             </Show>
                         </div>
                         {chain_rows}
+                        {move || evidence().map(|text| view! { <p class="data-source-chain__caption">{text}</p> })}
                         <p class="data-source-chain__caption">
                             "Top source that is reporting wins; if it goes quiet the next "
                             "takes over. Drag a row (or use the up/down arrows) to reorder."
@@ -661,7 +669,7 @@ pub fn SettingsDataSources(
                 <p class="settings-page__subtitle">
                     "Pick which cloud service supplies your forecast: the daily and "
                     "hourly outlook, rain expected tomorrow, and the evapotranspiration "
-                    "estimate the engine waters from. This is the main control if you "
+                    "estimate watering is sized from. This is the main control if you "
                     "have no local hardware. \"Auto (follow the chain)\" follows the "
                     "chain of your forecast sources; Open-Meteo (free, no key) is the "
                     "built-in default at the end of the chain."
@@ -853,14 +861,36 @@ fn nature_badge(nature: &str) -> impl IntoView {
     }
 }
 
+/// Does THIS chain row's source own its field in the live merge right now?
+///
+/// The snapshot's `field_sources` value is the merge's raw WRITER LABEL, and the
+/// merge stamps every source's CONFIG ID as that label (`runtime::writer_label`
+/// returns `entry.id`) -- a LAN station no differently from a cloud service. So a
+/// row matches on its own id and on nothing else: two same-kind cloud rows (whose
+/// display names collide) and a station (whose display name, "Tempest UDP (LAN)",
+/// is not its id) each resolve to exactly one "reporting now" row.
+///
+/// This page used to special-case the `tempest_udp` / `tempest_ws` kinds to a
+/// hardcoded "Tempest" vendor literal, left from when the UDP path wrote a
+/// constant instead of its id. That constant is gone, so the literal could never
+/// equal the owner: the live station row read "standby" (or "backstop") on the
+/// one page an owner opens to ask which source their temperature comes from.
+/// There is no kind arm here now, so the two cannot drift apart again.
+///
+/// `None` for `cand` is a DISABLED or removed source (the row renders "off"): it
+/// owns nothing, and must not fall into matching a `None` owner.
+fn row_owns_live(cand: Option<&SourceCandidate>, owner: Option<&str>) -> bool {
+    cand.is_some_and(|c| owner == Some(c.id.as_str()))
+}
+
 /// Render ONE ordered-chain row: drag handle, ordinal, friendly source name,
 /// nature badge, live-now marker, and up/down keyboard controls. `cand` is `None`
 /// when the id names a source that is DISABLED or removed (the endpoint only lists
 /// enabled sources): the row renders STRUCK-THROUGH "off, re-enable to use" rather
 /// than silently dropping it, with an extra warning when it is the chain PRIMARY.
-/// `owner` is the live owner's RAW writer label (a config id, or the "Tempest"
-/// constant), matched against each row's own writer label so exactly one row reads
-/// "reporting now" (a station and same-kind clouds all resolve correctly).
+/// `owner` is the live owner's RAW writer label (the config id of whichever source
+/// wrote the field), matched against each row's own source id so exactly one row
+/// reads "reporting now" (a station and same-kind clouds all resolve correctly).
 /// `move_to(field, from, to)` reorders + persists; the drag/drop + arrow handlers
 /// all call it. `focus_row` re-focuses the pressed arrow button on a
 /// keyboard-moved row after the re-render (row key, "up"/"down", bump counter).
@@ -877,7 +907,7 @@ fn chain_row<F>(
     focus_row: RwSignal<(String, &'static str, u32)>,
 ) -> impl IntoView
 where
-    F: Fn(String, usize, usize) + Copy + 'static,
+    F: Fn(String, usize, usize) + Copy + Send + Sync + 'static,
 {
     let ordinal = idx + 1;
     let is_first = idx == 0;
@@ -922,20 +952,12 @@ where
     };
 
     // The live-now marker: the row whose WRITER LABEL matches the live owner is
-    // "reporting now". Match by label (not display name): the snapshot owner is a
-    // config id (cloud) or the "Tempest" constant (station), so a station row
+    // "reporting now". Match by label (not display name), and the label is the
+    // source's config id for every kind (see `row_owns_live`), so a station row
     // (display name "Tempest UDP (LAN)") and two same-kind cloud rows (colliding
     // display names) all resolve correctly. A disabled row is "off"; the terminal
     // link of a multi-link chain is the "backstop"; everything else is "standby".
-    // Mirrors the server-side crate::tempest::state::TEMPEST_LABEL ("Tempest"),
-    // inlined because that merge-engine constant is ssr-only (not compiled into the
-    // wasm/hydrate build). A Tempest station writes this literal into the snapshot
-    // field_sources; every other source writes its config id.
-    let writer_label = match cand.as_ref().map(|c| c.kind.as_str()) {
-        Some("tempest_udp") | Some("tempest_ws") => "Tempest".to_string(),
-        _ => id.clone(),
-    };
-    let is_owner = present && owner.as_deref() == Some(writer_label.as_str());
+    let is_owner = row_owns_live(cand.as_ref(), owner.as_deref());
     let (marker_cls, marker_text) = if !present {
         ("data-source-chain__live--off", "off")
     } else if is_owner {
@@ -1035,15 +1057,14 @@ where
                 // The aria-labels carry "position N of M": after a move, focus
                 // returns to this button on the re-rendered row, so the fresh
                 // label doubles as the screen-reader confirmation of the new
-                // order. `data-move` is the focus-restore hook the effect above
+                // order. The direction class is the focus-restore hook the effect above
                 // queries; it carries no styling.
-                <button
-                    type="button"
-                    class="data-source-chain__move"
-                    data-move="up"
-                    aria-label=format!("Move {name} up, position {ordinal} of {len}")
+                <crate::components::ui::Button variant="secondary" size="sm"
+
+                    class="data-source-chain__move data-source-chain__move--up"
+                    aria_label=format!("Move {name} up, position {ordinal} of {len}")
                     disabled=is_first
-                    on:click=move |_| {
+                    on_click=Callback::new(move |_| {
                         if !is_first {
                             move_to(field_up.clone(), idx, idx - 1);
                             // Re-focus this same arrow on the row at its new
@@ -1054,17 +1075,15 @@ where
                                 *n += 1;
                             });
                         }
-                    }
-                >
+                    })>
                     "\u{25b2}"
-                </button>
-                <button
-                    type="button"
-                    class="data-source-chain__move"
-                    data-move="down"
-                    aria-label=format!("Move {name} down, position {ordinal} of {len}")
+                </crate::components::ui::Button>
+                <crate::components::ui::Button variant="secondary" size="sm"
+
+                    class="data-source-chain__move data-source-chain__move--down"
+                    aria_label=format!("Move {name} down, position {ordinal} of {len}")
                     disabled=is_last
-                    on:click=move |_| {
+                    on_click=Callback::new(move |_| {
                         if !is_last {
                             move_to(field_down.clone(), idx, idx + 1);
                             // Re-focus this same arrow on the row at its new
@@ -1075,10 +1094,9 @@ where
                                 *n += 1;
                             });
                         }
-                    }
-                >
+                    })>
                     "\u{25bc}"
-                </button>
+                </crate::components::ui::Button>
             </span>
         </li>
     }
@@ -1153,6 +1171,33 @@ async fn wait_for_restart_and_reload() {
     }
 }
 
+/// App-level pending state suppresses duplicate notices on individual pages.
+#[derive(Clone, Copy)]
+pub struct RuntimeRestartPending(pub Signal<bool>);
+
+#[component]
+pub fn RuntimeRestartBanner(snap: ReadSignal<crate::model::IrrigationSnapshot>) -> impl IntoView {
+    let reasons = RwSignal::new(Vec::<String>::new());
+    let dismissed = RwSignal::new(false);
+    Effect::new(move |_| {
+        let state = snap.get();
+        let next = if state.restart_required {
+            if state.restart_reasons.is_empty() {
+                vec!["Pending configuration changes need LocalSky to restart.".to_string()]
+            } else {
+                state.restart_reasons
+            }
+        } else {
+            Vec::new()
+        };
+        if reasons.get_untracked() != next {
+            reasons.set(next);
+            dismissed.set(false);
+        }
+    });
+    view! { <RestartBanner reasons dismissed persistent=true/> }
+}
+
 #[component]
 pub fn RestartBanner(
     /// The server's restart_reasons. Empty keeps the banner hidden.
@@ -1160,30 +1205,36 @@ pub fn RestartBanner(
     /// Set true when the user dismisses; keeps the banner hidden until the next
     /// restart-required save resets it.
     dismissed: RwSignal<bool>,
+    /// The app's runtime hold survives route changes and cannot be dismissed.
+    #[prop(default = false)]
+    persistent: bool,
 ) -> impl IntoView {
-    let show = move || !reasons.get().is_empty() && !dismissed.get();
+    let runtime_pending = use_context::<RuntimeRestartPending>();
+    let show = move || {
+        !reasons.get().is_empty()
+            && (persistent || !dismissed.get())
+            && (persistent || !runtime_pending.is_some_and(|pending| pending.0.get()))
+    };
     // Restart lifecycle: idle -> confirm/POST -> overlay until the server
     // cycles -> hard reload. Error text renders inline in the banner.
     let restarting = RwSignal::new(false);
     let restart_err: RwSignal<String> = RwSignal::new(String::new());
+    // Both confirmations are the shared two-step ConfirmSheet now (they used
+    // to be native confirm()s): the restart itself, and -- when the server
+    // answers 409 because a zone is watering -- the force override. The 409
+    // detail names the zones, so it is held in a signal the second sheet's
+    // body reads.
+    let restart_open = RwSignal::new(false);
+    let force_open = RwSignal::new(false);
+    let force_detail: RwSignal<String> = RwSignal::new(String::new());
+    let on_restart = Callback::new(move |_: leptos::ev::MouseEvent| restart_open.set(true));
+
+    // Confirmed restart: POST, then either ride the reload out or, on the
+    // watering guard, stage the force override behind the second sheet.
     #[allow(unused_variables)]
-    let on_restart = Callback::new(move |_: leptos::ev::MouseEvent| {
+    let do_restart = Callback::new(move |()| {
         #[cfg(feature = "hydrate")]
         {
-            let confirmed = web_sys::window()
-                .map(|w| {
-                    w.confirm_with_message(
-                        "Restart LocalSky now? The app is briefly unavailable while it \
-                         comes back (under Docker or the Home Assistant add-on this is \
-                         automatic; a bare process needs its service manager set to \
-                         restart on exit).",
-                    )
-                    .unwrap_or(false)
-                })
-                .unwrap_or(false);
-            if !confirmed {
-                return;
-            }
             restart_err.set(String::new());
             leptos::task::spawn_local(async move {
                 match post_restart(false).await {
@@ -1199,28 +1250,26 @@ pub fn RestartBanner(
                                 v.get("detail").and_then(|d| d.as_str()).map(String::from)
                             })
                             .unwrap_or_else(|| "a zone is currently watering".into());
-                        let force = web_sys::window()
-                            .map(|w| {
-                                w.confirm_with_message(&format!(
-                                    "{detail}\n\nRestart anyway? The shut-off backstop \
-                                     closes valves and boot reconciliation double-checks \
-                                     them."
-                                ))
-                                .unwrap_or(false)
-                            })
-                            .unwrap_or(false);
-                        if !force {
-                            return;
-                        }
-                        match post_restart(true).await {
-                            Ok(()) => {
-                                restarting.set(true);
-                                wait_for_restart_and_reload().await;
-                            }
-                            Err((s, b)) => {
-                                restart_err.set(format!("Restart failed (HTTP {s}): {b}"))
-                            }
-                        }
+                        force_detail.set(detail);
+                        force_open.set(true);
+                    }
+                    Err((s, b)) => restart_err.set(format!("Restart failed (HTTP {s}): {b}")),
+                }
+            });
+        }
+    });
+
+    // Confirmed force: the same POST with force=true.
+    #[allow(unused_variables)]
+    let do_force_restart = Callback::new(move |()| {
+        #[cfg(feature = "hydrate")]
+        {
+            restart_err.set(String::new());
+            leptos::task::spawn_local(async move {
+                match post_restart(true).await {
+                    Ok(()) => {
+                        restarting.set(true);
+                        wait_for_restart_and_reload().await;
                     }
                     Err((s, b)) => restart_err.set(format!("Restart failed (HTTP {s}): {b}")),
                 }
@@ -1239,8 +1288,7 @@ pub fn RestartBanner(
                 </span>
                 <div class="health-banner__text">
                     <strong>"Restart required to apply."</strong>
-                    " Your change is saved, but it needs a restart to take effect. "
-                    "Everything else applied live."
+                    " Your configuration is saved. New watering is on hold until LocalSky restarts to apply the pending changes."
                     // One line per server reason; plain divs keep the banner
                     // tight (no default list margins to fight).
                     {move || reasons.get()
@@ -1261,14 +1309,14 @@ pub fn RestartBanner(
                 >
                     "Restart now"
                 </Button>
-                <Button
+                {(!persistent).then(|| view! { <Button
                     variant="ghost"
                     size="sm"
                     aria_label="Dismiss restart-required notice"
                     on_click=Callback::new(move |_| dismissed.set(true))
                 >
                     "Dismiss"
-                </Button>
+                </Button> })}
             </div>
         </Show>
         // Full-screen wait state while the process cycles; cleared by the
@@ -1281,6 +1329,39 @@ pub fn RestartBanner(
                 </div>
             </div>
         </Show>
+        // Always mounted (each sheet hides itself), so the banner's Show and
+        // the overlay never take a live confirmation down with them.
+        <ConfirmSheet
+            visible=restart_open
+            title="Restart LocalSky now?"
+            body=Signal::derive(|| {
+                "The app is briefly unavailable while it comes back (under Docker or \
+                 the Home Assistant add-on this is automatic; a bare process needs its \
+                 service manager set to restart on exit)."
+                    .to_string()
+            })
+            confirm_label=Signal::derive(|| "Restart now".to_string())
+            on_confirm=do_restart
+        />
+        // The 409 override. Not danger styling: this is a confirm-to-allow
+        // past the watering guard, and the backstop still closes the valves.
+        <ConfirmSheet
+            visible=force_open
+            title="Restart anyway?"
+            body=Signal::derive(move || {
+                let raw = force_detail.get();
+                let detail = raw.trim().trim_end_matches('.').trim_end();
+                let consequence = "The shut-off backstop closes valves and boot \
+                                   reconciliation double-checks them.";
+                if detail.is_empty() {
+                    consequence.to_string()
+                } else {
+                    format!("{detail}. {consequence}")
+                }
+            })
+            confirm_label=Signal::derive(|| "Restart anyway".to_string())
+            on_confirm=do_force_restart
+        />
     }
 }
 
@@ -1456,6 +1537,7 @@ async fn fetch_field_sources() -> Result<FieldSourcesData, String> {
 struct LiveOwners {
     /// field_name -> the source label currently driving that reading.
     owners: std::collections::BTreeMap<String, String>,
+    current_weather: std::collections::BTreeMap<String, crate::weather::CurrentWeatherSample>,
     /// Live forecast-source label (forecast.forecast_source_label).
     forecast_label: String,
     /// UTC epoch of the most recent successful poll (last_refresh_epoch); 0 if
@@ -1504,6 +1586,11 @@ async fn fetch_live_owners() -> LiveOwners {
         .unwrap_or("")
         .to_string();
     LiveOwners {
+        current_weather: v
+            .get("current_weather")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default(),
         owners,
         forecast_label,
         refresh_epoch,
@@ -1533,12 +1620,8 @@ async fn patch_field_chains(
     chosen: std::collections::BTreeMap<String, Vec<String>>,
     forecast_choice: Option<String>,
 ) -> Result<Vec<String>, String> {
-    use gloo_net::http::Request;
-    let cur = Request::get("/api/config")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut cfg: serde_json::Value = cur.json().await.map_err(|e| e.to_string())?;
+    use crate::components::config_client::{get_config, put_config};
+    let mut cfg = get_config().await?;
     if let Some(obj) = cfg.as_object_mut() {
         obj.insert(
             "field_source_chains".into(),
@@ -1558,41 +1641,110 @@ async fn patch_field_chains(
             },
         );
     }
-    let resp = Request::put("/api/config")
-        .json(&cfg)
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::save_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
     // restart_required + restart_reasons: a tunable change (the common case
     // here) hot-reloads and reports restart_required=false; only a change a
-    // boot must wire flags it. Best-effort parse: a missing/old field reads as
-    // "no restart", which is the safe default.
-    let reasons = resp
-        .json::<serde_json::Value>()
-        .await
-        .ok()
-        .filter(|v| {
-            v.get("restart_required")
-                .and_then(|r| r.as_bool())
-                .unwrap_or(false)
-        })
-        .and_then(|v| {
-            v.get("restart_reasons")
-                .and_then(|r| r.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(str::to_string))
-                        .collect()
-                })
-        })
-        .unwrap_or_default();
-    Ok(reasons)
+    // boot must wire flags it. The shared client reads them off the PUT body
+    // (a missing/old field reads as "no restart", the safe default).
+    let outcome = put_config(&cfg).await?;
+    Ok(outcome.restart_reasons)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A chain-row candidate carrying only the two fields the live-owner match
+    /// reads, so a test states the case and nothing else.
+    fn cand(id: &str, kind: &str) -> SourceCandidate {
+        SourceCandidate {
+            id: id.to_string(),
+            kind: kind.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_live_tempest_station_row_is_the_owner_by_its_config_id() {
+        // The regression this page carried: it resolved the tempest_udp /
+        // tempest_ws kinds to a hardcoded "Tempest" writer label while the merge
+        // stamps the source's CONFIG ID, so the station row could never equal the
+        // snapshot owner and rendered "standby" (or "backstop", last in a chain)
+        // while it was in fact the source answering the reading.
+        let station = cand("tempest_lan", "tempest_udp");
+        assert!(
+            row_owns_live(Some(&station), Some("tempest_lan")),
+            "a Tempest UDP row whose config id is the live owner is reporting now"
+        );
+        let cloud_station = cand("tempest_cloud", "tempest_ws");
+        assert!(
+            row_owns_live(Some(&cloud_station), Some("tempest_cloud")),
+            "the Tempest WebSocket kind resolves by config id too"
+        );
+    }
+
+    #[test]
+    fn the_tempest_vendor_literal_is_not_an_owner() {
+        // The dead constant must not come back as a match: "Tempest" is a vendor
+        // name, never a writer label, so it owns nothing on this page.
+        let station = cand("tempest_lan", "tempest_udp");
+        assert!(!row_owns_live(Some(&station), Some("Tempest")));
+    }
+
+    #[test]
+    fn a_cloud_row_matches_only_its_own_id() {
+        // Unchanged behavior, pinned so the station path and the cloud path stay
+        // one rule: two same-kind cloud rows have colliding display names and are
+        // told apart by id alone.
+        let primary = cand("open_meteo", "open_meteo");
+        let second = cand("open_meteo_backup", "open_meteo");
+        assert!(row_owns_live(Some(&primary), Some("open_meteo")));
+        assert!(!row_owns_live(Some(&second), Some("open_meteo")));
+    }
+
+    #[test]
+    fn an_off_row_owns_nothing_and_a_missing_owner_owns_nothing() {
+        // A disabled or removed source renders "off" and must never claim the live
+        // marker. In particular an absent owner must not match an absent candidate.
+        assert!(!row_owns_live(None, Some("tempest_lan")));
+        assert!(!row_owns_live(None, None));
+        let station = cand("tempest_lan", "tempest_udp");
+        assert!(!row_owns_live(Some(&station), None));
+    }
+
+    /// Anti-drift: the label this page matches on is the label the merge actually
+    /// writes. ssr-only because `runtime` is the server build's module (the wasm
+    /// side cannot see it, which is how the vendor literal got inlined here in the
+    /// first place); the assertion holds the two ends together in CI.
+    #[cfg(feature = "ssr")]
+    #[test]
+    fn the_row_matches_the_writer_label_the_merge_stamps_for_a_tempest_source() {
+        use crate::config::schema::{SourceEntry, SourceKind, TempestUdpConfig};
+        let entry = SourceEntry {
+            id: "tempest_lan".to_string(),
+            priority: 100,
+            enabled: true,
+            max_age_s: None,
+            source: SourceKind::TempestUdp(TempestUdpConfig {
+                bind_addr: "0.0.0.0:50222".to_string(),
+                hub_serial: None,
+            }),
+        };
+        let stamped = crate::runtime::writer_label(&entry);
+        assert_eq!(
+            stamped, "tempest_lan",
+            "the merge stamps the config id, not a vendor name"
+        );
+        let row = cand(
+            &entry.id,
+            crate::config::kind_labels::source_kind_label(&entry.source),
+        );
+        assert_eq!(
+            row.kind, "tempest_udp",
+            "this is the station kind under test"
+        );
+        assert!(
+            row_owns_live(Some(&row), Some(stamped.as_str())),
+            "the chain row must match the exact label the merge writes"
+        );
+    }
 }

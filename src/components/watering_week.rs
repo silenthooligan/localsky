@@ -1,4 +1,4 @@
-// P3-8: Watering Week. A read-only 7-day plan: for today + 6 days, what LocalSky
+// Watering Week. A read-only 7-day plan: for today + 6 days, what LocalSky
 // will do (water / skip / blocked) and why, color-coded by category, from the
 // same engine that runs the morning check (the server-precomputed
 // `seven_day_verdicts`). Richer than the compact verdict strip -- full reasons +
@@ -8,17 +8,17 @@
 
 use crate::components::forecast::glyph::weather_code_glyph;
 use crate::components::units_fmt::{
-    depth_value_in, fmt_rain_amount, fmt_temp_short, temp_unit, temp_value, use_unit_prefs,
-    UnitPrefs,
+    fmt_optional_rain_amount, fmt_optional_temp_short, optional_depth_value_in,
+    optional_temp_value, temp_unit, use_unit_prefs, UnitPrefs,
 };
-use crate::ha::snapshot::{DayVerdict, IrrigationSnapshot};
+use crate::model::{DayVerdict, IrrigationSnapshot};
 use crate::timefmt::{format_md, format_wday_short};
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
 
 /// (human label, css-accent modifier) for a day's plan. The modifier keys the
 /// row's accent color; the palette mirrors the verdict strip for consistency.
-/// Categories follow the P3-8 brief: watering (scheduled/smart), rain skip,
+/// Categories: watering (scheduled/smart), rain skip,
 /// blocked-by-law (jurisdictional restriction), freeze, plus wind/pause/other.
 fn category(v: &DayVerdict) -> (&'static str, &'static str) {
     match v.verdict.as_str() {
@@ -26,40 +26,46 @@ fn category(v: &DayVerdict) -> (&'static str, &'static str) {
         // Key on the structured reason_code (P2 units architecture) so the
         // category is unit-independent; legacy cells with an empty code fall back
         // to the baked-reason substring match (the original behavior).
-        "skip" => match crate::gates_catalog::gate_family(&v.reason_code) {
+        "skip" => match crate::gates_catalog::GateFamily::of(&v.reason_code, &v.reason) {
             crate::gates_catalog::GateFamily::Restriction => ("Blocked by watering rules", "law"),
             crate::gates_catalog::GateFamily::Freeze => ("Skipped, freeze risk", "freeze"),
             crate::gates_catalog::GateFamily::Wind => ("Skipped, too windy", "wind"),
             // Saturated soil lands here too: the lawn is skipping BECAUSE
             // it has water, so it reads in the water family rather than as
             // a generic grey skip.
-            crate::gates_catalog::GateFamily::Water if v.reason_code == "soil_saturation" => {
-                ("Skipped, soil already wet", "rain")
+            crate::gates_catalog::GateFamily::Water => {
+                match crate::gates_catalog::water_kind(&v.reason_code, &v.reason) {
+                    crate::gates_catalog::WaterKind::Soil => ("Skipped, soil already wet", "rain"),
+                    crate::gates_catalog::WaterKind::Recent => ("Skipped, recent rain", "rain"),
+                    crate::gates_catalog::WaterKind::Forecast => ("Skipped, rain expected", "rain"),
+                }
             }
-            crate::gates_catalog::GateFamily::Water => ("Skipped, rain expected", "rain"),
             crate::gates_catalog::GateFamily::Pause => ("Paused", "pause"),
             crate::gates_catalog::GateFamily::SoilModel => ("Watering", "run"),
-            crate::gates_catalog::GateFamily::NoData => ("Skipped, no weather data", "skip"),
+            crate::gates_catalog::GateFamily::NoData => {
+                ("Skipped, required data unavailable", "skip")
+            }
             crate::gates_catalog::GateFamily::Other if v.reason_code.is_empty() => {
-                let r = v.reason.to_lowercase();
-                if r.contains("restrict")
-                    || r.contains("allowed")
-                    || r.contains("watering day")
-                    || r.contains("forbidden")
-                {
-                    ("Blocked by watering rules", "law")
-                } else if r.contains("freeze") || r.contains("frost") || r.contains("cold") {
-                    ("Skipped, freeze risk", "freeze")
-                } else if r.contains("wind") {
-                    ("Skipped, too windy", "wind")
-                } else if r.contains("rain") || r.contains("wet") || r.contains("saturat") {
-                    // Wet / saturated soil is the water family (blue), not a
-                    // generic gray skip: the lawn is skipping BECAUSE it has water.
-                    ("Skipped, soil already wet", "rain")
-                } else if r.contains("pause") {
-                    ("Paused", "pause")
-                } else {
-                    ("Skipped", "skip")
+                // A legacy row with no code: the shared prose ladder.
+                match crate::gates_catalog::GateFamily::from_prose(&v.reason) {
+                    crate::gates_catalog::GateFamily::Restriction => {
+                        ("Blocked by watering rules", "law")
+                    }
+                    crate::gates_catalog::GateFamily::Freeze => ("Skipped, freeze risk", "freeze"),
+                    crate::gates_catalog::GateFamily::Wind => ("Skipped, too windy", "wind"),
+                    crate::gates_catalog::GateFamily::Water => {
+                        match crate::gates_catalog::water_kind("", &v.reason) {
+                            crate::gates_catalog::WaterKind::Forecast => {
+                                ("Skipped, rain expected", "rain")
+                            }
+                            _ => ("Skipped, soil already wet", "rain"),
+                        }
+                    }
+                    crate::gates_catalog::GateFamily::Pause => ("Paused", "pause"),
+                    crate::gates_catalog::GateFamily::NoData => {
+                        ("Skipped, required data unavailable", "skip")
+                    }
+                    _ => ("Skipped", "skip"),
                 }
             }
             crate::gates_catalog::GateFamily::Other => ("Skipped", "skip"),
@@ -107,9 +113,9 @@ pub fn WateringWeekPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     let prefs = use_unit_prefs();
     view! {
         <div class="wk-page">
-            <header class="wk-page__header">
-                <p class="wk-page__eyebrow">"Plan"</p>
-                <h1 class="wk-page__title">"Watering Week"</h1>
+            <header class="page-head">
+                <p class="page-eyebrow">"Plan"</p>
+                <h1 class="page-title">"Watering Week"</h1>
                 <p class="wk-page__sub">
                     "Your next seven days at a glance: what LocalSky plans for each day, and why. "
                     "The same engine as the morning check, applied to each day's forecast. "
@@ -133,8 +139,9 @@ pub fn WateringWeekPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                     // Deployment IANA tz for the day labels (24h local, not the
                     // viewer's browser zone). Empty -> browser-local / UTC.
                     let tz = snap.get().timezone;
+                    let allowed = snap.get().allowed_days_phrase();
                     days.into_iter()
-                        .map(|v| view! { <WeekRow v=v prefs=p tz=tz.clone()/> }.into_any())
+                        .map(|v| view! { <WeekRow v=v prefs=p tz=tz.clone() allowed_days=allowed.clone().unwrap_or_default()/> }.into_any())
                         .collect::<Vec<_>>()
                         .into_any()
                 }}
@@ -144,7 +151,14 @@ pub fn WateringWeekPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
 }
 
 #[component]
-fn WeekRow(v: DayVerdict, prefs: UnitPrefs, tz: String) -> impl IntoView {
+fn WeekRow(
+    v: DayVerdict,
+    prefs: UnitPrefs,
+    tz: String,
+    /// "Thu and Sun": the days the rules allow, when a rule is configured.
+    #[prop(optional, into)]
+    allowed_days: Option<String>,
+) -> impl IntoView {
     let (primary, date) = day_label(v.time_epoch, v.day_offset, &tz);
     let (label, modifier) = category(&v);
     let glyph = weather_code_glyph(v.weather_code, true).0;
@@ -152,17 +166,27 @@ fn WeekRow(v: DayVerdict, prefs: UnitPrefs, tz: String) -> impl IntoView {
     let row_cls = format!("wk-row wk-row--{modifier}");
     let temp = format!(
         "{} / {}",
-        fmt_temp_short(v.temp_max_f, prefs),
-        fmt_temp_short(v.temp_min_f, prefs)
+        fmt_optional_temp_short(v.temp_max_f, prefs),
+        fmt_optional_temp_short(v.temp_min_f, prefs)
     );
     // Omit the percent when the provider reported no probability; the old
     // bare 0 read as a confident "0% chance".
     let rain = match v.precip_probability_max {
-        Some(prob) => format!("{} \u{b7} {prob}%", fmt_rain_amount(v.precip_in, prefs)),
-        None => fmt_rain_amount(v.precip_in, prefs),
+        Some(prob) => format!(
+            "{} \u{b7} {prob}%",
+            fmt_optional_rain_amount(v.precip_in, prefs)
+        ),
+        None => fmt_optional_rain_amount(v.precip_in, prefs),
     };
     let reason = if v.reason.is_empty() {
         "No skip conditions in the forecast.".to_string()
+    } else if v.reason_code == "restrictions" {
+        // The engine's sentence says "today"; on a Thursday row that reads
+        // as a lie. The rule is composed from the allowed days instead.
+        restriction_row_reason(
+            v.day_offset,
+            allowed_days.as_deref().filter(|d| !d.is_empty()),
+        )
     } else {
         v.reason.clone()
     };
@@ -177,9 +201,9 @@ fn WeekRow(v: DayVerdict, prefs: UnitPrefs, tz: String) -> impl IntoView {
     };
     let aria = format!(
         "{primary} {date}: {label}. {reason} High {} {unit}, low {} {unit}, {} {rain_word} rain{prob_phrase}.",
-        temp_value(v.temp_max_f, prefs),
-        temp_value(v.temp_min_f, prefs),
-        depth_value_in(v.precip_in, prefs),
+        optional_temp_value(v.temp_max_f, prefs),
+        optional_temp_value(v.temp_min_f, prefs),
+        optional_depth_value_in(v.precip_in, prefs),
         unit = temp_unit(prefs),
     );
     view! {
@@ -198,6 +222,20 @@ fn WeekRow(v: DayVerdict, prefs: UnitPrefs, tz: String) -> impl IntoView {
                 <span class="wk-row__reason">{reason}</span>
             </div>
         </div>
+    }
+}
+
+/// The sentence a restricted day gets on the Week page: names the day's
+/// standing and the allowed days, never "today" for a day that is not.
+pub fn restriction_row_reason(day_offset: u32, allowed_days: Option<&str>) -> String {
+    let standing = match day_offset {
+        0 => "Not a watering day under your rules.".to_string(),
+        1 => "Tomorrow is not a watering day under your rules.".to_string(),
+        _ => "Not a watering day under your rules.".to_string(),
+    };
+    match allowed_days {
+        Some(days) => format!("{standing} They allow {days}."),
+        None => standing,
     }
 }
 
@@ -237,9 +275,9 @@ mod tests {
             day_offset: 1,
             time_epoch: 0,
             weather_code: 0,
-            temp_max_f: 80.0,
-            temp_min_f: 60.0,
-            precip_in: 0.0,
+            temp_max_f: Some(80.0),
+            temp_min_f: Some(60.0),
+            precip_in: Some(0.0),
             precip_probability_max: Some(0),
             verdict: verdict.to_string(),
             reason: reason.to_string(),
@@ -266,6 +304,37 @@ mod tests {
         // Saturated/wet soil is the water family (blue rain accent), not a
         // generic gray skip -- the lawn is skipping because it already has water.
         assert_eq!(category(&dv("skip", "Soil already saturated")).1, "rain");
+        assert_eq!(
+            category(&dv("skip", "Soil already saturated")).0,
+            "Skipped, soil already wet"
+        );
+        let dry_day = dv("run", "");
+        assert_eq!(dry_day.precip_in, Some(0.0));
+        assert_eq!(category(&dry_day), ("Watering", "run"));
+        for code in [
+            "rain_now",
+            "rain_today_forecast",
+            "rain_next_4h",
+            "tomorrow_rain",
+            "rain_3day",
+            "planning_forecast",
+        ] {
+            let mut unknown = dv("skip", "Rain forecast unavailable; watering held");
+            unknown.reason_code = code.into();
+            unknown.precip_in = None;
+            assert_eq!(
+                category(&unknown),
+                ("Skipped, required data unavailable", "skip"),
+                "{code}"
+            );
+            // A known dry current day does not fill a missing future interval.
+            unknown.precip_in = Some(0.0);
+            assert_eq!(
+                category(&unknown),
+                ("Skipped, required data unavailable", "skip"),
+                "{code}"
+            );
+        }
     }
 
     #[test]
@@ -274,5 +343,23 @@ mod tests {
         assert_eq!(day_label(0, 1, "America/New_York").0, "Tomorrow");
         // Unloaded epoch on a far day still labels something.
         assert_eq!(day_label(0, 4, "America/New_York").0, "Day +4");
+    }
+}
+
+#[cfg(test)]
+mod restriction_row_tests {
+    use super::restriction_row_reason;
+
+    /// A row four days out under a district rule names the rule and the
+    /// allowed days; it contains no "today".
+    #[test]
+    fn a_thursday_row_never_says_today() {
+        let r = restriction_row_reason(4, Some("Thu and Sun"));
+        assert!(!r.contains("today"), "{r}");
+        assert!(r.contains("Thu and Sun"), "{r}");
+        assert_eq!(
+            restriction_row_reason(1, None),
+            "Tomorrow is not a watering day under your rules."
+        );
     }
 }

@@ -4,7 +4,7 @@
 // as `ClientError` so the advisor layer can degrade gracefully:
 // never panics, never blocks irrigation.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -80,12 +80,12 @@ pub struct LlmClient {
 }
 
 impl LlmClient {
-    fn build_http() -> Result<Client> {
-        Client::builder()
-            .timeout(Duration::from_secs(20))
-            .user_agent("localsky/advisor")
-            .build()
-            .context("build http client")
+    /// The advisor keeps its own purpose label as User-Agent rather than the
+    /// derived per-install identity; `net::client_with` cannot fail (it falls
+    /// back to reqwest defaults), so the `Result` on `from_env` / `from_config`
+    /// stays only because `llm::advisor` matches on it.
+    fn build_http() -> Client {
+        crate::net::client_with(Duration::from_secs(20), "localsky/advisor")
     }
 
     /// Construct from env. LLM_BASE_URL points at any OpenAI-compatible
@@ -105,7 +105,7 @@ impl LlmClient {
             Some("1") | Some("true") | Some("True")
         );
         Ok(Self {
-            http: Self::build_http()?,
+            http: Self::build_http(),
             base_url,
             model,
             api_key,
@@ -139,8 +139,8 @@ impl LlmClient {
         if base_url.trim().is_empty() {
             return None;
         }
-        Some(Self::build_http().map(|http| Self {
-            http,
+        Some(Ok(Self {
+            http: Self::build_http(),
             base_url,
             model,
             api_key,

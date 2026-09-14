@@ -11,7 +11,7 @@ use crate::components::ui::{Button, Icon};
 use crate::components::units_fmt::{
     deficit_value_mm, depth_phrase_in, depth_phrase_mm, depth_unit, use_unit_prefs, UnitPrefs,
 };
-use crate::ha::snapshot::{SmartSuppression, WaterBudget, ZoneState};
+use crate::model::{SmartSuppression, WaterBudget, ZoneState};
 
 /// (status key, label, color token) for a zone's live state. A zone the engine
 /// will SKIP must never read "SCHEDULED" even if it carries a leftover planned
@@ -29,8 +29,10 @@ use crate::ha::snapshot::{SmartSuppression, WaterBudget, ZoneState};
 /// nothing decided anything about (no budget row, no schedule).
 pub fn zone_status(z: &ZoneState, budget_held: bool) -> (&'static str, &'static str, &'static str) {
     let skipping = z.verdict.as_ref().is_some_and(|v| v.verdict == "skip");
-    if z.running {
+    if z.is_running() {
         ("running", "RUNNING", "var(--verdict-run)")
+    } else if z.run_state() == crate::model::RunState::Unconfirmed {
+        ("running", "RUNNING, UNCONFIRMED", "var(--verdict-run)")
     } else if skipping {
         ("skipping", "SKIPPING", "var(--verdict-skip)")
     } else if z.planned_run_seconds > 0 {
@@ -82,6 +84,9 @@ pub fn soil_hold_body(b: &WaterBudget, p: UnitPrefs) -> Option<String> {
         // engine would silently drop this row back to echoing a raw
         // machine string with millimeters in it.
         match b.soil_deferred_kind {
+            Some(crate::engine::soil_schedule::SoilDeferKind::ForecastUnavailable) => {
+                return Some(reason.to_string())
+            }
             Some(SoilDeferKind::ForecastRain) => {
                 // The wire's parenthetical bakes mm; the composed
                 // sentence states the same hold from the structured
@@ -95,9 +100,14 @@ pub fn soil_hold_body(b: &WaterBudget, p: UnitPrefs) -> Option<String> {
                 // the wire sentence reads correctly once its lead-in is
                 // gone.
                 let rest = reason
-                    .strip_prefix("waits for tomorrow: ")
+                    .strip_prefix(crate::voice::REASON_WAITS_FOR_TOMORROW)
                     .unwrap_or(reason);
                 return Some(format!("{rest}; this zone waits for tomorrow"));
+            }
+            Some(SoilDeferKind::Dormant) => {
+                // The engine's sentence already names the soil reading and
+                // the species threshold in whole degrees; it reads as is.
+                return Some(format!("{reason}. The deficit waits for the soil to warm"));
             }
             None => return Some(reason.to_string()),
         }
@@ -278,8 +288,8 @@ pub fn ZoneCard(
     let suppressed_today = suppression.as_ref().is_some_and(|x| x.active_today);
     let budget_held = (budget_reason.is_some() || suppressed_today)
         && zone.planned_run_seconds == 0
-        && !zone.running
-        && !zone.verdict.as_ref().is_some_and(|v| v.verdict == "skip");
+        && !zone.is_running_or_unconfirmed()
+        && zone.verdict.as_ref().is_none_or(|v| v.verdict != "skip");
     let (status, label, color) = zone_status(&zone, budget_held);
     // Per-device display-unit preference; read prefs.get() in render
     // closures so a units change (or post-hydration localStorage load)
@@ -300,14 +310,11 @@ pub fn ZoneCard(
     } else {
         ((zone.planned_run_seconds + 30) / 60).to_string()
     };
-    // Nothing summarizes today's run minutes on either path, so this is a
-    // dash rather than a "0 min" printed beside a hold line that names the
-    // inches already applied this week.
-    let today = zone
-        .today_run_minutes
-        .map(|v| format!("{v:.0}"))
-        .unwrap_or_else(|| "-".to_string());
-    let today_known = zone.today_run_minutes.is_some();
+    // Nothing produces today's run minutes on either path (the v1 field is
+    // deprecated), so this is a dash rather than a "0 min" printed beside
+    // a hold line that names the inches already applied this week.
+    let today = "-".to_string();
+    let today_known = false;
     // Deficit is a soil-water DEPTH stored in millimeters; convert at the
     // display boundary (helpers respect units_rain). Engine math + wire
     // format stay mm. The soil model's evidence replay produces it for
@@ -316,7 +323,9 @@ pub fn ZoneCard(
     // dash, never the fabricated 0.00 this tile printed before 0.7.22.
     let deficit_mm = zone.bucket_mm;
     let deficit_known = deficit_mm.is_some();
-    let running = zone.running;
+    // Stop is offered for anything but a confirmed idle: a controller
+    // that cannot report state must still be stoppable from here.
+    let running = zone.is_running_or_unconfirmed();
     let stop_slug = slug.clone();
     // Sticky per-zone override (Auto/Skip/Force). Card is re-created per
     // snapshot, so this value is current; the control POSTs set_zone_override.
@@ -370,7 +379,7 @@ pub fn ZoneCard(
     });
     let verdict_reason = verdict
         .as_ref()
-        // Show the reason on skips and on a soil-floor run (P1-2), so the green
+        // Show the reason on skips and on a soil-floor run, so the green
         // WATER pill explains "soil below minimum; forecast-rain skip overridden".
         .filter(|v| (v.verdict == "skip" || v.source == "soil_floor") && !v.reason.is_empty())
         .cloned()
@@ -505,39 +514,17 @@ pub fn ZoneCard(
                 {ceiling_note}
                 {suppression_note}
                 <div class="zone-card__stats">
-                    <div class="zone-card__stat">
-                        <span class="zone-card__k">"This morning"</span>
-                        <span class="zone-card__v">{planned}<small>" min"</small></span>
-                    </div>
-                    <div class="zone-card__stat">
-                        <span class="zone-card__k">"Today"</span>
-                        <span class="zone-card__v">
-                            {today}
-                            <small>{if today_known { " min" } else { "" }}</small>
-                        </span>
-                    </div>
-                    <div class="zone-card__stat">
-                        <span class="zone-card__k">"Deficit"</span>
-                        <span class="zone-card__v">
-                            // Magnitude via the shared deficit formatter: the
-                            // label carries the direction, so the tile never
-                            // shows the wire's minus sign as a fake surplus.
-                            {move || match deficit_mm {
-                                Some(v) => deficit_value_mm(v, prefs.get()),
-                                None => "-".to_string(),
-                            }}
-                            <small>{move || if deficit_known {
-                                format!(" {}", depth_unit(prefs.get()))
-                            } else {
-                                String::new()
-                            }}</small>
-                        </span>
-                    </div>
+                    <crate::components::ui::StatTile layout="compact" label="Next run" value=planned unit="min"/>
+                    <crate::components::ui::StatTile layout="compact" label="Today" value=today
+                        unit=if today_known { "min" } else { "" }/>
+                    <crate::components::ui::StatTile layout="compact" label="Deficit"
+                        value=Signal::derive(move || match deficit_mm {
+                            Some(v) => deficit_value_mm(v, prefs.get()),
+                            None => "-".to_string(),
+                        })
+                        unit=Signal::derive(move || if deficit_known { depth_unit(prefs.get()).to_string() } else { String::new() })/>
                     {soil_pct.map(|pct| view! {
-                        <div class="zone-card__stat">
-                            <span class="zone-card__k">"Soil"</span>
-                            <span class="zone-card__v">{format!("{pct:.0}")}<small>"%"</small></span>
-                        </div>
+                        <crate::components::ui::StatTile layout="compact" label="Soil" value=format!("{pct:.0}") unit="%"/>
                     })}
                 </div>
                 // Per-zone override. stop_propagation so tapping a segment sets

@@ -108,7 +108,16 @@ A schedule fires at most once per day per schedule. If two ticks land on
 the same minute (clock skew, a leap second), the dispatcher remembers it
 already fired today and does not double-run.
 
-## Restrictions still apply
+## Holds, safety, and restrictions
+
+Rain delay, vacation pause, hold-all, and active Skip overrides stop manual
+schedules. Enabled weather safety checks also apply by default.
+
+The **Ignore weather safety** option is a separate, persistent waiver. Arming
+it requires confirming the physical consequences, including watering during
+a freeze or high wind and without live weather evidence. The saved schedule
+wears an **Ignores weather** badge, and each dispatch records which gate was
+bypassed. The waiver never clears an operator hold or a watering restriction.
 
 Manual schedules are not a way around your [watering
 restrictions](restrictions.md). Before a manual run dispatches, the engine
@@ -126,13 +135,11 @@ floor and ceiling on top of it.
 
 ## Saving and when it takes effect
 
-The page edits a working copy. Add or edit a schedule with the form, then
-click **Save all changes** at the bottom to persist. Saving round-trips
-through the config API. The dispatcher reads the schedule list at startup,
-so a newly added or edited schedule takes effect on the next container
-restart rather than mid-run. Restrictions and the smart engine pick up
-changes on their own next tick, but the manual-schedule clock is read once
-at boot.
+Adding, saving, or deleting a schedule persists that change through the
+config API immediately. The scheduler reads the current saved schedule list
+on each tick, including the first schedule added to a running install.
+Schedule edits do not require a restart. A save failure is shown on the
+page; check it before assuming the schedule changed.
 
 ## Where to read more
 

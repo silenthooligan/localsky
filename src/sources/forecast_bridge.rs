@@ -59,7 +59,7 @@ pub fn spawn(
             sources = priority.load().len(),
             "forecast bridge started (forecast sources -> ForecastStore)"
         );
-        // P0-8 class supervisor: on a non-Open-Meteo forecast install this
+        // Supervisor: on a non-Open-Meteo forecast install this
         // bridge is the ONLY ForecastStore writer, so a panic must not kill it
         // for the process lifetime. The `owner` arbitration state re-derives
         // from the next emits after a restart; a resubscribe() drops events
@@ -136,7 +136,7 @@ pub fn spawn(
                         if !snapshot.has_extended_series() {
                             if let Some((donor, donor_at)) = &extended_donor {
                                 if at_epoch.saturating_sub(*donor_at) <= EXTENDED_DONOR_STALE_SECS {
-                                    snapshot.graft_extended_from(donor);
+                                    snapshot.graft_extended_from(donor, crate::timeutil::deployment_calendar());
                                 }
                             }
                         }
@@ -158,7 +158,7 @@ pub fn spawn(
                                 && (!current.daily.is_empty() || !current.hourly.is_empty())
                             {
                                 let mut regrafted = (*current).clone();
-                                regrafted.graft_extended_from(&snapshot);
+                                regrafted.graft_extended_from(&snapshot, crate::timeutil::deployment_calendar());
                                 store.store(regrafted);
                                 debug!(source_id = %source_id, "retro-grafted advisory series onto stored owner");
                             }

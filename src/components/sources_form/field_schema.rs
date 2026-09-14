@@ -322,29 +322,6 @@ impl FieldSpec {
         }
     }
 
-    /// A REQUIRED float. Mirror of `int_required` for non-integer numbers: no
-    /// sentinel default, inline required error when empty, key omitted on empty.
-    #[allow(dead_code)]
-    pub(crate) const fn float_required(
-        key: &'static str,
-        label: &'static str,
-        helptext: &'static str,
-        placeholder: &'static str,
-    ) -> Self {
-        Self {
-            key,
-            label,
-            field_type: FieldType::Number { integer: false },
-            helptext,
-            required: true,
-            default: FieldDefault::None,
-            placeholder,
-            secret: false,
-            display_unit: None,
-            doc_url: None,
-        }
-    }
-
     pub(crate) const fn boolean(
         key: &'static str,
         label: &'static str,
@@ -1324,7 +1301,7 @@ pub(crate) fn field_row(
             let spec_for_seed = spec.clone();
             let spec_for_set = spec.clone();
             view! {
-                <label style="display: flex; gap: 0.5rem; align-items: center; min-height: 44px;">
+                <label class:u-touch-row=true>
                     <input
                         type="checkbox"
                         prop:checked=move || field_bool_value(&cfg.get(), &spec_for_seed)
@@ -1527,6 +1504,7 @@ mod tests {
         pressure_metric: false,
         distance_metric: false,
         area_metric: false,
+        clock_12h: false,
     };
     const METRIC: UnitPrefs = UnitPrefs {
         distance_metric: true,

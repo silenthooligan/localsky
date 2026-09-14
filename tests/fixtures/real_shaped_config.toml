@@ -1,0 +1,322 @@
+schema_version = 2
+manual_schedules = []
+
+[deployment]
+units = "imperial"
+timezone = "America/New_York"
+display_name = "Example Garden"
+address_parity = "even"
+mode = "standalone"
+shadow_native = false
+ha_sprinkler_prefix = "example_sprinklers"
+
+[deployment.location]
+lat = 39.0997
+lon = -94.5786
+elevation_m = 6.0
+
+[features]
+demo_mode = false
+enable_mqtt_publish = true
+enable_advisor = false
+enable_push = true
+nerd_mode_default = false
+telemetry = false
+
+[[sources]]
+id = "tempest_lan"
+priority = 100
+enabled = true
+kind = "tempest_udp"
+
+[sources.config]
+bind_addr = "0.0.0.0:50222"
+
+[[sources]]
+id = "open_meteo"
+priority = 50
+enabled = true
+kind = "open_meteo"
+
+[sources.config]
+forecast_days = 7
+forecast_hours = 48
+past_days = 1
+include_radar = true
+model = "best_match"
+
+[[sources]]
+id = "ecowitt_gw"
+priority = 100
+enabled = true
+kind = "ecowitt_gw_poll"
+
+[sources.config]
+host = "192.0.2.10"
+poll_interval_s = 30
+username = "admin"
+password = "REDACTED"
+
+[sources.config.soil_calibration.1]
+ad_dry = 502.0
+ad_wet = 1442.0
+
+[sources.config.soil_calibration.2]
+ad_dry = 524.0
+ad_wet = 1355.0
+
+[sources.config.soil_calibration.3]
+ad_dry = 532.0
+ad_wet = 1430.0
+
+[sources.config.soil_calibration.4]
+ad_dry = 514.0
+ad_wet = 1469.0
+
+[[sources]]
+id = "noaa_mrms"
+priority = 75
+enabled = true
+kind = "noaa_mrms"
+
+[sources.config]
+product = "MultiSensor_QPE_01H_Pass2"
+rate_product = "PrecipRate"
+
+[[sources]]
+id = "nws"
+priority = 70
+enabled = true
+max_age_s = 2100
+kind = "nws"
+
+[sources.config]
+user_agent = "localsky/0.7.1 (+https://github.com/silenthooligan/localsky)"
+
+[field_source_overrides]
+
+[field_source_chains]
+air_temp_f = [
+    "tempest_lan",
+    "nws",
+    "open_meteo",
+    "ecowitt_gw",
+]
+pressure_in_hg = [
+    "tempest_lan",
+    "nws",
+    "open_meteo",
+    "ecowitt_gw",
+]
+rain_today_in = [
+    "tempest_lan",
+    "noaa_mrms",
+    "open_meteo",
+    "ecowitt_gw",
+]
+rh_pct = [
+    "tempest_lan",
+    "nws",
+    "open_meteo",
+    "ecowitt_gw",
+]
+solar_w_m2 = [
+    "tempest_lan",
+    "open_meteo",
+    "ecowitt_gw",
+]
+wind_mph = [
+    "nws",
+    "open_meteo",
+    "tempest_lan",
+    "ecowitt_gw",
+]
+
+[[controllers]]
+id = "opensprinkler"
+default = true
+enabled = true
+kind = "opensprinkler_direct"
+
+[controllers.config]
+host = "192.0.2.10"
+port = 80
+password_md5 = "REDACTED"
+poll_interval_s = 10
+
+[zones.back-yard]
+display_name = "Back Yard"
+area_sqft = 2000.0
+species = "st_augustine"
+soil_texture = "sandy_loam"
+slope_pct = 0.0
+sun_exposure = "full"
+sprinkler_type = "rotor"
+precip_rate_source = "catalog"
+controller_id = "opensprinkler"
+controller_station = "1"
+target_min_pct_soil = 30.0
+saturation_pct_soil = 70.0
+
+[zones.back-yard-shrubs]
+display_name = "Back Yard Shrubs"
+area_sqft = 500.0
+species = "ornamental_shrubs"
+soil_texture = "sandy_loam"
+slope_pct = 0.0
+sun_exposure = "partial"
+sprinkler_type = "spray"
+precip_rate_source = "catalog"
+controller_id = "opensprinkler"
+controller_station = "3"
+target_min_pct_soil = 25.0
+saturation_pct_soil = 65.0
+
+[zones.front-yard]
+display_name = "Front Yard"
+area_sqft = 1500.0
+species = "st_augustine"
+soil_texture = "sandy_loam"
+slope_pct = 0.0
+sun_exposure = "full"
+sprinkler_type = "spray"
+precip_rate_source = "catalog"
+controller_id = "opensprinkler"
+controller_station = "2"
+target_min_pct_soil = 30.0
+saturation_pct_soil = 70.0
+
+[zones.side-yard]
+display_name = "Side Yard"
+area_sqft = 800.0
+species = "st_augustine"
+soil_texture = "sandy_loam"
+slope_pct = 0.0
+sun_exposure = "partial"
+sprinkler_type = "spray"
+precip_rate_source = "catalog"
+controller_id = "opensprinkler"
+controller_station = "4"
+target_min_pct_soil = 30.0
+saturation_pct_soil = 70.0
+
+[notifications]
+
+[engine]
+capture_efficiency = 0.7
+session_rain_defer_in = 0.1
+soak_minutes = 30
+interleave_cycles = true
+et0_method = "auto"
+seasonal_adjust_pct = 100
+
+[engine.skip_rules]
+already_wet_in = 0.05
+rain_now_in_hr = 0.01
+rain_next_4h_skip_in = 0.1
+rain_3day_factor = 1.5
+heat_advisory_temp_f = 95.0
+heat_advisory_humidity_pct = 60.0
+heat_advisory_dry_days = 2
+wind_forecast_slack_mph = 5.0
+soil_quarantine_enabled = true
+soil_outlier_threshold_pct = 35.0
+rain_observed_window_days = 1
+max_wind_mph = 10.0
+min_temp_f = 38.0
+rain_skip_in = 0.25
+frost_skip_soil_f = 35.0
+disabled_rules = []
+
+[[engine.watering_restrictions]]
+id = "sjrwmd_dst"
+name = "St. Johns RWMD - Daylight saving"
+enabled = true
+allowed_weekdays_odd = [
+    3,
+    6,
+]
+allowed_weekdays_even = [
+    4,
+    0,
+]
+forbidden_hour_start = 10
+forbidden_hour_end = 16
+max_minutes_per_zone = 60
+
+[engine.watering_restrictions.effective]
+kind = "dst_only"
+
+[[engine.watering_restrictions]]
+id = "sjrwmd_est"
+name = "St. Johns RWMD - Standard time"
+enabled = true
+allowed_weekdays_odd = [6]
+allowed_weekdays_even = [0]
+forbidden_hour_start = 10
+forbidden_hour_end = 16
+max_minutes_per_zone = 60
+
+[engine.watering_restrictions.effective]
+kind = "standard_only"
+
+[scripting]
+skip_rules = []
+
+[conditions]
+rules = []
+
+[auth]
+mode = "disabled"
+session_ttl_days = 30
+trusted_networks = []
+trusted_proxies = ["192.0.2.10/32"]
+trusted_origins = []
+proxy_auth_header = "X-Auth-Request-Email"
+proxy_auth_allow = ["operator@example.com"]
+
+[network]
+mdns_enabled = true
+
+[updates]
+check_enabled = false
+
+[persistence]
+retention_days = 90
+runs_retention_days = 0
+
+[ui.radar]
+providers = []
+default_layers = [
+    "rainviewer",
+    "nexrad_iem",
+    "nowcast",
+    "lightning_tempest",
+]
+
+# A southern-hemisphere district stating its own seasonal dates. Present so
+# the install-safety gate actually exercises EffectiveWindow::FloatingRange,
+# which the settings form could not author and used to destroy on edit.
+[[engine.watering_restrictions]]
+id = "nsw_summer"
+name = "NSW summer roster"
+enabled = false
+allowed_weekdays_odd = [2, 5]
+allowed_weekdays_even = [3, 6]
+forbidden_hour_start = 10
+forbidden_hour_end = 16
+max_minutes_per_zone = 45
+
+[engine.watering_restrictions.effective]
+kind = "floating_range"
+wraps_year = true
+
+[engine.watering_restrictions.effective.start]
+month = 10
+weekday = 0
+nth = "first"
+
+[engine.watering_restrictions.effective.end]
+month = 4
+weekday = 0
+nth = "first"

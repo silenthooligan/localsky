@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RunRecord {
+    /// Durable watering job identity. None on legacy/unattributable rows.
+    #[serde(default)]
+    pub session_id: Option<String>,
     /// Zone slug: back_yard, front_yard, side_yard, back_yard_shrubs.
     pub zone: String,
     /// UTC epoch the run started.
@@ -25,6 +28,25 @@ pub struct RunRecord {
     /// empty on payloads from older builds.
     #[serde(default)]
     pub status: String,
+    /// The controller the row belongs to. Additive; None on payloads
+    /// from older builds and on rows written before the observer knew.
+    #[serde(default)]
+    pub controller_id: Option<String>,
+    /// Gross depth applied at the head, mm: duration x throughput.
+    /// Additive; None when the throughput was unknown at insert.
+    #[serde(default)]
+    pub applied_mm: Option<f64>,
+    /// Metered volume, when the controller has a flow meter. Additive.
+    #[serde(default)]
+    pub volume_gal: Option<f64>,
+    /// Why the row ended early, when it did ("ended by restart"). Additive.
+    #[serde(default)]
+    pub note: Option<String>,
+    /// Which segment of a cycle-and-soak plan this row is. Additive.
+    #[serde(default)]
+    pub cycle_index: Option<u32>,
+    #[serde(default)]
+    pub cycle_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -34,6 +56,29 @@ pub struct HistoryWindow {
     /// End of the window in UTC epoch (exclusive).
     pub to_epoch: i64,
     pub runs: Vec<RunRecord>,
+    /// Scheduled morning decisions, including mornings that needed no water.
+    /// Run records remain the authority for water actually delivered.
+    #[serde(default)]
+    pub daily: Vec<DailyDecision>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DailyDecision {
+    pub date_local: String,
+    pub epoch: i64,
+    /// scheduled | scheduled_legacy | missed_window | recorded_decision.
+    pub kind: String,
+    pub zones: Vec<DailyZoneDecision>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DailyZoneDecision {
+    pub zone: String,
+    pub name: String,
+    pub planned_seconds: u32,
+    pub reason_code: String,
+    pub reason: String,
+    pub water_need: String,
 }
 
 /// One row per verdict transition: written when the skip-check engine's
@@ -52,7 +97,7 @@ pub struct DecisionRecord {
     /// was stored (M0007+). None for legacy rows. Powers the Rule Lab's
     /// historical view.
     #[serde(default)]
-    pub trace: Option<crate::ha::snapshot::DecisionTrace>,
+    pub trace: Option<crate::model::DecisionTrace>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -147,7 +192,8 @@ pub struct TuningCompanionField {
     pub value: serde_json::Value,
 }
 
-/// Install-wide forecast-skip scorecard: did the rain-family skips pay off?
+/// Install-wide comparison of daily rain-family verdicts and observed rain.
+/// Verdict history does not establish an actual automatic-run outcome.
 /// Informational only (no Apply). Counts are null until at least
 /// `min_scored_days` rain-family skip days could be judged.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -165,7 +211,7 @@ pub struct TuningScorecard {
     pub min_scored_days: u32,
     /// The one plain line the UI renders.
     pub line: String,
-    /// Days skipped for rain already falling or already on the ground
+    /// Days with a first recorded hold verdict for rain falling or on the ground
     /// (reactive codes: rain_now, observed_rain, already_wet). Counted,
     /// never confirmation-scored: those skips confirm themselves and
     /// would distort the forecast tally in both directions. Null until
@@ -189,4 +235,52 @@ pub struct WeatherHistory {
     pub pressure_inhg: Vec<f64>,
     pub solar_w_m2: Vec<f64>,
     pub uv_index: Vec<f64>,
+}
+
+/// A stored run as the history wire shape.
+///
+/// The table is the storage layer's (`persistence::runs`); this is what
+/// /history has always answered with. Keeping the mapping here means the
+/// endpoint's shape is decided in the module that documents it rather
+/// than in a second query that happened to select the same columns.
+#[cfg(feature = "ssr")]
+impl From<crate::persistence::runs::RunRow> for RunRecord {
+    fn from(r: crate::persistence::runs::RunRow) -> Self {
+        Self {
+            session_id: r.session_id,
+            zone: r.zone_slug,
+            start_epoch: r.start_epoch,
+            // A row still running or merely intended has no duration yet;
+            // the window has always shown those as zero-length until they
+            // complete.
+            duration_s: r.duration_s.unwrap_or(0) as i64,
+            skip_reason: r.skip_reason,
+            source: r.source,
+            status: r.status,
+            // The historical placeholder is not an attribution.
+            controller_id: Some(r.controller_id).filter(|c| c != "unknown"),
+            applied_mm: r.applied_mm,
+            volume_gal: r.volume_gal,
+            note: r.note,
+            cycle_index: r.cycle_index,
+            cycle_count: r.cycle_count,
+        }
+    }
+}
+
+/// A stored verdict transition as the decisions wire shape. A row whose
+/// trace does not parse (a shape from an older build) carries no trace
+/// rather than failing the window.
+#[cfg(feature = "ssr")]
+impl From<crate::persistence::verdict_history::VerdictRow> for DecisionRecord {
+    fn from(r: crate::persistence::verdict_history::VerdictRow) -> Self {
+        Self {
+            epoch: r.epoch,
+            verdict: r.verdict,
+            reason: r.reason,
+            trace: (!r.trace_json.is_empty())
+                .then(|| serde_json::from_str(&r.trace_json).ok())
+                .flatten(),
+        }
+    }
 }

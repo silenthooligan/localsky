@@ -6,6 +6,10 @@
 // then upgrades to an honest "provider hasn't answered, retrying" note.
 // The parent only mounts it while the data is empty, so real data still
 // replaces it the instant a fetch lands.
+//
+// With no location configured there is no provider to wait on: the note
+// says so at once and points at setup, and never blames a provider that
+// was never asked.
 
 use leptos::prelude::*;
 
@@ -15,6 +19,38 @@ use leptos::prelude::*;
 /// as dead code without the cfg.)
 #[cfg(feature = "hydrate")]
 const GRACE_SECS: u64 = 12;
+
+/// The note the panel shows once it stops shimmering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingNote {
+    pub title: String,
+    pub body: &'static str,
+    pub link_href: &'static str,
+    pub link_label: &'static str,
+}
+
+/// What to render for an empty forecast panel. `None` is the skeleton.
+/// `located` is `/api/v1/info`'s answer (None while it is in flight).
+pub fn pending_note(what: &str, located: Option<bool>, waited: bool) -> Option<PendingNote> {
+    let title = format!("No {what} yet");
+    match located {
+        Some(false) => Some(PendingNote {
+            title,
+            body: "LocalSky does not know where the yard is yet, so there is nothing to \
+                   forecast. Set a location and this panel fills in about a minute later.",
+            link_href: "/setup",
+            link_label: "Set a location",
+        }),
+        _ if waited => Some(PendingNote {
+            title,
+            body: "The forecast provider hasn't answered since LocalSky started. It retries \
+                   automatically and this panel fills in as soon as data arrives.",
+            link_href: "/settings?section=devices",
+            link_label: "Check sources",
+        }),
+        _ => None,
+    }
+}
 
 #[component]
 pub fn ForecastPending(
@@ -39,16 +75,18 @@ pub fn ForecastPending(
     });
     #[cfg(not(feature = "hydrate"))]
     let _ = &set_waited;
+    // None on SSR and on the first client frame, so both render the
+    // skeleton; the deferred info fetch settles it afterwards.
+    let located = use_context::<crate::app::Located>().map(|l| l.0);
 
     move || {
-        if waited.get() {
+        let located = located.and_then(|l| l.get());
+        if let Some(note) = pending_note(&what, located, waited.get()) {
             view! {
                 <div class="forecast-pending" role="status">
-                    <span class="forecast-pending__title">{format!("No {what} yet")}</span>
-                    <span class="forecast-pending__body">
-                        "The forecast provider hasn't answered since LocalSky started. It retries automatically and this panel fills in as soon as data arrives."
-                    </span>
-                    <a class="forecast-pending__link" href="/settings/devices">"Check sources"</a>
+                    <span class="forecast-pending__title">{note.title}</span>
+                    <span class="forecast-pending__body">{note.body}</span>
+                    <a class="forecast-pending__link" href=note.link_href>{note.link_label}</a>
                 </div>
             }
             .into_any()
@@ -67,5 +105,35 @@ pub fn ForecastPending(
             };
             view! { <div class="forecast-pending-ghosts">{ghosts}</div> }.into_any()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// With no location there is no provider to blame, before or after
+    /// the grace period.
+    #[test]
+    fn an_unlocated_install_never_blames_the_provider() {
+        for waited in [false, true] {
+            let note = pending_note("hourly forecast", Some(false), waited)
+                .expect("the note shows at once, no grace period");
+            let text = format!("{} {} {}", note.title, note.body, note.link_label);
+            assert!(!text.to_lowercase().contains("provider"), "{text}");
+            assert_eq!(note.link_href, "/setup");
+            assert_eq!(note.title, "No hourly forecast yet");
+        }
+    }
+
+    /// A located install keeps the skeleton through the grace period and
+    /// then names the provider.
+    #[test]
+    fn a_located_install_waits_then_says_so() {
+        assert_eq!(pending_note("7-day forecast", Some(true), false), None);
+        assert_eq!(pending_note("7-day forecast", None, false), None);
+        let note = pending_note("7-day forecast", Some(true), true).unwrap();
+        assert!(note.body.contains("provider"));
+        assert_eq!(note.link_href, "/settings?section=devices");
     }
 }

@@ -38,7 +38,9 @@ pub const DEFAULT_WINDOW_DAYS: u32 = 14;
 /// persistence::verdict_history (a test there pins the equality) so the
 /// tuning scorecard and the accuracy scoreboard can never disagree on
 /// what counts as rain.
-pub const WET_IN: f64 = 0.05;
+/// Re-exported: the tuning report scores against the same definition
+/// of a wet day the engine gates on.
+pub use crate::engine::WET_DAY_IN as WET_IN;
 pub const SIG_IN: f64 = 0.10;
 /// A local day with at least this much observed rain breaks a dry stretch
 /// and disqualifies a backout event.
@@ -55,7 +57,7 @@ pub const SCORECARD_MIN_SCORED: u32 = 3;
 // credits them); re-exported here so engine callers keep one path.
 pub use crate::history::rollup::{
     applied_in_window, cluster_events, is_watering_evidence, is_watering_row, IrrigationEvent,
-    RunSegment, WindowedApplied, EVENT_CLUSTER_GAP_S,
+    RunSegment, WindowedApplied,
 };
 
 /// Drift check gates.
@@ -694,7 +696,7 @@ pub fn check_cap_clamped(slug: &str, inp: &CapClampInputs) -> CheckOutcome {
     // capped sessions at the zone's throughput, no capture or heat
     // factor (the weekly target is gross, homeowner semantics).
     let deliverable_week_mm = 7.0 * (max_dur as f64 / 3600.0) * inp.throughput_mm_hr;
-    let deliverable_week_in = round1(deliverable_week_mm / 25.4);
+    let deliverable_week_in = round1(crate::units::mm_to_in(deliverable_week_mm));
     if deliverable_week_in <= 0.0 || deliverable_week_in >= inp.weekly_budget_in {
         return CheckOutcome::Pass;
     }
@@ -1122,8 +1124,8 @@ pub fn check_precip_backout(slug: &str, inp: &BackoutInputs<'_>) -> CheckOutcome
 // Check E: forecast-skip scorecard (install-wide)
 // ---------------------------------------------------------------------
 
-/// One local day's morning verdict, reduced upstream exactly as
-/// accuracy_window does (earliest transition per configured-tz day).
+/// The first recorded verdict per configured local day. This is decision
+/// history, not evidence that the automatic morning ran or was skipped.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SkipDayRecord {
     pub date: NaiveDate,
@@ -1234,8 +1236,8 @@ pub fn score_forecast_skips(
         (
             Some(reactive),
             format!(
-                "Skipped {reactive} day(s) for rain already falling or on the ground in the \
-                 last {window_days}."
+                "Hold verdicts for rain already falling or on the ground: \
+                 {reactive} days in the last {window_days}."
             ),
         )
     } else {
@@ -1248,8 +1250,8 @@ pub fn score_forecast_skips(
             confirmed_days: Some(confirmed),
             min_scored_days: SCORECARD_MIN_SCORED,
             line: format!(
-                "Skipped {scored} days for forecast rain in the last {window_days}; rain came \
-                 {confirmed} of {scored}."
+                "Forecast rain prompted hold verdicts on {scored} days in the last \
+                 {window_days}; rain followed on {confirmed} of {scored}."
             ),
             reactive_days,
             reactive_line,
@@ -1415,7 +1417,8 @@ pub fn assemble_zone(
         let line = match silenced_hits.as_slice() {
             [(_, d)] => match (d.kind.as_str(), d.until_epoch) {
                 ("snooze", Some(until)) => {
-                    let date = (cal.local_date)(until)
+                    let date = cal
+                        .local_date(until)
                         .map(|dt| dt.format("%Y-%m-%d").to_string())
                         .unwrap_or_default();
                     format!("1 suggestion snoozed until {date}")
@@ -1449,7 +1452,7 @@ pub fn assemble_zone(
 // Water-balance provenance lines (unknowns register)
 // ---------------------------------------------------------------------
 
-use crate::ha::snapshot::SOIL_DIVERGENCE_PREFIX;
+use crate::model::SOIL_DIVERGENCE_PREFIX;
 
 /// The soil-vs-weekly line, one per weekly-governed zone with a shadow
 /// bucket: what the soil model would have done this morning against
@@ -1518,12 +1521,12 @@ fn balance_depth(mm: f64, rain_mm: bool) -> String {
     if rain_mm {
         format!("{mm:.1} mm")
     } else {
-        format!("{:.2} in", mm / 25.4)
+        format!("{:.2} in", crate::units::mm_to_in(mm))
     }
 }
 
 pub fn balance_term_lines(
-    b: &crate::ha::snapshot::WaterBudget,
+    b: &crate::model::WaterBudget,
     day_total_upsell: bool,
     rain_mm: bool,
 ) -> Vec<String> {
@@ -1607,7 +1610,7 @@ pub fn balance_term_lines(
 /// day (equal to the raw sum otherwise): this line audits the
 /// arithmetic, and the remainder it prints derives from the credited
 /// term; the raw depth and the clip live in `balance_term_lines`.
-pub fn balance_breakdown_line(b: &crate::ha::snapshot::WaterBudget) -> String {
+pub fn balance_breakdown_line(b: &crate::model::WaterBudget) -> String {
     let rain_mm = if b.rain_credit_cap_mm > 0.0 && b.observed_rain_credited_mm < b.observed_rain_mm
     {
         b.observed_rain_credited_mm
@@ -1618,10 +1621,10 @@ pub fn balance_breakdown_line(b: &crate::ha::snapshot::WaterBudget) -> String {
         "Water balance: target {:.2} in; rain {:.2} in; applied {:.2} in; forecast credit \
          {:.2} in; remainder {:.2} in across {} remaining session(s).",
         b.weekly_budget_in,
-        rain_mm / 25.4,
-        b.applied_mm / 25.4,
-        b.forecast_credit_mm / 25.4,
-        b.needed_mm / 25.4,
+        crate::units::mm_to_in(rain_mm),
+        crate::units::mm_to_in(b.applied_mm),
+        crate::units::mm_to_in(b.forecast_credit_mm),
+        crate::units::mm_to_in(b.needed_mm),
         b.remaining_sessions
     )
 }
@@ -1632,6 +1635,7 @@ mod tests {
 
     fn seg(start: i64, dur: i64) -> RunSegment {
         RunSegment {
+            session_id: Some(format!("fixture-day-{}", start / 86_400)),
             start_epoch: start,
             end_epoch: start + dur,
         }
@@ -1707,10 +1711,12 @@ mod tests {
         let t = 1_000_000;
         let segments = [
             RunSegment {
+                session_id: None,
                 start_epoch: t,
                 end_epoch: t + 1200,
             },
             RunSegment {
+                session_id: None,
                 start_epoch: t + 10,
                 end_epoch: t + 1190,
             },
@@ -1722,10 +1728,12 @@ mod tests {
         // non-overlapped portion.
         let segments = [
             RunSegment {
+                session_id: None,
                 start_epoch: t,
                 end_epoch: t + 1200,
             },
             RunSegment {
+                session_id: None,
                 start_epoch: t + 600,
                 end_epoch: t + 1800,
             },
@@ -2190,7 +2198,7 @@ mod tests {
     /// spoke imperial to every metric yard.
     #[test]
     fn the_balance_lines_speak_the_households_units() {
-        let b = crate::ha::snapshot::WaterBudget {
+        let b = crate::model::WaterBudget {
             observed_rain_mm: 25.4,
             observed_rain_credited_mm: 25.4,
             observed_rain_source: "gauge".into(),
@@ -2449,6 +2457,7 @@ mod tests {
             let start = i as i64 * 2 * day;
             let end = start + 3600;
             evs.push(IrrigationEvent {
+                session_id: None,
                 start_epoch: start,
                 end_epoch: end,
                 valve_open_s: 3600,
@@ -2637,7 +2646,11 @@ mod tests {
         let card = score_forecast_skips(&days, &obs, d("2026-06-30"), 30);
         assert_eq!(card.scored_days, Some(3));
         assert_eq!(card.confirmed_days, Some(2));
-        assert!(card.line.contains("rain came 2 of 3"), "{}", card.line);
+        assert!(
+            card.line.contains("rain followed on 2 of 3"),
+            "{}",
+            card.line
+        );
     }
 
     /// Reactive rain skips (rain already falling or on the ground) are
@@ -3074,7 +3087,7 @@ mod tests {
     /// up to the remainder it prints.
     #[test]
     fn balance_rain_line_names_the_soil_cap_only_when_clipped() {
-        let unclipped = crate::ha::snapshot::WaterBudget {
+        let unclipped = crate::model::WaterBudget {
             observed_rain_mm: 0.4 * 25.4,
             observed_rain_credited_mm: 0.4 * 25.4,
             rain_credit_cap_mm: 9.0,
@@ -3092,7 +3105,7 @@ mod tests {
             balance_breakdown_line(&unclipped)
         );
 
-        let clipped = crate::ha::snapshot::WaterBudget {
+        let clipped = crate::model::WaterBudget {
             observed_rain_mm: 1.2 * 25.4,
             observed_rain_credited_mm: 9.0,
             rain_credit_cap_mm: 9.0,
@@ -3112,7 +3125,7 @@ mod tests {
         );
 
         // A legacy row (cap 0 = unknown) never grows the suffix.
-        let legacy = crate::ha::snapshot::WaterBudget {
+        let legacy = crate::model::WaterBudget {
             observed_rain_mm: 1.2 * 25.4,
             observed_rain_source: "gauge".into(),
             ..Default::default()

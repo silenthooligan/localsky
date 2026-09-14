@@ -12,9 +12,11 @@
 // Setup notes: POST /setup flips auth.mode to "required" ONLY when it can
 // be persisted (ACCT-02). If a config exists (enable-from-Settings on a
 // configured install), it is loaded, set to required, saved, and the live
-// policy flipped only after the save succeeds. If there is NO config yet
-// (the wizard's Account step runs before POST /wizard/apply writes the
-// file), the account + session are created but the policy is left
+// policy flipped only after the save succeeds. That whole sequence runs
+// under the config write guard, since it writes the WHOLE document back
+// and would otherwise clobber a Settings save it overlapped. If there is
+// NO config yet (the wizard's Account step runs before POST /wizard/apply
+// writes the file), the account + session are created but the policy is left
 // disabled here; the wizard's apply persists required and flips the live
 // policy then, so an in-memory required never exists without on-disk
 // backing. Cookie is HttpOnly SameSite=Lax; Secure is added when the
@@ -25,7 +27,7 @@
 // plain-HTTP hit (loopback/private peer, no proxy headers) AND for a
 // plain-HTTP HA Supervisor ingress hit (X-Ingress-Path present but
 // X-Forwarded-Proto not https), so both installs keep a working cookie
-// (WH-04). See `should_set_secure`.
+//. See `should_set_secure`.
 
 use std::sync::Arc;
 
@@ -66,7 +68,7 @@ fn err(status: StatusCode, msg: impl Into<String>) -> Response {
 }
 
 /// Decide whether the session cookie should carry the `Secure` attribute
-/// (WH-04). The goal is robust HTTPS protection without breaking a
+///. The goal is robust HTTPS protection without breaking a
 /// pure-HTTP LAN install OR a plain-HTTP HA Supervisor ingress:
 ///
 ///   1. `X-Forwarded-Proto: https` -> Secure. The TLS proxy told us.
@@ -116,7 +118,7 @@ fn should_set_secure(req: &Request<Body>) -> bool {
     // only here when xfp is NOT https (step 1 already returned), so an
     // X-Ingress-Path present now means "ingress without provable TLS". Do
     // NOT force Secure: that would make the browser drop the cookie and lock
-    // the operator out of an HTTP HAOS in Required mode (WH-04). The only
+    // the operator out of an HTTP HAOS in Required mode. The only
     // authoritative TLS signal under ingress is xfp=https, handled in step
     // 1; absent that, the ingress edge is plain HTTP, so omit Secure exactly
     // like the bare-LAN case. (The Supervisor peer is a private Docker IP,
@@ -250,6 +252,18 @@ async fn post_setup(State(s): State<AuthApiState>, req: Request<Body>) -> Respon
     //     and flips the live policy then, so required mode and its
     //     on-disk backing always appear together.
     if s.cfg_store.is_initialized() {
+        // Serialize this whole read-modify-write against every other
+        // config writer (the Settings PUT, the raw PUT, rollback, the
+        // wizard apply), exactly as they do. The save below writes the
+        // WHOLE document, so without the guard a Settings save landing
+        // between our load and our save is silently overwritten by the
+        // older copy we read: the owner's zone edit vanishes behind a 200.
+        // The reverse interleave loses the auth flip instead, while the
+        // in-memory policy has already gone Required, which is the
+        // unbacked-required state the ACCT-02 note above exists to prevent.
+        // save() takes the separate save_lock, so calling it while holding
+        // this guard is safe (tokio mutexes are not reentrant).
+        let _write_guard = s.cfg_store.begin_write().await;
         match s.cfg_store.load().await {
             Ok(mut cfg) => {
                 cfg.auth.mode = crate::config::schema::AuthMode::Required;
@@ -549,7 +563,7 @@ mod tests {
 
     #[test]
     fn secure_handling_for_haos_ingress() {
-        // WH-04 / HAOS-over-HTTP: HA Supervisor ingress reached over plain
+        // HAOS over plain HTTP: HA Supervisor ingress reached over plain
         // HTTP sends X-Ingress-Path with X-Forwarded-Proto: http (or none).
         // Forcing Secure there makes the browser drop the cookie -> login
         // lockout in Required mode. So:
@@ -591,7 +605,7 @@ mod tests {
     fn secure_omitted_for_bare_lan_http() {
         // Pure LAN plain-HTTP install: no proxy headers, loopback or
         // private peer. Secure must be OMITTED or the cookie is dropped
-        // and the operator is locked out (WH-04 must not break this).
+        // and the operator is locked out (this must not break).
         assert!(!should_set_secure(&req("127.0.0.1", &[])));
         assert!(!should_set_secure(&req("10.0.0.50", &[])));
         assert!(!should_set_secure(&req("10.0.0.5", &[])));
@@ -620,5 +634,104 @@ mod tests {
             30,
         );
         assert!(h.to_str().unwrap().contains("Secure"));
+    }
+
+    fn setup_req() -> Request<Body> {
+        let body = r#"{"username":"owner","password":"hunter22valid"}"#;
+        let mut r = Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/setup")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let peer = SocketAddr::new("127.0.0.1".parse().unwrap(), 40000);
+        r.extensions_mut().insert(ConnectInfo(peer));
+        r
+    }
+
+    fn auth_runtime() -> Arc<AuthRuntime> {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::persistence::run_migrations(&mut conn).unwrap();
+        let db = Arc::new(tokio::sync::Mutex::new(conn));
+        Arc::new(AuthRuntime::new(crate::auth::AuthStore::new(db)))
+    }
+
+    /// First-account setup writes the WHOLE config document back, so it
+    /// must hold the config read-modify-write guard across its
+    /// load-mutate-save the way every other config writer does. Without
+    /// the guard it reads and rewrites the document underneath a Settings
+    /// save that is already mid-sequence, and one of the two edits is lost
+    /// while both callers are told they succeeded.
+    #[tokio::test]
+    async fn setup_waits_for_the_config_write_guard() {
+        let dir = std::env::temp_dir().join(format!(
+            "localsky-auth-test-{}-write-guard",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let cfg_store = Arc::new(FileConfigStore::new(dir.join("localsky.toml")));
+        let mut cfg = crate::config::schema::Config::default();
+        cfg.deployment.display_name = "before".into();
+        cfg_store.save(&cfg).await.unwrap();
+
+        let rt = auth_runtime();
+        let state = AuthApiState {
+            rt: rt.clone(),
+            cfg_store: cfg_store.clone(),
+        };
+
+        // Stand in for a Settings save already inside its guarded
+        // load-verify-mutate-validate-save: it has loaded and mutated, and
+        // has not yet written its edit back.
+        let guard = cfg_store.begin_write().await;
+        let mut settings_edit = cfg_store.load().await.unwrap();
+        settings_edit.deployment.display_name = "after".into();
+
+        let task = tokio::spawn(post_setup(State(state), setup_req()));
+
+        // The account is created BEFORE the config is touched, so this
+        // parks the test with the handler sitting right on top of its load.
+        for _ in 0..500 {
+            if rt.setup_complete.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            rt.setup_complete.load(std::sync::atomic::Ordering::Relaxed),
+            "setup handler never got as far as creating the account"
+        );
+
+        // The policy flips only after the config save succeeds, so a flip
+        // while we still hold the guard proves the handler read and wrote
+        // the whole document underneath us. Break on the flip so the
+        // unguarded case fails fast; the guarded case pays the full wait.
+        for _ in 0..100 {
+            if rt.policy.load().required {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            !rt.policy.load().required,
+            "setup saved auth.mode=required while another writer held the config write guard"
+        );
+
+        // The settings writer commits its edit, then releases.
+        cfg_store.save(&settings_edit).await.unwrap();
+        drop(guard);
+
+        let resp = task.await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Both edits survive: the handler re-read the document AFTER the
+        // settings save, so its whole-document write carries the newer
+        // display_name as well as the auth flip.
+        let on_disk = cfg_store.load().await.unwrap();
+        assert_eq!(on_disk.deployment.display_name, "after");
+        assert_eq!(on_disk.auth.mode, crate::config::schema::AuthMode::Required);
+        assert!(rt.policy.load().required);
     }
 }

@@ -28,7 +28,8 @@
 
 use crate::engine::forecast_bias::BiasModel;
 use crate::forecast::snapshot::ForecastSnapshot;
-use crate::ha::snapshot::WaterBudget;
+use crate::model::WaterBudget;
+use crate::units::{in_to_mm, mm_to_in};
 
 /// Defer today's session when the next-24h forecast rain reaches this
 /// depth (inches). The forward credit deliberately excludes the next 24
@@ -53,7 +54,6 @@ pub struct ZoneBalanceInputs {
     /// Gross weekly target, inches (homeowner semantics: includes rain).
     pub weekly_budget_in: f64,
     pub sessions_per_week: u32,
-    pub mode_active: bool,
     pub throughput_mm_hr: f64,
     /// Effective cap: zone max_duration min any active restriction cap.
     pub max_dur_s: u32,
@@ -61,6 +61,10 @@ pub struct ZoneBalanceInputs {
     /// (clustered run-history evidence). 0 = none on record in the
     /// trailing window; the zone is then eligible immediately.
     pub last_run_epoch: i64,
+    /// Actual gross depth in the latest session. Unknown legacy callers keep
+    /// the configured spacing; a short test or interrupted run does not earn
+    /// a full session's dry-down delay.
+    pub last_session_applied_mm: Option<f64>,
     /// Gross irrigation depth applied in the trailing window (mm),
     /// reconstructed as union valve-open seconds x throughput.
     pub applied_trailing_mm: f64,
@@ -122,10 +126,13 @@ pub struct BalanceGlobals {
 
 /// Month of a daily entry in the configured timezone, falling back to
 /// the month of `now` when the entry has no resolvable date.
-fn entry_month(entry_epoch: i64, now_epoch: i64, cal: crate::engine::calendar::Calendar) -> u32 {
-    use chrono::Datelike;
-    (cal.local_date)(entry_epoch)
-        .or_else(|| (cal.local_date)(now_epoch))
+fn entry_month(
+    marker: crate::engine::clock::DayMarker,
+    now_epoch: i64,
+    cal: crate::engine::calendar::Calendar,
+) -> u32 {
+    cal.day_of(marker)
+        .or_else(|| cal.date_of(now_epoch))
         .map(|d| d.month())
         .unwrap_or(1)
 }
@@ -135,6 +142,17 @@ pub fn compute_zone(
     zone: &ZoneBalanceInputs,
     g: &BalanceGlobals,
     fc: &ForecastSnapshot,
+) -> WaterBudget {
+    compute_zone_for_horizon(zone, g, fc, None)
+}
+
+/// Same allocator; a scenario explicitly separates forecast issue time from
+/// the future watering day. Live dispatch always calls `compute_zone`.
+pub fn compute_zone_for_horizon(
+    zone: &ZoneBalanceInputs,
+    g: &BalanceGlobals,
+    fc: &ForecastSnapshot,
+    as_of: Option<i64>,
 ) -> WaterBudget {
     use chrono::Datelike;
     // Clamped, not just floored at 1. The pacing below is
@@ -156,21 +174,38 @@ pub fn compute_zone(
     // raw model sum, so a low-probability drizzle carried the full weight
     // of certain rain against a 0.10 inch threshold and could zero every
     // zone nearly every day in a convective climate.
-    let next_24h_rain_in = fc.next_n_hours_precip_weighted_in(24);
-    let week_rain_weighted_in: f64 = fc
-        .daily
-        .iter()
-        .take(7)
-        .map(|d| d.precip_sum_in * d.precip_weight())
-        .sum();
-    let expected_rain_mm = week_rain_weighted_in * 25.4 * EXPECTED_RAIN_WIRE_CAPTURE;
+    let next_24h_rain_in = match as_of {
+        Some(as_of) => fc.scenario_rain_in(g.now_epoch, as_of, g.calendar),
+        None => fc.planning_precip_weighted_in(24, g.now_epoch),
+    };
+    let week_rain_weighted_in = (!fc.daily.is_empty())
+        .then(|| {
+            fc.daily
+                .iter()
+                .take(7)
+                .map(|d| d.precip_sum_in.map(|amount| amount * d.precip_weight()))
+                .sum::<Option<f64>>()
+        })
+        .flatten();
+    let expected_rain_mm =
+        week_rain_weighted_in.map(|amount| in_to_mm(amount) * EXPECTED_RAIN_WIRE_CAPTURE);
 
     // Pacing: sessions space out at floor(7/sessions) days. The forward
     // credit window runs from tomorrow until the next expected session,
     // NEVER the whole week: rain past the next session will be observed
     // (and credited as such) before it matters, and crediting it now
     // would double-count.
-    let min_interval_days = (7.0 / sessions as f64).floor() as i64;
+    let configured_interval_days = (7.0 / sessions as f64).floor() as i64;
+    let nominal_session_mm = in_to_mm(zone.weekly_budget_in.max(0.0)) / sessions as f64;
+    let min_interval_days = zone
+        .last_session_applied_mm
+        .filter(|mm| mm.is_finite() && *mm >= 0.0 && nominal_session_mm > 0.0)
+        .map(|mm| {
+            ((configured_interval_days as f64 * (mm / nominal_session_mm).clamp(0.0, 1.0)).floor()
+                as i64)
+                .max(1)
+        })
+        .unwrap_or(configured_interval_days);
     // LOCAL-CALENDAR-DAY difference, not floored elapsed seconds: the
     // evidence anchors on the previous event's END (near sunrise) while
     // the next dispatch evaluates EARLIER in the morning, so an epoch
@@ -179,8 +214,8 @@ pub fn compute_zone(
     // 4 days). "Sessions run N days apart" is calendar semantics.
     let days_since_last_run = if zone.last_run_epoch > 0 {
         match (
-            (g.calendar.local_date)(g.now_epoch),
-            (g.calendar.local_date)(zone.last_run_epoch),
+            g.calendar.local_date(g.now_epoch),
+            g.calendar.local_date(zone.last_run_epoch),
         ) {
             (Some(now_d), Some(last_d)) => (now_d - last_d).num_days(),
             // Unresolvable dates: nearest-day rounding (morning-to-morning
@@ -202,7 +237,7 @@ pub fn compute_zone(
     // legacy behavior there, where clamping up from zero would clip
     // every drop.
     let rain_cap_mm = if zone.rain_cap_mm > 0.0 {
-        zone.rain_cap_mm.clamp(0.05 * 25.4, 5.0 * 25.4)
+        zone.rain_cap_mm.clamp(in_to_mm(0.05), in_to_mm(5.0))
     } else {
         f64::INFINITY
     };
@@ -214,25 +249,59 @@ pub fn compute_zone(
     // 2 in day cannot bank more than the root zone can hold any more
     // than an observed one can.
     let credit_days = (days_until_next.saturating_sub(1)).max(0) as usize;
-    let forecast_credit_mm: f64 = fc
-        .daily
-        .iter()
-        .skip(1)
-        .take(credit_days)
-        .map(|d| {
-            (d.precip_sum_in
-                * d.precip_weight()
-                * g.bias
-                    .multiplier_for(entry_month(d.time_epoch, g.now_epoch, g.calendar))
-                * 25.4)
-                .min(rain_cap_mm)
+    // Walk forward from TOMORROW by civil day, not by skipping one row.
+    //
+    // `.skip(1)` assumed daily[0] is today. On a stale snapshot daily[0]
+    // is yesterday, so the credit window started at today, banking rain
+    // that has already fallen or is being handled by the defer gate, and
+    // ran one day short at the far end.
+    let credit_rows: Vec<&crate::forecast::snapshot::DailyEntry> =
+        match g.calendar.date_of(g.now_epoch) {
+            Some(today) => {
+                let aligned = fc.aligned(g.calendar, today);
+                (1..=credit_days as u16)
+                    .filter_map(|n| aligned.ahead(n))
+                    .collect()
+            }
+            // No usable clock: the positional reading is what it always was.
+            None => fc.daily.iter().skip(1).take(credit_days).collect(),
+        };
+    let credit = (credit_days == 0
+        || (!crate::forecast::snapshot::forecast_is_stale(
+            fc.last_refresh_epoch,
+            as_of.unwrap_or(g.now_epoch),
+        ) && credit_rows.len() == credit_days))
+        .then(|| {
+            credit_rows
+                .into_iter()
+                .map(|d| {
+                    d.precip_sum_in.map(|amount| {
+                        in_to_mm(
+                            amount
+                                * d.precip_weight()
+                                * g.bias.multiplier_for(entry_month(
+                                    d.day_marker,
+                                    g.now_epoch,
+                                    g.calendar,
+                                )),
+                        )
+                        .min(rain_cap_mm)
+                    })
+                })
+                .sum::<Option<f64>>()
         })
-        .sum();
+        .flatten();
+    // This is applied policy credit, not a reported precipitation amount.
+    // Unknown forecasts earn no credit and are named as unavailable.
+    let forecast_credit_mm = credit.unwrap_or(0.0);
     let forecast_credit_source = if credit_days == 0 {
-        "none".to_string()
+        "none"
+    } else if credit.is_some() {
+        "bias_forecast"
     } else {
-        "bias_forecast".to_string()
-    };
+        "unavailable"
+    }
+    .to_string();
 
     // Credited observed rain: each covered day's depth held to the cap.
     // When no day clips, the credited figure IS the raw sum, bit for
@@ -255,7 +324,7 @@ pub fn compute_zone(
     };
 
     // The balance. All terms gross mm.
-    let weekly_target_gross_mm = zone.weekly_budget_in * 25.4;
+    let weekly_target_gross_mm = in_to_mm(zone.weekly_budget_in);
     let remainder = (weekly_target_gross_mm
         - observed_credited_mm
         - zone.applied_trailing_mm
@@ -274,7 +343,9 @@ pub fn compute_zone(
     let session_capped = seconds_per_session > zone.max_dur_s;
     let session_final = seconds_per_session.min(zone.max_dur_s);
 
-    let current_month = (g.calendar.local_date)(g.now_epoch)
+    let current_month = g
+        .calendar
+        .local_date(g.now_epoch)
         .map(|d| d.month())
         .unwrap_or(1);
     let bias_multiplier = g.bias.multiplier_for(current_month);
@@ -283,10 +354,7 @@ pub fn compute_zone(
     // Today's recommendation. Reasons name what actually decided:
     // covered beats defer beats spacing, since "the week is already
     // covered" is the stronger truth than "a needed session is pushed".
-    let (today_seconds, today_reason) = if !zone.mode_active {
-        // Defensive only; mode_active is hard-true on live paths.
-        (0u32, "budget mode off".to_string())
-    } else if remainder <= 0.0 {
+    let (today_seconds, today_reason) = if remainder <= 0.0 {
         // When the cap clipped a day, the sentence says so honestly:
         // what fell, what counted, and why the difference drained away.
         // When nothing clipped, the wording is byte-identical to every
@@ -296,29 +364,35 @@ pub fn compute_zone(
                 "covered by rain and prior watering ({:.2}\" fell, {:.2}\" counted: the root \
                  zone holds about {:.2}\" a day, the rest drains past the roots + {:.2}\" \
                  applied against the {:.2}\" weekly target)",
-                g.observed_rain_mm / 25.4,
-                observed_credited_mm / 25.4,
-                rain_cap_mm / 25.4,
-                zone.applied_trailing_mm / 25.4,
+                mm_to_in(g.observed_rain_mm),
+                mm_to_in(observed_credited_mm),
+                mm_to_in(rain_cap_mm),
+                mm_to_in(zone.applied_trailing_mm),
                 zone.weekly_budget_in
             )
         } else {
             format!(
                 "covered by rain and prior watering ({:.2}\" rain + {:.2}\" applied against \
                  the {:.2}\" weekly target)",
-                g.observed_rain_mm / 25.4,
-                zone.applied_trailing_mm / 25.4,
+                mm_to_in(g.observed_rain_mm),
+                mm_to_in(zone.applied_trailing_mm),
                 zone.weekly_budget_in
             )
         };
         (0, reason)
-    } else if next_24h_rain_in >= g.session_rain_defer_in {
+    } else if next_24h_rain_in.is_none() {
+        (
+            0,
+            "Rain forecast unavailable for the next 24 hours; watering held".into(),
+        )
+    } else if next_24h_rain_in.is_some_and(|amount| amount >= g.session_rain_defer_in) {
         (
             0,
             format!(
                 "deferred for forecast rain ({:.2}\" expected in the next 24h weighted by \
                  probability, threshold {:.2}\")",
-                next_24h_rain_in, g.session_rain_defer_in
+                next_24h_rain_in.expect("known rain above defer threshold"),
+                g.session_rain_defer_in
             ),
         )
     } else if days_since_last_run < min_interval_days {
@@ -333,20 +407,30 @@ pub fn compute_zone(
     } else {
         (
             session_final,
-            format!(
-                "session {} of {} this week: {:.1} mm over {:.0} min",
-                zone.sessions_done + 1,
-                sessions,
-                session_gross_mm,
-                session_final as f64 / 60.0
-            ),
+            if zone.sessions_done >= sessions {
+                format!(
+                    "remaining weekly target: {:.1} mm over {:.0} min after {} recorded session(s)",
+                    session_gross_mm,
+                    session_final as f64 / 60.0,
+                    zone.sessions_done
+                )
+            } else {
+                format!(
+                    "session {} of {} this week: {:.1} mm over {:.0} min",
+                    zone.sessions_done + 1,
+                    sessions,
+                    session_gross_mm,
+                    session_final as f64 / 60.0
+                )
+            },
         )
     };
 
     WaterBudget {
         zone_slug: zone.slug.clone(),
         zone_name: zone.name.clone(),
-        mode_active: zone.mode_active,
+        // Always true: the field is kept on the v1 wire (deprecated).
+        mode_active: true,
         weekly_budget_in: zone.weekly_budget_in,
         sessions_per_week: sessions,
         expected_rain_mm,
@@ -399,13 +483,23 @@ mod tests {
     fn fc_with_daily(precip_in: &[f64]) -> ForecastSnapshot {
         let now = now_epoch();
         let mut fc = ForecastSnapshot::default();
+        fc.last_refresh_epoch = now;
         fc.daily = precip_in
             .iter()
             .enumerate()
             .map(|(i, p)| DailyEntry {
-                time_epoch: now + i as i64 * 86_400,
-                precip_sum_in: *p,
+                day_marker: crate::engine::clock::DayMarker::inside_local_day(
+                    now + i as i64 * 86_400,
+                ),
+                precip_sum_in: Some(*p),
                 precip_probability_max: None, // full weight
+                ..Default::default()
+            })
+            .collect();
+        fc.hourly = (-12..48)
+            .map(|hour| HourlyEntry {
+                time_epoch: now + hour * 3600,
+                precip_in: Some(0.0),
                 ..Default::default()
             })
             .collect();
@@ -418,10 +512,10 @@ mod tests {
             name: "Front".into(),
             weekly_budget_in: weekly_in,
             sessions_per_week: sessions,
-            mode_active: true,
             throughput_mm_hr: 10.0,
             max_dur_s: 14_400,
             last_run_epoch: 0,
+            last_session_applied_mm: None,
             applied_trailing_mm: 0.0,
             sessions_done: 0,
             target_inferred: false,
@@ -444,7 +538,7 @@ mod tests {
         // Watered today already.
         z.last_run_epoch = now_epoch();
         z.sessions_done = 1;
-        let b = compute_zone(&z, &globals(0.0, "gauge"), &ForecastSnapshot::default());
+        let b = compute_zone(&z, &globals(0.0, "gauge"), &fc_with_daily(&[0.0; 7]));
         assert_eq!(
             b.today_seconds, 0,
             "a zone that watered today must not be re-planned today"
@@ -512,7 +606,7 @@ mod tests {
         // expected_rain_mm keeps its historical wire scaling for the
         // legacy automation: weighted 7-day sum x 25.4 x 0.7.
         let wire_week: f64 = (0.5 + 0.3 + 0.4 * 5.0) * 25.4 * EXPECTED_RAIN_WIRE_CAPTURE;
-        assert!((b.expected_rain_mm - wire_week).abs() < 1e-9);
+        assert!((b.expected_rain_mm.unwrap() - wire_week).abs() < 1e-9);
     }
 
     /// A zone with no run on record is due now: no forward credit (the
@@ -547,7 +641,7 @@ mod tests {
         let mut g = globals(10.0, "gauge");
         // Train July at a 1.5x under-prediction correction (6 wet days).
         // The fixture's own pinned calendar, the one its globals carry.
-        let today = (g.calendar.local_date)(now_epoch()).unwrap();
+        let today = g.calendar.local_date(now_epoch()).unwrap();
         let obs: Vec<crate::engine::forecast_bias::Observation> = (1..=6)
             .map(|d| {
                 crate::engine::forecast_bias::Observation::new(
@@ -584,7 +678,8 @@ mod tests {
         assert_eq!(b.remaining_sessions, 1);
         assert!((b.mm_per_session - (25.4 - 5.0)).abs() < 1e-9);
         assert!(
-            b.today_reason.contains("session 6 of 2"),
+            b.today_reason.contains("remaining weekly target")
+                && b.today_reason.contains("5 recorded session(s)"),
             "{}",
             b.today_reason
         );
@@ -598,12 +693,13 @@ mod tests {
     /// days, not elapsed seconds.
     #[test]
     fn spacing_gate_passes_on_the_intended_session_day() {
-        let fc = fc_with_daily(&[0.0; 7]);
+        let mut fc = fc_with_daily(&[0.0; 7]);
         // Pinned: the spacing gate is calendar arithmetic, so the day it
         // measures must not shift with the machine running the test.
         let cal = crate::engine::calendar::Calendar::utc();
-        let today = (cal.local_date)(now_epoch()).expect("representable");
-        let midnight = (cal.day_bounds_utc)(today)
+        let today = cal.local_date(now_epoch()).expect("representable");
+        let midnight = cal
+            .day_bounds_datetime(today)
             .expect("local midnight resolves")
             .0
             .timestamp();
@@ -614,6 +710,7 @@ mod tests {
         z.last_run_epoch = dispatch - 3 * 86_400 + 3_600;
         let mut g = globals(0.0, "none");
         g.now_epoch = dispatch;
+        fc.last_refresh_epoch = dispatch;
         let b = compute_zone(&z, &g, &fc);
         assert!(
             b.today_seconds > 0,
@@ -637,7 +734,7 @@ mod tests {
         fc.hourly = (0..24)
             .map(|h| HourlyEntry {
                 time_epoch: now + h * 3600,
-                precip_in: 0.01, // 0.24" over 24h >= the 0.10" defer gate
+                precip_in: Some(0.01), // 0.24" over 24h >= the 0.10" defer gate
                 ..Default::default()
             })
             .collect();
@@ -652,6 +749,42 @@ mod tests {
         assert!(b.today_reason.contains("covered"), "{}", b.today_reason);
     }
 
+    #[test]
+    fn unknown_qpf_never_becomes_a_dry_session_or_reported_zero() {
+        let mut forecast = fc_with_daily(&[0.0; 7]);
+        let mut zone = zone(1.0, 2);
+        let globals = globals(0.0, "none");
+        let dry = compute_zone(&zone, &globals, &forecast);
+        assert!(dry.today_seconds > 0);
+        assert_eq!(dry.expected_rain_mm, Some(0.0));
+        // A prior session makes tomorrow part of the required credit window.
+        zone.last_run_epoch = now_epoch() - 86400;
+        forecast
+            .hourly
+            .iter_mut()
+            .find(|hour| hour.time_epoch == now_epoch() + 12 * 3600)
+            .unwrap()
+            .precip_in = None;
+        forecast.daily[1].precip_sum_in = None;
+        let missing = compute_zone(&zone, &globals, &forecast);
+        assert_eq!(missing.today_seconds, 0);
+        assert!(missing.today_reason.contains("unavailable"));
+        assert_eq!(missing.expected_rain_mm, None);
+        assert_eq!(
+            missing.forecast_credit_mm, 0.0,
+            "policy applies no unknown credit"
+        );
+        assert_eq!(missing.forecast_credit_source, "unavailable");
+        let mut stale = fc_with_daily(&[0.0; 7]);
+        stale.last_refresh_epoch = now_epoch() - crate::forecast::snapshot::FORECAST_MAX_AGE_S - 1;
+        let held = compute_zone(&zone, &globals, &stale);
+        assert_eq!(
+            held.today_seconds, 0,
+            "cached coverage alone cannot certify a plan"
+        );
+        assert_eq!(held.forecast_credit_source, "unavailable");
+    }
+
     /// The defer gate weighs forecast rain by probability, the same way
     /// the forward credit and the wire's weekly total already do. 0.24"
     /// of raw model rain at 30% probability is 0.072" of expected water:
@@ -664,7 +797,7 @@ mod tests {
         fc.hourly = (0..24)
             .map(|h| HourlyEntry {
                 time_epoch: now + h * 3600,
-                precip_in: 0.01, // 0.24" raw over 24h
+                precip_in: Some(0.01), // 0.24" raw over 24h
                 precip_probability: Some(30),
                 ..Default::default()
             })
@@ -695,7 +828,7 @@ mod tests {
         fc.hourly = (0..24)
             .map(|h| HourlyEntry {
                 time_epoch: now + h * 3600,
-                precip_in: 0.01, // 0.24" expected (no probability = full weight)
+                precip_in: Some(0.01), // 0.24" expected (no probability = full weight)
                 ..Default::default()
             })
             .collect();
@@ -897,7 +1030,7 @@ mod tests {
                 mode_active: true,
                 weekly_budget_in: 1.0,
                 sessions_per_week: 2,
-                expected_rain_mm: 0.0,
+                expected_rain_mm: Some(0.0),
                 needed_mm: 0.0,
                 mm_per_session: 0.0,
                 seconds_per_session: 0,
@@ -934,7 +1067,7 @@ mod tests {
         fc.hourly = (0..24)
             .map(|h| HourlyEntry {
                 time_epoch: now + h * 3600,
-                precip_in: 0.01,
+                precip_in: Some(0.01),
                 ..Default::default()
             })
             .collect();
@@ -949,7 +1082,7 @@ mod tests {
                 mode_active: true,
                 weekly_budget_in: 1.0,
                 sessions_per_week: 2,
-                expected_rain_mm: 0.0,
+                expected_rain_mm: Some(0.0),
                 needed_mm: 25.4,
                 mm_per_session: 12.7,
                 seconds_per_session: 4572,
@@ -1000,7 +1133,7 @@ mod tests {
                 mode_active: true,
                 weekly_budget_in: 2.0,
                 sessions_per_week: 2,
-                expected_rain_mm: wire_week * 25.4 * EXPECTED_RAIN_WIRE_CAPTURE,
+                expected_rain_mm: Some(wire_week * 25.4 * EXPECTED_RAIN_WIRE_CAPTURE),
                 needed_mm: needed,
                 mm_per_session: needed,
                 seconds_per_session: 10_145,
@@ -1042,7 +1175,7 @@ mod tests {
                 mode_active: true,
                 weekly_budget_in: 1.0,
                 sessions_per_week: 2,
-                expected_rain_mm: (0.4 + 0.4) * 25.4 * EXPECTED_RAIN_WIRE_CAPTURE,
+                expected_rain_mm: Some((0.4 + 0.4) * 25.4 * EXPECTED_RAIN_WIRE_CAPTURE),
                 needed_mm: 25.4,
                 mm_per_session: 12.7,
                 seconds_per_session: 4572,
@@ -1084,7 +1217,7 @@ mod tests {
                 mode_active: true,
                 weekly_budget_in: 2.0,
                 sessions_per_week: 2,
-                expected_rain_mm: 0.0,
+                expected_rain_mm: Some(0.0),
                 needed_mm: 2.0 * 25.4,
                 mm_per_session: 25.4,
                 seconds_per_session: 9144,
@@ -1127,7 +1260,7 @@ mod tests {
                 mode_active: true,
                 weekly_budget_in: 1.0,
                 sessions_per_week: 2,
-                expected_rain_mm: 0.0,
+                expected_rain_mm: Some(0.0),
                 needed_mm: 25.4 - 9.0,
                 mm_per_session: (25.4 - 9.0) / 2.0,
                 seconds_per_session: 2952,
@@ -1169,7 +1302,7 @@ mod tests {
                 mode_active: true,
                 weekly_budget_in: 0.3,
                 sessions_per_week: 2,
-                expected_rain_mm: 0.0,
+                expected_rain_mm: Some(0.0),
                 needed_mm: 0.0,
                 mm_per_session: 0.0,
                 seconds_per_session: 0,
@@ -1224,5 +1357,19 @@ mod tests {
             b.observed_rain_mm
         );
         assert!((b.observed_rain_credited_mm - 0.30 * 25.4).abs() < 1e-9);
+    }
+    #[test]
+    fn a_brief_valve_test_does_not_delay_a_full_weekly_session() {
+        let mut z = zone(1.0, 1);
+        z.last_run_epoch = now_epoch() - 86_400;
+        z.sessions_done = 1;
+        z.last_session_applied_mm = Some(0.1);
+        z.applied_trailing_mm = 0.1;
+        let g = globals(0.0, "none");
+        let fc = fc_with_daily(&[0.0; 7]);
+        let plan = compute_zone(&z, &g, &fc);
+        assert!(plan.today_seconds > 0, "{}", plan.today_reason);
+        z.last_session_applied_mm = None;
+        assert_eq!(compute_zone(&z, &g, &fc).today_seconds, 0);
     }
 }

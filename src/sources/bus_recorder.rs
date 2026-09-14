@@ -49,29 +49,53 @@ impl SourceLastSeen {
 }
 
 /// Shared per-source last-REACHABLE map, the reachability twin of
-/// `SourceLastSeen`. The adapters publish a `SourceEvent::Reachability` on every
-/// successful fetch (e.g. noaa_mrms.rs, nws.rs); the bus recorder stamps the
-/// receive epoch here on a `Reachability { reachable: true }` event so the
+/// `SourceLastSeen`. Adapters publish both connectivity edges. The recorder
+/// retains the latest verdict and stamps the last-success epoch so the
 /// honest-status taxonomy can tell a reachable-but-quiet source (a dry rain
 /// authority emitting no Observation) apart from a genuinely unreachable one.
 /// Cloneable handle; all clones see the same state. Lives in the `sources` layer
 /// (not `api`) so the bus recorder can record into it without `sources`
 /// depending on `api`; main.rs threads the same handle into both
 /// `HealthState.source_reachable` and the runtime so /api/config reads it too.
-/// API mirrors `SourceLastSeen` exactly (default(), `record`, `get`).
+/// `get` returns the last success; `reachable` returns the current verdict.
 #[derive(Clone, Default)]
 pub struct SourceReachability {
-    inner: Arc<RwLock<HashMap<String, i64>>>,
+    inner: Arc<RwLock<HashMap<String, ReachabilityState>>>,
+}
+
+#[derive(Clone, Copy)]
+struct ReachabilityState {
+    last_success: Option<i64>,
+    verdict: bool,
+    at_epoch: i64,
 }
 
 impl SourceReachability {
     /// Stamp `source_id` reachable as of `epoch` (monotonic: never regresses).
     pub fn record(&self, source_id: &str, epoch: i64) {
+        self.report(source_id, true, epoch);
+    }
+
+    /// Preserve both edges of the adapter's verdict. Reachability is state,
+    /// not a heartbeat: a quiet healthy adapter need not repeat `true`.
+    pub fn report(&self, source_id: &str, reachable: bool, epoch: i64) {
         if let Ok(mut m) = self.inner.write() {
-            let e = m.entry(source_id.to_string()).or_insert(i64::MIN);
-            if epoch > *e {
-                *e = epoch;
+            if m.get(source_id).is_some_and(|s| s.at_epoch > epoch) {
+                return;
             }
+            let last_success = if reachable {
+                Some(epoch)
+            } else {
+                m.get(source_id).and_then(|s| s.last_success)
+            };
+            m.insert(
+                source_id.to_string(),
+                ReachabilityState {
+                    last_success,
+                    verdict: reachable,
+                    at_epoch: epoch,
+                },
+            );
         }
     }
 
@@ -80,7 +104,15 @@ impl SourceReachability {
         self.inner
             .read()
             .ok()
-            .and_then(|m| m.get(source_id).copied())
+            .and_then(|m| m.get(source_id).and_then(|s| s.last_success))
+    }
+
+    /// Last explicit verdict, or None before the adapter has reported one.
+    pub fn reachable(&self, source_id: &str) -> Option<bool> {
+        self.inner
+            .read()
+            .ok()
+            .and_then(|m| m.get(source_id).map(|s| s.verdict))
     }
 }
 
@@ -102,34 +134,7 @@ pub fn zone_soil_key(zone_slug: &str) -> String {
 /// sampler/api/manifest history keys (`wind_avg_mph` / `pressure_inhg`) so a
 /// bus source's wind/pressure shows up in the sparkline history.
 pub fn weather_field_key(f: WeatherField) -> &'static str {
-    use WeatherField::*;
-    match f {
-        AirTempF => "air_temp_f",
-        DewPointF => "dew_point_f",
-        RhPct => "rh_pct",
-        // Wind + pressure keys match the weather_sampler / api::weather /
-        // manifest history keys so a bus source's wind/pressure also shows in
-        // the sparkline history (api::weather reads "wind_avg_mph"/"pressure_inhg").
-        WindMph => "wind_avg_mph",
-        WindGustMph => "wind_gust_mph",
-        WindBearingDeg => "wind_bearing_deg",
-        SolarWm2 => "solar_w_m2",
-        UvIndex => "uv_index",
-        Illuminance => "illuminance",
-        PressureInHg => "pressure_inhg",
-        RainTodayIn => "rain_today_in",
-        RainIntensityInHr => "rain_intensity_in_hr",
-        RainTypeStr => "rain_type_str",
-        LightningCount => "lightning_count",
-        LightningDistanceMi => "lightning_distance_mi",
-        Et0Today => "et0_today",
-        FlowGpm => "flow_gpm",
-        FlowTotalGalToday => "flow_total_gal_today",
-        LeafWetness => "leaf_wetness_pct",
-        ForecastDaily => "forecast_daily",
-        ForecastHourly => "forecast_hourly",
-        Pop => "pop",
-    }
+    f.history_key()
 }
 
 /// Spawn the recorder task. Subscribes to `bus` and, for every
@@ -139,7 +144,8 @@ pub fn weather_field_key(f: WeatherField) -> &'static str {
 /// `source_reachable` (the reachability twin of `last_seen`), which the
 /// honest-status taxonomy reads so a reachable-but-quiet source (a dry rain
 /// authority emitting no Observation) reads `watching`, never `offline`. A
-/// `reachable: false` is logged only and does NOT advance the epoch.
+/// `reachable: false` preserves the failure verdict without advancing the
+/// last-success epoch. Both health surfaces read that verdict directly.
 pub fn spawn(
     bus: broadcast::Sender<SourceEvent>,
     sensor_history: Option<SensorHistoryStore>,
@@ -202,23 +208,29 @@ pub fn spawn(
                     // source shows live in /api/health.
                     last_seen.record(&source_id, at_epoch);
                 }
+                Ok(SourceEvent::Strikes { source_id, strikes }) => {
+                    // A strike is an observation like any other: it proves
+                    // the feed is producing, so it keeps the source's
+                    // liveness current. The strikes themselves are display
+                    // data (the snapshot bridge holds the hour's ring) and
+                    // are not sensor_history rows.
+                    if let Some(newest) = strikes.iter().map(|s| s.time_epoch).max() {
+                        last_seen.record(&source_id, newest);
+                    }
+                }
+                // Which hardware is talking is not a reading, and carries
+                // no time of its own; the observations that come with it
+                // are what prove the source is alive.
+                Ok(SourceEvent::Identity { .. }) => {}
                 Ok(SourceEvent::Reachability {
                     source_id,
                     reachable,
                 }) => {
-                    // A successful fetch stamps the source reachable as of NOW
-                    // (the Reachability variant carries no epoch). The taxonomy
-                    // reads this dedicated channel so a reachable-but-quiet source
-                    // (no Observation this cycle) reads `watching`, not `offline`.
-                    // A `reachable: false` must NOT advance the epoch, so a real
-                    // connectivity fault still ages into `offline`.
-                    if reachable {
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs() as i64)
-                            .unwrap_or(0);
-                        source_reachable.record(&source_id, now);
-                    }
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    source_reachable.report(&source_id, reachable, now);
                     debug!(source = %source_id, reachable, "source reachability changed");
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -299,8 +311,31 @@ mod tests {
         assert_eq!(r.get("missing"), None);
     }
 
+    #[test]
+    fn reachability_preserves_both_edges_without_rewriting_last_success() {
+        let r = SourceReachability::default();
+        r.report("station", true, 100);
+        r.report("station", false, 110);
+        assert_eq!(r.get("station"), Some(100));
+        assert_eq!(r.reachable("station"), Some(false));
+        r.report("station", true, 105);
+        assert_eq!(
+            r.reachable("station"),
+            Some(false),
+            "an older success cannot revive it"
+        );
+        r.report("station", true, 110);
+        assert_eq!(
+            r.reachable("station"),
+            Some(true),
+            "same-second bus ordering is retained"
+        );
+        assert_eq!(r.get("station"), Some(110));
+        assert_eq!(r.reachable("never"), None);
+    }
+
     #[tokio::test]
-    async fn recorder_records_reachable_true_and_ignores_false() {
+    async fn recorder_records_both_reachability_verdicts() {
         let (tx, _rx0) = broadcast::channel::<SourceEvent>(16);
         let reach = SourceReachability::default();
         spawn(tx.clone(), None, SourceLastSeen::default(), reach.clone());
@@ -327,6 +362,24 @@ mod tests {
         // A reachable event was recorded with a sane recent epoch.
         let stamped = reach.get("mrms").expect("reachable:true should record");
         assert!(stamped > 0, "reachable epoch should be a real timestamp");
+        assert_eq!(reach.reachable("mrms"), Some(true));
+        tx.send(SourceEvent::Reachability {
+            source_id: "mrms".into(),
+            reachable: false,
+        })
+        .unwrap();
+        for _ in 0..50 {
+            if reach.reachable("mrms") == Some(false) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(reach.reachable("mrms"), Some(false));
+        assert_eq!(
+            reach.get("mrms"),
+            Some(stamped),
+            "failure keeps the last success"
+        );
         // The never-reachable source has no entry.
         assert_eq!(reach.get("never"), None);
     }

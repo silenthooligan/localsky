@@ -30,57 +30,17 @@ use crate::ports::weather_source::WeatherField;
 /// forecast bridge, not per-field, so it is not override-able here).
 pub fn field_name(f: WeatherField) -> Option<&'static str> {
     use WeatherField::*;
-    Some(match f {
-        AirTempF => "air_temp_f",
-        DewPointF => "dew_point_f",
-        RhPct => "rh_pct",
-        WindMph => "wind_mph",
-        WindGustMph => "wind_gust_mph",
-        WindBearingDeg => "wind_bearing_deg",
-        SolarWm2 => "solar_w_m2",
-        UvIndex => "uv_index",
-        Illuminance => "illuminance",
-        PressureInHg => "pressure_in_hg",
-        RainTodayIn => "rain_today_in",
-        RainIntensityInHr => "rain_intensity_in_hr",
-        LightningCount => "lightning_count",
-        LightningDistanceMi => "lightning_distance_mi",
-        Et0Today => "et0_today",
-        FlowGpm => "flow_gpm",
-        FlowTotalGalToday => "flow_total_gal_today",
-        Pop => "pop",
-        LeafWetness => "leaf_wetness_pct",
-        RainTypeStr | ForecastDaily | ForecastHourly => return None,
-    })
+    match f {
+        RainTypeStr | ForecastDaily | ForecastHourly => None,
+        other => Some(other.name()),
+    }
 }
 
 /// Parse a `field_source_overrides` config-map key back to a `WeatherField`.
 /// Inverse of [`field_name`]; unknown keys (typos, removed fields) return
 /// `None` and are ignored by the install path (never an error).
 pub fn parse_field_name(name: &str) -> Option<WeatherField> {
-    use WeatherField::*;
-    Some(match name {
-        "air_temp_f" => AirTempF,
-        "dew_point_f" => DewPointF,
-        "rh_pct" => RhPct,
-        "wind_mph" => WindMph,
-        "wind_gust_mph" => WindGustMph,
-        "wind_bearing_deg" => WindBearingDeg,
-        "solar_w_m2" => SolarWm2,
-        "uv_index" => UvIndex,
-        "illuminance" => Illuminance,
-        "pressure_in_hg" => PressureInHg,
-        "rain_today_in" => RainTodayIn,
-        "rain_intensity_in_hr" => RainIntensityInHr,
-        "lightning_count" => LightningCount,
-        "lightning_distance_mi" => LightningDistanceMi,
-        "et0_today" => Et0Today,
-        "flow_gpm" => FlowGpm,
-        "flow_total_gal_today" => FlowTotalGalToday,
-        "pop" => Pop,
-        "leaf_wetness_pct" => LeafWetness,
-        _ => return None,
-    })
+    WeatherField::parse(name).filter(|f| field_name(*f).is_some())
 }
 
 /// The user-relevant headline fields the override picker offers, in display

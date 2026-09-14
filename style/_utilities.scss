@@ -1,0 +1,22 @@
+// Repeated layout recipes, loaded after feature styles.
+.u-accent { color: var(--accent); }
+.u-faint { color: var(--text-faint); }
+.u-grid-two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-3); }
+.u-justify-start { justify-content: flex-start; }
+.u-m0 { margin: 0; }
+.u-mb0 { margin-bottom: 0; }
+.u-mb3 { margin: 0 0 var(--space-3); }
+.u-mb3-only { margin-bottom: var(--space-3); }
+.u-mb4 { margin: 0 0 var(--space-4); }
+.u-mb4-only { margin-bottom: var(--space-4); }
+.u-mt2 { margin-top: var(--space-2); }
+.u-mt3 { margin-top: var(--space-3); }
+.u-mt3-only { margin: var(--space-3) 0 0; }
+.u-mt4 { margin-top: var(--space-4); }
+.u-muted { opacity: 0.5; }
+.u-pl0 { padding-left: 0; }
+.u-row { display: flex; align-items: center; gap: var(--space-2); }
+.u-section-label { margin: 0 0 var(--space-3); color: var(--text-bright); font-weight: 600; }
+.u-touch-row { display: flex; gap: var(--space-2); align-items: center; min-height: 44px; }
+.u-touch-row-top { display: flex; gap: var(--space-2); align-items: flex-start; min-height: 44px; }
+.u-wrap-row { display: flex; flex-wrap: wrap; gap: var(--space-2); }

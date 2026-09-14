@@ -6,7 +6,7 @@
 //! This is the SINGLE source of truth: `engine::species_catalog::lookup` and
 //! `engine::sprinkler_catalog::catalog_precip_rate_mm_hr` delegate here (keyed by
 //! the enum's serde slug, pinned by tests), and the per-zone form reads it
-//! directly to show its FAO-56 params + precip estimate inline (P2-4) without an
+//! directly to show its FAO-56 params + precip estimate inline without an
 //! ssr round-trip.
 
 /// FAO-56 species profile (crop-coefficient curve + root depth + management
@@ -29,45 +29,86 @@ pub struct SpeciesProfile {
     pub salinity_tolerance_ds_m: Option<f64>,
     /// Recommended mow height (inches). None = N/A (shrubs, garden).
     pub mow_height_in: Option<f64>,
+    /// Soil temperature (F, at about 6 cm) below which the planting is
+    /// dormant: top growth stops, transpiration falls to near nothing,
+    /// and watering to a crop coefficient meant for a growing lawn is
+    /// watering a sleeping one. None for plantings the catalog does not
+    /// model a dormancy for.
+    ///
+    /// Warm-season turf (bermuda, zoysia, St. Augustine, bahia, centipede,
+    /// kikuyu) browns out once soil temperature holds below about 50 F
+    /// (Turgeon, Turfgrass Management; extension guidance for the Gulf
+    /// and the Transition Zone). Cool-season turf (bluegrass, fescue,
+    /// ryegrass) keeps growing slowly until soil temperature falls below
+    /// about 40 F (Beard, Turfgrass: Science and Culture). The 6 cm
+    /// depth is what Open-Meteo models and close to the crown.
+    pub dormancy_soil_f: Option<f64>,
     /// One-line operator note. Surfaced in the advisor tile.
     pub notes: &'static str,
     pub citation: &'static str,
 }
 
+/// The crop-coefficient curves are anchored on FAO-56 Table 12.
+///
+/// The table gives two turfgrass rows and COOL season is the higher of
+/// the two: Kc_mid 0.95 against warm season's 0.85. That is not a
+/// rounding detail, it is the physiology. Warm-season grasses use the C4
+/// pathway and are meaningfully more water-efficient than cool-season C3
+/// grasses.
+///
+/// The catalog shipped with those inverted. St Augustine and kikuyu sat
+/// at 1.00 and every cool-season grass at 0.85, while each entry cited
+/// the table that says the opposite. A St Augustine lawn was therefore
+/// watered about 18% over the cited figure at peak, and a fescue lawn
+/// about 11% under it, which is the wrong direction for both: the
+/// water-efficient grass got more and the thirsty one got less.
+///
+/// The monthly curves keep their shape and their winters. The table
+/// gives flat stage values and says nothing about the seasonal rise and
+/// fall a lawn actually follows, so each curve has its PEAK moved onto
+/// the table's Kc_mid while its trough stays where the extension guides
+/// put it. Scaling the whole curve would drag January down with July,
+/// and the winter figure is not what the correction is about: the table
+/// puts warm-season Kc_ini at 0.80, so a proportional rescale to 0.47
+/// would be a far larger claim than the evidence supports.
+///
 /// Species FAO-56 profile by config slug (snake_case). Total: an unknown slug
 /// falls back to the generic "other" profile.
 pub fn species_profile_by_slug(slug: &str) -> SpeciesProfile {
     match slug {
         // ----- Warm-season turfgrasses -----
         "st_augustine" => SpeciesProfile {
-            kc_monthly: [0.55, 0.60, 0.70, 0.85, 0.95, 1.00, 1.00, 1.00, 0.95, 0.85, 0.70, 0.55],
+            kc_monthly: [0.55, 0.58, 0.65, 0.75, 0.82, 0.85, 0.85, 0.85, 0.82, 0.75, 0.65, 0.55],
             root_depth_mm: 150.0,
             mad_pct: 0.50,
             default_sessions_per_week: 2,
             salinity_tolerance_ds_m: Some(6.0),
             mow_height_in: Some(3.5),
+            dormancy_soil_f: Some(50.0),
             notes: "Warm-season turf common across the US Southeast, Mediterranean climates, and Australia/NZ (sold there as Buffalo). Shallow-rooted; prefers deeper, less frequent watering.",
-            citation: "FAO-56 Table 12; UF/IFAS ENH62",
+            citation: "FAO-56 Table 12 warm-season turf (Kc_mid 0.85); UF/IFAS ENH62 for habit",
         },
         "bermuda" => SpeciesProfile {
-            kc_monthly: [0.50, 0.55, 0.65, 0.80, 0.90, 0.95, 0.95, 0.95, 0.90, 0.80, 0.65, 0.50],
+            kc_monthly: [0.50, 0.54, 0.62, 0.73, 0.81, 0.85, 0.85, 0.85, 0.81, 0.73, 0.62, 0.50],
             root_depth_mm: 200.0,
             mad_pct: 0.50,
             default_sessions_per_week: 2,
             salinity_tolerance_ds_m: Some(8.0),
             mow_height_in: Some(1.5),
+            dormancy_soil_f: Some(50.0),
             notes: "Deepest-rooted common turf. Drought-tolerant; can go semi-dormant in heat.",
-            citation: "FAO-56 Table 12; UF/IFAS ENH19",
+            citation: "FAO-56 Table 12 warm-season turf (Kc_mid 0.85); UF/IFAS ENH19 for habit",
         },
         "zoysia" => SpeciesProfile {
-            kc_monthly: [0.55, 0.60, 0.65, 0.75, 0.85, 0.90, 0.90, 0.90, 0.85, 0.75, 0.65, 0.55],
+            kc_monthly: [0.55, 0.59, 0.64, 0.72, 0.81, 0.85, 0.85, 0.85, 0.81, 0.72, 0.64, 0.55],
             root_depth_mm: 150.0,
             mad_pct: 0.50,
             default_sessions_per_week: 2,
             salinity_tolerance_ds_m: Some(7.0),
             mow_height_in: Some(2.0),
+            dormancy_soil_f: Some(50.0),
             notes: "Slow but dense; tolerates moderate shade; recovers slowly from drought.",
-            citation: "FAO-56 Table 12; UF/IFAS ENH11",
+            citation: "FAO-56 Table 12 warm-season turf (Kc_mid 0.85); UF/IFAS ENH11 for habit",
         },
         "bahia" => SpeciesProfile {
             kc_monthly: [0.55, 0.60, 0.65, 0.75, 0.80, 0.85, 0.85, 0.85, 0.80, 0.75, 0.65, 0.55],
@@ -76,8 +117,9 @@ pub fn species_profile_by_slug(slug: &str) -> SpeciesProfile {
             default_sessions_per_week: 2,
             salinity_tolerance_ds_m: Some(4.0),
             mow_height_in: Some(3.5),
+            dormancy_soil_f: Some(50.0),
             notes: "Drought-tolerant pasture-and-lawn grass widespread across the subtropical Americas; tolerates low fertility.",
-            citation: "FAO-56 Table 12; UF/IFAS ENH6",
+            citation: "FAO-56 Table 12 warm-season turf (Kc_mid 0.85); UF/IFAS ENH6 for habit",
         },
         "centipede" => SpeciesProfile {
             kc_monthly: [0.50, 0.55, 0.60, 0.70, 0.80, 0.85, 0.85, 0.85, 0.80, 0.70, 0.60, 0.50],
@@ -86,49 +128,54 @@ pub fn species_profile_by_slug(slug: &str) -> SpeciesProfile {
             default_sessions_per_week: 2,
             salinity_tolerance_ds_m: Some(3.0),
             mow_height_in: Some(2.0),
+            dormancy_soil_f: Some(50.0),
             notes: "Low-maintenance; shallow-rooted; iron-chlorotic on high-pH soils.",
-            citation: "FAO-56 Table 12; UF/IFAS ENH8",
+            citation: "FAO-56 Table 12 warm-season turf (Kc_mid 0.85); UF/IFAS ENH8 for habit",
         },
         "kikuyu" => SpeciesProfile {
-            kc_monthly: [0.55, 0.60, 0.70, 0.85, 0.95, 1.00, 1.00, 1.00, 0.95, 0.85, 0.70, 0.55],
+            kc_monthly: [0.55, 0.58, 0.65, 0.75, 0.82, 0.85, 0.85, 0.85, 0.82, 0.75, 0.65, 0.55],
             root_depth_mm: 300.0,
             mad_pct: 0.5,
             default_sessions_per_week: 2,
             salinity_tolerance_ds_m: Some(4.0),
             mow_height_in: Some(1.5),
+            dormancy_soil_f: Some(50.0),
             notes: "Southern-hemisphere staple (Australia, NZ, South Africa). Vigorous warm-season runner; curve anchors shift automatically below the equator.",
-            citation: "FAO-56 Table 12 (kikuyu grass)",
+            citation: "FAO-56 Table 12 warm-season turf (Kc_mid 0.85)",
         },
         // ----- Cool-season turfgrasses -----
         "kentucky_bluegrass" => SpeciesProfile {
-            kc_monthly: [0.55, 0.60, 0.75, 0.85, 0.85, 0.80, 0.78, 0.80, 0.85, 0.80, 0.65, 0.55],
+            kc_monthly: [0.55, 0.62, 0.82, 0.95, 0.95, 0.88, 0.86, 0.88, 0.95, 0.88, 0.68, 0.55],
             root_depth_mm: 150.0,
             mad_pct: 0.50,
             default_sessions_per_week: 2,
             salinity_tolerance_ds_m: Some(3.0),
             mow_height_in: Some(2.5),
+            dormancy_soil_f: Some(40.0),
             notes: "Self-repairs via rhizomes; dormant in summer drought without irrigation.",
-            citation: "FAO-56 Table 12 (cool-season turf)",
+            citation: "FAO-56 Table 12 cool-season turf (Kc_mid 0.95)",
         },
         "tall_fescue" => SpeciesProfile {
-            kc_monthly: [0.55, 0.65, 0.78, 0.85, 0.85, 0.80, 0.78, 0.80, 0.85, 0.80, 0.65, 0.55],
+            kc_monthly: [0.55, 0.68, 0.86, 0.95, 0.95, 0.88, 0.86, 0.88, 0.95, 0.88, 0.68, 0.55],
             root_depth_mm: 250.0,
             mad_pct: 0.55,
             default_sessions_per_week: 2,
             salinity_tolerance_ds_m: Some(5.0),
             mow_height_in: Some(3.5),
+            dormancy_soil_f: Some(40.0),
             notes: "Deep-rooted; most heat- and drought-tolerant cool-season grass.",
-            citation: "FAO-56 Table 12 (cool-season turf)",
+            citation: "FAO-56 Table 12 cool-season turf (Kc_mid 0.95)",
         },
         "perennial_ryegrass" => SpeciesProfile {
-            kc_monthly: [0.55, 0.65, 0.78, 0.85, 0.85, 0.80, 0.78, 0.80, 0.85, 0.80, 0.65, 0.55],
+            kc_monthly: [0.55, 0.68, 0.86, 0.95, 0.95, 0.88, 0.86, 0.88, 0.95, 0.88, 0.68, 0.55],
             root_depth_mm: 125.0,
             mad_pct: 0.50,
             default_sessions_per_week: 2,
             salinity_tolerance_ds_m: Some(5.0),
             mow_height_in: Some(2.5),
+            dormancy_soil_f: Some(40.0),
             notes: "Quick germination; often overseeded into dormant warm-season lawns for winter color.",
-            citation: "FAO-56 Table 12 (cool-season turf)",
+            citation: "FAO-56 Table 12 cool-season turf (Kc_mid 0.95)",
         },
         // ----- Non-turf zones -----
         "ornamental_shrubs" => SpeciesProfile {
@@ -138,6 +185,7 @@ pub fn species_profile_by_slug(slug: &str) -> SpeciesProfile {
             default_sessions_per_week: 1,
             salinity_tolerance_ds_m: None,
             mow_height_in: None,
+            dormancy_soil_f: None,
             notes: "Established shrubs; water deeply + infrequently. Drip preferred.",
             citation: "FAO-56 Table 12; UF/IFAS ENH1115",
         },
@@ -148,6 +196,7 @@ pub fn species_profile_by_slug(slug: &str) -> SpeciesProfile {
             default_sessions_per_week: 2,
             salinity_tolerance_ds_m: None,
             mow_height_in: None,
+            dormancy_soil_f: None,
             notes: "Critical at germination + fruit set. Mulch heavily to cut ET.",
             citation: "FAO-56 Table 12 (vegetables mid-season)",
         },
@@ -158,6 +207,7 @@ pub fn species_profile_by_slug(slug: &str) -> SpeciesProfile {
             default_sessions_per_week: 1,
             salinity_tolerance_ds_m: None,
             mow_height_in: None,
+            dormancy_soil_f: None,
             notes: "Established native plantings on drip. Water only during establishment / drought stress.",
             citation: "Operator convention; FAO-56 Kc_late for drought-tolerant ornamentals",
         },
@@ -169,6 +219,7 @@ pub fn species_profile_by_slug(slug: &str) -> SpeciesProfile {
             default_sessions_per_week: 2,
             salinity_tolerance_ds_m: None,
             mow_height_in: None,
+            dormancy_soil_f: None,
             notes: "Generic placeholder. Override per zone with measured values.",
             citation: "Operator-supplied",
         },
@@ -243,6 +294,66 @@ pub fn sprinkler_precip_mm_hr(slug: &str) -> f64 {
         _ => 25.0,
     }
 }
+
+/// How much of the water a head puts out actually reaches the root zone.
+///
+/// One operator knob, `capture_efficiency`, defaulting to 0.70, used to
+/// stand in for three physically different quantities at once: how much
+/// RAIN reaches the roots, how much IRRIGATION reaches them, and the
+/// factor a refill is grossed up by on the way out. They are not the
+/// same number and they do not move together.
+///
+/// Irrigation efficiency is dominated by the head. A drip line delivers
+/// water to the soil surface under the canopy with almost no drift or
+/// evaporation loss; a fixed spray throws a fine mist across a wide arc
+/// in the open. Charging both 30% losses means the drip zone is watered
+/// about a third longer than it needs and the spray zone is watered
+/// optimistically.
+///
+/// Values are low-quarter distribution uniformity combined with typical
+/// application efficiency for a well-maintained residential system.
+/// They are conservative on purpose: a badly aimed head or a windy site
+/// does worse, and the operator can measure their own with catch cups
+/// and override.
+///
+/// Sources: Irrigation Association landscape irrigation auditor guidance
+/// (DUlq by emission device), and the FAO-56 treatment of application
+/// efficiency.
+pub fn sprinkler_application_efficiency(slug: &str) -> f64 {
+    match slug {
+        // Sub-canopy, low pressure, no drift.
+        "drip" => 0.90,
+        // Low flow at the soil surface, but a narrow wetted pattern.
+        "bubbler" => 0.85,
+        // Multi-stream rotating heads: large droplets, low precipitation
+        // rate, good uniformity.
+        "mp_rotator" => 0.80,
+        // Rotors: large droplets carry well, but long throws lose to
+        // wind and evaporation.
+        "rotor" => 0.75,
+        // Fixed sprays: fine droplets across a wide arc, the most
+        // drift-prone and evaporation-prone of the common heads.
+        "spray" => 0.65,
+        // "other" and any unknown slug: the historical global figure,
+        // which is the honest answer when the head is unknown.
+        _ => 0.70,
+    }
+}
+
+/// How much of the rain that falls reaches the root zone.
+///
+/// Distinct from irrigation efficiency and higher than it. Rain arrives
+/// as large drops over the whole area with no drift and little
+/// evaporation in flight; what it loses is canopy interception and,
+/// on a heavy day, runoff. The runoff half is already handled: the soil
+/// bucket clamps at field capacity and the daily rain cap holds a storm
+/// to what the root zone can take.
+///
+/// So this factor covers interception alone, which for turf is small.
+/// Charging rain the same 30% loss as a fixed spray head credited the
+/// yard about a fifth less rain than it received, which deepens the
+/// modelled deficit and waters more.
+pub const RAIN_EFFECTIVENESS: f64 = 0.90;
 
 /// `[min, max]` of the monthly Kc curve, for a one-line "Kc x-y" summary.
 pub fn kc_range(p: &SpeciesProfile) -> (f64, f64) {
@@ -398,5 +509,97 @@ pub fn soil_profile_by_slug(slug: &str) -> SoilProfile {
         // Unknown or unset: the middle-of-the-road texture the zone form
         // also loads by default. Recursing keeps one copy of the numbers.
         _ => soil_profile_by_slug("sandy_loam"),
+    }
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+
+    fn peak(slug: &str) -> f64 {
+        species_profile_by_slug(slug)
+            .kc_monthly
+            .iter()
+            .cloned()
+            .fold(0.0_f64, f64::max)
+    }
+
+    /// The table's own ordering: cool-season turf transpires HARDER than
+    /// warm-season turf.
+    ///
+    /// FAO-56 Table 12 puts cool season at Kc_mid 0.95 and warm season
+    /// at 0.85, because warm-season grasses use the C4 pathway and are
+    /// meaningfully more water-efficient. The catalog shipped with those
+    /// inverted while citing the table that says otherwise, so the
+    /// water-efficient grass was watered hardest and the thirsty one
+    /// least.
+    #[test]
+    fn cool_season_turf_wants_more_water_than_warm_season() {
+        for warm in [
+            "st_augustine",
+            "bermuda",
+            "zoysia",
+            "bahia",
+            "centipede",
+            "kikuyu",
+        ] {
+            assert!(
+                (peak(warm) - 0.85).abs() < 1e-9,
+                "{warm} peaks at the table's warm-season Kc_mid, got {}",
+                peak(warm)
+            );
+        }
+        for cool in ["kentucky_bluegrass", "tall_fescue", "perennial_ryegrass"] {
+            assert!(
+                (peak(cool) - 0.95).abs() < 1e-9,
+                "{cool} peaks at the table's cool-season Kc_mid, got {}",
+                peak(cool)
+            );
+        }
+        assert!(
+            peak("tall_fescue") > peak("st_augustine"),
+            "the table's ordering, which the catalog used to invert"
+        );
+    }
+
+    /// The correction moved summer, not winter.
+    ///
+    /// Scaling a whole curve to move its peak drags January down with
+    /// July. The table puts warm-season Kc_ini at 0.80, so pulling a
+    /// dormant month to 0.47 would claim far more than the correction
+    /// supports. The trough encodes dormancy, which the three-stage
+    /// table does not describe, and it stays where it was.
+    #[test]
+    fn the_correction_left_the_winters_alone() {
+        let jan = |slug: &str| species_profile_by_slug(slug).kc_monthly[0];
+        assert!((jan("st_augustine") - 0.55).abs() < 1e-9);
+        assert!((jan("bermuda") - 0.50).abs() < 1e-9);
+        assert!((jan("tall_fescue") - 0.55).abs() < 1e-9);
+    }
+
+    /// Every turf entry cites the table it now actually follows.
+    #[test]
+    fn the_turf_citations_name_the_value_they_carry() {
+        for slug in [
+            "st_augustine",
+            "bermuda",
+            "zoysia",
+            "bahia",
+            "centipede",
+            "kikuyu",
+        ] {
+            let c = species_profile_by_slug(slug).citation;
+            assert!(
+                c.contains("warm-season") && c.contains("0.85"),
+                "{slug} cites the value it uses: {c}"
+            );
+        }
+        for slug in ["kentucky_bluegrass", "tall_fescue", "perennial_ryegrass"] {
+            let c = species_profile_by_slug(slug).citation;
+            assert!(
+                c.contains("cool-season") && c.contains("0.95"),
+                "{slug} cites the value it uses: {c}"
+            );
+        }
     }
 }

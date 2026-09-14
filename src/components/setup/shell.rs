@@ -23,6 +23,7 @@ const STEPS: &[(&str, &str, bool)] = &[
     // ("Any hardware, or none") and the engine's weather-only support.
     ("controllers", "Controller", true),
     ("zones", "Zones", true),
+    ("rules", "Watering rules", true),
     ("sensors", "Sensors", true),
     ("llm", "AI advisor", true),
     ("notifications", "Notifications", true),
@@ -178,6 +179,7 @@ where
                 </span>
             </div>
             <div class="setup-progress__track" role="progressbar"
+                aria-label="Setup progress"
                 aria-valuemin="1"
                 aria-valuemax=STEPS.len().to_string()
                 aria-valuenow=move || (idx() + 1).to_string()
@@ -213,7 +215,7 @@ where
 fn render_step(step: &str) -> impl IntoView {
     use crate::components::setup::{
         AccountStep, ControllersStep, LlmStep, LocationStep, NotificationsStep, ReviewStep,
-        SensorsStep, SourcesStep, WelcomeStep, ZonesStep,
+        RulesStep, SensorsStep, SourcesStep, WelcomeStep, ZonesStep,
     };
     match step {
         "welcome" => view! { <WelcomeStep/> }.into_any(),
@@ -221,6 +223,7 @@ fn render_step(step: &str) -> impl IntoView {
         "sources" => view! { <SourcesStep/> }.into_any(),
         "controllers" => view! { <ControllersStep/> }.into_any(),
         "zones" => view! { <ZonesStep/> }.into_any(),
+        "rules" => view! { <RulesStep/> }.into_any(),
         "sensors" => view! { <SensorsStep/> }.into_any(),
         "llm" => view! { <LlmStep/> }.into_any(),
         "notifications" => view! { <NotificationsStep/> }.into_any(),
@@ -262,16 +265,31 @@ pub fn SetupFooter(
     #[prop(into)] prev: Signal<Option<String>>,
     #[prop(into)] next: Signal<Option<String>>,
 ) -> impl IntoView {
+    let save_status = crate::components::setup::draft::status();
+    let can_leave = Signal::derive(move || {
+        let status = save_status.get();
+        status.pending == 0 && status.error.is_none()
+    });
+    let save_status = crate::components::setup::draft::status();
+    let pending_status = save_status.clone();
     view! {
         <footer class="setup-footer">
             {move || prev.get().map(|href| view! {
                 <Button variant="ghost" href=href>"Back"</Button>
             })}
-            <Button variant="ghost" href="/".to_string()>
-                "Save and finish later"
-            </Button>
-            {move || next.get().map(|href| view! {
+            {move || if can_leave.get() {
+                view! { <Button variant="ghost" href="/".to_string()>"Save and finish later"</Button> }.into_any()
+            } else {
+                view! { <Button variant="ghost" disabled=true>"Save and finish later"</Button> }.into_any()
+            }}
+            {move || next.get().filter(|_| can_leave.get()).map(|href| view! {
                 <Button variant="primary" href=href>"Next"</Button>
+            })}
+            {move || (pending_status.get().pending > 0).then(|| view! {
+                <p role="status">"Saving your setup..."</p>
+            })}
+            {move || save_status.get().error.map(|error| view! {
+                <p role="alert">{error}</p>
             })}
         </footer>
     }
@@ -288,5 +306,57 @@ pub fn prev_step_href(current: &str) -> Option<String> {
         None
     } else {
         STEPS.get(idx - 1).map(|(id, _, _)| format!("/setup/{id}"))
+    }
+}
+
+#[cfg(test)]
+mod vocabulary_tests {
+    /// The wizard speaks to a homeowner. Engineering vocabulary in a
+    /// string a person reads during setup is a bug: the reader did not
+    /// choose the file format, the standards body or the environment.
+    #[test]
+    fn the_wizard_speaks_to_a_homeowner() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/components/setup");
+        let banned = [
+            "FAO-56",
+            "IANA",
+            "env var",
+            ".toml",
+            "/api/",
+            "ET0",
+            "null island",
+        ];
+        let mut hits = Vec::new();
+        for path in crate::engine::clock::rust_sources(&root) {
+            let src = std::fs::read_to_string(&path).unwrap();
+            // Strings a person reads: comments, tests and request URLs
+            // ("/api/wizard/draft" is code, not copy) may say what they like.
+            let prose = src.split("#[cfg(test)]").next().unwrap_or("");
+            for (n, line) in prose.lines().enumerate() {
+                let t = line.trim_start();
+                if t.starts_with("//") || line.contains("\"/api/") {
+                    continue;
+                }
+                for b in banned {
+                    if line.contains(b) && line.contains('"') {
+                        hits.push(format!("{}:{}: {b}", path.display(), n + 1));
+                    }
+                }
+            }
+        }
+        assert!(
+            hits.is_empty(),
+            "wizard strings use engineering vocabulary:\n{}",
+            hits.join("\n")
+        );
+    }
+
+    #[test]
+    fn the_steps_include_rules() {
+        assert!(super::STEPS
+            .iter()
+            .any(|(id, label, optional)| *id == "rules"
+                && *label == "Watering rules"
+                && *optional));
     }
 }

@@ -1,0 +1,55 @@
+// Shared mixins. This file emits NO CSS, which is why every partial can
+// `@use` it without affecting the cascade: a module that outputs nothing
+// cannot move anything.
+//
+// These are mixins rather than shared classes on purpose. A mixin
+// duplicates declarations, which looks wasteful and is not: the
+// alternative, @extend, rewrites selector lists across the whole
+// compilation unit, and its reach silently changed the moment this
+// stylesheet was split into modules. A mixin does the same thing
+// wherever it is written.
+
+// ─────────────────────────────────────────────────────────────────────
+// Breakpoints
+// ─────────────────────────────────────────────────────────────────────
+// The two that carry the layout. 760 is the phone/desktop line: below it
+// the sidebar is gone and the bottom tab bar is the navigation. They are
+// named so a reader knows WHICH side of the line a block is for without
+// having to hold the number and the comparison in their head at once.
+
+@mixin phone {
+  @media (max-width: 760px) {
+    @content;
+  }
+}
+
+@mixin desk {
+  @media (min-width: 761px) {
+    @content;
+  }
+}
+
+@mixin reduced-motion {
+  @media (prefers-reduced-motion: reduce) {
+    @content;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Focus
+// ─────────────────────────────────────────────────────────────────────
+// One visible focus treatment, so a keyboard user sees the same ring on
+// every control. The offset varies by how tight the control is against
+// its neighbors, so it is the parameter; everything else is fixed.
+
+@mixin focus-ring($offset: var(--focus-ring-offset)) {
+  outline: var(--focus-ring);
+  outline-offset: $offset;
+}
+
+@mixin surface($background: var(--elev-1), $border: 1px solid var(--elev-border), $radius: var(--radius-lg), $shadow: var(--shadow-1)) {
+  background: $background;
+  border: $border;
+  border-radius: $radius;
+  @if $shadow != null { box-shadow: $shadow; }
+}

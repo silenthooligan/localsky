@@ -32,13 +32,14 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use tokio::sync::Mutex;
-use tokio::time::{interval, MissedTickBehavior};
-use tracing::{debug, info, warn};
 
 use crate::config::schema::LacrosseConfig;
 use crate::ports::weather_source::{
-    ShutdownSignal, SourceBus, SourceCaps, SourceEvent, WeatherField, WeatherSource,
+    ShutdownSignal, SourceBus, SourceCaps, WeatherField, WeatherSource,
 };
+use crate::sources::auth::{with_reauth, TokenCache};
+use crate::sources::poll::{run_polling, Poll};
+use crate::units::{c_to_f, kph_to_mph, mm_to_in};
 
 const IDTOOLKIT_URL: &str =
     "https://www.googleapis.com/identitytoolkit/v3/relyingparty/verifyPassword";
@@ -52,7 +53,9 @@ pub struct Lacrosse {
     id: String,
     config: LacrosseConfig,
     client: Client,
-    id_token: Mutex<Option<String>>,
+    /// The Firebase idToken (60min TTL). A 401 from the gateway
+    /// invalidates it; the next call logs in again.
+    id_token: TokenCache,
     /// Cached (location_id, device_id) after first locations lookup so
     /// we don't re-walk the tree on every poll.
     resolved: Mutex<Option<(String, String)>>,
@@ -64,21 +67,26 @@ struct AuthResponse {
     id_token: String,
 }
 
+/// A 401 from the gateway means the idToken expired, not that the
+/// upstream is down; only that earns a re-login and a retry.
+fn token_rejected(e: &anyhow::Error) -> bool {
+    let status = e.downcast_ref::<reqwest::Error>().and_then(|r| r.status());
+    status == Some(StatusCode::UNAUTHORIZED)
+}
+
 impl Lacrosse {
     pub fn new(id: impl Into<String>, config: LacrosseConfig) -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .expect("reqwest client construction");
         Self {
             id: id.into(),
             config,
-            client,
-            id_token: Mutex::new(None),
+            client: crate::net::client(Duration::from_secs(15)),
+            id_token: TokenCache::new(),
             resolved: Mutex::new(None),
         }
     }
 
+    /// Exchange email + password for a fresh idToken. Caching is the
+    /// `TokenCache`'s job; this only talks to the identity toolkit.
     async fn login(&self) -> anyhow::Result<String> {
         let url = format!("{IDTOOLKIT_URL}?key={FIREBASE_KEY}");
         let body = json!({
@@ -95,30 +103,37 @@ impl Lacrosse {
             .error_for_status()?
             .json()
             .await?;
-        *self.id_token.lock().await = Some(resp.id_token.clone());
         Ok(resp.id_token)
     }
 
-    async fn current_token(&self) -> anyhow::Result<String> {
-        if let Some(t) = self.id_token.lock().await.clone() {
-            return Ok(t);
-        }
-        self.login().await
+    /// One bearer-authenticated GET against the gateway. A 401 surfaces
+    /// as a `reqwest::Error` carrying the status so `token_rejected`
+    /// can tell it from an outage.
+    async fn get_with_token(&self, url: &str, token: String) -> anyhow::Result<Value> {
+        let resp = self
+            .client
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(resp.json().await?)
+    }
+
+    /// GET with the cached idToken; on a 401, log in again and retry once.
+    async fn get_json(&self, url: &str) -> anyhow::Result<Value> {
+        with_reauth(
+            &self.id_token,
+            || self.login(),
+            token_rejected,
+            |token| self.get_with_token(url, token),
+        )
+        .await
     }
 
     async fn locations(&self) -> anyhow::Result<Value> {
-        let mut token = self.current_token().await?;
-        let url = format!("{API_BASE}/active-user/locations");
-        for attempt in 0..2 {
-            let resp = self.client.get(&url).bearer_auth(&token).send().await?;
-            if resp.status() == StatusCode::UNAUTHORIZED && attempt == 0 {
-                *self.id_token.lock().await = None;
-                token = self.login().await?;
-                continue;
-            }
-            return Ok(resp.error_for_status()?.json().await?);
-        }
-        Err(anyhow::anyhow!("lacrosse locations retry exhausted"))
+        self.get_json(&format!("{API_BASE}/active-user/locations"))
+            .await
     }
 
     async fn resolve_target(&self) -> anyhow::Result<(String, String)> {
@@ -170,17 +185,7 @@ impl Lacrosse {
         let url = format!(
             "{API_BASE}/active-user/location/{loc}/sensors/{dev}/feed?fields=Temperature,Humidity,WindSpeed,Rain&from=0",
         );
-        let mut token = self.current_token().await?;
-        for attempt in 0..2 {
-            let resp = self.client.get(&url).bearer_auth(&token).send().await?;
-            if resp.status() == StatusCode::UNAUTHORIZED && attempt == 0 {
-                *self.id_token.lock().await = None;
-                token = self.login().await?;
-                continue;
-            }
-            return Ok(resp.error_for_status()?.json().await?);
-        }
-        Err(anyhow::anyhow!("lacrosse feed retry exhausted"))
+        self.get_json(&url).await
     }
 }
 
@@ -195,16 +200,6 @@ fn latest_value(feed: &Value, key: &str) -> Option<f64> {
         .last()?
         .get("s")?
         .as_f64()
-}
-
-fn c_to_f(c: f64) -> f64 {
-    c * 9.0 / 5.0 + 32.0
-}
-fn kph_to_mph(v: f64) -> f64 {
-    v * 0.621371
-}
-fn mm_to_in(mm: f64) -> f64 {
-    mm * 0.03937
 }
 
 fn extract_fields(feed: &Value) -> Vec<(WeatherField, f64)> {
@@ -258,57 +253,25 @@ impl WeatherSource for Lacrosse {
         }
     }
 
-    async fn run(
-        self: Arc<Self>,
-        bus: SourceBus,
-        mut shutdown: ShutdownSignal,
-    ) -> anyhow::Result<()> {
-        info!(source_id = %self.id, "LaCrosse source started");
-        let mut tick = interval(POLL_INTERVAL);
-        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut last_reachable: Option<bool> = None;
-        loop {
-            tokio::select! {
-                _ = tick.tick() => {
-                    match self.fetch_feed().await {
-                        Ok(feed) => {
-                            if last_reachable != Some(true) {
-                                let _ = bus.send(SourceEvent::Reachability {
-                                    source_id: self.id.clone(),
-                                    reachable: true,
-                                });
-                                last_reachable = Some(true);
-                            }
-                            let fields = extract_fields(&feed);
-                            if !fields.is_empty() {
-                                debug!(source_id = %self.id, fields_n = fields.len(), "LaCrosse updated");
-                                let _ = bus.send(SourceEvent::Observation {
-                                    source_id: self.id.clone(),
-                                    fields,
-                                    at_epoch: chrono::Utc::now().timestamp(),
-                                });
-                            }
-                        }
-                        Err(e) => {
-                            warn!(source_id = %self.id, error = %e, "LaCrosse fetch failed");
-                            if last_reachable != Some(false) {
-                                let _ = bus.send(SourceEvent::Reachability {
-                                    source_id: self.id.clone(),
-                                    reachable: false,
-                                });
-                                last_reachable = Some(false);
-                            }
-                        }
-                    }
-                }
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        info!(source_id = %self.id, "LaCrosse shutdown");
-                        return Ok(());
-                    }
-                }
-            }
-        }
+    async fn run(self: Arc<Self>, bus: SourceBus, shutdown: ShutdownSignal) -> anyhow::Result<()> {
+        // The loop (tick, missed-tick policy, fetch metric, reachability
+        // edges, shutdown) is `run_polling`'s; one poll is one feed read.
+        let id = self.id.clone();
+        run_polling(
+            self,
+            &id,
+            "LaCrosse",
+            POLL_INTERVAL,
+            bus,
+            shutdown,
+            |s| async move {
+                let feed = s.fetch_feed().await?;
+                let fields = extract_fields(&feed);
+                let now = chrono::Utc::now().timestamp();
+                Ok(Poll::observation(&s.id, fields, now))
+            },
+        )
+        .await
     }
 }
 
@@ -376,5 +339,15 @@ mod tests {
         });
         assert_eq!(latest_value(&feed, "Temperature"), Some(21.5));
         assert_eq!(latest_value(&feed, "Missing"), None);
+    }
+
+    #[test]
+    fn an_outage_is_not_a_rejected_token() {
+        // Only a 401 carried by a reqwest error earns a re-login; a
+        // parse or transport failure must not burn a login per poll.
+        assert!(!token_rejected(&anyhow::anyhow!("timeout")));
+        assert!(!token_rejected(&anyhow::anyhow!(
+            "lacrosse locations response missing items[]"
+        )));
     }
 }

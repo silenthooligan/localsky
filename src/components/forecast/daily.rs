@@ -4,7 +4,8 @@
 
 use crate::components::forecast::glyph::weather_code_glyph;
 use crate::components::units_fmt::{
-    fmt_rain_amount, fmt_rain_rate, fmt_temp_short, fmt_wind, use_unit_prefs, UnitPrefs,
+    fmt_optional_rain_amount, fmt_optional_temp_short, fmt_optional_wind, fmt_rain_rate,
+    use_unit_prefs, UnitPrefs,
 };
 use crate::forecast::snapshot::{DailyEntry, ForecastSnapshot};
 use crate::timefmt::{format_md, format_wday_short};
@@ -74,14 +75,28 @@ fn DailyCard(entry: DailyEntry, is_today: bool, prefs: UnitPrefs, tz: String) ->
     let day_label = if is_today {
         "Today".to_string()
     } else {
-        let d = format_wday_short(entry.time_epoch, &tz);
+        // The marker is an instant inside the day it labels, and `tz` is
+        // the deployment zone, so formatting it here yields that day. This
+        // is the one legitimate read of the raw stamp: a label, rendered in
+        // the frame the label was written in.
+        let stamp = entry
+            .day_marker
+            .provenance_epoch_not_an_instant()
+            .unwrap_or(0);
+        let d = format_wday_short(stamp, &tz);
         if d.is_empty() {
             "-".to_string()
         } else {
             d
         }
     };
-    let date_label = format_md(entry.time_epoch, &tz);
+    let date_label = format_md(
+        entry
+            .day_marker
+            .provenance_epoch_not_an_instant()
+            .unwrap_or(0),
+        &tz,
+    );
     let class = if is_today {
         "daily-card daily-card-today"
     } else {
@@ -92,12 +107,12 @@ fn DailyCard(entry: DailyEntry, is_today: bool, prefs: UnitPrefs, tz: String) ->
     // over 8 hours infiltrates, over 40 minutes it partly runs off. Only
     // rendered when the provider reports precipitation_hours (Open-Meteo);
     // advisory context only, the engine still counts the full total.
-    let rain_character = {
-        let wet = entry.precip_sum_in >= 0.1 && entry.precip_hours > 0.0;
+    let rain_character = entry.precip_sum_in.and_then(|rain| {
+        let wet = rain.is_finite() && rain >= 0.1 && entry.precip_hours > 0.0;
         if !wet {
             None
         } else {
-            let rate = entry.precip_sum_in / entry.precip_hours;
+            let rate = rain / entry.precip_hours;
             if rate >= 0.35 {
                 Some((
                     "burst",
@@ -121,7 +136,7 @@ fn DailyCard(entry: DailyEntry, is_today: bool, prefs: UnitPrefs, tz: String) ->
                 None
             }
         }
-    };
+    });
 
     view! {
         <article class=class>
@@ -129,16 +144,16 @@ fn DailyCard(entry: DailyEntry, is_today: bool, prefs: UnitPrefs, tz: String) ->
                 <span class="daily-card-day">{day_label}</span>
                 <span class="daily-card-date">{date_label}</span>
             </header>
-            <div class="daily-card-glyph" title=label aria-label=label>
+            <div class="daily-card-glyph" role="img" title=label aria-label=label>
                 <crate::components::ui::Icon name=g size=30/>
             </div>
             <div class="daily-card-temps">
-                <span class="daily-card-temp-hi">{fmt_temp_short(entry.temp_max_f, prefs)}</span>
+                <span class="daily-card-temp-hi">{fmt_optional_temp_short(entry.temp_max_f, prefs)}</span>
                 <span class="daily-card-temp-sep">"/"</span>
-                <span class="daily-card-temp-lo">{fmt_temp_short(entry.temp_min_f, prefs)}</span>
+                <span class="daily-card-temp-lo">{fmt_optional_temp_short(entry.temp_min_f, prefs)}</span>
             </div>
             <div class="daily-card-rain">
-                <span class="daily-card-rain-amt">{fmt_rain_amount(entry.precip_sum_in, prefs)}</span>
+                <span class="daily-card-rain-amt">{fmt_optional_rain_amount(entry.precip_sum_in, prefs)}</span>
                 // Dash when the provider reported no probability; the old
                 // bare 0 rendered a confident "0%".
                 <span class="daily-card-rain-pct">
@@ -156,7 +171,7 @@ fn DailyCard(entry: DailyEntry, is_today: bool, prefs: UnitPrefs, tz: String) ->
             <dl class="daily-card-meta">
                 <div class="kv">
                     <dt class="k">"wind"</dt>
-                    <dd class="v">{fmt_wind(entry.wind_max_mph, prefs)}</dd>
+                    <dd class="v">{fmt_optional_wind(entry.wind_max_mph, prefs)}</dd>
                 </div>
                 <div class="kv">
                     <dt class="k">"uv"</dt>

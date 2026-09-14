@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 
 // Issue #8 regression, end to end in the real UI: add a Rachio controller in
 // Settings, scan its zones, and verify the scan RESULT lands where the user
-// can act on it and survives the two-step save and a reload. The original
+// can act on it and survives saving from Devices and a reload. The original
 // defect: the scan reported "Found 7" while the JSON never changed and the
 // save persisted an empty map.
 //
@@ -38,38 +38,45 @@ const SCAN_ZONES = [
   { station_id: "1f00aa00-0000-4000-8000-000000000007", name: "Front Trees" },
 ];
 
-// Developer repro: drives a real Rachio scan against a locally configured
-// instance. Meaningless against the demo (record-only, no Rachio), so it
-// runs only when pointed at a target that has one.
-test.skip(!process.env.RACHIO_SCAN_TARGET, "set RACHIO_SCAN_TARGET to run the Rachio scan repro");
-
 test("Rachio scan fills zone_uuid_map, saves, and persists across reload", async ({
   page,
 }) => {
   // In-memory "server": GET /api/config serves what the last PUT saved.
-  let storedConfig: unknown = { controllers: [], zones: {} };
+  let storedConfig: any = { schema_version: 2, sources: [], controllers: [], zones: {} };
   let putBody: any = null;
+  let saveCount = 0;
+  const unexpectedWrites: string[] = [];
 
-  await page.route("**/api/config", async (route) => {
+  await page.route("**/api/**", async (route) => {
     const req = route.request();
-    if (req.method() === "PUT") {
+    const path = new URL(req.url()).pathname.replace("/api/v1/", "/api/");
+    if (path === "/api/config" && req.method() === "PUT") {
       putBody = req.postDataJSON();
       storedConfig = putBody;
-      await route.fulfill({ json: { ok: true } });
-    } else if (req.method() === "GET") {
+      saveCount += 1;
+      await route.fulfill({ json: { saved: 1, restart_required: false, restart_reasons: [] } });
+    } else if (path === "/api/config" && req.method() === "GET") {
       await route.fulfill({ json: storedConfig });
+    } else if (path === "/api/devices" && req.method() === "GET") {
+      await route.fulfill({ json: storedConfig.controllers.map((c: any) => ({
+        id: `controller:${c.id}`, source_id: c.id, name: c.id,
+        kind: "irrigation_controller", origin: "native", online: true,
+        enabled: true, children: [],
+      })) });
+    } else if (path === "/api/wizard/scan_zones" && req.method() === "POST") {
+      await route.fulfill({ json: { zones: SCAN_ZONES } });
+    } else if (!["GET", "HEAD"].includes(req.method())) {
+      unexpectedWrites.push(`${req.method()} ${path}`);
+      await route.fulfill({ status: 409, json: { error: "Unexpected fixture write" } });
     } else {
       await route.continue();
     }
   });
-  await page.route("**/api/v1/wizard/scan_zones", async (route) => {
-    await route.fulfill({ json: { zones: SCAN_ZONES } });
-  });
 
-  await page.goto("/settings/controllers", { waitUntil: "networkidle" });
+  await page.goto("/settings?section=devices", { waitUntil: "networkidle" });
 
   // Open the add form and pick the Rachio kind.
-  await page.getByRole("button", { name: "+ Add controller" }).click();
+  await page.getByRole("button", { name: "Controller", exact: true }).click();
   await page.getByRole("radio", { name: "Rachio", exact: true }).click();
 
   // Identity + connection fields. The token is the single password input;
@@ -111,14 +118,11 @@ test("Rachio scan fills zone_uuid_map, saves, and persists across reload", async
   await expect(textarea).toHaveValue(/"front_lawn": "1f00aa00-0000-4000-8000-000000000001"/);
   await expect(textarea).toHaveValue(/"front_trees": "1f00aa00-0000-4000-8000-000000000007"/);
 
-  // Two-step save: commit the entry, then save the whole config. Between
-  // the steps the pending work is flagged: the Unsaved-changes chip shows
-  // beside Save-all and clears once the save lands.
+  // Devices persists immediately: one Add action must write the scanned map.
+  expect(saveCount).toBe(0);
   await page.getByRole("button", { name: "Add controller", exact: true }).click();
-  await expect(page.getByText("Unsaved changes")).toBeVisible();
-  await page.getByRole("button", { name: "Save all changes" }).click();
   await expect(page.getByText(/Saved\./)).toBeVisible();
-  await expect(page.getByText("Unsaved changes")).toHaveCount(0);
+  expect(saveCount).toBe(1);
 
   // The persisted PUT body carries the full 7-entry map.
   expect(putBody).not.toBeNull();
@@ -133,11 +137,15 @@ test("Rachio scan fills zone_uuid_map, saves, and persists across reload", async
   // Reload: the page refetches the (captured) config; editing the entry
   // shows the persisted map in the Advanced JSON.
   await page.reload({ waitUntil: "networkidle" });
-  await page.getByRole("button", { name: "Edit controller rachio_main" }).click();
+  await page.getByRole("button", { name: /rachio_main/, expanded: false }).click();
+  await page.locator(".settings-card").filter({ hasText: "rachio_main" })
+    .getByRole("button", { name: "Edit", exact: true }).click();
   await page.getByText("Advanced: raw config JSON").click();
   const reopened = page.locator("textarea");
   await expect(reopened).toBeVisible();
   await expect(reopened).toHaveValue(/zone_uuid_map/);
   await expect(reopened).toHaveValue(/"garden": "1f00aa00-0000-4000-8000-000000000004"/);
   await expect(reopened).toHaveValue(/"back_fence": "1f00aa00-0000-4000-8000-000000000006"/);
+  expect(saveCount).toBe(1);
+  expect(unexpectedWrites).toEqual([]);
 });

@@ -21,7 +21,6 @@
 //   - Session token rotates; on 401 we re-login and retry once.
 //   - station numbers are 1-based and stable per device.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,6 +32,13 @@ use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use crate::config::schema::BhyveConfig;
+use crate::controllers::zone_map::ZoneMap;
+use crate::sources::auth::{with_reauth, TokenCache};
+
+/// B-hyve's cloud API takes run lengths in whole minutes and rounds
+/// up. Every segment is planned in multiples of this, and the handle
+/// reports the rounded figure, so the plan and the wait match the valve.
+pub const DURATION_QUANTUM_S: u32 = 60;
 use crate::ports::irrigation_controller::{
     ControllerCaps, ControllerError, ControllerResult, ControllerStatus, IrrigationController,
     RunHandle, RunRecord, ZoneRuntimeStatus,
@@ -44,10 +50,10 @@ pub struct Bhyve {
     id: String,
     config: BhyveConfig,
     client: Client,
-    /// Cached session token. Cleared on 401.
-    session_token: Arc<Mutex<Option<String>>>,
-    /// Reverse map (station -> slug) for status() decoding.
-    station_to_slug: BTreeMap<u32, String>,
+    /// Cached session token; a 401 invalidates it.
+    session_token: TokenCache,
+    /// Zone slug <-> station number, both directions.
+    zones: ZoneMap<u32>,
     last_status: Arc<Mutex<Option<ControllerStatus>>>,
 }
 
@@ -56,35 +62,38 @@ struct SessionResponse {
     orbit_session_token: String,
 }
 
+/// How one authenticated call fails: the session token was rejected (a
+/// 401, worth exactly one re-login), or anything else, passed through
+/// untouched. Only a 401 earns the retry; a 403 is refused outright.
+enum CallError {
+    TokenRejected,
+    Other(ControllerError),
+}
+
 impl Bhyve {
+    /// Infallible today (`net::client` falls back to reqwest's defaults
+    /// rather than failing); the `Result` stays for the registry's
+    /// uniform construction path.
     pub fn new(id: impl Into<String>, config: BhyveConfig) -> Result<Self, ControllerError> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .map_err(|e| ControllerError::Init(format!("reqwest client: {e}")))?;
-        let station_to_slug = config
-            .zone_station_map
-            .iter()
-            .map(|(slug, station)| (*station, slug.clone()))
-            .collect();
+        let zones = ZoneMap::new(
+            config
+                .zone_station_map
+                .iter()
+                .map(|(slug, station)| (slug.clone(), *station))
+                .collect(),
+        );
         Ok(Self {
             id: id.into(),
             config,
-            client,
-            session_token: Arc::new(Mutex::new(None)),
-            station_to_slug,
+            client: crate::net::client(Duration::from_secs(15)),
+            session_token: TokenCache::new(),
+            zones,
             last_status: Arc::new(Mutex::new(None)),
         })
     }
 
-    fn station_for(&self, slug: &str) -> Result<u32, ControllerError> {
-        self.config
-            .zone_station_map
-            .get(slug)
-            .copied()
-            .ok_or_else(|| ControllerError::ZoneUnknown(slug.to_string()))
-    }
-
+    /// Exchange email + password for a session token. Caching is the
+    /// `TokenCache`'s job; this only talks to /session.
     async fn login(&self) -> Result<String, ControllerError> {
         let url = format!("{API_BASE}/session");
         let body = json!({ "session": { "email": &self.config.email, "password": &self.config.password } });
@@ -113,63 +122,75 @@ impl Bhyve {
                 crate::net::reqwest_error_category(&e)
             ))
         })?;
-        *self.session_token.lock().await = Some(sr.orbit_session_token.clone());
         Ok(sr.orbit_session_token)
     }
 
-    async fn current_token(&self) -> Result<String, ControllerError> {
-        if let Some(t) = self.session_token.lock().await.clone() {
-            return Ok(t);
+    /// One call carrying a given session token. A 401 comes back as
+    /// `TokenRejected` so `authed_request` can tell "the session expired"
+    /// from "the upstream refused or is down".
+    async fn send_with_token(
+        &self,
+        method: &reqwest::Method,
+        url: &str,
+        body: Option<&Value>,
+        token: String,
+    ) -> Result<Value, CallError> {
+        let mut req = self
+            .client
+            .request(method.clone(), url)
+            .header("orbit-session-token", token);
+        if let Some(b) = body {
+            req = req.json(b);
         }
-        self.login().await
+        let resp = req.send().await.map_err(|e| {
+            CallError::Other(ControllerError::Transport(format!(
+                "bhyve {method} {url}: {}",
+                crate::net::reqwest_error_category(&e)
+            )))
+        })?;
+        let status = resp.status();
+        if status == StatusCode::UNAUTHORIZED {
+            return Err(CallError::TokenRejected);
+        }
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            return Err(CallError::Other(ControllerError::RateLimited));
+        }
+        if status == StatusCode::FORBIDDEN {
+            return Err(CallError::Other(ControllerError::AuthFailed));
+        }
+        if !status.is_success() {
+            return Err(CallError::Other(ControllerError::Remote(format!(
+                "bhyve {status}"
+            ))));
+        }
+        resp.json().await.map_err(|e| {
+            CallError::Other(ControllerError::Transport(format!(
+                "bhyve decode: {}",
+                crate::net::reqwest_error_category(&e)
+            )))
+        })
     }
 
+    /// The call with the cached session token; on a 401, log in again
+    /// and retry once.
     async fn authed_request(
         &self,
         method: reqwest::Method,
         url: String,
         body: Option<Value>,
     ) -> Result<Value, ControllerError> {
-        let mut token = self.current_token().await?;
-        for attempt in 0..2 {
-            let mut req = self
-                .client
-                .request(method.clone(), &url)
-                .header("orbit-session-token", &token);
-            if let Some(b) = &body {
-                req = req.json(b);
-            }
-            let resp = req.send().await.map_err(|e| {
-                ControllerError::Transport(format!(
-                    "bhyve {method} {url}: {}",
-                    crate::net::reqwest_error_category(&e)
-                ))
-            })?;
-            let status = resp.status();
-            if status == StatusCode::UNAUTHORIZED && attempt == 0 {
-                // Session expired; re-login and retry once.
-                *self.session_token.lock().await = None;
-                token = self.login().await?;
-                continue;
-            }
-            if status == StatusCode::TOO_MANY_REQUESTS {
-                return Err(ControllerError::RateLimited);
-            }
-            if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-                return Err(ControllerError::AuthFailed);
-            }
-            if !status.is_success() {
-                return Err(ControllerError::Remote(format!("bhyve {status}")));
-            }
-            return resp.json().await.map_err(|e| {
-                ControllerError::Transport(format!(
-                    "bhyve decode: {}",
-                    crate::net::reqwest_error_category(&e)
-                ))
-            });
-        }
-        // Unreachable, the loop returns or errors on every iteration.
-        Err(ControllerError::Remote("bhyve retry exhausted".into()))
+        with_reauth(
+            &self.session_token,
+            || async move { self.login().await.map_err(CallError::Other) },
+            |e: &CallError| matches!(e, CallError::TokenRejected),
+            |token| self.send_with_token(&method, &url, body.as_ref(), token),
+        )
+        .await
+        .map_err(|e| match e {
+            // Rejected again on a fresh session: the account is refused.
+            CallError::TokenRejected => ControllerError::AuthFailed,
+            CallError::Other(e) => e,
+        })
     }
 }
 
@@ -180,7 +201,7 @@ impl IrrigationController for Bhyve {
     }
 
     fn mapped_zone_slugs(&self) -> Vec<String> {
-        self.config.zone_station_map.keys().cloned().collect()
+        self.zones.slugs()
     }
 
     fn supports(&self) -> ControllerCaps {
@@ -198,17 +219,24 @@ impl IrrigationController for Bhyve {
             // B-hyve API has no per-station stop), so consumers must treat
             // a zone-stop as stopping every running station on the device.
             per_zone_stop: false,
+            duration_quantum_s: DURATION_QUANTUM_S,
         }
     }
 
+    /// A cloud read: the registry serves the last status inside this
+    /// window and re-reads after any command.
+    fn status_poll_interval_s(&self) -> Option<u32> {
+        Some(crate::controllers::guard::CLOUD_STATUS_POLL_S)
+    }
+
     async fn run_zone(&self, slug: &str, duration_s: u32) -> ControllerResult<RunHandle> {
-        let station = self.station_for(slug)?;
+        let station = self.zones.station_for(slug)?;
         let url = format!(
             "{API_BASE}/devices/{dev}/manual",
             dev = self.config.device_id
         );
         // B-hyve takes run_time in MINUTES, rounded up.
-        let run_time = duration_s.div_ceil(60);
+        let run_time = duration_s.div_ceil(DURATION_QUANTUM_S);
         let body = json!({
             "action": "run",
             "stations": [{ "station": station, "run_time": run_time }],
@@ -221,7 +249,9 @@ impl IrrigationController for Bhyve {
             controller_id: self.id.clone(),
             zone_slug: slug.to_string(),
             started_epoch: chrono::Utc::now().timestamp(),
-            planned_duration_s: duration_s,
+            // What was actually sent, so the executor waits for the whole
+            // minute the valve will be open and not the seconds we asked.
+            planned_duration_s: run_time * DURATION_QUANTUM_S,
             provider_ref: Some(station.to_string()),
         })
     }
@@ -250,10 +280,13 @@ impl IrrigationController for Bhyve {
         let url = format!("{API_BASE}/devices/{dev}", dev = self.config.device_id);
         match self.authed_request(reqwest::Method::GET, url, None).await {
             Ok(v) => {
-                let zone_states: Vec<ZoneRuntimeStatus> = self
-                    .station_to_slug
-                    .values()
-                    .map(|slug| ZoneRuntimeStatus {
+                // One entry per bound zone, in station order.
+                let mut by_station: Vec<(u32, &String)> =
+                    self.zones.iter().map(|(slug, st)| (*st, slug)).collect();
+                by_station.sort();
+                let zone_states: Vec<ZoneRuntimeStatus> = by_station
+                    .into_iter()
+                    .map(|(_, slug)| ZoneRuntimeStatus {
                         slug: slug.clone(),
                         // v1 does not parse live running state (a future
                         // wave could read `v.status.run_mode` + the active
@@ -274,6 +307,7 @@ impl IrrigationController for Bhyve {
                     .and_then(|f| f.as_str())
                     .map(|s| s.to_string());
                 let status = ControllerStatus {
+                    observed_epoch: Some(crate::timefmt::now_epoch()),
                     reachable: true,
                     master_enabled: None,
                     water_level_pct: None,
@@ -310,6 +344,7 @@ impl IrrigationController for Bhyve {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     fn cfg() -> BhyveConfig {
         let mut map = BTreeMap::new();
@@ -326,11 +361,12 @@ mod tests {
     #[test]
     fn station_lookup() {
         let b = Bhyve::new("bh", cfg()).unwrap();
-        assert_eq!(b.station_for("back_yard").unwrap(), 1);
+        assert_eq!(b.zones.station_for("back_yard").unwrap(), 1);
         assert!(matches!(
-            b.station_for("not_a_zone").unwrap_err(),
+            b.zones.station_for("not_a_zone").unwrap_err(),
             ControllerError::ZoneUnknown(_)
         ));
+        assert_eq!(b.mapped_zone_slugs(), vec!["back_yard", "front_lawn"]);
     }
 
     #[test]

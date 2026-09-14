@@ -18,18 +18,10 @@ pub fn HumidityPanel(snap: ReadSignal<Snapshot>) -> impl IntoView {
                 <span class="big-unit">" %"</span>
             </div>
             <div class="panel-substats">
-                <div class="panel-substat">
-                    <span class="panel-substat__k">"Dew point"</span>
-                    <span class="panel-substat__v">
-                        {move || fmt_temp_short(snap.get().dew_point_f, prefs.get())}
-                    </span>
-                </div>
-                <div class="panel-substat">
-                    <span class="panel-substat__k">"Wet bulb"</span>
-                    <span class="panel-substat__v">
-                        {move || fmt_temp_short(snap.get().wet_bulb_f, prefs.get())}
-                    </span>
-                </div>
+                <crate::components::ui::StatTile layout="compact" label="Dew point"
+                    value=Signal::derive(move || fmt_temp_short(snap.get().dew_point_f, prefs.get()))/>
+                <crate::components::ui::StatTile layout="compact" label="Wet bulb"
+                    value=Signal::derive(move || fmt_temp_short(snap.get().wet_bulb_f, prefs.get()))/>
             </div>
         </section>
     }

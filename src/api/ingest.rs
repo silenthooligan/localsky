@@ -3,7 +3,7 @@
 // Ecowitt local + HTTP webhook adapters constructed by
 // Runtime::build_receiver_sources into the live Axum router.
 //
-// Mounted by main.rs when v2 is enabled. Always returns 200 on
+// Mounted by the boot at /ingest and /api/v1/ingest. Always returns 200 on
 // successful parse (per the Ecowitt + generic-webhook conventions)
 // so a misconfigured downstream doesn't make a sensor's onboard
 // retry-storm escalate.

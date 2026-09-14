@@ -1,4 +1,4 @@
-// Deadline reaper (P0-1b). Enforces the active_runs ledger's shutoff deadlines
+// Deadline reaper. Enforces the active_runs ledger's shutoff deadlines
 // independent of any controller's own shutoff: for every commanded-ON zone past
 // its deadline, issue stop_zone and disarm. A stop that fails is retried next tick
 // (the row is kept), so we never give up enforcing a shutoff. This is the
@@ -12,7 +12,10 @@ use std::time::Duration;
 use chrono::Utc;
 
 use crate::controllers::registry::ControllerRegistry;
-use crate::persistence::ActiveRunsStore;
+use crate::persistence::runs::NewRun;
+use crate::persistence::{ActiveRun, ActiveRunsStore, RunRow, RunsStore};
+use crate::push::PushDispatcher;
+use crate::push::PushEvent;
 
 /// Poll granularity: the only slack on a failed-self-shutoff valve. The
 /// controller's own timer stays the precise fast-path; this is the guaranteed
@@ -48,7 +51,37 @@ pub fn effective_run_grace(per_zone_stop: bool) -> i64 {
 
 /// One reaper pass: enforce shutoff for every armed run at or past `now`. Returns
 /// the number of zones successfully stopped + disarmed this pass.
+#[cfg(test)]
 pub async fn reap_once(store: &ActiveRunsStore, registry: &ControllerRegistry, now: i64) -> usize {
+    let mut audit = ReapAudit::default();
+    reap_once_audited(store, registry, now, None, None, &mut audit).await
+}
+
+/// What the reaper has already reported, so a valve that stays open
+/// across many ten-second ticks produces one row and one push, not one
+/// per tick. Lives in the reaper loop; a successful stop clears its
+/// zone so a later failure reports again.
+#[derive(Debug, Default)]
+pub struct ReapAudit {
+    failed_once: std::collections::HashSet<String>,
+}
+
+/// The reaper pass with its audit trail: an enforcement, a failed stop
+/// and a controller nobody registered each leave a run row, and the
+/// dangerous ones push.
+pub async fn reap_once_audited(
+    store: &ActiveRunsStore,
+    registry: &ControllerRegistry,
+    now: i64,
+    runs: Option<&RunsStore>,
+    push: Option<&PushDispatcher>,
+    audit: &mut ReapAudit,
+) -> usize {
+    // Acquire before reading due rows: a queued run may extend a deadline.
+    // Taking a stale due snapshot and only then waiting for command ordering
+    // could close that new run and erase its freshly armed backstop.
+    let command_order = registry.zone_locks().command_order();
+    let _command = command_order.write().await;
     let due = match store.due(now).await {
         Ok(d) => d,
         Err(e) => {
@@ -92,6 +125,25 @@ pub async fn reap_once(store: &ActiveRunsStore, registry: &ControllerRegistry, n
                         zone = %run.zone_slug, controller = %run.controller_id,
                         "reaper: run's controller gone and no controller registered; keeping row for retry"
                     );
+                    if audit.failed_once.insert(run.zone_slug.clone()) {
+                        if let Some(rs) = runs {
+                            record_marker(
+                                rs,
+                                &run,
+                                now,
+                                "Shutoff could not be enforced: no controller is registered; the deadline row is kept and retried",
+                            )
+                            .await;
+                        }
+                        if let Some(p) = push {
+                            p.emit(PushEvent::ValveUnclosed {
+                                zone_name: run.zone_slug.clone(),
+                                zone_slug: run.zone_slug.clone(),
+                                controller_id: run.controller_id.clone(),
+                                overdue_s: now - run.off_deadline_epoch,
+                            });
+                        }
+                    }
                     continue;
                 }
             },
@@ -109,16 +161,33 @@ pub async fn reap_once(store: &ActiveRunsStore, registry: &ControllerRegistry, n
         // gets the device-wide stop; that is the genuine stuck-valve case,
         // where collateral is the accepted price of closing the valve.
         let device_wide = !controller.supports().per_zone_stop;
+        // Live, past the registry's status cache: a cached reading can
+        // be a poll interval old, which is exactly long enough for a
+        // zone that finished on its own timer to still read as running
+        // and take a sibling down with it.
+        //
+        // Asked for EVERY controller, not just device-wide ones. On a
+        // per-zone controller the deadline falls about thirty seconds
+        // after a normal completion, so without this every finished run
+        // filed a row claiming the controller's own timer had failed,
+        // which made the row that means a real stuck valve worthless.
+        // What the confirmation buys there is silence, NOT skipping the
+        // stop: `stop_zone` is an idempotent no-op on a closed valve, and
+        // an adapter that cannot see the valve must not be able to talk
+        // the reaper out of closing it.
+        let confirmed_idle = match controller.status_fresh().await {
+            // `reachable` matters: a cloud adapter degrades to its own
+            // last-known state and still answers Ok, and that answer is
+            // not evidence about the valve right now.
+            Ok(st) if st.reachable => st
+                .zone_states
+                .iter()
+                .find(|z| z.slug == run.zone_slug)
+                .map(|z| z.running_known && !z.running)
+                .unwrap_or(false),
+            _ => false, // unreachable or degraded: keep the fail-safe stop
+        };
         if device_wide {
-            let confirmed_idle = match controller.status().await {
-                Ok(st) => st
-                    .zone_states
-                    .iter()
-                    .find(|z| z.slug == run.zone_slug)
-                    .map(|z| z.running_known && !z.running)
-                    .unwrap_or(false),
-                Err(_) => false, // unreachable: keep the fail-safe stop
-            };
             if confirmed_idle {
                 tracing::info!(
                     zone = %run.zone_slug, controller = %controller.id(),
@@ -135,6 +204,25 @@ pub async fn reap_once(store: &ActiveRunsStore, registry: &ControllerRegistry, n
         }
         match controller.stop_zone(&run.zone_slug).await {
             Ok(()) => {
+                // The controller's own timer did not close this valve;
+                // LocalSky did, at the deadline. That is worth a row: a
+                // water bill is explained by the runs that ran long.
+                //
+                // Only when the valve was actually still open. A zone the
+                // controller confirmed idle got the stop anyway, as a
+                // no-op backstop, and saying "the timer failed" about a
+                // run that ended normally is the noise this guard exists
+                // to remove.
+                if let Some(rs) = runs.filter(|_| !confirmed_idle) {
+                    record_marker(
+                        rs,
+                        &run,
+                        now,
+                        "Shutoff enforced by LocalSky at the deadline; the controller's own timer did not close the valve",
+                    )
+                    .await;
+                }
+                audit.failed_once.remove(&run.zone_slug);
                 // Routine, not an alarm: the reaper is the authoritative shutoff at
                 // the deadline. The controller's own (precise) timer is the
                 // fast-path; this guarantees closure even if that timer failed or
@@ -178,25 +266,50 @@ pub async fn reap_once(store: &ActiveRunsStore, registry: &ControllerRegistry, n
             }
             Err(e) => {
                 // Keep the row and retry next tick: an unconfirmed stop is worse
-                // than a redundant one.
+                // than a redundant one. Say so once per episode: a row in
+                // History and a push, because this is the state in which
+                // water is leaving the property with nothing to stop it.
                 tracing::error!(
                     zone = %run.zone_slug, controller = %run.controller_id, error = %e,
                     "reaper: stop_zone failed; will retry next tick"
                 );
+                if audit.failed_once.insert(run.zone_slug.clone()) {
+                    if let Some(rs) = runs {
+                        record_marker(
+                            rs,
+                            &run,
+                            now,
+                            &format!(
+                                "Shutoff FAILED at the deadline: {e}; LocalSky retries every tick until the controller confirms"
+                            ),
+                        )
+                        .await;
+                    }
+                    if let Some(p) = push {
+                        p.emit(PushEvent::ValveUnclosed {
+                            zone_name: run.zone_slug.clone(),
+                            zone_slug: run.zone_slug.clone(),
+                            controller_id: controller.id().to_string(),
+                            overdue_s: now - run.off_deadline_epoch,
+                        });
+                    }
+                }
             }
         }
     }
     enforced
 }
 
-/// P0-1 boot reconciliation. Physically close every zone on every registered
-/// controller, then clear the persisted deadline ledger (if any). Run once at
-/// startup before the schedulers or API can dispatch, so a valve left open by a
-/// crash/redeploy mid-run (the MQTT path's shutoff is an in-process timer that
-/// dies with the process) is closed on the next start instead of staying open
-/// until a human notices. The ledger is cleared because `reconcile_stop_all`
-/// just closed everything, so any pre-restart deadlines are moot and must not
-/// make the reaper re-stop a valve already known off. Returns the ids of
+/// Boot reconciliation. Physically close every zone on every registered
+/// controller, then clear the persisted deadline rows of the controllers that
+/// CONFIRMED that stop. Run once at startup before the schedulers or API can
+/// dispatch, so a valve left open by a crash/redeploy mid-run (the MQTT path's
+/// shutoff is an in-process timer that dies with the process) is closed on the
+/// next start instead of staying open until a human notices. A confirmed
+/// controller's pre-restart deadlines are moot -- its valves are known off --
+/// and must not make the reaper re-stop them. A controller that did NOT answer
+/// keeps its rows: it may still have a valve open, and that row is the only
+/// thing that will make the reaper try the shutoff again. Returns the ids of
 /// controllers that did not confirm stop_all (unreachable at boot); best-effort,
 /// never fatal. A `None` store is a no-op clear: no DB means no persisted
 /// deadlines, but the valves are still physically closed regardless.
@@ -204,38 +317,200 @@ pub async fn boot_reconcile(
     registry: &ControllerRegistry,
     active_runs: Option<&ActiveRunsStore>,
 ) -> Vec<String> {
+    boot_reconcile_audited(registry, active_runs, None, Utc::now().timestamp()).await
+}
+
+/// A reaper marker row: a skip-shaped row (no water credited) whose
+/// reason says what the reaper did or could not do for this zone.
+async fn record_marker(runs: &RunsStore, run: &ActiveRun, now: i64, reason: &str) {
+    let row = NewRun {
+        session_id: None,
+        zone_slug: run.zone_slug.clone(),
+        start_epoch: now,
+        source: "reaper".into(),
+        controller_id: run.controller_id.clone(),
+        planned_duration_s: (run.off_deadline_epoch - run.started_epoch)
+            .clamp(0, i64::from(u32::MAX)) as u32,
+        skip_reason: None,
+        et0_mm: None,
+        etc_mm: None,
+        cycle_index: None,
+        cycle_count: None,
+    };
+    if let Err(e) = runs.insert_skipped(row, reason.to_string()).await {
+        tracing::warn!(zone = %run.zone_slug, error = %e, "reaper: audit row insert failed");
+    }
+}
+
+/// A durable per-zone hold, consumed by smart-morning catch-up. Unknown
+/// applied water must neither fill the balance nor invite a second full run.
+pub const RESTART_UNKNOWN_DURATION_REASON: &str =
+    "Watering held after restart: the previous run's watering duration could not be verified";
+
+/// An explicit dispatched segment spanning the stop instant. The safety
+/// ledger's deadline can cover several segments, soak gaps, and grace, so
+/// it never supplies a watering interval. Ended observer/dispatch rows stay
+/// intact; only a dispatcher's prewritten future tail needs truncation.
+fn segment_interrupted_by_restart(run: &ActiveRun, row: &RunRow, now: i64) -> bool {
+    row.zone_slug == run.zone_slug
+        && row.controller_id == run.controller_id
+        && row.start_epoch >= run.started_epoch
+        && row.start_epoch <= now
+        && row.end_epoch.is_some_and(|end| end > now)
+        && row.status == "completed"
+        && (row.source == "manual"
+            || row.source.starts_with("manual:")
+            || row.source == "smart_morning")
+}
+
+/// Boot reconcile with its audit trail.
+///
+/// Confirmed stops shorten individually recorded active segments in place.
+/// Without that evidence, a zero-water marker preserves the uncertainty and
+/// holds that zone's catch-up today. A deadline alone cannot establish when
+/// a valve was open. Unconfirmed controllers keep their deadlines for retry.
+pub async fn boot_reconcile_audited(
+    registry: &ControllerRegistry,
+    active_runs: Option<&ActiveRunsStore>,
+    runs: Option<&RunsStore>,
+    now: i64,
+) -> Vec<String> {
+    let armed = match active_runs {
+        Some(ar) => ar.armed().await.unwrap_or_default(),
+        None => Vec::new(),
+    };
     let failed = registry.reconcile_stop_all().await;
-    if let Some(ar) = active_runs {
-        match ar.clear_all().await {
-            Ok(n) if n > 0 => {
-                tracing::info!(
-                    cleared = n,
-                    "boot reconcile: cleared stale active-run deadlines"
-                )
+    if let Some(rs) = runs {
+        // Read before writing recovery records, so this pass cannot feed
+        // its own markers back into the evidence.
+        let earliest = armed.iter().map(|r| r.started_epoch).min();
+        let history = match earliest {
+            Some(from) => {
+                let until = now.max(from).saturating_add(1);
+                rs.window(from, until).await.unwrap_or_default()
             }
-            Ok(_) => {}
-            Err(e) => tracing::warn!(error = %e, "boot reconcile: could not clear active_runs"),
+            None => Vec::new(),
+        };
+        for run in &armed {
+            let confirmed =
+                registry.get(&run.controller_id).is_some() && !failed.contains(&run.controller_id);
+            let mut recorded_segment = false;
+            let mut evidence_error = false;
+            if confirmed {
+                for row in history
+                    .iter()
+                    .filter(|row| segment_interrupted_by_restart(run, row, now))
+                {
+                    match rs.abort_dispatched_segment_at_restart(row.id, now).await {
+                        Ok(changed) => recorded_segment |= changed,
+                        Err(e) => {
+                            evidence_error = true;
+                            tracing::warn!(zone = %run.zone_slug, error = %e, "boot reconcile: segment truncation failed");
+                        }
+                    }
+                }
+            }
+            if !recorded_segment || evidence_error {
+                let marker = NewRun {
+                    session_id: None,
+                    zone_slug: run.zone_slug.clone(),
+                    start_epoch: now,
+                    source: "restart".into(),
+                    controller_id: run.controller_id.clone(),
+                    planned_duration_s: 0,
+                    skip_reason: None,
+                    et0_mm: None,
+                    etc_mm: None,
+                    cycle_index: None,
+                    cycle_count: None,
+                };
+                // One row owns both facts: the run table is unique by zone,
+                // start and controller, so a second marker at this instant
+                // would silently lose the more urgent unclosed-valve warning.
+                let reason = if confirmed {
+                    RESTART_UNKNOWN_DURATION_REASON.into()
+                } else {
+                    format!("{RESTART_UNKNOWN_DURATION_REASON}. Boot stop failed: the controller did not answer; this valve may still be open")
+                };
+                if let Err(e) = rs.insert_skipped(marker, reason).await {
+                    tracing::warn!(zone = %run.zone_slug, error = %e, "boot reconcile: recovery marker insert failed");
+                }
+            }
+            if !confirmed && recorded_segment && !evidence_error {
+                record_marker(
+                    rs,
+                    run,
+                    now,
+                    "Boot stop failed: the controller did not answer; this valve may still be open",
+                )
+                .await;
+            }
+        }
+    }
+    if let Some(ar) = active_runs {
+        // Clear ONLY the controllers that CONFIRMED the stop. A controller that
+        // did not answer may still have a valve open, and its armed row is the
+        // only thing that will make the reaper try the shutoff again -- a
+        // wholesale `clear_all` threw away exactly the rows that matter. Rows
+        // armed under an id that is no longer registered are kept for the same
+        // reason (nothing here stopped them); the reaper's rename fallback
+        // resolves those on its next tick. This mirrors the dispatch path,
+        // which already scopes its post-stop clear with the same call.
+        let owned: Vec<String> = registry
+            .ids()
+            .into_iter()
+            .filter(|id| !failed.contains(id))
+            .collect();
+        let confirmed: Vec<&str> = owned.iter().map(String::as_str).collect();
+        if confirmed.is_empty() && !armed.is_empty() {
+            tracing::warn!(
+                armed = armed.len(),
+                "boot reconcile: no controller confirmed the boot stop; every deadline stays armed for the reaper"
+            );
+        }
+        if !confirmed.is_empty() {
+            match ar.clear_for_controllers(&confirmed).await {
+                Ok(n) if n > 0 => tracing::info!(
+                    cleared = n,
+                    kept = armed.len().saturating_sub(n),
+                    "boot reconcile: cleared stale deadlines for the controllers that confirmed the stop"
+                ),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "boot reconcile: could not clear active_runs"),
+            }
         }
     }
     failed
 }
 
 /// Spawn the reaper loop, polling every `REAP_INTERVAL`.
-pub fn spawn_run_reaper(store: ActiveRunsStore, registry: ControllerRegistry) {
+pub fn spawn_run_reaper(
+    store: ActiveRunsStore,
+    registry: ControllerRegistry,
+    runs: Option<RunsStore>,
+    push: Option<PushDispatcher>,
+) {
     tokio::spawn(async move {
+        let mut audit = ReapAudit::default();
         let mut tick = tokio::time::interval(REAP_INTERVAL);
         loop {
             tick.tick().await;
-            // P0-8 class: the reaper is the LAST line of stuck-valve defense,
+            // The reaper is the LAST line of stuck-valve defense,
             // so a panic inside one reap (a poisoned lock, an adapter bug)
             // must not kill the loop for the process lifetime. catch_unwind
             // turns it into a logged skip; the next tick retries against the
             // same persisted ledger. Mirrors the push dispatcher's supervisor.
             use futures::FutureExt;
-            let outcome =
-                std::panic::AssertUnwindSafe(reap_once(&store, &registry, Utc::now().timestamp()))
-                    .catch_unwind()
-                    .await;
+            let outcome = std::panic::AssertUnwindSafe(reap_once_audited(
+                &store,
+                &registry,
+                Utc::now().timestamp(),
+                runs.as_ref(),
+                push.as_ref(),
+                &mut audit,
+            ))
+            .catch_unwind()
+            .await;
             if outcome.is_err() {
                 tracing::error!("run reaper: reap tick PANICKED; continuing on next tick");
             }
@@ -255,7 +530,8 @@ mod tests {
     use tokio::sync::Mutex as TokioMutex;
 
     /// Records the zones it was asked to stop + how many times stop_all was
-    /// called (the boot-reconcile path); can be told to fail per-zone stops.
+    /// called (the boot-reconcile path); `fail` makes BOTH stops error, so a
+    /// controller that never confirms the boot stop can be exercised.
     struct StopRecorder {
         id: String,
         stopped: Arc<Mutex<Vec<String>>>,
@@ -278,6 +554,7 @@ mod tests {
                 remote_program_upload: false,
                 water_level: false,
                 per_zone_stop: true,
+                duration_quantum_s: 1,
             }
         }
         async fn run_zone(&self, slug: &str, duration_s: u32) -> ControllerResult<RunHandle> {
@@ -298,10 +575,14 @@ mod tests {
         }
         async fn stop_all(&self) -> ControllerResult<()> {
             self.stop_alls.fetch_add(1, Ordering::SeqCst);
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(ControllerError::Transport("unreachable".into()));
+            }
             Ok(())
         }
         async fn status(&self) -> ControllerResult<ControllerStatus> {
             Ok(ControllerStatus {
+                observed_epoch: None,
                 reachable: true,
                 master_enabled: None,
                 water_level_pct: None,
@@ -322,6 +603,391 @@ mod tests {
         let mut c = rusqlite::Connection::open_in_memory().unwrap();
         crate::persistence::run_migrations(&mut c).unwrap();
         ActiveRunsStore::new(Arc::new(TokioMutex::new(c)))
+    }
+
+    fn mem_stores() -> (ActiveRunsStore, RunsStore) {
+        let mut c = rusqlite::Connection::open_in_memory().unwrap();
+        crate::persistence::run_migrations(&mut c).unwrap();
+        let conn = Arc::new(TokioMutex::new(c));
+        (ActiveRunsStore::new(conn.clone()), RunsStore::new(conn))
+    }
+
+    #[tokio::test]
+    async fn reaper_reads_deadlines_after_the_pending_run_finishes_arming() {
+        let store = mem_store();
+        let (recorder, controller) = recorder("main", false);
+        let registry = ControllerRegistry::new();
+        registry.set(vec![(controller, true)]);
+        store
+            .arm("front".into(), "main".into(), 1000, 1100)
+            .await
+            .unwrap();
+        let commands = registry.zone_locks().command_order();
+        let pending_run = commands.read().await;
+        let reap = reap_once(&store, &registry, 1200);
+        tokio::pin!(reap);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), reap.as_mut())
+                .await
+                .is_err()
+        );
+        assert!(recorder.stopped.lock().unwrap().is_empty());
+        // This is the in-flight Run's new arm. The old deadline is no longer due
+        // once the exclusive stop barrier admits the reaper.
+        store
+            .arm("front".into(), "main".into(), 1150, 2000)
+            .await
+            .unwrap();
+        drop(pending_run);
+        assert_eq!(reap.await, 0);
+        assert_eq!(store.armed().await.unwrap()[0].off_deadline_epoch, 2000);
+        assert!(recorder.stopped.lock().unwrap().is_empty());
+    }
+
+    fn recorder(id: &str, fail: bool) -> (Arc<StopRecorder>, Arc<dyn IrrigationController>) {
+        let rec = Arc::new(StopRecorder {
+            id: id.into(),
+            stopped: Arc::new(Mutex::new(Vec::new())),
+            stop_alls: Arc::new(AtomicUsize::new(0)),
+            fail: AtomicBool::new(fail),
+        });
+        let ctrl: Arc<dyn IrrigationController> = rec.clone();
+        (rec, ctrl)
+    }
+
+    fn credited_seconds(rows: &[RunRow], zone: &str) -> i64 {
+        use crate::history::rollup::{applied_in_window, is_watering_evidence, RunSegment};
+        let segments: Vec<RunSegment> = rows
+            .iter()
+            .filter(|r| {
+                r.zone_slug == zone
+                    && is_watering_evidence(&r.source, &r.status, r.skip_reason.as_deref())
+            })
+            .map(|r| RunSegment {
+                session_id: None,
+                start_epoch: r.start_epoch,
+                end_epoch: r.start_epoch + i64::from(r.duration_s.unwrap_or(0)),
+            })
+            .collect();
+        applied_in_window(&segments, 0, 10_000).valve_open_s
+    }
+
+    fn segment_row(source: &str, start: i64, duration: u32) -> NewRun {
+        NewRun {
+            session_id: None,
+            zone_slug: "front".into(),
+            start_epoch: start,
+            source: source.into(),
+            controller_id: "a".into(),
+            planned_duration_s: duration,
+            skip_reason: None,
+            et0_mm: None,
+            etc_mm: None,
+            cycle_index: Some(0),
+            cycle_count: Some(3),
+        }
+    }
+
+    /// A stop the controller refuses leaves a row in History and a push,
+    /// once for the episode, not once per ten-second tick. A stop that
+    /// later succeeds leaves the enforcement row.
+    #[tokio::test]
+    async fn a_failed_shutoff_leaves_one_row_and_one_push() {
+        let (rec, ctrl) = recorder("ctrl", true);
+        let registry = ControllerRegistry::new();
+        registry.set(vec![(ctrl, true)]);
+        let (store, runs) = mem_stores();
+        store
+            .arm("front".into(), "ctrl".into(), 1000, 2000)
+            .await
+            .unwrap();
+        let (push, mut rx) = PushDispatcher::capturing();
+        let mut audit = ReapAudit::default();
+        // Three failing ticks.
+        for now in [2010, 2020, 2030] {
+            reap_once_audited(&store, &registry, now, Some(&runs), Some(&push), &mut audit).await;
+        }
+        let rows = runs.window(0, 10_000).await.unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].source, "reaper");
+        assert!(
+            rows[0]
+                .skip_reason
+                .as_deref()
+                .unwrap()
+                .starts_with("Shutoff FAILED"),
+            "{rows:?}"
+        );
+        let ev = rx.try_recv().expect("one push");
+        assert!(
+            matches!(ev, PushEvent::ValveUnclosed { ref zone_slug, overdue_s: 10, .. } if zone_slug == "front"),
+            "{ev:?}"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "the second and third ticks push nothing"
+        );
+        // The controller comes back: the deadline is enforced, with its row.
+        rec.fail.store(false, Ordering::SeqCst);
+        reap_once_audited(
+            &store,
+            &registry,
+            2040,
+            Some(&runs),
+            Some(&push),
+            &mut audit,
+        )
+        .await;
+        let rows = runs.window(0, 10_000).await.unwrap();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(
+            rows[1]
+                .skip_reason
+                .as_deref()
+                .unwrap()
+                .starts_with("Shutoff enforced"),
+            "{rows:?}"
+        );
+        assert!(
+            store.armed().await.unwrap().is_empty(),
+            "the row is disarmed once the stop confirmed"
+        );
+    }
+
+    /// An armed window without segment evidence does not establish valve
+    /// time, even on the first segment. Preserve unknown and hold catch-up.
+    #[tokio::test]
+    async fn boot_without_segment_evidence_records_unknown_duration_hold() {
+        let (_a, ctrl_a) = recorder("a", false);
+        let registry = ControllerRegistry::new();
+        registry.set(vec![(ctrl_a, true)]);
+        let (store, runs) = mem_stores();
+        // Cut short: the deadline was 2000, the process is back at 1500.
+        store
+            .arm("front".into(), "a".into(), 1000, 2000)
+            .await
+            .unwrap();
+        // Clock stepped back: even the recorded start lies in the future.
+        store
+            .arm("back".into(), "a".into(), 2400, 3000)
+            .await
+            .unwrap();
+        let failed = boot_reconcile_audited(&registry, Some(&store), Some(&runs), 1500).await;
+        assert!(failed.is_empty());
+        let rows = runs.window(0, 10_000).await.unwrap();
+        let front = rows
+            .iter()
+            .find(|r| r.zone_slug == "front")
+            .expect("front row");
+        assert_eq!(
+            (front.start_epoch, front.end_epoch, front.duration_s),
+            (1500, Some(1500), Some(0))
+        );
+        assert_eq!(front.status, "skipped");
+        assert_eq!(
+            front.skip_reason.as_deref(),
+            Some(RESTART_UNKNOWN_DURATION_REASON)
+        );
+        assert!(
+            !crate::history::rollup::is_watering_evidence(
+                &front.source,
+                &front.status,
+                front.skip_reason.as_deref()
+            ),
+            "unknown duration must not be watering evidence"
+        );
+        let back = rows
+            .iter()
+            .find(|r| r.zone_slug == "back")
+            .expect("back row");
+        assert_eq!((back.start_epoch, back.end_epoch), (1500, Some(1500)));
+        assert_eq!(credited_seconds(&rows, "front"), 0);
+        assert!(
+            store.armed().await.unwrap().is_empty(),
+            "the ledger is cleared afterwards"
+        );
+    }
+
+    /// The completed segment union survives a late restart unchanged.
+    /// A continuous aborted row, even capped to planned seconds, would
+    /// fill the soaks and extend the union beyond the real watering.
+    #[tokio::test]
+    async fn boot_does_not_credit_soak_gaps_as_water() {
+        let (_rec, ctrl) = recorder("os_main", false);
+        let registry = ControllerRegistry::new();
+        registry.set(vec![(ctrl, true)]);
+        let (store, runs) = mem_stores();
+        store
+            .arm("front".into(), "os_main".into(), 0, 4470)
+            .await
+            .unwrap();
+        // The dispatcher's own rows for the three cycles: valve open
+        // 2..882, 1782..2662 and 3562..4442, soak in between.
+        for (start, idx) in [(2_i64, 0_u32), (1782, 1), (3562, 2)] {
+            runs.insert_completed(
+                NewRun {
+                    session_id: None,
+                    zone_slug: "front".into(),
+                    start_epoch: start,
+                    source: "smart_morning".into(),
+                    controller_id: "os_main".into(),
+                    planned_duration_s: 880,
+                    skip_reason: None,
+                    et0_mm: None,
+                    etc_mm: None,
+                    cycle_index: Some(idx),
+                    cycle_count: Some(3),
+                },
+                start + 880,
+                880,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+
+        boot_reconcile_audited(&registry, Some(&store), Some(&runs), 6000).await;
+
+        let rows = runs.window(0, 10_000).await.unwrap();
+        let marker = rows
+            .iter()
+            .find(|r| r.source == "restart")
+            .expect("the restart row");
+        assert_eq!(
+            (marker.start_epoch, marker.duration_s),
+            (6000, Some(0)),
+            "recovery adds a marker, never a continuous cycle interval"
+        );
+        assert_eq!(credited_seconds(&rows, "front"), 2640);
+    }
+
+    #[tokio::test]
+    async fn boot_truncates_only_the_current_segment_and_never_duplicates_observed_water() {
+        // Exercise first-segment and later-segment restart with the same
+        // 300 seconds of current watering. A previous segment stays separate.
+        for previous in [false, true] {
+            let (_rec, ctrl) = recorder("a", false);
+            let registry = ControllerRegistry::new();
+            registry.set(vec![(ctrl, true)]);
+            let (active, runs) = mem_stores();
+            active
+                .arm(
+                    "front".into(),
+                    "a".into(),
+                    if previous { 0 } else { 1000 },
+                    4000,
+                )
+                .await
+                .unwrap();
+            if previous {
+                runs.insert_completed(segment_row("smart_morning", 0, 100), 100, 100, None)
+                    .await
+                    .unwrap();
+            }
+            runs.insert_completed(segment_row("manual", 1000, 600), 1600, 600, None)
+                .await
+                .unwrap();
+            // A duplicate observed interval must not double the dispatch row.
+            runs.insert_completed(segment_row("ha_refresher", 1000, 200), 1200, 200, None)
+                .await
+                .unwrap();
+            boot_reconcile_audited(&registry, Some(&active), Some(&runs), 1300).await;
+            let rows = runs.window(0, 10_000).await.unwrap();
+            let interrupted = rows.iter().find(|r| r.source == "manual").unwrap();
+            assert_eq!(
+                (
+                    interrupted.start_epoch,
+                    interrupted.end_epoch,
+                    interrupted.duration_s
+                ),
+                (1000, Some(1300), Some(300))
+            );
+            assert_eq!(interrupted.status, "aborted");
+            assert_eq!(interrupted.note.as_deref(), Some("ended by restart"));
+            assert_eq!(
+                credited_seconds(&rows, "front"),
+                if previous { 400 } else { 300 }
+            );
+            assert!(
+                !rows.iter().any(|r| r.source == "restart"),
+                "known segment needs no unknown-duration hold"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn boot_during_soak_preserves_only_the_ended_segment_and_holds_catch_up() {
+        let (_rec, ctrl) = recorder("a", false);
+        let registry = ControllerRegistry::new();
+        registry.set(vec![(ctrl, true)]);
+        let (active, runs) = mem_stores();
+        active
+            .arm("front".into(), "a".into(), 0, 4000)
+            .await
+            .unwrap();
+        runs.insert_completed(segment_row("smart_morning", 0, 100), 100, 100, None)
+            .await
+            .unwrap();
+        boot_reconcile_audited(&registry, Some(&active), Some(&runs), 500).await;
+        let rows = runs.window(0, 10_000).await.unwrap();
+        assert_eq!(credited_seconds(&rows, "front"), 100);
+        let marker = rows.iter().find(|r| r.source == "restart").unwrap();
+        assert_eq!(
+            marker.skip_reason.as_deref(),
+            Some(RESTART_UNKNOWN_DURATION_REASON)
+        );
+        assert_eq!(marker.duration_s, Some(0));
+    }
+
+    /// A controller that did NOT confirm the boot stop may still have a
+    /// valve open, and its armed row is the only thing that will make the
+    /// reaper try the shutoff again. Only the CONFIRMED controllers' rows
+    /// may be cleared; the old unconditional `clear_all` deleted both and
+    /// disarmed the backstop for exactly the valve that needed it.
+    #[tokio::test]
+    async fn boot_keeps_deadlines_of_controllers_that_did_not_confirm() {
+        let (_ok, answered) = recorder("confirmed", false);
+        let (_bad, silent) = recorder("offline", true); // stop_all errors
+        let registry = ControllerRegistry::new();
+        registry.set(vec![(answered, true), (silent, false)]);
+        let (store, runs) = mem_stores();
+        store
+            .arm("front".into(), "confirmed".into(), 0, 100)
+            .await
+            .unwrap();
+        store
+            .arm("back".into(), "offline".into(), 0, 100)
+            .await
+            .unwrap();
+
+        let failed = boot_reconcile_audited(&registry, Some(&store), Some(&runs), 200).await;
+        assert_eq!(failed, vec!["offline".to_string()]);
+
+        let still_armed = store.armed().await.unwrap();
+        assert_eq!(
+            still_armed
+                .iter()
+                .map(|r| r.zone_slug.as_str())
+                .collect::<Vec<_>>(),
+            vec!["back"],
+            "the confirmed controller's row is cleared; the unconfirmed one stays armed"
+        );
+        assert_eq!(
+            store.due(200).await.unwrap().len(),
+            1,
+            "the kept row is what the reaper picks up on its next tick"
+        );
+        let rows = runs.window(0, 10_000).await.unwrap();
+        let marker = rows
+            .iter()
+            .find(|r| r.zone_slug == "back" && r.source == "restart")
+            .and_then(|r| r.skip_reason.clone())
+            .unwrap_or_default();
+        assert!(
+            marker.contains("Boot stop failed")
+                && marker.starts_with(RESTART_UNKNOWN_DURATION_REASON),
+            "the unconfirmed valve is called out in History too: {rows:?}"
+        );
     }
 
     #[tokio::test]
@@ -432,7 +1098,7 @@ mod tests {
         );
     }
 
-    // P0-1 end-to-end: a run was in progress when the process was killed (its
+    // Boot reconciliation, end to end: a run was in progress when the process was killed (its
     // deadline is armed in the ledger and the in-process shutoff timer died with
     // it). Boot must physically close every valve AND clear the stale ledger so
     // the reaper does not later re-stop a valve already known off.
@@ -481,7 +1147,7 @@ mod tests {
         );
     }
 
-    // P0-1 edge: no persistence DB means no ActiveRunsStore, but boot must still
+    // No persistence DB means no ActiveRunsStore, but boot must still
     // physically close every valve in case a crash left one open. The None-store
     // clear is a no-op; reconcile_stop_all is not.
     #[tokio::test]
@@ -553,6 +1219,7 @@ mod tests {
                 remote_program_upload: false,
                 water_level: false,
                 per_zone_stop: false,
+                duration_quantum_s: 1,
             }
         }
         async fn run_zone(&self, slug: &str, duration_s: u32) -> ControllerResult<RunHandle> {
@@ -576,6 +1243,7 @@ mod tests {
                 return Err(ControllerError::Transport("unreachable".into()));
             }
             Ok(ControllerStatus {
+                observed_epoch: None,
                 reachable: true,
                 master_enabled: Some(true),
                 water_level_pct: None,

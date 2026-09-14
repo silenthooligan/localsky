@@ -33,7 +33,8 @@
 //   trigger     should_irrigate(depletion, RAW), then defer-by-deficit:
 //               hold when the capture-adjusted, bias-corrected,
 //               probability-weighted next-24h rain would pull the
-//               deficit back under RAW;
+//               deficit back under RAW, for at most
+//               MAX_CONSECUTIVE_DEFERS mornings running;
 //   sizing      refill to field capacity via refill_runtime_seconds,
 //               capped at the zone's effective max duration; an
 //               EXPLICIT weekly target additionally clamps today's
@@ -49,18 +50,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::schema::{GrassSpecies, SoilTexture};
 use crate::engine::soil_catalog::{raw_mm as raw_for, taw_mm as taw_for};
+use crate::engine::soil_decisions::{MorningOutcome, PastMorning};
 use crate::engine::species_catalog::{kc_at_doy_lat, lookup as species_lookup};
 use crate::engine::water_balance::{
     refill_runtime_seconds, should_irrigate, step as balance_step, ZoneWaterState,
 };
 
 /// Trailing local days replayed to reconstruct a zone's depletion.
-/// Chosen so the cold-start anchor (depletion 0 at window start) has
-/// washed out by the time the window ends: the [0, TAW] clamp erases
-/// any anchor offset at the first saturating or fully-depleting day,
-/// which arrives within ~2 days on sand and ~5 on clay at Florida
-/// summer ETc. Fourteen days sits comfortably past both, and the
-/// 90-day ledger retention covers it several times over.
+/// The window is bounded for predictable work; its length does not establish
+/// the initial water content. The planner checks convergence of wet and dry
+/// starting states before publishing a reconstructed deficit.
 pub const RECON_WINDOW_DAYS: i64 = 14;
 
 /// Minimum days in the replay window that must carry evidence (a
@@ -75,6 +74,24 @@ pub const RECON_WINDOW_DAYS: i64 = 14;
 /// install crosses it within its first few mornings as the engine's own
 /// resolved days land in the ledger.
 pub const MIN_EVIDENCE_DAYS: u32 = 3;
+
+/// Mornings running that defer-by-deficit may hold one zone before it
+/// waters anyway.
+///
+/// The count only grows on a forecast that did NOT deliver: rain that
+/// actually falls refills the bucket, drops the zone back under RAW and
+/// ends the run by itself. So this bounds consecutive forecast
+/// FAILURES, never a genuinely rainy week, and a rolling forecast that
+/// promises the same storm every morning can no longer park a zone at
+/// the bottom of its bucket indefinitely.
+///
+/// Three is about a bucket's worth of stress at Florida summer ETc
+/// (~4.25 mm/day) on the shallow-rooted turf profile (150 mm roots, MAD
+/// 0.50): sand reaches TAW on its second due morning, sandy loam and
+/// clay on their third, loam on its fourth. Past that the zone is at
+/// the bottom of its bucket with the forecast still unfulfilled, and
+/// the honest move is to water and say so.
+pub const MAX_CONSECUTIVE_DEFERS: u32 = 3;
 
 /// Which ladder rung resolved a day's ET0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,12 +114,8 @@ pub struct ResolvedEt0Day {
     pub source: Et0DaySource,
 }
 
-/// Resolve the ladder's evidence rungs for each requested day: ledger
-/// day rows first, archive entries second, `Fallback` marker when
-/// neither has a positive value for the date. Only positive values are
-/// evidence (the same rule every ET0 read in the codebase applies): a
-/// zero or negative entry reads as an absent measurement, not a
-/// rain-forest day with no evaporation.
+/// Resolve finite, nonnegative ET evidence for each date. A stored zero
+/// is a real zero; absence and invalid values move to the next rung.
 pub fn resolve_et0_days(
     dates: &[NaiveDate],
     ledger: &[(NaiveDate, f64)],
@@ -110,7 +123,7 @@ pub fn resolve_et0_days(
 ) -> Vec<ResolvedEt0Day> {
     let find = |rows: &[(NaiveDate, f64)], d: NaiveDate| -> Option<f64> {
         rows.iter()
-            .find(|(date, v)| *date == d && *v > 0.0)
+            .find(|(date, v)| *date == d && v.is_finite() && *v >= 0.0)
             .map(|(_, v)| *v)
     };
     dates
@@ -159,7 +172,7 @@ pub fn fallback_daily_etc_mm(explicit_weekly_target_in: Option<f64>, species: Gr
         // half their real demand.
         _ => crate::agronomy::default_weekly_target_in(crate::engine::species_slug(species)).0,
     };
-    weekly_in * 25.4 / 7.0
+    crate::units::in_to_mm(weekly_in) / 7.0
 }
 
 // ---- Per-zone parameters and evidence shapes ----
@@ -176,12 +189,29 @@ pub struct ZoneSoilParams {
     /// Management Allowed Depletion override; None = species default.
     pub mad_pct: Option<f64>,
     pub latitude_deg: f64,
-    /// EngineParams::capture_efficiency (default 0.70): the wet loss
-    /// between sky or hose and root zone. Applied symmetrically: rain
-    /// credits at gross x eff inside the bucket step, applied runs
-    /// enter the evidence at valve x throughput x eff, and the refill
-    /// divides by it on the way out.
+    /// The operator's capture-efficiency override, or a non-positive
+    /// value to take the catalog figures.
+    ///
+    /// This one number used to stand in for three physically different
+    /// quantities: how much RAIN reaches the roots, how much IRRIGATION
+    /// reaches them, and the factor a refill is grossed up by. They are
+    /// not the same and they do not move together. A drip line loses
+    /// almost nothing between emitter and soil; a fixed spray throws a
+    /// fine mist across a wide arc. Charging both 30% waters the drip
+    /// zone about a third longer than it needs.
+    ///
+    /// When set, the override still applies to everything, because an
+    /// operator who has measured their system is describing their system.
+    /// When unset, rain and irrigation each take their own figure.
+    ///
+    /// AS WIRED TODAY the assembly resolves the operator's value (or the
+    /// 0.70 default) before this struct is built, so the unset branch is
+    /// unreachable on the live path: both figures collapse to that one
+    /// number, and the catalog's rain and per-head efficiencies below
+    /// reach direct callers and tests only.
     pub capture_efficiency: f64,
+    /// The zone's head, which decides how much of a run lands.
+    pub sprinkler_type: crate::config::schema::SprinklerType,
     pub throughput_mm_hr: f64,
     /// Effective cap: zone max duration min any active restriction cap.
     pub max_dur_s: u32,
@@ -196,9 +226,32 @@ pub struct ZoneSoilParams {
     /// would starve a sandy yard in a dry month). Also the fallback
     /// rung's daily mean when set.
     pub explicit_weekly_budget_in: Option<f64>,
+    /// Recent 6 cm soil temperature, F, when the forecast models it.
+    /// Judged against the species' dormancy threshold.
+    pub soil_temp_f: Option<f64>,
+}
+
+/// A planting the soil says is asleep: the reading and the threshold
+/// it fell below.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Dormancy {
+    pub soil_temp_f: f64,
+    pub threshold_f: f64,
 }
 
 impl ZoneSoilParams {
+    /// Whether the soil temperature puts this planting below its
+    /// species' growth threshold. None when the species has no
+    /// modeled dormancy or the forecast carries no soil temperature.
+    pub fn dormancy(&self) -> Option<Dormancy> {
+        let threshold_f = species_lookup(self.species).dormancy_soil_f?;
+        let soil_temp_f = self.soil_temp_f?;
+        (soil_temp_f < threshold_f).then_some(Dormancy {
+            soil_temp_f,
+            threshold_f,
+        })
+    }
+
     fn root_depth(&self) -> f64 {
         self.root_depth_mm
             .unwrap_or_else(|| species_lookup(self.species).root_depth_mm)
@@ -229,6 +282,13 @@ pub struct ZoneDayEvidence {
     pub applied_valve_s: i64,
 }
 
+/// Persisted decisions for completed scheduled mornings. The current local day
+/// is explicit so its partial ET0 charge cannot be mistaken for a prior defer.
+pub struct DeferHistory<'a> {
+    pub today: NaiveDate,
+    pub mornings: &'a [PastMorning],
+}
+
 /// One replay-ready day: the charges and credits `replay` folds through
 /// the bucket step.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -248,23 +308,65 @@ pub struct ReplayDay {
 /// Turn gathered evidence into replay-ready days. Deterministic: Kc
 /// comes from the date's own day-of-year, the explicit rain cap is
 /// band-held exactly as the weekly engine holds it (0.05..=5.0 in;
+/// How much of a RUN reaches the root zone.
+///
+/// The operator's measured override when they set one, else the figure
+/// for the zone's own head. An operator who has run catch cups is
+/// describing their system and is believed over the catalog.
+pub fn irrigation_efficiency(p: &ZoneSoilParams) -> f64 {
+    if p.capture_efficiency > 0.0 {
+        return crate::engine::water_balance::resolve_capture_efficiency(p.capture_efficiency);
+    }
+    crate::agronomy::sprinkler_application_efficiency(crate::engine::sprinkler_slug(
+        p.sprinkler_type,
+    ))
+}
+
+/// How much of the RAIN that falls reaches the root zone.
+///
+/// Higher than irrigation efficiency, and not the same quantity. Rain
+/// arrives as large drops over the whole area with no drift; what it
+/// loses is canopy interception. Runoff is handled separately, by the
+/// bucket clamping at field capacity and by the daily rain cap.
+///
+/// Charging rain a fixed spray head's losses credited the yard about a
+/// fifth less rain than fell, which deepens the modelled deficit and
+/// waters more.
+pub fn rain_effectiveness(p: &ZoneSoilParams) -> f64 {
+    if p.capture_efficiency > 0.0 {
+        return crate::engine::water_balance::resolve_capture_efficiency(p.capture_efficiency);
+    }
+    crate::agronomy::RAIN_EFFECTIVENESS
+}
+
 /// non-positive disables clipping), and capture efficiency is clamped
 /// to [0, 1] on the applied conversion.
 pub fn build_replay_days(evidence: &[ZoneDayEvidence], p: &ZoneSoilParams) -> Vec<ReplayDay> {
-    let eff = crate::engine::water_balance::resolve_capture_efficiency(p.capture_efficiency);
+    let eff = irrigation_efficiency(p);
     let cap = p
         .explicit_rain_cap_mm
         .filter(|c| *c > 0.0)
-        .map(|c| c.clamp(0.05 * 25.4, 5.0 * 25.4));
+        .map(|c| c.clamp(crate::units::in_to_mm(0.05), crate::units::in_to_mm(5.0)));
+    // A dormant planting transpires almost nothing. The soil temperature
+    // in hand describes the recent day, so the crop coefficient is
+    // zeroed for the newest evidence day only: earlier days keep the
+    // demand they were charged, because the archive does not say when
+    // the soil cooled.
+    let dormant = p.dormancy().is_some();
+    let newest = evidence.iter().map(|d| d.date).max();
     evidence
         .iter()
         .map(|day| {
-            let etc_mm = match day.et0_mm {
-                Some(et0) if et0 > 0.0 => {
-                    let doy = day.date.ordinal() as u16;
-                    et0 * kc_at_doy_lat(p.species, doy, p.latitude_deg)
+            let etc_mm = if dormant && Some(day.date) == newest {
+                0.0
+            } else {
+                match day.et0_mm {
+                    Some(et0) if et0.is_finite() && et0 >= 0.0 => {
+                        let doy = day.date.ordinal() as u16;
+                        et0 * kc_at_doy_lat(p.species, doy, p.latitude_deg)
+                    }
+                    _ => fallback_daily_etc_mm(p.explicit_weekly_budget_in, p.species),
                 }
-                _ => fallback_daily_etc_mm(p.explicit_weekly_budget_in, p.species),
             };
             let gross_rain_mm = match cap {
                 Some(c) => day.gross_rain_mm.min(c),
@@ -290,7 +392,24 @@ pub fn build_replay_days(evidence: &[ZoneDayEvidence], p: &ZoneSoilParams) -> Ve
 /// `RECON_WINDOW_DAYS` window ends well past both on any texture. The
 /// result is clamped to [0, TAW] by construction (every step clamps).
 pub fn replay(days: &[ReplayDay], capture_efficiency: f64, taw_mm: f64) -> f64 {
+    // A RAW no depletion can reach: no day reads due, the hold count
+    // stays 0, and this is the plain fold.
+    replay_with_holds(days, capture_efficiency, taw_mm, f64::INFINITY).0
+}
+
+/// The same fold, plus the run of HELD mornings the window ENDS on:
+/// trailing days that closed with the bucket past RAW and no water
+/// applied. This is a dry-stress diagnostic only: it cannot establish WHY
+/// watering was withheld. The forecast-defer bound uses persisted morning
+/// decisions in `plan_zone_with_history` instead.
+pub fn replay_with_holds(
+    days: &[ReplayDay],
+    capture_efficiency: f64,
+    taw_mm: f64,
+    raw_mm: f64,
+) -> (f64, u32) {
     let mut state = ZoneWaterState::default();
+    let mut held = 0u32;
     for d in days {
         balance_step(
             &mut state,
@@ -300,8 +419,13 @@ pub fn replay(days: &[ReplayDay], capture_efficiency: f64, taw_mm: f64) -> f64 {
             capture_efficiency,
             taw_mm,
         );
+        if d.applied_net_mm <= 0.0 && should_irrigate(state.depletion_mm, raw_mm) {
+            held += 1;
+        } else {
+            held = 0;
+        }
     }
-    state.depletion_mm
+    (state.depletion_mm, held)
 }
 
 // ---- Trigger ----
@@ -310,30 +434,70 @@ pub fn replay(days: &[ReplayDay], capture_efficiency: f64, taw_mm: f64) -> f64 {
 /// depth. A DUE zone holds when the expected post-rain depletion
 /// max(depletion - eff x rain, 0) falls back under RAW, where `rain`
 /// is the bias-corrected, probability-weighted next-24h forecast depth
-/// (mm) the assembly resolves. The threshold is zone physics: sand's
-/// small RAW tolerates little forecast rain, clay's large RAW a lot.
-/// Returns the hold reason, or None when the zone is not due or the
-/// rain leaves it due anyway.
+/// (mm) the assembly resolves.
+///
+/// WHAT THE THRESHOLD ACTUALLY IS: the rain that holds a due zone is
+/// (depletion - RAW) / eff, the OVERSHOOT past the trigger. On the
+/// first due morning that overshoot is whatever fraction of a day's ETc
+/// carried the bucket over the line, so almost any forecast holds. It
+/// grows by ETc / eff each morning the promised rain fails to arrive,
+/// and then STOPS: the bucket clamps at TAW, and from there the
+/// threshold is flat at (TAW - RAW) / eff forever. At the live 0.70
+/// factor, St Augustine on 150 mm roots at MAD 0.50, that plateau is
+/// 6.4 mm (0.25 in) a morning on sand, 13.9 mm (0.55 in) on sandy loam,
+/// 16.1 mm (0.63 in) on loam. A wet-season forecast that keeps
+/// promising half an inch clears it every morning, which is how a
+/// rolling forecast could park a zone at the bottom of its bucket
+/// without limit. Hence `consecutive_defers`, counted by the caller,
+/// and `MAX_CONSECUTIVE_DEFERS`.
+///
+/// This used to say the threshold was "zone physics: sand's small RAW
+/// tolerates little forecast rain, clay's large RAW a lot". Only the
+/// plateau scales with RAW. At the trigger it is the overshoot, and
+/// sand's first due morning wants MORE rain than sandy loam's (5.7 mm
+/// against 4.3), not less.
+///
+/// Returns the hold reason, or None when the zone is not due, the rain
+/// leaves it due anyway, or it has already been held
+/// `MAX_CONSECUTIVE_DEFERS` mornings running.
 pub fn defer_by_deficit(
     depletion_mm: f64,
     raw_mm: f64,
     capture_efficiency: f64,
     expected_next_24h_rain_mm: f64,
+    consecutive_defers: u32,
 ) -> Option<String> {
+    if consecutive_defers >= MAX_CONSECUTIVE_DEFERS {
+        return None;
+    }
+    let effective = rain_covers_deficit(
+        depletion_mm,
+        raw_mm,
+        capture_efficiency,
+        expected_next_24h_rain_mm,
+    )?;
+    Some(format!(
+        "deferred: forecast rain refills the deficit ({effective:.1} of {depletion_mm:.1} \
+         mm expected)"
+    ))
+}
+
+/// The gate's arithmetic with the bound out of the way: how much of the
+/// forecast rain reaches the roots, when that is enough to pull a DUE
+/// zone's deficit back under RAW, else None. The gate and the
+/// bound-reached row share this one copy of the physics.
+fn rain_covers_deficit(
+    depletion_mm: f64,
+    raw_mm: f64,
+    capture_efficiency: f64,
+    expected_next_24h_rain_mm: f64,
+) -> Option<f64> {
     if !should_irrigate(depletion_mm, raw_mm) {
         return None;
     }
     let effective = crate::engine::water_balance::resolve_capture_efficiency(capture_efficiency)
         * expected_next_24h_rain_mm.max(0.0);
-    let post = (depletion_mm - effective).max(0.0);
-    if post < raw_mm {
-        Some(format!(
-            "deferred: forecast rain refills the deficit ({effective:.1} of {depletion_mm:.1} \
-             mm expected)"
-        ))
-    } else {
-        None
-    }
+    ((depletion_mm - effective).max(0.0) < raw_mm).then_some(effective)
 }
 
 // ---- Sizing ----
@@ -368,17 +532,21 @@ pub fn size_refill(
     p: &ZoneSoilParams,
     delivered_trailing_7d_mm: f64,
 ) -> SizedRefill {
+    // Grossing up a refill asks how long THE HEAD must run to put a
+    // depth into the root zone, so it takes the irrigation figure. A
+    // drip zone charged a fixed spray's losses ran about a third longer
+    // than it needed.
     let ideal_s = refill_runtime_seconds(
         depletion_mm,
         p.throughput_mm_hr,
-        p.capture_efficiency,
+        irrigation_efficiency(p),
         u32::MAX,
     );
     let capped_s = ideal_s.min(p.max_dur_s);
     let session_capped = ideal_s > p.max_dur_s;
     let (planned_seconds, ceiling_binding, ceiling_reason) = match p.explicit_weekly_budget_in {
         Some(target_in) if target_in > 0.0 && capped_s > 0 && p.throughput_mm_hr > 0.0 => {
-            let target_mm = target_in * 25.4;
+            let target_mm = crate::units::in_to_mm(target_in);
             let headroom_mm = (target_mm - delivered_trailing_7d_mm.max(0.0)).max(0.0);
             let headroom_s = ((headroom_mm / p.throughput_mm_hr) * 3600.0).round() as i64;
             let headroom_s = headroom_s.clamp(0, u32::MAX as i64) as u32;
@@ -386,9 +554,9 @@ pub fn size_refill(
                 let reason = format!(
                     "held to the weekly ceiling: {:.2} in of the {:.2} in target delivered \
                      in the last 7 days, {:.2} in of headroom left",
-                    delivered_trailing_7d_mm.max(0.0) / 25.4,
+                    crate::units::mm_to_in(delivered_trailing_7d_mm.max(0.0)),
                     target_in,
-                    headroom_mm / 25.4
+                    crate::units::mm_to_in(headroom_mm)
                 );
                 (headroom_s, true, Some(reason))
             } else {
@@ -412,6 +580,9 @@ pub fn size_refill(
 /// defaulted).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SoilZonePlan {
+    /// Horizon-aware explanation, shared by live dispatch sizing and outlook.
+    #[serde(default)]
+    pub planning_reason: Option<String>,
     #[serde(default)]
     pub zone_slug: String,
     /// Reconstructed depletion below field capacity (mm), in [0, TAW].
@@ -434,6 +605,17 @@ pub struct SoilZonePlan {
     /// instead of matching the sentence's opening words.
     #[serde(default)]
     pub deferred_kind: Option<SoilDeferKind>,
+    /// Completed scheduled mornings held specifically for forecast rain since
+    /// the last irrigation or bucket refill. Other holds do not spend this
+    /// allowance, and today's partial reading never counts as a past morning.
+    #[serde(default)]
+    pub consecutive_defers: u32,
+    /// The bound spent this tick: the forecast rain would have held this
+    /// zone again, but `MAX_CONSECUTIVE_DEFERS` mornings have already
+    /// gone that way, so it waters and `today_row` says how far it was
+    /// carried.
+    #[serde(default)]
+    pub defer_bound_reached: bool,
     #[serde(default)]
     pub planned_seconds: u32,
     /// The max-duration cap shorted the refill (Check A's deficit arm
@@ -454,6 +636,11 @@ pub struct SoilZonePlan {
     /// ETc mean with zero credits.
     #[serde(default)]
     pub fallback_days: u32,
+    /// Remaining dependence on unknown initial depletion, mm. Two replays
+    /// start at field capacity and wilting point; only convergence supports
+    /// a single reconstructed deficit in any climate or root depth.
+    #[serde(default)]
+    pub initial_uncertainty_mm: f64,
 }
 
 impl SoilZonePlan {
@@ -465,7 +652,7 @@ impl SoilZonePlan {
     /// (the 0.7.22 absent-not-zero contract) and lets the weekly
     /// allocator size a governed zone until enough rungs resolve.
     pub fn evidence_starved(&self) -> bool {
-        self.evidence_days < MIN_EVIDENCE_DAYS
+        self.evidence_days < MIN_EVIDENCE_DAYS || self.initial_uncertainty_mm > 0.1
     }
 }
 
@@ -476,8 +663,47 @@ impl SoilZonePlan {
 pub fn plan_zone(
     p: &ZoneSoilParams,
     evidence: &[ZoneDayEvidence],
-    expected_next_24h_rain_mm: f64,
+    expected_next_24h_rain_mm: Option<f64>,
     delivered_trailing_7d_mm: f64,
+) -> SoilZonePlan {
+    plan_zone_with_history(
+        p,
+        evidence,
+        expected_next_24h_rain_mm,
+        delivered_trailing_7d_mm,
+        None,
+    )
+}
+
+/// The live planner receives durable morning decisions alongside weather and
+/// applied-water evidence. Missing history starts the defer count at zero;
+/// ordinary waterless days are never substituted for missing decisions.
+pub fn plan_zone_with_history(
+    p: &ZoneSoilParams,
+    evidence: &[ZoneDayEvidence],
+    expected_next_24h_rain_mm: Option<f64>,
+    delivered_trailing_7d_mm: f64,
+    history: Option<DeferHistory<'_>>,
+) -> SoilZonePlan {
+    plan_zone_with_coverage(
+        p,
+        evidence,
+        expected_next_24h_rain_mm,
+        delivered_trailing_7d_mm,
+        history,
+        &[],
+    )
+}
+
+/// Unknown historical rain widens the wet end of the state interval. It does
+/// not become a zero-rain observation merely because ET was available that day.
+pub fn plan_zone_with_coverage(
+    p: &ZoneSoilParams,
+    evidence: &[ZoneDayEvidence],
+    expected_next_24h_rain_mm: Option<f64>,
+    delivered_trailing_7d_mm: f64,
+    history: Option<DeferHistory<'_>>,
+    unknown_rain_dates: &[NaiveDate],
 ) -> SoilZonePlan {
     let taw = p.taw_mm();
     let raw = p.raw_mm();
@@ -491,7 +717,79 @@ pub fn plan_zone(
         .filter(|d| d.et0_mm.is_some() || d.gross_rain_mm > 0.0 || d.applied_valve_s > 0)
         .count() as u32;
     let fallback_days = evidence.len() as u32 - evidence_days;
-    let depletion = replay(&build_replay_days(evidence, p), p.capture_efficiency, taw);
+    // Replay from the first day we actually know something about.
+    //
+    // The window is fourteen days and a fresh install has about three,
+    // so eleven leading days used to be charged the fallback ETc with
+    // zero rain. That is not a cautious assumption, it is a fabricated
+    // drought: enough dry days at the fallback rate drive any texture to
+    // TAW, so a brand-new install read a full deficit on its first tick
+    // and watered every zone to its cap on the first morning.
+    //
+    // A day before any evidence is UNKNOWN, not dry. The cold-start
+    // anchor is field capacity, and it belongs at the first evidenced
+    // day rather than fourteen days earlier. Gaps INSIDE the evidenced
+    // span still charge the fallback, because there the yard demonstrably
+    // existed and dried; it is only the leading run of nothing that was
+    // invented.
+    let first_known = evidence
+        .iter()
+        .position(|d| d.et0_mm.is_some() || d.gross_rain_mm > 0.0 || d.applied_valve_s > 0);
+    let replayed: &[ZoneDayEvidence] = match first_known {
+        Some(i) => &evidence[i..],
+        // Nothing at all is known. Replaying anything would be inventing
+        // it, so the bucket stays at its anchor and the plan reports as
+        // starved, which the assembly publishes as absence.
+        None => &[],
+    };
+    // The factor the replay applies is the RAIN one: balance_step
+    // multiplies gross rain by it, while applied water entered the
+    // evidence already net of the head's own losses. Passing one number
+    // for both charged rain a fixed spray's drift.
+    let rain_eff = rain_effectiveness(p);
+    let mut state = ZoneWaterState::default();
+    let mut upper = ZoneWaterState { depletion_mm: taw };
+    let mut consecutive_defers = 0u32;
+    for (day, charge) in replayed.iter().zip(build_replay_days(replayed, p)) {
+        balance_step(
+            &mut state,
+            charge.etc_mm,
+            charge.gross_rain_mm,
+            charge.applied_net_mm,
+            rain_eff,
+            taw,
+        );
+        balance_step(
+            &mut upper,
+            charge.etc_mm,
+            charge.gross_rain_mm,
+            charge.applied_net_mm,
+            rain_eff,
+            taw,
+        );
+        if unknown_rain_dates.contains(&day.date) {
+            state.depletion_mm = 0.0;
+        }
+        if let Some(history) = history.as_ref().filter(|history| day.date < history.today) {
+            let decision = history
+                .mornings
+                .iter()
+                .find(|morning| morning.date == day.date);
+            if charge.applied_net_mm > 0.0
+                || !should_irrigate(state.depletion_mm, raw)
+                || decision.is_some_and(|morning| morning.outcome == MorningOutcome::NotDue)
+            {
+                consecutive_defers = 0;
+            } else if decision
+                .is_some_and(|morning| morning.outcome == MorningOutcome::ForecastRain)
+            {
+                consecutive_defers = consecutive_defers.saturating_add(1);
+            }
+            // Restriction, operator and unknown holds neither spend nor advance
+            // the forecast-failure allowance. The next eligible morning resumes it.
+        }
+    }
+    let depletion = state.depletion_mm;
     let due = should_irrigate(depletion, raw);
     let mut plan = SoilZonePlan {
         zone_slug: p.slug.clone(),
@@ -501,20 +799,56 @@ pub fn plan_zone(
         due,
         evidence_days,
         fallback_days,
+        initial_uncertainty_mm: (upper.depletion_mm - depletion).max(0.0),
+        consecutive_defers,
         ..Default::default()
     };
+    // Asleep: the bucket is held where it is, whatever the deficit says.
+    // Watering a dormant lawn to a growing lawn's schedule is the most
+    // common way a continental yard wastes its autumn, and the deficit
+    // will still be there, unchanged, when the soil warms.
+    if let Some(d) = p.dormancy() {
+        plan.due = false;
+        plan.deferred_kind = Some(SoilDeferKind::Dormant);
+        plan.deferred_reason = Some(format!(
+            "Dormant: soil at {:.0}°F is below the {:.0}°F growth threshold for {}; holding the bucket",
+            d.soil_temp_f,
+            d.threshold_f,
+            crate::engine::species_slug(p.species).replace('_', " ")
+        ));
+        return plan;
+    }
     if !due {
         return plan;
     }
+    // The balance can be due while future rain is unknown. Keep the due
+    // evidence, but do not spend the rain-defer allowance or dispatch a refill
+    // on a fabricated dry forecast.
+    let Some(expected_next_24h_rain_mm) = expected_next_24h_rain_mm else {
+        plan.deferred_kind = Some(SoilDeferKind::ForecastUnavailable);
+        plan.deferred_reason =
+            Some("Rain forecast unavailable for the next 24 hours; watering held".into());
+        return plan;
+    };
+    // Deferring asks how much of the forecast RAIN will reach the roots.
     if let Some(reason) = defer_by_deficit(
         depletion,
         raw,
-        p.capture_efficiency,
+        rain_eff,
         expected_next_24h_rain_mm,
+        consecutive_defers,
     ) {
         plan.deferred_reason = Some(reason);
         plan.deferred_kind = Some(SoilDeferKind::ForecastRain);
         return plan;
+    }
+    if consecutive_defers >= MAX_CONSECUTIVE_DEFERS {
+        // Past the bound. When the rain WOULD have covered the deficit,
+        // this zone is watering only because it cannot be held any
+        // longer, and the row has to say so rather than reading like an
+        // ordinary refill.
+        let covered = rain_covers_deficit(depletion, raw, rain_eff, expected_next_24h_rain_mm);
+        plan.defer_bound_reached = covered.is_some();
     }
     let sized = size_refill(depletion, p, delivered_trailing_7d_mm);
     plan.planned_seconds = sized.planned_seconds;
@@ -532,6 +866,21 @@ pub fn plan_zone(
 /// shorted-by-cap suffix. The window-admission pass may still zero the
 /// returned seconds afterwards with its own reason.
 pub fn today_row(plan: &SoilZonePlan, cap_minutes: u32) -> (u32, String, bool) {
+    if let Some(reason) = &plan.planning_reason {
+        let reason = if plan.ceiling_binding {
+            format!(
+                "{reason}; {}",
+                plan.ceiling_reason
+                    .as_deref()
+                    .unwrap_or("limited by the weekly ceiling")
+            )
+        } else if plan.session_capped {
+            format!("{reason}; limited by the {cap_minutes}-minute cap")
+        } else {
+            reason.clone()
+        };
+        return (plan.planned_seconds, reason, plan.session_capped);
+    }
     if !plan.due {
         return (
             0,
@@ -566,8 +915,18 @@ pub fn today_row(plan: &SoilZonePlan, cap_minutes: u32) -> (u32, String, bool) {
         (plan.planned_seconds as f64 / 60.0).round(),
         (plan.depletion_mm / plan.taw_mm.max(f64::EPSILON) * 100.0).round()
     );
+    use std::fmt::Write;
+    if plan.defer_bound_reached {
+        // The forecast still shows rain, and the zone waters anyway: it
+        // has been held as long as defer-by-deficit may hold one, so the
+        // row says that rather than reading like an ordinary refill.
+        let _ = write!(
+            reason,
+            "; deferred as far as it can be, held for forecast rain {} mornings running",
+            plan.consecutive_defers
+        );
+    }
     if plan.session_capped {
-        use std::fmt::Write;
         let _ = write!(
             reason,
             "; shorted by the {cap_minutes}-min cap, the rest carries to tomorrow"
@@ -611,8 +970,14 @@ pub struct AdmissionOutcome {
 pub enum SoilDeferKind {
     /// Forecast rain is expected to refill the deficit on its own.
     ForecastRain,
+    /// Required next-24h rain evidence is missing; this does not spend a
+    /// forecast-rain defer morning or assert that rain is expected.
+    ForecastUnavailable,
     /// The morning window could not fit this zone today.
     Window,
+    /// The soil is below the species' growth threshold. The bucket is
+    /// held where it is and nothing is due until the soil warms.
+    Dormant,
 }
 
 /// Fit the due zones into the morning window. Ordering is the STRESS
@@ -661,8 +1026,8 @@ where
         }
     }
     let reason = format!(
-        "waits for tomorrow: the morning window fits {} of {} zones that need water, most \
-         depleted first",
+        "{}the morning window fits {} of {} zones that need water, most depleted first",
+        crate::voice::REASON_WAITS_FOR_TOMORROW,
         admitted_set.len(),
         due.len()
     );
@@ -717,17 +1082,15 @@ mod tests {
         );
     }
 
-    /// Zero and negative entries are absent measurements, not evidence:
-    /// a zeroed ledger row falls through to the archive, and a zeroed
-    /// archive entry falls through to the fallback rung.
+    /// A known zero takes precedence over a model estimate; negative ET is invalid.
     #[test]
-    fn non_positive_entries_are_not_evidence() {
+    fn zero_is_evidence_but_negative_et0_is_not() {
         let dates = [d(1), d(2)];
         let ledger = [(d(1), 0.0)];
         let archive = [(d(1), 4.1), (d(2), -1.0)];
         let out = resolve_et0_days(&dates, &ledger, &archive);
-        assert_eq!(out[0].et0_mm, Some(4.1));
-        assert_eq!(out[0].source, Et0DaySource::Archive);
+        assert_eq!(out[0].et0_mm, Some(0.0));
+        assert_eq!(out[0].source, Et0DaySource::Ledger);
         assert_eq!(out[1].et0_mm, None);
         assert_eq!(out[1].source, Et0DaySource::Fallback);
     }
@@ -743,10 +1106,12 @@ mod tests {
             mad_pct: None,
             latitude_deg: 28.5,
             capture_efficiency: 0.70,
+            sprinkler_type: crate::config::schema::SprinklerType::Spray,
             throughput_mm_hr: 15.0,
             max_dur_s: 3600,
             explicit_rain_cap_mm: None,
             explicit_weekly_budget_in: None,
+            soil_temp_f: None,
         }
     }
 
@@ -802,11 +1167,72 @@ mod tests {
     /// emergent per-day cap); the zone holds right after the storm and
     /// resumes the next day when daily ETc pushes depletion back over
     /// RAW, sized to the actual deficit instead of a weekly quota.
+    /// A drip zone is not charged a fixed spray's drift.
+    ///
+    /// One knob used to stand in for three physically different
+    /// quantities: how much rain reaches the roots, how much irrigation
+    /// reaches them, and the factor a refill is grossed up by. Charging
+    /// a drip line 30% losses waters it about a third longer than it
+    /// needs, every time.
+    #[test]
+    fn the_head_decides_how_much_of_a_run_lands() {
+        use crate::config::schema::SprinklerType;
+        let eff = |t: SprinklerType| {
+            let mut p = zone(SoilTexture::Loam);
+            p.capture_efficiency = 0.0; // no operator override
+            p.sprinkler_type = t;
+            irrigation_efficiency(&p)
+        };
+        assert!(eff(SprinklerType::Drip) > eff(SprinklerType::Rotor));
+        assert!(eff(SprinklerType::Rotor) > eff(SprinklerType::Spray));
+        assert!((eff(SprinklerType::Drip) - 0.90).abs() < 1e-9);
+        assert!((eff(SprinklerType::Spray) - 0.65).abs() < 1e-9);
+        // An unknown head takes the historical global figure, which is
+        // the honest answer when we do not know what is out there.
+        assert!((eff(SprinklerType::Other) - 0.70).abs() < 1e-9);
+    }
+
+    /// Rain is not irrigation, and it is credited higher.
+    ///
+    /// Rain arrives as large drops over the whole area with no drift and
+    /// little evaporation in flight; what it loses is canopy
+    /// interception. Runoff is handled elsewhere, by the bucket clamping
+    /// at field capacity. Charging rain a spray head's losses credited
+    /// the yard about a fifth less rain than fell, which deepens the
+    /// modelled deficit and waters more.
+    #[test]
+    fn rain_is_credited_more_generously_than_a_sprinkler() {
+        use crate::config::schema::SprinklerType;
+        let mut p = zone(SoilTexture::Loam);
+        p.capture_efficiency = 0.0;
+        p.sprinkler_type = SprinklerType::Spray;
+        assert!(
+            rain_effectiveness(&p) > irrigation_efficiency(&p),
+            "rain {} should beat a spray head {}",
+            rain_effectiveness(&p),
+            irrigation_efficiency(&p)
+        );
+    }
+
+    /// An operator who measured their system is believed over the
+    /// catalog, for every one of the three.
+    #[test]
+    fn a_measured_override_still_governs_everything() {
+        use crate::config::schema::SprinklerType;
+        let mut p = zone(SoilTexture::Loam);
+        p.capture_efficiency = 0.55;
+        p.sprinkler_type = SprinklerType::Drip;
+        assert!((irrigation_efficiency(&p) - 0.55).abs() < 1e-9);
+        assert!((rain_effectiveness(&p) - 0.55).abs() < 1e-9);
+    }
+
     #[test]
     fn sand_yard_storm_holds_then_resumes_on_the_deficit() {
         let p = zone(SoilTexture::Sand);
-        // July days with ET0 evidence at 5.0 mm; Kc for St Augustine in
-        // July is exactly 1.00, so each day charges 5.0 mm of ETc.
+        // July days with ET0 evidence at 5.0 mm. Kc for St Augustine in
+        // July is the FAO-56 warm-season Kc_mid of 0.85, so each day
+        // charges 4.25 mm of ETc. It charged 5.0 while the catalog put
+        // this grass at 1.00, above even the table's cool-season row.
         let mut evidence: Vec<ZoneDayEvidence> = (1..=4)
             .map(|day| ZoneDayEvidence {
                 date: d(day),
@@ -816,24 +1242,52 @@ mod tests {
             })
             .collect();
         evidence[2].gross_rain_mm = 1.2 * 25.4; // the storm, July 3
-                                                // Through the storm day: 5, clamp 9, then 9 + 5 - 0.7 x 30.48
-                                                // clamps at 0. The yard holds.
-        let through_storm = plan_zone(&p, &evidence[..3], 0.0, 0.0);
+                                                // Through the storm day: 4.25, then 8.5, then
+                                                // 8.5 + 4.25 - 0.7 x 30.48 clamps at 0. The yard
+                                                // holds. (It read 5 and 9 before the Kc correction.)
+        let through_storm = plan_zone(&p, &evidence[..3], Some(0.0), 0.0);
         assert_eq!(
             through_storm.depletion_mm, 0.0,
             "the storm fills the bucket"
         );
         assert!(!through_storm.due);
         assert_eq!(through_storm.planned_seconds, 0);
-        // One more 5 mm day: depletion 5.0 crosses RAW 4.5 and the zone
-        // resumes with a refill sized to the deficit: 5 / 0.7 / 15 mm/hr
-        // is about 1714 s, nowhere near a weekly-quota session.
-        let next_day = plan_zone(&p, &evidence, 0.0, 0.0);
-        assert!((next_day.depletion_mm - 5.0).abs() < 1e-9);
+        // One more day: depletion 4.25 crosses RAW 4.5? No: it sits just
+        // under, so take two more days of evidence to cross it. The point
+        // of the test is that the refill is sized to the deficit rather
+        // than to a weekly quota, and that survives the Kc correction.
+        let next_day = plan_zone(&p, &evidence, Some(0.0), 0.0);
+        assert!(
+            (next_day.depletion_mm - 4.25).abs() < 1e-9,
+            "one July day at ET0 5.0 charges 5.0 x 0.85, got {}",
+            next_day.depletion_mm
+        );
+        assert!(
+            !next_day.due,
+            "4.25 mm has not crossed RAW 4.5 yet, so the yard still holds"
+        );
+
+        // A second dry day does cross it. This is the correction visible
+        // as behavior: a grass the table calls water-efficient reaches
+        // its trigger a day later than the catalog's invented 1.00 made
+        // it. The refill is still sized to the deficit rather than to a
+        // weekly quota, which is what this test is really about.
+        evidence.push(ZoneDayEvidence {
+            date: d(5),
+            et0_mm: Some(5.0),
+            gross_rain_mm: 0.0,
+            applied_valve_s: 0,
+        });
+        let next_day = plan_zone(&p, &evidence, Some(0.0), 0.0);
+        assert!(
+            (next_day.depletion_mm - 8.5).abs() < 1e-9,
+            "two July days at 4.25 mm, got {}",
+            next_day.depletion_mm
+        );
         assert!(next_day.due, "depletion crossed RAW");
         assert!(
-            next_day.planned_seconds > 1700 && next_day.planned_seconds < 1800,
-            "refill sized to the deficit, got {}",
+            next_day.planned_seconds > 2800 && next_day.planned_seconds < 3000,
+            "refill sized to the deficit (8.5 / 0.7 / 15 mm/hr), got {}",
             next_day.planned_seconds
         );
         assert!(!next_day.session_capped);
@@ -848,7 +1302,7 @@ mod tests {
                 applied_valve_s: 0,
             })
             .collect();
-        let long = plan_zone(&p, &two_weeks, 0.0, 0.0);
+        let long = plan_zone(&p, &two_weeks, Some(0.0), 0.0);
         assert!(long.depletion_mm <= p.taw_mm() + 1e-9);
     }
 
@@ -866,13 +1320,13 @@ mod tests {
                 applied_valve_s: 0,
             })
             .collect();
-        let before = plan_zone(&p, &evidence, 0.0, 0.0);
+        let before = plan_zone(&p, &evidence, Some(0.0), 0.0);
         assert!(before.due, "two dry days on sand read due");
         // Yesterday's run: an hour on the valve at 15 mm/hr x 0.7 puts
         // back 10.5 mm net, covering the day's charge and the standing
         // deficit both.
         evidence[1].applied_valve_s = 3600;
-        let after = plan_zone(&p, &evidence, 0.0, 0.0);
+        let after = plan_zone(&p, &evidence, Some(0.0), 0.0);
         assert!(
             !after.due,
             "the applied evidence quenches the trigger, depletion {}",
@@ -883,11 +1337,60 @@ mod tests {
     /// Days with no ET0 evidence charge the fallback daily mean: the
     /// explicit weekly target spread over seven days, else the species
     /// class figure. No 5.0 mm constant anywhere.
+    /// A dormant bermuda lawn accrues no ETc for the day in hand and is
+    /// not due, whatever its deficit says. The bucket is held.
+    #[test]
+    fn a_dormant_bermuda_accrues_no_etc_and_is_not_due() {
+        let mut p = zone(SoilTexture::Loam);
+        p.species = crate::config::schema::GrassSpecies::Bermuda;
+        p.soil_temp_f = Some(45.0);
+        let evidence: Vec<ZoneDayEvidence> = (1..=14)
+            .map(|day| ZoneDayEvidence {
+                date: d(day),
+                et0_mm: Some(5.0),
+                gross_rain_mm: 0.0,
+                applied_valve_s: 0,
+            })
+            .collect();
+        let days = build_replay_days(&evidence, &p);
+        assert_eq!(days.last().unwrap().etc_mm, 0.0, "today's demand is zero");
+        assert!(
+            days[0].etc_mm > 0.0,
+            "earlier days keep the demand they were charged"
+        );
+        let plan = plan_zone(&p, &evidence, Some(0.0), 0.0);
+        assert!(!plan.due);
+        assert_eq!(plan.deferred_kind, Some(SoilDeferKind::Dormant));
+        assert!(
+            plan.deferred_reason
+                .as_deref()
+                .unwrap()
+                .starts_with("Dormant: soil at 45"),
+            "{:?}",
+            plan.deferred_reason
+        );
+        // The same soil under a cool-season lawn is still growing.
+        p.species = crate::config::schema::GrassSpecies::KentuckyBluegrass;
+        assert!(p.dormancy().is_none());
+        let plan = plan_zone(&p, &evidence, Some(0.0), 0.0);
+        assert_ne!(plan.deferred_kind, Some(SoilDeferKind::Dormant));
+        // And with no soil temperature in hand nothing is asleep.
+        p.species = crate::config::schema::GrassSpecies::Bermuda;
+        p.soil_temp_f = None;
+        assert!(p.dormancy().is_none());
+    }
+
     #[test]
     fn missing_et0_days_charge_the_fallback_rung() {
         let mut p = zone(SoilTexture::Loam);
         p.explicit_weekly_budget_in = Some(1.4);
-        let evidence: Vec<ZoneDayEvidence> = (1..=2)
+        // A gap INSIDE the evidenced span. Day one carries a real
+        // reading, so the yard demonstrably existed and dried; the two
+        // days after it have no rung and take the fallback mean.
+        //
+        // Leading unevidenced days are a different case entirely and are
+        // no longer charged at all: see all_fallback_window_reads_starved.
+        let mut evidence: Vec<ZoneDayEvidence> = (1..=3)
             .map(|day| ZoneDayEvidence {
                 date: d(day),
                 et0_mm: None,
@@ -895,17 +1398,22 @@ mod tests {
                 applied_valve_s: 0,
             })
             .collect();
-        let plan = plan_zone(&p, &evidence, 0.0, 0.0);
+        evidence[0].et0_mm = Some(0.0);
+        let plan = plan_zone(&p, &evidence, Some(0.0), 0.0);
         let per_day = 1.4 * 25.4 / 7.0;
         assert!(
             (plan.depletion_mm - 2.0 * per_day).abs() < 1e-9,
-            "two fallback days at {per_day} mm, got {}",
+            "the evidenced day charges zero; only the two \
+             gap days at {per_day} mm, got {}",
             plan.depletion_mm
         );
         // Without an explicit target the species class supplies it.
         p.explicit_weekly_budget_in = None;
-        let plan = plan_zone(&p, &evidence, 0.0, 0.0);
-        assert!((plan.depletion_mm - 2.0 * 25.4 / 7.0).abs() < 1e-9);
+        let plan = plan_zone(&p, &evidence, Some(0.0), 0.0);
+        // The species starting target is 0.85 in/week now, following the
+        // table's warm-season Kc_mid rather than the 1.00 the catalog
+        // had invented.
+        assert!((plan.depletion_mm - 2.0 * 0.85 * 25.4 / 7.0).abs() < 1e-9);
     }
 
     /// An EMPTY evidence vector replays to depletion 0 (the anchor) and
@@ -917,10 +1425,11 @@ mod tests {
     #[test]
     fn cold_start_plans_nothing() {
         let p = zone(SoilTexture::Sand);
-        let plan = plan_zone(&p, &[], 0.0, 0.0);
+        let plan = plan_zone(&p, &[], Some(0.0), 0.0);
         assert_eq!(
             plan,
             SoilZonePlan {
+                planning_reason: None,
                 zone_slug: "front".into(),
                 depletion_mm: 0.0,
                 taw_mm: p.taw_mm(),
@@ -934,6 +1443,9 @@ mod tests {
                 ceiling_reason: None,
                 evidence_days: 0,
                 fallback_days: 0,
+                initial_uncertainty_mm: p.taw_mm(),
+                consecutive_defers: 0,
+                defer_bound_reached: false,
             }
         );
         assert!(plan.evidence_starved());
@@ -945,6 +1457,46 @@ mod tests {
     /// to publish absence and stand the governed swap down. One rung
     /// over thirteen fallback days does not lift the starvation;
     /// `MIN_EVIDENCE_DAYS` evidenced days anywhere in the window do.
+    /// A fresh install does not read a drought it never had.
+    ///
+    /// The window is fourteen days and a new install has about three, so
+    /// eleven leading days used to be charged the species fallback ETc
+    /// with zero rain. Enough dry days at that rate drive any texture to
+    /// TAW, so day one showed a full deficit and every zone watered to
+    /// its cap on the first morning. A day before any evidence is
+    /// unknown, not dry.
+    #[test]
+    fn a_fresh_install_replays_only_the_days_it_knows() {
+        let p = zone(SoilTexture::Loam);
+        // Eleven days of nothing, then three real ones.
+        let mut evidence: Vec<ZoneDayEvidence> = (1..=14)
+            .map(|day| ZoneDayEvidence {
+                date: d(day),
+                et0_mm: None,
+                gross_rain_mm: 0.0,
+                applied_valve_s: 0,
+            })
+            .collect();
+        for day in evidence.iter_mut().skip(11) {
+            day.et0_mm = Some(5.0);
+        }
+        let plan = plan_zone(&p, &evidence, Some(0.0), 0.0);
+
+        // Three evidenced days of ETc, not fourteen days of assumption.
+        let kc = crate::engine::kc_at_doy_lat(p.species, d(12).ordinal() as u16, p.latitude_deg);
+        let expected = 3.0 * 5.0 * kc;
+        assert!(
+            (plan.depletion_mm - expected).abs() < 0.5,
+            "three known days charge about {expected} mm, got {}",
+            plan.depletion_mm
+        );
+        assert!(
+            plan.depletion_mm < p.taw_mm(),
+            "and nothing like the full {} mm the fabricated window produced",
+            p.taw_mm()
+        );
+    }
+
     #[test]
     fn all_fallback_window_reads_starved() {
         let p = zone(SoilTexture::Sand);
@@ -956,41 +1508,57 @@ mod tests {
                 applied_valve_s: 0,
             })
             .collect();
-        let plan = plan_zone(&p, &evidence, 0.0, 0.0);
+        let plan = plan_zone(&p, &evidence, Some(0.0), 0.0);
         assert_eq!(plan.evidence_days, 0);
         assert_eq!(plan.fallback_days, 14);
         assert!(plan.evidence_starved());
-        // The internal replay does pin TAW (assumption, not evidence),
-        // which is exactly why the flag exists: publishing this figure
-        // would fabricate a full deficit on day one.
-        assert!((plan.depletion_mm - p.taw_mm()).abs() < 1e-9);
-        assert!(plan.due);
+        // Nothing is known, so nothing is replayed. This used to pin TAW,
+        // because fourteen fallback days at the species mean with zero
+        // rain drive any texture to a full deficit. That is a fabricated
+        // drought: a brand-new install read a full deficit on its first
+        // tick and watered every zone to its cap on the first morning.
+        //
+        // An unevidenced day is unknown, not dry. The bucket stays at its
+        // anchor and the starved flag is what tells the assembly to
+        // publish absence.
+        assert!(
+            plan.depletion_mm.abs() < 1e-9,
+            "an all-unknown window invents no deficit, got {}",
+            plan.depletion_mm
+        );
+        assert!(
+            !plan.due,
+            "and nothing is due on a yard we know nothing about"
+        );
         // One rung resolving is not enough: thirteen of the fourteen
         // days still charge the fallback mean, so the guard holds.
         evidence[13].et0_mm = Some(0.2);
-        let plan = plan_zone(&p, &evidence, 0.0, 0.0);
+        let plan = plan_zone(&p, &evidence, Some(0.0), 0.0);
         assert_eq!(plan.evidence_days, 1);
         assert_eq!(plan.fallback_days, 13);
         assert!(plan.evidence_starved());
         // Two days still starve; the third lifts the guard.
         evidence[12].et0_mm = Some(0.2);
-        let plan = plan_zone(&p, &evidence, 0.0, 0.0);
+        let plan = plan_zone(&p, &evidence, Some(0.0), 0.0);
         assert_eq!(plan.evidence_days, 2);
         assert!(plan.evidence_starved());
         evidence[11].et0_mm = Some(0.2);
-        let plan = plan_zone(&p, &evidence, 0.0, 0.0);
+        let plan = plan_zone(&p, &evidence, Some(0.0), 0.0);
         assert_eq!(plan.evidence_days, MIN_EVIDENCE_DAYS);
         assert_eq!(plan.fallback_days, 11);
-        assert!(!plan.evidence_starved());
+        assert!(
+            plan.evidence_starved(),
+            "three low-ET days cannot resolve the initial moisture"
+        );
         // A nonzero rain row or applied seconds is evidence too.
         evidence[13].et0_mm = None;
         evidence[0].gross_rain_mm = 2.0;
-        let plan = plan_zone(&p, &evidence, 0.0, 0.0);
+        let plan = plan_zone(&p, &evidence, Some(0.0), 0.0);
         assert_eq!(plan.evidence_days, MIN_EVIDENCE_DAYS);
         assert!(!plan.evidence_starved());
         evidence[0].gross_rain_mm = 0.0;
         evidence[5].applied_valve_s = 600;
-        let plan = plan_zone(&p, &evidence, 0.0, 0.0);
+        let plan = plan_zone(&p, &evidence, Some(0.0), 0.0);
         assert_eq!(plan.evidence_days, MIN_EVIDENCE_DAYS);
         assert!(!plan.evidence_starved());
     }
@@ -1084,16 +1652,17 @@ mod tests {
     #[test]
     fn defer_by_deficit_holds_exactly_when_rain_covers() {
         // Due at 10.0 mm against RAW 9.0; 2 mm forecast x 0.7 = 1.4 mm
-        // expected refill; post-rain depletion 8.6 falls under RAW.
-        let held = defer_by_deficit(10.0, 9.0, 0.70, 2.0);
+        // expected refill; post-rain depletion 8.6 falls under RAW. The
+        // threshold is the OVERSHOOT past RAW (1.0 mm here), not RAW.
+        let held = defer_by_deficit(10.0, 9.0, 0.70, 2.0, 0);
         assert_eq!(
             held.as_deref(),
             Some("deferred: forecast rain refills the deficit (1.4 of 10.0 mm expected)")
         );
         // A deeper deficit rides through the same rain.
-        assert_eq!(defer_by_deficit(20.0, 9.0, 0.70, 2.0), None);
+        assert_eq!(defer_by_deficit(20.0, 9.0, 0.70, 2.0, 0), None);
         // Not due: nothing to defer.
-        assert_eq!(defer_by_deficit(8.0, 9.0, 0.70, 50.0), None);
+        assert_eq!(defer_by_deficit(8.0, 9.0, 0.70, 50.0, 0), None);
         // The plan-level composition: a due sand zone with heavy
         // forecast rain holds with the reason and zero seconds.
         let p = zone(SoilTexture::Sand);
@@ -1105,7 +1674,7 @@ mod tests {
                 applied_valve_s: 0,
             })
             .collect();
-        let plan = plan_zone(&p, &evidence, 20.0, 0.0);
+        let plan = plan_zone(&p, &evidence, Some(20.0), 0.0);
         assert!(plan.due);
         assert_eq!(plan.planned_seconds, 0);
         assert!(
@@ -1115,6 +1684,241 @@ mod tests {
             "{:?}",
             plan.deferred_reason
         );
+    }
+
+    /// THE BOUND: the rain that holds a zone on its first due morning
+    /// cannot hold it forever.
+    ///
+    /// Sandy loam at 4.25 mm/day ETc reads due on the third dry morning
+    /// (12.75 mm against RAW 9.75) and sits clamped at TAW 19.5 from the
+    /// fifth, where the rain that holds it stops growing: a flat
+    /// (19.5 - 9.75) / 0.70 = 13.93 mm every morning, forever. A standing
+    /// 20 mm forecast clears that plateau every one of those mornings, so
+    /// before the bound this zone deferred every morning for as long as
+    /// the forecast kept promising rain that never fell.
+    ///
+    /// The gate stops at `MAX_CONSECUTIVE_DEFERS`, counting only the
+    /// completed scheduled mornings the ledger actually calls forecast defers.
+    #[test]
+    fn defer_by_deficit_stops_at_the_consecutive_bound() {
+        // The gate itself: the same inputs hold one morning and water the
+        // next, on the count alone.
+        assert!(
+            defer_by_deficit(10.0, 9.0, 0.70, 2.0, MAX_CONSECUTIVE_DEFERS - 1).is_some(),
+            "the last allowed morning still holds"
+        );
+        assert_eq!(
+            defer_by_deficit(10.0, 9.0, 0.70, 2.0, MAX_CONSECUTIVE_DEFERS),
+            None,
+            "the bound waters instead of holding"
+        );
+        // Plan level, with a 20 mm forecast standing every morning.
+        let p = zone(SoilTexture::SandyLoam);
+        let dry = |n: u32| -> Vec<ZoneDayEvidence> {
+            (1..=n)
+                .map(|day| ZoneDayEvidence {
+                    date: d(day),
+                    et0_mm: Some(5.0),
+                    gross_rain_mm: 0.0,
+                    applied_valve_s: 0,
+                })
+                .collect()
+        };
+        let history: Vec<PastMorning> = (3..=5)
+            .map(|day| PastMorning {
+                date: d(day),
+                outcome: MorningOutcome::ForecastRain,
+            })
+            .collect();
+        for days in 3..=5 {
+            let plan = plan_zone_with_history(
+                &p,
+                &dry(days),
+                Some(20.0),
+                0.0,
+                Some(DeferHistory {
+                    today: d(days),
+                    mornings: &history,
+                }),
+            );
+            assert!(plan.due, "{days} dry days read due");
+            assert!(
+                plan.deferred_reason.is_some(),
+                "{days} dry days are still inside the bound: {plan:?}"
+            );
+            assert_eq!(plan.planned_seconds, 0);
+            assert!(!plan.defer_bound_reached);
+        }
+        // One hold too many: the zone waters, at its cap, and the row
+        // says how far it was carried.
+        let plan = plan_zone_with_history(
+            &p,
+            &dry(6),
+            Some(20.0),
+            0.0,
+            Some(DeferHistory {
+                today: d(6),
+                mornings: &history,
+            }),
+        );
+        assert_eq!(plan.consecutive_defers, MAX_CONSECUTIVE_DEFERS);
+        assert!(plan.defer_bound_reached);
+        assert_eq!(plan.deferred_reason, None);
+        assert_eq!(plan.planned_seconds, p.max_dur_s);
+        let (seconds, reason, _) = today_row(&plan, p.max_dur_s / 60);
+        assert!(seconds > 0, "the bound waters");
+        assert!(
+            reason.starts_with("soil refill:") && reason.contains("deferred as far as it can be"),
+            "{reason}"
+        );
+        // Rain that ACTUALLY falls ends the run: the bucket refills, the
+        // zone drops under RAW, and the count starts over. A genuinely
+        // rainy week never spends the bound; only a forecast that keeps
+        // failing does.
+        let mut wet = dry(7);
+        wet[3].gross_rain_mm = 30.0;
+        let plan = plan_zone_with_history(
+            &p,
+            &wet,
+            Some(20.0),
+            0.0,
+            Some(DeferHistory {
+                today: d(7),
+                mornings: &history,
+            }),
+        );
+        assert!(plan.due);
+        assert_eq!(plan.consecutive_defers, 0);
+        assert!(plan.deferred_reason.is_some(), "{plan:?}");
+    }
+
+    #[test]
+    fn restriction_holds_and_today_partial_charge_do_not_spend_forecast_defers() {
+        let params = zone(SoilTexture::SandyLoam);
+        let mut evidence: Vec<ZoneDayEvidence> = (1..=8)
+            .map(|day| ZoneDayEvidence {
+                date: d(day),
+                et0_mm: Some(5.0),
+                gross_rain_mm: 0.0,
+                applied_valve_s: 0,
+            })
+            .collect();
+        let mut mornings: Vec<PastMorning> = (3..=8)
+            .map(|day| PastMorning {
+                date: d(day),
+                outcome: if [3, 5, 8].contains(&day) {
+                    MorningOutcome::ForecastRain
+                } else {
+                    MorningOutcome::OtherHold
+                },
+            })
+            .collect();
+        for partial in [0.001, 2.0, 5.0] {
+            evidence[7].et0_mm = Some(partial);
+            let plan = plan_zone_with_history(
+                &params,
+                &evidence,
+                Some(20.0),
+                0.0,
+                Some(DeferHistory {
+                    today: d(8),
+                    mornings: &mornings,
+                }),
+            );
+            assert_eq!(
+                plan.consecutive_defers, 2,
+                "only completed forecast holds count; today and restrictions do not"
+            );
+            assert_eq!(plan.deferred_kind, Some(SoilDeferKind::ForecastRain));
+        }
+        let unknown = plan_zone(&params, &evidence, Some(20.0), 0.0);
+        assert_eq!(
+            unknown.consecutive_defers, 0,
+            "waterless days cannot invent decisions"
+        );
+        assert!(!unknown.defer_bound_reached);
+
+        // One more real completed forecast failure reaches the bound exactly.
+        mornings
+            .iter_mut()
+            .find(|morning| morning.date == d(7))
+            .unwrap()
+            .outcome = MorningOutcome::ForecastRain;
+        let plan = plan_zone_with_history(
+            &params,
+            &evidence,
+            Some(20.0),
+            0.0,
+            Some(DeferHistory {
+                today: d(8),
+                mornings: &mornings,
+            }),
+        );
+        assert_eq!(plan.consecutive_defers, 3);
+        assert!(plan.defer_bound_reached);
+
+        // Even a partial real run resets the forecast-failure episode.
+        evidence[5].applied_valve_s = 60;
+        let plan = plan_zone_with_history(
+            &params,
+            &evidence,
+            Some(20.0),
+            0.0,
+            Some(DeferHistory {
+                today: d(8),
+                mornings: &mornings,
+            }),
+        );
+        assert_eq!(plan.consecutive_defers, 1);
+    }
+
+    #[test]
+    fn missing_rain_holds_due_soil_even_after_defer_bound_and_zero_is_usable() {
+        let params = zone(SoilTexture::SandyLoam);
+        let evidence: Vec<ZoneDayEvidence> = (1..=8)
+            .map(|day| ZoneDayEvidence {
+                date: d(day),
+                et0_mm: Some(5.0),
+                gross_rain_mm: 0.0,
+                applied_valve_s: 0,
+            })
+            .collect();
+        let mornings: Vec<PastMorning> = (3..=7)
+            .map(|day| PastMorning {
+                date: d(day),
+                outcome: MorningOutcome::ForecastRain,
+            })
+            .collect();
+        let history = || {
+            Some(DeferHistory {
+                today: d(8),
+                mornings: &mornings,
+            })
+        };
+        let missing = plan_zone_with_history(&params, &evidence, None, 0.0, history());
+        assert!(missing.due);
+        assert!(missing.consecutive_defers >= MAX_CONSECUTIVE_DEFERS);
+        assert_eq!(missing.planned_seconds, 0);
+        assert_eq!(
+            missing.deferred_kind,
+            Some(SoilDeferKind::ForecastUnavailable)
+        );
+        assert!(missing
+            .deferred_reason
+            .as_deref()
+            .unwrap()
+            .contains("unavailable"));
+        assert!(
+            !missing.defer_bound_reached,
+            "missing QPF is not another forecast-rain failure"
+        );
+        let dry = plan_zone_with_history(&params, &evidence, Some(0.0), 0.0, history());
+        assert!(
+            dry.planned_seconds > 0,
+            "covered zero QPF permits a due refill"
+        );
+        assert_eq!(dry.deferred_kind, None);
+        assert_eq!(missing.consecutive_defers, dry.consecutive_defers);
     }
 
     /// The weekly ceiling binds only for an EXPLICIT target: partial
@@ -1281,6 +2085,7 @@ mod tests {
         assert_eq!(minimal.deferred_reason, None);
         assert!(!minimal.due);
         let full = SoilZonePlan {
+            planning_reason: None,
             zone_slug: "back".into(),
             depletion_mm: 7.5,
             taw_mm: 9.0,
@@ -1298,6 +2103,9 @@ mod tests {
             ceiling_reason: None,
             evidence_days: 9,
             fallback_days: 5,
+            initial_uncertainty_mm: 0.0,
+            consecutive_defers: 2,
+            defer_bound_reached: false,
         };
         let json = serde_json::to_string(&full).unwrap();
         let back: SoilZonePlan = serde_json::from_str(&json).unwrap();
@@ -1342,5 +2150,61 @@ mod tests {
             crate::engine::species_slug(GrassSpecies::StAugustine),
         );
         assert!((zeroed - st_aug_in * 25.4 / 7.0).abs() < 1e-9);
+    }
+    #[test]
+    fn deep_roots_and_low_et_do_not_assume_the_initial_state_washed_out() {
+        let mut p = zone(SoilTexture::Clay);
+        p.root_depth_mm = Some(800.0);
+        p.latitude_deg = -35.0;
+        let mut evidence: Vec<_> = (1..=14)
+            .map(|day| ZoneDayEvidence {
+                date: d(day),
+                et0_mm: Some(0.2),
+                gross_rain_mm: 0.0,
+                applied_valve_s: 0,
+            })
+            .collect();
+        let unknown = plan_zone(&p, &evidence, Some(0.0), 0.0);
+        assert!(unknown.initial_uncertainty_mm > 100.0);
+        assert!(unknown.evidence_starved());
+        evidence[13].gross_rain_mm = 1000.0;
+        let filled = plan_zone(&p, &evidence, Some(0.0), 0.0);
+        assert_eq!(filled.initial_uncertainty_mm, 0.0);
+        assert_eq!(filled.depletion_mm, 0.0);
+        assert!(!filled.evidence_starved());
+    }
+
+    #[test]
+    fn zero_et_days_charge_no_fallback_crop_demand() {
+        let p = zone(SoilTexture::Sand);
+        let evidence = vec![ZoneDayEvidence {
+            date: d(1),
+            et0_mm: Some(0.0),
+            gross_rain_mm: 0.0,
+            applied_valve_s: 0,
+        }];
+        assert_eq!(build_replay_days(&evidence, &p)[0].etc_mm, 0.0);
+    }
+
+    #[test]
+    fn missing_historical_rain_does_not_establish_a_drought() {
+        let p = zone(SoilTexture::Sand);
+        let mut evidence: Vec<_> = (1..=14)
+            .map(|day| ZoneDayEvidence {
+                date: d(day),
+                et0_mm: Some(5.0),
+                gross_rain_mm: 0.0,
+                applied_valve_s: 0,
+            })
+            .collect();
+        let dry = plan_zone(&p, &evidence, Some(0.0), 0.0);
+        assert!(!dry.evidence_starved());
+        let unknown = plan_zone_with_coverage(&p, &evidence, Some(0.0), 0.0, None, &[d(13)]);
+        assert!(unknown.initial_uncertainty_mm > 0.1);
+        assert!(unknown.evidence_starved());
+        evidence[13].gross_rain_mm = 60.0;
+        let storm = plan_zone_with_coverage(&p, &evidence, Some(0.0), 0.0, None, &[d(13)]);
+        assert_eq!(storm.depletion_mm, 0.0);
+        assert_eq!(storm.initial_uncertainty_mm, 0.0);
     }
 }

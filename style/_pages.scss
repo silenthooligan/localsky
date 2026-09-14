@@ -1,0 +1,639 @@
+@use "mixins" as *;
+
+// sensors and the shared zone detail
+//
+// Split out of main.scss, which had grown to 11,330 lines.
+// Load order is the cascade: see the @use list in main.scss.
+
+// ═══════════════════════════════════════════════════════════════════════
+// Sensors page
+// ═══════════════════════════════════════════════════════════════════════
+.sensors-page { display: flex; flex-direction: column; gap: var(--space-7); max-width: 1000px; }
+.sensors-page__sub { margin: 0; color: var(--text-dim); max-width: 70ch; }
+.sensors-howto { max-width: 80ch; border: 1px solid var(--elev-border); border-radius: var(--radius-md); background: var(--elev-1); }
+.sensors-howto summary { cursor: pointer; padding: var(--space-2) var(--space-3); font-weight: 600; color: var(--accent); }
+.sensors-howto__body { padding: 0 var(--space-3) var(--space-3); display: flex; flex-direction: column; gap: var(--space-2); }
+.sensors-howto__body p { margin: 0; color: var(--text-dim); font-size: var(--text-meta); line-height: 1.5; }
+.sensors-howto__body a { color: var(--accent); }
+.sensors-discovered { max-width: 80ch; border: 1px solid var(--elev-border); border-radius: var(--radius-md); background: var(--elev-1); }
+.sensors-discovered summary { cursor: pointer; padding: var(--space-2) var(--space-3); font-weight: 600; color: var(--accent); }
+.sensors-discovered__body { padding: 0 var(--space-3) var(--space-3); display: flex; flex-direction: column; gap: var(--space-3); }
+.sensors-discovered__group { display: flex; flex-direction: column; gap: 2px; }
+.sensors-discovered__role { margin: 0 0 var(--space-1); font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint); }
+.sensors-discovered__row { display: flex; justify-content: space-between; gap: var(--space-3); padding: 2px 0; font-size: var(--text-meta); }
+.sensors-discovered__name { color: var(--text-bright); }
+.sensors-discovered__val { color: var(--text-dim); font-family: var(--font-mono); }
+.sensors-page__heading { display: flex; flex-direction: column; gap: 2px; }
+
+.sensors-section__hint { margin: 0; font-size: var(--text-meta); color: var(--text-faint); a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; } }
+.sensors-empty {
+  color: var(--text-faint); padding: var(--space-5); line-height: var(--leading-normal);
+  background: var(--elev-1); border: 1px dashed var(--elev-border); border-radius: var(--radius);
+}
+
+// Soil moisture cards.
+.soil-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: var(--space-4); }
+.soil-card {
+  display: flex; flex-direction: column; gap: var(--space-2);
+  background: var(--elev-1); border: 1px solid var(--elev-border);
+  border-left: 3px solid var(--sc); border-radius: var(--radius);
+  box-shadow: var(--shadow-1); padding: var(--space-4);
+}
+.soil-card__head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.soil-card__name { font-weight: 700; color: var(--text-bright); }
+.soil-card__pill {
+  font-family: var(--font-mono); font-size: var(--text-micro); font-weight: 800; letter-spacing: 0.06em;
+  color: var(--sc); padding: 2px 7px; border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--sc) 16%, transparent); white-space: nowrap;
+}
+.soil-card__value { font-family: var(--font-mono); font-size: var(--text-stat); font-weight: 700; color: var(--text-bright); }
+// Retire-probe action: quiet by default (destructive), warns on hover.
+.soil-card__remove {
+  margin-top: 0.45rem;
+  align-self: flex-start;
+  font-size: var(--text-micro);
+  font-weight: 700;
+  color: var(--text-dim);
+  @include surface($background: (transparent), $radius: (var(--radius-sm)), $shadow: null);
+
+  padding: 3px 9px;
+  min-height: 32px;
+  cursor: pointer;
+  transition: color var(--motion-base) var(--ease-out), border-color var(--motion-base) var(--ease-out);
+}
+.soil-card__remove:hover {
+  color: var(--accent-warn, #e5c07b);
+  border-color: color-mix(in oklab, var(--accent-warn, #e5c07b) 50%, transparent);
+}
+.soil-card__remove:focus-visible { @include focus-ring(2px); }
+
+// Assigned soil sensor's live reading + origin, shown under the zone's
+// sensor picker so the zone carries the full data picture. Also the chip
+// row inside .soil-card on settings/devices and in the setup wizard, which
+// override margin-top and flex-wrap inline but still need the flex box,
+// gap, padding and border from here.
+//
+// Restored: this block was deleted with the zone-math purge because it sat
+// physically inside that comment section, but it is unrelated to it and
+// three live components still emit it (settings/zones.rs,
+// settings/sensors.rs, setup/sensors.rs).
+.zone-soil-live {
+  display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;
+  margin-top: 0.5rem; padding: 6px 10px; border-radius: var(--radius-sm);
+  background: var(--elev-1); border: 1px solid var(--elev-border);
+  &__pct { font-weight: 800; color: var(--accent); font-family: var(--font-mono); }
+  &__origin { color: var(--text-muted); font-size: var(--text-meta); }
+  &__manage { margin-left: auto; color: var(--accent); font-size: var(--text-meta); text-decoration: none;
+    &:hover { text-decoration: underline; } }
+}
+
+.sensor-readout__k { font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); }
+
+.source-health__dot { width: 9px; height: 9px; border-radius: 50%; }
+.source-health__kind { font-family: var(--font-mono); font-size: var(--text-meta); color: var(--text-faint); }
+.source-health__status { font-size: var(--text-meta); color: var(--text-dim); white-space: nowrap; }
+
+// Sensors master-detail explorer (list left, live data right).
+.sensors-shell {
+  display: grid;
+  grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
+  gap: var(--space-6);
+  align-items: start;
+}
+.sensors-list {
+  display: flex; flex-direction: column; gap: 2px;
+  background: var(--elev-1); border: 1px solid var(--elev-border);
+  border-radius: var(--radius-lg); padding: var(--space-3);
+  position: sticky; top: var(--space-5);
+}
+.sensors-list__group {
+  margin: var(--space-2) var(--space-2) 2px;
+  font-size: var(--text-micro); text-transform: uppercase; letter-spacing: var(--tracking-eyebrow);
+  color: var(--text-faint); font-weight: 700;
+}
+.sensor-row {
+  display: flex; align-items: center; gap: var(--space-3);
+  text-align: left; background: none; border: 0; border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3); cursor: pointer; color: var(--text);
+  transition: background var(--motion-fast) var(--ease-out);
+  &:hover { background: var(--surface-soft); }
+  &.is-active { background: color-mix(in oklab, var(--accent) 14%, transparent); box-shadow: inset 3px 0 0 var(--accent); }
+}
+.sensor-row__dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
+.sensor-row__text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.sensor-row__title { font-weight: 600; color: var(--text-bright); }
+.sensor-row__sub { font-size: var(--text-meta); color: var(--text-faint); font-family: var(--font-mono); }
+
+.sensors-detail {
+  min-width: 0;
+  // Same seam the Zones master-detail uses between rail and pane.
+  border-left: 1px solid var(--elev-border-strong);
+  padding-left: var(--space-6);
+}
+// Add/edit slides into the detail pane FROM THE RIGHT (beside the list, using
+// the wide pane) instead of replacing it with a jolt -- a contextual slide-out
+// that keeps the source list in view rather than a full-page jump.
+.sensors-detail__editor {
+  animation: detail-slide-in var(--motion-base) var(--ease-out);
+}
+@keyframes detail-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(28px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+@include reduced-motion {
+  .sensors-detail__editor {
+    animation: none;
+  }
+}
+.sensor-detail-card {
+  @include surface;
+
+  padding: var(--space-5); display: flex; flex-direction: column; gap: var(--space-4);
+}
+.sensor-detail-card__head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+// Title + entity badge cluster on the card head's left, so the badge
+// hugs the name while the status chip keeps the right edge.
+.sensor-detail-card__title-group { display: inline-flex; align-items: center; gap: var(--space-2); min-width: 0; }
+// Probe actions on the soil detail card (remove + manage link).
+.sensor-detail-card__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-2) 0 var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--elev-line);
+}
+.sensor-detail-card__manage {
+  font-size: var(--text-meta);
+  color: var(--text-dim);
+  text-decoration: none;
+
+  &:hover { color: var(--text-bright); text-decoration: underline; }
+}
+.sensor-detail-card__head h2 { margin: 0; font-size: var(--text-h2); color: var(--text-bright); }
+.source-editor { display: flex; flex-direction: column; gap: var(--space-3); }
+.source-editor__title { margin: 0 0 var(--space-2); font-size: var(--text-h2); color: var(--text-bright); }
+.source-editor__error { margin: 0; color: var(--verdict-skip); font-size: var(--text-meta); }
+.sensor-detail-card__big { font-family: var(--font-mono); font-size: var(--text-display); font-weight: 700; letter-spacing: var(--tracking-display); color: var(--sc, var(--text-bright)); line-height: 1; }
+
+.sensor-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-5); }
+.sensor-group { display: flex; flex-direction: column; gap: var(--space-2); }
+.sensor-group__title { margin: 0; font-size: var(--text-meta); text-transform: uppercase; letter-spacing: var(--tracking-eyebrow); color: var(--accent); font-weight: 700; }
+.sensor-group__fields { margin: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.sensor-field { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); border-bottom: 1px solid var(--elev-line); padding-bottom: var(--space-2); }
+.sensor-field:last-child { border-bottom: none; padding-bottom: 0; }
+.sensor-field dt { margin: 0; color: var(--text-dim); }
+.sensor-field dd { margin: 0; font-family: var(--font-mono); color: var(--text-bright); text-align: right; }
+
+@media (max-width: 860px) {
+  .sensors-shell { grid-template-columns: 1fr; }
+  .sensors-detail { border-left: 0; padding-left: 0; }
+  .sensors-list { position: static; }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Shared responsive zone detail (/zones/:slug).
+.zone-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  max-width: 820px;
+}
+.zone-detail__back {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  align-self: flex-start;
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 600;
+  &:hover { text-decoration: underline; }
+}
+.zone-detail__back-icon { transform: rotate(180deg); }
+.zone-detail__empty { color: var(--text-faint); padding: var(--space-7); text-align: center; }
+.zone-detail__head { display: flex; align-items: center; gap: var(--space-3); }
+.zone-detail__name { margin: 0; font-size: var(--text-h1); letter-spacing: var(--tracking-display); color: var(--text-bright); }
+.zone-detail__verdict {
+  font-family: var(--font-mono); font-size: var(--text-micro); font-weight: 800; letter-spacing: 0.06em;
+  color: var(--vc); padding: 3px 8px; border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--vc) 16%, transparent); white-space: nowrap;
+}
+.zone-detail__verdict-reason { margin: calc(-1 * var(--space-2)) 0 0; color: var(--text-soft); font-size: var(--text-meta); }
+.zone-detail__status {
+  font-family: var(--font-mono); font-size: var(--text-micro); font-weight: 700;
+  letter-spacing: 0.08em; padding: 4px 9px; border-radius: var(--radius-sm); white-space: nowrap;
+}
+.zone-detail__status--running { color: var(--verdict-run); background: color-mix(in oklab, var(--verdict-run) 16%, transparent); }
+.zone-detail__status--pending { color: var(--verdict-wind); background: color-mix(in oklab, var(--verdict-wind) 16%, transparent); animation: pulse-fade 1.2s ease-in-out infinite; }
+@include reduced-motion { .zone-detail__status--pending { animation: none; } }
+.zone-detail__status--scheduled { color: var(--accent); background: color-mix(in oklab, var(--accent) 16%, transparent); }
+.zone-detail__status--skipping { color: var(--verdict-skip); background: color-mix(in oklab, var(--verdict-skip) 16%, transparent); }
+.zone-detail__status--idle { color: var(--text-faint); background: var(--surface-soft); }
+// A zone the weekly budget zeroed: the engine decided about it and names
+// the gate, which is not the same thing as idle.
+.zone-detail__status--held { color: var(--accent-cool); background: color-mix(in oklab, var(--accent-cool) 16%, transparent); }
+// The allocator's own sentence, and the Override-schedule notice, shown
+// where the zero is.
+.zone-detail__reason {
+  margin: calc(-1 * var(--space-2)) 0 0;
+  color: var(--text-soft);
+  font-size: var(--text-meta);
+  line-height: 1.4;
+}
+.zone-detail__reason--suppressed { color: var(--text-faint); }
+.zone-detail__stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--space-3); }
+.zone-detail__panel {
+  @include surface;
+   padding: var(--space-5);
+  display: flex; flex-direction: column; gap: var(--space-4);
+}
+.zone-detail__panel-title { margin: 0; font-size: var(--text-h3); color: var(--text-bright); }
+// The Soil model panel's governs-vs-preview pill: the at-a-glance
+// distinction the verb mood ("Waters" / "Would water") used to carry
+// alone. Same pill grammar as the zone-card status pill.
+.zone-detail__panel-pill {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  margin-left: var(--space-2);
+  padding: 2px var(--space-2);
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  font-weight: 700;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+}
+.zone-detail__panel-pill--governs {
+  color: var(--accent);
+  border: 1px solid color-mix(in oklab, var(--accent) 45%, transparent);
+  background: color-mix(in oklab, var(--accent) 10%, transparent);
+}
+.zone-detail__panel-pill--preview {
+  color: var(--text-dim);
+  border: 1px solid color-mix(in oklab, var(--text-dim) 40%, transparent);
+  background: color-mix(in oklab, var(--text-dim) 8%, transparent);
+}
+.zone-detail__actions { flex-direction: row; align-items: center; }
+.zone-detail__run { display: flex; align-items: center; gap: var(--space-3); }
+// Home Assistant integration: hero + capability cards with status
+// chips and inline actions. Outcome-language UX, not a status dump.
+.ha-hero {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  @include surface;
+
+}
+.ha-hero--ok { border-color: color-mix(in oklab, var(--verdict-run) 35%, transparent); }
+.ha-hero__icon {
+  display: flex; align-items: center; justify-content: center;
+  width: 46px; height: 46px; flex: none;
+  @include surface($background: (var(--elev-2)), $radius: (var(--radius-md)), $shadow: null);
+  color: var(--text-faint);
+}
+.ha-hero--ok .ha-hero__icon { color: var(--verdict-run); border-color: color-mix(in oklab, var(--verdict-run) 35%, transparent); }
+.ha-hero__text { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.ha-hero__row { display: flex; align-items: center; gap: var(--space-3); }
+.ha-hero__row strong { font-size: var(--text-h3); color: var(--text-bright); }
+.ha-hero__text p { margin: 0; color: var(--text-dim); line-height: 1.5; max-width: 64ch; }
+
+.ha-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 2px 10px; border-radius: 999px;
+  font-size: var(--text-micro); font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+  border: 1px solid var(--elev-border-strong); color: var(--text-faint); background: var(--elev-2);
+  white-space: nowrap;
+}
+.ha-chip__dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.ha-chip--on { color: var(--verdict-run); border-color: color-mix(in oklab, var(--verdict-run) 40%, transparent); background: color-mix(in oklab, var(--verdict-run) 10%, var(--elev-2)); }
+.ha-chip--warn { color: var(--verdict-wind); border-color: color-mix(in oklab, var(--verdict-wind) 40%, transparent); background: color-mix(in oklab, var(--verdict-wind) 10%, var(--elev-2)); }
+.ha-chip--off { color: var(--text-faint); border-color: var(--elev-border-strong); background: var(--elev-2); }
+
+.ha-cards { display: flex; flex-direction: column; gap: var(--space-3); margin-top: var(--space-4); }
+.ha-card {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  @include surface($shadow: null);
+
+}
+.ha-card__icon {
+  display: flex; align-items: center; justify-content: center;
+  width: 38px; height: 38px; flex: none; margin-top: 2px;
+  @include surface($background: (var(--elev-2)), $radius: (var(--radius-md)), $shadow: null);
+  color: var(--text-faint);
+}
+.ha-card__icon--on { color: var(--verdict-run); }
+.ha-card__icon--warn { color: var(--verdict-wind); }
+.ha-card__body { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; flex: 1; }
+.ha-card__top { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
+.ha-card__title { font-weight: 700; color: var(--text-bright); }
+.ha-card__meaning { margin: 0; color: var(--text-dim); font-size: var(--text-body-sm); line-height: 1.5; max-width: 70ch; }
+.ha-card__actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
+.ha-card__actions:empty { display: none; }
+
+// No brightness filter on hover: it lightens the fill under the label and
+// dropped light mode to 3.97:1. A border change carries the state instead.
+
+// Shared action-row rhythm: button clusters get their own breathing
+// room instead of hugging the prose around them.
+.sensors-page__actions {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  flex-wrap: wrap;
+  margin: var(--space-4) 0 var(--space-2);
+}
+
+// HA panel: simple tier (connect guide + plain flow lines + advanced
+// disclosure).
+.ha-connect {
+  margin-top: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  background: var(--elev-1);
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius-lg);
+}
+.ha-connect__title { margin: 0 0 var(--space-2); font-weight: 700; color: var(--text-bright); }
+.ha-connect__steps { margin: 0 0 var(--space-3); padding-left: 1.2rem; display: flex; flex-direction: column; gap: var(--space-2); color: var(--text-dim); line-height: 1.5; }
+.ha-connect__steps strong { color: var(--text); }
+
+.ha-flows-simple {
+  margin-top: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-5);
+  background: var(--elev-1);
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius-lg);
+}
+.ha-flow-line { display: flex; align-items: flex-start; gap: var(--space-2); color: var(--text-dim); line-height: 1.5; }
+.ha-flow-line svg { color: var(--verdict-run); flex: none; margin-top: 3px; }
+.ha-flow-line strong { color: var(--text); }
+
+.ha-advanced { margin-top: var(--space-4); }
+.ha-advanced__summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border: 1px dashed var(--elev-border-strong);
+  border-radius: var(--radius-md);
+  color: var(--text-dim);
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+.ha-advanced__summary::-webkit-details-marker { display: none; }
+.ha-advanced__summary:hover { color: var(--text); border-color: var(--accent); }
+.ha-advanced__hint { margin-left: auto; font-weight: 400; font-size: var(--text-meta); color: var(--text-faint); }
+.ha-advanced[open] .ha-advanced__summary { border-style: solid; margin-bottom: var(--space-2); }
+
+// Wizard: progress bar + hero + pillars + needs list + optional badge.
+.setup-progress { display: flex; flex-direction: column; gap: var(--space-2); margin: var(--space-3) 0 0; padding: 0; list-style: none; }
+.setup-progress__meta { display: flex; justify-content: space-between; align-items: baseline; }
+.setup-progress__count { font-family: var(--font-mono); font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-faint); }
+.setup-progress__name { font-weight: 700; color: var(--text); }
+.setup-progress__track { height: 6px; border-radius: 999px; background: var(--elev-2); overflow: hidden; }
+.setup-progress__fill { height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--accent-cool, var(--accent))); transition: width var(--motion-base) ease; }
+.setup-progress__dots { display: flex; gap: var(--space-2); list-style: none; margin: 0; padding: 0; }
+.setup-progress__dot {
+  display: block; width: 9px; height: 9px; border-radius: 50%;
+  background: var(--elev-2); border: 1px solid var(--elev-border-strong);
+  transition: background var(--motion-fast) ease, transform var(--motion-fast) ease;
+}
+.setup-progress__dot--optional { border-style: dashed; }
+.setup-progress__dot--done { background: var(--accent); border-color: var(--accent); opacity: 0.55; }
+.setup-progress__dot--current { background: var(--accent); border-color: var(--accent); transform: scale(1.35); }
+.setup-progress__dot:hover { transform: scale(1.35); }
+
+.setup-hero { text-align: center; padding: var(--space-4) 0 var(--space-2); }
+.setup-hero__icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 64px; height: 64px; @include surface($background: (color-mix(in oklab, var(--accent) 12%, var(--elev-1))), $border: (1px solid color-mix(in oklab, var(--accent) 30%, transparent)), $shadow: null); margin-bottom: var(--space-3);
+  color: var(--accent);
+
+}
+.setup-hero__title { margin: 0 0 var(--space-2); font-size: var(--text-h1); color: var(--text-bright); }
+.setup-hero__sub { margin: 0 auto; color: var(--text-dim); max-width: 46ch; line-height: 1.55; }
+
+.setup-pillars { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: var(--space-3); margin: var(--space-5) 0; }
+.setup-pillar {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: var(--space-4);
+  background: var(--elev-1); border: 1px solid var(--elev-border); border-radius: var(--radius-lg);
+}
+.setup-pillar svg { color: var(--accent); }
+.setup-pillar strong { color: var(--text-bright); }
+.setup-pillar span { color: var(--text-faint); font-size: var(--text-body-sm); line-height: 1.45; }
+
+.setup-needs { margin-bottom: var(--space-4); padding: var(--space-4); background: var(--elev-2); border-radius: var(--radius-md); }
+.setup-needs__title { margin: 0 0 var(--space-2); font-weight: 600; color: var(--text); }
+.setup-needs__list { margin: 0; padding-left: 1.2rem; color: var(--text-dim); display: flex; flex-direction: column; gap: 4px; line-height: 1.45; }
+
+.setup-step__optional {
+  display: inline-block; vertical-align: middle; margin-left: var(--space-2);
+  padding: 2px 10px; border-radius: 999px;
+  font-size: var(--text-micro); font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--text-faint); background: var(--elev-2); border: 1px dashed var(--elev-border-strong);
+}
+
+// About page.
+.about-page { width: 100%; max-width: 880px; margin: 0 auto; padding: var(--space-6) var(--space-5) var(--space-8); display: flex; flex-direction: column; gap: var(--space-5); }
+.about-hero { text-align: center; padding-top: var(--space-4); }
+.about-hero__mark {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 92px; height: 92px; @include surface($background: (color-mix(in oklab, var(--accent) 10%, var(--elev-1))), $border: (1px solid color-mix(in oklab, var(--accent) 28%, transparent)), $radius: (26px), $shadow: (0 10px 40px color-mix(in oklab, var(--accent) 18%, transparent))); margin-bottom: var(--space-3);
+
+}
+.about-hero__mark img { display: block; }
+.about-hero__name { margin: 0; font-size: 2.2rem; letter-spacing: 0.06em; font-weight: 800; color: var(--text-bright); }
+.about-hero__accent { color: var(--accent); }
+.about-hero__tag { margin: var(--space-2) auto 0; color: var(--text-dim); max-width: 44ch; line-height: 1.55; }
+.about-hero__badges { display: flex; justify-content: center; gap: var(--space-2); margin-top: var(--space-3); }
+.about-hero__badges a { text-decoration: none; }
+
+.about-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--space-3); }
+.about-fact {
+  display: flex; flex-direction: column; gap: 2px; text-align: center;
+  padding: var(--space-3); background: var(--elev-1); border: 1px solid var(--elev-border); border-radius: var(--radius-md);
+}
+.about-fact__k { font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-faint); }
+.about-fact__v { font-weight: 700; color: var(--text-bright); }
+
+.about-links { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: var(--space-3); }
+.about-link {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: var(--space-4);
+  background: var(--elev-1); border: 1px solid var(--elev-border); border-radius: var(--radius-lg);
+  color: var(--text); text-decoration: none;
+  transition: border-color var(--motion-fast) ease, transform var(--motion-fast) ease;
+}
+.about-link:hover { border-color: var(--accent); transform: translateY(-1px); }
+.about-link svg { color: var(--accent); margin-bottom: 4px; }
+.about-link strong { color: var(--text-bright); }
+.about-link span { color: var(--text-faint); font-size: var(--text-body-sm); }
+
+.about-credits { padding-top: var(--space-2); }
+.about-credits__title { margin: 0 0 var(--space-3); font-size: var(--text-h3); color: var(--text); }
+.about-footer { text-align: center; color: var(--text-faint); font-size: var(--text-meta); margin: 0; }
+
+// Header affordance: jump straight to this zone's settings.
+.zone-detail__edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  padding: 4px 10px;
+  border: 1px solid var(--elev-border-strong);
+  border-radius: 999px;
+  color: var(--text-dim);
+  font-size: var(--text-meta);
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: color var(--motion-fast) ease, border-color var(--motion-fast) ease;
+}
+.zone-detail__edit:hover { color: var(--accent); border-color: var(--accent); }
+
+// Sensors hub: zones wired to a source, each linking into its editor.
+.sensor-assigned {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 2px var(--space-2) 2px 0;
+  padding: 4px 10px;
+  background: var(--elev-2);
+  border: 1px solid var(--elev-border);
+  border-radius: 999px;
+  color: var(--text);
+  font-size: var(--text-body-sm);
+  text-decoration: none;
+}
+.sensor-assigned:hover { border-color: var(--accent); }
+.sensor-assigned svg { color: var(--accent); }
+.sensor-assigned__edit { color: var(--text-faint); font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.05em; }
+
+// Soil sensor panel: probe stats grid + 7-day projection rail.
+.zone-soil__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--space-3); }
+
+.zone-soil__forecast { display: flex; flex-direction: column; gap: var(--space-2); }
+.zone-soil__forecast-label { font-size: var(--text-meta); color: var(--text-dim); }
+.zone-soil__forecast .ui-sparkline { width: 100%; }
+
+.zone-detail__math { margin: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.zone-detail__math > div { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); }
+.zone-detail__math dt { color: var(--text-dim); margin: 0; }
+.zone-detail__math dd { margin: 0; font-family: var(--font-mono); color: var(--text-bright); }
+.zone-detail__math-final { border-top: 1px solid var(--elev-line); padding-top: var(--space-2); dd { color: var(--accent); font-weight: 700; } }
+// The safety ceiling actually shortened the run: the Scheduled row is the
+// only place that says so, so it carries the warning tint.
+.zone-detail__math-final--capped dd { color: var(--accent-warn); }
+// Second group of the math panel: engine outputs that do NOT size the run.
+// Set apart so the panel cannot read as a formula whose operands they are.
+.zone-detail__panel-subtitle {
+  margin: var(--space-3) 0 0; font-size: var(--text-meta); font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint);
+}
+.zone-detail__panel-note { margin: 0; color: var(--text-faint); font-size: var(--text-meta); }
+
+// Tuning panel (results-based tuning report). Design-language v3: the
+// cadence line leads, secondary data notes collapse into one muted
+// disclosure, and the one recommendation card carries the attention
+// treatment (3px stripe, SUGGESTION pill, bumped headline, status-chip
+// confidence, mono current-to-suggested row). Missing numbers upstream
+// render as the dash-for-unknown idiom in the report lines themselves.
+.zone-tuning__line { margin: 0; color: var(--text-soft); font-size: var(--text-meta); }
+.zone-tuning__line--lead { color: var(--text-dim); font-size: var(--text-body-sm); }
+.zone-tuning__line--muted { color: var(--text-faint); }
+// The soil-vs-weekly comparison when the models diverge: visible beside
+// the lead (never behind the Data-notes disclosure), cool accent so it
+// reads as decision support rather than provenance.
+.zone-tuning__line--compare { color: var(--accent-cool); font-size: var(--text-body-sm); }
+// The probe-availability and insufficient-data lines fold into ONE quiet
+// group instead of co-equal paragraphs.
+.zone-tuning__notes summary {
+  cursor: pointer; color: var(--text-faint); font-size: var(--text-meta);
+}
+.zone-tuning__notes summary:hover { color: var(--text-dim); }
+.zone-tuning__notes p { margin: var(--space-1) 0 0; color: var(--text-faint); font-size: var(--text-meta); }
+.zone-tuning__card {
+  position: relative;
+  overflow: hidden; // clips the stripe to the card radius
+  display: flex; flex-direction: column; gap: var(--space-3);
+  @include surface($background: (color-mix(in oklab, var(--attention) 6%, transparent)), $border: (1px solid color-mix(in oklab, var(--attention) 35%, transparent)), $radius: (var(--radius-md)), $shadow: null);
+   padding: var(--space-4);
+
+  // Entity-stripe geometry, attention-tinted.
+  &::before {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 3px;
+    background: var(--attention);
+  }
+}
+.zone-tuning__card-head { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.zone-tuning__headline {
+  margin: 0; font-size: var(--text-body); font-weight: 600; color: var(--text-bright);
+}
+// Current -> suggested, the ZoneMathPanel dt/dd mono idiom, scannable
+// before any prose.
+.zone-tuning__delta { margin: 0; display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); }
+.zone-tuning__delta dt { margin: 0; color: var(--text-dim); }
+.zone-tuning__delta dd { margin: 0; font-family: var(--font-mono); color: var(--text-bright); }
+.zone-tuning__evidence summary {
+  cursor: pointer; color: var(--text-dim); font-size: var(--text-meta);
+}
+.zone-tuning__evidence summary:hover { color: var(--text-bright); }
+.zone-tuning__evidence-list {
+  margin: var(--space-2) 0 0; padding-left: var(--space-5);
+  display: flex; flex-direction: column; gap: var(--space-1);
+  color: var(--text-soft); font-size: var(--text-meta);
+}
+.zone-tuning__apply { display: flex; gap: var(--space-2); }
+// The do-not-suggest-again action: subtle text control, never a danger
+// treatment (it silences a suggestion; it destroys nothing).
+.zone-tuning__dismiss { align-self: flex-start; }
+
+// The muted dismissed/snoozed annotation with its inline Undo.
+.zone-tuning__dismissed { display: flex; align-items: baseline; gap: var(--space-2); }
+
+// Irrigation-page tuning strip: one slim row, attention dot + count link
+// + scorecard line. Rendered ABOVE the data columns when a suggestion
+// exists (attention precedes data); scorecard-only renders in the quiet
+// bottom slot.
+.tuning-strip {
+  display: flex; align-items: baseline; gap: var(--space-4); flex-wrap: wrap;
+  background: var(--elev-1); border: 1px solid var(--elev-border);
+  border-radius: var(--radius-lg); padding: var(--space-3) var(--space-4);
+  box-shadow: var(--shadow-1);
+}
+.tuning-strip__count {
+  display: inline-flex; align-items: baseline; gap: var(--space-2);
+  // Status-chip idiom: the dot never carries the meaning alone.
+  &::before {
+    content: "";
+    width: 8px; height: 8px; border-radius: 999px;
+    background: var(--attention);
+    flex: none;
+    align-self: center;
+  }
+}
+.tuning-strip__link { color: var(--attention); font-weight: 600; text-decoration: none; }
+.tuning-strip__link:hover { text-decoration: underline; }
+.tuning-strip__scorecard { color: var(--text-dim); font-size: var(--text-meta); }
+
+@media (max-width: 700px) {
+  .zone-detail__stats { grid-template-columns: repeat(2, 1fr); }
+}

@@ -168,6 +168,9 @@ pub fn field_role(field: &crate::ports::weather_source::WeatherField) -> &'stati
         F::Et0Today => "et",
         F::FlowGpm | F::FlowTotalGalToday => "flow",
         F::LeafWetness => "moisture",
+        F::WindLullMph | F::RapidWindMph | F::RapidWindBearingDeg => "wind",
+        F::BatteryV => "battery",
+        F::PrecipType | F::RainLastMinIn => "rain",
         F::ForecastDaily | F::ForecastHourly | F::Pop => "forecast",
     }
 }
@@ -175,31 +178,7 @@ pub fn field_role(field: &crate::ports::weather_source::WeatherField) -> &'stati
 /// Human label for a `WeatherField` (sensor-child label in the device view).
 #[cfg(feature = "ssr")]
 pub fn field_label(field: &crate::ports::weather_source::WeatherField) -> &'static str {
-    use crate::ports::weather_source::WeatherField as F;
-    match field {
-        F::AirTempF => "Air temperature",
-        F::DewPointF => "Dew point",
-        F::RhPct => "Humidity",
-        F::WindMph => "Wind speed",
-        F::WindGustMph => "Wind gust",
-        F::WindBearingDeg => "Wind direction",
-        F::SolarWm2 => "Solar radiation",
-        F::UvIndex => "UV index",
-        F::Illuminance => "Illuminance",
-        F::PressureInHg => "Pressure",
-        F::RainTodayIn => "Rain today",
-        F::RainIntensityInHr => "Rain intensity",
-        F::RainTypeStr => "Precipitation type",
-        F::LightningCount => "Lightning strikes",
-        F::LightningDistanceMi => "Lightning distance",
-        F::Et0Today => "Reference ET0",
-        F::FlowGpm => "Flow rate",
-        F::FlowTotalGalToday => "Flow total today",
-        F::LeafWetness => "Leaf wetness",
-        F::ForecastDaily => "Daily forecast",
-        F::ForecastHourly => "Hourly forecast",
-        F::Pop => "Precip probability",
-    }
+    field.label()
 }
 
 /// Stable key for a `WeatherField`, used as the `<key>` in a child sensor's
@@ -230,5 +209,11 @@ pub fn field_key(field: &crate::ports::weather_source::WeatherField) -> &'static
         F::ForecastDaily => "forecast_daily",
         F::ForecastHourly => "forecast_hourly",
         F::Pop => "pop",
+        F::WindLullMph => "wind_lull_mph",
+        F::RapidWindMph => "rapid_wind_mph",
+        F::RapidWindBearingDeg => "rapid_wind_bearing_deg",
+        F::BatteryV => "battery_v",
+        F::PrecipType => "precip_type",
+        F::RainLastMinIn => "rain_in_last_min",
     }
 }

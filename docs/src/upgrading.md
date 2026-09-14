@@ -51,8 +51,8 @@ Auto-updaters (Watchtower, Diun notifications, Renovate on a pinned compose file
 
 ## What happens on first boot after an upgrade
 
-1. **Database migrations run.** LocalSky keeps a chain of numbered SQLite migrations (M0001 through M0012 as of this release) and records each applied one in a `schema_migrations` table. On boot it applies only the ones your database has not seen yet. Each migration runs inside a single transaction, so a failure rolls back cleanly rather than leaving a half-migrated database. Skipping releases is fine: the chain applies in order, however many versions you jumped.
-2. **The config file loads.** `/data/localsky.toml` carries a `schema_version` field (currently `1`). Fields added by newer releases are filled with documented defaults when missing from an older file, and unknown leftover fields are ignored, so old configs keep loading.
+1. **Database migrations run.** LocalSky keeps a chain of numbered SQLite migrations ({{LOCALSKY_DB_MIGRATIONS}} of them as of this release) and records each applied one in a `schema_migrations` table. On boot it applies only the ones your database has not seen yet. Each migration runs inside a single transaction, so a failure rolls back cleanly rather than leaving a half-migrated database. Skipping releases is fine: the chain applies in order, however many versions you jumped.
+2. **Config migrations run, once.** `/data/localsky.toml` carries a `schema_version` field (currently `2`). Each release's config migrations are an ordered list applied exactly once; the ledger beside the config, `/data/localsky.ledger.toml`, records which have run, and the migrated document is written back so the next boot finds nothing to do. Fields added by newer releases are filled with documented defaults when missing from an older file, and unknown leftover fields are ignored, so old configs keep loading. 0.9.0's migration moves the server-owned records (which forecast authorities were seeded, which Home Assistant helpers the 0.7.22 migration recorded) out of the document and into the ledger, where no settings save, raw edit, rollback or restore can drop them.
 3. **The app comes up** at the same address with the same data, zones, and history.
 
 No manual migration steps. If a migration fails, the error appears in `docker logs localsky` with the migration version that failed.
@@ -133,7 +133,7 @@ The first check happens about a minute after boot; until then `latest` is null. 
 v0.1 installs are adopted in place; point the v0.2 container at the same `/data`:
 
 - An existing `irrigation.db` that predates the migration runner is detected on first boot. The legacy `runs` table is rebuilt into the current schema with every historical row preserved (your watering history carries forward), and existing web push subscriptions are kept as-is.
-- `/data/localsky.toml`, if the wizard already wrote one, loads unchanged: `schema_version = 1` then is `schema_version = 1` now.
+- `/data/localsky.toml`, if the wizard already wrote one, loads and migrates on the first boot (`schema_version = 1` becomes `2`, with the records it carried moved to `localsky.ledger.toml`).
 - New v0.2 surfaces ([authentication](authentication.md), the `/api/v1/*` API prefix, backup endpoints) start in their defaults: auth stays disabled until you create an owner account, and the old bare `/api/*` paths still work for existing clients.
 
 Take a copy of `/data` before the first v0.2 boot anyway. The runs-table rebuild is one-way, and a 30-second `tar czf localsky-v01.tar.gz -C /opt/localsky data` is cheap insurance.

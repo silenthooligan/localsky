@@ -8,33 +8,6 @@ use leptos::prelude::*;
 use crate::components::setup::shell::{next_step_href, prev_step_href, SetupFooter};
 use crate::components::ui::{Button, FormField, HelpHint, Panel, SecretInput, SegmentedControl};
 
-#[cfg(feature = "hydrate")]
-async fn fetch_draft() -> Option<serde_json::Value> {
-    let resp = gloo_net::http::Request::get("/api/wizard/draft")
-        .send()
-        .await
-        .ok()?;
-    resp.json::<serde_json::Value>().await.ok()
-}
-
-#[cfg(feature = "hydrate")]
-async fn save_draft(draft: serde_json::Value) -> Result<(), String> {
-    let resp = gloo_net::http::Request::put("/api/wizard/draft")
-        .json(&draft)
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::save_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    Ok(())
-}
-
 /// Assemble the draft's `config.llm` value from the picker state.
 /// `None` means "no LLM" (config.llm = null).
 fn llm_json(
@@ -97,7 +70,7 @@ pub fn LlmStep() -> impl IntoView {
     #[cfg(feature = "hydrate")]
     Effect::new(move |_| {
         leptos::task::spawn_local(async move {
-            if let Some(d) = fetch_draft().await {
+            if let Some(d) = crate::components::setup::draft::fetch().await {
                 let llm = d.get("config").and_then(|c| c.get("llm")).cloned();
                 if let Some(llm) = llm.filter(|v| !v.is_null()) {
                     let p = llm
@@ -160,7 +133,7 @@ pub fn LlmStep() -> impl IntoView {
         let candidate = draft.get_untracked();
         #[cfg(feature = "hydrate")]
         leptos::task::spawn_local(async move {
-            let _ = save_draft(candidate).await;
+            let _ = crate::components::setup::draft::save(&candidate).await;
         });
         #[cfg(not(feature = "hydrate"))]
         let _ = candidate;
@@ -330,7 +303,7 @@ pub fn LlmStep() -> impl IntoView {
             </Show>
 
             <Show when=show_test>
-                <div class="settings-form-actions" style="justify-content:flex-start">
+                <div class="settings-form-actions" class:u-justify-start=true>
                     <Button
                         variant="ghost"
                         disabled=Signal::derive(move || testing.get())
@@ -344,7 +317,7 @@ pub fn LlmStep() -> impl IntoView {
                 let m = test_msg.get();
                 (!m.is_empty()).then(|| {
                     let cls = if test_ok.get() { "setup-test-result is-ok" } else { "setup-test-result is-err" };
-                    view! { <p class=cls style="padding-left:0">{m}</p> }
+                    view! { <p class=cls class:u-pl0=true>{m}</p> }
                 })
             }}
 

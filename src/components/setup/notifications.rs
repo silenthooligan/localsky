@@ -10,33 +10,6 @@ use leptos::prelude::*;
 use crate::components::setup::shell::{next_step_href, prev_step_href, SetupFooter};
 use crate::components::ui::{FormField, HelpHint, Panel, Toggle};
 
-#[cfg(feature = "hydrate")]
-async fn fetch_draft() -> Option<serde_json::Value> {
-    let resp = gloo_net::http::Request::get("/api/wizard/draft")
-        .send()
-        .await
-        .ok()?;
-    resp.json::<serde_json::Value>().await.ok()
-}
-
-#[cfg(feature = "hydrate")]
-async fn save_draft(draft: serde_json::Value) -> Result<(), String> {
-    let resp = gloo_net::http::Request::put("/api/wizard/draft")
-        .json(&draft)
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::save_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    Ok(())
-}
-
 /// Reconstruct the single ntfy topic URL the wizard collects from the
 /// stored (base_url, topic) pair, e.g. ("https://ntfy.sh", "my-topic")
 /// -> "https://ntfy.sh/my-topic". Used only by the hydrate-side load.
@@ -81,7 +54,7 @@ pub fn NotificationsStep() -> impl IntoView {
     #[cfg(feature = "hydrate")]
     Effect::new(move |_| {
         leptos::task::spawn_local(async move {
-            if let Some(d) = fetch_draft().await {
+            if let Some(d) = crate::components::setup::draft::fetch().await {
                 let notif = d
                     .get("config")
                     .and_then(|c| c.get("notifications"))
@@ -208,7 +181,7 @@ pub fn NotificationsStep() -> impl IntoView {
         let candidate = draft.get_untracked();
         #[cfg(feature = "hydrate")]
         leptos::task::spawn_local(async move {
-            let _ = save_draft(candidate).await;
+            let _ = crate::components::setup::draft::save(&candidate).await;
         });
         #[cfg(not(feature = "hydrate"))]
         let _ = candidate;

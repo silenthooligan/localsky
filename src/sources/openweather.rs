@@ -19,14 +19,14 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashSet;
-use tokio::time::{interval, MissedTickBehavior};
-use tracing::{debug, info, warn};
+use tracing::debug;
 
 use crate::config::schema::{Location, OpenWeatherConfig};
 use crate::forecast::snapshot::{DailyEntry, ForecastSnapshot, HourlyEntry};
 use crate::ports::weather_source::{
     ShutdownSignal, SourceBus, SourceCaps, SourceEvent, WeatherField, WeatherSource,
 };
+use crate::sources::poll::{run_polling, Poll};
 
 const API_BASE: &str = "https://api.openweathermap.org/data/3.0";
 const POLL_INTERVAL: Duration = Duration::from_secs(10 * 60); // 10 min (free-tier safe)
@@ -93,6 +93,7 @@ struct DailyBlock {
     uvi: Option<f64>,
     /// Daily precip accumulation. OWM reports rain in mm even on
     /// units=imperial, so this is converted to inches downstream.
+    #[serde(default = "dry_rain")]
     rain: Option<f64>,
     #[serde(default)]
     weather: Vec<WeatherCond>,
@@ -116,9 +117,19 @@ struct HourlyBlock {
     wind_speed: Option<f64>, // mph (imperial)
     wind_deg: Option<f64>,
     pop: Option<f64>, // 0..1
+    #[serde(default = "dry_hourly_rain")]
     rain: Option<RainOneHour>,
     #[serde(default)]
     weather: Vec<WeatherCond>,
+}
+
+// OpenWeather documents omitted rain as a phenomenon that does not occur.
+// Serde defaults apply only to an absent key; explicit null stays unknown.
+fn dry_rain() -> Option<f64> {
+    Some(0.0)
+}
+fn dry_hourly_rain() -> Option<RainOneHour> {
+    Some(RainOneHour { one_h: Some(0.0) })
 }
 
 /// Map an OpenWeather condition code (`weather[0].id`) to a WMO weather code
@@ -181,23 +192,32 @@ fn build_snapshot(resp: &OneCallResponse, now_epoch: i64) -> ForecastSnapshot {
             let (temp_min_f, temp_max_f) = d
                 .temp
                 .as_ref()
-                .map(|t| (t.min.unwrap_or(0.0), t.max.unwrap_or(0.0)))
-                .unwrap_or((0.0, 0.0));
+                .map(|t| {
+                    (
+                        t.min.filter(|t| t.is_finite()),
+                        t.max.filter(|t| t.is_finite()),
+                    )
+                })
+                .unwrap_or((None, None));
             DailyEntry {
-                time_epoch: d.dt.unwrap_or(0),
+                // OpenWeather stamps a midday value.
+                day_marker: crate::engine::clock::DayMarker::inside_local_day(d.dt.unwrap_or(0)),
                 weather_code: first_wmo(&d.weather),
                 temp_max_f,
                 temp_min_f,
                 // OWM's daily block has no RH; filled from hourly by
                 // backfill_daily_humidity below.
-                humidity_pct: 0,
+                humidity_pct: None,
                 // OWM rain is mm even under units=imperial.
-                precip_sum_in: d.rain.unwrap_or(0.0) / 25.4,
+                precip_sum_in: d
+                    .rain
+                    .filter(|v| crate::forecast::precip::valid_amount(*v))
+                    .map(crate::units::mm_to_in),
                 // Absent pop stays None (provider gap), not a fabricated 0%.
                 precip_probability_max: d
                     .pop
                     .map(|p| ((p * 100.0).round() as i64).clamp(0, 100) as u32),
-                wind_max_mph: d.wind_speed.unwrap_or(0.0),
+                wind_max_mph: d.wind_speed.filter(|w| w.is_finite() && *w >= 0.0),
                 wind_gust_max_mph: d.wind_gust.unwrap_or(0.0),
                 uv_index_max: d.uvi.unwrap_or(0.0),
                 sunrise_epoch: d.sunrise.unwrap_or(0),
@@ -213,16 +233,24 @@ fn build_snapshot(resp: &OneCallResponse, now_epoch: i64) -> ForecastSnapshot {
         .map(|h| HourlyEntry {
             time_epoch: h.dt.unwrap_or(0),
             weather_code: first_wmo(&h.weather),
-            temp_f: h.temp.unwrap_or(0.0),
+            temp_f: h.temp.filter(|t| t.is_finite()),
             apparent_temp_f: h.feels_like.unwrap_or(0.0),
             // OWM rain.1h is mm even under units=imperial.
-            precip_in: h.rain.as_ref().and_then(|r| r.one_h).unwrap_or(0.0) / 25.4,
+            precip_in: h
+                .rain
+                .as_ref()
+                .and_then(|r| r.one_h)
+                .filter(|v| crate::forecast::precip::valid_amount(*v))
+                .map(crate::units::mm_to_in),
             precip_probability: h
                 .pop
                 .map(|p| ((p * 100.0).round() as i64).clamp(0, 100) as u32),
-            wind_mph: h.wind_speed.unwrap_or(0.0),
+            wind_mph: h.wind_speed.filter(|w| w.is_finite() && *w >= 0.0),
             wind_dir_deg: (h.wind_deg.unwrap_or(0.0).round() as i64).rem_euclid(360) as u32,
-            humidity_pct: (h.humidity.unwrap_or(0.0).round() as i64).clamp(0, 100) as u32,
+            humidity_pct: h
+                .humidity
+                .filter(|rh| rh.is_finite() && (0.0..=100.0).contains(rh))
+                .map(|rh| rh.round() as u32),
             cloud_cover_pct: (h.clouds.unwrap_or(0.0).round() as i64).clamp(0, 100) as u32,
             ..Default::default()
         })
@@ -239,21 +267,17 @@ fn build_snapshot(resp: &OneCallResponse, now_epoch: i64) -> ForecastSnapshot {
         ..Default::default()
     };
     // Pair each day's high temp with THAT day's afternoon humidity (hourly).
-    snap.backfill_daily_humidity();
+    snap.backfill_daily_humidity(crate::timeutil::deployment_calendar());
     snap
 }
 
 impl OpenWeather {
     pub fn new(id: impl Into<String>, config: OpenWeatherConfig, location: Location) -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .expect("reqwest client construction");
         Self {
             id: id.into(),
             config,
             location,
-            client,
+            client: crate::net::client(Duration::from_secs(15)),
         }
     }
 
@@ -322,89 +346,75 @@ impl WeatherSource for OpenWeather {
         }
     }
 
-    async fn run(
-        self: Arc<Self>,
-        bus: SourceBus,
-        mut shutdown: ShutdownSignal,
-    ) -> anyhow::Result<()> {
-        info!(source_id = %self.id, "OpenWeather source started");
-        let mut tick = interval(POLL_INTERVAL);
-        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut last_reachable: Option<bool> = None;
-        loop {
-            tokio::select! {
-                _ = tick.tick() => {
-                    match self.fetch().await {
-                        Ok(resp) => {
-                            if last_reachable != Some(true) {
-                                let _ = bus.send(SourceEvent::Reachability {
-                                    source_id: self.id.clone(),
-                                    reachable: true,
-                                });
-                                last_reachable = Some(true);
-                            }
-                            if let Some(c) = &resp.current {
-                                let mut fields = Vec::new();
-                                if let Some(v) = c.temp { fields.push((WeatherField::AirTempF, v)); }
-                                if let Some(v) = c.dew_point { fields.push((WeatherField::DewPointF, v)); }
-                                if let Some(v) = c.humidity { fields.push((WeatherField::RhPct, v)); }
-                                // OWM returns pressure in hPa even on imperial units.
-                                if let Some(v) = c.pressure { fields.push((WeatherField::PressureInHg, v * 0.02953)); }
-                                if let Some(v) = c.wind_speed { fields.push((WeatherField::WindMph, v)); }
-                                if let Some(v) = c.wind_gust { fields.push((WeatherField::WindGustMph, v)); }
-                                if let Some(v) = c.wind_deg { fields.push((WeatherField::WindBearingDeg, v)); }
-                                if let Some(v) = c.uvi { fields.push((WeatherField::UvIndex, v)); }
-                                // OWM current.rain["1h"] is mm over the last hour (mm/h) even
-                                // on units=imperial; / 25.4 -> in/hr for RainIntensityInHr.
-                                if let Some(v) = c.rain.as_ref().and_then(|r| r.one_h) {
-                                    fields.push((WeatherField::RainIntensityInHr, v / 25.4));
-                                }
-                                if !fields.is_empty() {
-                                    debug!(source_id = %self.id, fields_n = fields.len(), "OpenWeather updated");
-                                    let _ = bus.send(SourceEvent::Observation {
-                                        source_id: self.id.clone(),
-                                        fields,
-                                        at_epoch: chrono::Utc::now().timestamp(),
-                                    });
-                                }
-                            }
-                            // Forecast: build + emit a full snapshot from daily[]/hourly[].
-                            if !resp.daily.is_empty() || !resp.hourly.is_empty() {
-                                let now = chrono::Utc::now().timestamp();
-                                let snapshot = build_snapshot(&resp, now);
-                                debug!(
-                                    source_id = %self.id,
-                                    daily_n = snapshot.daily.len(),
-                                    hourly_n = snapshot.hourly.len(),
-                                    "OpenWeather forecast snapshot",
-                                );
-                                let _ = bus.send(SourceEvent::Forecast {
-                                    source_id: self.id.clone(),
-                                    snapshot,
-                                    at_epoch: now,
-                                });
-                            }
-                        }
-                        Err(e) => {
-                            warn!(source_id = %self.id, error = %e, "OpenWeather fetch failed");
-                            if last_reachable != Some(false) {
-                                let _ = bus.send(SourceEvent::Reachability {
-                                    source_id: self.id.clone(),
-                                    reachable: false,
-                                });
-                                last_reachable = Some(false);
-                            }
-                        }
+    async fn run(self: Arc<Self>, bus: SourceBus, shutdown: ShutdownSignal) -> anyhow::Result<()> {
+        let id = self.id.clone();
+        run_polling(
+            self,
+            &id,
+            "OpenWeather",
+            POLL_INTERVAL,
+            bus,
+            shutdown,
+            |s: Arc<OpenWeather>| async move {
+                let resp = s.fetch().await?;
+                let now = chrono::Utc::now().timestamp();
+
+                // Live fields from `current`. An absent block or an empty
+                // field set is a legitimate poll with no observation.
+                let mut fields = Vec::new();
+                if let Some(c) = &resp.current {
+                    if let Some(v) = c.temp {
+                        fields.push((WeatherField::AirTempF, v));
+                    }
+                    if let Some(v) = c.dew_point {
+                        fields.push((WeatherField::DewPointF, v));
+                    }
+                    if let Some(v) = c.humidity {
+                        fields.push((WeatherField::RhPct, v));
+                    }
+                    // OWM returns pressure in hPa even on imperial units.
+                    if let Some(v) = c.pressure {
+                        fields.push((WeatherField::PressureInHg, v * 0.02953));
+                    }
+                    if let Some(v) = c.wind_speed {
+                        fields.push((WeatherField::WindMph, v));
+                    }
+                    if let Some(v) = c.wind_gust {
+                        fields.push((WeatherField::WindGustMph, v));
+                    }
+                    if let Some(v) = c.wind_deg {
+                        fields.push((WeatherField::WindBearingDeg, v));
+                    }
+                    if let Some(v) = c.uvi {
+                        fields.push((WeatherField::UvIndex, v));
+                    }
+                    // OWM current.rain["1h"] is mm over the last hour (mm/h) even
+                    // on units=imperial; / 25.4 -> in/hr for RainIntensityInHr.
+                    if let Some(v) = c.rain.as_ref().and_then(|r| r.one_h) {
+                        fields.push((WeatherField::RainIntensityInHr, crate::units::mm_to_in(v)));
                     }
                 }
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        info!(source_id = %self.id, "OpenWeather shutdown");
-                        return Ok(());
-                    }
+                let mut poll = Poll::observation(&s.id, fields, now);
+
+                // Forecast: build + emit a full snapshot from daily[]/hourly[].
+                if !resp.daily.is_empty() || !resp.hourly.is_empty() {
+                    let snapshot = build_snapshot(&resp, now);
+                    debug!(
+                        source_id = %s.id,
+                        daily_n = snapshot.daily.len(),
+                        hourly_n = snapshot.hourly.len(),
+                        "OpenWeather forecast snapshot",
+                    );
+                    poll = poll.with(SourceEvent::Forecast {
+                        source_id: s.id.clone(),
+                        snapshot,
+                        at_epoch: now,
+                    });
                 }
-            }
-        }
+                anyhow::Ok(poll)
+            },
+        )
+        .await
     }
 }
 
@@ -484,6 +494,65 @@ mod tests {
     }
 
     #[test]
+    fn missing_or_invalid_temperatures_preserve_unknown_and_true_zero() {
+        let mut resp: OneCallResponse = serde_json::from_value(serde_json::json!({
+            "daily": [{ "dt": 1700000000 }],
+            "hourly": [{ "dt": 1700000000 }]
+        }))
+        .unwrap();
+        let snapshot = build_snapshot(&resp, 1700000000);
+        assert_eq!(snapshot.daily[0].temp_max_f, None);
+        assert_eq!(snapshot.daily[0].temp_min_f, None);
+        assert_eq!(snapshot.hourly[0].temp_f, None);
+        for invalid in [None, Some(f64::NAN), Some(f64::INFINITY)] {
+            resp.daily[0].temp = Some(DailyTemp {
+                min: invalid,
+                max: invalid,
+            });
+            resp.hourly[0].temp = invalid;
+            let snapshot = build_snapshot(&resp, 1700000000);
+            assert_eq!(snapshot.daily[0].temp_max_f, None);
+            assert_eq!(snapshot.daily[0].temp_min_f, None);
+            assert_eq!(snapshot.hourly[0].temp_f, None);
+        }
+        resp.daily[0].temp = Some(DailyTemp {
+            min: Some(-5.0),
+            max: Some(0.0),
+        });
+        resp.hourly[0].temp = Some(0.0);
+        let snapshot = build_snapshot(&resp, 1700000000);
+        assert_eq!(snapshot.daily[0].temp_max_f, Some(0.0));
+        assert_eq!(snapshot.daily[0].temp_min_f, Some(-5.0));
+        assert_eq!(snapshot.hourly[0].temp_f, Some(0.0));
+    }
+
+    #[test]
+    fn missing_wind_and_humidity_are_not_calm_dry_air() {
+        let mut resp: OneCallResponse = serde_json::from_value(serde_json::json!({
+            "daily": [{}], "hourly": [{}]
+        }))
+        .unwrap();
+        for invalid in [None, Some(-1.0), Some(f64::NAN), Some(f64::INFINITY)] {
+            resp.daily[0].wind_speed = invalid;
+            resp.hourly[0].wind_speed = invalid;
+            resp.hourly[0].humidity = invalid;
+            let snapshot = build_snapshot(&resp, 1);
+            assert_eq!(snapshot.daily[0].wind_max_mph, None);
+            assert_eq!(snapshot.hourly[0].wind_mph, None);
+            assert_eq!(snapshot.hourly[0].humidity_pct, None);
+        }
+        resp.hourly[0].humidity = Some(101.0);
+        assert_eq!(build_snapshot(&resp, 1).hourly[0].humidity_pct, None);
+        resp.daily[0].wind_speed = Some(0.0);
+        resp.hourly[0].wind_speed = Some(0.0);
+        resp.hourly[0].humidity = Some(0.0);
+        let snapshot = build_snapshot(&resp, 1);
+        assert_eq!(snapshot.daily[0].wind_max_mph, Some(0.0));
+        assert_eq!(snapshot.hourly[0].wind_mph, Some(0.0));
+        assert_eq!(snapshot.hourly[0].humidity_pct, Some(0));
+    }
+
+    #[test]
     fn parse_forecast_arrays_maps_units() {
         // Minimal One Call 3.0 response: units=imperial -> temp F, wind mph,
         // but rain stays mm; pop is 0..1.
@@ -531,13 +600,16 @@ mod tests {
 
         assert_eq!(snap.daily.len(), 1);
         let d0 = &snap.daily[0];
-        assert_eq!(d0.time_epoch, 1700000000);
+        assert_eq!(
+            d0.day_marker,
+            crate::engine::clock::DayMarker::inside_local_day(1700000000)
+        );
         assert_eq!(d0.weather_code, 61); // 500 -> WMO light rain
-        assert!((d0.temp_max_f - 78.5).abs() < 0.001); // already F
-        assert!((d0.temp_min_f - 55.0).abs() < 0.001);
-        assert!((d0.precip_sum_in - 1.0).abs() < 0.001); // 25.4 mm -> 1 in
+        assert!((d0.temp_max_f.unwrap() - 78.5).abs() < 0.001); // already F
+        assert!((d0.temp_min_f.unwrap() - 55.0).abs() < 0.001);
+        assert!((d0.precip_sum_in.unwrap() - 1.0).abs() < 0.001); // 25.4 mm -> 1 in
         assert_eq!(d0.precip_probability_max, Some(60)); // 0.6 -> 60%
-        assert!((d0.wind_max_mph - 9.0).abs() < 0.001);
+        assert!((d0.wind_max_mph.unwrap() - 9.0).abs() < 0.001);
         assert!((d0.wind_gust_max_mph - 18.0).abs() < 0.001);
         assert!((d0.uv_index_max - 7.2).abs() < 0.001);
         assert_eq!(d0.sunrise_epoch, 1699970000);
@@ -547,13 +619,37 @@ mod tests {
         let h0 = &snap.hourly[0];
         assert_eq!(h0.time_epoch, 1700000400);
         assert_eq!(h0.weather_code, 2); // 802 -> WMO scattered
-        assert!((h0.temp_f - 68.0).abs() < 0.001); // already F
+        assert!((h0.temp_f.unwrap() - 68.0).abs() < 0.001); // already F
         assert!((h0.apparent_temp_f - 66.0).abs() < 0.001);
-        assert!((h0.precip_in - 0.1).abs() < 0.001); // 2.54 mm -> 0.1 in
+        assert!((h0.precip_in.unwrap() - 0.1).abs() < 0.001); // 2.54 mm -> 0.1 in
         assert_eq!(h0.precip_probability, Some(30)); // 0.3 -> 30%
-        assert!((h0.wind_mph - 6.0).abs() < 0.001);
+        assert!((h0.wind_mph.unwrap() - 6.0).abs() < 0.001);
         assert_eq!(h0.wind_dir_deg, 10); // 370 wrapped -> 10
-        assert_eq!(h0.humidity_pct, 55);
+        assert_eq!(h0.humidity_pct, Some(55));
         assert_eq!(h0.cloud_cover_pct, 40);
+    }
+    #[test]
+    fn documented_sparse_dry_rain_differs_from_null_and_malformed_amounts() {
+        let response: OneCallResponse = serde_json::from_value(serde_json::json!({
+            "daily": [{"dt":1700000000}, {"dt":1700086400,"rain":null}, {"dt":1700172800,"rain":-1.0}],
+            "hourly": [{"dt":1700000000}, {"dt":1700003600,"rain":null}, {"dt":1700007200,"rain":{}}, {"dt":1700010800,"rain":{"1h":0.0}}]
+        })).unwrap();
+        let snapshot = build_snapshot(&response, 1700000000);
+        assert_eq!(
+            snapshot
+                .daily
+                .iter()
+                .map(|d| d.precip_sum_in)
+                .collect::<Vec<_>>(),
+            vec![Some(0.0), None, None]
+        );
+        assert_eq!(
+            snapshot
+                .hourly
+                .iter()
+                .map(|h| h.precip_in)
+                .collect::<Vec<_>>(),
+            vec![Some(0.0), None, None, Some(0.0)]
+        );
     }
 }

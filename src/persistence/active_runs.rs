@@ -1,4 +1,4 @@
-// Active-run safety ledger (P0-1b). A commanded-valve table with persisted
+// Active-run safety ledger. A commanded-valve table with persisted
 // shutoff deadlines, enforced by the deadline reaper (controllers::reaper)
 // independent of any controller's own shutoff. Deliberately separate from the
 // `runs` history table: `runs` records what HAPPENED (via the run-edge observer);
@@ -21,6 +21,9 @@ pub enum ActiveRunsError {
 pub struct ActiveRun {
     pub zone_slug: String,
     pub controller_id: String,
+    /// When the valve was commanded on. The boot pass reads it to write
+    /// an honest aborted row for a run a restart cut short.
+    pub started_epoch: i64,
     pub off_deadline_epoch: i64,
 }
 
@@ -36,7 +39,7 @@ impl ActiveRunsStore {
 
     /// Arm (or re-arm) a zone's shutoff deadline on a successful run_zone.
     /// DEADLINE-MONOTONIC on conflict: keep MAX(existing, new) off-deadline (and
-    /// the earliest start). The dispatch `zone_run_lock` only serializes the
+    /// the earliest start). The dispatch zone lock only serializes the
     /// commanding INSTANT, not the run DURATION, so a zone can legitimately have
     /// two overlapping commanded-on windows (a smart-morning cycle plus a manual
     /// run of the same zone). A plain INSERT OR REPLACE let the shorter, later
@@ -91,12 +94,41 @@ impl ActiveRunsStore {
     }
 
     /// Every armed run whose deadline has passed; the reaper enforces these.
+    /// Every armed row, due or not: the zones LocalSky has commanded on
+    /// and not yet commanded off. The snapshot reads this for zones whose
+    /// controller cannot report state, so a run on a fire-and-forget
+    /// controller is visible and stoppable rather than invisible.
+    pub async fn armed(&self) -> Result<Vec<ActiveRun>, ActiveRunsError> {
+        let c = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<ActiveRun>> {
+            let conn = c.blocking_lock();
+            let mut stmt = conn.prepare(
+                "SELECT zone_slug, controller_id, started_epoch, off_deadline_epoch \
+                 FROM active_runs ORDER BY off_deadline_epoch",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(ActiveRun {
+                        zone_slug: r.get(0)?,
+                        controller_id: r.get(1)?,
+                        started_epoch: r.get(2)?,
+                        off_deadline_epoch: r.get(3)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await
+        .map_err(|e| ActiveRunsError::Sqlite(format!("join: {e}")))?
+        .map_err(|e| ActiveRunsError::Sqlite(e.to_string()))
+    }
+
     pub async fn due(&self, now_epoch: i64) -> Result<Vec<ActiveRun>, ActiveRunsError> {
         let c = self.conn.clone();
         tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<ActiveRun>> {
             let conn = c.blocking_lock();
             let mut stmt = conn.prepare(
-                "SELECT zone_slug, controller_id, off_deadline_epoch
+                "SELECT zone_slug, controller_id, started_epoch, off_deadline_epoch
                  FROM active_runs WHERE off_deadline_epoch <= ?1
                  ORDER BY off_deadline_epoch ASC",
             )?;
@@ -105,7 +137,8 @@ impl ActiveRunsStore {
                     Ok(ActiveRun {
                         zone_slug: r.get(0)?,
                         controller_id: r.get(1)?,
-                        off_deadline_epoch: r.get(2)?,
+                        started_epoch: r.get(2)?,
+                        off_deadline_epoch: r.get(3)?,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;

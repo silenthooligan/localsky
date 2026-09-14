@@ -9,14 +9,6 @@ use leptos::prelude::*;
 
 use crate::components::ui::{Button, Icon};
 
-#[cfg(feature = "hydrate")]
-async fn save_draft(draft: serde_json::Value) {
-    let _ = gloo_net::http::Request::put("/api/wizard/draft")
-        .json(&draft)
-        .map(|r| r.send())
-        .ok();
-}
-
 /// Insert a source entry into the draft (id-keyed upsert).
 fn add_source(draft: RwSignal<serde_json::Value>, entry: serde_json::Value) {
     let id = entry
@@ -44,7 +36,8 @@ fn add_source(draft: RwSignal<serde_json::Value>, entry: serde_json::Value) {
     {
         let candidate = draft.get_untracked();
         leptos::task::spawn_local(async move {
-            save_draft(candidate).await;
+            // Fire-and-forget persist; the step's own Next saves again.
+            let _ = crate::components::setup::draft::save(&candidate).await;
         });
     }
 }
@@ -76,7 +69,8 @@ fn add_controller(draft: RwSignal<serde_json::Value>, entry: serde_json::Value) 
     {
         let candidate = draft.get_untracked();
         leptos::task::spawn_local(async move {
-            save_draft(candidate).await;
+            // Fire-and-forget persist; the step's own Next saves again.
+            let _ = crate::components::setup::draft::save(&candidate).await;
         });
     }
 }
@@ -254,11 +248,11 @@ pub fn NetworkScan(mode: &'static str, draft: RwSignal<serde_json::Value>) -> im
 
         if rows.is_empty() && scanned.get() {
             rows.push(view! {
-                <p class="sensors-section__hint" style="margin:0">
+                <p class="sensors-section__hint" class:u-m0=true>
                     {if mode == "sources" {
-                        "Nothing answered on this network segment. Gateways on another subnet need their IP entered manually below."
+                        "Nothing answered here. A gateway on another subnet needs its IP entered below."
                     } else {
-                        "No OpenSprinkler answered on this network segment. Cloud controllers (Rachio, B-hyve, Hydrawise, Rain Bird) are added manually below with their API credentials."
+                        "No OpenSprinkler answered here. Cloud controllers are added below with their credentials."
                     }}
                 </p>
             }.into_any());

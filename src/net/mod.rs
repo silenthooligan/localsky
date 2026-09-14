@@ -6,6 +6,46 @@
 
 pub mod safe_fetch;
 
+/// The one way an adapter, a controller or a service builds its outbound
+/// HTTP client: this timeout, this User-Agent (the derived per-install
+/// identity, see `sources::derived_user_agent`), reqwest's defaults for
+/// the rest. Adapters with a special need (a keyless authority that must
+/// carry the operator's contact string, an SSRF-hardened user-supplied
+/// host) start from `client_with` or `safe_fetch` instead of a builder of
+/// their own.
+pub fn client(timeout: std::time::Duration) -> reqwest::Client {
+    client_with(timeout, &crate::sources::derived_user_agent())
+}
+
+/// `client` with an explicit User-Agent.
+pub fn client_with(timeout: std::time::Duration, user_agent: &str) -> reqwest::Client {
+    client_opts(timeout, None, user_agent)
+}
+
+/// The full shape: a request timeout, an optional separate connect
+/// budget (so a dead host fails fast and a ladder reaches a live mirror
+/// within one tick instead of burning the whole request budget on TCP
+/// timeouts), and the User-Agent.
+pub fn client_opts(
+    timeout: std::time::Duration,
+    connect_timeout: Option<std::time::Duration>,
+    user_agent: &str,
+) -> reqwest::Client {
+    let mut b = reqwest::Client::builder()
+        .timeout(timeout)
+        .user_agent(user_agent);
+    if let Some(c) = connect_timeout {
+        b = b.connect_timeout(c);
+    }
+    b.build()
+        // reqwest only fails to build on a TLS backend that cannot load its
+        // roots; a fresh default client is the fallback every caller had.
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "http client build failed; using defaults");
+            reqwest::Client::new()
+        })
+}
+
 /// Classify a `reqwest::Error` into a COARSE category string, never the raw
 /// upstream message. The raw `reqwest::Error` Display embeds the target URL
 /// and OS/TLS error text; reflecting it to an API caller (the wizard probe /
@@ -148,6 +188,90 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+
+    fn production(path: &std::path::Path) -> String {
+        let src = std::fs::read_to_string(path).unwrap();
+        if path.to_string_lossy().ends_with("_tests.rs") {
+            return String::new();
+        }
+        crate::engine::clock::code_only(src.split("#[cfg(test)]").next().unwrap())
+    }
+
+    /// Every outbound HTTP client is built by `net::client` or `client_with`
+    /// (or `safe_fetch`, which pins its own DNS); no adapter, controller
+    /// or service keeps a builder of its own.
+    #[test]
+    fn no_client_builder_outside_net() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&root, &mut files);
+        let mut offenders = Vec::new();
+        for f in files {
+            let rel = f
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            if rel.starts_with("net/") {
+                continue;
+            }
+            let code = production(&f);
+            for (n, line) in code.lines().enumerate() {
+                if line.contains("Client::builder()") {
+                    offenders.push(format!("{rel}:{}: {}", n + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "build clients with net::client / net::client_with:
+{}",
+            offenders.join(
+                "
+"
+            )
+        );
+    }
+
+    /// A polling adapter runs on `sources::poll::run_polling`, or at least
+    /// reports its edges through `ReachabilityLatch`, so both reachability
+    /// transitions reach the bus.
+    #[test]
+    fn every_polling_adapter_reports_both_reachability_edges() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sources");
+        let mut files = Vec::new();
+        walk(&root, &mut files);
+        let mut offenders = Vec::new();
+        for f in files {
+            let name = f.file_name().unwrap().to_string_lossy().to_string();
+            if name == "poll.rs" || name == "mod.rs" {
+                continue;
+            }
+            let code = production(&f);
+            let polls = code.contains("interval(") && code.contains("SourceEvent::");
+            if !polls {
+                continue;
+            }
+            if !(code.contains("run_polling(") || code.contains("ReachabilityLatch")) {
+                offenders.push(name);
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "poll through sources::poll (run_polling or ReachabilityLatch): {offenders:?}"
+        );
+    }
+
     use super::constant_time_eq;
 
     #[test]

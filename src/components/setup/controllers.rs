@@ -18,33 +18,6 @@ use crate::components::controllers_form::{
 use crate::components::setup::shell::{next_step_href, prev_step_href, SetupFooter};
 use crate::components::ui::{Button, HelpHint};
 
-#[cfg(feature = "hydrate")]
-async fn fetch_draft() -> Option<serde_json::Value> {
-    let resp = gloo_net::http::Request::get("/api/wizard/draft")
-        .send()
-        .await
-        .ok()?;
-    resp.json::<serde_json::Value>().await.ok()
-}
-
-#[cfg(feature = "hydrate")]
-async fn save_draft(draft: serde_json::Value) -> Result<(), String> {
-    let resp = gloo_net::http::Request::put("/api/wizard/draft")
-        .json(&draft)
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::save_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    Ok(())
-}
-
 /// Human label for a controller kind, from the shared kind picker options.
 fn controller_kind_pretty(kind: &str) -> String {
     controller_kind_options()
@@ -108,7 +81,7 @@ pub fn ControllersStep() -> impl IntoView {
     #[cfg(feature = "hydrate")]
     Effect::new(move |_| {
         leptos::task::spawn_local(async move {
-            if let Some(d) = fetch_draft().await {
+            if let Some(d) = crate::components::setup::draft::fetch().await {
                 draft.set(d);
             }
         });
@@ -172,7 +145,7 @@ pub fn ControllersStep() -> impl IntoView {
         let candidate = draft.get_untracked();
         #[cfg(feature = "hydrate")]
         leptos::task::spawn_local(async move {
-            let _ = save_draft(candidate).await;
+            let _ = crate::components::setup::draft::save(&candidate).await;
         });
         #[cfg(not(feature = "hydrate"))]
         let _ = candidate;
@@ -207,7 +180,7 @@ pub fn ControllersStep() -> impl IntoView {
         if controllers.is_empty() {
             return view! {
                 <div class="setup-empty">
-                    <p class="setup-step__body" style="margin:0 0 var(--space-3)">
+                    <p class="setup-step__body" class:u-mb3=true>
                         "No controllers added yet. Add your hardware below, or, if you don't have "
                         "irrigation hardware yet, simulate runs to explore scheduling first."
                     </p>
@@ -230,7 +203,9 @@ pub fn ControllersStep() -> impl IntoView {
 
     view! {
         <div class="setup-step">
-            <h2 class="setup-step__title">"What runs your sprinklers?"<HelpHint topic="controllers"/></h2>
+            <h2 class="setup-step__title">
+                {crate::voice::WHAT_RUNS_YOUR_SPRINKLERS}<HelpHint topic="controllers"/>
+            </h2>
             <p class="setup-step__body">
                 "Which hardware fires your valves? OpenSprinkler and DIY boards (HTTP or MQTT) "
                 "talk directly on your network; Rachio, Hydrawise, B-hyve and Rain Bird connect "
@@ -257,10 +232,10 @@ pub fn ControllersStep() -> impl IntoView {
                 }.into_any()
             }}
 
-            <p class="sensors-section__hint" style="margin-top: var(--space-3)">
-                "Skipping is fine: if HA_URL and HA_LONG_LIVED_TOKEN env vars are set, LocalSky "
+            <p class="sensors-section__hint" class:u-mt3=true>
+                "Skipping is fine: with Home Assistant connected, LocalSky "
                 "synthesizes a Home Assistant controller automatically; otherwise add one later "
-                "under "<a href="/settings/controllers">"Settings"</a>". Zones imported from a scan "
+                "under "<a href="/settings?section=devices">"Settings"</a>". Zones imported from a scan "
                 "land in the next step with sensible placeholders you can refine."
             </p>
 
@@ -415,7 +390,7 @@ fn WizardControllerRow(
         let candidate = draft.get_untracked();
         #[cfg(feature = "hydrate")]
         leptos::task::spawn_local(async move {
-            let _ = save_draft(candidate).await;
+            let _ = crate::components::setup::draft::save(&candidate).await;
         });
         #[cfg(not(feature = "hydrate"))]
         let _ = candidate;
@@ -527,7 +502,7 @@ fn WizardControllerRow(
         let candidate = draft.get_untracked();
         #[cfg(feature = "hydrate")]
         leptos::task::spawn_local(async move {
-            let _ = save_draft(candidate).await;
+            let _ = crate::components::setup::draft::save(&candidate).await;
         });
         #[cfg(not(feature = "hydrate"))]
         let _ = candidate;

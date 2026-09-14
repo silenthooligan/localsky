@@ -11,9 +11,10 @@
 use crate::components::forecast::glyph::weather_code_glyph;
 use crate::components::ui::HelpHint;
 use crate::components::units_fmt::{
-    fmt_rain_amount, fmt_temp_short, temp_unit, temp_value, use_unit_prefs, UnitPrefs,
+    fmt_optional_rain_amount, fmt_optional_temp_short, optional_temp_value, temp_unit,
+    use_unit_prefs, UnitPrefs,
 };
-use crate::ha::snapshot::{DayVerdict, IrrigationSnapshot};
+use crate::model::{DayVerdict, IrrigationSnapshot};
 use crate::timefmt::format_wday_short;
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
@@ -29,7 +30,7 @@ pub fn VerdictStrip(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                     <HelpHint topic="verdict-strip"/>
                 </h3>
                 <span class="verdict-strip-subtitle">
-                    "Predicted skip / run for today + 6 days, same engine as the morning check"
+                    "Today's decision and six-day weather outlook"
                 </span>
                 <SourceFreshnessPill snap/>
             </header>
@@ -91,23 +92,19 @@ fn VerdictCell(v: DayVerdict, prefs: UnitPrefs, tz: String) -> impl IntoView {
     // The DayVerdict carries the engine's per-day SkipCheck operands only via the
     // baked reason (the 7-day strip doesn't carry per-cell operands), so the
     // tooltip uses the baked reason text. Classification keys on reason_code.
-    let tooltip = if v.reason.is_empty() {
-        format!("{weekday}: run")
-    } else {
-        format!("{weekday}: {} - {}", v.verdict, v.reason)
-    };
+    let tooltip = cell_tooltip(&v, &weekday_long(v.time_epoch, v.day_offset, &tz));
     // temp_max_f / temp_min_f are °F; route through the unit formatter.
     let temp_str = format!(
         "{}/{}",
-        fmt_temp_short(v.temp_max_f, prefs),
-        fmt_temp_short(v.temp_min_f, prefs)
+        fmt_optional_temp_short(v.temp_max_f, prefs),
+        fmt_optional_temp_short(v.temp_min_f, prefs)
     );
     // precip_in is INCHES; route through the unit formatter. The percent is
     // omitted when the provider reported no probability (the old bare 0
     // claimed "0% chance").
     let rain_str = match v.precip_probability_max {
-        Some(prob) => format!("{} · {prob}%", fmt_rain_amount(v.precip_in, prefs)),
-        None => fmt_rain_amount(v.precip_in, prefs),
+        Some(prob) => format!("{} · {prob}%", fmt_optional_rain_amount(v.precip_in, prefs)),
+        None => fmt_optional_rain_amount(v.precip_in, prefs),
     };
     let tag = verdict_short_label(&v);
     // Full-narration label for screen readers. Color + tag carry the
@@ -117,8 +114,8 @@ fn VerdictCell(v: DayVerdict, prefs: UnitPrefs, tz: String) -> impl IntoView {
     let aria = format!(
         "{weekday}: {tag_lower}, {rain_str}, high {temp_max} {unit}, low {temp_min} {unit}",
         tag_lower = tag.to_lowercase(),
-        temp_max = temp_value(v.temp_max_f, prefs),
-        temp_min = temp_value(v.temp_min_f, prefs),
+        temp_max = optional_temp_value(v.temp_max_f, prefs),
+        temp_min = optional_temp_value(v.temp_min_f, prefs),
         unit = temp_unit(prefs),
     );
     view! {
@@ -172,9 +169,9 @@ fn SourceFreshnessPill(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     // vocabulary so every surface speaks the same words.
     let nature_word = move || -> &'static str {
         match snap.with(|s| s.forecast.rain_nature) {
-            crate::ha::snapshot::RainNature::Measured => "measured",
-            crate::ha::snapshot::RainNature::RadarQpe => "radar",
-            crate::ha::snapshot::RainNature::Model => "forecast",
+            crate::model::RainNature::Measured => "measured",
+            crate::model::RainNature::RadarQpe => "radar",
+            crate::model::RainNature::Model => "forecast",
         }
     };
     // A genuine coverage gap: NO source owns the rain field AND no forecast
@@ -227,6 +224,40 @@ fn SourceFreshnessPill(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     }
 }
 
+/// The hover title: the day spelled out, the verdict as the strip labels
+/// it, and the reason. The raw verdict code ("run_extended") and the
+/// chip's abbreviation ("TOM") are for the cell, not for a sentence.
+fn cell_tooltip(v: &crate::model::DayVerdict, day: &str) -> String {
+    let label = if v.mixed_hold {
+        "PARTIAL"
+    } else {
+        crate::components::verdict::verdict_label(&v.verdict)
+    };
+    if v.reason.is_empty() {
+        format!("{day}: {label}")
+    } else {
+        format!("{day}: {label} - {}", v.reason)
+    }
+}
+
+/// "Today" / "Tomorrow" / "Wednesday", for prose. `format_weekday` is
+/// the chip's abbreviation.
+fn weekday_long(epoch: i64, offset: u32, tz: &str) -> String {
+    match offset {
+        0 => "Today".to_string(),
+        1 => "Tomorrow".to_string(),
+        _ if epoch == 0 => format!("In {offset} days"),
+        _ => {
+            let wd = crate::timefmt::format_wday_full(epoch, tz);
+            if wd.is_empty() {
+                format!("In {offset} days")
+            } else {
+                wd
+            }
+        }
+    }
+}
+
 /// Map the day-offset + epoch to "TODAY" / "TOM" / "Wed" / etc. Always
 /// renders something even if the epoch is 0 (forecast not yet loaded). The
 /// weekday is rendered in the deployment's IANA `tz` (24h local), not the
@@ -255,28 +286,14 @@ fn format_weekday(epoch: i64, offset: u32, tz: &str) -> String {
 /// `reason_code` (P2 units architecture) so the class is unit-independent; legacy
 /// cells with an empty code fall back to the baked-reason substring match.
 fn verdict_skip_class(v: &DayVerdict) -> &'static str {
-    match v.reason_code.as_str() {
-        "freeze_now" | "overnight_freeze" | "soil_frost" => "verdict-cell-skip-freeze",
-        "wind_now" | "wind_forecast" => "verdict-cell-skip-wind",
-        "rain_now" | "already_wet" | "observed_rain" | "rain_next_4h" | "tomorrow_rain"
-        | "rain_3day" => "verdict-cell-skip-rain",
-        "paused" | "pause_until" => "verdict-cell-skip-pause",
-        "" => {
-            // Legacy row (no code): classify from the baked reason text.
-            let r = v.reason.to_lowercase();
-            if r.contains("freeze") {
-                "verdict-cell-skip-freeze"
-            } else if r.contains("wind") {
-                "verdict-cell-skip-wind"
-            } else if r.contains("rain") || r.contains("wet") {
-                "verdict-cell-skip-rain"
-            } else if r.contains("paused") {
-                "verdict-cell-skip-pause"
-            } else {
-                "verdict-cell-skip"
-            }
-        }
-        _ => "verdict-cell-skip",
+    use crate::gates_catalog::GateFamily;
+    match GateFamily::of(&v.reason_code, &v.reason) {
+        GateFamily::Freeze => "verdict-cell-skip-freeze",
+        GateFamily::Wind => "verdict-cell-skip-wind",
+        GateFamily::Water => "verdict-cell-skip-rain",
+        GateFamily::Pause => "verdict-cell-skip-pause",
+        GateFamily::Restriction => "verdict-cell-skip-law",
+        GateFamily::SoilModel | GateFamily::NoData | GateFamily::Other => "verdict-cell-skip",
     }
 }
 
@@ -286,40 +303,35 @@ fn verdict_skip_class(v: &DayVerdict) -> &'static str {
 /// has no touch affordance and a hover-only narration is invisible on
 /// mobile: a cell the inert-gate demotion rewrote to a run reads SOIL
 /// (run tint, the class already keys on the verdict), and a
-/// mixed-install rain skip that holds only the Weekly-model zones reads
-/// RAIN* so the cell itself says the skip is partial (the Week page
+/// mixed-install decision that holds only some zones reads
+/// PARTIAL so the cell itself says the hold is partial (the Week page
 /// carries the full sentence).
 fn verdict_short_label(v: &DayVerdict) -> &'static str {
+    if v.mixed_hold {
+        return "PARTIAL";
+    }
     match v.verdict.as_str() {
         "run_extended" => "EXTEND",
-        "skip" => match crate::gates_catalog::gate_family(&v.reason_code) {
+        "skip" => match crate::gates_catalog::GateFamily::of(&v.reason_code, &v.reason) {
             crate::gates_catalog::GateFamily::Freeze => "FREEZE",
             crate::gates_catalog::GateFamily::Wind => "WIND",
-            crate::gates_catalog::GateFamily::Water => {
-                if v.mixed_hold {
-                    "RAIN*"
-                } else {
-                    "RAIN"
-                }
-            }
+            crate::gates_catalog::GateFamily::Water => "RAIN",
             crate::gates_catalog::GateFamily::Pause => "PAUSE",
             // A restriction is a legal block, not weather; the Week page
             // spells it out, the strip keeps the neutral tag.
-            crate::gates_catalog::GateFamily::Restriction => "SKIP",
+            // A day the district refuses is a rule, not a failure of the
+            // forecast, and the tag says so.
+            crate::gates_catalog::GateFamily::Restriction => "RULES",
             crate::gates_catalog::GateFamily::SoilModel => "SOIL",
             crate::gates_catalog::GateFamily::NoData => "NO DATA",
             crate::gates_catalog::GateFamily::Other if v.reason_code.is_empty() => {
-                let r = v.reason.to_lowercase();
-                if r.contains("freeze") {
-                    "FREEZE"
-                } else if r.contains("wind") {
-                    "WIND"
-                } else if r.contains("rain") || r.contains("wet") {
-                    "RAIN"
-                } else if r.contains("paused") {
-                    "PAUSE"
-                } else {
-                    "SKIP"
+                match crate::gates_catalog::GateFamily::from_prose(&v.reason) {
+                    crate::gates_catalog::GateFamily::Freeze => "FREEZE",
+                    crate::gates_catalog::GateFamily::Wind => "WIND",
+                    crate::gates_catalog::GateFamily::Water => "RAIN",
+                    crate::gates_catalog::GateFamily::Pause => "PAUSE",
+                    crate::gates_catalog::GateFamily::Restriction => "RULES",
+                    _ => "SKIP",
                 }
             }
             crate::gates_catalog::GateFamily::Other => "SKIP",
@@ -344,7 +356,7 @@ mod tests {
 
     /// The demotion and the mixed partial hold are visible IN the cell,
     /// not only in the hover title: a demoted cell reads SOIL on the run
-    /// tint, a mixed-install rain hold reads RAIN*, and a plain run or a
+    /// tint, a mixed-install hold reads PARTIAL, and a plain run or a
     /// yard-wide rain skip keeps its shipped tag.
     #[test]
     fn soil_model_cells_carry_their_own_tags() {
@@ -361,21 +373,68 @@ mod tests {
         let mut mixed = cell(
             "skip",
             "tomorrow_rain",
-            &format!("Rain expected. {}", crate::ha::snapshot::MIXED_SKIP_NOTE),
+            &format!("Rain expected. {}", crate::model::MIXED_SKIP_NOTE),
         );
         mixed.mixed_hold = true;
-        assert_eq!(verdict_short_label(&mixed), "RAIN*");
+        assert_eq!(verdict_short_label(&mixed), "PARTIAL");
+        mixed.verdict = "run".into();
+        mixed.reason_code = "run".into();
+        mixed.reason = "1 of 2 zones can water; 1 remains on hold".into();
+        assert_eq!(verdict_short_label(&mixed), "PARTIAL");
+        assert!(cell_tooltip(&mixed, "Today").starts_with("Today: PARTIAL"));
         // The note alone no longer makes the tag: without the flag this
         // is a whole-yard hold.
         let note_only = cell(
             "skip",
             "tomorrow_rain",
-            &format!("Rain expected. {}", crate::ha::snapshot::MIXED_SKIP_NOTE),
+            &format!("Rain expected. {}", crate::model::MIXED_SKIP_NOTE),
         );
         assert_eq!(verdict_short_label(&note_only), "RAIN");
         let plain_skip = cell("skip", "tomorrow_rain", "Rain expected");
         assert_eq!(verdict_short_label(&plain_skip), "RAIN");
         let plain_run = cell("run", "run", "");
         assert_eq!(verdict_short_label(&plain_run), "RUN");
+
+        let mut dry_day = plain_run;
+        dry_day.precip_in = Some(0.0);
+        assert_eq!(verdict_short_label(&dry_day), "RUN");
+        for code in [
+            "rain_now",
+            "rain_today_forecast",
+            "rain_next_4h",
+            "tomorrow_rain",
+            "rain_3day",
+            "planning_forecast",
+        ] {
+            let mut unknown = cell("skip", code, "Rain forecast unavailable; watering held");
+            unknown.precip_in = None;
+            assert_eq!(verdict_short_label(&unknown), "NO DATA", "{code}");
+            assert_eq!(verdict_skip_class(&unknown), "verdict-cell-skip", "{code}");
+            // Today's reported zero cannot supply missing rain in another interval.
+            unknown.precip_in = Some(0.0);
+            assert_eq!(verdict_short_label(&unknown), "NO DATA", "{code}");
+            assert!(cell_tooltip(&unknown, "Tomorrow").contains("unavailable"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tooltip_tests {
+    use super::*;
+
+    /// The hover title speaks the strip's own labels: an extended run
+    /// reads "WATER +", never the code "run_extended", and tomorrow is
+    /// spelled out.
+    #[test]
+    fn the_tooltip_labels_an_extended_run() {
+        let v = crate::model::DayVerdict {
+            verdict: "run_extended".into(),
+            reason: "Heat wave ahead".into(),
+            ..Default::default()
+        };
+        let tip = cell_tooltip(&v, &weekday_long(0, 1, "America/New_York"));
+        assert_eq!(tip, "Tomorrow: WATER + - Heat wave ahead");
+        assert!(!tip.contains("run_extended"));
+        assert!(!tip.contains("TOM"));
     }
 }

@@ -3,7 +3,7 @@
 // Adapters shipped:
 //   ambient_weather.rs - api.ambientweather.net (cloud-routed LAN station)
 //   blitzortung.rs   - Blitzortung.org community lightning (opt-in,
-//                      display-only; feeds TempestStore, not the bus)
+//                      display-only; publishes strike events on the bus)
 //   davis_wll.rs     - Davis WeatherLink Live LAN gateway (VP2 / Vue)
 //   demo_replay.rs   - synthetic data for demo mode
 //   ecowitt_local.rs - LAN gateway POST receiver
@@ -13,7 +13,7 @@
 //   met_norway.rs    - api.met.no (global, free)
 //   mqtt_subscribe.rs - any MQTT broker, topic->field mapping
 //   netatmo.rs       - api.netatmo.com Weather Station cloud
-//   noaa_mrms.rs     - NOAA MRMS radar QPE grid (US, keyless; stub adapter)
+//   noaa_mrms.rs     - NOAA MRMS radar QPE grid (US, keyless)
 //   nws.rs           - api.weather.gov (US, free)
 //   openweather.rs   - api.openweathermap.org One Call API 3.0
 //   pirate_weather.rs - api.pirateweather.net (Dark-Sky-compatible)
@@ -22,14 +22,14 @@
 //   tuya_cloud.rs    - openapi.tuyaXX.com (RainPoint, Smart Life, OEMs)
 //   yolink.rs        - YoSmart YoLink cloud (api.yosmart.com)
 //
-// Adapters declared in schema but not yet built:
-//   tempest_udp (legacy path in src/tempest/*)
-//   open_meteo (legacy path in src/forecast/*)
+//   tempest_udp.rs  - configured Tempest LAN listener, publishes on the bus
+//   open_meteo      - forecast poller in src/forecast/*, publishes on the bus
 //
 // Foundation modules:
 //   registry.rs - SourceRegistry behind arc-swap
 
 pub mod ambient_weather;
+pub mod auth;
 pub mod blitzortung;
 pub mod bus_recorder;
 pub mod cloud_catalog;
@@ -50,11 +50,13 @@ pub mod noaa_mrms;
 pub mod nws;
 pub mod openweather;
 pub mod pirate_weather;
+pub mod poll;
 pub mod prometheus;
 pub mod registry;
 pub mod rest_poll;
 pub mod snapshot_bridge;
 pub mod synoptic;
+pub mod tempest_udp;
 pub mod tempest_ws;
 pub mod tuya_cloud;
 pub mod units;

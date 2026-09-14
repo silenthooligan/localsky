@@ -44,21 +44,17 @@ fn soil_path_hint(kind: &str) -> impl IntoView {
              the zone's soil sensor in the zone editor.",
         ),
         "ha_passthrough" => Some(
-            "Home Assistant soil path: fill the Home Assistant URL and Long-lived token fields \
-             above to bridge HA. Soil probes HA already owns are then bound straight from the \
-             zone editor (Settings, Zones, pick the zone, Soil moisture sensor): they list as \
-             ha:sensor.<entity>. The field_map (in the advanced JSON box) is for weather fields, \
-             not soil.",
+            "Fill the Home Assistant URL and token above. Probes it already owns are then bound in the zone editor, listed as ha:sensor.<entity>.",
         ),
         _ => None,
     };
     text.map(|t| {
         view! {
-            <p class="sensors-section__hint" style="margin-bottom: var(--space-3)">
+            <p class="sensors-section__hint" class:u-mb3-only=true>
                 {t}
                 " "
                 <a href=doc_url("first-soil-sensor") target="_blank" rel="noopener noreferrer"
-                    style="color: var(--accent)">
+                    class:u-accent=true>
                     "Add your first soil sensor →"
                 </a>
             </p>
@@ -121,7 +117,7 @@ fn connection_hint(kind: &str) -> impl IntoView {
     };
     text.map(|t| {
         view! {
-            <p class="sensors-section__hint" style="margin-bottom: var(--space-3)">
+            <p class="sensors-section__hint" class:u-mb3-only=true>
                 {t}
                 " "
                 <a href=doc_url(doc) target="_blank" rel="noopener noreferrer"
@@ -131,44 +127,6 @@ fn connection_hint(kind: &str) -> impl IntoView {
             </p>
         }
     })
-}
-
-/// The source kinds the form offers, as (value, label) pairs.
-pub fn kind_options() -> Vec<(String, String)> {
-    [
-        ("tempest_udp", "Tempest UDP"),
-        ("tempest_ws", "Tempest cloud"),
-        ("davis_wll", "Davis WLL"),
-        ("ecowitt_local", "Ecowitt LAN (push)"),
-        ("ecowitt_gw_poll", "Ecowitt gateway (poll)"),
-        ("ambient_weather", "AmbientWeather"),
-        ("netatmo", "Netatmo"),
-        ("yolink", "YoLink"),
-        ("lacrosse", "LaCrosse View"),
-        ("tuya_cloud", "Tuya / RainPoint"),
-        ("open_meteo", "Open-Meteo"),
-        ("nws", "NWS (US)"),
-        ("met_norway", "Met.no"),
-        ("synoptic", "Synoptic / MesoWest"),
-        ("openweather", "OpenWeather"),
-        ("pirate_weather", "PirateWeather"),
-        ("weatherkit", "Apple WeatherKit"),
-        ("mqtt", "MQTT"),
-        ("http_webhook", "HTTP webhook"),
-        ("rest_poll", "REST poll (any API)"),
-        ("prometheus", "Prometheus"),
-        ("influxdb", "InfluxDB"),
-        ("ha_passthrough", "HA passthrough"),
-        // blitzortung is intentionally NOT offered: Blitzortung.org requires
-        // explicit permission before using their community lightning feed, which
-        // we do not yet have. The adapter + config exist, but the source stays
-        // out of the picker (like the deferred esphome_native controller) so it
-        // cannot go live until permission is granted; re-add this line then.
-        ("demo_replay", "Demo"),
-    ]
-    .into_iter()
-    .map(|(v, l)| (v.to_string(), l.to_string()))
-    .collect()
 }
 
 /// The kind picker organized by the user's MENTAL MODEL instead of a flat list
@@ -361,35 +319,6 @@ pub fn kind_blurb(kind: &str) -> &'static str {
     }
 }
 
-/// Sensible default current-conditions priority for a newly-added source,
-/// keyed by kind so a fresh setup follows the convention without manual tuning:
-/// a dedicated weather station outranks a local sensor gateway, which outranks a
-/// cloud service. Per-field merge means a lower-priority partial source still
-/// contributes the fields a higher source doesn't, so these only break ties on
-/// SHARED fields (e.g. a station + a barometer both reporting pressure).
-pub fn default_priority_for_kind(kind: &str) -> i32 {
-    match kind {
-        // Dedicated LAN weather stations reporting a full observation set.
-        "tempest_udp" | "tempest_ws" | "davis_wll" | "ecowitt_local" => 100,
-        // Local sensor gateways / generic local feeds: often partial (soil,
-        // barometer, a few channels) so they sit just under a full station.
-        "ecowitt_gw_poll" | "mqtt" | "http_webhook" | "rest_poll" | "prometheus" | "influxdb"
-        | "ha_passthrough" | "yolink" | "tuya_cloud" => 90,
-        // Synoptic is a REAL nearest-station observation (denser than NWS), so it
-        // seeds above the model/forecast cloud tier, matching region.rs's
-        // station-authority rank (70). It is not a forecast kind, so
-        // normalize_new_cloud_sources leaves this seed as the final priority.
-        "synoptic" => 70,
-        // Cloud current/forecast services back up the local sensors.
-        "open_meteo" | "nws" | "met_norway" | "openweather" | "pirate_weather" | "weatherkit"
-        | "ambient_weather" | "netatmo" | "lacrosse" => 50,
-        // Single-purpose / fallback feeds.
-        "blitzortung" => 50,
-        "demo_replay" => 10,
-        _ => 50,
-    }
-}
-
 /// Icon registry name (ui::Icon) for a source kind.
 pub fn kind_icon(kind: &str) -> &'static str {
     match kind {
@@ -415,136 +344,6 @@ pub fn kind_icon(kind: &str) -> &'static str {
     }
 }
 
-pub fn kind_pretty(kind: &str) -> &'static str {
-    match kind {
-        "tempest_udp" => "Tempest UDP (LAN)",
-        "tempest_ws" => "Tempest WebSocket (cloud)",
-        "davis_wll" => "Davis WeatherLink Live",
-        "open_meteo" => "Open-Meteo",
-        "nws" => "NWS (US weather service)",
-        "noaa_mrms" => "NOAA MRMS",
-        "openweather" => "OpenWeather",
-        "pirate_weather" => "Pirate Weather",
-        "met_norway" => "Met.no (Norway)",
-        "synoptic" => "Synoptic Data (MesoWest)",
-        "weatherkit" => "Apple WeatherKit",
-        "ecowitt_local" => "Ecowitt local POST (push)",
-        "ecowitt_gw_poll" => "Ecowitt gateway local-API poll",
-        "mqtt" => "MQTT subscribe",
-        "http_webhook" => "HTTP webhook receiver",
-        "rest_poll" => "Generic REST API poll",
-        "prometheus" => "Prometheus instant-query",
-        "influxdb" => "InfluxDB (InfluxQL)",
-        "ha_passthrough" => "Home Assistant passthrough",
-        // The cloud weather STATION tier: the user's OWN station, cloud-routed.
-        // Named as a personal station so the kind picker / provenance never
-        // reads as an anonymous "cloud" service.
-        "ambient_weather" => "Ambient Weather (your station)",
-        "netatmo" => "Netatmo (your station)",
-        "yolink" => "YoLink cloud",
-        "lacrosse" => "La Crosse (your station)",
-        "tuya_cloud" => "Tuya / Smart Life cloud",
-        "blitzortung" => "Blitzortung community lightning",
-        "demo_replay" => "Demo replay (synthetic)",
-        _ => "Unknown",
-    }
-}
-
-/// Short, plain-language summary of what a source kind actually brings to
-/// LocalSky, derived from each adapter's declared WeatherField set + caps
-/// (see `src/sources/*` and `ports/weather_source.rs`). Surfaced in the kind
-/// picker so a user knows whether a device is weather-only, forecast-only, or
-/// a MIXED device (weather + soil moisture + leaf wetness, like Ecowitt)
-/// BEFORE they choose it. This is labeling only; every kind stays onboardable.
-pub fn kind_caps(kind: &str) -> &'static str {
-    match kind {
-        // Mixed LAN stations/gateways: full weather observation set PLUS
-        // native soil-moisture channels and leaf wetness.
-        "ecowitt_local" | "ecowitt_gw_poll" => "Weather + Soil moisture + Leaf wetness",
-        // Davis WLL exposes weather plus soil/leaf sensor stations.
-        "davis_wll" => "Weather + soil/leaf",
-        // Tempest: full local weather station, no soil/leaf.
-        "tempest_udp" => "Weather station (local)",
-        "tempest_ws" => "Weather station (cloud)",
-        // Cloud-hosted personal weather stations.
-        "ambient_weather" | "netatmo" | "lacrosse" => "Weather station (cloud)",
-        // Cloud weather services: live current conditions plus forecast for
-        // the configured location, no live yard sensors.
-        "open_meteo" | "nws" | "met_norway" | "openweather" | "pirate_weather" | "weatherkit" => {
-            "Live conditions + forecast (cloud)"
-        }
-        // Synoptic is a real nearest-station observation only (no forecast, and
-        // its requested vars carry no rain gauge).
-        "synoptic" => "Live conditions, no rain (cloud station)",
-        // Bridges: capabilities follow whatever device/entity you map.
-        "tuya_cloud" | "mqtt" | "ha_passthrough" => "Weather and/or soil (depends on device)",
-        // Single-purpose feeds.
-        "blitzortung" => "Lightning only",
-        "demo_replay" => "Synthetic demo data",
-        // Generic ingest: depends entirely on what you point it at.
-        "http_webhook" | "rest_poll" | "prometheus" | "influxdb" | "yolink" => {
-            "Weather and/or soil (depends on device)"
-        }
-        _ => "Weather data",
-    }
-}
-
-/// Friendly display name for a CLOUD WEATHER SERVICE kind, written for a
-/// non-expert: it answers "what is NWS / OpenWeather?" in plain words. This is
-/// the name shown next to the tier chip in the per-field picker and the wizard,
-/// so a user who has never heard the acronym still understands. Returns the kind
-/// string itself for non-cloud-service kinds (the per-field picker only calls
-/// this for the cloud services it lists).
-pub fn cloud_service_name(kind: &str) -> &'static str {
-    match kind {
-        "open_meteo" => "Open-Meteo",
-        "nws" => "NWS (US National Weather Service)",
-        "openweather" => "OpenWeather",
-        "met_norway" => "Met.no (Norwegian Meteorological Institute)",
-        "synoptic" => "Synoptic Data (MesoWest station network)",
-        "weatherkit" => "WeatherKit (Apple)",
-        "pirate_weather" => "Pirate Weather",
-        "noaa_mrms" => "NOAA MRMS",
-        // The cloud weather STATION tier: the user's OWN station routed through
-        // the vendor cloud, so name it as a personal station, not an anonymous
-        // service. Without these arms friendly_source_name fell through to the
-        // generic "Cloud weather service" label / raw id.
-        "ambient_weather" => "Ambient Weather (your station)",
-        "netatmo" => "Netatmo (your station)",
-        "lacrosse" => "La Crosse (your station)",
-        _ => "Cloud weather service",
-    }
-}
-
-/// THE shared id/kind -> friendly display-name resolver, used at every
-/// PRESENTATION boundary that would otherwise show a raw kind/id string
-/// ("open_meteo", "nws") where a person expects a name ("Open-Meteo", "NWS").
-/// It prefers the human cloud-service name (so a cloud kind reads as a brand),
-/// and falls back to `kind_pretty` for the local stations/gateways/bridges. The
-/// internal merge key stays the raw id; this is for display only. Callers:
-/// the Sensors tab provenance, the conditions provenance build in api/health.rs,
-/// and the per-field picker candidates. Returns an owned String so it composes
-/// with the id-keyed lookups (a raw label that maps to nothing stays itself).
-pub fn friendly_source_name(kind: &str) -> String {
-    // A cloud weather service gets its brand name; everything else (local
-    // stations, gateways, bridges, generic ingest) gets the pretty kind label.
-    // kind_pretty returns "Unknown" for an unrecognized kind, so fall back to
-    // the raw string itself in that case rather than hiding it behind "Unknown".
-    match cloud_service_name(kind) {
-        // cloud_service_name only names the cloud services; its catch-all is the
-        // generic "Cloud weather service", which means "not a known cloud kind".
-        "Cloud weather service" => {
-            let pretty = kind_pretty(kind);
-            if pretty == "Unknown" {
-                kind.to_string()
-            } else {
-                pretty.to_string()
-            }
-        }
-        named => named.to_string(),
-    }
-}
-
 /// THE shared plain-language descriptor for a cloud weather service, the single
 /// source of truth reused by BOTH the Settings per-field picker (data_sources.rs)
 /// and the wizard add-source kind picker (sources_form KindPicker). For each
@@ -555,6 +354,10 @@ pub fn friendly_source_name(kind: &str) -> String {
 /// Returns `None` for kinds that are not cloud weather services (local stations,
 /// bridges, lightning), so callers can show this descriptor only where it
 /// applies. No em dashes anywhere (commas / colons / parentheses / periods).
+pub use crate::config::kind_labels::{
+    cloud_service_name, friendly_source_name, kind_caps, kind_options, kind_pretty,
+};
+
 pub fn cloud_service_descriptor(kind: &str) -> Option<&'static str> {
     Some(match kind {
         "open_meteo" => {
@@ -586,19 +389,6 @@ pub fn cloud_service_descriptor(kind: &str) -> Option<&'static str> {
         }
         _ => return None,
     })
-}
-
-/// Human label for a source TIER chip in the per-field picker. The tier id comes
-/// from the candidate API (`get_field_sources`): "device" for a local physical
-/// sensor on the network, "cloud" for a cloud weather service supplying a current
-/// value for the field, "forecast" for a source that only forecasts the field.
-pub fn tier_chip_label(tier: &str) -> &'static str {
-    match tier {
-        "device" => "Your device",
-        "cloud" => "Cloud service",
-        "forecast" => "Forecast",
-        _ => "Source",
-    }
 }
 
 /// One-line, plain-language descriptor shown beside a candidate in the per-field
@@ -915,7 +705,7 @@ pub fn SourceEditorPanel(
             <Panel title="Identity".to_string()>
                 <FormField
                     label="ID".to_string()
-                    helptext="A short slug you control (e.g. ecowitt_gw, tempest_lan). Anything you type is normalized to snake_case as you go. You CAN rename it while editing: the rename migrates your per-reading picks, forecast source, and zone soil bindings to the new id automatically, so nothing breaks.".to_string()
+                    helptext="A short name you control, like ecowitt_gw. Renaming it here is safe: your per-reading picks and zone bindings follow it.".to_string()
                     error=Signal::derive(|| None::<String>)
                 >
                     <input
@@ -1042,7 +832,7 @@ pub fn SourceEditorPanel(
             <Panel title="Behavior".to_string()>
                 <FormField
                     label="Default rank (advanced)".to_string()
-                    helptext="You normally never touch this. The REAL priority control is the drag-to-reorder chain under Devices, 'Which source provides each reading': the order you set there IS the priority the engine uses per reading. This number only seeds the STARTING order for a reading you have not reordered yet (100 = local station, 50 = cloud/forecast, 10 = fallback), with automatic failover if a source goes stale.".to_string()
+                    helptext="Rarely needed. Drag the chain under 'Which source provides each reading' instead; this only seeds the starting order for readings you have not reordered.".to_string()
                     error=Signal::derive(|| None::<String>)
                 >
                     <input
@@ -1064,7 +854,7 @@ pub fn SourceEditorPanel(
                     helptext="Unchecked sources stay configured but don't poll/receive.".to_string()
                     error=Signal::derive(|| None::<String>)
                 >
-                    <label style="display: flex; gap: 0.5rem; align-items: center; min-height: 44px;">
+                    <label class:u-touch-row=true>
                         <input
                             type="checkbox"
                             prop:checked=move || enabled.get()
@@ -1086,7 +876,7 @@ pub fn SourceEditorPanel(
                 <div class="settings-section-fold__body">
                     <FormField
                         label="Config (JSON)".to_string()
-                        helptext="Escape hatch for keys not in the labeled forms above. Stays in sync both ways, so you rarely need it; use it only for hand-tuning or keys without a widget yet.".to_string()
+                        helptext="For keys the form above has no field for. It stays in sync both ways.".to_string()
                         error=Signal::derive(|| None::<String>)
                     >
                         <textarea

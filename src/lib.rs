@@ -3,12 +3,13 @@
 // and the WASM client (compiled with feature `hydrate`, attaches to the
 // HTML the server already streamed).
 
-// Matching budget for the lib crate. The release overflow actually hits the
-// BINARY crate (see the load-bearing copy + full explanation in src/main.rs);
-// recursion_limit is per-crate, so the bin needs its own and this one alone
-// is NOT sufficient. Kept here as a safeguard since the lib hosts the deep
-// component trees and could approach the budget on its own as they grow.
-// Compile-time query budget only, no runtime cost.
+// The query budget the release build needs. The overflow ("queries
+// overflow the depth limit!") hits wherever leptos_axum's
+// generate_route_list + LeptosRoutes + the SSR shell monomorphize the
+// whole component tree in one place: that is `boot::api` in THIS crate
+// since the boot moved out of main.rs. recursion_limit is per-crate, so
+// the bin keeps its own copy for the day something deep lands there
+// again. Compile-time only, no runtime cost.
 #![recursion_limit = "512"]
 // Lint baseline: stylistic clippy classes the codebase predates. CI
 // runs -D warnings; these allows keep that gate meaningful for new
@@ -30,9 +31,8 @@ pub mod docs;
 pub mod explain;
 pub mod forecast;
 pub mod gates_catalog;
-pub mod ha;
 pub mod history;
-pub mod nav_log;
+pub mod model;
 pub mod radar_catalog;
 pub mod reason_render;
 // The controller-station shapes. Ungated on purpose: dispatch (runtime),
@@ -41,7 +41,11 @@ pub mod reason_render;
 // no validator.
 pub mod station_id;
 pub mod tempest;
+pub mod text;
 pub mod timefmt;
+pub mod units;
+pub mod voice;
+pub mod weather;
 
 #[cfg(feature = "hydrate")]
 pub mod push_client;
@@ -75,13 +79,15 @@ pub mod ha_adopt;
 #[cfg(feature = "ssr")]
 pub mod instance;
 #[cfg(feature = "ssr")]
+pub mod integrations;
+#[cfg(feature = "ssr")]
 pub mod llm;
+#[cfg(feature = "ssr")]
+pub mod mdns;
 #[cfg(feature = "ssr")]
 pub mod metrics;
 #[cfg(feature = "ssr")]
 pub mod net;
-#[cfg(feature = "ssr")]
-pub mod network;
 #[cfg(feature = "ssr")]
 pub mod notifications;
 #[cfg(feature = "ssr")]
@@ -90,9 +96,16 @@ pub mod persistence;
 pub mod ports;
 #[cfg(feature = "ssr")]
 pub mod push;
-// THE irrigation snapshot refresher. Native (supports HA OR native sources),
-// so it lives at the crate root rather than under `ha::` (which named it
-// misleadingly). Distinct from `forecast::refresher`, the forecast poller.
+// The irrigation snapshot refresher: the ten-second tick that reads the
+// stores, decides, and stores the result. It supports Home Assistant or
+// native sources, which is why it is not under an integration. The
+// forecast has its own poller, `forecast::open_meteo`.
+#[cfg(feature = "ssr")]
+pub mod assembly;
+#[cfg(feature = "ssr")]
+pub mod boot;
+#[cfg(feature = "ssr")]
+pub mod logring;
 #[cfg(feature = "ssr")]
 pub mod refresher;
 #[cfg(feature = "ssr")]
@@ -101,6 +114,8 @@ pub mod runtime;
 pub mod runtime_helpers;
 #[cfg(feature = "ssr")]
 pub mod scheduler;
+#[cfg(feature = "ssr")]
+pub mod setup_gate;
 #[cfg(feature = "ssr")]
 pub mod sources;
 #[cfg(feature = "ssr")]
@@ -125,10 +140,6 @@ pub fn hydrate() {
 
 #[cfg(feature = "hydrate")]
 fn register_service_worker() {
-    use crate::nav_log::log_nav;
-    use wasm_bindgen::closure::Closure;
-    use wasm_bindgen::JsCast;
-
     let win = match web_sys::window() {
         Some(w) => w,
         None => return,
@@ -139,7 +150,6 @@ fn register_service_worker() {
     // undefined, so container.register() below throws an uncaught TypeError
     // mid-hydration. Bail cleanly so HTTP access still boots the app fully.
     if !win.is_secure_context() {
-        log_nav("sw: skipped (insecure context)");
         return;
     }
 
@@ -147,7 +157,6 @@ fn register_service_worker() {
     // else's origin; a service worker there would fight the host app's own
     // SW and the PWA flows are meaningless. Direct access keeps the PWA.
     if !crate::base::base_path().is_empty() {
-        log_nav("sw: skipped (ingress prefix)");
         return;
     }
 
@@ -158,47 +167,21 @@ fn register_service_worker() {
     // user can debug without the SW racing them.
     if let Ok(Some(storage)) = win.local_storage() {
         if matches!(storage.get_item("sw_disabled"), Ok(Some(_))) {
-            log_nav("sw: disabled via localStorage");
             return;
         }
     }
 
     let container = win.navigator().service_worker();
 
-    // controllerchange fires when a new SW takes over (post-activate +
-    // clients.claim()). Useful signal that fresh code is now in charge.
-    let cc_cb = Closure::<dyn FnMut(_)>::new(move |_e: web_sys::Event| {
-        log_nav("sw: controllerchange (new SW active)");
-    });
-    let _ = container
-        .add_event_listener_with_callback("controllerchange", cc_cb.as_ref().unchecked_ref());
-    cc_cb.forget();
-
-    let messages_cb = Closure::<dyn FnMut(_)>::new(move |_e: web_sys::MessageEvent| {
-        log_nav("sw: postMessage from SW");
-    });
-    let _ =
-        container.add_event_listener_with_callback("message", messages_cb.as_ref().unchecked_ref());
-    messages_cb.forget();
-
     // Kick the registration. The Promise resolves to a ServiceWorkerRegistration;
     // we don't need to do anything with it here, the browser maintains the
     // registration in storage and we just want the install/activate cycle to run.
+    // A failure is logged to the console and otherwise ignored: the app runs
+    // fully without the worker.
     let promise = container.register("/sw.js");
     wasm_bindgen_futures::spawn_local(async move {
-        match wasm_bindgen_futures::JsFuture::from(promise).await {
-            Ok(_) => log_nav("sw: registered /sw.js"),
-            Err(e) => {
-                let msg = e
-                    .as_string()
-                    .or_else(|| {
-                        js_sys::Reflect::get(&e, &wasm_bindgen::JsValue::from_str("message"))
-                            .ok()
-                            .and_then(|v| v.as_string())
-                    })
-                    .unwrap_or_else(|| "register failed".into());
-                log_nav(format!("sw: register error: {msg}"));
-            }
+        if let Err(e) = wasm_bindgen_futures::JsFuture::from(promise).await {
+            web_sys::console::warn_2(&wasm_bindgen::JsValue::from_str("sw register failed"), &e);
         }
     });
 }

@@ -149,6 +149,15 @@
   // or unparseable.
   var FALLBACK_PROVIDERS = [
     {
+      id: 'librewxr',
+      label: 'Radar + nowcast (LibreWXR)',
+      kind: 'rainviewer',
+      coverageLabel: 'US, Canada, Europe, Japan, Taiwan, SE Asia',
+      url: 'https://api.librewxr.net/public/weather-maps.json',
+      attribution: 'LibreWXR',
+      crossfade: false,
+    },
+    {
       id: 'rainviewer',
       label: 'RainViewer (global composite)',
       kind: 'rainviewer',
@@ -374,11 +383,16 @@
       .attribution({ position: 'bottomleft', prefix: false })
       .addTo(map);
 
+    // CARTO's raster tiles now require a key and otherwise return a watermarked
+    // image with HTTP 200. A default install must have a usable map without an
+    // account. Keep OSM attribution visible and let the browser honor its tile
+    // cache headers; request only the normal interactive viewport.
+    // https://operations.osmfoundation.org/policies/tiles/
     L.tileLayer(
-      'https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png',
+      'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
       {
-        attribution: '© OpenStreetMap · © CARTO',
-        subdomains: 'abcd',
+        attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+        referrerPolicy: 'strict-origin-when-cross-origin',
         minZoom: 0,
         maxZoom: 19,
       }
@@ -468,6 +482,8 @@
     }
 
     var radarLayer = rainviewerDesc ? L.layerGroup() : null;
+    var activeRadarProvider = rainviewerDesc;
+    var radarProviderStatus = '';
     var radarTiles = {};
     var radarFrames = [];
     var radarPastCount = 0;
@@ -561,6 +577,7 @@
       var nowN = radarPastCount; // observed count; nowN-1 is "now"
       var tileN = radarFrames.length; // observed + any radar nowcast tiles
       var timeEl = document.getElementById('radar-time');
+      if (timeEl && activeRadarProvider) timeEl.dataset.provider = activeRadarProvider.id;
       if (idx < tileN) {
         // A radar tile: observed (idx < nowN) or real nowcast (idx >= nowN).
         var visibleOp = rvOpacityForZoom(map.getZoom());
@@ -575,7 +592,7 @@
           else if (idx >= nowN) {
             tag = ' (+' + Math.max(1, Math.round((f.time - Date.now() / 1000) / 60)) + 'm forecast)';
           }
-          timeEl.textContent = clockLabel(f.time) + tag;
+          timeEl.textContent = clockLabel(f.time) + tag + radarProviderStatus;
         }
       } else {
         // Open-Meteo model overlay (where the provider has no radar
@@ -601,7 +618,29 @@
     }
 
     function loadRainViewer() {
-      return fetch(rainviewerDesc.url).then(function (r) { return r.json(); });
+      // Only configured/recommended providers participate. A denied or quiet
+      // preferred endpoint must not blank the animation while a listed backup
+      // is usable; regional WMS layers remain independent throughout.
+      var candidates = providers.filter(function (p) { return p.kind === 'rainviewer'; });
+      function attempt(index) {
+        if (index >= candidates.length) return Promise.reject(new Error('No radar provider answered'));
+        var provider = candidates[index];
+        var abort = new AbortController();
+        var timer = setTimeout(function () { abort.abort(); }, 8000);
+        return fetch(provider.url, { signal: abort.signal, cache: 'no-cache' })
+          .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+          .then(function (data) {
+            if (!data || typeof data.host !== 'string' || !data.host.startsWith('https://') ||
+                !data.radar || !Array.isArray(data.radar.past) || !data.radar.past.length ||
+                !data.radar.past.every(function (f) { return Number.isFinite(f.time) && typeof f.path === 'string' && f.path.startsWith('/v2/radar/'); })) {
+              throw new Error('Incomplete radar frame metadata');
+            }
+            return { data: data, provider: provider };
+          })
+          .finally(function () { clearTimeout(timer); })
+          .catch(function () { return attempt(index + 1); });
+      }
+      return attempt(0);
     }
 
     // (Re)build the observed RainViewer frame set (history through now)
@@ -636,7 +675,7 @@
           // errors). The crossfade WMS source takes over for detail.
           maxNativeZoom: 7,
           errorTileUrl: TRANSPARENT_TILE,
-          attribution: rainviewerDesc.attribution,
+          attribution: activeRadarProvider.attribution,
         });
         radarTiles[i] = t;
         radarLayer.addLayer(t);
@@ -1797,15 +1836,24 @@
     function refreshRainViewer() {
       if (!rainviewerDesc) return;
       loadRainViewer()
-        .then(function (data) { rebuildRadarFrames(data); })
-        .catch(function (e) { warnOnce('rainviewer', 'RainViewer load failed', e); });
+        .then(function (result) {
+          activeRadarProvider = result.provider;
+          radarProviderStatus = result.provider.id === rainviewerDesc.id ? '' : ' · via ' + result.provider.attribution;
+          rebuildRadarFrames(result.data);
+        })
+        .catch(function (e) {
+          radarProviderStatus = ' · radar unavailable';
+          var timeEl = document.getElementById('radar-time');
+          if (timeEl) timeEl.textContent = 'Radar unavailable';
+          warnOnce('rainviewer', 'Radar providers unavailable', e);
+        });
     }
 
     var btn = document.getElementById('radar-play');
     if (btn) {
       btn.addEventListener('click', function () {
         radarPlaying = !radarPlaying;
-        btn.textContent = radarPlaying ? '⏸ pause' : '▶ play';
+        (btn.querySelector('.btn__label') || btn).textContent = radarPlaying ? '⏸ pause' : '▶ play';
         if (radarPlaying) radarTick();
         else if (radarTimer) clearTimeout(radarTimer);
       });

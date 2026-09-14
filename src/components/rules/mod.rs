@@ -17,11 +17,11 @@ use leptos::prelude::*;
 use leptos_router::hooks::{use_location, use_navigate};
 
 use crate::components::rules::conditions::ConditionsSection;
-use crate::components::ui::Button;
+use crate::components::ui::{Button, ConfirmSheet, HelpHint};
 use crate::components::units_fmt::{use_unit_prefs, UnitPrefs};
 use crate::components::verdict::{verdict_label, verdict_token};
-use crate::ha::snapshot::{DecisionTrace, IrrigationSnapshot, RuleEval};
 use crate::history::types::DecisionRecord;
+use crate::model::{DecisionTrace, IrrigationSnapshot, RuleEval};
 use crate::reason_render::{render_rule_detail, render_rule_margin, render_trace_reason};
 
 fn fmt_day(epoch: i64) -> String {
@@ -109,9 +109,9 @@ pub fn RuleLabPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
 
     view! {
         <div class="rulelab-page">
-            <header class="rulelab-page__header">
-                <p class="rulelab-page__eyebrow">"Irrigation logic"</p>
-                <h1 class="rulelab-page__title">"Rule Lab"</h1>
+            <header class="page-head">
+                <p class="page-eyebrow">"Irrigation logic"</p>
+                <h1 class="page-title">"Rule Lab"<HelpHint topic="skip-rules"/></h1>
                 <p class="rulelab-page__sub">
                     "Configure your watering rules, and see exactly why each day was decided."
                 </p>
@@ -204,7 +204,7 @@ fn SafetyGates() -> impl IntoView {
             <summary>"Built-in skip rules, run before your rules"</summary>
             <div class="rulelab-gates__body">
                 <p class="sensors-section__hint">
-                    "These deterministic gates decide first, in this order. Each weather gate can be disabled if you know what you are doing; control and legal gates (override, pause, restrictions) are always on. Disabling is config, not code: a snapshot is kept and one click re-enables."
+                    "These gates decide first, in this order. A weather gate can be turned off; control and legal gates cannot. Turning one off is reversible in a click."
                 </p>
                 <Button variant="primary" href="/settings/skip-rules" class="rulelab-gates__cta">
                     "Configure thresholds (rain inches, wind mph, freeze temperature)"
@@ -320,10 +320,8 @@ fn BuiltinGateManager() -> impl IntoView {
     #[cfg(feature = "hydrate")]
     Effect::new(move |_| {
         leptos::task::spawn_local(async move {
-            if let Ok(resp) = gloo_net::http::Request::get("/api/config").send().await {
-                if let Ok(v) = resp.json::<serde_json::Value>().await {
-                    config.set(v);
-                }
+            if let Ok(v) = crate::components::config_client::get_config().await {
+                config.set(v);
             }
         });
     });
@@ -343,20 +341,20 @@ fn BuiltinGateManager() -> impl IntoView {
             .unwrap_or_default()
     };
 
-    let set_disabled = move |id: String, disable: bool, meaning: &'static str| {
+    // Turning a gate off needs an explicit acknowledgement, so it stages
+    // behind the shared ConfirmSheet instead of a native confirm(): the
+    // row asks, the sheet's on_confirm writes. Re-enabling restores the
+    // safe default and applies straight away. The gate the sheet is
+    // about is parked here as (id, what-disabling-means); None = nothing
+    // pending.
+    let pending_gate: RwSignal<Option<(String, String)>> = RwSignal::new(None);
+    let confirm_open = RwSignal::new(false);
+
+    // The write itself, with no confirmation in it: the direct re-enable
+    // and the sheet's on_confirm both land here.
+    let set_disabled = move |id: String, disable: bool| {
         #[cfg(feature = "hydrate")]
         {
-            if disable {
-                let msg = format!(
-                    "Disable the built-in '{id}' gate?\n\nWhat this means: {meaning}\n\nThe engine will no longer protect against this on its own. You can re-enable it here at any time."
-                );
-                let ok = web_sys::window()
-                    .and_then(|w| w.confirm_with_message(&msg).ok())
-                    .unwrap_or(false);
-                if !ok {
-                    return;
-                }
-            }
             config.update(|cfg| {
                 let Some(sr) = cfg.pointer_mut("/engine/skip_rules") else {
                     return;
@@ -373,8 +371,8 @@ fn BuiltinGateManager() -> impl IntoView {
             });
             let candidate = config.get_untracked();
             leptos::task::spawn_local(async move {
-                match crate::components::rules::conditions::save_config(candidate).await {
-                    Ok(()) => crate::components::ui::use_toast().success(if disable {
+                match crate::components::config_client::put_config(&candidate).await {
+                    Ok(_) => crate::components::ui::use_toast().success(if disable {
                         "Gate disabled. The trace will show it as disabled by operator."
                     } else {
                         "Gate re-enabled."
@@ -384,8 +382,15 @@ fn BuiltinGateManager() -> impl IntoView {
             });
         }
         #[cfg(not(feature = "hydrate"))]
-        let _ = (id, disable, meaning);
+        let _ = (id, disable);
     };
+
+    let do_disable = Callback::new(move |()| {
+        if let Some((id, _)) = pending_gate.get_untracked() {
+            set_disabled(id, true);
+        }
+        pending_gate.set(None);
+    });
 
     view! {
         <div class="gate-list">
@@ -393,9 +398,17 @@ fn BuiltinGateManager() -> impl IntoView {
                 let id_s = id.to_string();
                 let on_click = {
                     let id_c = id_s.clone();
+                    let meaning_c = meaning.to_string();
                     move |_| {
                         let currently_disabled = disabled_now().contains(&id_c);
-                        set_disabled(id_c.clone(), !currently_disabled, meaning);
+                        if currently_disabled {
+                            // Re-enabling restores the safe default: no confirm.
+                            set_disabled(id_c.clone(), false);
+                        } else {
+                            // Ask first; the sheet's on_confirm does the write.
+                            pending_gate.set(Some((id_c.clone(), meaning_c.clone())));
+                            confirm_open.set(true);
+                        }
                     }
                 };
                 let id_chk = id_s.clone();
@@ -431,6 +444,27 @@ fn BuiltinGateManager() -> impl IntoView {
                     </div>
                 }
             }).collect_view()}
+
+            // Always mounted, outside the row map: a row's Off opens it,
+            // it hides itself, and the disable writes from its on_confirm.
+            <ConfirmSheet
+                visible=confirm_open
+                title=Signal::derive(move || match pending_gate.get() {
+                    Some((id, _)) => format!("Disable the {id} gate?"),
+                    None => "Disable this gate?".to_string(),
+                })
+                body=Signal::derive(move || {
+                    let Some((_, meaning)) = pending_gate.get() else {
+                        return String::new();
+                    };
+                    format!(
+                        "{meaning} Watering will no longer be held for this on its \
+                         own. You can re-enable it here at any time."
+                    )
+                })
+                confirm_label=Signal::derive(|| "Disable gate".to_string())
+                on_confirm=do_disable
+            />
         </div>
     }
 }

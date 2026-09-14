@@ -16,13 +16,9 @@ pub fn Panel(
     /// side) instead of leaving callers to float it in the body.
     #[prop(into, optional)]
     help_topic: String,
-    /// True drops internal padding so callers can position content
-    /// edge-to-edge (used by HistoryPanel for the Gantt strip).
-    #[prop(default = false)]
-    flush: bool,
     children: Children,
 ) -> impl IntoView {
-    let class = if flush { "panel panel--flush" } else { "panel" };
+    let class = "panel";
     let has_help = !help_topic.is_empty();
     view! {
         <section class=class>

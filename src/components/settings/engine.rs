@@ -20,16 +20,9 @@ use crate::components::ui::{
 /// pinned.
 fn model_flip_summary(to_soil: bool) -> &'static str {
     if to_soil {
-        "Watering switches to the Soil model on the next evaluation, usually within a \
-         minute. Each zone waters when its own soil deficit crosses its trigger and \
-         refills it, in place of the fixed weekly split; zones pinned to a model in the \
-         zone editor keep their pin. The soil-vs-weekly comparison line in each zone's \
-         Tuning panel retires; the soil plan becomes the plan."
+        "Every zone will water when its own deficit crosses its trigger, instead of on a fixed weekly split. Zones pinned in the zone editor keep their pin. The soil-vs-weekly comparison line retires."
     } else {
-        "Watering switches to the Weekly model on the next evaluation, usually within a \
-         minute. Each zone waters toward its weekly target split across sessions; zones \
-         pinned to a model in the zone editor keep their pin. The soil-vs-weekly \
-         comparison line returns to each zone's Tuning panel."
+        "Every zone will water toward its weekly target, split across sessions. Zones pinned in the zone editor keep their pin. The soil-vs-weekly comparison line returns."
     }
 }
 
@@ -42,15 +35,16 @@ pub fn SettingsEngine() -> impl IntoView {
     let soak_minutes = RwSignal::new(seed.soak_minutes);
     let interleave_cycles = RwSignal::new(seed.interleave_cycles);
     let seasonal_adjust_pct = RwSignal::new(seed.seasonal_adjust_pct);
-    // engine.scheduling_model: "weekly" (the shipped default) | "soil".
-    let scheduling_model = RwSignal::new("weekly".to_string());
+    // engine.scheduling_model: "soil" (the shipped default since 0.9.0)
+    // | "weekly" (the original allocator, for installs that pin it).
+    let scheduling_model = RwSignal::new("soil".to_string());
     // What the last load showed, for change detection: the field rides a
     // save ONLY when the operator changed it on this page. An unset
     // config (absent key = follow the shipped default) must stay unset
     // across saves of unrelated knobs, or every install would stamp an
-    // explicit "weekly" indistinguishable from a deliberate choice (the
+    // explicit model indistinguishable from a deliberate choice (the
     // 0.7.9 GET-PUT round-trip lesson).
-    let scheduling_model_loaded = RwSignal::new("weekly".to_string());
+    let scheduling_model_loaded = RwSignal::new("soil".to_string());
 
     let loaded = RwSignal::new(false);
     // Initial-load state: Some(err) when the config GET failed. The editor body
@@ -115,7 +109,7 @@ pub fn SettingsEngine() -> impl IntoView {
                         crate::components::settings_ui::toast_saved(
                             result_msg,
                             result_ok,
-                            "Saved. Applies on the next evaluation, usually within a minute.",
+                            crate::voice::SAVED_LIVE,
                         );
                     }
                     Err(e) => {
@@ -152,7 +146,7 @@ pub fn SettingsEngine() -> impl IntoView {
                     "How the engine sizes and shapes the runs it dispatches: the "
                     "scheduling model, cycle-and-soak pacing and the seasonal "
                     "water budget. Skip thresholds live on the "
-                    <a href="/settings/skip-rules" style="color: var(--accent)">"Skip rules"</a>
+                    <a href="/settings/skip-rules" class:u-accent=true>"Skip rules"</a>
                     " page."
                 </p>
             </header>
@@ -166,7 +160,7 @@ pub fn SettingsEngine() -> impl IntoView {
             >
 
             <Panel title="Scheduling model".to_string()>
-                <p class="settings-page__subtitle" style="margin: 0 0 0.85rem">
+                <p class="settings-page__subtitle" class:u-mb3=true>
                     "Which model sizes and schedules smart-morning runs. Weekly "
                     "splits each zone's weekly target into sessions spaced "
                     "across the week. Soil waters each zone when its own soil "
@@ -175,14 +169,14 @@ pub fn SettingsEngine() -> impl IntoView {
                 </p>
                 <FormField
                     label="Model".to_string()
-                    helptext="Applies to every zone without a per-zone pin (the zone editor's Scheduling model field). Under Soil, a set weekly target acts as a delivery ceiling and Sessions per week has no effect; both keep their meaning for zones pinned to Weekly. Applies on the next evaluation, usually within a minute.".to_string()
+                    helptext="How runs are sized for zones with no pin of their own. Soil follows each zone's own deficit; Weekly splits a fixed target into sessions.".to_string()
                     error=Signal::derive(|| None::<String>)
                 >
                     <SegmentedControl
                         value=scheduling_model
                         options=vec![
-                            ("weekly".into(), "Weekly".into()),
                             ("soil".into(), "Soil".into()),
+                            ("weekly".into(), "Weekly".into()),
                         ]
                         aria_label="Scheduling model".to_string()
                     />
@@ -201,15 +195,15 @@ pub fn SettingsEngine() -> impl IntoView {
             </Panel>
 
             <Panel title="Cycle and soak".to_string()>
-                <p class="settings-page__subtitle" style="margin: 0 0 0.85rem">
+                <p class="settings-page__subtitle" class:u-mb3=true>
                     "When a zone's sprinklers apply water faster than the soil "
-                    "absorbs it, the engine splits the run into short cycles "
+                    "absorbs it, the run is split into short cycles "
                     "with soak pauses between them so the water sinks in "
                     "instead of running off."
                 </p>
                 <FormField
                     label="Soak time (minutes)".to_string()
-                    helptext="Minimum pause between a zone's cycles so the water can infiltrate. 5-120 minutes; default 30. Longer soaks suit clay and slopes; applies on the next evaluation, usually within a minute.".to_string()
+                    helptext="Shortest pause between a zone's cycles. LocalSky already sets each from how fast the soil drains; raise it only if your surface needs longer. 5-120 minutes.".to_string()
                     error=Signal::derive(|| None::<String>)
                 >
                     <div class="seasonal-dial">
@@ -234,22 +228,22 @@ pub fn SettingsEngine() -> impl IntoView {
                 <Toggle
                     checked=interleave_cycles
                     label="Interleave cycles across zones".to_string()
-                    helptext="Water other zones during a zone's soak pauses so the morning sequence finishes sooner. One valve still runs at a time, and every soak keeps at least its full length. Turn this off on a well or other low-recovery supply, where the idle soak gaps double as recovery time. Applies on the next evaluation, usually within a minute.".to_string()
+                    helptext="Water other zones during a soak so the morning finishes sooner. Still one valve at a time, and no soak is shortened. Turn it off on a well.".to_string()
                 />
             </Panel>
 
-            // P2-6: the seasonal trust dial (moved here from Skip rules; it is
+            // The seasonal trust dial (moved here from Skip rules; it is
             // a run-shaping control, not a skip threshold).
             <Panel title="Water budget".to_string()>
-                <p class="settings-page__subtitle" style="margin: 0 0 0.85rem">
+                <p class="settings-page__subtitle" class:u-mb3=true>
                     "The trust dial. Scales every zone's run depth up or down without "
                     "touching the per-zone math, like the seasonal-adjust on a commercial "
-                    "controller. 100% is the engine's computed amount; dial down in a wet, "
+                    "controller. 100% is the computed amount; dial down in a wet, "
                     "cool stretch and up in a heat wave."
                 </p>
                 <FormField
                     label="Seasonal adjustment".to_string()
-                    helptext="Percent of the engine-computed run depth, 50-150%. Applied before the per-zone safety cap, so tonight's planned minutes already reflect it.".to_string()
+                    helptext="Percent of the computed depth, 50-150%. Applied before the per-zone cap.".to_string()
                     error=Signal::derive(|| None::<String>)
                 >
                     <div class="seasonal-dial">
@@ -274,7 +268,7 @@ pub fn SettingsEngine() -> impl IntoView {
                         {move || {
                             let p = seasonal_adjust_pct.get();
                             if p == 100 {
-                                "Every run waters the engine's computed depth.".to_string()
+                                "Every run waters the computed depth.".to_string()
                             } else if p < 100 {
                                 format!("Every run waters {p}% of the computed depth (drier).")
                             } else {
@@ -325,7 +319,7 @@ pub fn SettingsEngine() -> impl IntoView {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
 struct EngineDraft {
     /// Lives on `engine` (engine.soak_minutes).
     soak_minutes: u32,
@@ -353,39 +347,25 @@ mod tests {
     fn the_model_flip_summary_states_the_change_and_the_comparison_line() {
         let to_soil = model_flip_summary(true);
         assert!(
-            to_soil.starts_with("Watering switches to the Soil model"),
+            to_soil.starts_with("Every zone will water when its own deficit"),
             "{to_soil}"
         );
-        assert!(to_soil.contains("usually within a minute"), "{to_soil}");
         assert!(to_soil.contains("keep their pin"), "{to_soil}");
-        assert!(
-            to_soil.contains("comparison line in each zone's Tuning panel retires"),
-            "{to_soil}"
-        );
+        assert!(to_soil.contains("comparison line retires"), "{to_soil}");
         let to_weekly = model_flip_summary(false);
         assert!(
-            to_weekly.starts_with("Watering switches to the Weekly model"),
+            to_weekly.starts_with("Every zone will water toward its weekly target"),
             "{to_weekly}"
         );
         assert!(to_weekly.contains("comparison line returns"), "{to_weekly}");
     }
 }
 
+/// Load the engine knobs off the shared config document. The GET goes
+/// through the shared client; only the engine-table parsing lives here.
 #[cfg(feature = "hydrate")]
 async fn fetch_engine() -> Result<EngineDraft, String> {
-    use gloo_net::http::Request;
-    let resp = Request::get("/api/config")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::load_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    let val: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let val = crate::components::config_client::get_config().await?;
     let engine = val.get("engine");
     Ok(EngineDraft {
         soak_minutes: engine
@@ -403,25 +383,24 @@ async fn fetch_engine() -> Result<EngineDraft, String> {
             .and_then(|v| v.as_u64())
             .map(|n| n as u32)
             .unwrap_or(100),
-        // Absent = the shipped default (weekly).
+        // Absent = the shipped default (soil since 0.9.0).
         scheduling_model: engine
             .and_then(|e| e.get("scheduling_model"))
             .and_then(|v| v.as_str())
-            .unwrap_or("weekly")
+            .unwrap_or("soil")
             .to_string(),
         // Freshly loaded: nothing changed yet.
         scheduling_model_changed: false,
     })
 }
 
+/// Read-merge-write of the engine knobs through the shared client. Every
+/// knob here hot-reloads through the watering policy, so the PUT's
+/// restart reasons are not surfaced: this page's save toast already says
+/// "applies on the next evaluation".
 #[cfg(feature = "hydrate")]
 async fn patch_engine(d: EngineDraft) -> Result<(), String> {
-    use gloo_net::http::Request;
-    let cur = Request::get("/api/config")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut cfg: serde_json::Value = cur.json().await.map_err(|e| e.to_string())?;
+    let mut cfg = crate::components::config_client::get_config().await?;
     let engine = cfg
         .as_object_mut()
         .and_then(|c| c.get_mut("engine"))
@@ -453,18 +432,7 @@ async fn patch_engine(d: EngineDraft) -> Result<(), String> {
             serde_json::json!(d.scheduling_model),
         );
     }
-    let resp = Request::put("/api/config")
-        .json(&cfg)
-        .map_err(|e| e.to_string())?
-        .send()
+    crate::components::config_client::put_config(&cfg)
         .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::save_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    Ok(())
+        .map(|_| ())
 }

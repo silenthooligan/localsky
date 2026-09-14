@@ -12,7 +12,7 @@ LocalSky is two products in one Docker container.
 
 A **self-hosted weather dashboard** that is cloud-first out of the box: a new install with no hardware picks up Open-Meteo automatically and shows you weather immediately, then reads your weather station over the LAN when you add one (Tempest, Ecowitt, Ambient Weather, Davis, and more). It merges Open-Meteo with regional forecast sources (NWS in the US, MET Norway, OpenWeather, Pirate Weather) using per-field priority chains, so you set the backup order for each reading yourself, and it labels every reading with an honesty tag (measured, radar, nowcast, or forecast) so you always know where a number came from. Display units are configurable, with a household default and a per-device override. The result renders in a fast installable PWA with built-in radar (RainViewer worldwide, NOAA MRMS and IEM NEXRAD in the US) and lightning. Useful on its own, even if you never irrigate anything.
 
-A **smart irrigation engine** that pairs the same weather data with peer-reviewed agronomy (FAO-56 reference ET, USDA soil textures, species-aware Kc curves, a 17-rule skip ladder) and drives OpenSprinkler, Rachio, Rain Bird, Hydrawise, B-hyve, or any valve reachable over MQTT or Home Assistant. Optional. Off until you wire a controller.
+A **smart irrigation engine** that pairs the same weather data with peer-reviewed agronomy (FAO-56 reference ET, USDA soil textures, species-aware Kc curves, a {{LOCALSKY_SKIP_RULES}}-rule skip ladder) and drives OpenSprinkler, Rachio, Rain Bird, Hydrawise, B-hyve, or any valve reachable over MQTT or Home Assistant. Optional. Off until you wire a controller.
 
 This site is the operator's manual. The dashboard, settings UI, and first-run wizard are designed to keep you out of YAML and out of the terminal for day-to-day use. The chapters here exist for when you want to understand exactly what the engine is doing, swap a sensor source, calibrate a zone, or wire LocalSky into the rest of your stack.
 
@@ -47,7 +47,13 @@ LocalSky is designed to work well in either configuration:
 
 Both modes are first-class. Pick the one that fits your stack.
 
-Everything runs on your own hardware. The only outbound calls are the ones you opt into: public forecast sources (Open-Meteo, NWS, and others) and any cloud-backed controller you connect (Rachio, B-hyve, Hydrawise). A LAN-only setup with a local controller makes none.
+Everything runs on your own hardware, and every script and stylesheet the pages use is served by LocalSky itself; nothing is fetched from a CDN. The outbound calls an install makes are these, and each is yours to make or not:
+
+- **Forecast and observation providers** you configure: Open-Meteo, NWS, Met.no and the other sources under Devices. A location with no sources fetches nothing.
+- **Radar and map tiles** when you open the radar page: the basemap comes from CARTO and the precipitation layers from the radar provider you pick (RainViewer by default). A LAN-only install can leave the radar page closed, or disable the radar providers, and makes none of these.
+- **Cloud-backed controllers** you connect (Rachio, B-hyve, Hydrawise) and **notification sinks** you enable (ntfy, Slack, Web Push).
+
+No telemetry, no analytics, no update check unless you turn it on. A LAN-only setup with a local controller and no radar makes no outbound call at all.
 
 ## Project links
 

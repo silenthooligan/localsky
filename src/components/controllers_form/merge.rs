@@ -371,8 +371,7 @@ pub fn bind_message(outcome: &BindOutcome) -> String {
         BindOutcome::Applied { bound, replaced } => {
             let plural = if *bound == 1 { "" } else { "s" };
             let mut msg = format!(
-                "Bound {bound} zone{plural}. Save to apply; the engine picks up a new binding \
-                 on its next start."
+                "Bound {bound} zone{plural}. Save to apply; a new binding takes effect on the next start."
             );
             if *replaced > 0 {
                 let were = if *replaced == 1 { "was" } else { "were" };

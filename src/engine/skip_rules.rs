@@ -3,38 +3,28 @@
 // here, and HA's automation reads the same verdict via REST sensor and
 // acts on it.
 //
-// Phase 3D extraction: this is the former src/ha/skip_logic.rs moved
-// under engine/ with hardcoded constants pulled out into SkipRuleParams
-// (sourced from config.engine.skip_rules at runtime). Defaults match
-// the previous const values so existing call sites pass without changes.
-// src/ha/skip_logic.rs is now a thin re-export shim for back-compat.
+// The thresholds are `SkipRuleParams`, read from `config.engine.skip_rules`
+// at runtime rather than compiled in, so an operator can move a gate
+// without a rebuild. The defaults are the values that were once consts.
 
 use std::collections::HashSet;
 
 use crate::config::schema::{AddressParity, SkipRuleParams, WateringRestriction};
 use crate::engine::conditions::{apply_zone_rules, ConditionCtx, ConditionRule};
 use crate::engine::restrictions;
-use crate::ha::snapshot::{DecisionTrace, RainNature, RuleEval, SkipCheck, ZoneVerdict};
+#[cfg(feature = "ssr")]
+use crate::engine::scripting::CompiledScripts;
+use crate::model::{DecisionTrace, RainNature, RuleEval, SkipCheck, ZoneVerdict};
 
 /// Inputs the engine needs. Caller fills these from HA states +
 /// ForecastSnapshot helpers + TempestStore.
 #[derive(Debug, Clone, Default)]
 pub struct Inputs {
-    /// The DEPLOYMENT's UTC offset in seconds at `now_epoch`, supplied by
-    /// the caller. Watering restrictions are evaluated against the
-    /// operator's wall clock, so this decides which weekday, parity and
-    /// forbidden-hours window applies: a legal question. The engine used
-    /// to read it from a process-wide timezone, which meant a container
-    /// left on the wrong zone could water on a banned day or block every
-    /// legal morning, and made the answer depend on where the process
-    /// ran. Defaults to 0 (UTC), so a caller that forgets is
-    /// deterministic rather than machine-dependent.
-    pub utc_offset_seconds: i32,
     // ── Live readings ──
     pub temp_now_f: f64,
     pub wind_now_mph: f64,
     pub rain_today_in: f64,
-    pub rain_intensity_now_in_hr: f64,
+    pub rain_intensity_now_in_hr: Option<f64>,
     /// The HONEST nature of the current-rain reading driving
     /// `rain_intensity_now_in_hr`, derived by the refresher's 3-tier rain gate
     /// from the merge owner: `Measured` (a LAN gauge or NWS observation),
@@ -48,7 +38,7 @@ pub struct Inputs {
     pub humidity_now_pct: f64,
 
     // ── Open-Meteo forecast ──
-    pub forecast_in: f64,
+    pub forecast_in: Option<f64>,
     /// Tomorrow's max precipitation probability, percent. `None` when the
     /// forecast provider reports no probability series: the tomorrow-rain
     /// gate then weights `forecast_in` at FULL value (see
@@ -56,9 +46,9 @@ pub struct Inputs {
     /// claim. The old bare u32 collapsed "not reported" into 0%, which
     /// zeroed the expected rain and watered ahead of forecast storms.
     pub rain_tomorrow_prob_pct: Option<u32>,
-    pub rain_3day_weighted_in: f64,
-    pub rain_7day_weighted_in: f64,
-    pub rain_next_4h_in: f64,
+    pub rain_3day_weighted_in: Option<f64>,
+    pub rain_7day_weighted_in: Option<f64>,
+    pub rain_next_4h_in: Option<f64>,
     /// OBSERVED rain over the recent window: today's measured total plus the
     /// last `rain_observed_window_days` of past observed daily rain. Drives the
     /// sensor-independent observed-rain SKIP backstop (a hard skip that binds
@@ -66,7 +56,26 @@ pub struct Inputs {
     /// is honored even when a soil probe is bad/offline). Computed in the
     /// refresher from the live `rain_today_in` + `past_n_day_precip_in(window)`.
     pub rain_observed_recent_in: f64,
+    /// The day's forecast peak wind. Informational once a run window is
+    /// known; the gate's fallback when one is not.
     pub wind_max_today_mph: f64,
+    /// Forecast peak wind across the minutes the yard plans to water,
+    /// from the hourly series. `None` when the hour is unknowable (no
+    /// location, no sunrise) or the hourly series does not reach it.
+    ///
+    /// The wind gate used to judge the daily peak, which is the
+    /// afternoon's figure, against a run that finishes before sunrise. A
+    /// 25 mph afternoon refused a 5 mph dawn.
+    pub wind_window_max_mph: Option<f64>,
+    /// Which window the yard is planned into. A post-sunrise window is
+    /// chosen only when the pre-dawn hours were below the freeze
+    /// threshold, and it carries its own temperatures: the freeze gates
+    /// judge `window_min_temp_f` for it rather than the pre-dawn "now"
+    /// and the coming night's low.
+    pub run_window: crate::engine::dispatch_window::WindowKind,
+    /// Forecast minimum across the planned window and the hours after
+    /// it, when the hourly series covers them.
+    pub window_min_temp_f: Option<f64>,
     /// Forecast overnight low for the next 24h. `None` when the hourly
     /// forecast window is unavailable, so the overnight-freeze gate can
     /// distinguish "no data" from a genuine 0 °F (or colder) low. The
@@ -120,17 +129,47 @@ pub struct Inputs {
     pub forecast_stale: bool,
 
     // ── Toggles ──
+    /// The shared runtime reports startup wiring that cannot be applied live.
+    /// Unlike a control override, this is never waived or disabled.
+    pub restart_required: bool,
     pub is_paused: bool,
+    /// Today's rain as the FORECAST MODEL has it, kept apart from
+    /// `rain_today_in`, which is what a gauge actually caught. They used
+    /// to be blended with `max`, and the blend fed a gate whose message
+    /// says "Already wet", so on a morning the model expected an
+    /// afternoon storm the yard hard-skipped and the dashboard reported
+    /// rain that had not fallen. Two numbers, two gates, two messages.
+    pub rain_today_forecast_in: Option<f64>,
     pub is_dry_run: bool,
 
     // ── Phase 4 control surfaces ──
     pub pause_until_epoch: i64,
-    pub now_epoch: i64,
+    /// The deployment's calendar.
+    ///
+    /// A deployment property, like the address parity beside it. Gates
+    /// that render or compare a time OTHER than `when` need it: a
+    /// vacation pause expiring in December cannot be rendered with the
+    /// offset in force today, which is what it used to do.
+    pub calendar: crate::engine::calendar::Calendar,
+    /// WHEN this decision is about.
+    ///
+    /// This was two fields, `now_epoch` and `utc_offset_seconds`, and
+    /// that is precisely how the 7-day strip came to judge a US Eastern
+    /// yard's morning in UTC: one writer filled the instant honestly and
+    /// left the offset at its Default, which is zero, which reads as UTC.
+    /// Nothing objected, because a pair of integers is a pair of integers.
+    ///
+    /// An instant and the offset in force at it are ONE fact, so they are
+    /// one value now, and only the deployment Calendar can mint it. The
+    /// pair also had a state nobody meant: both zero, which claimed a real
+    /// instant in 1970 and was indistinguishable from "unset". `Unknown`
+    /// says that out loud, and gates abstain rather than guess.
+    pub when: crate::engine::clock::DecisionTime,
     pub override_tomorrow: String,
     pub is_tomorrow: bool,
-    /// Sticky global override: "auto" | "skip" | "run". Beats the engine
-    /// verdict (a per-zone override in turn beats this). "run" forces watering
-    /// past the skip conditions. "" / "auto" = follow the engine.
+    /// Sticky global override: "auto" | "skip" | "run". A run overrides rain
+    /// and soil recommendations, while safety, restrictions and operator holds
+    /// remain binding. "" / "auto" = follow the engine.
     pub global_override: String,
     /// Sticky per-zone overrides: zone slug -> "skip" | "run". Absent = auto.
     /// Applied in `decide_per_zone`, beating both the global override and the
@@ -143,6 +182,10 @@ pub struct Inputs {
     pub watering_restrictions: Vec<WateringRestriction>,
     /// Operator's address parity from `cfg.deployment.address_parity`.
     pub address_parity: AddressParity,
+    /// Days in the trailing week on which any zone watered, for a
+    /// restriction that allows at most N days a week. Empty when no
+    /// history is in hand, which reads as nothing spent.
+    pub watered_days: Vec<crate::engine::clock::CivilDay>,
 }
 
 /// Health/provenance of the live "now" readings feeding the engine.
@@ -150,10 +193,10 @@ pub struct Inputs {
 /// that doesn't track provenance (simulator, verdict strip, tests).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LiveReadings {
-    /// Fresh local station data (Tempest packet within the staleness window).
+    /// Fresh measured fields, including remote station observations.
     #[default]
     Station,
-    /// Station stale or absent; current-hour forecast values standing in.
+    /// At least one current field is estimated (selected model or forecast fallback).
     ForecastFallback,
     /// No station data and no forecast. Fail safe: skip, don't fabricate.
     Unavailable,
@@ -162,45 +205,68 @@ pub enum LiveReadings {
 /// One zone's live soil reading + its per-zone thresholds, sourced from
 /// `ZoneConfig` (saturation/target) and the assigned sensor. `pct: None`
 /// means the probe is offline or no sensor is assigned.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ZoneSoil {
     pub slug: String,
     pub name: String,
     pub pct: Option<f64>,
+    /// A bound probe whose reading is absent is a data fault. An unbound zone
+    /// can still use weather and its soil model without claiming a measurement.
+    pub probe_configured: bool,
     pub saturation_pct: f64,
     pub target_min_pct: f64,
+    /// Whether the soil model governs this zone.
+    ///
+    /// A soil-governed zone already counts forward rain against its own
+    /// deficit, so the yard-wide forward-rain gates are inert for it: it
+    /// waters anyway, and its deficit is what decides. That is an
+    /// irrigation rule, so the engine applies it and the trace says so.
+    /// It used to be applied by the refresher, after the fact, by
+    /// string-matching reason codes and rewriting verdicts the engine had
+    /// already produced, which left the decision trace describing a
+    /// morning that did not happen.
+    pub governed_by_soil_model: bool,
+    /// The automatic planner has no complete next-24h rain evidence. Scoped
+    /// per zone and binding for either sizing strategy; Force cannot create
+    /// a duration from an unavailable automatic plan.
+    pub planning_forecast_unavailable: bool,
+    /// The zone's head, so a restriction that exempts drip or bubbler
+    /// irrigation can stand aside for it.
+    pub sprinkler_type: crate::config::schema::SprinklerType,
 }
 
+/// Yard-wide gates a soil-governed zone rides through.
+///
+/// All three are forward-looking rain: rain later today, rain tomorrow,
+/// rain over three days. The soil model has already credited that rain
+/// against the zone's deficit, so skipping on it would double-count and
+/// leave the zone dry. Gates about right now (rain falling, already wet,
+/// saturated soil) and gates about safety or law are NOT inert and still
+/// bind every zone.
+pub const SOIL_MODEL_INERT_GATES: &[&str] = &[
+    "rain_next_4h",
+    "tomorrow_rain",
+    "rain_3day",
+    "rain_today_forecast",
+];
+
 // ─────────────────────────────────────────────────────────────────────
-// Soil-probe QUARANTINE + infer-from-siblings (2026-06 incident: a probe
-// physically in a bad spot read 28% while siblings read 71-76% after the
-// same rain, so the per-zone saturation gate trusted 28% and the zone ran
-// while saturated). A zone whose probe is OFFLINE (None) or a WILD OUTLIER
-// versus its siblings is DISTRUSTED; its effective soil for the soil gates
-// (saturation + soil_floor) is INFERRED from the trustworthy sibling median,
-// so a quarantined zone with saturated neighbors reads saturated and skips.
-//
-// Scope boundary: ONLY the soil gates ever see the inferred value. Global /
-// weather / safety gates, the observed-recent-rain backstop, the per-zone
-// condition rules, and the serialized raw `soil_<slug>_pct` fields all keep
-// the raw reading. Quarantine never forces a run: a TRUSTWORTHY genuinely-dry
-// zone is left untouched (the soil_floor moat stays intact). Disabled
-// (`soil_quarantine_enabled = false`) restores the exact pre-quarantine path.
+// Soil-probe quarantine. A sibling median can identify an implausible reading;
+// it cannot establish that this zone is dry. Quarantined probes become absent
+// for eligibility and the protected soil_probe gate holds their zone. Raw
+// readings remain available for diagnosis. Zones with no bound probe never
+// acquire a synthetic reading or a probe-fault hold from their neighbors.
 // ─────────────────────────────────────────────────────────────────────
 
 /// One zone's quarantine outcome, produced by `quarantine_plan` and parallel
 /// to `Inputs::soil_zones`. `Some` means the zone's probe was distrusted AND a
-/// trustworthy sibling median existed, so its soil was inferred; `None` means
-/// the zone is trusted as-is (or there was no trustworthy median to infer from,
-/// in which case the raw reading stands and nothing is surfaced).
+/// trustworthy sibling median existed to explain the fault. Missing configured
+/// probes are held even without siblings, independently of outlier detection.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ZoneQuarantine {
     /// The raw reading the probe reported. `None` when the probe was offline.
     raw_pct: Option<f64>,
-    /// The substituted effective soil (the trustworthy sibling median).
-    inferred_pct: f64,
-    /// Median of the trustworthy siblings, for the surfaced reason. Equal to
-    /// `inferred_pct`; kept separate for readability at the call sites.
+    /// Median of the trustworthy siblings, for diagnosis only.
     sibling_median: f64,
 }
 
@@ -218,17 +284,14 @@ fn median(vals: &[f64]) -> f64 {
 }
 
 /// Compute the per-zone quarantine plan (parallel to `zones`). For each zone:
-///   * OFFLINE (None) probes are always UNTRUSTWORTHY.
+///   * OFFLINE (None) configured probes are always UNTRUSTWORTHY.
 ///   * A PRESENT reading is UNTRUSTWORTHY only when >= 3 zones report AND it
 ///     deviates from the median of all present readings by more than
 ///     `soil_outlier_threshold_pct` (catches a wildly-low bad-spot probe and a
 ///     wildly-high one alike).
-/// The TRUSTWORTHY MEDIAN is the median of readings that are present AND not
-/// outliers. Every untrustworthy zone gets that median substituted as its
-/// effective soil. When no trustworthy median exists (all offline/outliers, or
-/// fewer than 3 present so outliers can't be judged and only offline zones are
-/// distrusted with no present non-outlier siblings), the entry is `None` and the
-/// raw reading stands (fallback to current behavior).
+/// The trustworthy median is diagnostic evidence only. Without a median, no
+/// outlier comparison is possible; a configured missing probe still fails the
+/// soil_probe gate. Disabling outlier detection never waives missing data.
 ///
 /// `enabled = false` returns an all-`None` plan (exact pre-quarantine behavior).
 fn quarantine_plan(zones: &[ZoneSoil], p: &SkipRuleParams) -> Vec<Option<ZoneQuarantine>> {
@@ -238,7 +301,7 @@ fn quarantine_plan(zones: &[ZoneSoil], p: &SkipRuleParams) -> Vec<Option<ZoneQua
     }
     let present: Vec<f64> = zones.iter().filter_map(|z| z.pct).collect();
     // Outliers can only be judged with >= 3 present readings; with fewer, no
-    // PRESENT reading is ever distrusted (offline zones still may be inferred).
+    // PRESENT reading is ever distrusted.
     let can_judge_outliers = present.len() >= 3;
     let present_median = if present.is_empty() {
         0.0
@@ -248,14 +311,14 @@ fn quarantine_plan(zones: &[ZoneSoil], p: &SkipRuleParams) -> Vec<Option<ZoneQua
     let is_outlier = |pct: f64| {
         can_judge_outliers && (pct - present_median).abs() > p.soil_outlier_threshold_pct
     };
-    // Trustworthy = present AND not an outlier. Its median is the inferred value.
+    // Trustworthy = present AND not an outlier. Its median explains the fault.
     let trustworthy: Vec<f64> = zones
         .iter()
         .filter_map(|z| z.pct)
         .filter(|&pct| !is_outlier(pct))
         .collect();
     if trustworthy.is_empty() {
-        // No trustworthy median to infer from: fall back to raw readings.
+        // No sibling comparison; missing configured probes are still held.
         return none_plan();
     }
     let trust_median = median(&trustworthy);
@@ -263,29 +326,29 @@ fn quarantine_plan(zones: &[ZoneSoil], p: &SkipRuleParams) -> Vec<Option<ZoneQua
         .iter()
         .map(|z| {
             let untrustworthy = match z.pct {
-                None => true,                 // offline
+                None => z.probe_configured,
                 Some(pct) => is_outlier(pct), // wild outlier vs siblings
             };
             untrustworthy.then_some(ZoneQuarantine {
                 raw_pct: z.pct,
-                inferred_pct: trust_median,
                 sibling_median: trust_median,
             })
         })
         .collect()
 }
 
-/// The EFFECTIVE soil zones for the soil gates: each quarantined zone's `pct`
-/// replaced by its inferred sibling median, every other zone unchanged. Shared
-/// by `decide`, `global_verdict` (and thus `decide_per_zone`), and
+/// The effective soil zones: each quarantined zone's reading is unavailable
+/// and its configured identity is retained for the data hold. Shared
+/// by `decide`, `decide_per_zone`, and
 /// `decide_traced` so all soil-gate paths judge identical effective soil.
 fn effective_soil_zones(zones: &[ZoneSoil], plan: &[Option<ZoneQuarantine>]) -> Vec<ZoneSoil> {
     zones
         .iter()
         .zip(plan)
         .map(|(z, q)| match q {
-            Some(qi) => ZoneSoil {
-                pct: Some(qi.inferred_pct),
+            Some(_) => ZoneSoil {
+                pct: None,
+                probe_configured: true,
                 ..z.clone()
             },
             None => z.clone(),
@@ -293,9 +356,8 @@ fn effective_soil_zones(zones: &[ZoneSoil], plan: &[Option<ZoneQuarantine>]) -> 
         .collect()
 }
 
-/// An `Inputs` clone whose `soil_zones` carry the quarantine-inferred effective
-/// soil. ONLY the soil gates read `soil_zones.pct`, so substituting here scopes
-/// the inference to saturation + soil_floor without touching any other gate.
+/// An `Inputs` clone whose `soil_zones` expose quarantined readings as unknown
+/// to the data hold and soil gates.
 /// (The raw `i.soil_zones` is still what `evaluate_with` serializes into the
 /// SkipCheck `soil_<slug>_pct` fields and what `decide_per_zone` feeds the
 /// condition rules, so transparency + condition semantics are unchanged.)
@@ -346,25 +408,51 @@ fn suspect_reason(q: &ZoneQuarantine) -> String {
     )
 }
 
-/// Surfaced reason for a quarantined zone whose soil verdict was decided on the
-/// inferred value, e.g. "Soil probe suspect (28% vs yard 73%); inferred from
-/// neighbors". The offline case names "(offline; ...)".
-fn quarantine_reason(q: &ZoneQuarantine, decided: &str) -> String {
-    let probe = match q.raw_pct {
-        Some(raw) => format!("{raw:.0}%"),
-        None => "offline".to_string(),
-    };
+fn quarantine_reason(q: &ZoneQuarantine) -> String {
     format!(
-        "Soil probe suspect ({} vs yard {:.0}%); inferred from neighbors -> {}",
-        probe, q.sibling_median, decided
+        "{}; watering held until the probe is reliable",
+        suspect_reason(q)
     )
+}
+
+const SOIL_PROBE_HOLD_REASON: &str =
+    "Soil probe unavailable or untrusted; watering held until the probe is reliable";
+
+/// Inputs are scoped to one zone for its decision. The aggregate only holds
+/// here when every zone has a probe fault; final per-zone projection handles
+/// mixed yards without denying an unbound or healthy sibling permission.
+fn soil_probe_unavailable(i: &Inputs) -> bool {
+    !i.soil_zones.is_empty()
+        && i.soil_zones
+            .iter()
+            .all(|z| z.probe_configured && z.pct.is_none())
+}
+
+/// Data holds are returned even when an earlier operator/weather gate wins.
+/// A manual schedule may waive weather; it must still see this independent
+/// data-integrity decision without rebuilding the quarantine rules itself.
+fn probe_data_holds(i: &Inputs, p: &SkipRuleParams) -> std::collections::BTreeMap<String, String> {
+    let plan = quarantine_plan(&i.soil_zones, p);
+    let effective = effective_soil_zones(&i.soil_zones, &plan);
+    effective
+        .iter()
+        .zip(&plan)
+        .filter(|(z, _)| z.probe_configured && z.pct.is_none())
+        .map(|(z, q)| {
+            let reason = q
+                .as_ref()
+                .map(quarantine_reason)
+                .unwrap_or_else(|| SOIL_PROBE_HOLD_REASON.to_string());
+            (z.slug.clone(), reason)
+        })
+        .collect()
 }
 
 // Bridge the generalized per-zone `soil_zones` Vec to/from the flattened
 // `SkipCheck.soil_fields` map ("soil_<slug>_pct" + "saturation_<slug>_pct" +
 // "target_<slug>_pct" for EVERY zone), which the manifest's per-zone soil
 // descriptor reads. Generalizes the old fixed four-yard-slug fields to any
-// number of zones with any slug. P1-2: target_min_pct (the per-zone soil floor)
+// number of zones with any slug. target_min_pct (the per-zone soil floor)
 // is serialized too, so the Simulator's what-if round-trip preserves a custom
 // floor instead of silently snapping every zone back to the 30% default.
 fn build_soil_fields(zones: &[ZoneSoil]) -> std::collections::BTreeMap<String, Option<f64>> {
@@ -380,7 +468,7 @@ fn build_soil_fields(zones: &[ZoneSoil]) -> std::collections::BTreeMap<String, O
 /// Rebuild `soil_zones` from a serialized SkipCheck's flattened soil map (used
 /// by the Simulator's what-if round-trip). Recovers every zone present, not a
 /// fixed set.
-fn rebuild_soil_zones(s: &crate::ha::snapshot::SkipCheck) -> Vec<ZoneSoil> {
+fn rebuild_soil_zones(s: &crate::model::SkipCheck) -> Vec<ZoneSoil> {
     s.soil_fields
         .keys()
         .filter_map(|k| k.strip_prefix("soil_").and_then(|r| r.strip_suffix("_pct")))
@@ -396,7 +484,7 @@ fn rebuild_soil_zones(s: &crate::ha::snapshot::SkipCheck) -> Vec<ZoneSoil> {
                 .copied()
                 .flatten()
                 .unwrap_or(crate::config::schema::DEFAULT_SATURATION_PCT);
-            // P1-2: recover the per-zone floor; 30.0 only when absent (an older
+            // Recover the per-zone floor; 30.0 only when absent (an older
             // serialized SkipCheck or demo fixture written before target_*).
             let target_min_pct = s
                 .soil_fields
@@ -408,23 +496,30 @@ fn rebuild_soil_zones(s: &crate::ha::snapshot::SkipCheck) -> Vec<ZoneSoil> {
                 name: slug.replace('_', " "),
                 slug: slug.to_string(),
                 pct,
+                probe_configured: s.soil_probe_configured.get(slug).copied().unwrap_or(false),
                 saturation_pct,
                 target_min_pct,
+                governed_by_soil_model: false,
+                planning_forecast_unavailable: s
+                    .planning_forecast_unavailable
+                    .iter()
+                    .any(|zone| zone == slug),
+                sprinkler_type: Default::default(),
             }
         })
         .collect()
 }
 
-fn format_pause_until(epoch: i64, offset: chrono::FixedOffset) -> String {
-    // #3 (TZ correctness) + #8 (24h rule): render the vacation-pause "until"
-    // timestamp in the deployment's CONFIGURED timezone (not chrono::Local, the
-    // container TZ) and in 24-hour local time. The configured-TZ offset comes
-    // from timeutil (process-wide, set at boot from cfg.deployment.timezone);
-    // applied to the epoch it yields the operator's wall clock. %H:%M is 24-hour
-    // (was %-I %p, 12-hour).
-    let tz_offset = offset;
-    match chrono::DateTime::from_timestamp(epoch, 0).map(|dt| dt.with_timezone(&tz_offset)) {
-        Some(dt) => dt.format("%a %b %-d, %H:%M").to_string(),
+fn format_pause_until(epoch: i64, cal: crate::engine::calendar::Calendar) -> String {
+    // The vacation-pause "until" timestamp, in the deployment's own frame
+    // and on a 24-hour clock.
+    //
+    // The offset now comes from the calendar AT THE PAUSE EXPIRY, not at
+    // "now". A pause set in October and expiring in December was rendered
+    // with October's offset, so it read an hour early across the November
+    // transition, and for an evening expiry it named the wrong weekday.
+    match cal.at(epoch) {
+        Some(z) => z.format("%a %b %-d, %H:%M"),
         None => format!("epoch {epoch}"),
     }
 }
@@ -447,8 +542,32 @@ pub fn heat_index_f(temp_f: f64, humidity_pct: f64) -> f64 {
         - 0.00000199 * t * t * r * r
 }
 
-/// ET multiplier from heat index. 1.00 at HI ≤ 85, scaling linearly to
-/// 1.30 at HI 105 °F. Capped at +30%.
+/// ET multiplier from vapor pressure deficit, the atmosphere's drying
+/// power.
+///
+/// 1.00 at or below 1.0 kPa, scaling linearly to 1.30 at 3.0 kPa.
+///
+/// This used to key off the NOAA heat index, which is a HUMAN COMFORT
+/// measure and rises with humidity. Evapotranspiration does the
+/// opposite: humid air is already close to saturated, so it pulls less
+/// water out of a leaf. The old multiplier therefore pushed hardest
+/// exactly where demand was lowest, and a dry 105 F afternoon in Phoenix
+/// scored a LOWER heat index than a muggy 95 F one in Jacksonville while
+/// evaporating considerably more.
+///
+/// VPD is the quantity FAO-56 puts in the Penman-Monteith numerator, and
+/// it is what actually drives the demand this multiplier is reaching
+/// for.
+pub fn et_demand_multiplier(vpd_kpa: f64) -> f64 {
+    let bonus = (((vpd_kpa - 1.0) / 2.0) * 0.30).clamp(0.0, 0.30);
+    1.0 + bonus
+}
+
+/// The old heat-index multiplier, kept only so a caller that genuinely
+/// has no VPD can still ask.
+///
+/// Prefer [`et_demand_multiplier`]. This one is wrong about humidity by
+/// construction, for the reasons above.
 pub fn et_heat_multiplier(heat_idx_f: f64) -> f64 {
     let bonus = (((heat_idx_f - 85.0) / 20.0) * 0.30).clamp(0.0, 0.30);
     1.0 + bonus
@@ -470,15 +589,18 @@ pub fn et_heat_multiplier(heat_idx_f: f64) -> f64 {
 /// jurisdictional watering-restrictions compliance gate. Entries naming
 /// them in config are silently ignored.
 pub const PROTECTED_RULES: &[&str] = &[
+    "restart_required",
     "override",
     "pause_until",
     "paused",
     "restrictions",
     "dry_run",
-    // P1-8a: the live-data fail-safe (skip when no station AND no forecast) must
+    // The live-data fail-safe (skip when no station AND no forecast) must
     // not be operator-disableable, or disabling it reintroduces deciding on
     // fabricated values. Hard-enforced like dry_run.
     "live_data",
+    "soil_probe",
+    "planning_forecast",
 ];
 
 // builtin_rule_catalog lives in crate::gates_catalog (plain data, no
@@ -499,11 +621,15 @@ fn disabled_set(p: &SkipRuleParams) -> HashSet<&str> {
 /// Back-compat entrypoint using `SkipRuleParams::default()`. Defaults
 /// reproduce the v0.1 hardcoded thresholds.
 impl Inputs {
-    /// The deployment's offset as a chrono value. One place converts it,
-    /// so no gate has to remember the units.
-    pub fn tz_offset(&self) -> chrono::FixedOffset {
-        chrono::FixedOffset::east_opt(self.utc_offset_seconds)
-            .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).expect("UTC is representable"))
+    /// The instant this decision is about, or 0 when none is known.
+    ///
+    /// Derived, not stored. The old shape kept this next to an offset that
+    /// could disagree with it; there is nothing left to disagree with.
+    pub fn now_epoch(&self) -> i64 {
+        self.when
+            .zoned()
+            .map(crate::engine::clock::Zoned::epoch)
+            .unwrap_or(0)
     }
 }
 
@@ -530,6 +656,7 @@ pub fn evaluate_with(i: &Inputs, params: &SkipRuleParams) -> SkipCheck {
         temp_now_f: i.temp_now_f,
         wind_now_mph: i.wind_now_mph,
         rain_today_in: i.rain_today_in,
+        rain_today_forecast_in: i.rain_today_forecast_in,
         rain_intensity_now_in_hr: i.rain_intensity_now_in_hr,
         humidity_now_pct: i.humidity_now_pct,
 
@@ -540,6 +667,9 @@ pub fn evaluate_with(i: &Inputs, params: &SkipRuleParams) -> SkipCheck {
         rain_next_4h_in: i.rain_next_4h_in,
         rain_observed_recent_in: i.rain_observed_recent_in,
         wind_max_today_mph: i.wind_max_today_mph,
+        wind_window_max_mph: i.wind_window_max_mph,
+        run_window: i.run_window,
+        window_min_temp_f: i.window_min_temp_f,
         // Wire shape stays f64 for /api/v1 back-compat: missing data keeps
         // the historical 0.0 placeholder, with the new (additive) validity
         // flag alongside so consumers can tell 0 °F from "no forecast".
@@ -562,6 +692,18 @@ pub fn evaluate_with(i: &Inputs, params: &SkipRuleParams) -> SkipCheck {
         // <slug>_pct" entry per configured zone (any slug, any count). The
         // manifest's per-zone soil descriptor reads these.
         soil_fields: build_soil_fields(&i.soil_zones),
+        soil_probe_holds: probe_data_holds(i, params),
+        planning_forecast_unavailable: i
+            .soil_zones
+            .iter()
+            .filter(|zone| zone.planning_forecast_unavailable)
+            .map(|zone| zone.slug.clone())
+            .collect(),
+        soil_probe_configured: i
+            .soil_zones
+            .iter()
+            .map(|z| (z.slug.clone(), z.probe_configured))
+            .collect(),
         soil_temp_yard_min_f: i.soil_temp_yard_min_f,
         soil_temp_yard_max_f: i.soil_temp_yard_max_f,
         frost_skip_soil_f: i.frost_skip_soil_f,
@@ -569,6 +711,7 @@ pub fn evaluate_with(i: &Inputs, params: &SkipRuleParams) -> SkipCheck {
         is_paused: i.is_paused,
         is_dry_run: i.is_dry_run,
 
+        script_hold: None,
         will_skip: verdict == "skip",
         verdict: verdict.to_string(),
         reason,
@@ -576,6 +719,164 @@ pub fn evaluate_with(i: &Inputs, params: &SkipRuleParams) -> SkipCheck {
         // invisible. "run" on a clean run; mirrors the verdict/reason above.
         reason_code: reason_code.to_string(),
     }
+}
+
+/// A complete engine answer. Live consumers receive built-in gates, scoped
+/// conditions and user scripts together, so a new consumer cannot accidentally
+/// treat a partially evaluated per-zone run as permission to water.
+#[cfg(feature = "ssr")]
+pub struct Decisions {
+    pub skip_check: SkipCheck,
+    pub trace: DecisionTrace,
+    pub zones: Vec<ZoneVerdict>,
+    pub force_overrode_guard: Option<String>,
+}
+
+#[cfg(feature = "ssr")]
+pub fn evaluate_decisions(
+    i: &Inputs,
+    params: &SkipRuleParams,
+    rules: &[ConditionRule],
+    scripts: &CompiledScripts,
+) -> Decisions {
+    let mut answer = Decisions {
+        skip_check: evaluate_with(i, params),
+        trace: decide_traced(i, params),
+        zones: decide_per_zone(i, params, rules),
+        force_overrode_guard: force_overrode_guard(i, params),
+    };
+    let runnable = |verdict: &str| matches!(verdict, "run" | "run_extended");
+    // Rhai reads yard-wide facts. Compute its first hold once, including when
+    // a built-in gate already holds every zone: a manual weather waiver must
+    // still receive the owner's independent script decision.
+    answer.skip_check.script_hold = scripts.apply_user_skip(i);
+    if let Some(user_skip) = answer.skip_check.script_hold.as_ref() {
+        for zone in &mut answer.zones {
+            if runnable(&zone.verdict) {
+                zone.verdict = "skip".into();
+                zone.reason = user_skip.reason.clone();
+                zone.reason_code = user_skip.id.clone();
+                zone.source = "script".into();
+                zone.multiplier = 1.0;
+                zone.value = None;
+                zone.threshold = None;
+            }
+        }
+        let decides_aggregate = runnable(&answer.skip_check.verdict);
+        // Copy before updating the aggregate, which also owns the typed hold.
+        let hold = user_skip.clone();
+        if decides_aggregate {
+            answer
+                .skip_check
+                .decide("skip", hold.reason.clone(), hold.id.clone());
+            answer.trace.verdict = "skip".into();
+            answer.trace.reason = hold.reason.clone();
+            answer.trace.reason_code = hold.id.clone();
+            for rule in &mut answer.trace.rules {
+                if rule.outcome == "fired" {
+                    rule.outcome = "passed".into();
+                    rule.detail.push_str("; watering held by user script");
+                }
+            }
+        }
+        answer.trace.rules.push(RuleEval {
+            id: hold.id,
+            label: hold.name,
+            category: "script".into(),
+            detail: if decides_aggregate {
+                hold.reason
+            } else {
+                format!(
+                    "Additional script hold; an earlier gate already holds watering. {}",
+                    hold.reason
+                )
+            },
+            outcome: if decides_aggregate {
+                "fired"
+            } else {
+                "skipped"
+            }
+            .into(),
+            verdict: Some("skip".into()),
+            ..Default::default()
+        });
+    }
+    // The yard headline is a summary of the completed zone answers. A gate
+    // that applies to sprinkler heads must not claim exempt beds are held,
+    // and a runnable yard must not hide conditions that hold every zone.
+    if !answer.zones.is_empty() {
+        let running = answer.zones.iter().filter(|z| runnable(&z.verdict)).count();
+        let held = answer.zones.len() - running;
+        let extended = answer.zones.iter().any(|z| z.verdict == "run_extended");
+        let aggregate_gate_holds_a_zone = answer
+            .zones
+            .iter()
+            .any(|z| z.verdict == "skip" && z.reason_code == answer.skip_check.reason_code);
+        if running == 0 && (runnable(&answer.skip_check.verdict) || !aggregate_gate_holds_a_zone) {
+            if let Some(zone) = answer.zones.iter().find(|z| z.verdict == "skip") {
+                answer.skip_check.decide(
+                    "skip",
+                    format!("All zones are holding. {}", zone.reason),
+                    zone.reason_code.clone(),
+                );
+            }
+        } else if running > 0 && (answer.skip_check.will_skip || held > 0) {
+            let reason = if held > 0 {
+                format!("{running} of {} zones can water; {held} remain on hold. Check each zone for its reason.", answer.zones.len())
+            } else {
+                "All zones can water after their own safety checks.".into()
+            };
+            answer.skip_check.decide(
+                if extended { "run_extended" } else { "run" },
+                reason,
+                "run".into(),
+            );
+        } else if running > 0 && answer.skip_check.verdict == "run_extended" && !extended {
+            answer.skip_check.decide(
+                "run",
+                "Zones keep their planned watering time.".into(),
+                "run".into(),
+            );
+        }
+        if answer.trace.verdict != answer.skip_check.verdict
+            || answer.trace.reason != answer.skip_check.reason
+        {
+            for rule in &mut answer.trace.rules {
+                if rule.outcome == "fired" {
+                    rule.outcome = "passed".into();
+                    rule.detail.push_str("; applicability resolved per zone");
+                }
+            }
+            answer.trace.verdict = answer.skip_check.verdict.clone();
+            answer.trace.reason = answer.skip_check.reason.clone();
+            answer.trace.reason_code = answer.skip_check.reason_code.clone();
+            if answer.skip_check.will_skip {
+                // A script that initially sat behind a yard forecast gate may
+                // become the deciding hold after scoped soil-model evaluation.
+                // Promote its existing row rather than duplicate the rule id.
+                if let Some(script_row) = answer
+                    .trace
+                    .rules
+                    .iter_mut()
+                    .find(|r| r.category == "script" && r.id == answer.skip_check.reason_code)
+                {
+                    script_row.outcome = "fired".into();
+                    script_row.detail = answer.skip_check.reason.clone();
+                } else {
+                    answer.trace.rules.push(RuleEval {
+                        id: answer.skip_check.reason_code.clone(),
+                        label: "All zones are holding".into(),
+                        category: "condition".into(),
+                        detail: answer.skip_check.reason.clone(),
+                        outcome: "fired".into(),
+                        verdict: Some("skip".into()),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+    }
+    answer
 }
 
 /// Aggregate rule ladder. Order matters: first matching rule wins. Order
@@ -602,14 +903,22 @@ fn decide(i: &Inputs, p: &SkipRuleParams) -> (&'static str, String) {
 /// `decide` delegates here so the two can never drift.
 fn decide_with_code(i: &Inputs, p: &SkipRuleParams) -> (&'static str, String, &'static str) {
     let disabled = disabled_set(p);
-    // pre_soil never reads soil_zones.pct, so the raw inputs are correct here.
-    if let Some(v) = pre_soil(i, p, &disabled) {
+    let effective = with_effective_soil(i, p);
+    decide_ladder(&effective, p, &disabled)
+}
+
+/// The one deterministic ladder, for both the yard and an individual zone.
+/// The caller supplies effective soil and the restrictions/gates applicable to
+/// its scope. Changing scope never bypasses the rest of the ladder.
+fn decide_ladder(
+    i: &Inputs,
+    p: &SkipRuleParams,
+    disabled: &HashSet<&str>,
+) -> (&'static str, String, &'static str) {
+    if let Some(v) = pre_soil(i, p, disabled) {
         return v;
     }
-    // From the soil gates onward, judge the quarantine-inferred effective soil so
-    // a bad/offline probe inherits its trustworthy siblings' reading.
-    let eff = with_effective_soil(i, p);
-    if let Some(v) = soil_saturation(&eff, &disabled) {
+    if let Some(v) = soil_saturation(i, disabled) {
         return v;
     }
     // Soil-floor (the moat): a soft forecast-rain skip is demoted to a run when a
@@ -618,247 +927,240 @@ fn decide_with_code(i: &Inputs, p: &SkipRuleParams) -> (&'static str, String, &'
     // runs the dry zones and skips the wet ones. dry_run / hard skips are never
     // demotable (soil_floor_demotes is false for them). Code is "soil_floor" (the
     // moat rung), matching the soil_floor gate that fires in decide_traced.
-    if soil_floor_demotes(&eff, p, &disabled) {
+    if soil_floor_demotes(i, p, disabled) {
         return ("run", String::new(), "soil_floor");
     }
-    post_soil(&eff, p, &disabled, false)
+    post_soil(i, p, disabled, false)
 }
 
-/// The global verdict EXCLUDING the per-zone soil-saturation gate. Used by
-/// `decide_per_zone` as the yard-wide baseline that binds every zone;
-/// each zone then layers its own soil + custom-condition gates on top.
-fn global_verdict(
-    i: &Inputs,
-    p: &SkipRuleParams,
-    disabled: &HashSet<&str>,
-) -> (&'static str, String, &'static str) {
-    // floor_active = false: decide_per_zone needs the RAW soft-rain verdict so it
-    // can tell a healthy-dry zone (which it RUNS) from a wet sibling (which still
-    // SKIPs) on a demotion morning. The aggregate decide() handles the floor. The
-    // third element is the firing global rule id (P1), which decide_per_zone
-    // carries into each zone's reason_code when the global gate binds it.
-    pre_soil(i, p, disabled).unwrap_or_else(|| post_soil(i, p, disabled, false))
-}
-
-/// Per-zone verdicts. The global gates (safety + weather) bind every zone
-/// identically; then each zone layers its own soil-saturation gate and the
-/// user's custom condition rules (augment-only). Safety boundary: this can
-/// only ADD a skip, extend, or shrink a zone's run, never clear a global
-/// gate or force a run. Returns one verdict per entry in `i.soil_zones`.
+/// This zone's OWN soil-saturation skip, judged on the effective (post-
+/// quarantine) soil, or `None` when the probe is silent, the operator
+/// disabled the gate, or the ground is not saturated.
 ///
-/// Note vs the aggregate `decide()`: there, yard-wide soil saturation is
-/// ordered before the rain-forecast gates; here the global (weather)
-/// verdict is computed first and binds all zones, then per-zone soil runs.
-/// So a uniform setup yields the same per-zone VERDICT as `decide()`'s
-/// aggregate (pinned by `decide_per_zone_matches_decide_when_uniform`),
-/// though the skip REASON may name weather where the aggregate named soil.
+/// Extracted so both paths through `decide_per_zone` that end in a run can
+/// consult it. The exempt path used to return "run" without it, which was
+/// invisible while the dispatcher blanket-held the yard on any aggregate
+/// skip and became a saturated-ground dispatch the moment the dispatcher
+/// started honoring exemptions.
+///
+/// `z` supplies identity (slug, name), `eff_z` the reading being judged;
+/// they are the same zone from `i.soil_zones` and the effective-soil copy.
+fn zone_saturation_skip(
+    z: &ZoneSoil,
+    eff_z: &ZoneSoil,
+    disabled: &HashSet<&str>,
+) -> Option<ZoneVerdict> {
+    let pct = eff_z
+        .pct
+        .filter(|_| !disabled.contains("soil_saturation"))?;
+    if pct < eff_z.saturation_pct {
+        return None;
+    }
+    let reason = format!(
+        "Soil saturated ({:.0}% \u{2265} {:.0}% threshold)",
+        pct, eff_z.saturation_pct
+    );
+    let source = "soil_saturation";
+    Some(ZoneVerdict {
+        zone_slug: z.slug.clone(),
+        zone_name: z.name.clone(),
+        verdict: "skip".into(),
+        reason,
+        source: source.into(),
+        multiplier: 1.0,
+        reason_code: source.into(),
+        value: Some(pct),
+        threshold: Some(eff_z.saturation_pct),
+    })
+}
+
+/// Per-zone decisions run the same ladder as the yard. The scope supplies one
+/// zone's effective soil and only the restrictions that bind it. A soil-model
+/// zone removes already-accounted forecast-rain gates, then re-runs the entire
+/// ladder, including holds and its own soil saturation. Every ordinary run
+/// reaches the owner's condition rules before it can leave the engine.
+///
+/// Explicit overrides retain their separate owner-control semantics. This
+/// built-in-only entrypoint serves simulations/tests; live assembly must use
+/// `evaluate_decisions` so user scripts reach the same verdicts as dispatch.
 pub fn decide_per_zone(
     i: &Inputs,
     p: &SkipRuleParams,
     rules: &[ConditionRule],
 ) -> Vec<ZoneVerdict> {
     let disabled = disabled_set(p);
-    let (gverdict, greason, gcode) = global_verdict(i, p, &disabled);
-    // Soil-probe quarantine plan (parallel to i.soil_zones) + the effective-soil
-    // inputs the soil gates judge. A distrusted (offline / outlier) probe inherits
-    // its trustworthy siblings' median for the saturation + soil_floor gates only.
     let plan = quarantine_plan(&i.soil_zones, p);
-    let eff_i = with_effective_soil(i, p);
-    // Soil-floor demotion baseline (the moat), computed on the EFFECTIVE soil so a
-    // quarantined zone inferred-saturated cannot demote a rain skip. `demotes` is
-    // yard-wide (some zone healthy-dry + a demotable soft-rain skip + rain-removed
-    // leaves a run); `soft_id` names the overridden rule for provenance. Each zone
-    // then applies its OWN `zone_healthy_dry` test, so on the same morning a dry
-    // zone runs and a wet sibling skips.
-    let demotes = soil_floor_demotes(&eff_i, p, &disabled);
-    let soft_id = if demotes {
-        demotable_soft_skip_id(&eff_i, p, &disabled)
-    } else {
-        None
-    };
+    let effective = effective_soil_zones(&i.soil_zones, &plan);
+    let (_, yard_reason, yard_code) = decide_with_code(i, p);
     i.soil_zones
         .iter()
-        .zip(eff_i.soil_zones.iter())
+        .zip(effective.iter())
         .zip(plan.iter())
         .map(|((z, eff_z), quarantine)| {
-            // Sticky override beats the engine entirely for this zone. A
-            // zone-specific override wins over the global one; "run" forces
-            // the zone past every skip gate (incl. its own soil saturation),
-            // "skip" force-skips it. (The global override also already shaped
-            // gverdict via pre_soil; this per-zone pass is what lets a single
-            // zone diverge from the global decision + override soil.)
-            let (eff, scope) = match i.zone_overrides.get(&z.slug).map(String::as_str) {
-                Some("skip") => ("skip", "this zone"),
-                Some("run") => ("run", "this zone"),
-                _ => match i.global_override.as_str() {
-                    "skip" => ("skip", "global"),
-                    "run" => ("run", "global"),
-                    _ => ("auto", ""),
-                },
+            let scope = restrictions::ZoneScope {
+                slug: &z.slug,
+                sprinkler: z.sprinkler_type,
             };
-            match eff {
-                "skip" => {
-                    return ZoneVerdict {
-                        zone_slug: z.slug.clone(),
-                        zone_name: z.name.clone(),
-                        verdict: "skip".into(),
-                        reason: format!("Override: skip ({scope})"),
-                        source: "override".into(),
-                        multiplier: 1.0,
-                        reason_code: "override".into(),
-                        value: None,
-                        threshold: None,
-                    }
-                }
-                "run" => {
-                    return ZoneVerdict {
-                        zone_slug: z.slug.clone(),
-                        zone_name: z.name.clone(),
-                        verdict: "run".into(),
-                        reason: format!("Override: force run ({scope})"),
-                        source: "override".into(),
-                        multiplier: 1.0,
-                        reason_code: "override".into(),
-                        value: None,
-                        threshold: None,
-                    }
-                }
-                _ => {}
-            }
-            // Global safety/weather gate binds every zone, UNLESS the skip is a
-            // soft forecast-rain skip AND this zone is measured healthy-dry: then
-            // the zone RUNS (the moat). Hard / dry_run / saturation skips are not
-            // demotable (`demotes` is false), so they bind unchanged.
-            if gverdict == "skip" {
-                if demotes {
-                    // The dry-floor veto judges the EFFECTIVE soil: a quarantined
-                    // zone inferred-saturated is mechanically not healthy-dry, so it
-                    // cannot run on a stale low reading; a trusted genuinely-dry zone
-                    // still runs (moat intact).
-                    if let Some(pct) = zone_healthy_dry(eff_z) {
-                        let sid = soft_id.unwrap_or("rain_next_4h");
-                        return ZoneVerdict {
-                            zone_slug: z.slug.clone(),
-                            zone_name: z.name.clone(),
-                            verdict: "run".into(),
-                            reason: format!(
-                                "Soil {:.0}% < {:.0}% minimum; {} skip overridden",
-                                pct,
-                                z.target_min_pct,
-                                soft_rain_label(sid)
-                            ),
-                            source: "soil_floor".into(),
-                            multiplier: 1.0,
-                            // P1: the dry-floor moat decided this zone. Soil
-                            // operands: measured % vs the zone's dry floor.
-                            reason_code: "soil_floor".into(),
-                            value: Some(pct),
-                            threshold: Some(z.target_min_pct),
-                        };
-                    }
-                }
-                return ZoneVerdict {
-                    zone_slug: z.slug.clone(),
-                    zone_name: z.name.clone(),
-                    verdict: "skip".into(),
-                    reason: greason.clone(),
-                    source: "global".into(),
-                    multiplier: 1.0,
-                    // P1: a global gate bound this zone; carry its firing id so a
-                    // later client renders the same reason the yard-wide decision
-                    // used. No soil operands (the deciding gate is non-soil).
-                    reason_code: gcode.into(),
-                    value: None,
-                    threshold: None,
-                };
-            }
-            // Global verdict is run / run_extended. Per-zone soil saturation
-            // can still skip this individual zone, judged on the EFFECTIVE soil so
-            // a quarantined probe inherits its trustworthy siblings' reading.
-            // Honors the same operator disable id as the yard-wide gate: disabling
-            // "soil_saturation" disables soil-saturation skips everywhere.
-            if let Some(pct) = eff_z.pct.filter(|_| !disabled.contains("soil_saturation")) {
-                if pct >= eff_z.saturation_pct {
-                    // Quarantined-and-inferred zones surface the suspect-probe
-                    // provenance + source so the UI and an alerting layer can see
-                    // the verdict rode the neighbors, not this zone's own probe.
-                    // reason_code mirrors `source` here: a quarantined-and-inferred
-                    // zone's saturation decision rode the neighbors, so its code is
-                    // "soil_quarantine"; an own-probe saturation skip is
-                    // "soil_saturation". Soil operands: effective % vs saturation %.
-                    let (reason, source) = match quarantine {
-                        Some(q) => (
-                            quarantine_reason(
-                                q,
-                                &format!(
-                                    "saturated ({:.0}% \u{2265} {:.0}% threshold)",
-                                    pct, eff_z.saturation_pct
-                                ),
-                            ),
-                            "soil_quarantine",
-                        ),
-                        None => (
-                            format!(
-                                "Soil saturated ({:.0}% \u{2265} {:.0}% threshold)",
-                                pct, eff_z.saturation_pct
-                            ),
-                            "soil_saturation",
-                        ),
-                    };
-                    return ZoneVerdict {
-                        zone_slug: z.slug.clone(),
-                        zone_name: z.name.clone(),
-                        verdict: "skip".into(),
-                        reason,
-                        source: source.into(),
-                        multiplier: 1.0,
-                        reason_code: source.into(),
-                        value: Some(pct),
-                        threshold: Some(eff_z.saturation_pct),
-                    };
-                }
-            }
-            // User condition rules (augment-only).
-            let ctx = ConditionCtx { i, zone: z };
-            let outcome = apply_zone_rules(rules, &ctx);
-            if let Some((_, reason)) = outcome.skip {
-                return ZoneVerdict {
-                    zone_slug: z.slug.clone(),
-                    zone_name: z.name.clone(),
-                    verdict: "skip".into(),
-                    reason,
-                    source: "condition".into(),
-                    multiplier: 1.0,
-                    // P1: a user custom-condition rule skipped this zone. No
-                    // canonical engine operands (the rule's metric is user-defined).
-                    reason_code: "condition".into(),
-                    value: None,
-                    threshold: None,
-                };
-            }
-            let verdict = if gverdict == "run_extended" || outcome.extend {
-                "run_extended"
-            } else {
-                "run"
+            let mut own = Inputs {
+                soil_zones: vec![eff_z.clone()],
+                ..i.clone()
             };
-            let touched = outcome.extend || (outcome.multiplier - 1.0).abs() > 1e-9;
-            // P1: a clean run carries the global firing id ("run" when nothing
-            // fired, "heat_advisory" on a run_extended); a custom rule that only
-            // extended/adjusted (no skip) is "condition". Mirrors `source`/verdict.
-            let reason_code = if touched { "condition" } else { gcode };
-            ZoneVerdict {
+            own.watering_restrictions
+                .retain(|r| restrictions::applies_to_zone(r, Some(scope)));
+            let override_scope = match i.zone_overrides.get(&z.slug).map(String::as_str) {
+                Some("run") if i.global_override == "skip" => "global",
+                Some(value @ ("skip" | "run")) => {
+                    own.global_override = value.into();
+                    "this zone"
+                }
+                _ => "global",
+            };
+            let original = decide_ladder(&own, p, &disabled);
+            let mut applicable = disabled.clone();
+            if z.governed_by_soil_model {
+                applicable.extend(SOIL_MODEL_INERT_GATES.iter().copied());
+                applicable.insert("heat_advisory");
+            }
+            let (verdict, reason, code) = decide_ladder(&own, p, &applicable);
+            let mut result = ZoneVerdict {
                 zone_slug: z.slug.clone(),
                 zone_name: z.name.clone(),
                 verdict: verdict.into(),
-                reason: greason.clone(),
-                source: if touched { "condition" } else { "global" }.into(),
-                multiplier: outcome.multiplier,
-                reason_code: reason_code.into(),
+                reason,
+                source: "global".into(),
+                multiplier: 1.0,
+                reason_code: code.into(),
                 value: None,
                 threshold: None,
+            };
+            if code == "override" {
+                result.source = "override".into();
+                if matches!(own.global_override.as_str(), "skip" | "run") {
+                    let action = if verdict == "skip" {
+                        "skip"
+                    } else {
+                        "force run"
+                    };
+                    result.reason = format!("Override: {action} ({override_scope})");
+                }
+                return result;
             }
+            if code == "soil_saturation" {
+                // Preserve the zone's measured provenance and operands;
+                // eligibility was decided by the same saturation rung as the yard.
+                if let Some(saturated) = zone_saturation_skip(z, eff_z, &applicable) {
+                    return saturated;
+                }
+            }
+            if code == "soil_probe" {
+                result.source = "soil_quarantine".into();
+                if let Some(q) = quarantine {
+                    result.reason = quarantine_reason(q);
+                }
+            }
+            if verdict == "skip" {
+                return result;
+            }
+            if code == "soil_floor" {
+                if let Some(pct) = zone_healthy_dry(eff_z) {
+                    let soft_id =
+                        demotable_soft_skip_id(&own, p, &applicable).unwrap_or("rain_next_4h");
+                    result.reason = format!(
+                        "Soil {:.0}% < {:.0}% minimum; {} skip overridden",
+                        pct,
+                        z.target_min_pct,
+                        soft_rain_label(soft_id)
+                    );
+                    result.source = "soil_floor".into();
+                    result.value = Some(pct);
+                    result.threshold = Some(z.target_min_pct);
+                }
+            } else if yard_code == "restrictions" {
+                result.reason =
+                    format!("Exempt from the restriction holding the yard. ({yard_reason})");
+                result.source = "exempt".into();
+                result.reason_code = "restrictions".into();
+            } else if z.governed_by_soil_model
+                && original.0 == "skip"
+                && SOIL_MODEL_INERT_GATES.contains(&original.2)
+            {
+                result.reason = format!(
+                    "Waters anyway: soil zones already count this forecast rain \
+                     against their deficit. ({})",
+                    original.1
+                );
+                result.source = "soil_model".into();
+                result.reason_code = original.2.into();
+            } else if z.governed_by_soil_model && original.2 == "heat_advisory" {
+                result.reason = format!(
+                    "Runs normally: measured water use already charges hot days into \
+                     the soil deficit. ({})",
+                    original.1
+                );
+                result.source = "soil_model".into();
+                result.reason_code = "soil_model".into();
+            }
+            let outcome = apply_zone_rules(rules, &ConditionCtx { i, zone: z });
+            if let Some((_, reason)) = outcome.skip {
+                result.verdict = "skip".into();
+                result.reason = reason;
+                result.source = "condition".into();
+                result.reason_code = "condition".into();
+                result.value = None;
+                result.threshold = None;
+                return result;
+            }
+            if outcome.extend {
+                result.verdict = "run_extended".into();
+            }
+            result.multiplier = outcome.multiplier;
+            if result.source == "global"
+                && (outcome.extend || (outcome.multiplier - 1.0).abs() > 1e-9)
+            {
+                result.source = "condition".into();
+                result.reason_code = "condition".into();
+            }
+            result
         })
         .collect()
+}
+
+/// Rain/soil recommendations a convenience force-run can set aside. The list
+/// is deliberately positive: a future safety or operator-control gate remains
+/// binding without a caller remembering to protect it.
+const FORCE_RUN_BYPASSED_GATES: &[&str] = &[
+    "rain_now",
+    "already_wet",
+    "rain_today_forecast",
+    "observed_rain",
+    "soil_saturation",
+    "rain_next_4h",
+    "tomorrow_rain",
+    "rain_3day",
+    "soil_floor",
+];
+
+fn without_force_run(i: &Inputs) -> Inputs {
+    let mut probe = i.clone();
+    if probe.global_override == "run" {
+        probe.global_override = "auto".into();
+    }
+    if probe.override_tomorrow == "run" {
+        probe.override_tomorrow = "auto".into();
+    }
+    probe
+}
+
+fn force_run_block(
+    i: &Inputs,
+    p: &SkipRuleParams,
+    disabled: &HashSet<&str>,
+) -> Option<(&'static str, String, &'static str)> {
+    let probe = without_force_run(i);
+    let mut applicable = disabled.clone();
+    applicable.extend(FORCE_RUN_BYPASSED_GATES.iter().copied());
+    let decision = decide_ladder(&probe, p, &applicable);
+    (decision.0 == "skip").then_some(decision)
 }
 
 /// Gates that run before the soil-saturation block: override, pause,
@@ -866,17 +1168,35 @@ pub fn decide_per_zone(
 /// = a gate fired (first wins); `None` = fall through to soil/weather.
 /// The control + restriction gates ignore `disabled` (PROTECTED_RULES,
 /// hard-enforced); every weather/safety gate consults it.
+const PLANNING_FORECAST_HOLD_REASON: &str =
+    "Rain forecast unavailable for the watering plan's next 24 hours; watering held";
+fn planning_forecast_unavailable(i: &Inputs) -> bool {
+    !i.soil_zones.is_empty()
+        && i.soil_zones
+            .iter()
+            .all(|zone| zone.planning_forecast_unavailable)
+}
+
 fn pre_soil(
     i: &Inputs,
     p: &SkipRuleParams,
     disabled: &HashSet<&str>,
 ) -> Option<(&'static str, String, &'static str)> {
-    // Sticky global override (highest precedence: beats the one-day override,
-    // pause, restrictions, and every weather/soil gate). "run" force-runs past
-    // all skip conditions; "skip" force-skips. "auto"/"" falls through.
+    if i.restart_required {
+        return Some((
+            "skip",
+            crate::gates_catalog::RESTART_REQUIRED_REASON.to_string(),
+            "restart_required",
+        ));
+    }
+    // Force is a rain/soil convenience override, not an implicit safety waiver.
+    // Re-evaluate the same ladder's safety and hold gates before allowing it.
     match i.global_override.as_str() {
         "skip" => return Some(("skip", "Manual override: skip".to_string(), "override")),
-        "run" => return Some(("run", "Manual override: force run".to_string(), "override")),
+        "run" => {
+            return force_run_block(i, p, disabled)
+                .or_else(|| Some(("run", "Manual override: force run".to_string(), "override")))
+        }
         _ => {}
     }
     if i.is_tomorrow {
@@ -888,12 +1208,15 @@ fn pre_soil(
                     "override",
                 ))
             }
-            "run" => return Some(("run", String::new(), "override")),
+            "run" => {
+                return force_run_block(i, p, disabled)
+                    .or_else(|| Some(("run", String::new(), "override")))
+            }
             _ => {}
         }
     }
-    if i.pause_until_epoch > 0 && i.now_epoch > 0 && i.now_epoch < i.pause_until_epoch {
-        let until = format_pause_until(i.pause_until_epoch, i.tz_offset());
+    if i.pause_until_epoch > 0 && i.now_epoch() > 0 && i.now_epoch() < i.pause_until_epoch {
+        let until = format_pause_until(i.pause_until_epoch, i.calendar);
         return Some((
             "skip",
             format!("Paused (vacation until {until})"),
@@ -912,12 +1235,15 @@ fn pre_soil(
     // UTC would otherwise shift every weekday/parity/forbidden-hours window
     // and could water on a legally banned day or block every legal morning.
     // Same fix as format_pause_until above.
-    if !i.watering_restrictions.is_empty() && i.now_epoch > 0 {
-        let tz_offset = i.tz_offset();
-        if let Some(now_local) =
-            chrono::DateTime::from_timestamp(i.now_epoch, 0).map(|dt| dt.with_timezone(&tz_offset))
+    if !i.watering_restrictions.is_empty() && i.when.is_known() {
         {
-            let v = restrictions::evaluate(now_local, &i.watering_restrictions, i.address_parity);
+            let v = restrictions::evaluate_for(
+                i.when,
+                &i.watering_restrictions,
+                i.address_parity,
+                &i.watered_days,
+                None,
+            );
             if v.skip {
                 return Some((
                     "skip",
@@ -938,6 +1264,16 @@ fn pre_soil(
             "live_data",
         ));
     }
+    if soil_probe_unavailable(i) {
+        return Some(("skip", SOIL_PROBE_HOLD_REASON.to_string(), "soil_probe"));
+    }
+    if planning_forecast_unavailable(i) {
+        return Some((
+            "skip",
+            PLANNING_FORECAST_HOLD_REASON.into(),
+            "planning_forecast",
+        ));
+    }
     // Currently raining, HARD tier: an OBSERVATION-GRADE rain reading (a LAN
     // gauge, NWS observation, or MRMS radar QPE) actively over the threshold is
     // ground truth. It binds every zone and is ordered here in pre_soil BEFORE the
@@ -948,30 +1284,28 @@ fn pre_soil(
     // stays the stable "Currently raining (...)" the unit-aware renderer mirrors;
     // the honest rain NATURE travels on the snapshot's Forecast.rain_nature badge.
     if rain_now_hard_fires(i, p, disabled) {
-        return Some((
-            "skip",
-            format!(
-                "Currently raining ({:.2} in/hr)",
-                i.rain_intensity_now_in_hr
-            ),
-            "rain_now",
-        ));
+        return Some(("skip", rain_now_reason(i), "rain_now"));
     }
-    if !disabled.contains("freeze_now") && i.temp_now_f < i.min_temp_f {
-        return Some((
-            "skip",
-            format!(
-                "Freeze risk now ({:.0}°F < {:.0}°F)",
-                i.temp_now_f, i.min_temp_f
-            ),
-            "freeze_now",
-        ));
+    if !disabled.contains("freeze_now") {
+        let (t, when) = freeze_on_trial(i);
+        if t < i.min_temp_f {
+            return Some((
+                "skip",
+                format!("Freeze risk {when} ({t:.0}°F < {:.0}°F)", i.min_temp_f),
+                "freeze_now",
+            ));
+        }
     }
     // Applicability is "do we have a forecast low at all" (Option), not a
     // numeric sentinel: a genuine low of 0 °F or colder must still skip.
+    //
+    // A post-sunrise window is exempt: it was chosen because the morning
+    // was freezing, and it was chosen for clearing the threshold through
+    // the run and the hours after it. The coming night's low is not what
+    // a mid-morning run is exposed to.
     if let Some(t24) = i
         .temp_min_24h_f
-        .filter(|_| !disabled.contains("overnight_freeze"))
+        .filter(|_| !disabled.contains("overnight_freeze") && overnight_freeze_applies(i))
     {
         if t24 < i.min_temp_f {
             return Some((
@@ -1009,24 +1343,37 @@ fn pre_soil(
             "wind_now",
         ));
     }
-    if !disabled.contains("wind_forecast")
-        && i.wind_max_today_mph > i.max_wind_mph + p.wind_forecast_slack_mph
-    {
-        return Some((
-            "skip",
-            format!(
-                "Windy day forecast (peak {:.0} mph > {:.0} + {:.0})",
-                i.wind_max_today_mph, i.max_wind_mph, p.wind_forecast_slack_mph
-            ),
-            "wind_forecast",
-        ));
+    if !disabled.contains("wind_forecast") {
+        let (peak, scope) = wind_on_trial(i);
+        if peak > i.max_wind_mph + p.wind_forecast_slack_mph {
+            return Some((
+                "skip",
+                wind_forecast_reason(scope, peak, i.max_wind_mph, p.wind_forecast_slack_mph),
+                "wind_forecast",
+            ));
+        }
     }
+    // MEASURED rain only. This gate is reactive: it answers "did enough
+    // water already land on this yard", and the only thing that can
+    // answer it is something that caught rain. The modelled figure gets
+    // its own rung below so a gaugeless install still skips, but says
+    // what kind of number it is skipping on.
     if !disabled.contains("already_wet") && i.rain_today_in >= p.already_wet_in {
         return Some((
             "skip",
-            format!("Already wet ({:.2}\" today)", i.rain_today_in),
+            format!("Already wet ({:.2}\" measured today)", i.rain_today_in),
             "already_wet",
         ));
+    }
+    // The same threshold against the model's own day total, for an
+    // install with no gauge. Named and worded as a forecast, and listed
+    // in SOIL_MODEL_INERT_GATES, because a soil-governed zone has
+    // already counted this rain against its own deficit and must not be
+    // held twice for it.
+    if !disabled.contains("rain_today_forecast")
+        && forecast_rain_fires(i.rain_today_forecast_in, p.already_wet_in, false)
+    {
+        return Some(("skip", rain_today_forecast_reason(i), "rain_today_forecast"));
     }
     // OBSERVED-recent-rain backstop (sensor-independent). A HARD skip ordered
     // here in pre_soil, BEFORE soil_saturation and the soil_floor moat, so heavy
@@ -1100,15 +1447,123 @@ fn soil_saturation(
 /// is NOT in this set, so it is never demoted). The three forecast gates follow.
 const SOIL_FLOOR_DEMOTABLE: &[&str] = &["rain_now", "rain_next_4h", "tomorrow_rain", "rain_3day"];
 
+/// The temperature the freeze gate judges, and when it is for.
+///
+/// The pre-dawn window is judged on the live reading: the run is now.
+/// A post-sunrise window was planned ahead for clearing the threshold,
+/// so it is judged on the forecast minimum across its own hours; the
+/// live reading at the pre-dawn refresh is exactly the freezing hour the
+/// window was moved to avoid.
+fn freeze_on_trial(i: &Inputs) -> (f64, &'static str) {
+    use crate::engine::dispatch_window::WindowKind;
+    match (i.run_window, i.window_min_temp_f) {
+        (WindowKind::PostSunrise, Some(t)) => (t, "during the run"),
+        _ => (i.temp_now_f, "now"),
+    }
+}
+
+/// The coming night's low binds a pre-dawn run. A post-sunrise window
+/// was chosen for clearing the threshold through the run and the hours
+/// after it, and a mid-morning run is not exposed to the next night.
+fn overnight_freeze_applies(i: &Inputs) -> bool {
+    i.run_window == crate::engine::dispatch_window::WindowKind::PreDawn
+}
+
+/// Which minutes the wind forecast gate is judging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindScope {
+    /// The hours the yard plans to water, from the hourly series.
+    RunWindow,
+    /// The whole day, because no run window is knowable.
+    Day,
+}
+
+impl WindScope {
+    fn detail(self) -> &'static str {
+        match self {
+            WindScope::RunWindow => "in the run window",
+            WindScope::Day => "today",
+        }
+    }
+}
+
+/// The wind figure the forecast gate judges, and where it came from.
+///
+/// The run window's own peak when the hourly series covers it, the day's
+/// peak otherwise. The daily peak is the whole day's worst hour, almost
+/// always an afternoon, and a yard that finishes before sunrise should
+/// not be refused for it.
+fn wind_on_trial(i: &Inputs) -> (f64, WindScope) {
+    match i.wind_window_max_mph {
+        Some(w) => (w, WindScope::RunWindow),
+        None => (i.wind_max_today_mph, WindScope::Day),
+    }
+}
+
+fn wind_forecast_reason(scope: WindScope, peak: f64, max: f64, slack: f64) -> String {
+    match scope {
+        WindScope::RunWindow => format!(
+            "Windy while the yard waters (peak {peak:.0} mph in the run window > {max:.0} + {slack:.0})"
+        ),
+        WindScope::Day => {
+            format!("Windy day forecast (peak {peak:.0} mph > {max:.0} + {slack:.0})")
+        }
+    }
+}
+
 /// The three forward-looking rain SKIP conditions, factored out so `post_soil`,
 /// `decide_traced`, and the soil-floor classifier all read ONE source of truth
 /// (no drift between the aggregate ladder and the per-zone veto). Each is the
 /// exact condition the matching gate fires on, `disabled` membership included so
 /// the predicates are self-contained.
+// Missing forecast amounts are an unavailable hold in the SAME rain rung.
+// The existing per-zone soil/force scopes can therefore waive that rung
+// deliberately; an absent forecast never turns into a new global safety gate.
+fn forecast_rain_fires(amount: Option<f64>, threshold: f64, stale: bool) -> bool {
+    amount.is_none_or(|amount| !stale && amount >= threshold)
+}
+
+struct RainAmount(Option<f64>);
+impl std::fmt::Display for RainAmount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(value) => std::fmt::Display::fmt(&value, f),
+            None => f.write_str("unknown"),
+        }
+    }
+}
+fn rain_amount(value: Option<f64>) -> RainAmount {
+    RainAmount(value)
+}
+
+fn rain_now_reason(i: &Inputs) -> String {
+    match i.rain_intensity_now_in_hr {
+        Some(rate) => format!("Currently raining ({rate:.2} in/hr)"),
+        None => "Current rain estimate unavailable; watering held".into(),
+    }
+}
+fn rain_today_forecast_reason(i: &Inputs) -> String {
+    match i.rain_today_forecast_in {
+        Some(amount) => format!("Rain forecast today ({amount:.2}\" expected, not measured)"),
+        None => "Today's rain forecast unavailable; watering held".into(),
+    }
+}
+fn rain_next_4h_reason(i: &Inputs) -> String {
+    match i.rain_next_4h_in {
+        Some(amount) => format!("Rain expected within 4h ({amount:.2}\" forecast)"),
+        None => "Rain forecast unavailable for the next 4 hours; watering held".into(),
+    }
+}
+fn rain_3day_reason(i: &Inputs) -> String {
+    match i.rain_3day_weighted_in {
+        Some(amount) => format!("Heavy rain in next 3 days ({amount:.2}\" weighted)"),
+        None => "Rain forecast unavailable for the next 3 days; watering held".into(),
+    }
+}
+
 fn rain_next_4h_fires(i: &Inputs, p: &SkipRuleParams, disabled: &HashSet<&str>) -> bool {
     !disabled.contains("rain_next_4h")
-        && !i.forecast_stale
-        && i.rain_next_4h_in >= p.rain_next_4h_skip_in
+        && forecast_rain_fires(i.rain_next_4h_in, p.rain_next_4h_skip_in, i.forecast_stale)
 }
 /// Probability weight for tomorrow's forecast rain, 0.0..=1.0. `None` (the
 /// provider reports no probability) weights the amount at FULL value:
@@ -1126,23 +1581,27 @@ fn tomorrow_prob_weight(i: &Inputs) -> f64 {
 /// actually reported one; with no probability the string claims only the
 /// forecast amount (which the gate weighted at full value).
 fn tomorrow_rain_reason(i: &Inputs) -> String {
+    let Some(amount) = i.forecast_in else {
+        return "Tomorrow's rain forecast unavailable; watering held".into();
+    };
     match i.rain_tomorrow_prob_pct {
-        Some(p) => format!(
-            "Tomorrow rain ({:.2}\" \u{d7} {}% confidence)",
-            i.forecast_in, p
-        ),
-        None => format!("Tomorrow rain ({:.2}\" forecast)", i.forecast_in),
+        Some(p) => format!("Tomorrow rain ({amount:.2}\" × {p}% confidence)"),
+        None => format!("Tomorrow rain ({amount:.2}\" forecast)"),
     }
 }
 
 fn tomorrow_rain_fires(i: &Inputs, _p: &SkipRuleParams, disabled: &HashSet<&str>) -> bool {
-    let weighted = i.forecast_in * tomorrow_prob_weight(i);
-    !disabled.contains("tomorrow_rain") && !i.forecast_stale && weighted >= i.rain_skip_in
+    let weighted = i.forecast_in.map(|amount| amount * tomorrow_prob_weight(i));
+    !disabled.contains("tomorrow_rain")
+        && forecast_rain_fires(weighted, i.rain_skip_in, i.forecast_stale)
 }
 fn rain_3day_fires(i: &Inputs, p: &SkipRuleParams, disabled: &HashSet<&str>) -> bool {
     !disabled.contains("rain_3day")
-        && !i.forecast_stale
-        && i.rain_3day_weighted_in >= p.rain_3day_factor * i.rain_skip_in
+        && forecast_rain_fires(
+            i.rain_3day_weighted_in,
+            p.rain_3day_factor * i.rain_skip_in,
+            i.forecast_stale,
+        )
 }
 /// OBSERVED-recent-rain backstop. Fires when measured rain over the recent
 /// window (today + the configured past days) reaches the user `rain_skip_in`
@@ -1168,7 +1627,9 @@ fn rain_now_is_observation_grade(i: &Inputs) -> bool {
 /// condition both the hard and soft tiers share). Honors the `rain_now` disable
 /// id so the whole gate (either tier) goes inert when the operator turns it off.
 fn rain_now_rate_fires(i: &Inputs, p: &SkipRuleParams, disabled: &HashSet<&str>) -> bool {
-    !disabled.contains("rain_now") && i.rain_intensity_now_in_hr > p.rain_now_in_hr
+    !disabled.contains("rain_now")
+        && i.rain_intensity_now_in_hr
+            .is_none_or(|rate| rate > p.rain_now_in_hr)
 }
 
 /// The "currently raining" gate as a HARD skip: the rate is over threshold AND
@@ -1188,6 +1649,15 @@ fn rain_now_hard_fires(i: &Inputs, p: &SkipRuleParams, disabled: &HashSet<&str>)
 /// moat instead of the hard pre-soil tier.
 fn rain_now_model_fires(i: &Inputs, p: &SkipRuleParams, disabled: &HashSet<&str>) -> bool {
     rain_now_rate_fires(i, p, disabled) && !rain_now_is_observation_grade(i)
+}
+
+/// Shared heat eligibility for the deciding ladder and its trace. Humidity
+/// affects the heat-index multiplier, not whether a dry heat wave needs water.
+fn heat_advisory_applies(i: &Inputs, p: &SkipRuleParams) -> bool {
+    i.temp_max_3day_f >= p.heat_advisory_temp_f
+        && i.days_since_significant_rain >= p.heat_advisory_dry_days
+        && i.rain_3day_weighted_in
+            .is_some_and(|rain| rain < 0.5 * i.rain_skip_in)
 }
 
 /// The moat's core per-zone test. A zone may demote a soft forecast-rain skip to
@@ -1293,14 +1763,7 @@ fn post_soil(
     // "Currently raining (...)" the unit-aware renderer mirrors; the honest soft
     // model-estimate phrasing rides the trace detail.
     if !floor_active && rain_now_model_fires(i, p, disabled) {
-        return (
-            "skip",
-            format!(
-                "Currently raining ({:.2} in/hr)",
-                i.rain_intensity_now_in_hr
-            ),
-            "rain_now",
-        );
+        return ("skip", rain_now_reason(i), "rain_now");
     }
     // The three forward-looking rain SKIPs below are suppressed when the
     // forecast is stale (`forecast_stale`): a frozen "rain coming" snapshot from
@@ -1308,34 +1771,40 @@ fn post_soil(
     // measured gates (rain_now from the station, already_wet, soil) still apply,
     // and freeze / heat-advisory keep their own (safe-direction) behavior.
     if !floor_active && rain_next_4h_fires(i, p, disabled) {
-        return (
-            "skip",
-            format!(
-                "Rain expected within 4h ({:.2}\" forecast)",
-                i.rain_next_4h_in
-            ),
-            "rain_next_4h",
-        );
+        return ("skip", rain_next_4h_reason(i), "rain_next_4h");
     }
     if !floor_active && tomorrow_rain_fires(i, p, disabled) {
         return ("skip", tomorrow_rain_reason(i), "tomorrow_rain");
     }
     if !floor_active && rain_3day_fires(i, p, disabled) {
-        return (
-            "skip",
-            format!(
-                "Heavy rain in next 3 days ({:.2}\" weighted)",
-                i.rain_3day_weighted_in
-            ),
-            "rain_3day",
-        );
+        return ("skip", rain_3day_reason(i), "rain_3day");
     }
-    if !disabled.contains("heat_advisory")
-        && i.temp_max_3day_f >= p.heat_advisory_temp_f
-        && i.humidity_now_pct >= p.heat_advisory_humidity_pct
-        && i.days_since_significant_rain >= p.heat_advisory_dry_days
-        && i.rain_3day_weighted_in < 0.5 * i.rain_skip_in
-    {
+    // A heat advisory no longer requires HUMID heat.
+    //
+    // This gate used to demand humidity at or above a threshold
+    // defaulting to 60%, which meant an arid yard never got a heat
+    // response at all: Phoenix at 110 F and 15% relative humidity failed
+    // the test, while a muggy Gulf Coast afternoon passed it. That is
+    // backwards. Dry heat evaporates more, not less, and the arid yard
+    // is the one that needs the extension.
+    //
+    // The remaining conditions are the ones that were always doing the
+    // work: a hot three-day peak, a dry stretch behind it, and no
+    // meaningful rain in the forecast.
+    // Above the heat advisory, and only just. The advisory returns
+    // run_extended, so with the hold BELOW it a hot dry morning watered
+    // the yard with "All watering is on hold" switched on. Everything
+    // above this point is a weather SKIP, and a weather skip stays the
+    // reported reason because it tells the owner more than the hold does
+    // and both answers are "do not water".
+    //
+    // The rule id stays `dry_run` so the gate catalog and any stored
+    // decision traces are unaffected.
+    if i.is_dry_run {
+        return ("skip", "All watering is on hold".to_string(), "dry_run");
+    }
+
+    if !disabled.contains("heat_advisory") && heat_advisory_applies(i, p) {
         return (
             "run_extended",
             format!(
@@ -1344,10 +1813,6 @@ fn post_soil(
             ),
             "heat_advisory",
         );
-    }
-
-    if i.is_dry_run {
-        return ("skip", "Dry-run mode".to_string(), "dry_run");
     }
 
     ("run", String::new(), "run")
@@ -1364,7 +1829,7 @@ fn post_soil(
 // the two functions together so they can never silently drift.
 // ─────────────────────────────────────────────────────────────────────
 
-// `RuleEval` + `DecisionTrace` live in `crate::ha::snapshot` (the shared,
+// `RuleEval` + `DecisionTrace` live in `crate::model` (the shared,
 // both-features serde contract) so the hydrate-side Rule Lab UI can read
 // them; `decide_traced` here (ssr-only) produces them.
 
@@ -1467,10 +1932,17 @@ fn gate(
 /// or pause would mask every weather slider behind the same skip.
 pub fn inputs_from_skipcheck(s: &SkipCheck) -> Inputs {
     Inputs {
+        // The wire carries both now, so the hypothetical keeps whichever
+        // number actually held the yard rather than silently dropping the
+        // modelled one and changing the verdict it is explaining.
+        rain_today_forecast_in: s.rain_today_forecast_in,
+        // Unused: `when` below is Unknown, so no gate asks the calendar
+        // anything. Named explicitly rather than defaulted so the next
+        // reader does not have to work out whether it mattered.
+        calendar: crate::engine::calendar::Calendar::utc(),
         // The wire does not round-trip the deployment offset; the
         // Simulator rebuilding from a snapshot evaluates in UTC, which is
         // deterministic and never a live decision.
-        utc_offset_seconds: 0,
         temp_now_f: s.temp_now_f,
         wind_now_mph: s.wind_now_mph,
         rain_today_in: s.rain_today_in,
@@ -1491,6 +1963,10 @@ pub fn inputs_from_skipcheck(s: &SkipCheck) -> Inputs {
         rain_next_4h_in: s.rain_next_4h_in,
         rain_observed_recent_in: s.rain_observed_recent_in,
         wind_max_today_mph: s.wind_max_today_mph,
+        wind_window_max_mph: s.wind_window_max_mph,
+        watered_days: Vec::new(),
+        run_window: s.run_window,
+        window_min_temp_f: s.window_min_temp_f,
         temp_min_24h_f: if s.temp_min_24h_valid {
             Some(s.temp_min_24h_f)
         } else {
@@ -1515,10 +1991,15 @@ pub fn inputs_from_skipcheck(s: &SkipCheck) -> Inputs {
         // assumes healthy inputs (matches the other neutralized gates).
         live_readings: LiveReadings::Station,
         // Control gates neutralized for the what-if.
+        restart_required: false,
         is_paused: false,
         is_dry_run: false,
         pause_until_epoch: 0,
-        now_epoch: 0,
+        // No clock: the control gates are neutralized for the
+        // what-if, and Unknown is what that actually means. The
+        // old spelling was 0 + 0, which claims a real instant in
+        // 1970 in a UTC deployment.
+        when: crate::engine::clock::DecisionTime::Unknown,
         override_tomorrow: String::new(),
         is_tomorrow: false,
         global_override: "auto".to_string(),
@@ -1528,7 +2009,7 @@ pub fn inputs_from_skipcheck(s: &SkipCheck) -> Inputs {
     }
 }
 
-/// P3-9: annotate each threshold gate with a plain-language "distance to flip"
+/// Annotate each threshold gate with a plain-language "distance to flip"
 /// so the Rule Lab shows how close tonight's call was, not just pass/fire.
 /// Only gates with a numeric threshold get a margin; binary control/safety
 /// gates (override, pause, restrictions, dry_run, live_data) and the run /
@@ -1595,10 +2076,10 @@ fn annotate_margins(rules: &mut [RuleEval], i: &Inputs, p: &SkipRuleParams) {
             Some((label, actual, threshold, unit_kind_for(unit), over_line))
         };
         let annotated = match r.id.as_str() {
-            "rain_now" => {
-                let (a, t) = (i.rain_intensity_now_in_hr, p.rain_now_in_hr);
+            "rain_now" => i.rain_intensity_now_in_hr.and_then(|a| {
+                let t = p.rain_now_in_hr;
                 mk(a, t, a > t, " in/hr", 2)
-            }
+            }),
             "already_wet" => {
                 let (a, t) = (i.rain_today_in, p.already_wet_in);
                 mk(a, t, a >= t, "\"", 2)
@@ -1607,36 +2088,36 @@ fn annotate_margins(rules: &mut [RuleEval], i: &Inputs, p: &SkipRuleParams) {
                 let (a, t) = (i.rain_observed_recent_in, i.rain_skip_in);
                 mk(a, t, a >= t, "\"", 2)
             }
-            "rain_next_4h" => {
-                let (a, t) = (i.rain_next_4h_in, p.rain_next_4h_skip_in);
+            "rain_next_4h" => i.rain_next_4h_in.and_then(|a| {
+                let t = p.rain_next_4h_skip_in;
                 mk(a, t, a >= t, "\"", 2)
-            }
-            "rain_3day" => {
-                let (a, t) = (i.rain_3day_weighted_in, p.rain_3day_factor * i.rain_skip_in);
+            }),
+            "rain_3day" => i.rain_3day_weighted_in.and_then(|a| {
+                let t = p.rain_3day_factor * i.rain_skip_in;
                 mk(a, t, a >= t, "\"", 2)
-            }
-            "tomorrow_rain" => {
-                let a = i.forecast_in * tomorrow_prob_weight(i);
+            }),
+            "tomorrow_rain" => i.forecast_in.and_then(|amount| {
+                let a = amount * tomorrow_prob_weight(i);
                 let t = i.rain_skip_in;
                 mk(a, t, a >= t, "\"", 2)
-            }
+            }),
             "wind_now" => {
                 let (a, t) = (i.wind_now_mph, i.max_wind_mph);
                 mk(a, t, a > t, " mph", 0)
             }
             "wind_forecast" => {
-                let (a, t) = (
-                    i.wind_max_today_mph,
-                    i.max_wind_mph + p.wind_forecast_slack_mph,
-                );
+                let (a, _) = wind_on_trial(i);
+                let t = i.max_wind_mph + p.wind_forecast_slack_mph;
                 mk(a, t, a > t, " mph", 0)
             }
             "freeze_now" => {
-                let (a, t) = (i.temp_now_f, i.min_temp_f);
+                let (a, _) = freeze_on_trial(i);
+                let t = i.min_temp_f;
                 mk(a, t, a < t, "°F", 0)
             }
             "overnight_freeze" => i
                 .temp_min_24h_f
+                .filter(|_| overnight_freeze_applies(i))
                 .and_then(|a| mk(a, i.min_temp_f, a < i.min_temp_f, "°F", 0)),
             "soil_frost" => i
                 .soil_temp_yard_min_f
@@ -1718,7 +2199,7 @@ fn unit_kind_for(unit: &str) -> &'static str {
 /// yard-wide force-run warning); per-zone `decide_per_zone` keeps its own
 /// override provenance.
 pub fn force_overrode_guard(i: &Inputs, p: &SkipRuleParams) -> Option<String> {
-    if i.global_override.as_str() != "run" {
+    if i.global_override.as_str() != "run" || decide_with_code(i, p).0 == "skip" {
         return None;
     }
     // Neutralize ONLY the global override; everything else (pause, dry_run,
@@ -1739,6 +2220,25 @@ pub fn force_overrode_guard(i: &Inputs, p: &SkipRuleParams) -> Option<String> {
 /// Traced twin of `decide`. Returns the same verdict + reason plus the
 /// full per-rule provenance. Order and conditions mirror `decide`.
 pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
+    let force_requested = i.global_override == "run"
+        || (i.global_override != "skip" && i.is_tomorrow && i.override_tomorrow == "run");
+    if force_requested && force_run_block(&with_effective_soil(i, p), p, &disabled_set(p)).is_some()
+    {
+        // Trace the exact same scoped evaluation that refused the force request.
+        // Keeping the request row visible explains why an armed force still holds.
+        let mut scoped_params = p.clone();
+        scoped_params
+            .disabled_rules
+            .extend(FORCE_RUN_BYPASSED_GATES.iter().map(|id| (*id).to_string()));
+        let mut trace = decide_traced(&without_force_run(i), &scoped_params);
+        if let Some(override_row) = trace.rules.iter_mut().find(|r| r.id == "override") {
+            if override_row.outcome != "fired" {
+                override_row.detail =
+                    "force run requested; safety checks and operator holds still apply".into();
+            }
+        }
+        return trace;
+    }
     let mut rules: Vec<RuleEval> = Vec::with_capacity(18);
     let mut decided: Option<(String, String)> = None;
     // Operator-disabled built-in rules (protected ids already filtered
@@ -1748,7 +2248,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
     // post_soil exactly; the parity tests pin the two ladders together.
     let disabled = disabled_set(p);
 
-    // Quarantine-inferred effective soil, shared with decide()/decide_per_zone so
+    // Quarantine-filtered effective soil, shared with decide()/decide_per_zone so
     // every soil-gate path judges identical soil. ONLY soil_zones differs from
     // `i`; the soil_saturation gate, the soil_floor demotion state, and the
     // soil_saturation margin all read `eff`, while every other gate keeps reading
@@ -1778,6 +2278,24 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
     } else {
         "no measured-dry zone; soft forecast-rain skip applies".to_string()
     };
+
+    gate(
+        &mut rules,
+        &mut decided,
+        &disabled,
+        "restart_required",
+        "Restart required",
+        "control",
+        true,
+        i.restart_required,
+        if i.restart_required {
+            crate::gates_catalog::RESTART_REQUIRED_REASON.to_string()
+        } else {
+            "startup configuration is active".to_string()
+        },
+        "skip",
+        crate::gates_catalog::RESTART_REQUIRED_REASON.to_string(),
+    );
 
     // Manual override (sticky global override + the tomorrow cell), one row.
     //
@@ -1866,15 +2384,15 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
         "pause_until",
         "Vacation pause (timed)",
         "control",
-        i.pause_until_epoch > 0 && i.now_epoch > 0,
-        i.now_epoch < i.pause_until_epoch,
+        i.pause_until_epoch > 0 && i.now_epoch() > 0,
+        i.now_epoch() < i.pause_until_epoch,
         // Stable, readable detail. The old "now {now_epoch} vs until {x}" baked
         // the live clock into the trace, so the decision_trace mutated every
-        // ~10s tick and defeated the P3-2 SSE change-gate (and read as noise).
+        // ~10s tick and defeated the SSE change-gate (and read as noise).
         if i.pause_until_epoch > 0 {
             format!(
                 "until {}",
-                format_pause_until(i.pause_until_epoch, i.tz_offset())
+                format_pause_until(i.pause_until_epoch, i.calendar)
             )
         } else {
             "no timed pause set".to_string()
@@ -1882,7 +2400,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
         "skip",
         format!(
             "Paused (vacation until {})",
-            format_pause_until(i.pause_until_epoch, i.tz_offset())
+            format_pause_until(i.pause_until_epoch, i.calendar)
         ),
     );
 
@@ -1903,28 +2421,20 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
 
     // Jurisdictional / HOA watering restrictions.
     {
-        let applicable = !i.watering_restrictions.is_empty() && i.now_epoch > 0;
-        // TZ: configured deployment timezone, not chrono::Local. Mirrors
-        // pre_soil so the trace matches the live decision.
-        let tz_offset = i.tz_offset();
+        let applicable = !i.watering_restrictions.is_empty() && i.when.is_known();
         let (cond, reason) = if applicable {
-            match chrono::DateTime::from_timestamp(i.now_epoch, 0)
-                .map(|dt| dt.with_timezone(&tz_offset))
-            {
-                Some(now_local) => {
-                    let v = restrictions::evaluate(
-                        now_local,
-                        &i.watering_restrictions,
-                        i.address_parity,
-                    );
-                    (
-                        v.skip,
-                        v.reason
-                            .unwrap_or_else(|| "Watering restriction".to_string()),
-                    )
-                }
-                None => (false, String::new()),
-            }
+            let v = restrictions::evaluate_for(
+                i.when,
+                &i.watering_restrictions,
+                i.address_parity,
+                &i.watered_days,
+                None,
+            );
+            (
+                v.skip,
+                v.reason
+                    .unwrap_or_else(|| "Watering restriction".to_string()),
+            )
         } else {
             (false, String::new())
         };
@@ -1955,14 +2465,48 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
         true,
         i.live_readings == LiveReadings::Unavailable,
         match i.live_readings {
-            LiveReadings::Station => "live station readings".to_string(),
-            LiveReadings::ForecastFallback => {
-                "station stale/absent; using forecast current-hour values (degraded)".to_string()
-            }
+            LiveReadings::Station => "measured current readings".to_string(),
+            LiveReadings::ForecastFallback => "estimated current weather (degraded)".to_string(),
             LiveReadings::Unavailable => "no station data and no forecast".to_string(),
         },
         "skip",
         "Live weather unavailable (no station data or forecast); failing safe".to_string(),
+    );
+
+    gate(
+        &mut rules,
+        &mut decided,
+        &disabled,
+        "soil_probe",
+        "Soil probe availability",
+        "safety",
+        true,
+        soil_probe_unavailable(&eff),
+        if soil_probe_unavailable(&eff) {
+            SOIL_PROBE_HOLD_REASON.to_string()
+        } else {
+            "no probe fault holds every zone in this scope".to_string()
+        },
+        "skip",
+        SOIL_PROBE_HOLD_REASON.to_string(),
+    );
+
+    gate(
+        &mut rules,
+        &mut decided,
+        &disabled,
+        "planning_forecast",
+        "Watering-plan rain availability",
+        "soil",
+        true,
+        planning_forecast_unavailable(&eff),
+        if planning_forecast_unavailable(&eff) {
+            PLANNING_FORECAST_HOLD_REASON.into()
+        } else {
+            "no scoped watering plan is held for missing rain evidence".into()
+        },
+        "skip",
+        PLANNING_FORECAST_HOLD_REASON.into(),
     );
 
     // Currently raining. Fires (skip) for an OBSERVATION-GRADE rate over the
@@ -1990,13 +2534,11 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
         rain_now_hard_fires(i, p, &disabled) || (rain_now_model_fires(i, p, &disabled) && !demotes),
         format!(
             "{:.2} in/hr vs {:.2} threshold",
-            i.rain_intensity_now_in_hr, p.rain_now_in_hr
+            rain_amount(i.rain_intensity_now_in_hr),
+            p.rain_now_in_hr
         ),
         "skip",
-        format!(
-            "Currently raining ({:.2} in/hr)",
-            i.rain_intensity_now_in_hr
-        ),
+        rain_now_reason(i),
     );
 
     // Freeze risk now.
@@ -2008,19 +2550,30 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
         "Freeze risk now",
         "safety",
         true,
-        i.temp_now_f < i.min_temp_f,
-        format!("{:.0}°F vs {:.0}°F min", i.temp_now_f, i.min_temp_f),
+        freeze_on_trial(i).0 < i.min_temp_f,
+        {
+            // The pre-dawn detail keeps its exact historical shape; the
+            // renderer reconstructs it byte for byte. A post-sunrise
+            // window names its hours.
+            let (t, when) = freeze_on_trial(i);
+            if when == "now" {
+                format!("{t:.0}°F vs {:.0}°F min", i.min_temp_f)
+            } else {
+                format!("{t:.0}°F {when} vs {:.0}°F min", i.min_temp_f)
+            }
+        },
         "skip",
-        format!(
-            "Freeze risk now ({:.0}°F < {:.0}°F)",
-            i.temp_now_f, i.min_temp_f
-        ),
+        {
+            let (t, when) = freeze_on_trial(i);
+            format!("Freeze risk {when} ({t:.0}°F < {:.0}°F)", i.min_temp_f)
+        },
     );
 
     // Overnight freeze look-ahead. Applicable only when a 24h forecast
     // low exists; a genuine 0 °F (or colder) low still fires the rule.
     {
         let t24 = i.temp_min_24h_f;
+        let applies = overnight_freeze_applies(i);
         gate(
             &mut rules,
             &mut decided,
@@ -2028,11 +2581,12 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
             "overnight_freeze",
             "Overnight freeze",
             "safety",
-            t24.is_some(),
-            t24.map(|t| t < i.min_temp_f).unwrap_or(false),
-            match t24 {
-                Some(t) => format!("24h low {:.0}°F vs {:.0}°F min", t, i.min_temp_f),
-                None => "no 24h forecast low".to_string(),
+            t24.is_some() && applies,
+            applies && t24.map(|t| t < i.min_temp_f).unwrap_or(false),
+            match (applies, t24) {
+                (false, _) => "post-sunrise window; judged by its own hours".to_string(),
+                (true, Some(t)) => format!("24h low {:.0}°F vs {:.0}°F min", t, i.min_temp_f),
+                (true, None) => "no 24h forecast low".to_string(),
             },
             "skip",
             format!(
@@ -2095,16 +2649,23 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
         "Windy day forecast",
         "weather",
         true,
-        i.wind_max_today_mph > i.max_wind_mph + p.wind_forecast_slack_mph,
-        format!(
-            "peak {:.0} mph vs {:.0}+{:.0}",
-            i.wind_max_today_mph, i.max_wind_mph, p.wind_forecast_slack_mph
-        ),
+        wind_on_trial(i).0 > i.max_wind_mph + p.wind_forecast_slack_mph,
+        {
+            let (peak, scope) = wind_on_trial(i);
+            format!(
+                "peak {:.0} mph {} vs {:.0}+{:.0} (day peak {:.0})",
+                peak,
+                scope.detail(),
+                i.max_wind_mph,
+                p.wind_forecast_slack_mph,
+                i.wind_max_today_mph
+            )
+        },
         "skip",
-        format!(
-            "Windy day forecast (peak {:.0} mph > {:.0} + {:.0})",
-            i.wind_max_today_mph, i.max_wind_mph, p.wind_forecast_slack_mph
-        ),
+        {
+            let (peak, scope) = wind_on_trial(i);
+            wind_forecast_reason(scope, peak, i.max_wind_mph, p.wind_forecast_slack_mph)
+        },
     );
 
     // Already wet today.
@@ -2118,11 +2679,32 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
         true,
         i.rain_today_in >= p.already_wet_in,
         format!(
-            "{:.2}\" today vs {:.2}\" floor",
+            "{:.2}\" measured today vs {:.2}\" floor",
             i.rain_today_in, p.already_wet_in
         ),
         "skip",
-        format!("Already wet ({:.2}\" today)", i.rain_today_in),
+        format!("Already wet ({:.2}\" measured today)", i.rain_today_in),
+    );
+
+    // The modelled twin, so the trace shows WHICH of the two rain numbers
+    // held the yard. Without a row here the decision trace would show the
+    // measured gate not firing and no reason for the skip.
+    gate(
+        &mut rules,
+        &mut decided,
+        &disabled,
+        "rain_today_forecast",
+        "Rain forecast today",
+        "weather",
+        true,
+        forecast_rain_fires(i.rain_today_forecast_in, p.already_wet_in, false),
+        format!(
+            "{:.2}\" expected today vs {:.2}\" floor",
+            rain_amount(i.rain_today_forecast_in),
+            p.already_wet_in
+        ),
+        "skip",
+        rain_today_forecast_reason(i),
     );
 
     // Observed recent rain (sensor-independent backstop). Mirrors pre_soil's
@@ -2153,7 +2735,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
 
     // Yard-wide soil saturation. Generalized to iterate the configured
     // zones; applicable only when at least one zone exists and every zone
-    // reports a reading. Judged on the EFFECTIVE (quarantine-inferred) soil so
+    // reports a reading. Judged on the EFFECTIVE (quarantine-filtered) soil so
     // the trace's verdict matches decide()'s `soil_saturation(&eff, ...)`: an
     // offline/outlier probe inheriting its trustworthy siblings' median can now
     // make the gate applicable + fire.
@@ -2235,35 +2817,31 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
         !demotes && rain_next_4h_fires(i, p, &disabled),
         format!(
             "{:.2}\" next 4h vs {:.2}\" skip",
-            i.rain_next_4h_in, p.rain_next_4h_skip_in
+            rain_amount(i.rain_next_4h_in),
+            p.rain_next_4h_skip_in
         ),
         "skip",
-        format!(
-            "Rain expected within 4h ({:.2}\" forecast)",
-            i.rain_next_4h_in
-        ),
+        rain_next_4h_reason(i),
     );
 
     // Tomorrow rain (confidence-weighted).
     {
-        let weighted = i.forecast_in * tomorrow_prob_weight(i);
-        // The detail names the weighting honestly per case: a provider gap
-        // (None) takes the amount at full weight and says so (the #4a
-        // "phantom 0% confidence" row used to render here); a REPORTED 0%
-        // can never fire (weighted is 0) and states that plainly.
-        let detail = match i.rain_tomorrow_prob_pct {
-            Some(0) if i.forecast_in > 0.0 => format!(
-                "{:.2}\" forecast at a reported 0% probability (does not skip)",
-                i.forecast_in
-            ),
-            Some(prob) => format!(
-                "{:.2}\" × {}% = {:.2}\" vs {:.2}\"",
-                i.forecast_in, prob, weighted, i.rain_skip_in
-            ),
-            None => format!(
-                "{:.2}\" at full weight (no probability reported) vs {:.2}\"",
-                i.forecast_in, i.rain_skip_in
-            ),
+        let detail = match i.forecast_in {
+            None => "Tomorrow's rain amount is unavailable".into(),
+            Some(amount) => match i.rain_tomorrow_prob_pct {
+                Some(0) if amount > 0.0 => {
+                    format!("{amount:.2}\" forecast at a reported 0% probability (does not skip)")
+                }
+                Some(prob) => format!(
+                    "{amount:.2}\" × {prob}% = {:.2}\" vs {:.2}\"",
+                    amount * tomorrow_prob_weight(i),
+                    i.rain_skip_in
+                ),
+                None => format!(
+                    "{amount:.2}\" at full weight (no probability reported) vs {:.2}\"",
+                    i.rain_skip_in
+                ),
+            },
         };
         gate(
             &mut rules,
@@ -2292,14 +2870,11 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
         !demotes && rain_3day_fires(i, p, &disabled),
         format!(
             "{:.2}\" weighted vs {:.2}\"",
-            i.rain_3day_weighted_in,
+            rain_amount(i.rain_3day_weighted_in),
             p.rain_3day_factor * i.rain_skip_in
         ),
         "skip",
-        format!(
-            "Heavy rain in next 3 days ({:.2}\" weighted)",
-            i.rain_3day_weighted_in
-        ),
+        rain_3day_reason(i),
     );
 
     // Soil floor (the moat): a measured-dry zone demotes the soft forecast-rain
@@ -2321,6 +2896,21 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
         String::new(),
     );
 
+    // Dry-run mode.
+    gate(
+        &mut rules,
+        &mut decided,
+        &disabled,
+        "dry_run",
+        "Hold all watering",
+        "control",
+        true,
+        i.is_dry_run,
+        format!("dry_run = {}", i.is_dry_run),
+        "skip",
+        "All watering is on hold".to_string(),
+    );
+
     // Heat advisory -> extend the run.
     gate(
         &mut rules,
@@ -2330,10 +2920,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
         "Heat advisory",
         "heat",
         true,
-        i.temp_max_3day_f >= p.heat_advisory_temp_f
-            && i.humidity_now_pct >= p.heat_advisory_humidity_pct
-            && i.days_since_significant_rain >= p.heat_advisory_dry_days
-            && i.rain_3day_weighted_in < 0.5 * i.rain_skip_in,
+        heat_advisory_applies(i, p),
         format!(
             "peak {:.0}°F, RH {:.0}%, {} dry days",
             i.temp_max_3day_f, i.humidity_now_pct, i.days_since_significant_rain
@@ -2345,25 +2932,10 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
         ),
     );
 
-    // Dry-run mode.
-    gate(
-        &mut rules,
-        &mut decided,
-        &disabled,
-        "dry_run",
-        "Dry-run mode",
-        "control",
-        true,
-        i.is_dry_run,
-        format!("dry_run = {}", i.is_dry_run),
-        "skip",
-        "Dry-run mode".to_string(),
-    );
-
-    // P3-9: fill in each threshold gate's distance-to-flip now that the full
+    // Fill in each threshold gate's distance-to-flip now that the full
     // ladder is built (so "fired vs passed" is settled before we phrase it).
     // `eff` differs from `i` only in soil_zones, so every non-soil margin is
-    // identical; the soil_saturation margin reads the effective (inferred) soil
+    // identical; the soil_saturation margin reads the effective soil
     // to match the gate it annotates.
     annotate_margins(&mut rules, &eff, p);
 
@@ -2392,7 +2964,13 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
         // 100% on every healthy chain install when this also tripped on
         // ForecastFallback, making the metric useless and training users to
         // ignore the daily "backup data" qualifier on the day it is real.
-        degraded: i.live_readings == LiveReadings::Unavailable || i.forecast_stale,
+        degraded: i.live_readings == LiveReadings::Unavailable
+            || i.forecast_stale
+            || i.rain_today_forecast_in.is_none()
+            || i.forecast_in.is_none()
+            || i.rain_next_4h_in.is_none()
+            || i.rain_3day_weighted_in.is_none()
+            || i.rain_intensity_now_in_hr.is_none(),
         reason_code,
         rules,
     }
@@ -2409,7 +2987,7 @@ mod tests {
     /// STRICTLY below the floor.
     #[test]
     fn the_probe_band_matches_the_gate_operators_at_the_edges() {
-        use crate::ha::snapshot::{SoilBand, SoilForecast};
+        use crate::model::{SoilBand, SoilForecast};
         let fc = |pct: f64| SoilForecast {
             zone_slug: "z".into(),
             current_pct: Some(pct),
@@ -2444,8 +3022,8 @@ mod tests {
         let mut i = base();
         // A yard whose soil floor demotes a forecast-rain skip: gates sit
         // over their own thresholds while a stronger rule holds the call.
-        i.rain_next_4h_in = 1.0;
-        i.rain_3day_weighted_in = 3.0;
+        i.rain_next_4h_in = Some(1.0);
+        i.rain_3day_weighted_in = Some(3.0);
         i.rain_today_in = 1.0;
         let trace = decide_traced(&i, &SkipRuleParams::default());
         let mut checked = 0;
@@ -2473,7 +3051,7 @@ mod tests {
     /// show it for an unrelated skip.
     #[test]
     fn the_pause_codes_are_exactly_what_the_ui_treats_as_paused() {
-        use crate::ha::snapshot::is_pause_code;
+        use crate::model::is_pause_code;
         let mut i = base();
         i.is_paused = true;
         let toggle = evaluate_with(&i, &SkipRuleParams::default());
@@ -2482,8 +3060,11 @@ mod tests {
 
         let mut i = base();
         i.is_paused = false;
-        i.now_epoch = 1_700_000_000;
-        i.pause_until_epoch = i.now_epoch + 86_400;
+        i.when = crate::engine::clock::DecisionTime::at(
+            crate::engine::calendar::Calendar::utc(),
+            1_700_000_000,
+        );
+        i.pause_until_epoch = i.now_epoch() + 86_400;
         let timed = evaluate_with(&i, &SkipRuleParams::default());
         assert_eq!(timed.reason_code, "pause_until");
         assert!(is_pause_code(&timed.reason_code));
@@ -2508,7 +3089,7 @@ mod tests {
     fn soil_fields_generalize_to_any_zone_slug() {
         // A zone with a non-default slug must surface soil_<slug>_pct +
         // saturation_<slug>_pct (the manifest reads these), and round-trip back.
-        // P1-2: a non-default per-zone floor (42%, not the 30% default) must
+        // A non-default per-zone floor (42%, not the 30% default) must
         // survive the round-trip; the pre-fix rebuild hardcoded 30.0 and silently
         // dropped it in the simulator's what-if.
         let zones = vec![ZoneSoil {
@@ -2517,12 +3098,16 @@ mod tests {
             pct: Some(33.0),
             saturation_pct: 65.0,
             target_min_pct: 42.0,
+            probe_configured: false,
+            governed_by_soil_model: false,
+            planning_forecast_unavailable: false,
+            sprinkler_type: Default::default(),
         }];
         let m = build_soil_fields(&zones);
         assert_eq!(m.get("soil_vegetable_garden_pct"), Some(&Some(33.0)));
         assert_eq!(m.get("saturation_vegetable_garden_pct"), Some(&Some(65.0)));
         assert_eq!(m.get("target_vegetable_garden_pct"), Some(&Some(42.0)));
-        let sc = crate::ha::snapshot::SkipCheck {
+        let sc = crate::model::SkipCheck {
             soil_fields: m,
             ..Default::default()
         };
@@ -2541,7 +3126,7 @@ mod tests {
     fn rebuild_soil_zones_floor_defaults_to_30_when_absent() {
         // Backward compatibility: an older serialized SkipCheck (or a demo
         // fixture) written before target_* still rebuilds with the 30% default.
-        let sc = crate::ha::snapshot::SkipCheck {
+        let sc = crate::model::SkipCheck {
             soil_fields: std::collections::BTreeMap::from([
                 ("soil_back_yard_pct".to_string(), Some(25.0)),
                 ("saturation_back_yard_pct".to_string(), Some(70.0)),
@@ -2555,26 +3140,31 @@ mod tests {
 
     fn base() -> Inputs {
         Inputs {
+            rain_today_forecast_in: Some(0.0),
             // Fixtures evaluate in UTC so a restriction window means the
             // same thing on every machine.
-            utc_offset_seconds: 0,
+            calendar: crate::engine::calendar::Calendar::utc(),
             temp_now_f: 70.0,
             wind_now_mph: 3.0,
             rain_today_in: 0.0,
-            rain_intensity_now_in_hr: 0.0,
+            rain_intensity_now_in_hr: Some(0.0),
             // The historical fixture assumed a live LAN gauge drove the rain rate,
             // so default the nature to Measured (observation-grade). A test that
             // sets rain_intensity_now_in_hr thus exercises the HARD rain_now skip
             // by default; the model-rain (soft) tests set rain_nature = Model.
             rain_nature: RainNature::Measured,
             humidity_now_pct: 55.0,
-            forecast_in: 0.0,
+            forecast_in: Some(0.0),
             rain_tomorrow_prob_pct: None,
-            rain_3day_weighted_in: 0.0,
-            rain_7day_weighted_in: 0.0,
-            rain_next_4h_in: 0.0,
+            rain_3day_weighted_in: Some(0.0),
+            rain_7day_weighted_in: Some(0.0),
+            rain_next_4h_in: Some(0.0),
             rain_observed_recent_in: 0.0,
             wind_max_today_mph: 6.0,
+            wind_window_max_mph: None,
+            watered_days: Vec::new(),
+            run_window: Default::default(),
+            window_min_temp_f: None,
             temp_min_24h_f: Some(60.0),
             temp_max_3day_f: 80.0,
             heat_index_max_3day_f: 0.0,
@@ -2588,10 +3178,14 @@ mod tests {
             frost_skip_soil_f: 35.0,
             live_readings: LiveReadings::Station,
             forecast_stale: false,
+            restart_required: false,
             is_paused: false,
             is_dry_run: false,
             pause_until_epoch: 0,
-            now_epoch: 1_700_000_000,
+            when: crate::engine::clock::DecisionTime::at(
+                crate::engine::calendar::Calendar::utc(),
+                1_700_000_000,
+            ),
             override_tomorrow: String::new(),
             is_tomorrow: false,
             global_override: "auto".to_string(),
@@ -2601,7 +3195,7 @@ mod tests {
         }
     }
 
-    // P0-2: a stale forecast must not fabricate a forward-looking rain skip (it
+    // A stale forecast must not fabricate a forward-looking rain skip (it
     // would starve the yard during an outage), and it must mark the trace degraded
     // so the confidence is honest. Mirror with a fresh forecast that DOES skip.
     #[test]
@@ -2609,7 +3203,7 @@ mod tests {
         let p = SkipRuleParams::default();
         let mut i = base();
         // Heavy 3-day rain that, with a fresh forecast, fires the rain_3day skip.
-        i.rain_3day_weighted_in = 5.0;
+        i.rain_3day_weighted_in = Some(5.0);
 
         i.forecast_stale = false;
         let fresh = decide_traced(&i, &p);
@@ -2668,6 +3262,10 @@ mod tests {
                 pct: b,
                 saturation_pct: 70.0,
                 target_min_pct: 30.0,
+                probe_configured: false,
+                governed_by_soil_model: false,
+                planning_forecast_unavailable: false,
+                sprinkler_type: Default::default(),
             },
             ZoneSoil {
                 slug: "front_yard".into(),
@@ -2675,6 +3273,10 @@ mod tests {
                 pct: f,
                 saturation_pct: 70.0,
                 target_min_pct: 30.0,
+                probe_configured: false,
+                governed_by_soil_model: false,
+                planning_forecast_unavailable: false,
+                sprinkler_type: Default::default(),
             },
             ZoneSoil {
                 slug: "side_yard".into(),
@@ -2682,6 +3284,10 @@ mod tests {
                 pct: s,
                 saturation_pct: 70.0,
                 target_min_pct: 30.0,
+                probe_configured: false,
+                governed_by_soil_model: false,
+                planning_forecast_unavailable: false,
+                sprinkler_type: Default::default(),
             },
             ZoneSoil {
                 slug: "back_yard_shrubs".into(),
@@ -2689,6 +3295,10 @@ mod tests {
                 pct: sh,
                 saturation_pct: 85.0,
                 target_min_pct: 25.0,
+                probe_configured: false,
+                governed_by_soil_model: false,
+                planning_forecast_unavailable: false,
+                sprinkler_type: Default::default(),
             },
         ]
     }
@@ -2703,7 +3313,7 @@ mod tests {
             f(&mut i);
             scenarios.push(i);
         };
-        push(|i| i.rain_intensity_now_in_hr = 0.05);
+        push(|i| i.rain_intensity_now_in_hr = Some(0.05));
         push(|i| i.temp_now_f = 30.0);
         push(|i| {
             i.temp_now_f = 50.0;
@@ -2712,6 +3322,18 @@ mod tests {
         push(|i| i.temp_min_24h_f = None);
         push(|i| i.live_readings = LiveReadings::ForecastFallback);
         push(|i| i.live_readings = LiveReadings::Unavailable);
+        push(|i| i.restart_required = true);
+        push(|i| i.rain_today_forecast_in = None);
+        push(|i| i.rain_next_4h_in = None);
+        push(|i| i.forecast_in = None);
+        push(|i| i.rain_3day_weighted_in = None);
+        push(|i| i.rain_intensity_now_in_hr = None);
+        push(|i| {
+            i.soil_zones = vec![ZoneSoil {
+                planning_forecast_unavailable: true,
+                ..Default::default()
+            }]
+        });
         push(|i| i.soil_temp_yard_min_f = Some(33.0));
         push(|i| i.wind_now_mph = 20.0);
         push(|i| i.wind_max_today_mph = 30.0);
@@ -2720,17 +3342,17 @@ mod tests {
         push(|i| {
             i.soil_zones = soil4(Some(80.0), Some(80.0), Some(80.0), Some(90.0));
         });
-        push(|i| i.rain_next_4h_in = 0.20);
+        push(|i| i.rain_next_4h_in = Some(0.20));
         push(|i| {
-            i.forecast_in = 0.40;
+            i.forecast_in = Some(0.40);
             i.rain_tomorrow_prob_pct = Some(90);
         });
-        push(|i| i.rain_3day_weighted_in = 1.0);
+        push(|i| i.rain_3day_weighted_in = Some(1.0));
         push(|i| {
             i.temp_max_3day_f = 98.0;
             i.humidity_now_pct = 70.0;
             i.days_since_significant_rain = 3;
-            i.rain_3day_weighted_in = 0.0;
+            i.rain_3day_weighted_in = Some(0.0);
         });
         push(|i| i.is_dry_run = true);
         push(|i| i.is_paused = true);
@@ -2747,7 +3369,7 @@ mod tests {
         // zone -> decide() and decide_traced must agree on ("run","") with only
         // the soil_floor gate firing.
         push(|i| {
-            i.rain_next_4h_in = 0.50;
+            i.rain_next_4h_in = Some(0.50);
             i.soil_zones = soil4(Some(20.0), Some(45.0), Some(45.0), Some(45.0));
         });
         // Sticky global override (the #3 fix): the trace ladder must honor it as
@@ -2761,6 +3383,141 @@ mod tests {
             i.min_temp_f = 35.0;
         });
         scenarios
+    }
+
+    #[test]
+    fn missing_rain_holds_its_enabled_rung_and_known_zero_does_not() {
+        type Missing = fn(&mut Inputs);
+        let cases: &[(&str, Missing)] = &[
+            ("rain_today_forecast", |i| i.rain_today_forecast_in = None),
+            ("rain_next_4h", |i| i.rain_next_4h_in = None),
+            ("tomorrow_rain", |i| i.forecast_in = None),
+            ("rain_3day", |i| i.rain_3day_weighted_in = None),
+            ("rain_now", |i| i.rain_intensity_now_in_hr = None),
+        ];
+        for (id, missing) in cases {
+            let mut input = base();
+            assert_eq!(
+                evaluate_with(&input, &SkipRuleParams::default()).verdict,
+                "run"
+            );
+            missing(&mut input);
+            let result = evaluate_with(&input, &SkipRuleParams::default());
+            assert_eq!(result.reason_code, *id);
+            assert!(result.will_skip && result.reason.contains("unavailable"));
+            let trace = decide_traced(&input, &SkipRuleParams::default());
+            assert_eq!(trace.reason_code, result.reason_code);
+            assert_eq!(trace.reason, result.reason);
+            assert!(trace.degraded);
+            let row = trace.rules.iter().find(|row| row.id == *id).unwrap();
+            assert!(
+                row.margin_label.is_none(),
+                "unknown rain has no numeric headroom"
+            );
+            let mut params = SkipRuleParams::default();
+            params.disabled_rules.push((*id).into());
+            assert_eq!(
+                evaluate_with(&input, &params).verdict,
+                "run",
+                "{id} stays in its disable scope"
+            );
+        }
+        let mut hot = base();
+        hot.temp_max_3day_f = 99.0;
+        hot.days_since_significant_rain = 10;
+        hot.rain_3day_weighted_in = None;
+        let mut params = SkipRuleParams::default();
+        params.disabled_rules.push("rain_3day".into());
+        assert_eq!(
+            evaluate_with(&hot, &params).verdict,
+            "run",
+            "unknown cannot earn a heat extension"
+        );
+        hot.rain_3day_weighted_in = Some(0.0);
+        assert_eq!(evaluate_with(&hot, &params).verdict, "run_extended");
+    }
+
+    #[cfg(feature = "ssr")]
+    #[test]
+    fn planning_rain_hold_is_scoped_and_force_cannot_revive_an_unavailable_plan() {
+        let mut input = base();
+        input.soil_zones = vec![
+            ZoneSoil {
+                slug: "held".into(),
+                name: "Held".into(),
+                planning_forecast_unavailable: true,
+                ..Default::default()
+            },
+            ZoneSoil {
+                slug: "ready".into(),
+                name: "Ready".into(),
+                ..Default::default()
+            },
+        ];
+        input.global_override = "run".into();
+        let mut params = SkipRuleParams::default();
+        params.disabled_rules.push("planning_forecast".into());
+        for soil in [false, true] {
+            input.soil_zones[0].governed_by_soil_model = soil;
+            let answer = evaluate_decisions(&input, &params, &[], &CompiledScripts::compile(&[]));
+            assert_eq!(zv(&answer.zones, "held").reason_code, "planning_forecast");
+            assert_eq!(zv(&answer.zones, "held").verdict, "skip");
+            assert_eq!(zv(&answer.zones, "ready").verdict, "run");
+            assert!(!answer.skip_check.will_skip, "only the affected zone holds");
+            let roundtrip = inputs_from_skipcheck(&answer.skip_check);
+            assert!(
+                roundtrip
+                    .soil_zones
+                    .iter()
+                    .find(|zone| zone.slug == "held")
+                    .unwrap()
+                    .planning_forecast_unavailable
+            );
+        }
+        input.soil_zones[1].planning_forecast_unavailable = true;
+        let answer = evaluate_decisions(&input, &params, &[], &CompiledScripts::compile(&[]));
+        assert_eq!(answer.skip_check.reason_code, "planning_forecast");
+        assert_eq!(answer.trace.reason_code, "planning_forecast");
+        assert!(answer.zones.iter().all(|zone| zone.verdict == "skip"));
+    }
+
+    #[test]
+    fn soil_model_can_ignore_missing_daily_rain_when_its_own_plan_has_evidence() {
+        let mut input = base();
+        input.forecast_in = None;
+        input.rain_3day_weighted_in = None;
+        input.soil_zones = vec![
+            ZoneSoil {
+                slug: "soil".into(),
+                governed_by_soil_model: true,
+                ..Default::default()
+            },
+            ZoneSoil {
+                slug: "weekly".into(),
+                ..Default::default()
+            },
+        ];
+        let zones = decide_per_zone(&input, &SkipRuleParams::default(), &[]);
+        assert_eq!(zv(&zones, "soil").verdict, "run");
+        assert_eq!(zv(&zones, "weekly").reason_code, "tomorrow_rain");
+        input.forecast_stale = true;
+        input.forecast_in = Some(2.0);
+        input.rain_3day_weighted_in = Some(5.0);
+        assert!(
+            decide_per_zone(&input, &SkipRuleParams::default(), &[])
+                .iter()
+                .all(|zone| zone.verdict == "run"),
+            "known stale rain keeps the documented starvation escape"
+        );
+        input.forecast_in = None;
+        assert_eq!(
+            zv(
+                &decide_per_zone(&input, &SkipRuleParams::default(), &[]),
+                "weekly"
+            )
+            .reason_code,
+            "tomorrow_rain"
+        );
     }
 
     /// Parity assertions shared by the default-params and disabled-rules
@@ -2814,13 +3571,17 @@ mod tests {
         // adversarial review caught); it must say the gate was overridden.
         let p = SkipRuleParams::default();
         let mut i = base();
-        i.rain_next_4h_in = 0.50;
+        i.rain_next_4h_in = Some(0.50);
         i.soil_zones = vec![ZoneSoil {
             slug: "back_yard".into(),
             name: "back yard".into(),
             pct: Some(20.0),
             saturation_pct: 70.0,
             target_min_pct: 30.0,
+            probe_configured: false,
+            governed_by_soil_model: false,
+            planning_forecast_unavailable: false,
+            sprinkler_type: Default::default(),
         }];
         let t = decide_traced(&i, &p);
         let row = t.rules.iter().find(|r| r.id == "rain_next_4h").unwrap();
@@ -2862,14 +3623,20 @@ mod tests {
     #[test]
     fn trace_is_stable_across_the_clock() {
         // The decision_trace must not bake the live clock into any rule detail:
-        // it would mutate every ~10s refresh, defeating the P3-2 SSE change-gate
+        // it would mutate every ~10s refresh, defeating the SSE change-gate
         // and reading as noise. Two evaluations 11s apart with identical weather,
         // soil, and control state must produce byte-identical traces.
         let p = SkipRuleParams::default();
         let mut early = base();
-        early.now_epoch = 1_782_567_229;
+        early.when = crate::engine::clock::DecisionTime::at(
+            crate::engine::calendar::Calendar::utc(),
+            1_782_567_229,
+        );
         let mut late = base();
-        late.now_epoch = 1_782_567_240;
+        late.when = crate::engine::clock::DecisionTime::at(
+            crate::engine::calendar::Calendar::utc(),
+            1_782_567_240,
+        );
         assert_eq!(
             decide_traced(&early, &p),
             decide_traced(&late, &p),
@@ -2880,10 +3647,16 @@ mod tests {
         // string used to bake in now_epoch. With an active pause (same expiry,
         // different clock) the trace must STILL be byte-identical.
         let mut p_early = base();
-        p_early.now_epoch = 1_782_567_229;
-        p_early.pause_until_epoch = p_early.now_epoch + 3600;
+        p_early.when = crate::engine::clock::DecisionTime::at(
+            crate::engine::calendar::Calendar::utc(),
+            1_782_567_229,
+        );
+        p_early.pause_until_epoch = p_early.now_epoch() + 3600;
         let mut p_late = base();
-        p_late.now_epoch = 1_782_567_240;
+        p_late.when = crate::engine::clock::DecisionTime::at(
+            crate::engine::calendar::Calendar::utc(),
+            1_782_567_240,
+        );
         p_late.pause_until_epoch = p_early.pause_until_epoch;
         let te = decide_traced(&p_early, &p);
         assert_eq!(te.verdict, "skip", "an active pause skips");
@@ -2919,6 +3692,37 @@ mod tests {
             "Live weather unavailable (no station data or forecast); failing safe",
             "live_data",
         ),
+        (
+            "skip",
+            crate::gates_catalog::RESTART_REQUIRED_REASON,
+            "restart_required",
+        ),
+        (
+            "skip",
+            "Today's rain forecast unavailable; watering held",
+            "rain_today_forecast",
+        ),
+        (
+            "skip",
+            "Rain forecast unavailable for the next 4 hours; watering held",
+            "rain_next_4h",
+        ),
+        (
+            "skip",
+            "Tomorrow's rain forecast unavailable; watering held",
+            "tomorrow_rain",
+        ),
+        (
+            "skip",
+            "Rain forecast unavailable for the next 3 days; watering held",
+            "rain_3day",
+        ),
+        (
+            "skip",
+            "Current rain estimate unavailable; watering held",
+            "rain_now",
+        ),
+        ("skip", PLANNING_FORECAST_HOLD_REASON, "planning_forecast"),
         ("skip", "Soil frost (33.0°F < 35°F threshold)", "soil_frost"),
         ("skip", "Wind too high now (20.0 mph > 10 mph)", "wind_now"),
         (
@@ -2926,7 +3730,7 @@ mod tests {
             "Windy day forecast (peak 30 mph > 10 + 5)",
             "wind_forecast",
         ),
-        ("skip", "Already wet (0.10\" today)", "already_wet"),
+        ("skip", "Already wet (0.10\" measured today)", "already_wet"),
         (
             "skip",
             "Already wet (1.50\" rain in the last 2 day(s))",
@@ -2957,16 +3761,15 @@ mod tests {
             "Heat advisory: running planned + 15% (peak 98°F)",
             "heat_advisory",
         ),
-        ("skip", "Dry-run mode", "dry_run"),
+        ("skip", "All watering is on hold", "dry_run"),
         ("skip", "Paused (vacation mode)", "paused"),
         ("skip", "Manual override (skip tomorrow)", "override"),
         ("run", "", "override"),
         ("run", "", "soil_floor"),
-        // Sticky global override (the #3 fix): both ladders honor it as the
-        // first rung, so the decided tuple is the override verdict regardless of
-        // the weather/soil state behind it (the "run" case force-runs a freeze).
+        // Intent safety correction: a convenience force may skip rain/soil
+        // recommendations, but the same freeze still binds both ladders.
         ("skip", "Manual override: skip", "override"),
-        ("run", "Manual override: force run", "override"),
+        ("skip", "Freeze risk now (28°F < 35°F)", "freeze_now"),
     ];
 
     #[test]
@@ -3014,7 +3817,7 @@ mod tests {
 
         // rain_now (rain-rate gate).
         let mut i = base();
-        i.rain_intensity_now_in_hr = 0.05;
+        i.rain_intensity_now_in_hr = Some(0.05);
         assert_eq!(evaluate_with(&i, &p).reason_code, "rain_now");
 
         // observed_rain (the sensor-independent backstop).
@@ -3035,10 +3838,9 @@ mod tests {
     }
 
     #[test]
-    fn reason_code_soil_quarantine_for_inferred_zone() {
+    fn reason_code_soil_probe_for_quarantined_zone() {
         // A wild-outlier probe (28% vs siblings ~73%) is quarantined; the zone's
-        // saturation decision rides the inferred sibling median, so the per-zone
-        // verdict's reason_code is "soil_quarantine", not "soil_saturation".
+        // data hold carries the diagnostic source without claiming saturation.
         let p = SkipRuleParams::default();
         let mut i = base();
         i.soil_zones = soil4(Some(28.0), Some(72.0), Some(74.0), Some(90.0));
@@ -3048,15 +3850,17 @@ mod tests {
             bad.source, "soil_quarantine",
             "the outlier zone is quarantined"
         );
-        assert_eq!(bad.reason_code, "soil_quarantine");
-        // Soil operands carried: effective % vs saturation %.
-        assert!(bad.value.is_some() && bad.threshold == Some(70.0));
+        assert_eq!(bad.reason_code, "soil_probe");
+        assert!(
+            bad.value.is_none() && bad.threshold.is_none(),
+            "unknown moisture has no saturation operands"
+        );
     }
 
     #[test]
     fn suspect_probes_flags_outlier_independent_of_verdict() {
         // A wild-outlier probe (28% vs siblings ~52%) is quarantined. Here a
-        // GLOBAL gate (forecast rain within 4h) decides every zone, so the
+        // GLOBAL operator pause decides every zone, so the
         // per-zone verdict.source is "global" and the old verdict-gated banner
         // would have hidden the bad probe. suspect_probes still flags it because
         // it reads the quarantine plan off the RAW readings, not the verdict.
@@ -3066,11 +3870,10 @@ mod tests {
         // incident's numbers). back_yard at 28% keeps the all-zones
         // soil_saturation gate from firing, so the deciding gate is global.
         i.soil_zones = soil4(Some(28.0), Some(72.0), Some(74.0), Some(76.0));
-        // Force a global forecast-rain skip that binds every zone (checked
-        // before the per-zone soil-saturation rung, so it masks the source).
-        i.rain_next_4h_in = 1.0;
+        // An operator pause precedes the protected probe-data gate and
+        // therefore masks its source while the diagnostic remains visible.
+        i.is_paused = true;
 
-        // The deciding gate is global, NOT soil_quarantine.
         let zvs = decide_per_zone(&i, &p, &[]);
         let bad = zvs.iter().find(|z| z.zone_slug == "back_yard").unwrap();
         assert_eq!(bad.verdict, "skip");
@@ -3208,7 +4011,7 @@ mod tests {
     #[test]
     fn pause_until_short_circuits_with_human_reason() {
         let mut i = base();
-        i.pause_until_epoch = i.now_epoch + 3600;
+        i.pause_until_epoch = i.now_epoch() + 3600;
         let s = evaluate(&i);
         assert_eq!(s.verdict, "skip");
         assert!(s.reason.starts_with("Paused (vacation until"));
@@ -3217,7 +4020,7 @@ mod tests {
     #[test]
     fn pause_until_expired_falls_through() {
         let mut i = base();
-        i.pause_until_epoch = i.now_epoch - 3600;
+        i.pause_until_epoch = i.now_epoch() - 3600;
         let s = evaluate(&i);
         assert_eq!(s.verdict, "run");
     }
@@ -3244,7 +4047,7 @@ mod tests {
     #[test]
     fn currently_raining() {
         let mut i = base();
-        i.rain_intensity_now_in_hr = 0.05;
+        i.rain_intensity_now_in_hr = Some(0.05);
         let s = evaluate(&i);
         assert_eq!(s.verdict, "skip");
         // base() is Measured (observation-grade) -> a HARD rain_now skip. The
@@ -3256,7 +4059,7 @@ mod tests {
     #[test]
     fn rain_next_4h_skips() {
         let mut i = base();
-        i.rain_next_4h_in = 0.15;
+        i.rain_next_4h_in = Some(0.15);
         let s = evaluate(&i);
         assert_eq!(s.verdict, "skip");
         assert!(s.reason.contains("4h"));
@@ -3265,7 +4068,7 @@ mod tests {
     #[test]
     fn tomorrow_high_confidence_skips() {
         let mut i = base();
-        i.forecast_in = 0.30;
+        i.forecast_in = Some(0.30);
         i.rain_tomorrow_prob_pct = Some(90);
         let s = evaluate(&i);
         assert_eq!(s.verdict, "skip");
@@ -3279,7 +4082,7 @@ mod tests {
         // FULL value and can skip. The pre-1.18 engine multiplied by a
         // fabricated 0% and watered ahead of every such forecast storm.
         let mut i = base();
-        i.forecast_in = 0.40; // >= rain_skip_in 0.25 at full weight
+        i.forecast_in = Some(0.40); // >= rain_skip_in 0.25 at full weight
         i.rain_tomorrow_prob_pct = None;
         let s = evaluate(&i);
         assert_eq!(s.verdict, "skip");
@@ -3386,13 +4189,17 @@ mod tests {
         let p = SkipRuleParams::default();
         let mut i = base();
         i.rain_observed_recent_in = 1.5;
-        i.rain_next_4h_in = 0.50; // also a (demotable) forecast-rain skip
+        i.rain_next_4h_in = Some(0.50); // also a (demotable) forecast-rain skip
         i.soil_zones = vec![ZoneSoil {
             slug: "back_yard".into(),
             name: "back yard".into(),
             pct: Some(20.0),
             saturation_pct: 70.0,
             target_min_pct: 30.0,
+            probe_configured: false,
+            governed_by_soil_model: false,
+            planning_forecast_unavailable: false,
+            sprinkler_type: Default::default(),
         }];
         // Aggregate skips (the hard observed-rain gate wins).
         assert_eq!(decide(&i, &p).0, "skip");
@@ -3425,7 +4232,7 @@ mod tests {
         i.temp_max_3day_f = 96.0;
         i.humidity_now_pct = 65.0;
         i.days_since_significant_rain = 3;
-        i.rain_3day_weighted_in = 0.05;
+        i.rain_3day_weighted_in = Some(0.05);
         let s = evaluate(&i);
         assert_eq!(s.verdict, "run_extended");
     }
@@ -3436,7 +4243,7 @@ mod tests {
         i.temp_max_3day_f = 92.0; // below default 95
         i.humidity_now_pct = 65.0;
         i.days_since_significant_rain = 3;
-        i.rain_3day_weighted_in = 0.05;
+        i.rain_3day_weighted_in = Some(0.05);
         // Default config -> not hot enough -> plain run.
         let s = evaluate(&i);
         assert_eq!(s.verdict, "run");
@@ -3592,8 +4399,7 @@ mod tests {
     fn yard_wide_saturation_does_not_skip_with_partial_data_quarantine_off() {
         // With quarantine OFF, an offline probe keeps the yard-wide gate
         // inapplicable (the pre-quarantine behavior the gate guarantees on its
-        // own). The quarantine-on counterpart (offline inferred from saturated
-        // siblings -> skip) is `quarantine_offline_probe_infers_from_saturated_siblings`.
+        // own). Configured offline probes have a separate protected data hold.
         let mut p = SkipRuleParams::default();
         p.soil_quarantine_enabled = false;
         let mut i = base();
@@ -3627,7 +4433,7 @@ mod tests {
         i.is_dry_run = true;
         let s = evaluate(&i);
         assert_eq!(s.verdict, "skip");
-        assert_eq!(s.reason, "Dry-run mode");
+        assert_eq!(s.reason, "All watering is on hold");
     }
 
     #[test]
@@ -3713,6 +4519,294 @@ mod tests {
         assert_eq!(evaluate(&i).verdict, "run");
     }
 
+    /// The wind gate judges the minutes the yard waters, not the day.
+    ///
+    /// The daily peak is the afternoon's figure. A yard that finishes
+    /// before sunrise was being refused for weather it would never be
+    /// out in: a 25 mph afternoon peak skipped a 5 mph dawn.
+    #[test]
+    fn a_gusty_afternoon_does_not_skip_a_calm_dawn() {
+        let mut i = base();
+        i.wind_max_today_mph = 25.0;
+        i.wind_window_max_mph = Some(5.0);
+        let v = evaluate(&i);
+        assert_eq!(v.verdict, "run", "{}", v.reason);
+    }
+
+    /// And the converse: a windy dawn skips even when the day as a whole
+    /// reads mild, because the day as a whole is not when the yard waters.
+    #[test]
+    fn a_windy_dawn_skips_even_under_a_mild_day_peak() {
+        let mut i = base();
+        i.wind_max_today_mph = 12.0;
+        i.wind_window_max_mph = Some(20.0);
+        let v = evaluate(&i);
+        assert_eq!(v.verdict, "skip");
+        assert_eq!(v.reason_code, "wind_forecast");
+        assert!(
+            v.reason.contains("run window"),
+            "the reason says which minutes were judged: {}",
+            v.reason
+        );
+    }
+
+    /// With no run window to judge, the daily peak still governs. This
+    /// is the install with no location, or a strip cell past the hourly
+    /// series, and a calm zero would be the wrong thing to invent.
+    #[test]
+    fn without_a_window_the_day_peak_governs() {
+        let mut i = base();
+        i.wind_max_today_mph = 25.0;
+        i.wind_window_max_mph = None;
+        let v = evaluate(&i);
+        assert_eq!(v.verdict, "skip");
+        assert_eq!(v.reason_code, "wind_forecast");
+        assert!(v.reason.starts_with("Windy day forecast"), "{}", v.reason);
+    }
+
+    /// A drip bed under a rule that exempts drip waters on a day the
+    /// rule refuses the yard, and says why; the spray zone next to it
+    /// does not.
+    #[test]
+    fn a_drip_zone_under_an_exempting_rule_runs_on_a_non_allowed_day() {
+        use crate::config::schema::{SprinklerType, WateringRestriction};
+        let mut i = base();
+        i.watering_restrictions = vec![WateringRestriction {
+            id: "schedule".into(),
+            name: "Schedule".into(),
+            allowed_weekdays: vec![3, 6],
+            exempt_sprinklers: vec![SprinklerType::Drip],
+            ..Default::default()
+        }];
+        // Monday 27 July 2026, 06:00 UTC.
+        i.when = crate::engine::clock::DecisionTime::at(
+            crate::engine::calendar::Calendar::utc(),
+            1_785_132_000,
+        );
+        i.soil_zones = vec![
+            ZoneSoil {
+                slug: "front".into(),
+                name: "Front".into(),
+                sprinkler_type: SprinklerType::Spray,
+                ..Default::default()
+            },
+            ZoneSoil {
+                slug: "beds".into(),
+                name: "Beds".into(),
+                sprinkler_type: SprinklerType::Drip,
+                ..Default::default()
+            },
+        ];
+        let yard = evaluate(&i);
+        assert_eq!(yard.reason_code, "restrictions", "{}", yard.reason);
+        let zones = decide_per_zone(&i, &SkipRuleParams::default(), &[]);
+        let front = zones.iter().find(|z| z.zone_slug == "front").unwrap();
+        let beds = zones.iter().find(|z| z.zone_slug == "beds").unwrap();
+        assert_eq!(front.verdict, "skip");
+        assert_eq!(front.reason_code, "restrictions");
+        assert_eq!(beds.verdict, "run", "{}", beds.reason);
+        assert_eq!(beds.source, "exempt");
+        assert!(beds.reason.starts_with("Exempt"), "{}", beds.reason);
+    }
+
+    /// The restricted-day zone set the exempt branch is judged against, with
+    /// explicit soil so the saturation gate has something to read.
+    fn exempting_restriction() -> crate::config::schema::WateringRestriction {
+        use crate::config::schema::{SprinklerType, WateringRestriction};
+        WateringRestriction {
+            id: "schedule".into(),
+            name: "Schedule".into(),
+            allowed_weekdays: vec![3, 6],
+            exempt_sprinklers: vec![SprinklerType::Drip],
+            ..Default::default()
+        }
+    }
+
+    fn spray_and_drip(front_pct: f64, beds_pct: f64) -> Vec<ZoneSoil> {
+        use crate::config::schema::SprinklerType;
+        vec![
+            ZoneSoil {
+                slug: "front".into(),
+                name: "Front".into(),
+                pct: Some(front_pct),
+                saturation_pct: 70.0,
+                target_min_pct: 30.0,
+                probe_configured: false,
+                governed_by_soil_model: false,
+                planning_forecast_unavailable: false,
+                sprinkler_type: SprinklerType::Spray,
+            },
+            ZoneSoil {
+                slug: "beds".into(),
+                name: "Beds".into(),
+                pct: Some(beds_pct),
+                saturation_pct: 70.0,
+                target_min_pct: 30.0,
+                probe_configured: false,
+                governed_by_soil_model: false,
+                planning_forecast_unavailable: false,
+                sprinkler_type: SprinklerType::Drip,
+            },
+        ]
+    }
+
+    /// The exemption lifts the ordinance, not the ground. A drip bed the
+    /// restriction stands aside for, whose OWN probe reads saturated, skips
+    /// for its own soil.
+    ///
+    /// The exempt branch returns before the per-zone soil gate (that gate is
+    /// only reached when the yard verdict was a run), so this verdict used to
+    /// be "run". While the dispatcher blanket-held the yard on any aggregate
+    /// skip, that only painted a card. The moment the dispatcher started
+    /// honoring exemptions it became a valve opening on saturated ground on a
+    /// restricted day after rain.
+    #[test]
+    fn an_exempt_zone_whose_own_soil_is_saturated_still_skips() {
+        let mut i = base();
+        i.watering_restrictions = vec![exempting_restriction()];
+        // Monday 27 July 2026, 06:00 UTC: not an allowed weekday.
+        i.when = crate::engine::clock::DecisionTime::at(
+            crate::engine::calendar::Calendar::utc(),
+            1_785_132_000,
+        );
+        i.soil_zones = spray_and_drip(75.0, 80.0);
+        assert_eq!(evaluate(&i).reason_code, "restrictions");
+        let zones = decide_per_zone(&i, &SkipRuleParams::default(), &[]);
+        let beds = zones.iter().find(|z| z.zone_slug == "beds").unwrap();
+        assert_eq!(beds.verdict, "skip", "{}", beds.reason);
+        assert_eq!(beds.source, "soil_saturation");
+        assert_eq!(beds.reason_code, "soil_saturation");
+        assert!(beds.reason.starts_with("Soil saturated"), "{}", beds.reason);
+        assert_eq!(beds.value, Some(80.0));
+        assert_eq!(beds.threshold, Some(70.0));
+    }
+
+    /// The same zone with dry ground still runs, so the gate above is the
+    /// soil and not the exemption having stopped working.
+    #[test]
+    fn an_exempt_zone_with_dry_soil_still_runs() {
+        let mut i = base();
+        i.watering_restrictions = vec![exempting_restriction()];
+        i.when = crate::engine::clock::DecisionTime::at(
+            crate::engine::calendar::Calendar::utc(),
+            1_785_132_000,
+        );
+        i.soil_zones = spray_and_drip(40.0, 45.0);
+        let zones = decide_per_zone(&i, &SkipRuleParams::default(), &[]);
+        let beds = zones.iter().find(|z| z.zone_slug == "beds").unwrap();
+        assert_eq!(beds.verdict, "run", "{}", beds.reason);
+        assert_eq!(beds.source, "exempt");
+    }
+
+    /// The owner's own condition rule holds an exempt zone too. Same reason
+    /// as the soil gate: the exempt branch returns before the per-zone rule
+    /// pass, and the dispatcher now acts on what it returns, so a rule the
+    /// owner wrote would otherwise be silently deleted on restricted days.
+    #[test]
+    fn an_exempt_zone_under_a_user_condition_skip_still_skips() {
+        let mut i = base();
+        i.watering_restrictions = vec![exempting_restriction()];
+        i.when = crate::engine::clock::DecisionTime::at(
+            crate::engine::calendar::Calendar::utc(),
+            1_785_132_000,
+        );
+        i.soil_zones = spray_and_drip(40.0, 45.0);
+        let rule = ConditionRule {
+            id: "beds_wet_enough".into(),
+            name: String::new(),
+            enabled: true,
+            scope: RuleScope::Zones(vec!["beds".into()]),
+            condition: ConditionExpr::Compare {
+                metric: Metric::ZoneSoilPct,
+                op: CmpOp::Gt,
+                value: 35.0,
+            },
+            action: RuleAction::Skip,
+        };
+        let zones = decide_per_zone(&i, &SkipRuleParams::default(), std::slice::from_ref(&rule));
+        let beds = zones.iter().find(|z| z.zone_slug == "beds").unwrap();
+        assert_eq!(beds.verdict, "skip", "{}", beds.reason);
+        assert_eq!(beds.source, "condition");
+        assert_eq!(beds.reason_code, "condition");
+    }
+
+    /// The exemption lifts the schedule, not the weather. The same drip
+    /// bed on a freezing morning still skips, for the freeze.
+    #[test]
+    fn an_exempt_zone_is_still_judged_by_the_weather() {
+        use crate::config::schema::{SprinklerType, WateringRestriction};
+        let mut i = base();
+        i.watering_restrictions = vec![WateringRestriction {
+            id: "schedule".into(),
+            name: "Schedule".into(),
+            allowed_weekdays: vec![3, 6],
+            exempt_sprinklers: vec![SprinklerType::Drip],
+            ..Default::default()
+        }];
+        i.when = crate::engine::clock::DecisionTime::at(
+            crate::engine::calendar::Calendar::utc(),
+            1_785_132_000,
+        );
+        i.temp_now_f = 28.0;
+        i.soil_zones = vec![ZoneSoil {
+            slug: "beds".into(),
+            name: "Beds".into(),
+            sprinkler_type: SprinklerType::Drip,
+            ..Default::default()
+        }];
+        let zones = decide_per_zone(&i, &SkipRuleParams::default(), &[]);
+        assert_eq!(zones[0].verdict, "skip");
+        assert_eq!(zones[0].reason_code, "freeze_now", "{}", zones[0].reason);
+    }
+
+    /// The parity gate that did nothing: identical odd and even rows on
+    /// a default install with no parity chosen now bind.
+    #[test]
+    fn identical_rows_skip_a_monday_without_a_parity() {
+        use crate::config::schema::{AddressParity, WateringRestriction};
+        let mut i = base();
+        i.address_parity = AddressParity::NotApplicable;
+        i.watering_restrictions = vec![WateringRestriction {
+            id: "two_days".into(),
+            name: "Two days a week".into(),
+            allowed_weekdays_odd: vec![3, 6],
+            allowed_weekdays_even: vec![3, 6],
+            ..Default::default()
+        }];
+        i.when = crate::engine::clock::DecisionTime::at(
+            crate::engine::calendar::Calendar::utc(),
+            1_785_132_000,
+        );
+        let v = evaluate(&i);
+        assert_eq!(v.verdict, "skip");
+        assert_eq!(v.reason_code, "restrictions");
+    }
+
+    /// A post-sunrise window is judged on its own hours. The pre-dawn
+    /// reading of 30 F is the hour the window was moved to avoid.
+    #[test]
+    fn a_post_sunrise_window_is_judged_on_its_own_hours() {
+        use crate::engine::dispatch_window::WindowKind;
+        let mut i = base();
+        i.temp_now_f = 30.0;
+        i.temp_min_24h_f = Some(28.0);
+        i.min_temp_f = 38.0;
+        let dawn = evaluate(&i);
+        assert_eq!(dawn.reason_code, "freeze_now", "{}", dawn.reason);
+
+        i.run_window = WindowKind::PostSunrise;
+        i.window_min_temp_f = Some(42.0);
+        let later = evaluate(&i);
+        assert_eq!(later.verdict, "run", "{}", later.reason);
+
+        // A post-sunrise window that does not clear the threshold after
+        // all (the forecast moved) still skips, and says when.
+        i.window_min_temp_f = Some(35.0);
+        let cold = evaluate(&i);
+        assert_eq!(cold.reason_code, "freeze_now");
+        assert!(cold.reason.contains("during the run"), "{}", cold.reason);
+    }
+
     #[test]
     fn wind_slack_is_configurable() {
         let mut i = base();
@@ -3727,6 +4821,201 @@ mod tests {
     }
 
     // ── Per-zone decision (decide_per_zone) ──
+
+    /// A soil-governed zone rides through the forward-rain gates, and
+    /// the ENGINE says so.
+    ///
+    /// This rule existed, but it lived in the refresher, which rewrote
+    /// verdicts the engine had already produced by string-matching reason
+    /// codes. The decision trace was deliberately left on the raw ladder,
+    /// so the trace described a morning that did not happen and the hero
+    /// and its own explanation read different copies.
+    /// Dry heat evaporates more, and the multiplier now knows it.
+    ///
+    /// The heat index rises with humidity while evapotranspiration falls
+    /// with it. A dry 105 F afternoon in Phoenix scores a LOWER heat
+    /// index than a muggy 95 F one on the Gulf Coast while evaporating
+    /// considerably more water, so the old multiplier pushed hardest
+    /// exactly where demand was lowest.
+    #[test]
+    fn the_demand_multiplier_follows_drying_power_not_comfort() {
+        // Calm, humid air asks nothing extra.
+        assert!((et_demand_multiplier(0.5) - 1.0).abs() < 1e-9);
+        assert!((et_demand_multiplier(1.0) - 1.0).abs() < 1e-9);
+        // Dry air asks more, up to the cap.
+        assert!((et_demand_multiplier(2.0) - 1.15).abs() < 1e-9);
+        assert!((et_demand_multiplier(3.0) - 1.30).abs() < 1e-9);
+        assert!((et_demand_multiplier(6.0) - 1.30).abs() < 1e-9);
+        // The old measure got Phoenix versus Jacksonville backwards:
+        // 105 F at 15% RH has a lower heat index than 95 F at 70% RH.
+        let phoenix = heat_index_f(105.0, 15.0);
+        let jacksonville = heat_index_f(95.0, 70.0);
+        assert!(
+            phoenix < jacksonville,
+            "heat index rises with humidity: {phoenix} vs {jacksonville}"
+        );
+        assert!(
+            et_heat_multiplier(phoenix) < et_heat_multiplier(jacksonville),
+            "so the old multiplier pushed the humid yard harder"
+        );
+    }
+
+    /// An arid yard gets a heat response.
+    ///
+    /// The advisory used to require humidity at or above a threshold,
+    /// defaulting to 60%, so Phoenix at 110 F and 15% RH never
+    /// qualified while a muggy afternoon did. Dry heat is the case that
+    /// most needs the extension.
+    #[test]
+    fn a_dry_heat_wave_earns_the_advisory() {
+        let p = SkipRuleParams::default();
+        let mut i = base();
+        i.temp_max_3day_f = p.heat_advisory_temp_f + 5.0;
+        i.humidity_now_pct = 12.0;
+        i.days_since_significant_rain = p.heat_advisory_dry_days + 1;
+        i.rain_3day_weighted_in = Some(0.0);
+        i.rain_skip_in = 0.25;
+        let s = evaluate_with(&i, &p);
+        assert_eq!(
+            s.verdict, "run_extended",
+            "arid heat extends the run: {} / {}",
+            s.verdict, s.reason
+        );
+        assert_eq!(s.reason_code, "heat_advisory");
+    }
+
+    #[test]
+    fn dry_and_humid_heat_share_trace_and_hold_all_precedence() {
+        let p = SkipRuleParams::default();
+        for humidity in [12.0, 75.0] {
+            for held in [false, true] {
+                let mut i = base();
+                i.temp_max_3day_f = 110.0;
+                i.humidity_now_pct = humidity;
+                i.days_since_significant_rain = 10;
+                i.is_dry_run = held;
+                let decided = evaluate_with(&i, &p);
+                let traced = decide_traced(&i, &p);
+                assert_eq!(decided.verdict, if held { "skip" } else { "run_extended" });
+                assert_eq!(traced.verdict, decided.verdict);
+                assert_eq!(traced.reason_code, decided.reason_code);
+                assert_eq!(traced.reason, decided.reason);
+                assert_eq!(
+                    traced.rules.iter().filter(|r| r.outcome == "fired").count(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hold_all_prevents_soil_floor_demotion_and_preserves_trace_parity() {
+        let p = SkipRuleParams::default();
+        for held in [false, true] {
+            let mut i = base();
+            i.soil_zones = soil4(Some(20.0), Some(20.0), Some(20.0), Some(20.0));
+            i.rain_next_4h_in = Some(1.0);
+            i.temp_max_3day_f = 110.0;
+            i.days_since_significant_rain = 10;
+            i.is_dry_run = held;
+            assert_eq!(soil_floor_demotes(&i, &p, &disabled_set(&p)), !held);
+            let decided = evaluate_with(&i, &p);
+            let traced = decide_traced(&i, &p);
+            assert_eq!(decided.verdict, if held { "skip" } else { "run" });
+            assert_eq!(traced.verdict, decided.verdict);
+            assert_eq!(traced.reason_code, decided.reason_code);
+            assert_eq!(traced.reason, decided.reason);
+            assert_eq!(
+                traced.rules.iter().filter(|r| r.outcome == "fired").count(),
+                1
+            );
+            assert!(decide_per_zone(&i, &p, &[])
+                .iter()
+                .all(|z| z.verdict == decided.verdict));
+        }
+    }
+
+    #[test]
+    fn a_soil_governed_zone_rides_through_forecast_rain() {
+        let p = SkipRuleParams::default();
+        let mut i = base();
+        // A yard-wide skip on rain three days out, which the soil model
+        // has already credited against each zone's deficit.
+        i.rain_3day_weighted_in = Some(5.0);
+        i.rain_skip_in = 0.25;
+        i.soil_zones = vec![
+            ZoneSoil {
+                slug: "soil_zone".into(),
+                name: "Soil zone".into(),
+                pct: Some(50.0),
+                saturation_pct: 90.0,
+                target_min_pct: 20.0,
+                probe_configured: false,
+                governed_by_soil_model: true,
+                planning_forecast_unavailable: false,
+                sprinkler_type: Default::default(),
+            },
+            ZoneSoil {
+                slug: "weekly_zone".into(),
+                name: "Weekly zone".into(),
+                pct: Some(50.0),
+                saturation_pct: 90.0,
+                target_min_pct: 20.0,
+                probe_configured: false,
+                governed_by_soil_model: false,
+                planning_forecast_unavailable: false,
+                sprinkler_type: Default::default(),
+            },
+        ];
+
+        let verdicts = decide_per_zone(&i, &p, &[]);
+        let soil = verdicts
+            .iter()
+            .find(|v| v.zone_slug == "soil_zone")
+            .expect("soil zone verdict");
+        let weekly = verdicts
+            .iter()
+            .find(|v| v.zone_slug == "weekly_zone")
+            .expect("weekly zone verdict");
+
+        assert_eq!(soil.verdict, "run", "the soil zone waters anyway");
+        assert_eq!(soil.source, "soil_model", "and says who decided");
+        assert!(
+            soil.reason.contains("already count this forecast rain"),
+            "the reason explains why: {}",
+            soil.reason
+        );
+        assert_eq!(
+            weekly.verdict, "skip",
+            "the weekly zone still obeys the yard-wide gate"
+        );
+    }
+
+    /// Inertness is only for gates the soil model has already accounted
+    /// for. Safety, law and rain falling right now still bind every zone.
+    #[test]
+    fn a_soil_governed_zone_still_obeys_the_gates_that_are_not_inert() {
+        let p = SkipRuleParams::default();
+        let mut i = base();
+        // Freeze is not a forward-rain gate.
+        i.temp_now_f = 20.0;
+        i.min_temp_f = 38.0;
+        i.soil_zones = vec![ZoneSoil {
+            slug: "soil_zone".into(),
+            name: "Soil zone".into(),
+            pct: Some(30.0),
+            saturation_pct: 90.0,
+            target_min_pct: 20.0,
+            probe_configured: false,
+            governed_by_soil_model: true,
+            planning_forecast_unavailable: false,
+            sprinkler_type: Default::default(),
+        }];
+
+        let v = decide_per_zone(&i, &p, &[]);
+        assert_eq!(v[0].verdict, "skip", "freeze binds a soil zone too");
+        assert_ne!(v[0].source, "soil_model");
+    }
 
     #[test]
     fn decide_per_zone_matches_decide_when_uniform() {
@@ -3753,7 +5042,7 @@ mod tests {
             // Uniform all-dry + soft forecast rain: the soil floor demotes yard-wide,
             // so decide() AND every per-zone verdict are "run" -> they still AGREE.
             // Only a MIXED yard diverges (soil_floor_demotes_soft_rain_per_zone).
-        push(|i| i.rain_next_4h_in = 0.50);
+        push(|i| i.rain_next_4h_in = Some(0.50));
 
         for (n, i) in scenarios.iter().enumerate() {
             let (agg, _) = decide(i, &p);
@@ -3769,7 +5058,7 @@ mod tests {
         }
     }
 
-    // ── P1-2: measured-dry-soil veto (the soil_floor moat) ───────────────────
+    // ── measured-dry-soil veto (the soil_floor moat) ───────────────────
 
     /// Find a zone's verdict by slug.
     fn zv<'a>(v: &'a [ZoneVerdict], slug: &str) -> &'a ZoneVerdict {
@@ -3802,7 +5091,7 @@ mod tests {
         // aggregate runs (will_skip bypassed).
         let p = SkipRuleParams::default();
         let mut i = base();
-        i.rain_next_4h_in = 0.50;
+        i.rain_next_4h_in = Some(0.50);
         i.soil_zones = vec![
             ZoneSoil {
                 slug: "back_yard".into(),
@@ -3810,6 +5099,10 @@ mod tests {
                 pct: Some(20.0),
                 saturation_pct: 70.0,
                 target_min_pct: 30.0,
+                probe_configured: false,
+                governed_by_soil_model: false,
+                planning_forecast_unavailable: false,
+                sprinkler_type: Default::default(),
             },
             ZoneSoil {
                 slug: "front_yard".into(),
@@ -3817,6 +5110,10 @@ mod tests {
                 pct: Some(45.0),
                 saturation_pct: 70.0,
                 target_min_pct: 30.0,
+                probe_configured: false,
+                governed_by_soil_model: false,
+                planning_forecast_unavailable: false,
+                sprinkler_type: Default::default(),
             },
         ];
         let v = decide_per_zone(&i, &p, &[]);
@@ -3842,11 +5139,15 @@ mod tests {
                 pct: Some(20.0),
                 saturation_pct: 70.0,
                 target_min_pct: 30.0,
+                probe_configured: false,
+                governed_by_soil_model: false,
+                planning_forecast_unavailable: false,
+                sprinkler_type: Default::default(),
             }]
         };
         type Mut = fn(&mut Inputs);
         let cases: &[(&str, Mut)] = &[
-            ("rain_now", |i| i.rain_intensity_now_in_hr = 0.05),
+            ("rain_now", |i| i.rain_intensity_now_in_hr = Some(0.05)),
             ("freeze_now", |i| i.temp_now_f = 30.0),
             ("overnight_freeze", |i| {
                 i.temp_now_f = 50.0;
@@ -3858,7 +5159,7 @@ mod tests {
             ("already_wet", |i| i.rain_today_in = 0.10),
             ("paused", |i| i.is_paused = true),
             ("pause_until", |i| {
-                i.pause_until_epoch = i.now_epoch + 3600;
+                i.pause_until_epoch = i.now_epoch() + 3600;
             }),
             ("global_override", |i| i.global_override = "skip".into()),
             ("live_data", |i| i.live_readings = LiveReadings::Unavailable),
@@ -3868,7 +5169,7 @@ mod tests {
         ];
         for (name, mutate) in cases {
             let mut i = base();
-            i.rain_next_4h_in = 0.50;
+            i.rain_next_4h_in = Some(0.50);
             i.soil_zones = dry();
             mutate(&mut i);
             let v = decide_per_zone(&i, &p, &[]);
@@ -3892,7 +5193,7 @@ mod tests {
         // healthy-dry (sat >= target), so the yard skips and nothing demotes.
         let p = SkipRuleParams::default();
         let mut i = base();
-        i.rain_next_4h_in = 0.50;
+        i.rain_next_4h_in = Some(0.50);
         i.soil_zones = soil4(Some(80.0), Some(80.0), Some(80.0), Some(90.0));
         assert_eq!(decide(&i, &p).0, "skip");
         for z in decide_per_zone(&i, &p, &[]) {
@@ -3909,13 +5210,17 @@ mod tests {
         let p = SkipRuleParams::default();
         let mk = |pct: Option<f64>, target: f64| {
             let mut i = base();
-            i.rain_next_4h_in = 0.50;
+            i.rain_next_4h_in = Some(0.50);
             i.soil_zones = vec![ZoneSoil {
                 slug: "back_yard".into(),
                 name: "back yard".into(),
                 pct,
                 saturation_pct: 70.0,
                 target_min_pct: target,
+                probe_configured: false,
+                governed_by_soil_model: false,
+                planning_forecast_unavailable: false,
+                sprinkler_type: Default::default(),
             }];
             i
         };
@@ -3937,13 +5242,17 @@ mod tests {
         let mut p = SkipRuleParams::default();
         p.disabled_rules = vec!["soil_floor".into()];
         let mut i = base();
-        i.rain_next_4h_in = 0.50;
+        i.rain_next_4h_in = Some(0.50);
         i.soil_zones = vec![ZoneSoil {
             slug: "back_yard".into(),
             name: "back yard".into(),
             pct: Some(20.0),
             saturation_pct: 70.0,
             target_min_pct: 30.0,
+            probe_configured: false,
+            governed_by_soil_model: false,
+            planning_forecast_unavailable: false,
+            sprinkler_type: Default::default(),
         }];
         assert_eq!(decide(&i, &p).0, "skip");
         assert_eq!(
@@ -3958,7 +5267,7 @@ mod tests {
     /// rain-nature cases below; only `rain_nature` differs between them.
     fn raining_with_dry_zone(nature: RainNature) -> Inputs {
         let mut i = base();
-        i.rain_intensity_now_in_hr = 0.05; // over the default rain_now threshold
+        i.rain_intensity_now_in_hr = Some(0.05); // over the default rain_now threshold
         i.rain_nature = nature;
         i.soil_zones = vec![ZoneSoil {
             slug: "back_yard".into(),
@@ -3966,6 +5275,10 @@ mod tests {
             pct: Some(20.0), // measured-dry: below the 30% floor
             saturation_pct: 70.0,
             target_min_pct: 30.0,
+            probe_configured: false,
+            governed_by_soil_model: false,
+            planning_forecast_unavailable: false,
+            sprinkler_type: Default::default(),
         }];
         i
     }
@@ -4064,12 +5377,62 @@ mod tests {
         }
     }
 
-    // ── P1-6: end-to-end golden matrix ───────────────────────────────────────
+    // ── end-to-end golden matrix ───────────────────────────────────────
     // Every gate firing in isolation (ladder order), the key head-to-head
     // precedence cases, the soil_floor demotion, heat run_extended, the stale-
     // forecast suppression, and the default run. Verdict + reason-substring are
     // pinned against the real gate format strings, so any drift is one readable
     // failure.
+    /// A forecast is not rain that fell.
+    ///
+    /// `already_wet` is the reactive gate: its whole job is "did enough
+    /// water already land here". It used to be fed `max(gauge, model)`,
+    /// so on a July morning where the model expected an afternoon storm
+    /// the yard hard-skipped and the dashboard reported "Already wet
+    /// (0.34" today)" over dry ground. In a convective climate that is
+    /// most mornings, and the observations ledger correctly refuses to
+    /// record a model total as measurement, so the miss left no trace.
+    ///
+    /// Both halves are asserted here: the measured gate must ignore a
+    /// forecast, and the modelled gate must never claim measurement.
+    #[test]
+    fn a_forecast_never_fires_the_measured_rain_gate() {
+        let p = SkipRuleParams::default();
+
+        // Model says a storm is coming; nothing has fallen.
+        let mut i = Inputs::default();
+        i.rain_today_forecast_in = Some(0.40);
+        i.rain_today_in = 0.0;
+        let (verdict, reason, code) = decide_with_code(&i, &p);
+        assert_eq!(verdict, "skip", "an expected storm still holds the yard");
+        assert_eq!(
+            code, "rain_today_forecast",
+            "but on the MODELLED rung, not the measured one"
+        );
+        assert!(
+            reason.contains("expected") && !reason.starts_with("Already wet"),
+            "the reason must not claim the rain fell: {reason}"
+        );
+
+        // Same number, actually caught by a gauge.
+        let mut i = Inputs::default();
+        i.rain_today_in = 0.40;
+        let (verdict, reason, code) = decide_with_code(&i, &p);
+        assert_eq!(verdict, "skip");
+        assert_eq!(
+            code, "already_wet",
+            "a measured total fires the measured gate"
+        );
+        assert!(
+            reason.contains("measured"),
+            "and says so, so the owner can tell the two apart: {reason}"
+        );
+
+        // Case 1 above already proves the separation: the same 0.40 that
+        // fires the modelled rung leaves `already_wet` unfired, because
+        // the measured total is zero and the codes differ.
+    }
+
     #[test]
     fn golden_verdict_matrix() {
         type Mut = fn(&mut Inputs);
@@ -4090,7 +5453,7 @@ mod tests {
             ),
             (
                 "pause_until",
-                |i| i.pause_until_epoch = i.now_epoch + 3600,
+                |i| i.pause_until_epoch = i.now_epoch() + 3600,
                 "skip",
                 "Paused (vacation until",
             ),
@@ -4108,7 +5471,7 @@ mod tests {
             ),
             (
                 "rain_now",
-                |i| i.rain_intensity_now_in_hr = 0.05,
+                |i| i.rain_intensity_now_in_hr = Some(0.05),
                 "skip",
                 "Currently raining",
             ),
@@ -4151,6 +5514,15 @@ mod tests {
                 "skip",
                 "Already wet",
             ),
+            // The modelled twin. Same threshold, different rung, and the
+            // reason has to say "expected" so a forecast is never read as
+            // rain that fell.
+            (
+                "rain_today_forecast",
+                |i| i.rain_today_forecast_in = Some(0.10),
+                "skip",
+                "Rain forecast today",
+            ),
             (
                 "observed_rain",
                 |i| i.rain_observed_recent_in = 1.5,
@@ -4165,14 +5537,14 @@ mod tests {
             ),
             (
                 "rain_next_4h",
-                |i| i.rain_next_4h_in = 0.20,
+                |i| i.rain_next_4h_in = Some(0.20),
                 "skip",
                 "Rain expected within 4h",
             ),
             (
                 "tomorrow_rain",
                 |i| {
-                    i.forecast_in = 0.40;
+                    i.forecast_in = Some(0.40);
                     i.rain_tomorrow_prob_pct = Some(90);
                 },
                 "skip",
@@ -4180,7 +5552,7 @@ mod tests {
             ),
             (
                 "rain_3day",
-                |i| i.rain_3day_weighted_in = 1.0,
+                |i| i.rain_3day_weighted_in = Some(1.0),
                 "skip",
                 "Heavy rain in next 3 days",
             ),
@@ -4190,17 +5562,22 @@ mod tests {
                     i.temp_max_3day_f = 98.0;
                     i.humidity_now_pct = 70.0;
                     i.days_since_significant_rain = 3;
-                    i.rain_3day_weighted_in = 0.0;
+                    i.rain_3day_weighted_in = Some(0.0);
                 },
                 "run_extended",
                 "Heat advisory",
             ),
-            ("dry_run", |i| i.is_dry_run = true, "skip", "Dry-run mode"),
+            (
+                "dry_run",
+                |i| i.is_dry_run = true,
+                "skip",
+                "All watering is on hold",
+            ),
             // precedence: the earlier gate wins when two fire
             (
                 "override_run_beats_rain",
                 |i| {
-                    i.rain_intensity_now_in_hr = 0.05;
+                    i.rain_intensity_now_in_hr = Some(0.05);
                     i.global_override = "run".into();
                 },
                 "run",
@@ -4227,7 +5604,7 @@ mod tests {
             (
                 "rain_now_beats_freeze",
                 |i| {
-                    i.rain_intensity_now_in_hr = 0.05;
+                    i.rain_intensity_now_in_hr = Some(0.05);
                     i.temp_now_f = 30.0;
                 },
                 "skip",
@@ -4246,7 +5623,7 @@ mod tests {
                 "saturation_beats_rain_4h",
                 |i| {
                     i.soil_zones = soil4(Some(80.0), Some(80.0), Some(80.0), Some(90.0));
-                    i.rain_next_4h_in = 0.20;
+                    i.rain_next_4h_in = Some(0.20);
                 },
                 "skip",
                 "All zones soil-saturated",
@@ -4264,7 +5641,7 @@ mod tests {
             (
                 "soil_floor_demotes_4h",
                 |i| {
-                    i.rain_next_4h_in = 0.50;
+                    i.rain_next_4h_in = Some(0.50);
                     i.soil_zones = soil4(Some(20.0), Some(45.0), Some(45.0), Some(45.0));
                 },
                 "run",
@@ -4273,7 +5650,7 @@ mod tests {
             (
                 "stale_forecast_no_skip",
                 |i| {
-                    i.rain_3day_weighted_in = 5.0;
+                    i.rain_3day_weighted_in = Some(5.0);
                     i.forecast_stale = true;
                 },
                 "run",
@@ -4317,9 +5694,8 @@ mod tests {
     fn soil_gate_detail_names_zones_missing_readings() {
         // Two probes offline (front_yard flatlined, shrubs unassigned):
         // the inapplicable gate's detail must name them, not the old
-        // generic "not all zones have soil sensors". Quarantine OFF so the
-        // offline probes stay offline (with it on they'd be inferred from the
-        // two present readings and the gate would become applicable).
+        // generic "not all zones have soil sensors". Missing readings remain
+        // unknown regardless of whether outlier detection is enabled.
         let mut p = SkipRuleParams::default();
         p.soil_quarantine_enabled = false;
         let mut i = base();
@@ -4413,7 +5789,7 @@ mod tests {
     #[test]
     fn disabled_rain_now_allows_run_while_raining() {
         let mut i = base();
-        i.rain_intensity_now_in_hr = 0.05;
+        i.rain_intensity_now_in_hr = Some(0.05);
         // Sanity: default params skip on active rain.
         assert_eq!(evaluate(&i).verdict, "skip");
 
@@ -4464,6 +5840,34 @@ mod tests {
     }
 
     #[test]
+    fn restart_hold_cannot_be_disabled_or_hidden_by_an_override() {
+        let mut i = base();
+        i.restart_required = true;
+        i.soil_zones = soil4(Some(20.0), Some(40.0), Some(40.0), Some(40.0));
+        let mut p = SkipRuleParams::default();
+        p.disabled_rules = builtin_rule_catalog()
+            .iter()
+            .map(|g| g.0.to_string())
+            .collect();
+        for override_mode in ["auto", "run", "skip"] {
+            i.global_override = override_mode.into();
+            i.zone_overrides.insert("back_yard".into(), "run".into());
+            let answer = evaluate_decisions(&i, &p, &[], &CompiledScripts::compile(&[]));
+            assert_eq!(answer.skip_check.reason_code, "restart_required");
+            assert_eq!(
+                answer.skip_check.reason,
+                crate::gates_catalog::RESTART_REQUIRED_REASON
+            );
+            assert_eq!(answer.trace.reason_code, "restart_required");
+            assert_eq!(answer.trace.rules[0].outcome, "fired");
+            assert!(answer
+                .zones
+                .iter()
+                .all(|z| z.verdict == "skip" && z.reason_code == "restart_required"));
+        }
+    }
+
+    #[test]
     fn protected_control_gates_cannot_be_disabled() {
         // Listing EVERY protected id changes nothing: dry-run, the timed
         // pause, and the tomorrow override all keep deciding.
@@ -4474,10 +5878,10 @@ mod tests {
         i.is_dry_run = true;
         let s = evaluate_with(&i, &p);
         assert_eq!(s.verdict, "skip");
-        assert_eq!(s.reason, "Dry-run mode");
+        assert_eq!(s.reason, "All watering is on hold");
 
         let mut i = base();
-        i.pause_until_epoch = i.now_epoch + 3600;
+        i.pause_until_epoch = i.now_epoch() + 3600;
         assert_eq!(evaluate_with(&i, &p).verdict, "skip");
 
         let mut i = base();
@@ -4503,6 +5907,7 @@ mod tests {
             forbidden_hour_start: Some(0),
             forbidden_hour_end: Some(24),
             max_minutes_per_zone: None,
+            ..Default::default()
         }];
         let mut p = SkipRuleParams::default();
         p.disabled_rules = vec!["restrictions".into()];
@@ -4601,7 +6006,7 @@ mod tests {
     fn global_override_run_forces_run_past_rain() {
         let mut i = base();
         // Heavy rain now normally skips (matches the rain-now parity scenario).
-        i.rain_intensity_now_in_hr = 0.05;
+        i.rain_intensity_now_in_hr = Some(0.05);
         assert_eq!(
             decide(&i, &SkipRuleParams::default()).0,
             "skip",
@@ -4616,7 +6021,126 @@ mod tests {
     }
 
     #[test]
-    fn force_overrode_guard_names_the_overridden_hard_guard() {
+    fn force_run_preserves_safety_restrictions_and_operator_holds_in_every_scope() {
+        type Change = fn(&mut Inputs);
+        let cases: &[(&str, Change)] = &[
+            ("restart_required", |i| i.restart_required = true),
+            ("freeze_now", |i| i.temp_now_f = 28.0),
+            ("overnight_freeze", |i| i.temp_min_24h_f = Some(28.0)),
+            ("soil_frost", |i| i.soil_temp_yard_min_f = Some(28.0)),
+            ("wind_now", |i| i.wind_now_mph = 50.0),
+            ("wind_forecast", |i| i.wind_max_today_mph = 50.0),
+            ("live_data", |i| i.live_readings = LiveReadings::Unavailable),
+            ("paused", |i| i.is_paused = true),
+            ("pause_until", |i| {
+                i.pause_until_epoch = i.now_epoch() + 3600
+            }),
+            ("dry_run", |i| i.is_dry_run = true),
+            ("restrictions", |i| {
+                i.watering_restrictions = vec![WateringRestriction {
+                    allowed_weekdays: vec![0],
+                    ..Default::default()
+                }];
+                i.when = crate::engine::clock::DecisionTime::at(
+                    crate::engine::calendar::Calendar::utc(),
+                    1_700_000_000,
+                );
+            }),
+        ];
+        let p = SkipRuleParams::default();
+        for (expected, change) in cases {
+            for scope in ["global", "zone", "tomorrow"] {
+                let mut inputs = base();
+                inputs.soil_zones = soil4(Some(40.0), Some(40.0), Some(40.0), Some(40.0));
+                // A force-able earlier rain gate must not hide the later safety
+                // gate, which was the failure mode of blanket override precedence.
+                inputs.rain_intensity_now_in_hr = Some(1.0);
+                change(&mut inputs);
+                match scope {
+                    "global" => inputs.global_override = "run".into(),
+                    "zone" => {
+                        inputs
+                            .zone_overrides
+                            .insert("back_yard".into(), "run".into());
+                    }
+                    _ => {
+                        inputs.is_tomorrow = true;
+                        inputs.override_tomorrow = "run".into();
+                    }
+                }
+                let zones = decide_per_zone(&inputs, &p, &[]);
+                let back = zv(&zones, "back_yard");
+                assert_eq!(back.verdict, "skip", "{scope}: {expected}");
+                assert_eq!(back.reason_code, *expected, "{scope}");
+                if scope != "zone" {
+                    let aggregate = evaluate_with(&inputs, &p);
+                    let trace = decide_traced(&inputs, &p);
+                    assert_eq!(aggregate.reason_code, *expected, "{scope}");
+                    assert_eq!(trace.verdict, aggregate.verdict, "{scope}");
+                    assert_eq!(trace.reason_code, aggregate.reason_code, "{scope}");
+                    assert_eq!(trace.reason, aggregate.reason, "{scope}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn soil_model_reruns_the_ladder_after_removing_forecast_rain() {
+        let p = SkipRuleParams::default();
+        let mut inputs = base();
+        inputs.rain_next_4h_in = Some(1.0);
+        inputs.is_dry_run = true;
+        inputs.soil_zones = soil4(None, None, None, None);
+        for zone in &mut inputs.soil_zones {
+            zone.governed_by_soil_model = true;
+        }
+        let zones = decide_per_zone(&inputs, &p, &[]);
+        assert!(zones
+            .iter()
+            .all(|zone| zone.verdict == "skip" && zone.reason_code == "dry_run"));
+
+        // A forecast-today gate occurs before observed recent rain. Removing
+        // only the first must still expose the actual measured-rain backstop.
+        inputs.is_dry_run = false;
+        inputs.rain_today_forecast_in = Some(1.0);
+        inputs.rain_observed_recent_in = 2.0;
+        let zones = decide_per_zone(&inputs, &p, &[]);
+        assert!(zones
+            .iter()
+            .all(|zone| zone.verdict == "skip" && zone.reason_code == "observed_rain"));
+    }
+
+    #[test]
+    fn custom_conditions_reach_soil_floor_and_soil_model_runs() {
+        use crate::engine::conditions::{ConditionExpr, RuleAction, RuleScope};
+        let rule = ConditionRule {
+            id: "owner_hold".into(),
+            name: "Garden party".into(),
+            enabled: true,
+            scope: RuleScope::AllZones,
+            condition: ConditionExpr::All(vec![]),
+            action: RuleAction::Skip,
+        };
+        for governed in [false, true] {
+            let mut inputs = base();
+            inputs.rain_next_4h_in = Some(1.0);
+            inputs.soil_zones = soil4(Some(20.0), Some(20.0), Some(20.0), Some(20.0));
+            for zone in &mut inputs.soil_zones {
+                zone.governed_by_soil_model = governed;
+            }
+            let zones = decide_per_zone(
+                &inputs,
+                &SkipRuleParams::default(),
+                std::slice::from_ref(&rule),
+            );
+            assert!(zones
+                .iter()
+                .all(|zone| zone.verdict == "skip" && zone.source == "condition"));
+        }
+    }
+
+    #[test]
+    fn force_overrode_guard_names_only_a_gate_actually_overridden() {
         // #2: a force-run watering THROUGH a hard guard surfaces the guard it is
         // suppressing (so the UI can warn), without changing override-beats-all.
         let p = SkipRuleParams::default();
@@ -4634,7 +6158,7 @@ mod tests {
             "force run over a would-be run names no guard"
         );
 
-        // Force run through a freeze: the freeze reason is surfaced, verdict unchanged.
+        // A convenience force cannot waive a freeze. No warning may claim it did.
         let mut i = base();
         i.temp_now_f = 28.0;
         i.min_temp_f = 35.0;
@@ -4644,12 +6168,16 @@ mod tests {
             "sanity: the freeze skips without an override"
         );
         i.global_override = "run".into();
-        assert_eq!(decide(&i, &p).0, "run", "force run still wins");
-        let guard = force_overrode_guard(&i, &p).expect("freeze guard surfaced");
-        assert!(
-            guard.contains("Freeze"),
-            "guard names the freeze: {guard:?}"
-        );
+        assert_eq!(decide(&i, &p).0, "skip", "freeze still holds");
+        assert_eq!(force_overrode_guard(&i, &p), None);
+
+        // Rain/soil recommendations remain overridable and visible afterward.
+        i.temp_now_f = 70.0;
+        i.rain_today_in = 0.5;
+        assert_eq!(decide(&i, &p).0, "run");
+        assert!(force_overrode_guard(&i, &p)
+            .unwrap()
+            .contains("Already wet"));
 
         // A force-SKIP is not a force-run: no overridden-guard signal.
         let mut i = base();
@@ -4660,7 +6188,7 @@ mod tests {
     }
 
     #[test]
-    fn zone_override_run_beats_global_skip() {
+    fn zone_override_run_cannot_clear_global_skip() {
         let mut i = base();
         i.soil_zones = soil4(Some(40.0), Some(40.0), Some(40.0), Some(40.0));
         i.global_override = "skip".into();
@@ -4668,7 +6196,7 @@ mod tests {
         let zv = decide_per_zone(&i, &SkipRuleParams::default(), &[]);
         let front = zv.iter().find(|z| z.zone_slug == "front_yard").unwrap();
         let back = zv.iter().find(|z| z.zone_slug == "back_yard").unwrap();
-        assert_eq!(front.verdict, "run", "zone override run beats global skip");
+        assert_eq!(front.verdict, "skip", "the current yard-wide hold wins");
         assert_eq!(back.verdict, "skip", "other zones follow the global skip");
     }
 
@@ -4725,7 +6253,7 @@ mod tests {
         }
     }
 
-    // ── Soil-probe QUARANTINE + infer-from-siblings ─────────────────────────
+    // ── Soil-probe quarantine and data holds ─────────────────────────
 
     #[test]
     fn quarantine_config_defaults() {
@@ -4736,64 +6264,42 @@ mod tests {
     }
 
     #[test]
-    fn quarantine_outlier_low_probe_infers_saturated_and_skips() {
-        // (a) The real incident: back_yard's bad-spot probe reads 28% while its
-        // three siblings read 76/71/73 after the same rain. With the saturation
-        // threshold at 70, the three siblings are saturated; back_yard is a wild
-        // outlier (28 vs median 72 -> 44pp > 35), so it is quarantined and its
-        // soil inferred from the trustworthy median (~73). The zone then reads
-        // saturated and SKIPS, sourced "soil_quarantine".
+    fn quarantine_low_outlier_holds_without_claiming_measured_saturation() {
         let p = SkipRuleParams::default();
         let mut i = base();
         i.soil_zones = soil4(Some(28.0), Some(76.0), Some(71.0), Some(73.0));
-        // shrubs has an 85% saturation threshold; lift it so the bug isolates to
-        // the saturation inference, not the shrubs' own dryness.
         i.soil_zones[3].saturation_pct = 70.0;
-
-        // Aggregate: all four effective zones saturated -> yard-wide skip.
-        assert_eq!(decide(&i, &p).0, "skip");
-        assert!(evaluate_with(&i, &p).will_skip);
-
-        // Per-zone: back_yard's verdict is decided on the inferred value.
-        let v = decide_per_zone(&i, &p, &[]);
-        let back = zv(&v, "back_yard");
-        assert_eq!(
-            back.verdict, "skip",
-            "quarantined zone must not run while saturated"
-        );
+        let answer = evaluate_decisions(&i, &p, &[], &CompiledScripts::compile(&[]));
+        assert_eq!(answer.skip_check.verdict, "skip", "all final zones hold");
+        let back = zv(&answer.zones, "back_yard");
+        assert_eq!(back.verdict, "skip");
+        assert_eq!(back.reason_code, "soil_probe");
         assert_eq!(back.source, "soil_quarantine");
-        assert!(
-            back.reason.contains("28%") && back.reason.contains("inferred from neighbors"),
-            "reason must name the suspect reading + inference, got {:?}",
-            back.reason
+        assert!(back.reason.contains("28% vs yard 73%"));
+        assert!(back.reason.contains("watering held"));
+        assert!(!back.reason.contains("saturated"));
+        assert_eq!(zv(&answer.zones, "front_yard").source, "soil_saturation");
+        assert_eq!(
+            answer.skip_check.soil_fields["soil_back_yard_pct"],
+            Some(28.0),
+            "the diagnostic reading stays raw"
         );
-        // The trustworthy siblings keep their normal soil_saturation source.
-        assert_eq!(zv(&v, "front_yard").source, "soil_saturation");
     }
 
     #[test]
-    fn quarantine_offline_probe_infers_from_saturated_siblings() {
-        // (b) An OFFLINE (None) probe with saturated siblings: quarantine infers
-        // the trustworthy median, so the offline zone reads saturated and skips.
+    fn quarantine_offline_probe_holds_with_saturated_siblings() {
         let p = SkipRuleParams::default();
         let mut i = base();
         i.soil_zones = soil4(None, Some(80.0), Some(78.0), Some(82.0));
+        i.soil_zones[0].probe_configured = true;
         i.soil_zones[3].saturation_pct = 70.0;
-
-        assert_eq!(
-            decide(&i, &p).0,
-            "skip",
-            "yard-wide saturation via inference"
-        );
-        let v = decide_per_zone(&i, &p, &[]);
-        let back = zv(&v, "back_yard");
+        let answer = evaluate_decisions(&i, &p, &[], &CompiledScripts::compile(&[]));
+        assert_eq!(answer.skip_check.verdict, "skip");
+        let back = zv(&answer.zones, "back_yard");
         assert_eq!(back.verdict, "skip");
+        assert_eq!(back.reason_code, "soil_probe");
         assert_eq!(back.source, "soil_quarantine");
-        assert!(
-            back.reason.contains("offline") && back.reason.contains("inferred from neighbors"),
-            "offline reason must say offline, got {:?}",
-            back.reason
-        );
+        assert!(back.reason.contains("offline") && back.reason.contains("watering held"));
     }
 
     #[test]
@@ -4828,8 +6334,8 @@ mod tests {
         // probe (no outliers, soil_floor intact).
         let p = SkipRuleParams::default();
         let mut i = base();
-        i.rain_next_4h_in = 0.50; // demotable soft forecast-rain skip
-                                  // All four genuinely dry, tight spread (20/22/19/21): no outlier.
+        i.rain_next_4h_in = Some(0.50); // demotable soft forecast-rain skip
+                                        // All four genuinely dry, tight spread (20/22/19/21): no outlier.
         i.soil_zones = soil4(Some(20.0), Some(22.0), Some(19.0), Some(21.0));
         // No zone is quarantined.
         assert!(
@@ -4852,63 +6358,49 @@ mod tests {
     }
 
     #[test]
-    fn quarantine_offline_runs_via_floor_when_dry_siblings_infer_dry() {
-        // (d-bis) An OFFLINE zone whose trustworthy siblings are genuinely dry
-        // infers a DRY value, so on a soft-rain morning it too runs via the floor.
-        // Quarantine never forces a run nor a skip on its own; it only swaps the
-        // effective soil and lets the normal gates decide.
+    fn quarantine_offline_probe_cannot_borrow_dry_permission_from_siblings() {
         let p = SkipRuleParams::default();
         let mut i = base();
-        i.rain_next_4h_in = 0.50;
+        i.rain_next_4h_in = Some(0.50);
         i.soil_zones = soil4(None, Some(20.0), Some(22.0), Some(21.0));
+        i.soil_zones[0].probe_configured = true;
         let v = decide_per_zone(&i, &p, &[]);
         let back = zv(&v, "back_yard");
-        assert_eq!(
-            back.verdict, "run",
-            "offline zone inferred dry runs via the floor"
-        );
-        assert_eq!(back.source, "soil_floor");
+        assert_eq!(back.verdict, "skip");
+        assert_eq!(back.reason_code, "soil_probe");
+        assert_eq!(zv(&v, "front_yard").verdict, "run");
+        assert_eq!(zv(&v, "front_yard").source, "soil_floor");
     }
 
     #[test]
-    fn quarantine_under_three_present_no_outlier_offline_falls_back() {
-        // (e) Fewer than 3 PRESENT readings: no present reading is ever flagged an
-        // outlier. With only 2 present trustworthy readings an OFFLINE zone is
-        // still inferred (a trustworthy median exists); with 0/1 present and the
-        // rest offline, there is no trustworthy median, so quarantine is inert and
-        // the raw (None) reading stands (current behavior).
-        let p = SkipRuleParams::default();
-
-        // Two present saturated + two offline. Outliers can't be judged (only 2
-        // present), but a trustworthy median (median of the two present) exists,
-        // so BOTH offline zones are inferred saturated. A would-be low outlier
-        // among the two present is NOT flagged (under 3 present).
+    fn configured_offline_probe_holds_even_without_sibling_evidence() {
         let mut i = base();
         i.soil_zones = soil4(Some(80.0), Some(82.0), None, None);
-        i.soil_zones[0].saturation_pct = 70.0;
-        i.soil_zones[1].saturation_pct = 70.0;
-        i.soil_zones[2].saturation_pct = 70.0;
-        i.soil_zones[3].saturation_pct = 70.0;
+        i.soil_zones
+            .iter_mut()
+            .for_each(|z| z.probe_configured = true);
+        let p = SkipRuleParams::default();
         let plan = quarantine_plan(&i.soil_zones, &p);
         assert!(
             plan[0].is_none() && plan[1].is_none(),
-            "present zones not flagged with <3 present"
-        );
-        assert!(
-            plan[2].is_some() && plan[3].is_some(),
-            "offline zones inferred from the trustworthy median"
+            "two readings cannot establish outliers"
         );
         let v = decide_per_zone(&i, &p, &[]);
-        assert_eq!(zv(&v, "side_yard").source, "soil_quarantine");
+        assert_eq!(zv(&v, "side_yard").reason_code, "soil_probe");
 
-        // No trustworthy median at all (all offline): quarantine inert, fall back.
-        let mut j = base();
-        j.soil_zones = soil4(None, None, None, None);
-        assert!(quarantine_plan(&j.soil_zones, &p)
-            .iter()
-            .all(Option::is_none));
-        // With no soil data the saturation gate is inapplicable -> a clear day runs.
-        assert_eq!(decide(&j, &p).0, "run");
+        i.soil_zones.iter_mut().for_each(|z| z.pct = None);
+        for quarantine_enabled in [true, false] {
+            let mut p = p.clone();
+            p.soil_quarantine_enabled = quarantine_enabled;
+            p.disabled_rules.push("soil_probe".into());
+            let answer = evaluate_decisions(&i, &p, &[], &CompiledScripts::compile(&[]));
+            assert_eq!(answer.skip_check.reason_code, "soil_probe");
+            assert_eq!(answer.trace.reason_code, "soil_probe");
+            assert!(answer
+                .zones
+                .iter()
+                .all(|z| z.verdict == "skip" && z.reason_code == "soil_probe"));
+        }
     }
 
     #[test]
@@ -4926,6 +6418,10 @@ mod tests {
                 pct: Some(28.0),
                 saturation_pct: 70.0,
                 target_min_pct: 30.0,
+                probe_configured: false,
+                governed_by_soil_model: false,
+                planning_forecast_unavailable: false,
+                sprinkler_type: Default::default(),
             },
             ZoneSoil {
                 slug: "front_yard".into(),
@@ -4933,6 +6429,10 @@ mod tests {
                 pct: Some(76.0),
                 saturation_pct: 70.0,
                 target_min_pct: 30.0,
+                probe_configured: false,
+                governed_by_soil_model: false,
+                planning_forecast_unavailable: false,
+                sprinkler_type: Default::default(),
             },
             ZoneSoil {
                 slug: "side_yard".into(),
@@ -4940,6 +6440,10 @@ mod tests {
                 pct: Some(71.0),
                 saturation_pct: 70.0,
                 target_min_pct: 30.0,
+                probe_configured: false,
+                governed_by_soil_model: false,
+                planning_forecast_unavailable: false,
+                sprinkler_type: Default::default(),
             },
         ];
         let plan3 = quarantine_plan(&i3.soil_zones, &p);
@@ -4957,6 +6461,10 @@ mod tests {
                 pct: Some(28.0),
                 saturation_pct: 70.0,
                 target_min_pct: 30.0,
+                probe_configured: false,
+                governed_by_soil_model: false,
+                planning_forecast_unavailable: false,
+                sprinkler_type: Default::default(),
             },
             ZoneSoil {
                 slug: "front_yard".into(),
@@ -4964,6 +6472,10 @@ mod tests {
                 pct: Some(76.0),
                 saturation_pct: 70.0,
                 target_min_pct: 30.0,
+                probe_configured: false,
+                governed_by_soil_model: false,
+                planning_forecast_unavailable: false,
+                sprinkler_type: Default::default(),
             },
         ];
         assert!(
@@ -5002,19 +6514,31 @@ mod tests {
     }
 
     #[test]
-    fn quarantine_high_outlier_distrusted_too() {
-        // The outlier test is two-sided: a wildly-HIGH probe (one stuck at 95
-        // amid {30,28,32}) is distrusted and inferred down to the dry median, so
-        // it does NOT spuriously skip on a saturated-looking false reading.
+    fn quarantine_high_outlier_never_becomes_inferred_dry_permission() {
         let p = SkipRuleParams::default();
         let mut i = base();
         i.soil_zones = soil4(Some(95.0), Some(30.0), Some(28.0), Some(32.0));
-        let plan = quarantine_plan(&i.soil_zones, &p);
-        assert!(plan[0].is_some(), "95 vs ~30 median is a high outlier");
-        // back_yard inferred to the dry median (~30) -> runs, not a false skip.
-        let v = decide_per_zone(&i, &p, &[]);
-        assert_eq!(zv(&v, "back_yard").verdict, "run");
-        assert_ne!(zv(&v, "back_yard").source, "soil_saturation");
+        assert!(quarantine_plan(&i.soil_zones, &p)[0].is_some());
+        for mode in ["auto", "global_force", "zone_force", "soil_model"] {
+            let mut i = i.clone();
+            match mode {
+                "global_force" => i.global_override = "run".into(),
+                "zone_force" => {
+                    i.zone_overrides.insert("back_yard".into(), "run".into());
+                }
+                "soil_model" => i.soil_zones[0].governed_by_soil_model = true,
+                _ => {}
+            }
+            let v = decide_per_zone(&i, &p, &[]);
+            let back = zv(&v, "back_yard");
+            assert_eq!(back.verdict, "skip", "{mode}");
+            assert_eq!(back.reason_code, "soil_probe", "{mode}");
+            assert_eq!(
+                zv(&v, "front_yard").verdict,
+                "run",
+                "a trusted sibling remains eligible"
+            );
+        }
     }
 
     #[test]
@@ -5027,6 +6551,7 @@ mod tests {
         outlier.soil_zones[3].saturation_pct = 70.0;
         let mut offline = base();
         offline.soil_zones = soil4(None, Some(80.0), Some(78.0), Some(82.0));
+        offline.soil_zones[0].probe_configured = true;
         offline.soil_zones[3].saturation_pct = 70.0;
         for i in [&outlier, &offline] {
             let (v, r) = decide(i, &p);
@@ -5036,5 +6561,116 @@ mod tests {
             let fired = t.rules.iter().filter(|e| e.outcome == "fired").count();
             assert!(fired <= 1, "at most one fired rule on a quarantine morning");
         }
+    }
+    #[test]
+    fn unbound_zones_never_acquire_probe_faults_or_inferred_dry_readings() {
+        let p = SkipRuleParams::default();
+        let mut i = base();
+        i.soil_zones = soil4(None, Some(20.0), Some(22.0), Some(21.0));
+        assert!(quarantine_plan(&i.soil_zones, &p)[0].is_none());
+        assert!(probe_data_holds(&i, &p).is_empty());
+        assert_eq!(
+            zv(&decide_per_zone(&i, &p, &[]), "back_yard").verdict,
+            "run"
+        );
+        i.rain_next_4h_in = Some(0.5);
+        let zones = decide_per_zone(&i, &p, &[]);
+        assert_eq!(
+            zv(&zones, "back_yard").reason_code,
+            "rain_next_4h",
+            "an unprobed zone cannot borrow a sibling's dry-soil floor"
+        );
+        i.soil_zones[0].governed_by_soil_model = true;
+        let zones = decide_per_zone(&i, &p, &[]);
+        assert_eq!(
+            zv(&zones, "back_yard").verdict,
+            "run",
+            "an intentionally unprobed soil model still governs its zone"
+        );
+    }
+
+    #[test]
+    fn probe_fault_stays_binding_under_force_and_trace_matches() {
+        let mut i = base();
+        i.soil_zones = vec![ZoneSoil {
+            slug: "front".into(),
+            probe_configured: true,
+            governed_by_soil_model: true,
+            planning_forecast_unavailable: false,
+            ..Default::default()
+        }];
+        let mut p = SkipRuleParams::default();
+        p.disabled_rules = PROTECTED_RULES.iter().map(|id| (*id).to_string()).collect();
+        for force in ["none", "global", "zone", "tomorrow"] {
+            let mut i = i.clone();
+            match force {
+                "global" => i.global_override = "run".into(),
+                "zone" => {
+                    i.zone_overrides.insert("front".into(), "run".into());
+                }
+                "tomorrow" => {
+                    i.is_tomorrow = true;
+                    i.override_tomorrow = "run".into();
+                }
+                _ => {}
+            }
+            let answer = evaluate_decisions(&i, &p, &[], &CompiledScripts::compile(&[]));
+            assert_eq!(answer.skip_check.reason_code, "soil_probe", "{force}");
+            assert_eq!(answer.trace.reason_code, "soil_probe", "{force}");
+            assert_eq!(answer.zones[0].reason_code, "soil_probe", "{force}");
+            assert_eq!(answer.zones[0].verdict, "skip", "{force}");
+            assert_eq!(
+                answer
+                    .trace
+                    .rules
+                    .iter()
+                    .filter(|r| r.outcome == "fired")
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn probe_holds_round_trip_as_typed_metadata_even_when_weather_wins() {
+        let mut i = base();
+        i.temp_now_f = 25.0;
+        i.soil_zones = soil4(None, Some(95.0), Some(28.0), Some(30.0));
+        i.soil_zones[0].probe_configured = true;
+        let p = SkipRuleParams::default();
+        let sc = evaluate_with(&i, &p);
+        assert_eq!(sc.reason_code, "freeze_now");
+        assert_eq!(
+            sc.soil_probe_holds.len(),
+            2,
+            "the earlier freeze cannot hide offline or outlier data"
+        );
+        let json = serde_json::to_value(&sc).unwrap();
+        assert_eq!(json["soil_probe_configured"]["back_yard"], true);
+        assert!(json["soil_back_yard_pct"].is_null());
+        assert!(json["soil_probe_holds"]["front_yard"]
+            .as_str()
+            .unwrap()
+            .contains("95%"));
+        let recovered: SkipCheck = serde_json::from_value(json.clone()).unwrap();
+        let inputs = inputs_from_skipcheck(&recovered);
+        assert!(
+            inputs
+                .soil_zones
+                .iter()
+                .find(|z| z.slug == "back_yard")
+                .unwrap()
+                .probe_configured
+        );
+        assert_eq!(probe_data_holds(&inputs, &p), sc.soil_probe_holds);
+        let mut legacy = json;
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("soil_probe_configured");
+        legacy.as_object_mut().unwrap().remove("soil_probe_holds");
+        let recovered: SkipCheck = serde_json::from_value(legacy).unwrap();
+        assert!(recovered.soil_probe_configured.is_empty());
+        assert!(recovered.soil_probe_holds.is_empty());
     }
 }

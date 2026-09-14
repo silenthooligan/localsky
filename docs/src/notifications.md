@@ -1,12 +1,19 @@
 # Notifications
 
-LocalSky can push three classes of events to your subscribed devices:
+LocalSky notifies you about the things that matter to a lawn and a water bill:
 
-- **Zone started** when an irrigation zone transitions from idle to running.
-- **Zone stopped** when a zone finishes, with the duration in minutes.
-- **Daily verdict** once per day, the first time the skip-check verdict is computed (skip / run / run extended, with the reason).
+- **Zone started** and **zone stopped**, with the duration.
+- **Daily verdict** once per day, the first time the morning's decision is made (skip, run, run extended, with the reason).
+- **A zone that did not start** because the controller refused the command, and **a controller that is not answering** when the morning needed it.
+- **A valve that may still be open**: its shutoff was due and the controller has not confirmed closing it. LocalSky keeps retrying; this is the one notification worth walking outside for.
+- **Water moving with nothing running**, when a flow meter is connected.
+- **A weather source that went quiet**, and **a soil probe that stopped reporting**.
 
-**Web Push (browser / PWA) is the delivery channel implemented today.** The configuration schema and the Settings UI also carry blocks for MQTT, ntfy, Slack, and email; those sinks are scaffolded but event delivery for them is not wired up in this release. (LocalSky's MQTT support today publishes Home Assistant discovery entities and sensor states, which is a separate feature: see the [HACS integration](hacs.md) page.)
+Three channels deliver them: **Web Push** to a subscribed browser or the installed app, **ntfy** to any topic on any ntfy server, and **Slack** through an incoming webhook. Enable any or all under Settings, then Notifications; the wizard asks for the ntfy and Slack URLs on a new install. The Home Assistant MQTT block on the same page is a different feature, the discovery publisher for entities and sensor states; see the [HACS integration](hacs.md) page. The dashboard-only nudges (a tuning report is ready, a run cap was raised) go to Web Push alone.
+
+## ntfy and Slack
+
+ntfy wants a server (the public `https://ntfy.sh` or your own) and a topic; an access token is optional. LocalSky posts one message per event with the headline as the title. Slack wants an incoming webhook URL; LocalSky posts the headline in bold and the detail on the next line. A sink that fails is logged and never blocks the others. There is no email channel: it would need an SMTP dependency this image does not carry, so the field was removed rather than shipped dead.
 
 ## Web Push
 
@@ -78,7 +85,7 @@ A configured instance returns `{ "public_key": "BNJxRy7..." }`. A `503` with `{ 
 
 ### 4. Subscribe a device
 
-Open the dashboard on each phone / laptop / tablet that should receive notifications. Go to **Settings -> Notifications -> Web Push** and tap **Subscribe on this device**. The browser asks for notification permission; allow it. The dashboard registers a push endpoint with the public key, and from that moment LocalSky can wake the device.
+Open the dashboard on each phone / laptop / tablet that should receive notifications. Go to **Settings -> Notifications -> Web Push** and tap **Subscribe this device**. The browser asks for notification permission; allow it. The dashboard registers a push endpoint with the public key, and from that moment LocalSky can wake the device.
 
 To stop receiving on a device: tap **Unsubscribe** in the same panel, or clear the site data in the browser. Endpoints that a browser has revoked are pruned automatically the next time a push to them fails.
 

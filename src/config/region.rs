@@ -502,7 +502,7 @@ pub fn region_keyless_authority_entries(
 /// provider actually serves.
 ///
 /// Deletions stick: every id this pass handles is recorded in
-/// `cfg.seeded_source_ids` (whether appended or already present), and
+/// `ledger.seeded_source_ids` (whether appended or already present), and
 /// ids on that list are never touched again. Keyed providers are never
 /// seeded. Returns `(appended_log_lines, config_changed)`: `changed` is
 /// true whenever the config was mutated AT ALL, including the
@@ -511,6 +511,7 @@ pub fn region_keyless_authority_entries(
 /// hand-added source would be resurrected on the next boot.
 pub fn seed_missing_forecast_authorities(
     cfg: &mut crate::config::schema::Config,
+    ledger: &mut crate::config::ledger::Ledger,
 ) -> (Vec<String>, bool) {
     let (lat, lon) = (cfg.deployment.location.lat, cfg.deployment.location.lon);
     // Location never set: the region is unknowable, and a fresh install
@@ -521,10 +522,10 @@ pub fn seed_missing_forecast_authorities(
     let mut appended = Vec::new();
     let mut changed = false;
     for entry in region_keyless_authority_entries(lat, lon) {
-        if cfg.seeded_source_ids.contains(&entry.id) {
+        if ledger.seeded_source_ids.contains(&entry.id) {
             continue;
         }
-        cfg.seeded_source_ids.push(entry.id.clone());
+        ledger.seeded_source_ids.push(entry.id.clone());
         changed = true;
         if cfg.sources.iter().any(|s| s.id == entry.id) {
             // Already configured by hand: just mark it handled so a later
@@ -551,13 +552,14 @@ pub fn seed_missing_forecast_authorities(
 /// Safety: only a priority still EXACTLY at the flat default (50) is
 /// lifted (any other value is a user choice and is never touched), and
 /// every enabled region-ranked source id present on the first run is
-/// recorded in `cfg.priority_repaired_ids` whether it was lifted or not,
+/// recorded in `ledger.priority_repaired_ids` whether it was lifted or not,
 /// so the pass runs at most once per source: a user who later sets a
 /// repaired source BACK to 50 deliberately keeps their 50. Sources added
 /// after this pass are ranked at add-time by
 /// `normalize_new_cloud_sources` and never reach here unmarked.
 pub fn repair_flat_default_priorities(
     cfg: &mut crate::config::schema::Config,
+    ledger: &mut crate::config::ledger::Ledger,
 ) -> (Vec<String>, bool) {
     let (lat, lon) = (cfg.deployment.location.lat, cfg.deployment.location.lon);
     if lat == 0.0 && lon == 0.0 {
@@ -566,7 +568,7 @@ pub fn repair_flat_default_priorities(
     const FLAT_DEFAULT: i32 = 50;
     let mut log = Vec::new();
     let mut changed = false;
-    let repaired: Vec<String> = cfg.priority_repaired_ids.clone();
+    let repaired: Vec<String> = ledger.priority_repaired_ids.clone();
     for entry in cfg.sources.iter_mut().filter(|e| e.enabled) {
         let region_rank = default_priority_for(&entry.source, lat, lon);
         if region_rank == FLAT_DEFAULT {
@@ -575,7 +577,7 @@ pub fn repair_flat_default_priorities(
         if repaired.contains(&entry.id) {
             continue;
         }
-        cfg.priority_repaired_ids.push(entry.id.clone());
+        ledger.priority_repaired_ids.push(entry.id.clone());
         changed = true;
         if entry.priority == FLAT_DEFAULT {
             entry.priority = region_rank;
@@ -722,6 +724,7 @@ mod tests {
 
     #[test]
     fn repair_lifts_flat_default_authority_once_and_respects_later_user_reset() {
+        let mut ledger = crate::config::ledger::Ledger::default();
         let (lat, lon) = ORLANDO;
         // MRMS predating the ranking: flat 50. NWS already at its rank. A
         // hand-tuned Pirate at 63 must never be touched.
@@ -734,7 +737,7 @@ mod tests {
                 entry("pirate", pirate(), 63, true),
             ],
         );
-        let (log, changed) = repair_flat_default_priorities(&mut cfg);
+        let (log, changed) = repair_flat_default_priorities(&mut cfg, &mut ledger);
         assert!(changed);
         assert_eq!(
             log.len(),
@@ -748,12 +751,12 @@ mod tests {
         // Every evaluated id is marked, lifted or not.
         for id in ["noaa_mrms", "nws", "pirate"] {
             assert!(
-                cfg.priority_repaired_ids.contains(&id.to_string()),
+                ledger.priority_repaired_ids.contains(&id.to_string()),
                 "{id} marked"
             );
         }
         // Second run: no-op.
-        let (log2, changed2) = repair_flat_default_priorities(&mut cfg);
+        let (log2, changed2) = repair_flat_default_priorities(&mut cfg, &mut ledger);
         assert!(log2.is_empty() && !changed2, "idempotent after marking");
         // User later sets a repaired source BACK to 50: their choice sticks.
         cfg.sources
@@ -761,7 +764,7 @@ mod tests {
             .find(|s| s.id == "noaa_mrms")
             .unwrap()
             .priority = 50;
-        let (log3, changed3) = repair_flat_default_priorities(&mut cfg);
+        let (log3, changed3) = repair_flat_default_priorities(&mut cfg, &mut ledger);
         assert!(
             log3.is_empty() && !changed3,
             "deliberate 50 is never re-lifted"
@@ -771,16 +774,17 @@ mod tests {
 
     #[test]
     fn repair_skips_unlocated_and_disabled() {
+        let mut ledger = crate::config::ledger::Ledger::default();
         // No location: unknowable region, untouched.
         let mut cfg = cfg_at(0.0, 0.0, vec![entry("noaa_mrms", mrms(), 50, true)]);
-        let (_, changed) = repair_flat_default_priorities(&mut cfg);
+        let (_, changed) = repair_flat_default_priorities(&mut cfg, &mut ledger);
         assert!(!changed);
         // Disabled source: untouched and unmarked (a later enable re-evaluates).
         let (lat, lon) = ORLANDO;
         let mut cfg = cfg_at(lat, lon, vec![entry("noaa_mrms", mrms(), 50, false)]);
-        let (_, changed) = repair_flat_default_priorities(&mut cfg);
+        let (_, changed) = repair_flat_default_priorities(&mut cfg, &mut ledger);
         assert!(!changed);
-        assert!(cfg.priority_repaired_ids.is_empty());
+        assert!(ledger.priority_repaired_ids.is_empty());
     }
 
     #[test]
@@ -1160,6 +1164,7 @@ mod tests {
 
     #[test]
     fn seeding_appends_us_authorities_to_existing_hardware_install() {
+        let mut ledger = crate::config::ledger::Ledger::default();
         // A pre-existing US install: LAN station + Open-Meteo only (exactly the
         // 2026-07 outage shape: observations local, forecast single-provider).
         let mut cfg = cfg_at(
@@ -1167,34 +1172,35 @@ mod tests {
             ORLANDO.1,
             vec![entry("open_meteo", om(), 50, true)],
         );
-        let (appended, changed) = seed_missing_forecast_authorities(&mut cfg);
+        let (appended, changed) = seed_missing_forecast_authorities(&mut cfg, &mut ledger);
         assert!(changed);
         assert_eq!(appended.len(), 2, "US gains NWS + NOAA MRMS: {appended:?}");
         let nws_e = cfg.sources.iter().find(|s| s.id == "nws").unwrap();
         assert_eq!(nws_e.priority, 70, "NWS lands at the researched US rank");
         assert!(nws_e.enabled);
         assert!(nws_e.max_age_s.is_some(), "slow-cadence window seeded");
-        assert!(cfg.seeded_source_ids.contains(&"nws".to_string()));
-        assert!(cfg.seeded_source_ids.contains(&"noaa_mrms".to_string()));
+        assert!(ledger.seeded_source_ids.contains(&"nws".to_string()));
+        assert!(ledger.seeded_source_ids.contains(&"noaa_mrms".to_string()));
 
         // Second boot: idempotent, untouched.
         let before = cfg.sources.len();
-        let (appended2, changed2) = seed_missing_forecast_authorities(&mut cfg);
+        let (appended2, changed2) = seed_missing_forecast_authorities(&mut cfg, &mut ledger);
         assert!(appended2.is_empty() && !changed2);
         assert_eq!(cfg.sources.len(), before);
     }
 
     #[test]
     fn seeding_never_resurrects_a_deleted_authority() {
+        let mut ledger = crate::config::ledger::Ledger::default();
         let mut cfg = cfg_at(
             ORLANDO.0,
             ORLANDO.1,
             vec![entry("open_meteo", om(), 50, true)],
         );
-        let _ = seed_missing_forecast_authorities(&mut cfg);
+        let _ = seed_missing_forecast_authorities(&mut cfg, &mut ledger);
         // The user deletes the seeded NWS.
         cfg.sources.retain(|s| s.id != "nws");
-        let (appended, changed) = seed_missing_forecast_authorities(&mut cfg);
+        let (appended, changed) = seed_missing_forecast_authorities(&mut cfg, &mut ledger);
         assert!(!changed, "tombstoned id must not mutate the config");
         assert!(appended.is_empty());
         assert!(
@@ -1205,6 +1211,7 @@ mod tests {
 
     #[test]
     fn seeding_marks_hand_added_authority_so_its_deletion_sticks_too() {
+        let mut ledger = crate::config::ledger::Ledger::default();
         // The user added NWS by hand before this pass ever ran.
         let mut cfg = cfg_at(
             ORLANDO.0,
@@ -1214,7 +1221,7 @@ mod tests {
                 entry("nws", nws(), 42, true),
             ],
         );
-        let (appended, changed) = seed_missing_forecast_authorities(&mut cfg);
+        let (appended, changed) = seed_missing_forecast_authorities(&mut cfg, &mut ledger);
         // Marker-only for nws (mrms still appends): the hand-tuned entry is
         // untouched but the id is recorded, and the change must persist.
         assert!(changed);
@@ -1223,22 +1230,23 @@ mod tests {
             nws_e.priority, 42,
             "hand-tuned entry is left byte-identical"
         );
-        assert!(cfg.seeded_source_ids.contains(&"nws".to_string()));
+        assert!(ledger.seeded_source_ids.contains(&"nws".to_string()));
         assert!(!appended.iter().any(|l| l.contains("'nws'")));
 
         cfg.sources.retain(|s| s.id != "nws");
-        let (_, changed2) = seed_missing_forecast_authorities(&mut cfg);
+        let (_, changed2) = seed_missing_forecast_authorities(&mut cfg, &mut ledger);
         assert!(!changed2);
         assert!(!cfg.sources.iter().any(|s| s.id == "nws"));
     }
 
     #[test]
     fn seeding_skips_unlocated_and_global_installs() {
+        let mut ledger = crate::config::ledger::Ledger::default();
         // Null Island: region unknowable, config untouched.
         let mut unlocated = cfg_at(0.0, 0.0, vec![entry("open_meteo", om(), 50, true)]);
-        let (a, c) = seed_missing_forecast_authorities(&mut unlocated);
+        let (a, c) = seed_missing_forecast_authorities(&mut unlocated, &mut ledger);
         assert!(a.is_empty() && !c);
-        assert!(unlocated.seeded_source_ids.is_empty());
+        assert!(ledger.seeded_source_ids.is_empty());
 
         // Global region: no extra keyless authority exists to seed.
         let mut sydney = cfg_at(
@@ -1246,7 +1254,7 @@ mod tests {
             SYDNEY.1,
             vec![entry("open_meteo", om(), 50, true)],
         );
-        let (a2, c2) = seed_missing_forecast_authorities(&mut sydney);
+        let (a2, c2) = seed_missing_forecast_authorities(&mut sydney, &mut ledger);
         assert!(a2.is_empty() && !c2);
         assert_eq!(sydney.sources.len(), 1);
     }

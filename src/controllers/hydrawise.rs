@@ -18,10 +18,9 @@
 // Caveats:
 //   - The "RESTful" API is GET-only and ignores Content-Type. Every
 //     command goes in the query string.
-//   - Hydrawise rate-limits to 30 calls / 5 min per api_key. Our
-//     status() poll is on the engine's cadence; the engine adds its
-//     own minimum interval before re-polling, so we don't add our
-//     own here.
+//   - Hydrawise rate-limits to 30 calls / 5 min per api_key. status()
+//     declares CLOUD_STATUS_POLL_S and the registry's throttle serves
+//     the cached readback inside that window, so no throttle here.
 //   - relay_id values are NOT zone numbers, they're stable Hydrawise
 //     relay IDs surfaced in statusschedule.php. Two paths fill the
 //     binding: the controller editor's "Scan zones" merges results into
@@ -29,7 +28,6 @@
 //     (controller_station = relay id, e.g. from the wizard's import)
 //     overlay that map at build time (runtime::build_controllers).
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -41,6 +39,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use crate::config::schema::HydrawiseConfig;
+use crate::controllers::zone_map::ZoneMap;
 use crate::ports::irrigation_controller::{
     ControllerCaps, ControllerError, ControllerResult, ControllerStatus, IrrigationController,
     RunHandle, RunRecord, ZoneRuntimeStatus,
@@ -52,8 +51,10 @@ pub struct Hydrawise {
     id: String,
     config: HydrawiseConfig,
     client: Client,
-    /// Reverse map (relay_id -> slug) for status() lookups.
-    relay_to_slug: HashMap<i64, String>,
+    /// Zone slug -> Hydrawise relay_id, built from `config.zone_relay_map`
+    /// at construction. Commands look up the relay for a slug; status()
+    /// walks it the other way (relay_id -> slug).
+    zones: ZoneMap<i64>,
     last_status: Arc<Mutex<Option<ControllerStatus>>>,
 }
 
@@ -80,31 +81,24 @@ struct RelayStatus {
 }
 
 impl Hydrawise {
+    /// `Result` is kept for the callers that match on it
+    /// (`runtime::build_controllers`); `net::client` itself cannot fail.
     pub fn new(id: impl Into<String>, config: HydrawiseConfig) -> Result<Self, ControllerError> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .map_err(|e| ControllerError::Init(format!("reqwest client: {e}")))?;
-        let relay_to_slug = config
-            .zone_relay_map
-            .iter()
-            .map(|(slug, relay)| (*relay, slug.clone()))
-            .collect();
+        let client = crate::net::client(Duration::from_secs(15));
+        let zones = ZoneMap::new(
+            config
+                .zone_relay_map
+                .iter()
+                .map(|(slug, relay)| (slug.clone(), *relay))
+                .collect(),
+        );
         Ok(Self {
             id: id.into(),
             config,
             client,
-            relay_to_slug,
+            zones,
             last_status: Arc::new(Mutex::new(None)),
         })
-    }
-
-    fn relay_for(&self, slug: &str) -> Result<i64, ControllerError> {
-        self.config
-            .zone_relay_map
-            .get(slug)
-            .copied()
-            .ok_or_else(|| ControllerError::ZoneUnknown(slug.to_string()))
     }
 
     async fn get_json(&self, url: String) -> Result<Value, ControllerError> {
@@ -163,7 +157,7 @@ impl IrrigationController for Hydrawise {
     }
 
     fn mapped_zone_slugs(&self) -> Vec<String> {
-        self.config.zone_relay_map.keys().cloned().collect()
+        self.zones.slugs()
     }
 
     fn supports(&self) -> ControllerCaps {
@@ -178,11 +172,18 @@ impl IrrigationController for Hydrawise {
             remote_program_upload: false,
             water_level: false,
             per_zone_stop: true,
+            duration_quantum_s: 1,
         }
     }
 
+    /// A cloud read: the registry serves the last status inside this
+    /// window and re-reads after any command.
+    fn status_poll_interval_s(&self) -> Option<u32> {
+        Some(crate::controllers::guard::CLOUD_STATUS_POLL_S)
+    }
+
     async fn run_zone(&self, slug: &str, duration_s: u32) -> ControllerResult<RunHandle> {
-        let relay = self.relay_for(slug)?;
+        let relay = self.zones.station_for(slug)?;
         let url = format!(
             "{API_BASE}/setzone.php?action=run&period_id=999&relay_id={relay}&custom={duration_s}&api_key={key}",
             key = self.config.api_key,
@@ -199,7 +200,7 @@ impl IrrigationController for Hydrawise {
     }
 
     async fn stop_zone(&self, slug: &str) -> ControllerResult<()> {
-        let relay = self.relay_for(slug)?;
+        let relay = self.zones.station_for(slug)?;
         let url = format!(
             "{API_BASE}/setzone.php?action=stop&relay_id={relay}&api_key={key}",
             key = self.config.api_key,
@@ -233,11 +234,11 @@ impl IrrigationController for Hydrawise {
                     .relays
                     .iter()
                     .filter_map(|r| {
-                        self.relay_to_slug.get(&r.relay_id).map(|slug| {
+                        self.zones.slug_for(&r.relay_id).map(|slug| {
                             // Hydrawise convention: time=1 -> currently running.
                             let running = r.time == 1;
                             ZoneRuntimeStatus {
-                                slug: slug.clone(),
+                                slug: slug.to_string(),
                                 running,
                                 remaining_s: if running {
                                     r.run.map(|v| v.max(0) as u32)
@@ -251,6 +252,7 @@ impl IrrigationController for Hydrawise {
                     })
                     .collect();
                 let status = ControllerStatus {
+                    observed_epoch: Some(crate::timefmt::now_epoch()),
                     reachable: true,
                     master_enabled: resp.master.map(|m| m != 0),
                     water_level_pct: None,
@@ -309,11 +311,15 @@ mod tests {
     #[test]
     fn relay_lookup() {
         let h = Hydrawise::new("hd", cfg()).unwrap();
-        assert_eq!(h.relay_for("back_yard").unwrap(), 1234);
+        assert_eq!(h.zones.station_for("back_yard").unwrap(), 1234);
         assert!(matches!(
-            h.relay_for("not_a_zone").unwrap_err(),
+            h.zones.station_for("not_a_zone").unwrap_err(),
             ControllerError::ZoneUnknown(_)
         ));
+        // status() resolves relays back to slugs through the same map.
+        assert_eq!(h.zones.slug_for(&5678), Some("front_lawn"));
+        assert_eq!(h.zones.slug_for(&1), None);
+        assert_eq!(h.mapped_zone_slugs(), vec!["back_yard", "front_lawn"]);
     }
 
     #[test]

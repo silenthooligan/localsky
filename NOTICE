@@ -31,9 +31,15 @@ This product uses (but does not redistribute the source of):
 
   * Open-Meteo (https://open-meteo.com/) for forecast data.
   * RainViewer (https://www.rainviewer.com/api.html) for radar tiles.
-  * Leaflet (https://leafletjs.com/) for map rendering.
+  * CARTO basemap tiles (https://carto.com/basemaps/) under the radar map.
 
 This product redistributes (vendored, license header retained):
+
+  * Leaflet v1.9.4 (https://leafletjs.com/), at public/vendor/leaflet/,
+    for map rendering. BSD 2-Clause License, (c) 2010-2023 Vladimir
+    Agafonkin. The vendored files are the published release, unmodified:
+    leaflet.js sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=,
+    leaflet.css sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=.
 
   * leaflet-velocity v2.1.4 (https://github.com/onaci/leaflet-velocity),
     at public/vendor/leaflet-velocity.min.js, for the animated wind

@@ -23,8 +23,9 @@
 // (or `<var>_value_1d` for a DERIVED value, e.g. sea-level pressure) as
 // `{ "date_time": ..., "value": <number|null> }`. We parse the first STATION that
 // yields any non-null mapped scalar into WeatherField values and emit them as one
-// live current Observation on the same SourceEvent bus + reachability pattern
-// nws.rs uses.
+// live current Observation through the shared poll loop
+// (sources::poll::run_polling), which owns the tick, the fetch metric, the
+// reachability edges and shutdown.
 //
 // Units (verified against the live API 2026-07-01): bare `units=english` returns
 // wind_speed in KNOTS and sea_level_pressure in MILLIBARS, NOT the imperial units
@@ -46,13 +47,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::collections::HashSet;
-use tokio::time::{interval, MissedTickBehavior};
-use tracing::{debug, info, warn};
+use tracing::debug;
 
 use crate::config::schema::{Location, SynopticConfig};
 use crate::ports::weather_source::{
-    ShutdownSignal, SourceBus, SourceCaps, SourceEvent, WeatherField, WeatherSource,
+    ShutdownSignal, SourceBus, SourceCaps, WeatherField, WeatherSource,
 };
+use crate::sources::poll::{run_polling, Poll};
 
 const API_BASE: &str = "https://api.synopticdata.com/v2";
 const POLL_INTERVAL: Duration = Duration::from_secs(10 * 60); // 10 min
@@ -285,67 +286,39 @@ impl WeatherSource for Synoptic {
         }
     }
 
-    async fn run(
-        self: Arc<Self>,
-        bus: SourceBus,
-        mut shutdown: ShutdownSignal,
-    ) -> anyhow::Result<()> {
-        info!(source_id = %self.id, "Synoptic source started");
-        let mut tick = interval(POLL_INTERVAL);
-        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut last_reachable: Option<bool> = None;
-        loop {
-            tokio::select! {
-                _ = tick.tick() => {
-                    match self.fetch().await {
-                        Ok(resp) => {
-                            if last_reachable != Some(true) {
-                                let _ = bus.send(SourceEvent::Reachability {
-                                    source_id: self.id.clone(),
-                                    reachable: true,
-                                });
-                                last_reachable = Some(true);
-                            }
-                            let fields = first_mapped_fields(&resp);
-                            if !fields.is_empty() {
-                                debug!(
-                                    source_id = %self.id,
-                                    fields_n = fields.len(),
-                                    "Synoptic current observation updated"
-                                );
-                                let _ = bus.send(SourceEvent::Observation {
-                                    source_id: self.id.clone(),
-                                    fields,
-                                    at_epoch: chrono::Utc::now().timestamp(),
-                                });
-                            } else {
-                                debug!(
-                                    source_id = %self.id,
-                                    stations_n = resp.station.len(),
-                                    "Synoptic stations reported no current scalars this cycle"
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            warn!(source_id = %self.id, error = %e, "Synoptic fetch failed");
-                            if last_reachable != Some(false) {
-                                let _ = bus.send(SourceEvent::Reachability {
-                                    source_id: self.id.clone(),
-                                    reachable: false,
-                                });
-                                last_reachable = Some(false);
-                            }
-                        }
-                    }
+    async fn run(self: Arc<Self>, bus: SourceBus, shutdown: ShutdownSignal) -> anyhow::Result<()> {
+        let id = self.id.clone();
+        run_polling(
+            self,
+            &id,
+            "Synoptic",
+            POLL_INTERVAL,
+            bus,
+            shutdown,
+            |s: Arc<Self>| async move {
+                let resp = s.fetch().await?;
+                let fields = first_mapped_fields(&resp);
+                if fields.is_empty() {
+                    debug!(
+                        source_id = %s.id,
+                        stations_n = resp.station.len(),
+                        "Synoptic stations reported no current scalars this cycle"
+                    );
+                    return Ok(Poll::none());
                 }
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        info!(source_id = %self.id, "Synoptic source shutdown");
-                        return Ok(());
-                    }
-                }
-            }
-        }
+                debug!(
+                    source_id = %s.id,
+                    fields_n = fields.len(),
+                    "Synoptic current observation updated"
+                );
+                Ok(Poll::observation(
+                    &s.id,
+                    fields,
+                    chrono::Utc::now().timestamp(),
+                ))
+            },
+        )
+        .await
     }
 }
 

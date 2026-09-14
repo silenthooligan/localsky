@@ -52,7 +52,7 @@ services:
       retries: 3
 ```
 
-`/api/v1/info` is the cheapest liveness probe. Use `/api/v1/health` instead if you want your monitor to alert on `degraded`, not just on dead.
+`/api/v1/info` is the cheapest liveness probe. Use `/api/v1/health?strict=1` if you want your monitor to alert on `degraded`, not just on dead: with `strict=1` the endpoint answers `503` whenever the status is not `ok` (plain `/api/v1/health` always answers `200` and says what is wrong in the body). For a bug report, `GET /api/v1/diagnostics` returns one JSON bundle with health, info, the last 300 log lines, the config with secrets redacted, and the current decision trace; it is scrubbed against your own secret values and safe to paste.
 
 ## Install and first boot
 
@@ -133,12 +133,12 @@ Nothing dramatic, by design. When an enabled source crosses the offline threshol
 
 ### Controller was offline when watering should have started
 
-Runs do not queue. When the morning scheduler dispatches a zone and the controller call fails, LocalSky logs a warning (`smart morning: controller dispatch failed`), abandons the rest of that zone's segments, moves on to the next zone, and records the failure for that zone in History with the controller's own error text. As long as LocalSky itself keeps running there is no retry later in the day; the next attempt is tomorrow's window. Check `docker logs` around your dispatch time and fix the controller's reachability (power, IP change, password).
+Runs do not queue. When the morning scheduler dispatches a zone and the controller call fails, LocalSky logs a warning (`controller dispatch failed` with `source=smart_morning`, then `smart morning: segment not dispatched` naming the segment), abandons the rest of that zone's segments, moves on to the next zone, and records the failure for that zone in History with the controller's own error text. As long as LocalSky itself keeps running there is no retry later in the day; the next attempt is tomorrow's window. Check `docker logs` around your dispatch time and fix the controller's reachability (power, IP change, password).
 
 If LocalSky **restarts** while the watering window is still open (a redeploy, an out-of-memory kill, a host reboot) it re-checks the morning at boot, and the outcome depends on how far the sequence got:
 
 - **Every zone's dispatch failed.** Every row for the morning is a dispatch failure, so the morning does not count as handled. If the grace period below has not expired and the controller is reachable again, the catch-up waters. A morning that mixes a failure with a zone the engine itself decided to skip counts as handled: the skip row is a decision about the yard, and the refused zones wait for tomorrow.
-- **Two or more zones watered before the failure.** The morning counts as handled and the zones that never ran wait for tomorrow. On a large yard this is the common shape of a controller that dies partway through: the zones already watered are what stop a restart from re-running the whole sequence on top of water already on the ground, and the price is that the dry zones are not picked up until the next window. Run them by hand from the zone page if you do not want to wait.
+- **Some zones watered before the failure.** Each zone is judged on its own evidence: a zone that received its planned water since the window opened is left alone, and a zone that received less is dispatched for the remainder. The morning counts as handled only once every planned zone has had its water (or a skip row says the engine decided otherwise), so a restart after a controller died partway through finishes the dry zones rather than re-running the whole sequence on top of water already on the ground.
 
 A zone the controller currently reports as running is skipped by the morning dispatcher, on the scheduled path and the catch-up path alike, so a catch-up cannot re-open a valve that is already open. A run you start by hand, from the zone page or from a manual schedule, is not gated this way: it commands the zone on whatever the controller currently reports.
 
@@ -203,7 +203,7 @@ A schedule's water still counts against the zone's weekly budget on the days the
 
 ### The soil Deficit reads a dash
 
-The deficit is computed for every zone with a species and a soil texture, from the soil model's replay of measured ET, rain, and completed runs (negative = needs water), so a dash appears only where no bucket can be derived: a zone list from `LOCALSKY_ZONES` with no per-zone agronomy configured. Add the zone under Settings, then Zones, and the deficit fills on the next refresh. Before 0.8.0 the field's only producer was a Home Assistant Smart Irrigation entity and every install showed a dash rather than a 0.00 nothing measured.
+The deficit is computed for every zone with a species and a soil texture, from the soil model's replay of measured ET, rain, and completed runs (negative = needs water), so a dash appears only where no bucket can be derived: a zone with no species or soil texture configured. Set both under Settings, then Zones, and the deficit fills on the next refresh. Before 0.8.0 the field's only producer was a Home Assistant Smart Irrigation entity and every install showed a dash rather than a 0.00 nothing measured.
 
 ## Auth and reverse proxy
 

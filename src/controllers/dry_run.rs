@@ -67,6 +67,7 @@ impl IrrigationController for DryRunController {
             // snapshot fields directly; it does not ride this adapter.)
             water_level: false,
             per_zone_stop: true,
+            duration_quantum_s: 1,
         }
     }
 
@@ -83,6 +84,7 @@ impl IrrigationController for DryRunController {
                 let _ = store
                     .insert_completed(
                         NewRun {
+                            session_id: None,
                             zone_slug: slug.to_string(),
                             start_epoch: start,
                             source: "dry_run".to_string(),
@@ -134,6 +136,7 @@ impl IrrigationController for DryRunController {
     async fn status(&self) -> ControllerResult<ControllerStatus> {
         let running = self.pretend_running.lock().await.clone();
         Ok(ControllerStatus {
+            observed_epoch: None,
             reachable: true,
             master_enabled: Some(true),
             // No fabricated readback; see supports().

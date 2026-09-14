@@ -493,19 +493,6 @@ async fn fetch_catalog() -> Result<CloudCatalog, String> {
     resp.json::<CloudCatalog>().await.map_err(|e| e.to_string())
 }
 
-/// Fetch the wizard draft as raw JSON for the draft-mode catalog overlay.
-/// Best-effort: any failure reads as "no draft", leaving the catalog exactly
-/// as the server computed it.
-#[cfg(feature = "hydrate")]
-async fn fetch_draft_value() -> Option<serde_json::Value> {
-    use gloo_net::http::Request;
-    let resp = Request::get("/api/wizard/draft").send().await.ok()?;
-    if !resp.ok() {
-        return None;
-    }
-    resp.json::<serde_json::Value>().await.ok()
-}
-
 /// WIZARD DRAFT overlay for the catalog (issue #7). The server computes
 /// `already_configured` / `configured_present` and the deployment lat/lon from
 /// the LIVE config, which mid-wizard is NOT the config the user is building: a
@@ -699,20 +686,17 @@ fn station_field_keys(kind: &str) -> Vec<&'static str> {
     }
 }
 
-/// Fetch GET /api/config and extract the enabled non-cloud LAN STATION entries
-/// for the position-aware backup chain, as `StationEntry { id, friendly_name,
-/// priority, fields }`. Mirrors the same round-trip `devices.rs::fetch_config`
-/// uses; the priority round-trips on each source entry, and the kind+config sit
-/// flattened (the `SourceKind` serde tag) so we read `kind` directly. Only
-/// `is_lan_station_kind` entries that are enabled are returned; a disabled or
-/// cloud/generic source is skipped. Best-effort: any failure reads as no station.
+/// Fetch GET /api/config (via the shared `config_client`) and extract the
+/// enabled non-cloud LAN STATION entries for the position-aware backup chain,
+/// as `StationEntry { id, friendly_name, priority, fields }`. Same round-trip
+/// every settings page uses; the priority round-trips on each source entry, and
+/// the kind+config sit flattened (the `SourceKind` serde tag) so we read `kind`
+/// directly. Only `is_lan_station_kind` entries that are enabled are returned;
+/// a disabled or cloud/generic source is skipped. Best-effort: any failure
+/// (network, non-2xx, malformed) reads as no station.
 #[cfg(feature = "hydrate")]
 async fn fetch_station_entries() -> Vec<StationEntry> {
-    use gloo_net::http::Request;
-    let Ok(resp) = Request::get("/api/config").send().await else {
-        return Vec::new();
-    };
-    let Ok(cfg) = resp.json::<serde_json::Value>().await else {
+    let Ok(cfg) = crate::components::config_client::get_config().await else {
         return Vec::new();
     };
     let Some(sources) = cfg.get("sources").and_then(|s| s.as_array()) else {
@@ -767,19 +751,8 @@ async fn patch_sources<F>(mutate: F) -> Result<Vec<String>, String>
 where
     F: FnOnce(&mut Vec<serde_json::Value>),
 {
-    use gloo_net::http::Request;
-    let cur = Request::get("/api/config")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !cur.ok() {
-        let body = cur.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::load_error_message(
-            cur.status(),
-            &body,
-        ));
-    }
-    let mut cfg: serde_json::Value = cur.json().await.map_err(|e| e.to_string())?;
+    use crate::components::config_client::{get_config, put_config};
+    let mut cfg = get_config().await?;
     {
         let obj = cfg
             .as_object_mut()
@@ -791,39 +764,8 @@ where
             .ok_or_else(|| "sources is not an array".to_string())?;
         mutate(arr);
     }
-    let resp = Request::put("/api/config")
-        .json(&cfg)
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::save_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    let reasons = resp
-        .json::<serde_json::Value>()
-        .await
-        .ok()
-        .filter(|v| {
-            v.get("restart_required")
-                .and_then(|r| r.as_bool())
-                .unwrap_or(false)
-        })
-        .and_then(|v| {
-            v.get("restart_reasons")
-                .and_then(|r| r.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(str::to_string))
-                        .collect()
-                })
-        })
-        .unwrap_or_default();
-    Ok(reasons)
+    let outcome = put_config(&cfg).await?;
+    Ok(outcome.restart_reasons)
 }
 
 /// GET the WIZARD DRAFT, run the SAME `sources` mutation the live path uses on
@@ -843,19 +785,17 @@ async fn patch_draft_sources<F>(mutate: F) -> Result<(), String>
 where
     F: FnOnce(&mut Vec<serde_json::Value>),
 {
-    use gloo_net::http::Request;
-    let cur = Request::get("/api/wizard/draft")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !cur.ok() {
-        let body = cur.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::load_error_message(
-            cur.status(),
-            &body,
-        ));
-    }
-    let mut draft: serde_json::Value = cur.json().await.map_err(|e| e.to_string())?;
+    use crate::components::setup::draft;
+    // GET /api/wizard/draft always answers 200 (a default draft when none is
+    // stored), so `None` here is a real failure (network, auth, server), never
+    // "no draft yet". The shared client folds the status into that `None`, so
+    // this path cannot echo the server's status word; it refuses to write
+    // instead: PUTting a fresh default draft over a stored one would clobber
+    // every earlier wizard step.
+    let mut draft = draft::fetch().await.ok_or_else(|| {
+        "Couldn't load your setup draft, so nothing was saved. Reload the page and try again."
+            .to_string()
+    })?;
     {
         let obj = draft
             .as_object_mut()
@@ -872,20 +812,7 @@ where
             .ok_or_else(|| "draft sources is not an array".to_string())?;
         mutate(arr);
     }
-    let resp = Request::put("/api/wizard/draft")
-        .json(&draft)
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::save_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    Ok(())
+    draft::save(&draft).await
 }
 
 /// Route a sources splice to the store the panel is editing: the WIZARD DRAFT
@@ -1056,7 +983,10 @@ pub fn CloudWeatherServices(
                         // the rows and the location callout read what the
                         // user actually built so far.
                         if write_draft {
-                            if let Some(d) = fetch_draft_value().await {
+                            // Best-effort: any failure reads as "no draft",
+                            // leaving the catalog exactly as the server
+                            // computed it.
+                            if let Some(d) = crate::components::setup::draft::fetch().await {
                                 overlay_draft_onto_catalog(&mut c, &d);
                             }
                         }
@@ -1103,12 +1033,9 @@ pub fn CloudWeatherServices(
             Ok(reasons) => {
                 result_ok.set(true);
                 if write_draft {
-                    result_msg.set(
-                        "Saved to your setup draft. It takes effect when you finish setup."
-                            .to_string(),
-                    );
+                    result_msg.set(crate::voice::SAVED_TO_DRAFT.to_string());
                 } else {
-                    result_msg.set("Saved. Applied to the live engine.".to_string());
+                    result_msg.set(crate::voice::SAVED_LIVE.to_string());
                     restart_dismissed.set(false);
                     restart_reasons.set(reasons);
                     if let Some(cb) = on_changed {
@@ -1615,7 +1542,7 @@ fn CapabilityMatrix(catalog: RwSignal<CloudCatalog>) -> impl IntoView {
                             .into_any()
                         } else {
                             view! {
-                                <span aria-label=format!("{label}: not covered") style="color:var(--text-faint)">"\u{2013}"</span>
+                                <span aria-label=format!("{label}: not covered") class:u-faint=true>"\u{2013}"</span>
                             }
                             .into_any()
                         };
@@ -1658,7 +1585,7 @@ fn CapabilityMatrix(catalog: RwSignal<CloudCatalog>) -> impl IntoView {
                 <p class="settings-section-head__sub">
                     "A dot marks a covered reading, tinted by how honest that reading is: "
                     <span style="color:var(--accent-good)">"green measured"</span>", "
-                    <span style="color:var(--accent)">"blue nowcast"</span>", "
+                    <span class:u-accent=true>"blue nowcast"</span>", "
                     <span style="color:var(--accent-warn)">"amber forecast"</span>"."
                 </p>
             </div>

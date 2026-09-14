@@ -10,6 +10,10 @@
 //       GET /api/config                -> for the zone list + the save
 //       PUT /api/config                -> persist a binding
 //
+// The config GET/PUT go through crate::components::config_client (the one
+// browser client for the config document); only the inventory and
+// soil/remove calls are made directly here.
+//
 // Like every other settings component this is HTTP-only (gloo_net) so it
 // compiles for both ssr and hydrate without touching any ssr-gated module.
 
@@ -17,7 +21,7 @@ use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
 
 use crate::components::settings_ui::{SettingsLoadError, SettingsResult};
-use crate::components::ui::{HelpHint, Icon, Panel};
+use crate::components::ui::{ConfirmSheet, HelpHint, Icon, Panel};
 use crate::components::units_fmt::{temp_unit, temp_value, use_unit_prefs, UnitPrefs};
 use crate::docs::doc_url;
 
@@ -115,44 +119,6 @@ async fn fetch_inventory() -> Result<Inventory, String> {
     resp.json::<Inventory>().await.map_err(|e| e.to_string())
 }
 
-#[cfg(feature = "hydrate")]
-async fn fetch_config() -> Result<serde_json::Value, String> {
-    use gloo_net::http::Request;
-    let resp = Request::get("/api/config")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::load_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    resp.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[cfg(feature = "hydrate")]
-async fn save_config(cfg: serde_json::Value) -> Result<(), String> {
-    use gloo_net::http::Request;
-    let resp = Request::put("/api/config")
-        .json(&cfg)
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::save_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    Ok(())
-}
-
 /// Result of POST /sensors/soil/remove (mirror of the server RemoveSoilResp).
 #[cfg(feature = "hydrate")]
 #[derive(Clone, Debug, Deserialize)]
@@ -205,18 +171,8 @@ fn fmt_age(age_s: Option<f64>) -> String {
     }
 }
 
-/// Friendly label for a source/gateway kind (snake_case from the API).
 fn kind_label(kind: &str) -> String {
-    match kind {
-        "ecowitt_gw_poll" | "ecowitt" => "Ecowitt gateway".to_string(),
-        "ecowitt_push" => "Ecowitt push".to_string(),
-        "mqtt" => "MQTT".to_string(),
-        "home_assistant" | "ha" => "Home Assistant".to_string(),
-        "opensprinkler" => "OpenSprinkler".to_string(),
-        "esphome" => "ESPHome".to_string(),
-        "" => "Source".to_string(),
-        other => other.replace('_', " "),
-    }
+    crate::config::kind_labels::gateway_kind_label(kind, "Source")
 }
 
 // ---------------------------------------------------------------------------
@@ -252,7 +208,7 @@ pub fn SettingsSensors() -> impl IntoView {
             wasm_bindgen_futures::spawn_local(async move {
                 // Config first: without it we can't render the bind dropdown
                 // or save, so a config failure is the hard "load failed".
-                match fetch_config().await {
+                match crate::components::config_client::get_config().await {
                     Ok(cfg) => {
                         config_json.set(cfg);
                         load_error.set(None);
@@ -338,12 +294,15 @@ pub fn SettingsSensors() -> impl IntoView {
         result_msg.set(String::new());
         #[cfg(feature = "hydrate")]
         wasm_bindgen_futures::spawn_local(async move {
-            match save_config(candidate).await {
+            match crate::components::config_client::put_config(&candidate)
+                .await
+                .map(|_| ())
+            {
                 Ok(()) => {
                     crate::components::settings_ui::toast_saved(
                         result_msg,
                         result_ok,
-                        "Binding saved. Engine uses it on the next tick.",
+                        crate::voice::SAVED_LIVE,
                     );
                     // Refresh inventory so bound_zone_name reflects the change.
                     if let Ok(inv) = fetch_inventory().await {
@@ -367,24 +326,27 @@ pub fn SettingsSensors() -> impl IntoView {
     // Retire a probe entirely: clear its binding in LocalSky AND, when the
     // gateway has a login configured, unregister it on the gateway (Tier 1
     // device management), so a dead/removed sensor stops showing in both
-    // places. Confirmed first because the gateway write is destructive.
+    // places. Confirmed first because the gateway write is destructive: the
+    // row's Remove button only stages the probe, the shared ConfirmSheet
+    // mounted once in the page view below asks the question, and `do_remove`
+    // makes the call after the sheet closes.
+    let pending_remove: RwSignal<Option<String>> = RwSignal::new(None);
+    let remove_open = RwSignal::new(false);
     let remove = Callback::new(move |probe_id: String| {
         if saving.get() {
             return;
         }
-        #[cfg(feature = "hydrate")]
-        {
-            let confirmed = web_sys::window()
-                .and_then(|w| {
-                    w.confirm_with_message(
-                        "Remove this soil probe? This clears its binding in LocalSky and, if the gateway login is set, unregisters it on the gateway (which stops the gateway from re-adding it).",
-                    )
-                    .ok()
-                })
-                .unwrap_or(false);
-            if !confirmed {
-                return;
-            }
+        pending_remove.set(Some(probe_id));
+        remove_open.set(true);
+    });
+
+    let do_remove = Callback::new(move |()| {
+        let Some(probe_id) = pending_remove.get_untracked() else {
+            return;
+        };
+        pending_remove.set(None);
+        if saving.get() {
+            return;
         }
         saving.set(true);
         result_msg.set(String::new());
@@ -407,7 +369,7 @@ pub fn SettingsSensors() -> impl IntoView {
                     if let Ok(inv) = fetch_inventory().await {
                         inventory.set(inv);
                     }
-                    if let Ok(cfg) = fetch_config().await {
+                    if let Ok(cfg) = crate::components::config_client::get_config().await {
                         config_json.set(cfg);
                     }
                 }
@@ -501,7 +463,7 @@ pub fn SettingsSensors() -> impl IntoView {
                     "input, such as OpenSprinkler. Wire a pulse flow sensor to its FLOW input "
                     "and set the K-factor on the device; LocalSky reads it automatically. "
                     <a href=doc_url("first-soil-sensor") target="_blank" rel="noopener noreferrer"
-                        style="color: var(--accent)">
+                        class:u-accent=true>
                         "Flow meters: capable vs connected →"
                     </a>
                 </p>
@@ -545,7 +507,7 @@ pub fn SettingsSensors() -> impl IntoView {
                         } else {
                             view! {
                                 <Panel title="Soil probes".to_string()>
-                                    <p class="sensors-section__hint" style="margin-bottom: var(--space-4)">
+                                    <p class="sensors-section__hint" class:u-mb4-only=true>
                                         "Grouped by the gateway or source each probe reports through. "
                                         "Bind a probe to a zone to let it drive that zone's skip decision."
                                     </p>
@@ -564,6 +526,19 @@ pub fn SettingsSensors() -> impl IntoView {
                     <SettingsResult result_msg=result_msg result_ok=result_ok/>
                 </Show>
             </Show>
+
+            <ConfirmSheet
+                visible=remove_open
+                title="Remove this soil probe?"
+                body=Signal::derive(|| {
+                    "This clears its binding in LocalSky and, if the gateway login is set, \
+                     unregisters it on the gateway (which stops the gateway from re-adding it)."
+                        .to_string()
+                })
+                confirm_label=Signal::derive(|| "Remove".to_string())
+                danger=true
+                on_confirm=do_remove
+            />
         </div>
     }
 }
@@ -613,10 +588,10 @@ fn gateway_card(
                 <span class="soil-card__name">{gw.label}</span>
                 <span class="source-health__kind">{kind}</span>
             </div>
-            <div class="source-health__status" style="display:flex; align-items:center; gap:0.5rem">
+            <div class="source-health__status" class:u-row=true>
                 <span class=dot_class style=dot_style></span>
                 <span>{online_text}</span>
-                <span style="color: var(--text-faint)">"·"</span>
+                <span class:u-faint=true>"·"</span>
                 <span>{count_label}</span>
             </div>
             <div class="soil-grid">
@@ -690,7 +665,7 @@ fn soil_probe_row(
             <div class="zone-soil-live" style="margin-top:0; flex-wrap:wrap">
                 {chips}
             </div>
-            <label class="sensor-readout__k" style="margin-top:0.4rem">"Bound zone"</label>
+            <label class="sensor-readout__k" class:u-mt2=true>"Bound zone"</label>
             <select
                 class="ui-input"
                 on:change=move |ev| {
@@ -783,11 +758,11 @@ fn flow_card(f: FlowMeter) -> impl IntoView {
              automatically once the controller reports it."
         };
         view! {
-            <p class="sensors-section__hint" style="margin-top:0.4rem">
+            <p class="sensors-section__hint" class:u-mt2=true>
                 {help_text}
                 " "
                 <a href=doc_url("first-soil-sensor") target="_blank" rel="noopener noreferrer"
-                    style="color: var(--accent)">
+                    class:u-accent=true>
                     "How to connect a flow meter →"
                 </a>
             </p>
@@ -804,7 +779,7 @@ fn flow_card(f: FlowMeter) -> impl IntoView {
                 <span class="source-health__status">{state_label}</span>
                 {age_pill}
             </div>
-            <div class="soil-card__value" style="display:flex; align-items:center; gap:0.5rem">
+            <div class="soil-card__value" class:u-row=true>
                 <Icon name="gauge".to_string() size=22/>
                 {value}
             </div>
@@ -819,14 +794,14 @@ fn flow_card(f: FlowMeter) -> impl IntoView {
 /// crowding the page, and links to the getting-started doc.
 fn model_explainer() -> impl IntoView {
     view! {
-        <p class="sensors-section__hint" style="margin: 0 0 var(--space-4)">
+        <p class="sensors-section__hint" class:u-mb4=true>
             "How the pieces fit: "<strong>"controllers"</strong>" open valves, "
             <strong>"sources"</strong>" (a weather station, an Ecowitt gateway, a forecast, "
             "an MQTT broker, or Home Assistant) bring data in, and "<strong>"sensors"</strong>
             " are the probes and meters those carry, such as a soil probe on a gateway or a "
             "flow meter on a controller. Add a source under Devices and its sensors show up here. "
             <a href=doc_url("first-soil-sensor") target="_blank" rel="noopener noreferrer"
-                style="color: var(--accent)">
+                class:u-accent=true>
                 "Add your first soil sensor →"
             </a>
         </p>
@@ -838,10 +813,10 @@ fn empty_state() -> impl IntoView {
     view! {
         <Panel title="Soil probes".to_string()>
             <div class="sensors-empty">
-                <p style="margin:0 0 var(--space-3); color: var(--text-bright); font-weight: 600">
+                <p class:u-section-label=true>
                     "No soil sensors yet."
                 </p>
-                <p style="margin:0 0 var(--space-3)">
+                <p class:u-mb3=true>
                     "LocalSky can read soil moisture from a few places. Add one and it shows up here, "
                     "ready to bind to a zone:"
                 </p>
@@ -862,13 +837,13 @@ fn empty_state() -> impl IntoView {
                         "in automatically."
                     </li>
                 </ul>
-                <p style="margin: var(--space-3) 0 0">
-                    <a href="/settings?section=devices&add=source" style="color: var(--accent)">
+                <p class:u-mt3-only=true>
+                    <a href="/settings?section=devices&add=source" class:u-accent=true>
                         "Add a sensor in Devices →"
                     </a>
                     "  ·  "
                     <a href=doc_url("first-soil-sensor") target="_blank" rel="noopener noreferrer"
-                        style="color: var(--accent)">
+                        class:u-accent=true>
                         "Add your first soil sensor"
                     </a>
                 </p>

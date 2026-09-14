@@ -66,7 +66,7 @@ fn winter_card(s: &ForecastSnapshot) -> Option<ConditionCard> {
         .daily
         .iter()
         .take(2)
-        .map(|d| d.temp_min_f)
+        .filter_map(|d| d.temp_min_f)
         .min_by(|a, b| a.total_cmp(b))
     {
         rows.push(("Coldest night".to_string(), format!("{min:.0}F")));

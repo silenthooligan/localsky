@@ -1,0 +1,636 @@
+@use "mixins" as *;
+
+// light and high-contrast, and the base reset
+//
+// Split out of main.scss, which had grown to 11,330 lines.
+// Load order is the cascade: see the @use list in main.scss.
+
+// ─────────────────────────────────────────────────────────────────────
+// Light theme. Hand-tuned, NOT auto-inverted.
+// ─────────────────────────────────────────────────────────────────────
+// The light variant mirrors the brand reference's light-side artwork:
+// snow surface, ink text, brand-blue + brand-teal accents (slightly
+// darkened for AA contrast against a near-white backdrop). The
+// gradients darken so the data-flow accent still reads on white.
+
+// Light tokens defined ONCE as a @mixin so both [data-theme="light"]
+// (always-light) and [data-theme="auto"] inside @media
+// (prefers-color-scheme: light) can @include them.
+//
+// Why @mixin and not @extend %placeholder: Dart Sass forbids
+// `@extend selector` across media queries (the placeholder lives at
+// the top level; the @media auto-branch is inside a media query;
+// extending the same placeholder from both produces an error). Mixin
+// inclusion is duplication-by-design and works in any context.
+@mixin localsky-light-tokens {
+  --bg-deep: var(--brand-snow-50);
+  --bg-panel: #ffffff;
+  --bg-panel-soft: var(--brand-snow-100);
+  // Light page wash: a faint cool snow tint, not dark navy.
+  --bg-wash: var(--brand-snow-100);
+
+  --text: var(--brand-ink-800);
+  --text-bright: var(--brand-ink-900);
+  // Soft sits between body text and dim, same role as the dark theme's.
+  --text-soft: color-mix(in oklab, var(--brand-ink-800) 60%, var(--brand-ink-700));
+  // Light-mode dim/faint are intentionally deeper than the dark-mode
+  // equivalents: at 96 to 98% L backgrounds the mid-gray inks read as
+  // washed-out, so anchor body-secondary on ink-700 and eyebrows on
+  // ink-600 for the contrast the dark scheme gets for free.
+  --text-dim: var(--brand-ink-700);
+  --text-faint: var(--brand-ink-600);
+
+  --border: var(--brand-snow-200);
+  --border-strong: var(--brand-ink-200);
+
+  --accent: var(--brand-blue-600);
+  --accent-text: var(--brand-blue-700);
+  --accent-cool: var(--brand-blue-500);
+  --accent-rain: var(--brand-blue-500);
+  --accent-good: var(--brand-teal-600);
+  // Deepened for AA text: the old #d97a00 / #c97a00 measured 2.96:1 and
+  // 3.18:1 on snow-50 (3.12 / 3.35 on white) yet color normal-size text
+  // (chain fall-through warnings, restart banners, stale badges). These
+  // keep the warm-orange vs amber hue split and clear 4.5:1 on both
+  // white and snow-50 (warm 4.67:1, warn 4.78:1 on snow-50).
+  --accent-warm: #a85e00;
+  --accent-warn: #a06000;
+  --accent-hot:  #d63838;
+  --accent-danger: #c43b3b;
+  --accent-lightning: #c69400;
+  --accent-water: var(--brand-blue-500);
+
+  // Legacy aliases → v2 elevation (light). Light separates by shadow,
+  // so glass/clay surfaces become white cards with the v2 shadow ramp.
+
+  --clay-shadow-light: rgba(255, 255, 255, 0.85);
+  --clay-shadow-dark: rgba(15, 21, 37, 0.12);
+
+  --surface-soft: rgba(15, 21, 37, 0.04);
+  --surface-softer: rgba(15, 21, 37, 0.02);
+
+  // Compass tokens: light variant. Disc is a near-white dome with a
+  // pale snow shadow; the south needle pulls from the ink scale so it
+  // still reads as a real tail (not invisible) on the bright disc.
+  --compass-bg-top: #ffffff;
+  --compass-bg-bot: var(--brand-snow-200);
+  --compass-needle-s-top: var(--brand-ink-200);
+  --compass-needle-s-bot: var(--brand-ink-500);
+  --compass-hub-top: #ffffff;
+  --compass-hub-bot: var(--brand-ink-300);
+
+  // Light-mode gradients pull from the brand scale's deeper end so the
+  // sweep is still visible on near-white panels.
+  --grad-flow: linear-gradient(135deg, var(--brand-blue-600) 0%, var(--brand-teal-600) 100%);
+  // Light --grad-flow already passes AA with white (blue-600 -> teal-600, min
+  // 4.67:1), so the CTA gradient just reuses it here.
+  --grad-flow-cta: var(--grad-flow);
+
+  --focus-halo: 0 0 0 4px rgba(20, 144, 220, 0.22);
+
+  // v2 elevation: LIGHT separates surfaces by SHADOW DEPTH, not fill,
+  // so the elev fills stay near-white and the shadow ramp does the work.
+  --elev-0: var(--brand-snow-50);
+  --elev-1: #ffffff;
+  --elev-2: #ffffff;
+  --elev-3: #ffffff;
+  --elev-line: rgba(15, 21, 37, 0.07);
+  --elev-border: rgba(15, 21, 37, 0.10);
+  --elev-border-strong: rgba(15, 21, 37, 0.18);
+  --shadow-1: 0 1px 2px rgba(15, 21, 37, 0.06);
+  --shadow-2: 0 4px 14px rgba(15, 21, 37, 0.10);
+  --shadow-3: 0 16px 40px rgba(15, 21, 37, 0.16);
+  --specular: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  // Light panels bottom out at #ffffff, so the recess goes the other way.
+  --input-bg: #e9eef8;
+  --input-bg-disabled: #eef2fa;
+  --input-border: #78849a;
+  --input-border-hover: #5d6878;
+  // Light accents were already deepened for white text.
+  --on-accent: #ffffff;
+  --on-danger: #ffffff;
+}
+
+// Per-selector overrides for the dark-only `rgba(255, 255, 255, X)` text
+// and border colors sprinkled through the stylesheet. On a light backdrop
+// they paint white-on-white and disappear; remap to ink-tinted overlays
+// so the affected widgets keep their structure in light mode.
+@mixin localsky-light-element-overrides {
+  // The sidebar stays dark in every theme, but its base fill is
+  // 72%-navy-over-transparent: over the dark page it reads near-black,
+  // over light mode's white page it washes to a mid gray and the
+  // (re-pinned light) nav text loses contrast. Pin an opaque navy in
+  // light mode so the side panel text stays crisp.
+  .sidebar {
+    background: var(--brand-navy-900);
+    border-right-color: rgba(15, 21, 37, 0.18);
+  }
+  .uv-bar { background: rgba(15, 21, 37, 0.08); }
+  // The dry-run ribbon fills with --accent-warm, which light mode
+  // deepens for AA text; the shared dark-ink ribbon text would drop to
+  // about 3.5:1 on the deeper amber, so flip it to white (5.0:1).
+  @at-root html#{&}[data-dry-run="true"]::before { color: #ffffff; }
+  // Neon-yellow text on a yellow-tinted near-white background disappears.
+  // Flip the active mode-toggle segment to a saturated amber fill with
+  // dark ink text so it still pops while staying legible on near-white.
+  .mode-toggle__seg.is-active {
+    --mode-amber: #f5b800;
+    color: var(--brand-ink-900);
+    background: linear-gradient(180deg, #ffd400 0%, #f5b800 100%);
+    border-color: var(--mode-amber);
+    box-shadow:
+      inset 0 0 0 1px color-mix(in oklab, var(--mode-amber) 70%, transparent),
+      0 0 8px color-mix(in oklab, var(--mode-amber) 45%, transparent);
+    text-shadow: none;
+  }
+}
+
+// The one place light mode is applied: an explicit choice, or "auto" when
+// the OS prefers light. Everything light-specific lives in the two mixins
+// above so a new override needs exactly one edit.
+@mixin localsky-light {
+  @include localsky-light-tokens;
+  @include localsky-light-element-overrides;
+}
+[data-theme="light"] { @include localsky-light; }
+@media (prefers-color-scheme: light) {
+  [data-theme="auto"] { @include localsky-light; }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// High-contrast theme. Glass blur disabled; solid surfaces.
+// ─────────────────────────────────────────────────────────────────────
+// Brand-hinted: accent uses brand-blue-300 (the lighter shade) which
+// hits ~9:1 contrast on pure black. accent-good uses brand-teal-200 for
+// similar reasons. text-bright stays pure white; borders stay pure white.
+
+[data-theme="hc"] {
+  --bg-deep: #000000;
+  --bg-panel: #000000;
+  --bg-panel-soft: #0a0a0a;
+  --bg-wash: #000000;
+
+  --text: #ffffff;
+  --text-soft: #ffffff;
+  --text-dim: #ffffff;
+  --text-faint: #cccccc;
+
+  --border: #ffffff;
+  --border-strong: #ffffff;
+
+  --accent: var(--brand-blue-300);          // 9:1 contrast on black
+  --accent-text: var(--brand-blue-200);
+  --accent-rain: var(--brand-blue-300);
+  --accent-good: var(--brand-teal-200);     // 9:1 contrast on black
+  --accent-warm: #ffcc00;
+  --accent-warn: #ffcc00;
+  --accent-hot:  #ff4040;
+  --accent-danger: #ff4040;
+  --accent-lightning: #ffff00;
+
+  --shadow: 0 0 0 2px #ffffff;
+
+  --glass-bg: #000000;
+  --glass-border: #ffffff;
+
+  --clay-surface: #000000;
+  --clay-shadow-light: #ffffff;
+  --clay-shadow-dark: #ffffff;
+  --clay-shadow: 0 0 0 2px #ffffff;
+  --clay-shadow-pressed: 0 0 0 3px #ffffff inset;
+
+  // Disable brand gradients in HC: solid colors only.
+  --grad-flow: var(--brand-blue-300);
+  // CTA gradient in HC MUST stay the light solid (= --grad-flow), NOT inherit
+  // the dark base blue-600 -> teal-600: .btn--primary is in the HC black-text
+  // override list, and black on the light brand-blue-300 (#5fb4ff) is 9.46:1,
+  // whereas black on the dark blue-600 would be ~4.49:1 (a regression). Reuse
+  // --grad-flow so HC .btn--primary renders exactly as before.
+  --grad-flow-cta: var(--grad-flow);
+
+  --focus-halo: 0 0 0 4px #ffffff;
+
+  // v2 elevation in HC: solid black surfaces, white hairline borders,
+  // no shadow blur (2px solid rings stand in).
+  --elev-0: #000000;
+  --elev-1: #000000;
+  --elev-2: #0a0a0a;
+  --elev-3: #121212;
+  --elev-line: #ffffff;
+  --elev-border: #ffffff;
+  --elev-border-strong: #ffffff;
+  --shadow-1: 0 0 0 1px #ffffff;
+  --shadow-2: 0 0 0 2px #ffffff;
+  --shadow-3: 0 0 0 2px #ffffff;
+  --specular: none;
+  --input-bg: #000000;
+  --input-bg-disabled: #000000;
+  --input-border: #ffffff;
+  --input-border-hover: #ffffff;
+  --on-accent: #000000;
+  --on-danger: #000000;
+  // The heading above this block has always said "glass blur disabled".
+  // That was true of the retired panel blur and false of every literal
+  // one, which kept blurring in high-contrast. Now it is true.
+  --blur-chrome: none;
+  --blur-overlay: none;
+  --blur-scrim: none;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  // Subtle radial wash above the deep backdrop, gives the surface a
+  // sense of depth without a heavy gradient. The tint pulls from the
+  // brand navy-800 so it harmonizes with the brand reference's dark
+  // panel color.
+  background: radial-gradient(ellipse at 30% 0%, var(--bg-wash), var(--bg-deep) 60%);
+  color: var(--text);
+  font-family: var(--font-sans);
+  min-height: 100vh;
+  min-height: 100dvh; // dynamic vh: account for mobile browser chrome
+  -webkit-font-smoothing: antialiased;
+  // App-shell, not a webpage: kill the browser pull-to-refresh and the
+  // vertical rubber-band scroll-chaining. A downward swipe at the top of a
+  // screen no longer reloads (the SSE streams keep data live, so a reload is
+  // pure redundancy that would only bounce the user back through the auth
+  // gate). Only the Y axis: the horizontal swipe-back gesture stays live so
+  // back navigation between app screens still works (the login/wizard pages
+  // are dropped from history via location.replace, so back never reaches
+  // them).
+  overscroll-behavior-y: none;
+}
+
+body {
+  background-attachment: fixed;
+  position: relative;
+  overflow-x: hidden;
+  // Native-app touch feel: no grey tap-flash on press, no long-press
+  // callout menu, and the app chrome is not text-selectable (a drag
+  // shouldn't start a selection on a button or label). Real inputs and
+  // anything tagged .is-selectable opt back in just below.
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+// Text entry and explicitly-flagged content stay selectable / long-press
+// capable; everything else (the chrome) keeps the app feel above.
+input, textarea, select, [contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+
+// Snappy taps on controls: drop the legacy 300ms delay and double-tap-zoom
+// without touching pan/scroll gestures elsewhere (charts and the radar map
+// declare their own touch-action).
+button, a, label, summary, [role="button"], .btn {
+  touch-action: manipulation;
+}
+
+// Mode banners. app.rs sets data-dry-run / data-demo on <html> after
+// fetching /api/v1/info on hydrate; these banners are pure CSS from
+// there. Without them, an operator who left LOCALSKY_SMART_DRY_RUN=1
+// after a test cycle sees "nothing happened this morning" and assumes
+// a regression, when in fact the scheduler is logging the dispatch
+// and silently doing nothing. body::before/after are taken by the
+// aurora backdrop, so the banners ride on html::before / html::after.
+html[data-dry-run="true"]::before,
+html[data-demo="true"]::after {
+  display: block;
+  position: fixed;
+  left: 0;
+  right: 0;
+  z-index: var(--z-toast);
+  padding: 0.45rem 1rem;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: center;
+  color: #0f1518;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+}
+html[data-dry-run="true"]::before {
+  content: "Dry-run mode: irrigation dispatch is silenced (LOCALSKY_SMART_DRY_RUN=1)";
+  top: 0;
+  background: var(--accent-warm, #f5a623);
+}
+html[data-demo="true"]::after {
+  content: "Demo mode: synthetic weather, controllers in record-only mode";
+  top: 0;
+  background: var(--accent, #4dd2ff);
+}
+// Stack demo below dry-run when both are active.
+html[data-dry-run="true"][data-demo="true"]::after {
+  top: 2.2rem;
+}
+// Push the app shell down so the first banner doesn't cover content.
+html[data-dry-run="true"] body,
+html[data-demo="true"] body {
+  padding-top: 2.2rem;
+}
+html[data-dry-run="true"][data-demo="true"] body {
+  padding-top: 4.4rem;
+}
+
+// Aurora backdrop. Two slow-drifting low-opacity color washes give the
+// liquid-glass panels something to refract. Sized larger than viewport
+// and translated by the keyframes; pointer-events:none so they never
+// catch clicks. Single fixed layer per pseudo-element so scroll doesn't
+// shift them, the glass on top reads as floating in space.
+body::before,
+body::after {
+  content: "";
+  position: fixed;
+  inset: -20%;
+  pointer-events: none;
+  z-index: 0;
+  filter: blur(60px);
+  // Quieter in v2: a faint, strictly on-brand blue+teal ambient wash that
+  // sits behind the flat elevation surfaces (the purple/green/amber washes
+  // and the heavy 0.55 opacity belonged to the retired glass aesthetic).
+  // S5: lifted from 0.3 -> 0.42 so the signature blue+teal wash actually reads
+  // through the hairline borders (at 0.3 behind --elev-1 it was ~invisible).
+  // Taste dial -- nudge down if it competes with bright metric panels.
+  opacity: 0.42;
+}
+
+body::before {
+  background:
+    radial-gradient(40rem 28rem at 18% 22%, rgba(94, 200, 255, 0.24), transparent 60%),
+    radial-gradient(36rem 30rem at 82% 78%, rgba(46, 179, 164, 0.19), transparent 60%);
+  animation: aurora-drift-a 48s ease-in-out infinite alternate;
+}
+
+body::after {
+  background:
+    radial-gradient(30rem 22rem at 75% 18%, rgba(20, 144, 220, 0.16), transparent 60%);
+  animation: aurora-drift-b 64s ease-in-out infinite alternate;
+}
+
+@keyframes aurora-drift-a {
+  0%   { transform: translate3d(0, 0, 0) rotate(0deg); }
+  50%  { transform: translate3d(2rem, -1.5rem, 0) rotate(2deg); }
+  100% { transform: translate3d(-1.5rem, 2rem, 0) rotate(-1.5deg); }
+}
+
+@keyframes aurora-drift-b {
+  0%   { transform: translate3d(0, 0, 0) rotate(0deg); }
+  50%  { transform: translate3d(-2rem, 1.5rem, 0) rotate(-2deg); }
+  100% { transform: translate3d(1.5rem, -2rem, 0) rotate(1.5deg); }
+}
+
+// Respect users who turn motion off, freeze the auroras.
+@include reduced-motion {
+  body::before, body::after {
+    animation: none;
+  }
+}
+
+// App shell: sidebar (~240px) on the left, main page column on the right.
+// On mobile the sidebar is hidden entirely; the bottom tab-bar
+// (.mobile-tab-bar) is the navigation and .mobile-app-bar shows the brand.
+.app-shell {
+  position: relative;
+  z-index: var(--z-base);
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+// ============================================================
+// Sidebar nav
+// ============================================================
+
+.sidebar {
+  flex: 0 0 232px;
+  width: 232px;
+  position: sticky;
+  top: 0;
+  align-self: flex-start;
+  height: 100vh;
+  height: 100dvh;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+  padding: var(--space-5) var(--space-3) var(--space-4);
+  background: color-mix(in oklab, var(--brand-navy-900) 72%, transparent);
+  -webkit-backdrop-filter: var(--blur-chrome);
+  backdrop-filter: var(--blur-chrome);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  z-index: var(--z-nav);
+
+  // The sidebar background is intentionally dark in every theme for
+  // hierarchy, so re-pin the text tokens to their dark-theme values
+  // inside the sidebar. Without this, light-mode's dark inks render
+  // dark-on-dark and the nav labels disappear.
+  --text: #e6ecf5;
+  --text-bright: #ffffff;
+  --text-dim: #94a0b6;
+  --text-faint: #8693ac;
+  --border: rgba(255, 255, 255, 0.08);
+}
+
+.sidebar-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0 0.5rem 0.6rem;
+  font-family: var(--font-display);
+  font-weight: 800;
+  letter-spacing: -0.005em;
+  font-size: 1.55rem;
+  color: var(--text);
+  text-decoration: none;
+
+  &-mark {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    color: var(--accent-good);   // teal cloud outline
+    > svg, > img { width: 100%; height: 100%; display: block; }
+  }
+  &-name { display: inline-flex; align-items: baseline; }
+
+}
+
+.sidebar-section { display: flex; flex-direction: column; gap: var(--space-1); }
+
+// Trailing configuration section (Settings). Set apart from the analysis tools
+// above it by a divider, but rendered at the SAME weight as every other nav
+// entry. Settings is now a single primary destination (its tabs live inside the
+// page), so it should not read as a shrunken footnote: same font, padding, and
+// color as Weather / Irrigation; the divider gives it a defined separation.
+.sidebar-section--compact {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--elev-border);
+  .sidebar-section-title {
+    color: color-mix(in oklab, var(--text-faint) 75%, transparent);
+  }
+}
+
+.sidebar-section-title {
+  padding: var(--space-1) var(--space-3) 2px;
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  font-weight: 600;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--text-faint);
+  // Subtle gradient underline on the section header pulls the eye to
+  // group breaks without a hard divider line.
+  position: relative;
+  margin-bottom: var(--space-1);
+  &::after {
+    content: "";
+    position: absolute;
+    left: var(--space-3);
+    right: var(--space-3);
+    bottom: -2px;
+    height: 1px;
+    background: linear-gradient(90deg,
+      color-mix(in oklab, var(--accent) 40%, transparent),
+      transparent);
+    opacity: 0.6;
+  }
+}
+
+.sidebar-nav {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+// Indented sub-link under a parent NavLink. Used by Irrigation's
+// children, which only render when the current route is /irrigation*.
+.sidebar-link--sub {
+  padding-left: calc(var(--space-7) - 2px);
+  font-size: var(--text-body-sm);
+  padding-top: 0.32rem;
+  padding-bottom: 0.32rem;
+  .sidebar-link-icon { opacity: 0.65; transform: scale(0.9); }
+}
+
+.sidebar-link {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0.42rem var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-body);
+  font-weight: 500;
+  color: var(--text-dim);
+  text-decoration: none;
+  position: relative;
+  transition: color 80ms ease, background 120ms ease;
+
+  &:hover {
+    color: var(--text);
+    background: color-mix(in oklab, var(--accent) 7%, transparent);
+    text-decoration: none;
+    .sidebar-link-icon { color: var(--text); opacity: 1; }
+  }
+
+  // Active link: brand-accent tint background + left rail accent.
+  // The 2px brand-blue rail aligns with the section underline gradient
+  // for visual rhythm.
+  &.is-active {
+    color: var(--text-bright);
+    background: color-mix(in oklab, var(--accent) 12%, transparent);
+    .sidebar-link-icon { color: var(--accent); opacity: 1; }
+    &::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0.32rem;
+      bottom: 0.32rem;
+      width: 2px;
+      border-radius: 2px;
+      background: var(--accent);
+    }
+  }
+}
+.sidebar-link-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.15rem;
+  height: 1.15rem;
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+.sidebar-link-label { flex: 1; }
+
+// Suggestions count on a nav entry (the Zones link): entity-badge
+// geometry tinted --attention, fed by the app-level tuning summary.
+// The component renders no element at zero, so this only ever styles a
+// real count; no hiding rules needed here.
+.sidebar-link-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.2rem;
+  padding: 1px var(--space-2);
+  border-radius: 999px;
+  font-size: var(--text-micro);
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--attention);
+  background: color-mix(in oklab, var(--attention) 16%, transparent);
+  border: 1px solid color-mix(in oklab, var(--attention) 40%, transparent);
+  white-space: nowrap;
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  padding: var(--space-3) var(--space-3) var(--space-1);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-top: 1px solid var(--border);
+}
+.sidebar-footer-link {
+  color: var(--text-faint);
+  font-size: var(--text-body-sm);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 0.32rem var(--space-2);
+  border-radius: var(--radius-sm);
+  transition: color 80ms ease, background 120ms ease;
+  &:hover {
+    color: var(--text);
+    background: color-mix(in oklab, var(--accent) 6%, transparent);
+  }
+  .sidebar-footer-glyph {
+    display: inline-flex;
+    align-items: center;
+    opacity: 0.6;
+  }
+}
+
+// ------------------------------------------------------------
+// Mobile drawer + top app bar (≤760px)
+// ------------------------------------------------------------
+
+.mobile-app-bar {
+  display: none;
+}

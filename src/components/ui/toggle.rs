@@ -16,6 +16,9 @@ pub fn Toggle(
     /// Disabled state. Defaults false.
     #[prop(default = false)]
     disabled: bool,
+    /// User action only: programmatic reseeding must not submit another save.
+    #[prop(optional)]
+    on_change: Option<Callback<bool>>,
 ) -> impl IntoView {
     let id = format!("toggle-{}", uuid_like());
     let label_owned = label;
@@ -40,7 +43,11 @@ pub fn Toggle(
                 disabled=disabled
                 on:click=move |_| {
                     if !disabled {
-                        checked.update(|v| *v = !*v);
+                        let next = !checked.get_untracked();
+                        checked.set(next);
+                        if let Some(on_change) = on_change {
+                            on_change.run(next);
+                        }
                     }
                 }
             >

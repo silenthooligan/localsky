@@ -465,7 +465,7 @@ pub fn MqttSoilSubscriptions(
                             </FormField>
                             <FormField
                                 label="Bind to zone (optional)".to_string()
-                                helptext="The zone this probe measures. When set, this topic is recorded as that zone's own soil channel (it won't be merged into global humidity). Finish wiring it in the zone editor: open the zone and pick this source's soil channel as its soil-moisture sensor.".to_string()
+                                helptext="The zone this probe measures; its reading becomes that zone's own soil channel. Finish in the zone editor by picking it as the soil sensor.".to_string()
                                 error=Signal::derive(|| None::<String>)
                             >
                                 <select class="ui-input" on:change=set_zone>
@@ -503,9 +503,13 @@ pub fn MqttSoilSubscriptions(
                     }
                 }).collect_view()
             }}
-            <button type="button" class="setup-footer__btn setup-footer__btn--ghost" on:click=add_row>
+            <crate::components::ui::Button
+    variant="ghost"
+    size="md"
+    on_click=Callback::new(add_row)
+    class="setup-footer__btn setup-footer__btn--ghost">
                 "+ Add soil subscription"
-            </button>
+            </crate::components::ui::Button>
         </div>
     }
 }
@@ -645,9 +649,13 @@ pub fn EcowittSoilCalibration(config_text: RwSignal<String>) -> impl IntoView {
                     }
                 }).collect_view()
             }}
-            <button type="button" class="setup-footer__btn setup-footer__btn--ghost" on:click=add_row>
+            <crate::components::ui::Button
+    variant="ghost"
+    size="md"
+    on_click=Callback::new(add_row)
+    class="setup-footer__btn setup-footer__btn--ghost">
                 "+ Add a channel"
-            </button>
+            </crate::components::ui::Button>
         </div>
     }
 }

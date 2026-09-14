@@ -25,6 +25,13 @@ dispatch.
    run length starts. It then takes the seasonal adjustment and any
    condition rule's multiplier, and is held to the zone's cap, so the
    minutes on the panel do not have to equal depth divided by throughput.
+
+   That seasonal adjustment is one dial for the whole yard, on the Engine
+   settings page: 100% is the depth as computed, and you turn it down for
+   a wet, cool stretch or up for a heat wave. It scales the depth before
+   the zone's cap clamps the result, so the minutes here already include
+   it; the [irrigation engine page](irrigation-engine.md) carries the
+   dial's range and the rest of its behavior.
 2. **Scheduled**: the minutes that will actually dispatch, and what the
    zone's safety ceiling did to them. The ceiling is `max_run_minutes`,
    tightened further by any active watering restriction. The row reads
@@ -41,6 +48,17 @@ dispatch.
    a rain defer, an Override schedule); the [tuning
    report](tuning-report.md) is where that shows up, because it is a
    statement about the week rather than about tonight.
+
+   A Force override is the one case where minutes appear with no target
+   behind them. Set Force on the zone, or globally with the zone left on
+   Auto, and a run whose computed length came out zero waters a bounded
+   default of five minutes instead, held down to the zone's ceiling when
+   that ceiling is shorter. Without the floor, a Force on an already
+   satisfied yard flips the verdict to run and then dispatches nothing,
+   because a zone planned for zero seconds is skipped. A zone sitting at
+   zero for any other reason stays at zero, and so does a day an Override
+   manual schedule already covers, so a forced run never stacks on top of
+   the run you scheduled yourself.
 
 ## Not part of tonight's minutes
 

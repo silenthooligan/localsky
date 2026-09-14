@@ -63,7 +63,7 @@ pub fn WelcomeCard() -> impl IntoView {
         });
     });
 
-    // P2-2: render tonight's ACTUAL verdict in plain language (deterministic,
+    // Render tonight's ACTUAL verdict in plain language (deterministic,
     // reusing crate::explain) so a novice's first sight after onboarding is
     // "here's what I'll do tonight and why", not an empty dashboard.
     let decision = RwSignal::new(Option::<crate::explain::DecisionExplanation>::None);
@@ -74,7 +74,7 @@ pub fn WelcomeCard() -> impl IntoView {
                 .send()
                 .await
             {
-                if let Ok(snap) = resp.json::<crate::ha::snapshot::IrrigationSnapshot>().await {
+                if let Ok(snap) = resp.json::<crate::model::IrrigationSnapshot>().await {
                     if let Some(trace) = snap.decision_trace.as_ref() {
                         let past = crate::components::irrigation::hero::today_run_passed(&snap);
                         decision.set(Some(crate::explain::explain_decision(trace, past)));
@@ -112,7 +112,7 @@ pub fn WelcomeCard() -> impl IntoView {
                     </button>
                 </div>
                 <p class="welcome-card__body">
-                    "Setup is done and the engine is live. A few good first stops:"
+                    "Setup is done and watering is live. A few good first stops:"
                 </p>
                 {move || {
                     decision.get().map(|e| {
@@ -140,6 +140,13 @@ pub fn WelcomeCard() -> impl IntoView {
                     })
                 }}
                 <div class="welcome-card__links">
+                    <a class="welcome-card__link" href="/settings/restrictions">
+                        <Icon name="ban" size=18/>
+                        <span class="welcome-card__link-text">
+                            <strong>"Watering rules"</strong>
+                            <span>"tell LocalSky which days your district allows"</span>
+                        </span>
+                    </a>
                     <a class="welcome-card__link" href="/sensors">
                         <Icon name="activity" size=18/>
                         <span class="welcome-card__link-text">

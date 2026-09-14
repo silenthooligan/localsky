@@ -1,0 +1,247 @@
+@use "mixins" as *;
+
+// affordance grammar and entity identity
+//
+// Split out of main.scss, which had grown to 11,330 lines.
+// Load order is the cascade: see the @use list in main.scss.
+
+// ═══════════════════════════════════════════════════════════════════════
+// AFFORDANCE GRAMMAR (design-language v3)
+// ═══════════════════════════════════════════════════════════════════════
+// Every surface declares exactly ONE affordance class so its interactivity
+// is unambiguous. The invariant: a surface is interactive IFF it has a hover
+// state. This is the rule that fixes "what's clickable vs static vs editable".
+//
+//   .is-static       read-only data; no hover, no pointer
+//   .is-interactive  click navigates/selects; hover lift + ring, pointer
+//   .is-editable     opens an editor; interactive + a persistent edit cue
+//   .is-control      a container of inputs/buttons; the container itself
+//                    isn't clickable, its children are
+//
+// Apply on the SAME element that carries the surface look (card, row, tile).
+
+.is-static {
+  cursor: default;
+}
+
+.is-interactive {
+  cursor: pointer;
+  // The lift springs (--ease-spring + --motion-base) for a native, physical feel;
+  // shadow/background stay on the linear ease-out (springing a shadow looks off).
+  will-change: transform;
+  transition:
+    box-shadow var(--motion-fast) var(--ease-out),
+    background-color var(--motion-fast) var(--ease-out),
+    transform var(--motion-base) var(--ease-spring);
+
+  &:hover {
+    background-color: var(--surface-interactive-hover-bg);
+    box-shadow: var(--shadow-2), var(--hover-ring);
+    transform: translateY(-1px);
+  }
+
+  &:active {
+    transform: translateY(0);
+    box-shadow: var(--shadow-1), var(--press-ring);
+  }
+
+  &:focus-visible {
+    @include focus-ring(3px);
+    box-shadow: var(--focus-halo);
+  }
+}
+
+// Editable = interactive PLUS a persistent pencil cue in the top-right so a
+// card that opens an editor is distinguishable from one that merely selects.
+.is-editable {
+  @extend .is-interactive;
+  position: relative;
+
+  &::after {
+    content: "\270E"; // pencil
+    position: absolute;
+    top: var(--space-2);
+    right: var(--space-3);
+    font-size: var(--text-meta);
+    color: var(--text-faint);
+    opacity: 0.55;
+    transition: opacity var(--motion-fast) var(--ease-out);
+    pointer-events: none;
+  }
+
+  &:hover::after,
+  &:focus-within::after {
+    opacity: 1;
+    color: var(--accent);
+  }
+}
+
+// Control container, visually a recessed tray that holds live controls; the
+// container is NOT clickable, only its children are.
+.is-control {
+  background: var(--surface-control-bg);
+  border-radius: var(--radius-sm);
+  cursor: default;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// ENTITY IDENTITY: source / sensor / controller / zone
+// ═══════════════════════════════════════════════════════════════════════
+// A left stripe (instant category scan) + a labelled badge. Applied to the
+// per-entity cards so the four concepts are never confused for one another.
+
+.entity-stripe {
+  position: relative;
+  // The stripe rides the left edge; cards already have a radius so we clip it.
+  overflow: hidden;
+
+  &::before {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 3px;
+    background: var(--entity-color, transparent);
+  }
+}
+
+.entity-stripe--source {
+  --entity-color: var(--entity-source);
+}
+.entity-stripe--sensor {
+  --entity-color: var(--entity-sensor);
+}
+.entity-stripe--controller {
+  --entity-color: var(--entity-controller);
+}
+.entity-stripe--zone {
+  --entity-color: var(--entity-zone);
+}
+
+// Entity badge: uppercase micro-label tinted to the entity color. Distinct
+// from status badges (which carry health). kind ∈ source/sensor/controller/zone.
+.entity-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px var(--space-2);
+  border-radius: 999px;
+  font-size: var(--text-micro);
+  font-weight: 700;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--entity-color, var(--text-dim));
+  background: color-mix(in oklab, var(--entity-color, var(--text-dim)) 16%, transparent);
+  border: 1px solid color-mix(in oklab, var(--entity-color, var(--text-dim)) 40%, transparent);
+  white-space: nowrap;
+}
+.entity-badge--source {
+  --entity-color: var(--entity-source);
+}
+.entity-badge--sensor {
+  --entity-color: var(--entity-sensor);
+}
+.entity-badge--controller {
+  --entity-color: var(--entity-controller);
+}
+.entity-badge--zone {
+  --entity-color: var(--entity-zone);
+}
+
+// Status dot+text: health that never relies on color alone (a11y).
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-meta);
+  font-weight: 600;
+  color: var(--status-color, var(--text-dim));
+
+  &::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: var(--status-color, var(--text-faint));
+    flex: none;
+  }
+}
+.status-chip--online {
+  --status-color: var(--status-online);
+}
+.status-chip--stale {
+  --status-color: var(--status-stale);
+}
+.status-chip--offline {
+  --status-color: var(--status-offline);
+}
+.status-chip--unknown {
+  --status-color: var(--status-unknown);
+}
+
+// Attention pill: entity-badge geometry tinted --attention. Marks a
+// surface that carries an actionable suggestion (the tuning card's
+// SUGGESTION tag, the zone-card pill). Text plus tint, never color
+// alone.
+.attention-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px var(--space-2);
+  border-radius: 999px;
+  font-size: var(--text-micro);
+  font-weight: 700;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--attention);
+  background: color-mix(in oklab, var(--attention) 16%, transparent);
+  border: 1px solid color-mix(in oklab, var(--attention) 40%, transparent);
+  white-space: nowrap;
+}
+
+// Skip-to-content link. Visually hidden until focused, then pops to
+// the upper-left corner. Keyboard users get a one-tab route past nav.
+.skip-link {
+  position: absolute;
+  top: -100px;
+  left: 8px;
+  z-index: var(--z-skip);
+  padding: 8px 14px;
+  background: var(--bg-panel);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  text-decoration: none;
+  font-weight: 600;
+  transition: top 120ms ease;
+}
+.skip-link:focus,
+.skip-link:focus-visible {
+  top: 8px;
+}
+
+// Screen-reader-only utility (standard clip-rect recipe). display:none
+// or visibility:hidden would remove the node from the accessibility
+// tree; this keeps it announceable while rendering nothing.
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+// Honor reduced-motion globally. Specific component animations may
+// still respect this individually but having a fleet-wide guard
+// prevents any future addition from forgetting.
+@include reduced-motion {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

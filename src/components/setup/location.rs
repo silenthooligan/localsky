@@ -3,8 +3,8 @@
 // address search drives the existing Nominatim proxy
 // (GET /api/wizard/geocode?q=) so nobody has to know their coordinates,
 // and the timezone autofills from the offline tzf dataset
-// (GET /api/v1/location/timezone) whenever lat/lon change and the field
-// is still empty.
+// (GET /api/v1/location/timezone) whenever lat/lon change, unless the
+// owner entered the timezone manually.
 
 use leptos::prelude::*;
 
@@ -16,33 +16,6 @@ use crate::components::units_fmt::use_unit_prefs;
 /// elevation_m config field are both meters) but shown/entered in the user's
 /// selected length unit, so imperial users never type or read a metric value.
 const M_PER_FT: f64 = 0.3048;
-
-#[cfg(feature = "hydrate")]
-async fn fetch_draft() -> Option<serde_json::Value> {
-    let resp = gloo_net::http::Request::get("/api/wizard/draft")
-        .send()
-        .await
-        .ok()?;
-    resp.json::<serde_json::Value>().await.ok()
-}
-
-#[cfg(feature = "hydrate")]
-async fn save_draft(draft: serde_json::Value) -> Result<(), String> {
-    let resp = gloo_net::http::Request::put("/api/wizard/draft")
-        .json(&draft)
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::save_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    Ok(())
-}
 
 #[component]
 pub fn LocationStep() -> impl IntoView {
@@ -70,6 +43,11 @@ pub fn LocationStep() -> impl IntoView {
 
     let draft = RwSignal::new(serde_json::Value::Null);
     let loaded = RwSignal::new(false);
+    let saving = RwSignal::new(false);
+    let edited = RwSignal::new(false);
+    let save_error = RwSignal::new(Option::<String>::None);
+    let save_revision = RwSignal::new(0_u64);
+    let timezone_user_edited = RwSignal::new(false);
 
     // Address search state.
     let query = RwSignal::new(String::new());
@@ -79,7 +57,7 @@ pub fn LocationStep() -> impl IntoView {
     #[cfg(feature = "hydrate")]
     Effect::new(move |_| {
         leptos::task::spawn_local(async move {
-            if let Some(d) = fetch_draft().await {
+            if let Some(d) = crate::components::setup::draft::fetch().await {
                 if let Some(loc) = d
                     .get("config")
                     .and_then(|c| c.get("deployment"))
@@ -109,6 +87,7 @@ pub fn LocationStep() -> impl IntoView {
                     .and_then(|v| v.as_str())
                 {
                     tz.set(t.to_string());
+                    timezone_user_edited.set(!t.trim().is_empty());
                 }
                 draft.set(d);
                 loaded.set(true);
@@ -121,6 +100,15 @@ pub fn LocationStep() -> impl IntoView {
         if !loaded.get_untracked() {
             return;
         }
+        let (Some(la), Some(lo)) = (lat.get_untracked(), lon.get_untracked()) else {
+            return;
+        };
+        if !(-90.0..=90.0).contains(&la)
+            || !(-180.0..=180.0).contains(&lo)
+            || (la == 0.0 && lo == 0.0)
+        {
+            return;
+        }
         let mut changed = false;
         draft.update(|d| {
             let Some(dep) = d
@@ -130,12 +118,11 @@ pub fn LocationStep() -> impl IntoView {
             else {
                 return;
             };
-            // lat/lon persist as numbers (the config schema wants f64); an
-            // unset field writes 0.0 so the draft stays valid, and the Review
-            // step still flags 0,0 as "not set". elevation_m is meters or null.
+            // Publish a complete coordinate pair. Missing longitude must not
+            // become a real zero meridian while the owner is still typing.
             let next_loc = serde_json::json!({
-                "lat": lat.get_untracked().unwrap_or(0.0),
-                "lon": lon.get_untracked().unwrap_or(0.0),
+                "lat": la,
+                "lon": lo,
                 "elevation_m": match elevation_m.get_untracked() {
                     Some(m) => m.into(),
                     None => serde_json::Value::Null,
@@ -153,27 +140,54 @@ pub fn LocationStep() -> impl IntoView {
                 changed = true;
             }
         });
-        if !changed {
+        if !changed && save_error.get_untracked().is_none() {
+            edited.set(false);
             return;
         }
-        let candidate = draft.get_untracked();
+        edited.set(false);
+        save_revision.update(|revision| *revision += 1);
+        if saving.get_untracked() {
+            return;
+        }
+        saving.set(true);
+        save_error.set(None);
         #[cfg(feature = "hydrate")]
         leptos::task::spawn_local(async move {
-            let _ = save_draft(candidate).await;
+            loop {
+                let Some(revision) = save_revision.try_get_untracked() else {
+                    return;
+                };
+                let Some(candidate) = draft.try_get_untracked() else {
+                    return;
+                };
+                let result = crate::components::setup::draft::save(&candidate).await;
+                let Some(latest) = save_revision.try_get_untracked() else {
+                    return;
+                };
+                if let Err(error) = result {
+                    save_error.set(Some(error));
+                    saving.set(false);
+                    return;
+                }
+                if latest == revision {
+                    saving.set(false);
+                    return;
+                }
+            }
         });
         #[cfg(not(feature = "hydrate"))]
-        let _ = candidate;
+        saving.set(false);
     };
 
-    // Autofill the timezone from lat/lon whenever they change and the
-    // field is still empty. Quiet failure: the field stays editable.
+    // Auto-derived timezones follow the current coordinates. Manual entries
+    // remain authoritative. Quiet failure: the field stays editable.
     let suggest_tz = move || {
         #[cfg(feature = "hydrate")]
         {
             let (Some(la), Some(lo)) = (lat.get_untracked(), lon.get_untracked()) else {
                 return;
             };
-            if !tz.get_untracked().trim().is_empty() {
+            if timezone_user_edited.get_untracked() {
                 return;
             }
             leptos::task::spawn_local(async move {
@@ -181,7 +195,10 @@ pub fn LocationStep() -> impl IntoView {
                 if let Ok(resp) = gloo_net::http::Request::get(&url).send().await {
                     if let Ok(v) = resp.json::<serde_json::Value>().await {
                         if let Some(name) = v.get("timezone").and_then(|t| t.as_str()) {
-                            if tz.get_untracked().trim().is_empty() {
+                            if lat.try_get_untracked() == Some(Some(la))
+                                && lon.try_get_untracked() == Some(Some(lo))
+                                && timezone_user_edited.try_get_untracked() == Some(false)
+                            {
                                 tz.set(name.to_string());
                                 persist_now();
                             }
@@ -216,7 +233,10 @@ pub fn LocationStep() -> impl IntoView {
                                 // Re-check the guard: the user may have typed
                                 // while the request was in flight. The API
                                 // returns meters; store meters (rounded).
-                                if !elevation_user_edited.get_untracked() {
+                                if lat.try_get_untracked() == Some(Some(la))
+                                    && lon.try_get_untracked() == Some(Some(lo))
+                                    && elevation_user_edited.try_get_untracked() == Some(false)
+                                {
                                     elevation_m.set(Some(m.round()));
                                     persist_now();
                                 }
@@ -229,6 +249,18 @@ pub fn LocationStep() -> impl IntoView {
     };
 
     let commit = move || {
+        let (Some(la), Some(lo)) = (lat.get_untracked(), lon.get_untracked()) else {
+            return;
+        };
+        if !(-90.0..=90.0).contains(&la)
+            || !(-180.0..=180.0).contains(&lo)
+            || (la == 0.0 && lo == 0.0)
+        {
+            return;
+        }
+        if !timezone_user_edited.get_untracked() {
+            tz.set(String::new());
+        }
         suggest_tz();
         suggest_elevation();
         persist_now();
@@ -243,7 +275,7 @@ pub fn LocationStep() -> impl IntoView {
         results.set(Vec::new());
         #[cfg(feature = "hydrate")]
         leptos::task::spawn_local(async move {
-            let url = format!("/api/wizard/geocode?q={}", urlencoding_lite(&q));
+            let url = format!("/api/wizard/geocode?q={}", crate::text::query_value(&q));
             if let Ok(resp) = gloo_net::http::Request::get(&url).send().await {
                 if let Ok(v) = resp.json::<serde_json::Value>().await {
                     let list = v
@@ -281,7 +313,7 @@ pub fn LocationStep() -> impl IntoView {
                 Some(format!("Latitude must be between -90 and 90 (got {v:.4})"))
             }
             Some(v) if v == 0.0 && lon.get() == Some(0.0) => {
-                Some("0,0 is the null island default; set your actual location".to_string())
+                Some("That is the middle of the ocean. Search your address above.".to_string())
             }
             _ => None,
         }
@@ -299,7 +331,13 @@ pub fn LocationStep() -> impl IntoView {
         let (Some(la), Some(lo)) = (lat.get(), lon.get()) else {
             return false;
         };
-        !(la == 0.0 && lo == 0.0) && lat_err.get().is_none() && lon_err.get().is_none()
+        loaded.get()
+            && !saving.get()
+            && !edited.get()
+            && save_error.get().is_none()
+            && !(la == 0.0 && lo == 0.0)
+            && lat_err.get().is_none()
+            && lon_err.get().is_none()
     };
 
     let next_href = move || {
@@ -346,10 +384,9 @@ pub fn LocationStep() -> impl IntoView {
         <div class="setup-step">
             <h2 class="setup-step__title">"Where are you?"<HelpHint topic="location"/></h2>
             <p class="setup-step__body">
-                "LocalSky uses latitude and longitude for the radar center, the "
-                "Open-Meteo forecast, sunrise/sunset, and the FAO-56 ET0 "
-                "calculation. Search an address or type coordinates; the "
-                "timezone fills itself in from the location."
+                "Your location sets the forecast, the radar, sunrise and how "
+                "much water the lawn loses to the sun each day. Search an "
+                "address or type coordinates; the time zone fills itself in."
             </p>
 
             <FormField
@@ -361,14 +398,14 @@ pub fn LocationStep() -> impl IntoView {
                     <input
                         type="text"
                         class="ui-input"
-                        placeholder="e.g. Springfield, Sydney, or 51.5, -0.1"
+                        placeholder=crate::voice::LOCATION_SEARCH_EXAMPLE
                         prop:value=move || query.get()
                         on:input=move |ev| query.set(event_target_value(&ev))
                         on:keydown=move |ev| if ev.key() == "Enter" { on_search(()) }
                     />
                     <Button
                         variant="ghost"
-                        disabled=Signal::derive(move || searching.get())
+                        disabled=Signal::derive(move || !loaded.get() || searching.get())
                         on_click=Callback::new(move |_| on_search(()))
                     >
                         {move || if searching.get() { "Searching…" } else { "Search" }}
@@ -387,8 +424,10 @@ pub fn LocationStep() -> impl IntoView {
                     step="0.0001"
                     class="ui-input"
                     placeholder="e.g. 40.7128"
+                    disabled=move || !loaded.get()
                     prop:value=move || lat.get().map(|v| v.to_string()).unwrap_or_default()
                     on:input=move |ev| {
+                        edited.set(true);
                         let raw = event_target_value(&ev);
                         if raw.trim().is_empty() {
                             lat.set(None);
@@ -410,8 +449,10 @@ pub fn LocationStep() -> impl IntoView {
                     step="0.0001"
                     class="ui-input"
                     placeholder="e.g. -74.0060"
+                    disabled=move || !loaded.get()
                     prop:value=move || lon.get().map(|v| v.to_string()).unwrap_or_default()
                     on:input=move |ev| {
+                        edited.set(true);
                         let raw = event_target_value(&ev);
                         if raw.trim().is_empty() {
                             lon.set(None);
@@ -425,14 +466,14 @@ pub fn LocationStep() -> impl IntoView {
 
             <FormField
                 label="Elevation".to_string()
-                helptext="Auto-filled from your location; edit to override. Used by FAO-56 net-radiation.".to_string()
+                helptext="Filled in from your location. Higher ground gets more sun and dries faster; edit if the number looks wrong.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 // Unit-suffixed input: the value is shown and entered in your
                 // selected length unit (feet for imperial, meters for metric)
                 // but stored as meters internally. The suffix updates with the
                 // unit preference (it resolves client-side after hydration).
-                <div style="display:flex; align-items:center; gap: var(--space-2)">
+                <div class:u-row=true>
                     <input
                         type="number"
                         step="1"
@@ -450,6 +491,7 @@ pub fn LocationStep() -> impl IntoView {
                         on:input=move |ev| {
                             let raw = event_target_value(&ev);
                             elevation_user_edited.set(true);
+                            edited.set(true);
                             if raw.trim().is_empty() {
                                 elevation_m.set(None);
                             } else if let Ok(v) = raw.parse::<f64>() {
@@ -465,7 +507,7 @@ pub fn LocationStep() -> impl IntoView {
 
             <FormField
                 label="Timezone".to_string()
-                helptext="IANA name (e.g. America/New_York or Europe/Berlin). Autofills from the location; clear to re-derive at boot.".to_string()
+                helptext="Filled in from the location, for example America/New_York. Clear it to have LocalSky work it out again.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 <input
@@ -473,8 +515,16 @@ pub fn LocationStep() -> impl IntoView {
                     class="ui-input"
                     placeholder="America/New_York"
                     prop:value=move || tz.get()
-                    on:input=move |ev| tz.set(event_target_value(&ev))
-                    on:change=move |_| persist_now()
+                    on:input=move |ev| {
+                        let value = event_target_value(&ev);
+                        timezone_user_edited.set(!value.trim().is_empty());
+                        tz.set(value);
+                        edited.set(true);
+                    }
+                    on:change=move |_| {
+                        suggest_tz();
+                        persist_now();
+                    }
                 />
             </FormField>
 
@@ -484,20 +534,4 @@ pub fn LocationStep() -> impl IntoView {
             />
         </div>
     }
-}
-
-/// Tiny query encoder for the geocode call (space + reserved chars).
-#[cfg(feature = "hydrate")]
-fn urlencoding_lite(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b' ' => out.push('+'),
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b',' => {
-                out.push(b as char)
-            }
-            other => out.push_str(&format!("%{other:02X}")),
-        }
-    }
-    out
 }

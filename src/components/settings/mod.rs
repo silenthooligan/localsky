@@ -17,7 +17,6 @@
 pub mod account;
 pub mod advanced;
 pub mod cloud_weather;
-pub mod controllers;
 pub mod data_sources;
 pub mod devices;
 pub mod engine;
@@ -92,7 +91,6 @@ pub fn form_state_url(pathname: &str, search: &str, next: &FormState) -> String 
 pub use account::SettingsAccount;
 pub use advanced::SettingsAdvanced;
 pub use cloud_weather::{CloudWeatherServices, CloudWeatherWizardSection};
-pub use controllers::SettingsControllers;
 pub use data_sources::{RestartBanner, SettingsDataSources};
 pub use devices::SettingsDevices;
 pub use engine::SettingsEngine;

@@ -23,7 +23,7 @@
 #[cfg(test)]
 mod tests {
     use crate::forecast::snapshot::ForecastSnapshot;
-    use crate::ha::snapshot::IrrigationSnapshot;
+    use crate::model::IrrigationSnapshot;
     use crate::tempest::state::Snapshot as TempestSnapshot;
     use insta::assert_json_snapshot;
     use serde_json::json;
@@ -44,6 +44,7 @@ mod tests {
         let info = super::super::info::Info {
             service: "localsky",
             service_version: "0.0.0-test",
+            build_revision: "test-revision",
             api_version: "0.0.0-test",
             api_prefix: "/api/v1",
             license: "Apache-2.0",
@@ -54,6 +55,7 @@ mod tests {
             uuid: Some("00000000-0000-0000-0000-000000000000".into()),
             has_irrigation: false,
             nerd_mode_default: false,
+            location_configured: true,
         };
         assert_json_snapshot!("info_v1", info);
     }
@@ -82,7 +84,7 @@ mod tests {
     /// `smart_suppressed`, has to fail here rather than ship green.
     #[test]
     fn irrigation_zone_v1_shape() {
-        use crate::ha::snapshot::{SmartSuppression, ZoneMath, ZoneState};
+        use crate::model::{SmartSuppression, ZoneMath, ZoneState};
         let zones = vec![
             ZoneState {
                 slug: "front_yard".into(),
@@ -129,7 +131,7 @@ mod tests {
     /// instead of shipping green.
     #[test]
     fn irrigation_water_budget_v1_shape() {
-        use crate::ha::snapshot::WaterBudget;
+        use crate::model::WaterBudget;
         let budgets = vec![
             WaterBudget {
                 zone_slug: "front_yard".into(),
@@ -142,7 +144,7 @@ mod tests {
                 mode_active: true,
                 weekly_budget_in: 1.0,
                 sessions_per_week: 2,
-                expected_rain_mm: 4.5,
+                expected_rain_mm: Some(4.5),
                 needed_mm: 16.4,
                 mm_per_session: 8.2,
                 seconds_per_session: 2952,
@@ -164,12 +166,14 @@ mod tests {
                 target_inferred: false,
                 scheduling_model: "weekly".into(),
                 soil_depletion_mm: Some(5.2),
+                soil_depletion_range_mm: None,
                 soil_taw_mm: Some(9.0),
                 soil_raw_mm: Some(4.5),
                 soil_due: true,
                 soil_planned_seconds: 1783,
                 soil_deferred_reason: None,
                 soil_deferred_kind: None,
+                dormant: false,
                 soil_ceiling_binding: false,
                 // Zero on purpose: the evidence-census pair skips
                 // serialization at zero, so the pinned wire snapshot
@@ -194,6 +198,7 @@ mod tests {
                     .into(),
                 scheduling_model: "soil".into(),
                 soil_depletion_mm: Some(5.1),
+                soil_depletion_range_mm: None,
                 soil_taw_mm: Some(9.0),
                 soil_raw_mm: Some(4.5),
                 soil_due: true,
@@ -214,7 +219,7 @@ mod tests {
     /// absent rather than defaulting to a fabricated zero.
     #[test]
     fn zone_bucket_and_suppression_default_when_absent() {
-        use crate::ha::snapshot::ZoneState;
+        use crate::model::ZoneState;
         let mut v = serde_json::to_value(ZoneState {
             slug: "back_yard".into(),
             ..Default::default()
@@ -406,8 +411,10 @@ mod tests {
         let health = HealthResponse {
             status: "ok",
             config_present: true,
+            location_configured: true,
             version: "0.0.0-test",
             schema_version: Some(0),
+            valves_unclosed: Vec::new(),
             uptime_s: 0,
             subsystems: SubsystemReport {
                 config_store: "ok",
@@ -420,6 +427,7 @@ mod tests {
                 last_seen_epoch: Some(0),
                 stale_for_s: Some(0),
                 status: "active",
+                note: None,
             }],
             controllers: vec![ControllerSummary {
                 id: "opensprinkler".into(),
@@ -427,7 +435,7 @@ mod tests {
                 default: true,
                 enabled: true,
             }],
-            soil_probe_faults: vec![crate::ha::snapshot::SoilProbeFault {
+            soil_probe_faults: vec![crate::model::SoilProbeFault {
                 zone_slug: "back_yard".into(),
                 zone_name: "Back yard".into(),
                 sensor_id: "source:ecowitt_gw:soilmoisture1".into(),
@@ -438,6 +446,7 @@ mod tests {
                 reachable: false,
                 snapshot_source: "standalone",
                 passthrough_sources: vec![("ha_weather".to_string(), 0)],
+                tempest_listener: crate::tempest::status::ListenerStatus::NotConfigured,
                 service_call_controllers: vec!["ha_valves".to_string()],
                 mqtt_discovery: false,
                 hacs_last_seen_epoch: 0,
@@ -536,10 +545,10 @@ mod tests {
                 scored_days: Some(4),
                 confirmed_days: Some(3),
                 min_scored_days: 3,
-                line: "Skipped 4 days for forecast rain in the last 30; rain came 3 of 4.".into(),
+                line: "Forecast rain prompted hold verdicts on 4 days in the last 30; rain followed on 3 of 4.".into(),
                 reactive_days: Some(2),
-                reactive_line: "Skipped 2 day(s) for rain already falling or on the ground in \
-                                the last 30."
+                reactive_line: "Hold verdicts for rain already falling or on the ground: \
+                                2 days in the last 30."
                     .into(),
             },
         };

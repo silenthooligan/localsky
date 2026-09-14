@@ -87,6 +87,10 @@ pub struct WizardDraft {
     pub water_supply: Option<WaterSupply>,
     /// Last update epoch. Used by the UI to show "resumed Xm ago".
     pub last_updated_epoch: i64,
+    /// Region authorities `finalize_sources` seeded, recorded in the ledger
+    /// on apply so a deletion before the first restart sticks.
+    #[serde(default)]
+    pub seeded_source_ids: Vec<String>,
 }
 
 impl Default for WizardDraft {
@@ -98,6 +102,7 @@ impl Default for WizardDraft {
             telemetry_choice: None,
             water_supply: None,
             last_updated_epoch: chrono::Utc::now().timestamp(),
+            seeded_source_ids: Vec::new(),
         }
     }
 }
@@ -363,8 +368,8 @@ impl WizardStore {
                 // seed_missing_forecast_authorities would see the id absent from
                 // both sources and seeded_source_ids and re-add it. Writing the
                 // id here means the tombstone exists the instant the source does.
-                if !draft.config.seeded_source_ids.contains(&entry.id) {
-                    draft.config.seeded_source_ids.push(entry.id.clone());
+                if !draft.seeded_source_ids.contains(&entry.id) {
+                    draft.seeded_source_ids.push(entry.id.clone());
                 }
                 draft.config.sources.push(entry);
             }
@@ -833,16 +838,17 @@ mod tests {
         let mut d = draft_at(28.5, -81.4); // Orlando, US
         WizardStore::finalize_sources(&mut d);
         // The tombstones exist the instant the authorities do.
-        assert!(d.config.seeded_source_ids.contains(&"nws".to_string()));
-        assert!(d
-            .config
-            .seeded_source_ids
-            .contains(&"noaa_mrms".to_string()));
+        assert!(d.seeded_source_ids.contains(&"nws".to_string()));
+        assert!(d.seeded_source_ids.contains(&"noaa_mrms".to_string()));
 
         // User deletes NWS from the UI before any restart records a tombstone.
         d.config.sources.retain(|s| s.id != "nws");
-        // First boot seeding runs against the wizard-produced config.
-        let _ = crate::config::region::seed_missing_forecast_authorities(&mut d.config);
+        // The apply records the tombstones in the ledger; the first boot
+        // seeding then runs against the wizard-produced config.
+        let mut ledger = crate::config::ledger::Ledger::default();
+        ledger.absorb_seeded(d.seeded_source_ids.clone());
+        let _ =
+            crate::config::region::seed_missing_forecast_authorities(&mut d.config, &mut ledger);
         assert!(
             !d.config.sources.iter().any(|s| s.id == "nws"),
             "an authority deleted before the first restart must NOT be resurrected"

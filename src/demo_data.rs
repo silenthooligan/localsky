@@ -15,11 +15,11 @@ use tracing::info;
 
 use crate::forecast::snapshot::{DailyEntry, ForecastSnapshot, HourlyEntry};
 use crate::forecast::ForecastStore;
-use crate::ha::snapshot::{
+use crate::model::{
     DayVerdict, Forecast, IrrigationSnapshot, RainNature, SkipCheck, SoilForecast, WaterBudget,
     ZoneMath, ZoneState,
 };
-use crate::ha::IrrigationStore;
+use crate::refresher::IrrigationStore;
 use crate::tempest::state::{Snapshot as TempestSnapshot, TempestStore};
 
 /// Spawn the demo-data feeder. Tick cadence 3s; synthesized "day"
@@ -47,7 +47,7 @@ pub fn spawn(
         tokio::spawn(seed_history(conn));
     }
     if let Some(conn) = history {
-        tokio::spawn(feed_sensor_history(conn));
+        tokio::spawn(feed_sensor_history(conn, tempest.clone()));
     }
     tokio::spawn(async move {
         let mut tick = interval(Duration::from_secs(3));
@@ -93,7 +93,7 @@ pub fn spawn(
 /// provenance) instead of a pile of never-seen offline entries.
 fn stamp_source_provenance(tempest: &TempestStore, snap: &TempestSnapshot, now: i64) {
     use crate::ports::weather_source::WeatherField as F;
-    tempest.apply_source_fields(
+    tempest.apply_received_fields(
         &[
             (F::AirTempF, snap.air_temp_f),
             (F::WindMph, snap.wind_avg_mph),
@@ -101,11 +101,13 @@ fn stamp_source_provenance(tempest: &TempestStore, snap: &TempestSnapshot, now: 
             (F::RainIntensityInHr, snap.rain_intensity_in_hr),
         ],
         now,
+        now,
         true,
-        crate::tempest::state::TEMPEST_LABEL,
+        "tempest",
     );
-    tempest.apply_source_fields(
+    tempest.apply_received_fields(
         &[(F::PressureInHg, snap.pressure_inhg)],
+        now,
         now,
         true,
         "ecowitt",
@@ -114,8 +116,9 @@ fn stamp_source_provenance(tempest: &TempestStore, snap: &TempestSnapshot, now: 
     // demo_snapshot); the expect documents that invariant rather than
     // silently re-fabricating a 0%.
     let pop = snap.pop_pct.expect("demo snapshot always sets pop_pct");
-    tempest.apply_source_fields(
+    tempest.apply_received_fields(
         &[(F::Pop, pop), (F::Et0Today, snap.et0_today)],
+        now,
         now,
         false,
         "open_meteo",
@@ -129,7 +132,10 @@ fn stamp_source_provenance(tempest: &TempestStore, snap: &TempestSnapshot, now: 
 /// rows double as real telemetry: the soil channels match the zone bindings
 /// the seed configures (`source:ecowitt:soilmoisture_<slug>`), so the soil
 /// pickers, Sensors page, and sparklines all show plausible data.
-async fn feed_sensor_history(conn: Arc<tokio::sync::Mutex<rusqlite::Connection>>) {
+async fn feed_sensor_history(
+    conn: Arc<tokio::sync::Mutex<rusqlite::Connection>>,
+    tempest: Arc<TempestStore>,
+) {
     use crate::persistence::sensor_history::Reading;
     use crate::sources::bus_recorder::zone_soil_key;
 
@@ -174,6 +180,30 @@ async fn feed_sensor_history(conn: Arc<tokio::sync::Mutex<rusqlite::Connection>>
             key: "pop".to_string(),
             value: (35.0 + wiggle * 20.0).clamp(0.0, 100.0),
         });
+        // The station's own trend. A live install gets these from the bus
+        // recorder as the source publishes them; the demo feeder writes
+        // the snapshot wholesale and never touches the bus, so it records
+        // its own or the telemetry strip has nothing to draw. Read from the
+        // live snapshot, not re-synthesized, so the sparkline and the
+        // reading printed above it are the same numbers.
+        let snap = tempest.snapshot();
+        for (key, value) in [
+            ("air_temp_f", snap.air_temp_f),
+            ("rh_pct", snap.rh_pct),
+            ("wind_avg_mph", snap.wind_avg_mph),
+            ("pressure_inhg", snap.pressure_inhg),
+            ("solar_w_m2", snap.solar_w_m2),
+            ("uv_index", snap.uv_index),
+            ("rain_today_in", snap.rain_in_today),
+            ("rain_intensity_in_hr", snap.rain_intensity_in_hr),
+        ] {
+            rows.push(Reading {
+                epoch: now,
+                source_id: "tempest".to_string(),
+                key: key.to_string(),
+                value,
+            });
+        }
         if let Err(e) = store.insert_many(rows).await {
             tracing::debug!("demo_data: sensor-history heartbeat failed: {e}");
         }
@@ -209,6 +239,9 @@ pub fn seed_config() -> crate::config::schema::Config {
         toml::from_str("").expect("empty document deserializes to a default Config");
 
     cfg.deployment.display_name = "LocalSky Demo".to_string();
+    // The switch is LOCALSKY_DEMO=1; the seeded config records it so the
+    // Advanced page's status line and the manifest read the truth.
+    cfg.features.demo_mode = true;
     cfg.deployment.location = Location {
         lat: 28.54,
         lon: -81.38,
@@ -471,11 +504,20 @@ fn synth_tempest(t_sim: f64) -> TempestSnapshot {
         has_live_station: true,
         // The demo accumulator is always today's.
         rain_today_day_ordinal: crate::timeutil::local_day_ordinal(now),
+        rain_today_suspect_source: None,
     }
 }
 
 fn synth_irrigation(t_sim: f64) -> IrrigationSnapshot {
     let now = chrono::Utc::now().timestamp();
+    synth_irrigation_at(t_sim, now, crate::timeutil::deployment_calendar())
+}
+
+fn synth_irrigation_at(
+    t_sim: f64,
+    now: i64,
+    calendar: crate::engine::calendar::Calendar,
+) -> IrrigationSnapshot {
     let day_phase = (t_sim / 86400.0) * std::f64::consts::TAU;
 
     let zones = vec![
@@ -546,25 +588,35 @@ fn synth_irrigation(t_sim: f64) -> IrrigationSnapshot {
     snap.water_level_pct = Some(100.0);
     snap.water_level_capable = true;
     snap.next_run_epoch = now + 6 * 3600;
+    snap.next_run_day_offset = calendar
+        .date_of(now)
+        .zip(calendar.date_of(snap.next_run_epoch))
+        .and_then(|(today, slot)| {
+            u32::try_from(slot.naive().signed_duration_since(today.naive()).num_days()).ok()
+        });
     // next_run_total_minutes is summed from the zone plans once the balance
     // rows exist, below.
     snap.zones = zones;
     snap.skip_check = SkipCheck {
+        rain_today_forecast_in: Some(0.0),
         temp_now_f: 82.0,
         wind_now_mph: 5.5,
         rain_today_in: 0.0,
-        rain_intensity_now_in_hr: if raining_now { 0.05 } else { 0.0 },
+        rain_intensity_now_in_hr: Some(if raining_now { 0.05 } else { 0.0 }),
         humidity_now_pct: 62.0,
         // Tomorrow's rain matches the forecast seed (daily[1]: 0.40" at 85%)
         // AND the tomorrow-rain phase reason above, so the hero re-render and
         // the baked string carry the same operands.
-        forecast_in: 0.40,
+        forecast_in: Some(0.40),
         rain_tomorrow_prob_pct: Some(85),
-        rain_3day_weighted_in: 0.42,
-        rain_7day_weighted_in: 0.95,
-        rain_next_4h_in,
+        rain_3day_weighted_in: Some(0.42),
+        rain_7day_weighted_in: Some(0.95),
+        rain_next_4h_in: Some(rain_next_4h_in),
         rain_observed_recent_in: 0.0,
         wind_max_today_mph: 8.0,
+        wind_window_max_mph: None,
+        run_window: Default::default(),
+        window_min_temp_f: None,
         temp_min_24h_f: 71.0,
         temp_min_24h_valid: true,
         temp_max_3day_f: 97.0,
@@ -592,11 +644,15 @@ fn synth_irrigation(t_sim: f64) -> IrrigationSnapshot {
             ("saturation_side_yard_pct".to_string(), Some(70.0)),
             ("saturation_back_yard_shrubs_pct".to_string(), Some(85.0)),
         ]),
+        soil_probe_configured: Default::default(),
+        soil_probe_holds: Default::default(),
+        planning_forecast_unavailable: Default::default(),
         soil_temp_yard_min_f: Some(74.0),
         soil_temp_yard_max_f: Some(82.0),
         frost_skip_soil_f: 35.0,
         is_paused: false,
         is_dry_run: false,
+        script_hold: None,
         will_skip: verdict == "skip",
         verdict: verdict.to_string(),
         // P1: derive the demo reason_code from the same classifier the scoreboard
@@ -611,34 +667,34 @@ fn synth_irrigation(t_sim: f64) -> IrrigationSnapshot {
     // HA manifest sensors read: empty forecast source, 0.0 ET0, 0 gust.
     snap.forecast = Forecast {
         rain_today_tempest_in: 0.0,
-        rain_today_om_in: 0.0,
+        rain_today_om_in: Some(0.0),
         station_source_label: "Demo".to_string(),
         forecast_source_label: "Open-Meteo (demo)".to_string(),
-        rain_intensity_in_hr: if raining_now { 0.05 } else { 0.0 },
+        rain_intensity_in_hr: Some(if raining_now { 0.05 } else { 0.0 }),
         rain_type: if raining_now { "rain" } else { "none" }.to_string(),
         // The demo presents as a live local station (serial + battery), so its
         // rain reading is an observation-grade gauge read, not a model fill.
         rain_is_live: true,
         rain_nature: RainNature::Measured,
-        rain_tomorrow_in: 0.40,
-        rain_3day_in: 0.40,
+        rain_tomorrow_in: Some(0.40),
+        rain_3day_in: Some(0.40),
         eto_today_mm: Some(3.5 + (day_phase * 0.5).sin() * 1.0),
         eto_tomorrow_mm: 4.4,
         eto_3day_avg_mm: 4.2,
         temp_max_today_f: Some(88.0),
         temp_min_today_f: Some(71.0),
-        wind_max_today_mph: 8.0,
+        wind_max_today_mph: Some(8.0),
         wind_gust_today_mph: 12.0,
         humidity_mean_today_pct: Some(65.0),
-        rain_3day_weighted_in: 0.42,
-        rain_7day_weighted_in: 0.95,
-        rain_next_4h_in,
+        rain_3day_weighted_in: Some(0.42),
+        rain_7day_weighted_in: Some(0.95),
+        rain_next_4h_in: Some(rain_next_4h_in),
         rain_tomorrow_prob_pct: Some(85),
-        temp_min_24h_f: 71.0,
-        temp_max_3day_f: 97.0,
-        humidity_now_pct: 62.0,
-        heat_index_now_f: 88.0,
-        heat_index_max_3day_f: 109.0,
+        temp_min_24h_f: Some(71.0),
+        temp_max_3day_f: Some(97.0),
+        humidity_now_pct: Some(62.0),
+        heat_index_now_f: Some(88.0),
+        heat_index_max_3day_f: Some(109.0),
         // Matches the per-zone ZoneMath heat_mult so the math tile agrees.
         heat_multiplier: 1.15,
         days_since_significant_rain: 2,
@@ -654,14 +710,16 @@ fn synth_irrigation(t_sim: f64) -> IrrigationSnapshot {
         soil_moisture_3_9_in48h_vwc: 0.16,
     };
     snap.seven_day_verdicts = synth_seven_day_verdicts(now);
+    // Today is the current decision, just as on the live assembly path. The
+    // remaining cells keep their forecast showcase; a future slot may differ
+    // from today's verdict and is identified by next_run_day_offset above.
+    if let Some(today) = snap.seven_day_verdicts.first_mut() {
+        today.verdict.clone_from(&snap.skip_check.verdict);
+        today.reason.clone_from(&snap.skip_check.reason);
+        today.reason_code.clone_from(&snap.skip_check.reason_code);
+    }
     snap.soil_forecasts = synth_soil_forecasts();
-    snap.water_budgets = synth_water_budgets(
-        now,
-        crate::engine::calendar::Calendar {
-            local_date: crate::timeutil::local_date,
-            day_bounds_utc: crate::timeutil::local_day_bounds_utc,
-        },
-    );
+    snap.water_budgets = synth_water_budgets(now, crate::timeutil::deployment_calendar());
     // The demo's engine default stays weekly with side_yard pinned to
     // soil, so the pinned zone's model chip (rendered only where a
     // zone's model differs from this baseline) shows in screenshots.
@@ -793,9 +851,10 @@ fn synth_seven_day_verdicts(now: i64) -> Vec<DayVerdict> {
             d.day_offset = i as u32;
             d.time_epoch = now + (i as i64) * 86400;
             d.weather_code = *w_code;
-            d.temp_max_f = highs[i];
-            d.temp_min_f = 71.0 + (i as f64) * 0.2;
-            d.precip_in = if v.starts_with("skip") { 0.4 } else { 0.0 };
+            d.temp_max_f = Some(highs[i]);
+            d.temp_min_f = Some(71.0 + (i as f64) * 0.2);
+            d.precip_in = Some(if v.starts_with("skip") { 0.4 } else { 0.0 });
+            d.rain_evidence_incomplete = false;
             d.precip_probability_max = Some(if v.starts_with("skip") { 85 } else { 15 });
             d.verdict = v.to_string();
             d.reason = r.to_string();
@@ -879,7 +938,25 @@ fn synth_water_budgets(now: i64, cal: crate::engine::calendar::Calendar) -> Vec<
     // The balance settles against trailing evidence only; the showcase
     // forecast block is display data (its rain would otherwise trip the
     // defer gate every synthetic day).
-    let fc = ForecastSnapshot::default();
+    let fc = ForecastSnapshot {
+        last_refresh_epoch: now,
+        source_reachable: true,
+        hourly: (0..48)
+            .map(|hour| HourlyEntry {
+                time_epoch: now + hour * 3600,
+                precip_in: Some(0.0),
+                ..Default::default()
+            })
+            .collect(),
+        daily: (0..8)
+            .map(|day| DailyEntry {
+                day_marker: crate::engine::clock::DayMarker::inside_local_day(now + day * 86400),
+                precip_sum_in: Some(0.0),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    };
     let zones: [(&str, &str, f64, u32, i64, i64, u32); 4] = [
         // (slug, name, weekly_in, sessions/wk, last_run_epoch,
         //  trailing valve-open seconds, sessions done in the window)
@@ -912,10 +989,10 @@ fn synth_water_budgets(now: i64, cal: crate::engine::calendar::Calendar) -> Vec<
                 name: name.to_string(),
                 weekly_budget_in: *weekly,
                 sessions_per_week: *sessions,
-                mode_active: true,
                 throughput_mm_hr: THROUGHPUT_MM_HR,
                 max_dur_s: cap_s,
                 last_run_epoch: *last_run,
+                last_session_applied_mm: None,
                 applied_trailing_mm: *open_s as f64 / 3600.0 * THROUGHPUT_MM_HR,
                 sessions_done: *done,
                 // The demo sets a weekly target per zone above, so no zone
@@ -1030,13 +1107,23 @@ fn apply_demo_soil_plans(budgets: &mut [WaterBudget]) {
             max_dur_s: DEMO_MAX_RUN_MINUTES.unwrap_or(60) * 60,
             explicit_rain_cap_mm: None,
             explicit_weekly_budget_in: weekly_in,
+            sprinkler_type: crate::config::schema::SprinklerType::Spray,
+            soil_temp_f: None,
         };
         let evidence: Vec<ZoneDayEvidence> = dates
             .iter()
             .enumerate()
             .map(|(i, date)| ZoneDayEvidence {
                 date: *date,
-                et0_mm: None,
+                // A real summer ET0 on every day, so the demo's stories
+                // are built on evidence rather than on absence.
+                //
+                // These days used to carry no ET0 at all, and the
+                // deficits the demo showed came from the replay charging
+                // a fallback mean across a window with nothing in it.
+                // That is the fabricated drought a fresh install used to
+                // read, so the demo was unintentionally showing it off.
+                et0_mm: Some(5.0),
                 gross_rain_mm: rain_days
                     .iter()
                     .find(|(d, _)| *d == i)
@@ -1057,7 +1144,7 @@ fn apply_demo_soil_plans(budgets: &mut [WaterBudget]) {
             .filter(|(d, _)| *d >= 7)
             .map(|(_, s)| *s / 3600.0 * THROUGHPUT_MM_HR)
             .sum::<f64>();
-        let plan = plan_zone(&params, &evidence, 0.0, delivered_7d_mm);
+        let plan = plan_zone(&params, &evidence, Some(0.0), delivered_7d_mm);
         let Some(b) = budgets.iter_mut().find(|b| b.zone_slug == slug) else {
             continue;
         };
@@ -1088,17 +1175,17 @@ fn synth_forecast() -> ForecastSnapshot {
     let daily: Vec<DailyEntry> = (0..7)
         .map(|d| {
             let mut e = DailyEntry::default();
-            e.time_epoch = now + d * 86400;
+            e.day_marker = crate::engine::clock::DayMarker::inside_local_day(now + d * 86400);
             e.weather_code = if d == 1 || d == 4 { 80 } else { 2 };
-            e.temp_max_f = highs[d as usize];
-            e.temp_min_f = 71.0 + (d as f64) * 0.2;
-            e.precip_sum_in = if d == 1 {
+            e.temp_max_f = Some(highs[d as usize]);
+            e.temp_min_f = Some(71.0 + (d as f64) * 0.2);
+            e.precip_sum_in = Some(if d == 1 {
                 0.4
             } else if d == 4 {
                 0.6
             } else {
                 0.0
-            };
+            });
             e.precip_probability_max = Some(if d == 1 {
                 85
             } else if d == 4 {
@@ -1106,7 +1193,7 @@ fn synth_forecast() -> ForecastSnapshot {
             } else {
                 15
             });
-            e.wind_max_mph = 8.0;
+            e.wind_max_mph = Some(8.0);
             e.uv_index_max = 9.0;
             e.sunrise_epoch = now + d * 86400 + 6 * 3600;
             e.sunset_epoch = now + d * 86400 + 19 * 3600;
@@ -1117,11 +1204,11 @@ fn synth_forecast() -> ForecastSnapshot {
         .map(|h| {
             let mut e = HourlyEntry::default();
             e.time_epoch = now + h * 3600;
-            e.temp_f = 75.0 + 8.0 * ((h as f64) / 24.0 * std::f64::consts::TAU).sin();
-            e.precip_in = if h > 2 && h < 6 { 0.04 } else { 0.0 };
+            e.temp_f = Some(75.0 + 8.0 * ((h as f64) / 24.0 * std::f64::consts::TAU).sin());
+            e.precip_in = Some(if h > 2 && h < 6 { 0.04 } else { 0.0 });
             e.precip_probability = Some(if h > 2 && h < 6 { 75 } else { 10 });
-            e.wind_mph = 5.0;
-            e.humidity_pct = 60;
+            e.wind_mph = Some(5.0);
+            e.humidity_pct = Some(60);
             e.weather_code = 2;
             e
         })
@@ -1137,10 +1224,10 @@ fn synth_forecast() -> ForecastSnapshot {
     f.past_daily = (0..7)
         .map(|d| {
             let mut e = DailyEntry::default();
-            e.time_epoch = now - (7 - d) * 86400;
-            e.precip_sum_in = if d == 4 { 0.25 } else { 0.0 };
-            e.temp_max_f = 86.0;
-            e.temp_min_f = 70.0;
+            e.day_marker = crate::engine::clock::DayMarker::inside_local_day(now - (7 - d) * 86400);
+            e.precip_sum_in = Some(if d == 4 { 0.25 } else { 0.0 });
+            e.temp_max_f = Some(86.0);
+            e.temp_min_f = Some(70.0);
             e
         })
         .collect();
@@ -1155,8 +1242,36 @@ fn synth_forecast() -> ForecastSnapshot {
 /// runs table is empty. Deterministic: every value keys off the day
 /// index (no RNG).
 async fn seed_history(conn: Arc<tokio::sync::Mutex<rusqlite::Connection>>) {
-    use crate::history::db::{record_decision, record_run};
-    use crate::history::types::{DecisionRecord, RunRecord};
+    use crate::persistence::runs::{NewRun, RunsStore};
+    use crate::persistence::VerdictHistoryStore;
+
+    // One synthetic row, written the way the observer writes a real one.
+    // A duration of zero with a reason is the skip shape.
+    async fn seed_run(runs: &RunsStore, slug: &str, start: i64, dur: i64, reason: Option<&str>) {
+        let _ = runs
+            .insert_observed(
+                NewRun {
+                    session_id: None,
+                    zone_slug: slug.into(),
+                    start_epoch: start,
+                    source: "ha_refresher".into(),
+                    controller_id: "demo_controller".into(),
+                    planned_duration_s: dur.max(0) as u32,
+                    skip_reason: reason.map(str::to_string),
+                    et0_mm: None,
+                    etc_mm: None,
+                    cycle_index: None,
+                    cycle_count: None,
+                },
+                dur,
+                None,
+                None,
+            )
+            .await;
+    }
+
+    let runs = RunsStore::new(conn.clone());
+    let verdicts = VerdictHistoryStore::new(conn.clone());
 
     let existing: i64 = {
         let c = conn.lock().await;
@@ -1189,60 +1304,35 @@ async fn seed_history(conn: Arc<tokio::sync::Mutex<rusqlite::Connection>>) {
         let kind = back % 7;
         match kind {
             2 => {
-                let _ = record_decision(
-                    conn.clone(),
-                    DecisionRecord {
-                        epoch: start,
-                        verdict: "skip".into(),
-                        reason: "Rain expected within 4h (0.31 in forecast)".into(),
-                        trace: None,
-                    },
-                    String::new(),
-                )
-                .await;
-                for (slug, _) in zones {
-                    let _ = record_run(
-                        conn.clone(),
-                        RunRecord {
-                            zone: slug.into(),
-                            start_epoch: start,
-                            duration_s: 0,
-                            skip_reason: Some("Rain expected within 4h".into()),
-                            source: String::new(),
-                            status: String::new(),
-                        },
+                let _ = verdicts
+                    .insert_transition(
+                        start,
+                        "skip".into(),
+                        "Rain expected within 4h (0.31 in forecast)".into(),
+                        String::new(),
                     )
                     .await;
+                for (slug, _) in zones {
+                    seed_run(&runs, slug, start, 0, Some("Rain expected within 4h")).await;
                 }
             }
             5 => {
-                let _ = record_decision(
-                    conn.clone(),
-                    DecisionRecord {
-                        epoch: start,
-                        verdict: "skip".into(),
-                        reason: "Wind 14 mph above 10 mph threshold".into(),
-                        trace: None,
-                    },
-                    String::new(),
-                )
-                .await;
+                let _ = verdicts
+                    .insert_transition(
+                        start,
+                        "skip".into(),
+                        "Wind 14 mph above 10 mph threshold".into(),
+                        String::new(),
+                    )
+                    .await;
             }
             0 | 3 => {
                 // Rest day: bucket still comfortable, no rows.
             }
             _ => {
-                let _ = record_decision(
-                    conn.clone(),
-                    DecisionRecord {
-                        epoch: start,
-                        verdict: "run".into(),
-                        reason: String::new(),
-                        trace: None,
-                    },
-                    String::new(),
-                )
-                .await;
+                let _ = verdicts
+                    .insert_transition(start, "run".into(), String::new(), String::new())
+                    .await;
                 let mut t = start;
                 for (slug, dur) in zones {
                     // back_yard sits out the trailing week: the balance
@@ -1256,18 +1346,7 @@ async fn seed_history(conn: Arc<tokio::sync::Mutex<rusqlite::Connection>>) {
                     }
                     let jitter = ((back * 37 + t) % 90) - 45;
                     let d = (dur + jitter).max(300);
-                    let _ = record_run(
-                        conn.clone(),
-                        RunRecord {
-                            zone: slug.into(),
-                            start_epoch: t,
-                            duration_s: d,
-                            skip_reason: None,
-                            source: String::new(),
-                            status: String::new(),
-                        },
-                    )
-                    .await;
+                    seed_run(&runs, slug, t, d, None).await;
                     watered.entry(slug).or_default().push((t, t + d));
                     t += d + 300;
                 }
@@ -1338,7 +1417,7 @@ async fn seed_tuning_signals(
         let mut n = 0u32;
         for (i, d) in fc.daily.iter().take(7).enumerate() {
             let doy = (base_doy + i as u16 - 1) % 366 + 1;
-            if let Some(et0) = crate::refresher::native_et0_mm(d, lat, doy) {
+            if let Some(et0) = crate::assembly::native_et0_mm(d, lat, doy, 0.0) {
                 let kc = crate::engine::kc_at_doy_lat(species, doy, lat);
                 sum += crate::engine::etc_mm(et0, kc, 1.0);
                 n += 1;
@@ -1498,17 +1577,13 @@ mod seed_config_tests {
         let snap = synth_tempest(30_000.0);
         stamp_source_provenance(&store, &snap, 1_700_000_000);
         let owners = store.current_owner_labels();
-        for label in [
-            crate::tempest::state::TEMPEST_LABEL,
-            "ecowitt",
-            "open_meteo",
-        ] {
+        for label in ["tempest", "ecowitt", "open_meteo"] {
             assert!(owners.contains(label), "{label} must own a field");
         }
         // The per-field map the feeder copies onto the irrigation snapshot
         // (the refresher's job on a real deployment) carries the same story.
         let map = store.field_source_map();
-        assert_eq!(map.get("wind_mph").map(String::as_str), Some("Tempest"));
+        assert_eq!(map.get("wind_mph").map(String::as_str), Some("tempest"));
         assert_eq!(
             map.get("pressure_in_hg").map(String::as_str),
             Some("ecowitt")
@@ -1542,6 +1617,37 @@ mod seed_config_tests {
             assert_eq!(f.rain_tomorrow_prob_pct, Some(85));
             assert!(f.days_since_significant_rain > 0);
             assert!(f.heat_multiplier >= 1.0);
+        }
+    }
+
+    #[test]
+    fn demo_today_and_next_slot_use_their_own_decision_and_calendar_day() {
+        let calendar = crate::engine::calendar::Calendar::fixed_offset(-4 * 3600).unwrap();
+        // September 10, 2026: noon and 9pm in the demo's New York timezone.
+        // A six-hour-ahead slot is today in the first case, tomorrow in the second.
+        for (instant, expected_offset) in [("2026-09-10T16:00:00Z", 0), ("2026-09-11T01:00:00Z", 1)]
+        {
+            let now = chrono::DateTime::parse_from_rfc3339(instant)
+                .unwrap()
+                .timestamp();
+            for t_sim in [0.0, 20_000.0, 40_000.0, 60_000.0, 80_000.0] {
+                let s = synth_irrigation_at(t_sim, now, calendar);
+                let today = &s.seven_day_verdicts[0];
+                assert_eq!(today.verdict, s.skip_check.verdict);
+                assert_eq!(today.reason, s.skip_check.reason);
+                assert_eq!(today.reason_code, s.skip_check.reason_code);
+                assert_eq!(today.verdict == "skip", s.skip_check.will_skip);
+                assert_eq!(s.next_run_day_offset, Some(expected_offset));
+                let slot = &s.seven_day_verdicts[expected_offset as usize];
+                assert_eq!(
+                    calendar.date_of(slot.time_epoch),
+                    calendar.date_of(s.next_run_epoch)
+                );
+                if expected_offset == 1 {
+                    assert_eq!(slot.reason_code, "already_wet");
+                    assert_eq!(slot.verdict, "skip");
+                }
+            }
         }
     }
 
@@ -1635,11 +1741,12 @@ mod seed_config_tests {
                 z.planned_run_seconds = by.seconds_per_session;
             }
         }
-        let seq = crate::scheduler::smart_morning::sequence_wall_seconds(
+        let seq = crate::engine::sequence::wall_seconds(
             &policy.zone_agronomy,
             &zones,
             policy.soak_minutes,
             policy.interleave_cycles,
+            policy.duration_quantum_s,
         );
         // A pinned calendar and a pinned date: the claim is that the
         // demo's raised morning fits its own window, which must not
@@ -1777,6 +1884,7 @@ mod seed_config_tests {
             pressure_metric: false,
             distance_metric: false,
             area_metric: false,
+            clock_12h: false,
         };
         for i in 0..200 {
             let t_sim = i as f64 * (86400.0 / 200.0);

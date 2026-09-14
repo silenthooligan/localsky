@@ -1,0 +1,462 @@
+@use "mixins" as *;
+
+// brand ramps, the semantic token layer, the z-index ladder
+//
+// Split out of main.scss, which had grown to 11,330 lines.
+// Load order is the cascade: see the @use list in main.scss.
+
+// Theme tokens.
+//
+// Default (dark) tokens live on :root. Theme switching happens via
+// `<html data-theme="...">`; each [data-theme="..."] block below
+// overrides the relevant tokens. The boot script in app.rs sets
+// data-theme synchronously before first paint to avoid FOUC.
+//
+// Available themes:
+//   (none / default)        Dark glass-morphism (the "house" theme)
+//   data-theme="light"      Hand-tuned light mode (NOT auto-inverted;
+//                           the aurora gradient + clay shadows need
+//                           bespoke light values)
+//   data-theme="hc"         High-contrast (pure-black + pure-white,
+//                           glass blur disabled, solid borders)
+//   data-theme="auto"       Follows prefers-color-scheme; uses the
+//                           light tokens when system is light
+//
+// All component selectors read CSS custom properties; never hardcode
+// colors past this block.
+
+:root {
+  // ─────────────────────────────────────────────────────────────────
+  // LocalSky brand palette
+  // ─────────────────────────────────────────────────────────────────
+  // Anchored at the hexes extracted from docs/assets/brand/reference.jpg
+  // via PIL color histograms (see docs/assets/brand/build_logo.py).
+  // Each brand color is laid out on a 50..900 lightness scale so
+  // components have proper tinted/shaded variants for borders, hover,
+  // background washes, etc, without anyone reaching for raw hex.
+  //
+  // Scale convention (Tailwind-style):
+  //   *-50  = nearly-bg tint
+  //   *-100 = subtle wash (faint panel)
+  //   *-300 = strong tint (badge, chip)
+  //   *-500 = canonical brand color (button, link, focus)
+  //   *-700 = darker shade (active state)
+  //   *-900 = deep shadow / inverse surface
+  // ─────────────────────────────────────────────────────────────────
+
+  // Brand blue: the wifi waves, infinity loops, water drop, "SKY" wordmark.
+  --brand-blue-50:  #e9f3fc;
+  --brand-blue-100: #c8e1f7;
+  --brand-blue-200: #93c5ee;
+  --brand-blue-300: #5fb4ff;   // hover-lighter
+  --brand-blue-400: #36a3ec;
+  --brand-blue-500: #1490dc;   // ★ canonical
+  --brand-blue-600: #0e7ab8;
+  --brand-blue-700: #0a6195;
+  --brand-blue-800: #074a73;
+  --brand-blue-900: #053758;
+
+  // Brand teal: the cloud outline on dark variant, pin V frame.
+  --brand-teal-50:  #e6f6f4;
+  --brand-teal-100: #c6ebe6;
+  --brand-teal-200: #8edcd2;
+  --brand-teal-300: #67d1bb;
+  --brand-teal-400: #2eb3a4;
+  --brand-teal-500: #149c92;   // ★ canonical
+  --brand-teal-600: #0f8076;
+  --brand-teal-700: #0c655d;
+  --brand-teal-800: #094c46;
+  --brand-teal-900: #073833;
+
+  // Brand ink: the cloud outline on light variant + the dark surface
+  // (these are visually identical; the design uses the SAME color for
+  // both, which is a clever piece of identity work in the reference).
+  --brand-ink-50:  #f3f5f7;
+  --brand-ink-100: #e0e4e9;
+  --brand-ink-200: #b6bec9;
+  --brand-ink-300: #8b95a3;
+  --brand-ink-400: #5d6878;
+  --brand-ink-500: #3e4853;
+  --brand-ink-600: #353e48;
+  --brand-ink-700: #2f3740;
+  --brand-ink-800: #2a3139;   // ★ canonical
+  --brand-ink-900: #1f262d;
+
+  // Brand navy: deeper backdrop layer that sits below ink. This is
+  // the PWA splash + the deepest layer of the dark variant.
+  --brand-navy-700: #1a2236;
+  --brand-navy-800: #122036;
+  --brand-navy-900: #0b1220;   // ★ canonical
+
+  // Brand snow: the light variant surface tones.
+  --brand-snow-50:  #f6f9ff;   // ★ canonical
+  --brand-snow-100: #eef2fa;
+  --brand-snow-200: #e0e6f1;
+
+  // ─────────────────────────────────────────────────────────────────
+  // Semantic tokens (default = dark variant)
+  // ─────────────────────────────────────────────────────────────────
+  // Every component reads these. Theme-switching just rewrites them.
+
+  // Surfaces.
+  --bg-deep: var(--brand-navy-900);
+  --bg-panel: #0f131c;
+  --bg-panel-soft: #161b27;
+  // Theme-aware top-of-page radial wash. MUST be remapped per theme
+  // (light/hc redefine it): a hardcoded navy here is what made light
+  // mode read as dark.
+  --bg-wash: var(--brand-navy-800);
+
+  // Text.
+  --text: #e6ecf5;
+  --text-bright: #ffffff;
+  // Soft: reading text one step quieter than --text but clearly above
+  // --text-dim (report lines, verdict reasons). Was referenced in four
+  // places without ever being defined, so those spots silently inherited
+  // the parent color; defined here (and per-theme below) it resolves.
+  --text-soft: #c3cddf;
+  --text-dim: #94a0b6;
+  // Faint but still AA: the old #6f7c95 fell to 3.69:1 on elev-3, where
+  // it colors real reading text (placeholders, hints, empty states,
+  // gate explanations). #828ea8 clears 4.5:1 on every elev surface
+  // (4.72:1 on elev-3, 5.19:1 on elev-2, 5.51:1 on elev-1) while
+  // staying visibly dimmer than --text-dim.
+  --text-faint: #828ea8;
+
+  // Borders.
+  --border: #232a3a;
+  --border-strong: #2f3a52;
+
+  // Accents: brand-aligned. The dark warm/hot/lightning accents stay
+  // saturated because they read against the navy backdrop; the cool +
+  // good + rain + danger accents all pull from the brand scale.
+  --accent: var(--brand-blue-500);
+  // The accent as running text on a surface. A fill can be 3:1; text
+  // needs 4.5:1, which blue-500 misses on the dark elevations.
+  --accent-text: var(--brand-blue-300);
+  --accent-cool: var(--brand-blue-300);
+  --accent-rain: var(--brand-blue-400);
+  --accent-good: var(--brand-teal-400);
+  --accent-warm: #ffb84a;
+  --accent-warn: #f0a83a;            // also used by skip-check banners
+  --accent-hot:  #ff5a5a;
+  --accent-danger: #ff6b6b;
+  --accent-lightning: #ffe066;
+  --accent-water: var(--brand-blue-300);
+  // UV index band colors (between warm-orange and hot-red, plus an extreme
+  // violet). Not derivable from the brand ramp, so they live as their own
+  // semantic tokens rather than bare hex at the call site.
+  --accent-uv-high: #ff8a3a;
+  --accent-uv-extreme: #d96cff;
+
+  // Geometry.
+  --radius: 14px;
+  --radius-lg: 20px;
+  --radius-md: 12px;
+  --radius-sm: 8px;
+  // Legacy shadow aliases → v2 ramp (defined below). Keeps old call
+  // sites consistent with the new elevation shadows.
+  --shadow: var(--shadow-2);
+
+  // ─────────────────────────────────────────────────────────────────
+  // Spacing scale (4px base). Every component-internal spacing must
+  // pull from this so vertical + horizontal rhythm stays consistent
+  // across surfaces. No raw px / rem outside this block.
+  // ─────────────────────────────────────────────────────────────────
+  --space-0:  0;
+  --space-1:  0.25rem;   //  4px: tight stacked items (icon+label)
+  --space-2:  0.5rem;    //  8px: within a row, between two label parts
+  --space-3:  0.75rem;   // 12px: compact card padding, list item gap
+  --space-4:  1rem;      // 16px: default card padding, between rows
+  --space-5:  1.25rem;   // 20px: standard panel padding
+  --space-6:  1.5rem;    // 24px: section gap, between panels
+  --space-7:  2rem;      // 32px: page-level vertical rhythm
+  --space-8:  3rem;      // 48px: major page sections
+  --space-9:  4rem;      // 64px: rarely; only above/below the hero
+
+  // ─────────────────────────────────────────────────────────────────
+  // Settings master-detail shell widths. The Devices/settings pane is
+  // capped by the GRID TRACK (.settings-shell grid-template-columns),
+  // not by any inner .settings-page wrapper. These two tokens are the
+  // single source of truth for that track; media tiers below the grid
+  // widen --settings-pane-max on bigger screens (cap + center on
+  // ultrawide, never a stretched column).
+  // ─────────────────────────────────────────────────────────────────
+  --settings-list-w:   340px;   // left nav / section-list column
+  --settings-pane-max: 900px;   // comfortable editor + provider-table width
+
+  // ─────────────────────────────────────────────────────────────────
+  // Type scale. Names map to role, not to size, so a size change
+  // doesn't fan out to a name change. Sizes use clamp() where the
+  // role needs to scale across viewport widths.
+  //
+  //   display  → only the very largest number on the page (hero temp)
+  //   h1       → page title
+  //   h2       → section title (panel-title)
+  //   h3       → sub-section
+  //   body     → default reading text
+  //   body-sm  → secondary reading text + dense lists
+  //   meta     → labels, eyebrow text, micro-stats
+  //   mono     → tabular data + code
+  //
+  // Bumped one notch up from v1 so data reads at glance distance,
+  // dashboard usage is "look from across the room", not "lean in to
+  // read a recipe".
+  // ─────────────────────────────────────────────────────────────────
+  --text-display: clamp(2.75rem, 7vw, 4.5rem);
+  --text-h1:      clamp(1.6rem, 2.6vw, 2.1rem);
+  --text-h2:      1.3rem;
+  --text-h3:      1.1rem;
+  --text-body:    1rem;
+  --text-body-sm: 0.92rem;
+  --text-caption: 0.8rem;       // small labels: matrix cells, chips, dense tables
+  --text-data:    1.1rem;       // tabular numerics (hero strip, panel metrics)
+  --text-meta:    0.78rem;
+  --text-micro:   0.68rem;
+  // Letter-spacing for the eyebrow / meta caps style.
+  --tracking-eyebrow: 0.16em;
+  --tracking-tight: -0.02em;
+  // Line-heights.
+  --leading-tight: 1;
+  --leading-snug: 1.15;
+  --leading-normal: 1.45;
+
+  // Type.
+  --font-mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-display: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+
+  // ─────────────────────────────────────────────────────────────────
+  // Surface tier definitions: the "where does the eye land?" rules.
+  //
+  //   tier-1  → primary surface. ONE per route (hero, biggest card).
+  //             Brand gradient accent stripe on top. Largest text.
+  //   tier-2  → key panels with prominent numbers (wind, rain).
+  //             Standard glass surface. Big-number focal point.
+  //   tier-3  → supporting panels with dense data or sparklines.
+  //             Compact density.
+  //   tier-4  → tertiary lists, forms, controls.
+  //             No focal accent; subdued borders.
+  //
+  // Components consume these via .panel--tier-N modifiers below.
+  // ─────────────────────────────────────────────────────────────────
+
+  // ─────────────────────────────────────────────────────────────────
+  // Legacy glass + clay tokens: now ALIASED onto the v2 elevation
+  // system so the older Weather/Irrigation/Settings surfaces adopt the
+  // flat, crisp v2 look without a component-by-component rewrite. The
+  // frosted-glass blur and claymorphic inset shadows are retired; these
+  // names stay only as a compatibility shim for components that still
+  // reference them. (Migrate call sites to --elev-* / --shadow-N over
+  // time, then delete this block.)
+  // ─────────────────────────────────────────────────────────────────
+  --glass-bg: var(--elev-1);
+  --glass-border: var(--elev-border);
+  --glass-blur: none;
+
+  // Backdrop blur by role. --glass-blur above is the retired panel blur
+  // and stays `none`; these three are the sites that really do blur.
+  --blur-chrome: blur(18px) saturate(150%);  // sidebar, app bar, tab bar
+  --blur-overlay: blur(10px) saturate(140%); // controls floating on a map
+  --blur-scrim: blur(3px);                   // full-bleed scrims
+
+  // Sticky overlay bars (mobile app bar, toolbar, running banner,
+  // drawer), use the highest elevation so they read as solid above
+  // scrolling content.
+  --surface-frosted: var(--elev-2);
+  --surface-frosted-strong: var(--elev-3);
+
+  // Subtle white wash used on focused list items + chip tints.
+  --surface-soft: rgba(255, 255, 255, 0.04);
+  --surface-softer: rgba(255, 255, 255, 0.02);
+
+  --clay-surface: var(--elev-2);
+  --clay-surface-raised: var(--elev-2);
+  --clay-shadow-light: var(--elev-line);
+  --clay-shadow-dark: rgba(0, 0, 0, 0.35);
+  --clay-shadow: var(--shadow-1);
+  --clay-shadow-pressed: inset 0 1px 2px rgba(0, 0, 0, 0.3);
+
+  // ─────────────────────────────────────────────────────────────────
+  // Brand gradients (reusable across hero, panels, badges)
+  // ─────────────────────────────────────────────────────────────────
+  // The "data flow" gradient is the signature blue-to-teal sweep, the
+  // visual that ties the logomark's wifi (blue) to its cloud outline
+  // (teal). Use sparingly on headers + CTAs.
+  --grad-flow: linear-gradient(135deg, var(--brand-blue-500) 0%, var(--brand-teal-500) 100%);
+  // CTA-surface variant of the flow gradient, for button BACKGROUNDS only
+  // (.btn--primary et al). The dark --grad-flow endpoints (blue-500 #1490dc,
+  // teal-500 #149c92) give white-text contrast of just 3.47:1 / 3.39:1, under
+  // WCAG AA 4.5:1 for the 0.92rem/600 button label (not "large" text). Deepen
+  // to blue-600 -> teal-600 (min 4.67:1 white across the sweep) for buttons
+  // WITHOUT darkening the many decorative --grad-flow uses (hero glows, 3px
+  // accent stripes, progress fills). Light + HC reuse their own --grad-flow
+  // (light is already blue-600 -> teal-600; HC is a light solid whose existing
+  // black-text override carries the contrast).
+  --grad-flow-cta: linear-gradient(135deg, var(--brand-blue-600) 0%, var(--brand-teal-600) 100%);
+
+  // ─────────────────────────────────────────────────────────────────
+  // Focus ring (a11y): brand blue, 2px solid, with a subtle outer halo
+  // ─────────────────────────────────────────────────────────────────
+  --focus-ring: 2px solid var(--accent);
+  --focus-ring-offset: 2px;
+  --focus-halo: 0 0 0 4px rgba(20, 144, 220, 0.25);
+
+  // Compass face tokens (consumed by the inline SVG gradient stops in
+  // src/components/wind.rs). The dark scheme reads as a deep navy
+  // dome with a brushed-ink needle tail; light overrides come from
+  // the localsky-light-tokens mixin.
+  --compass-bg-top: var(--brand-navy-700);
+  --compass-bg-bot: #050a14;
+  --compass-needle-s-top: var(--brand-ink-400);
+  --compass-needle-s-bot: var(--brand-ink-700);
+  --compass-hub-top: var(--brand-ink-300);
+  --compass-hub-bot: var(--brand-ink-800);
+
+  // ═════════════════════════════════════════════════════════════════
+  // v2 EVOLVED SURFACE SYSTEM: single coherent elevation model.
+  // ═════════════════════════════════════════════════════════════════
+  // Replaces the glass+clay duality and the importance/material-
+  // conflated 4-tier system with ONE elevation ramp (0..3) applied
+  // uniformly. Material is one treatment, importance is type-size +
+  // accent, never the surface itself.
+  //
+  // Crucially: DARK separates surfaces by FILL LIGHTNESS, LIGHT
+  // separates by SHADOW DEPTH. Each mode uses the contrast mechanism
+  // that actually works on its background, this is what makes both
+  // themes first-class instead of light-as-afterthought.
+  //
+  //   elev-0  → app background (deepest)
+  //   elev-1  → resting panel
+  //   elev-2  → raised panel (hover, hero, active)
+  //   elev-3  → overlay (sheet, popover, menu, toast)
+  // ─────────────────────────────────────────────────────────────────
+  --elev-0: var(--brand-navy-900);
+  --elev-1: #11161f;
+  --elev-2: #161c28;
+  --elev-3: #1d2433;
+  --elev-line: rgba(255, 255, 255, 0.06);          // hairline divider
+  --elev-border: rgba(255, 255, 255, 0.09);         // panel border
+  --elev-border-strong: rgba(255, 255, 255, 0.16);  // focused/active
+
+  // One shadow ramp tied to elevation (supersedes --shadow/-lg + clay).
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.30), 0 1px 1px rgba(0, 0, 0, 0.20);
+  --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.35), 0 2px 4px rgba(0, 0, 0, 0.25);
+  --shadow-3: 0 16px 40px rgba(0, 0, 0, 0.45), 0 4px 12px rgba(0, 0, 0, 0.30);
+  // The one signature "lit edge": used on the hero + primary buttons.
+  --specular: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+
+  // ─────────────────────────────────────────────────────────────────
+  // Verdict tokens: the shared decision vocabulary. The verdict strip,
+  // Rule Lab, History, Simulator, and the zone canvas all render the
+  // SAME color for the same decision so the language is consistent.
+  // ─────────────────────────────────────────────────────────────────
+  --verdict-run:    var(--accent-good);     // watering recommended
+  --verdict-skip:   var(--accent-rain);     // skipped (rain / already wet)
+  --verdict-freeze: var(--accent-cool);     // skipped (freeze gate)
+  --verdict-wind:   var(--accent-warn);     // skipped (wind gate)
+  --verdict-extend: var(--accent-warm);     // extended run (heat)
+  --verdict-off:    var(--text-faint);      // disabled / no zone
+
+  // Attention: a surface carrying an actionable suggestion (the tuning
+  // recommendation card, zone-card pills, the Suggestions KPI, the
+  // irrigation strip). Rides the established warn accent, never a new
+  // hue; var() resolves through the cascade, so the light and
+  // high-contrast --accent-warn overrides carry it per theme.
+  --attention: var(--accent-warn);
+
+  // ─────────────────────────────────────────────────────────────────
+  // Motion language. Durations + easings as tokens so micro-interactions
+  // feel systemic, not ad-hoc. The global prefers-reduced-motion guard
+  // above neutralizes all of these.
+  // ─────────────────────────────────────────────────────────────────
+  --motion-fast: 120ms;
+  --motion-base: 200ms;
+  --motion-slow: 320ms;
+  --ease-out:    cubic-bezier(0.2, 0, 0, 1);          // entrances
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);   // the overshoot feel
+
+  // Z-index scale. One named ladder so stacking is intentional, not a race of
+  // ad-hoc 9999s. Higher tier always wins; never hardcode a raw z-index.
+  --z-base:     1;     // in-flow raised bits (active cells, chips)
+  --z-raised:  10;     // sticky headers / the mobile app bar
+  --z-nav:     20;     // the bottom tab-bar (above content, below overlays)
+  --z-dropdown: 100;   // popovers, menus, tooltips, help bodies
+  --z-backdrop: 200;   // modal/sheet scrims
+  --z-modal:   300;    // sheets, dialogs, the modal panel itself
+  --z-toast:   400;    // toasts / transient notifications (top of the app)
+  --z-blocking: 500;   // the restart scrim: the app is unusable beneath it
+  --z-skip:    600;    // the skip link, which must beat everything on focus
+
+  // Stat-tile primary number + tightened display tracking (v2 dashboards).
+  --text-stat: clamp(1.4rem, 2.2vw, 1.9rem);
+  --tracking-display: -0.025em;
+
+  // ═════════════════════════════════════════════════════════════════
+  // AFFORDANCE + ENTITY + STATUS LAYER (design-language v3)
+  // ═════════════════════════════════════════════════════════════════
+  // The token ramps above are strong; what was missing is a consistent
+  // vocabulary that makes interactivity + entity-type legible at a glance
+  // (the ".is this a button, a card, or a label? is it a source or a
+  // sensor?" problem). These reference the theme-aware base tokens, so
+  // they resolve correctly in every theme without duplication.
+  //
+  // Affordance roles: what a surface DOES.
+  --surface-static-bg: var(--elev-1); //          read-only data
+  --surface-interactive-bg: var(--elev-1); //     clickable surface
+  --surface-interactive-hover-bg: var(--elev-2); // hover of same
+  --surface-control-bg: var(--elev-2); //         holds inputs/buttons
+  --hover-ring: inset 0 0 0 1px var(--elev-border-strong);
+  --press-ring: inset 0 0 0 2px var(--accent);
+
+  // Fields read as RECESSED: a fill one step darker than the surface
+  // holding them, and a border that clears 3:1 against every surface it
+  // can sit on. The binding case is this border on --elev-3, 3.42:1.
+  --input-bg: #0b0f17;
+  --input-bg-disabled: #10151e;
+  --input-border: #6b7691;
+  --input-border-hover: #8b95a3;
+  // Defined once here on purpose: var() resolves per theme, so light and
+  // high-contrast pick up their own accent without redeclaring these.
+  --input-border-focus: var(--accent);
+  --input-border-invalid: var(--accent-danger);
+  --control-h: 44px;        // the touch target every control clears
+  --control-h-dense: 36px;  // dense rows opt down, fine pointers only
+
+  // Foreground on a filled accent or danger surface, decided once per
+  // theme. Dark accents are LIGHT fills, so dark takes a dark foreground:
+  // white on them measures 1.72 to 3.47:1.
+  --on-accent: var(--brand-navy-900);
+  --on-danger: #000000;
+
+  // Entity identity: what a thing IS. One source of truth for the
+  // source/sensor/controller/zone color coding used by stripes + badges.
+  --entity-source: var(--brand-blue-500); //      data in
+  --entity-sensor: var(--brand-teal-400); //      named readings
+  // Repointed off --accent-warm: warm read as a warning and collided with
+  // the warn/stale status semantics. Controllers get their category cue from
+  // the quiet stripe + icon glyph, not a warm tint.
+  --entity-controller: var(--text-dim); //        actuation out
+  --entity-zone: var(--accent-good); //           the yard area
+
+  // Live status: health of a source/controller/sensor.
+  --status-online: var(--verdict-run);
+  --status-stale: var(--accent-warn);
+  --status-offline: var(--accent-danger);
+  --status-unknown: var(--text-faint);
+
+  // "This source is feeding a reading right now" is just the healthy/good
+  // status, so it folds into --accent-good (the single feeding-now green).
+  // The old separate --owner token is retired; consumers use --accent-good.
+}
+
+// ----- A11y primitives -----
+
+// Visible focus ring on every interactive element via :focus-visible.
+// Mouse :focus alone doesn't trigger it (browser heuristic) so it's
+// keyboard-only and out of the way for pointer users.
+:focus-visible {
+  @include focus-ring;
+  border-radius: 4px;
+}

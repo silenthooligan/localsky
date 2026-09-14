@@ -80,10 +80,10 @@ async fn probe(client: reqwest::Client, ip: Ipv4Addr, port: u16) -> Option<Disco
 pub async fn discover_opensprinkler(per_host_timeout: Duration) -> Vec<DiscoveredController> {
     use futures::stream::{self, StreamExt};
 
-    let client = match reqwest::Client::builder().timeout(per_host_timeout).build() {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
+    // Per-host timeout, derived per-install User-Agent; `net::client`
+    // cannot fail (it falls back to a default client), so the old
+    // "return nothing on build error" arm is gone.
+    let client = crate::net::client(per_host_timeout);
 
     let mut targets = Vec::new();
     for net in local_subnets() {

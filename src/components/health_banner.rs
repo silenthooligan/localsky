@@ -49,7 +49,9 @@ pub fn HealthBanner() -> impl IntoView {
                         .await
                         .ok()?;
                     let v = resp.json::<serde_json::Value>().await.ok()?;
-                    Some(coverage_gaps(&v))
+                    let mut list = listener_conflicts(&v);
+                    list.extend(coverage_gaps(&v));
+                    Some(list)
                 }
                 .await;
                 if let Some(list) = next {
@@ -83,9 +85,9 @@ pub fn HealthBanner() -> impl IntoView {
                 </span>
                 <span class="health-banner__text">
                     {label}
-                    " The engine keeps deciding from the freshest data it has."
+                    " Decisions keep using the freshest data available."
                 </span>
-                <a class="health-banner__link" href="/settings/devices">"Add a source"</a>
+                <a class="health-banner__link" href="/settings?section=devices">"Add a source"</a>
                 <button
                     type="button"
                     class="health-banner__dismiss"
@@ -98,6 +100,39 @@ pub fn HealthBanner() -> impl IntoView {
         }
         .into_any()
     }
+}
+
+/// A configured station LocalSky cannot read, which is not a coverage gap
+/// and would otherwise stay invisible here.
+///
+/// The gap logic below asks "does some source own this reading", and
+/// under a station outage the forecast fallback still owns them, so a
+/// blocked station never registers. But the operator configured a
+/// station and is not getting it, and on a machine shared with Home
+/// Assistant that is the single most likely thing to go wrong. It used
+/// to surface only as a line in a container log.
+#[cfg(feature = "hydrate")]
+fn listener_conflicts(v: &serde_json::Value) -> Vec<String> {
+    let l = &v["ha"]["tempest_listener"];
+    let state = l["state"].as_str().unwrap_or("");
+    if state != "address_in_use" && state != "error" {
+        return Vec::new();
+    }
+    // Rebuild the typed status so the WORDS live in one place and are
+    // covered by their own tests, rather than being written twice.
+    let bind_addr = l["bind_addr"].as_str().unwrap_or_default().to_string();
+    let detail = l["detail"].as_str().unwrap_or_default().to_string();
+    let status = if state == "address_in_use" {
+        crate::tempest::status::ListenerStatus::AddressInUse { bind_addr, detail }
+    } else {
+        crate::tempest::status::ListenerStatus::Error { bind_addr, detail }
+    };
+    let mut line = format!("{}. {}", status.headline(), status.detail());
+    if let Some(first) = status.actions().first() {
+        line.push(' ');
+        line.push_str(first);
+    }
+    vec![line]
 }
 
 /// Derive the TRUE coverage gaps from a parsed /api/health payload. A gap is a

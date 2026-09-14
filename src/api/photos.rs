@@ -6,11 +6,11 @@
 // deployment.zones.<slug>.photo_url.
 //
 // The photos directory itself is served as static files via
-// tower_http::services::ServeDir mounted at /site/photos in main.rs,
+// tower_http::services::ServeDir mounted at /site/photos by the boot,
 // so the URL this endpoint returns is directly fetchable by the
 // browser without any extra wiring.
 //
-// GATING (LS-REC-05): the upload POST is in the PRIVILEGED set
+// GATING: the upload POST is in the PRIVILEGED set
 // (auth::middleware::is_privileged_path), so in the shipped Disabled default
 // an anonymous internet caller cannot fill disk with 10 MB uploads; an
 // IP-vouched LAN/loopback caller (or an authenticated owner) still reaches

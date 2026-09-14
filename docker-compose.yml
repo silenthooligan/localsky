@@ -35,7 +35,6 @@ services:
       - LEPTOS_SITE_ROOT=site
       - WEATHER_APP_LAT=${WEATHER_APP_LAT}
       - WEATHER_APP_LON=${WEATHER_APP_LON}
-      - WEATHER_APP_ZOOM=${WEATHER_APP_ZOOM}
       # HA REST poll for irrigation snapshot. Long-lived HA token.
       - HA_TOKEN=${HA_LONG_LIVED_TOKEN}
       - HA_URL=${HA_URL:-http://homeassistant.local:8123}

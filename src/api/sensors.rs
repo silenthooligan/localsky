@@ -28,34 +28,37 @@ use crate::controllers::registry::ControllerRegistry;
 use crate::persistence::sensor_history::SensorHistoryStore;
 use crate::ports::config_store::ConfigStore;
 
-/// Boot-time handles for GET /sensors/inventory: the config store (zone
-/// bindings + source labels) and the controller registry (flow-meter
-/// capability + live GPM). Set once from main.rs. Unset (demo, or boot
-/// before wiring) makes the inventory fall back to soil-only with no zone
-/// bindings and no flow entries, rather than failing.
-struct InventoryHandles {
-    cfg_store: Arc<FileConfigStore>,
-    controllers: ControllerRegistry,
+/// What GET /sensors/inventory reads beyond the database: the config
+/// store (zone bindings + source labels) and the controller registry
+/// (flow-meter capability + live GPM). Absent (demo mode) the inventory
+/// falls back to soil-only with no zone bindings and no flow entries.
+#[derive(Clone)]
+pub struct InventoryState {
+    pub cfg_store: Arc<FileConfigStore>,
+    pub controllers: ControllerRegistry,
 }
 
-static INVENTORY: std::sync::OnceLock<InventoryHandles> = std::sync::OnceLock::new();
-
-/// Register the config store + controller registry used by the unified
-/// sensor inventory (called from main at boot).
-pub fn set_inventory_handles(cfg_store: Arc<FileConfigStore>, controllers: ControllerRegistry) {
-    let _ = INVENTORY.set(InventoryHandles {
-        cfg_store,
-        controllers,
-    });
+/// The sensors routes' state: the history database plus the inventory
+/// handles.
+#[derive(Clone)]
+pub struct SensorsState {
+    pub db: Arc<Mutex<Connection>>,
+    pub inventory: Option<InventoryState>,
 }
 
-pub fn router(db: Arc<Mutex<Connection>>) -> Router {
+impl axum::extract::FromRef<SensorsState> for Arc<Mutex<Connection>> {
+    fn from_ref(st: &SensorsState) -> Self {
+        st.db.clone()
+    }
+}
+
+pub fn router(db: Arc<Mutex<Connection>>, inv: Option<InventoryState>) -> Router {
     Router::new()
         .route("/soil", get(soil))
         .route("/discovered", get(discovered))
         .route("/inventory", get(inventory))
         .route("/soil/remove", axum::routing::post(remove_soil))
-        .with_state(db)
+        .with_state(SensorsState { db, inventory: inv })
 }
 
 #[derive(Serialize, Clone)]
@@ -129,7 +132,7 @@ fn pretty_key(key: &str) -> String {
 /// Excludes LocalSky's own `localsky_*` outputs and `*_raw_pct` debug
 /// entities. Empty when HA isn't configured/reachable.
 async fn discover_ha() -> Vec<DiscoveredSensor> {
-    let Ok(client) = crate::ha::rest::HaClient::from_env() else {
+    let Ok(client) = crate::integrations::home_assistant::rest::HaClient::from_env() else {
         return Vec::new();
     };
     let Ok(states) = client.states().await else {
@@ -299,7 +302,8 @@ struct FlowSensor {
     /// so a user with no meter never sees a phantom sensor. Replaces the old
     /// `detected` field, which conflated capability with presence.
     connected: bool,
-    /// LIVE: latest measured flow, null when none/idle.
+    /// LIVE: latest valid measured flow, null when unavailable. Zero is a
+    /// real idle reading and requires the same connected-meter evidence.
     gpm: Option<f64>,
     /// Seconds since the reading, when known (live controller read = 0).
     age_s: Option<i64>,
@@ -333,14 +337,14 @@ fn sibling_key(key: &str, suffix_fmt: impl Fn(&str) -> String) -> Option<String>
 /// endpoint uses (HA soil + native channels), enriched with battery/temp/EC
 /// + zone binding; flow from controllers advertising a flow meter.
 async fn inventory(
-    axum::extract::State(db): axum::extract::State<Arc<Mutex<Connection>>>,
+    axum::extract::State(st): axum::extract::State<SensorsState>,
 ) -> Json<InventoryResponse> {
-    let cfg = match INVENTORY.get() {
+    let cfg = match st.inventory.as_ref() {
         Some(h) => h.cfg_store.load().await.ok(),
         None => None,
     };
-    let controllers = INVENTORY.get().map(|h| h.controllers.clone());
-    Json(build_inventory(SensorHistoryStore::new(db), cfg, controllers.as_ref()).await)
+    let controllers = st.inventory.as_ref().map(|h| h.controllers.clone());
+    Json(build_inventory(SensorHistoryStore::new(st.db), cfg, controllers.as_ref()).await)
 }
 
 /// POST /sensors/soil/remove: retire a zone's soil probe. Always clears the
@@ -369,9 +373,10 @@ struct RemoveSoilResp {
 }
 
 async fn remove_soil(
-    axum::extract::State(db): axum::extract::State<Arc<Mutex<Connection>>>,
+    axum::extract::State(st): axum::extract::State<SensorsState>,
     Json(req): Json<RemoveSoilReq>,
 ) -> Json<RemoveSoilResp> {
+    let db = st.db;
     use crate::config::schema::SourceKind;
     use crate::sources::ecowitt_gw_mgmt::{
         soil_channel_of, unregister_soil_channel, UnregisterOutcome,
@@ -385,7 +390,7 @@ async fn remove_soil(
         })
     };
 
-    let Some(h) = INVENTORY.get() else {
+    let Some(h) = st.inventory.as_ref() else {
         return resp(0, "unavailable", "config store not ready".into());
     };
     // Read-modify-write guard shared with every other config writer
@@ -653,9 +658,24 @@ async fn build_inventory(
             // contributes connected=false, gpm=null rather than erroring, so a
             // supported-but-unreachable controller reads as "supported, none
             // connected" instead of a phantom sensor.
-            let st = c.status().await.ok();
-            let connected = st.as_ref().map(|s| s.flow_connected).unwrap_or(false);
-            let gpm = st.and_then(|s| s.flow_gpm);
+            // Some cloud adapters return their last known status inside Ok
+            // with reachable=false. That cache cannot certify meter presence
+            // or publish yesterday's flow as a live measurement.
+            let st = c.status().await.ok().filter(|s| s.reachable);
+            let (connected, gpm) = st
+                .as_ref()
+                .map(|s| {
+                    crate::controllers::flow::current_flow(
+                        s,
+                        crate::timefmt::now_epoch(),
+                        c.status_poll_interval_s(),
+                    )
+                })
+                .unwrap_or((false, None));
+            // How old the reading really is: a cloud controller is polled on
+            // the interval it declares, so its flow figure can be a minute
+            // old even though this handler just asked for it.
+            let observed_epoch = st.as_ref().and_then(|s| s.observed_epoch);
             let kind = cfg
                 .as_ref()
                 .and_then(|cfg| cfg.controllers.iter().find(|e| e.id == id))
@@ -669,10 +689,14 @@ async fn build_inventory(
                 supported: true,
                 connected,
                 gpm,
-                // Live read: the reading is "now". Controllers expose no
-                // separate measurement timestamp, so 0 when a value is
-                // present, null when there is none.
-                age_s: gpm.map(|_| 0),
+                // The age of the reading itself: zero for a controller read
+                // on demand, the real lag for one served from the status
+                // cache, and null when there is no value to age.
+                age_s: gpm.map(|_| {
+                    observed_epoch
+                        .map(|e| (crate::timefmt::now_epoch() - e).max(0))
+                        .unwrap_or(0)
+                }),
             });
         }
     }
@@ -719,6 +743,7 @@ mod inventory_tests {
     /// resolves to opensprinkler_direct from the config entry.
     struct FlowFake {
         id: String,
+        reachable: bool,
         connected: bool,
         gpm: Option<f64>,
     }
@@ -738,6 +763,7 @@ mod inventory_tests {
                 remote_program_upload: false,
                 water_level: true,
                 per_zone_stop: true,
+                duration_quantum_s: 1,
             }
         }
         async fn run_zone(&self, _slug: &str, _d: u32) -> ControllerResult<RunHandle> {
@@ -751,7 +777,8 @@ mod inventory_tests {
         }
         async fn status(&self) -> ControllerResult<ControllerStatus> {
             Ok(ControllerStatus {
-                reachable: true,
+                observed_epoch: None,
+                reachable: self.reachable,
                 master_enabled: Some(true),
                 water_level_pct: Some(100.0),
                 rain_sensor_tripped: Some(false),
@@ -888,6 +915,7 @@ mod inventory_tests {
         registry.set(vec![(
             Arc::new(FlowFake {
                 id: "opensprinkler".into(),
+                reachable: true,
                 connected: true,
                 gpm: Some(8.4),
             }) as Arc<dyn IrrigationController>,
@@ -959,6 +987,7 @@ mod inventory_tests {
         registry.set(vec![(
             Arc::new(FlowFake {
                 id: "opensprinkler".into(),
+                reachable: true,
                 connected: false,
                 gpm: None,
             }) as Arc<dyn IrrigationController>,
@@ -983,5 +1012,35 @@ mod inventory_tests {
         assert!(inv.soil.is_empty());
         assert!(inv.gateways.is_empty());
         assert!(inv.flow.is_empty());
+    }
+
+    #[tokio::test]
+    async fn inventory_requires_reachable_connected_and_valid_flow_evidence() {
+        for (reachable, connected, gpm, expected_connected, expected_gpm) in [
+            (false, true, Some(8.4), false, None),
+            (true, false, Some(8.4), false, None),
+            (true, true, Some(f64::NAN), true, None),
+            (true, true, Some(f64::INFINITY), true, None),
+            (true, true, Some(-1.0), true, None),
+            (true, true, Some(0.0), true, Some(0.0)),
+        ] {
+            let registry = ControllerRegistry::new();
+            registry.set(vec![(
+                Arc::new(FlowFake {
+                    id: "opensprinkler".into(),
+                    reachable,
+                    connected,
+                    gpm,
+                }),
+                true,
+            )]);
+            let inventory =
+                build_inventory(fresh_store().await, Some(test_config()), Some(&registry)).await;
+            let meter = &inventory.flow[0];
+            assert!(meter.supported);
+            assert_eq!(meter.connected, expected_connected);
+            assert_eq!(meter.gpm, expected_gpm);
+            assert_eq!(meter.age_s.is_some(), expected_gpm.is_some());
+        }
     }
 }

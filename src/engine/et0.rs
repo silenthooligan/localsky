@@ -23,6 +23,7 @@
 // MJ/m²/day, mm/day. Adapters convert at the boundary.
 
 use crate::config::schema::Et0Method;
+pub use crate::units::{f_to_c, mph_to_ms};
 
 /// Inputs for a single-day ET0 computation. All temperatures in °C, RH
 /// in %, wind in m/s at 2m height, radiation in MJ/m²/day, pressure in
@@ -271,25 +272,10 @@ fn net_longwave_radiation(t_max_c: f64, t_min_c: f64, ea_kpa: f64, rs: f64, rso:
 
 // ----- Unit conversion helpers (adapter use) -----
 
-/// Convert °F to °C.
-pub fn f_to_c(t_f: f64) -> f64 {
-    (t_f - 32.0) * 5.0 / 9.0
-}
-
-/// Convert mph to m/s.
-pub fn mph_to_ms(mph: f64) -> f64 {
-    mph * 0.44704
-}
-
 /// Convert W/m² to MJ/m²/day for a *daily mean* solar irradiance.
 /// (W/m² * 86400 s/day) / 1e6 = MJ/m²/day; equivalent to *0.0864.
 pub fn wm2_mean_to_mj_day(w_m2_mean: f64) -> f64 {
     w_m2_mean * 0.0864
-}
-
-/// Convert inHg to kPa.
-pub fn inhg_to_kpa(inhg: f64) -> f64 {
-    inhg * 3.38639
 }
 
 /// Adjust wind from u_z at height z to u_2 at 2m. FAO-56 eq. 47.
@@ -302,6 +288,91 @@ pub fn wind_to_2m(u_z_ms: f64, height_m: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    /// Penman-Monteith is reachable now, and it is a different answer.
+    ///
+    /// Every PM input was hardcoded to None with elevation pinned at
+    /// sea level, so has_full_pm_inputs could never be true and Auto
+    /// always fell through to Hargreaves-Samani, which estimates
+    /// radiation from the temperature range alone. Two of this module's
+    /// own converters had no callers at all.
+    #[test]
+    fn auto_reaches_penman_monteith_once_the_inputs_exist() {
+        let bare = Et0Inputs {
+            t_max_c: 30.0,
+            t_min_c: 18.0,
+            t_mean_c: None,
+            rh_max_pct: None,
+            rh_min_pct: None,
+            rh_mean_pct: None,
+            u2_ms: None,
+            solar_rad_mj_m2_day: None,
+            pressure_kpa: None,
+            elevation_m: 0.0,
+            latitude_deg: 30.3,
+            doy: 180,
+        };
+        let hs = compute(&bare, Et0Method::Auto);
+        assert!(hs.et0_mm_day > 0.0);
+
+        let full = Et0Inputs {
+            rh_mean_pct: Some(60.0),
+            u2_ms: Some(2.0),
+            solar_rad_mj_m2_day: Some(22.0),
+            ..bare
+        };
+        let pm = compute(&full, Et0Method::Auto);
+        assert!(pm.et0_mm_day > 0.0);
+        assert!(
+            (pm.et0_mm_day - hs.et0_mm_day).abs() > 0.01,
+            "PM should differ from the temperature-only estimate:              PM {} vs HS {}",
+            pm.et0_mm_day,
+            hs.et0_mm_day
+        );
+    }
+
+    /// Elevation reaches the pressure term, which is the whole reason
+    /// the operator is asked for it.
+    #[test]
+    fn elevation_moves_the_answer() {
+        let at = |elevation_m: f64| {
+            compute(
+                &Et0Inputs {
+                    t_max_c: 30.0,
+                    t_min_c: 18.0,
+                    t_mean_c: None,
+                    rh_max_pct: None,
+                    rh_min_pct: None,
+                    rh_mean_pct: Some(60.0),
+                    u2_ms: Some(2.0),
+                    solar_rad_mj_m2_day: Some(22.0),
+                    pressure_kpa: None,
+                    elevation_m,
+                    latitude_deg: 39.7,
+                    doy: 180,
+                },
+                Et0Method::Auto,
+            )
+            .et0_mm_day
+        };
+        let sea_level = at(0.0);
+        let mile_high = at(1609.0);
+        assert!(
+            (sea_level - mile_high).abs() > 0.01,
+            "a mile of elevation must change ET0: {sea_level} vs {mile_high}"
+        );
+    }
+
+    /// The 10m to 2m wind conversion had no callers and now has one.
+    #[test]
+    fn wind_is_converted_from_the_height_it_was_measured_at() {
+        // Forecast wind is reported at 10m; PM wants 2m, which is slower.
+        let at_10m = 4.0;
+        let at_2m = wind_to_2m(at_10m, 10.0);
+        assert!(at_2m < at_10m, "2m wind is slower than 10m: {at_2m}");
+        // A reading already at 2m passes through untouched.
+        assert_eq!(wind_to_2m(3.0, 2.0), 3.0);
+    }
+
     use super::*;
 
     fn approx(a: f64, b: f64, eps: f64) -> bool {
@@ -495,5 +566,30 @@ mod tests {
         let u10 = 5.0;
         let u2 = wind_to_2m(u10, 10.0);
         assert!(u2 > 0.0 && u2 < u10);
+    }
+}
+
+#[cfg(test)]
+mod published_reference_tests {
+    use super::*;
+    #[test]
+    fn fao56_example_18_uccle_july_6() {
+        // FAO-56 chapter 4 Example 18: 3.88 mm/day, rounded to 3.9.
+        // https://www.fao.org/4/X0490E/x0490e08.htm
+        let input = Et0Inputs {
+            t_max_c: 21.5,
+            t_min_c: 12.3,
+            t_mean_c: Some(16.9),
+            rh_max_pct: Some(84.0),
+            rh_min_pct: Some(63.0),
+            rh_mean_pct: None,
+            u2_ms: Some(wind_to_2m(10.0 / 3.6, 10.0)),
+            solar_rad_mj_m2_day: Some(22.07),
+            pressure_kpa: None,
+            elevation_m: 100.0,
+            latitude_deg: 50.8,
+            doy: 187,
+        };
+        assert!((penman_monteith(&input).et0_mm_day - 3.88).abs() < 0.03);
     }
 }

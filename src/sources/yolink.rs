@@ -13,10 +13,13 @@
 //   Home.getDeviceList  , list devices once at startup (logged, not used for queries today)
 //   {Type}.getState     , pull current device state per mapping
 //
-// The adapter polls each configured device every 60s. Token is cached
-// and refreshed automatically on 401. The user maps LocalSky
-// WeatherFields onto specific (device_id, state_path) pairs, same
-// pattern as ha_passthrough but talking to YoLink instead of HA.
+// The adapter polls each configured device every 60s on
+// `sources::poll::run_polling` (tick, fetch metric, reachability edges,
+// shutdown). The bearer token lives in a `sources::auth::TokenCache`; a
+// 401 from the v2 API invalidates it and `with_reauth` logs in again and
+// retries the call once. The user maps LocalSky WeatherFields onto
+// specific (device_id, state_path) pairs, same pattern as ha_passthrough
+// but talking to YoLink instead of HA.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,17 +29,18 @@ use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use tokio::sync::Mutex;
-use tokio::time::{interval, MissedTickBehavior};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::config::schema::{YolinkConfig, YolinkFieldMap};
 use crate::ports::weather_source::{
     ShutdownSignal, SourceBus, SourceCaps, SourceEvent, WeatherField, WeatherSource,
 };
+use crate::sources::auth::{with_reauth, TokenCache};
 use crate::sources::mqtt_subscribe::parse_weather_field;
+use crate::sources::poll::{run_polling, Poll};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(60);
+const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct Yolink {
     id: String,
@@ -44,7 +48,8 @@ pub struct Yolink {
     /// Pre-parsed mapping list. Entries with unparseable field strings
     /// are dropped at construction with a warn.
     mapping: Vec<ResolvedMapping>,
-    access_token: Mutex<Option<String>>,
+    /// The OAuth2 bearer token: fetched on first use, dropped on a 401.
+    token: TokenCache,
 }
 
 #[derive(Debug, Clone)]
@@ -65,11 +70,29 @@ struct TokenResponse {
     access_token: String,
 }
 
+/// The v2 API refused the bearer token (HTTP 401). `with_reauth` treats
+/// exactly this error as "log in again and retry once"; every other
+/// failure (timeout, 5xx, bad JSON) is an outage and is not retried.
+#[derive(Debug)]
+struct TokenRejected;
+
+impl std::fmt::Display for TokenRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "yolink api {}", StatusCode::UNAUTHORIZED)
+    }
+}
+
+impl std::error::Error for TokenRejected {}
+
+fn token_rejected(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<TokenRejected>().is_some()
+}
+
 impl Yolink {
     pub fn new(id: impl Into<String>, config: YolinkConfig) -> Self {
         let id = id.into();
         let mapping = build_mapping(&id, &config.device_field_map);
-        // P4-7: no stored client. Each request builds an SSRF-hardened client
+        // No stored client. Each request builds an SSRF-hardened client
         // pinned to the (operator-overridable) base_url's resolved host via
         // safe_fetch, so a base_url pointed at a private/loopback address is
         // refused instead of probed.
@@ -77,11 +100,13 @@ impl Yolink {
             id,
             config,
             mapping,
-            access_token: Mutex::new(None),
+            token: TokenCache::new(),
         }
     }
 
-    async fn refresh_token(&self) -> anyhow::Result<String> {
+    /// One client_credentials grant. This is the `TokenCache` auth_fn: it
+    /// only returns the token; the cache is what keeps it.
+    async fn fetch_token(&self) -> anyhow::Result<String> {
         let url = format!(
             "{}/open/yolink/token",
             self.config.base_url.trim_end_matches('/')
@@ -89,11 +114,11 @@ impl Yolink {
         // YoLink's /open/yolink/token uses standard OAuth2 form encoding.
         let body = format!(
             "grant_type=client_credentials&client_id={cid}&client_secret={cs}",
-            cid = form_encode(&self.config.client_id),
-            cs = form_encode(&self.config.client_secret),
+            cid = crate::text::form_value(&self.config.client_id),
+            cs = crate::text::form_value(&self.config.client_secret),
         );
         let (client, safe_url) =
-            crate::net::safe_fetch::build_safe_client(&url, Duration::from_secs(15)).await?;
+            crate::net::safe_fetch::build_safe_client(&url, HTTP_TIMEOUT).await?;
         let resp: TokenResponse = client
             .post(safe_url)
             .header(
@@ -106,15 +131,29 @@ impl Yolink {
             .error_for_status()?
             .json()
             .await?;
-        *self.access_token.lock().await = Some(resp.access_token.clone());
         Ok(resp.access_token)
     }
 
-    async fn current_token(&self) -> anyhow::Result<String> {
-        if let Some(t) = self.access_token.lock().await.clone() {
-            return Ok(t);
+    /// One authenticated POST to the v2 API. A 401 becomes `TokenRejected`
+    /// so `with_reauth` can re-authenticate and retry; any other non-2xx
+    /// is reported by status only (no upstream body).
+    async fn post_authed(&self, url: &str, body: &Value, token: String) -> anyhow::Result<Value> {
+        let (client, safe_url) =
+            crate::net::safe_fetch::build_safe_client(url, HTTP_TIMEOUT).await?;
+        let resp = client
+            .post(safe_url)
+            .bearer_auth(&token)
+            .json(body)
+            .send()
+            .await?;
+        let status = resp.status();
+        if status == StatusCode::UNAUTHORIZED {
+            return Err(TokenRejected.into());
         }
-        self.refresh_token().await
+        if !status.is_success() {
+            return Err(anyhow::anyhow!("yolink api {status}"));
+        }
+        Ok(crate::net::safe_fetch::read_json_capped(resp).await?)
     }
 
     async fn api_call(&self, method: &str, target_device: &str) -> anyhow::Result<Value> {
@@ -128,28 +167,86 @@ impl Yolink {
             "time": chrono::Utc::now().timestamp_millis(),
             "msgid": format!("{}", chrono::Utc::now().timestamp_millis()),
         });
-        let mut token = self.current_token().await?;
-        for attempt in 0..2 {
-            let (client, safe_url) =
-                crate::net::safe_fetch::build_safe_client(&url, Duration::from_secs(15)).await?;
-            let resp = client
-                .post(safe_url)
-                .bearer_auth(&token)
-                .json(&body)
-                .send()
-                .await?;
-            let status = resp.status();
-            if status == StatusCode::UNAUTHORIZED && attempt == 0 {
-                *self.access_token.lock().await = None;
-                token = self.refresh_token().await?;
-                continue;
-            }
-            if !status.is_success() {
-                return Err(anyhow::anyhow!("yolink api {status}"));
-            }
-            return Ok(crate::net::safe_fetch::read_json_capped(resp).await?);
+        let url = url.as_str();
+        let body = &body;
+        with_reauth(
+            &self.token,
+            move || self.fetch_token(),
+            token_rejected,
+            move |token| self.post_authed(url, body, token),
+        )
+        .await
+    }
+
+    /// One poll: every mapped device's `{Type}.getState`, folded into one
+    /// Observation (global fields) plus a KeyedReading per soil zone. A
+    /// device that fails or lacks the state path is skipped at debug. When
+    /// no device answers at all the poll fails, which the loop logs at warn
+    /// and reports as the offline edge; an empty mapping is idle and simply
+    /// never reports online.
+    async fn poll_once(self: Arc<Self>) -> anyhow::Result<Poll> {
+        if self.mapping.is_empty() {
+            return Ok(Poll::none().unreachable());
         }
-        Err(anyhow::anyhow!("yolink retry exhausted"))
+        let mut fields: Vec<(WeatherField, f64)> = Vec::new();
+        let mut soil: Vec<(String, f64)> = Vec::new();
+        let mut any_ok = false;
+        let mut last_err: Option<anyhow::Error> = None;
+        for m in &self.mapping {
+            let method = format!("{}.getState", m.device_type);
+            let resp = match self.api_call(&method, &m.device_id).await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    debug!(source_id = %self.id, device_id = m.device_id, error = %e, "yolink getState failed");
+                    last_err = Some(e);
+                    continue;
+                }
+            };
+            any_ok = true;
+            let Some(raw) = extract_state_number(&resp, &m.state_path) else {
+                debug!(
+                    source_id = %self.id,
+                    device_id = m.device_id,
+                    path = %m.state_path.join("."),
+                    "yolink state path missing or non-numeric"
+                );
+                continue;
+            };
+            let v = raw * m.scale + m.offset;
+            if let Some(zone) = &m.zone_slug {
+                // Per-zone soil channel -> KeyedReading.
+                soil.push((crate::sources::bus_recorder::zone_soil_key(zone), v));
+            } else if let Some(f) = m.field {
+                fields.push((f, v));
+            }
+        }
+        if !any_ok {
+            let last = last_err
+                .map(|e| format!("{e:#}"))
+                .unwrap_or_else(|| "no error recorded".to_string());
+            return Err(anyhow::anyhow!(
+                "no mapped device answered ({} tried); last error: {last}",
+                self.mapping.len()
+            ));
+        }
+        let now = chrono::Utc::now().timestamp();
+        let mut poll = Poll::none();
+        for (key, value) in soil {
+            poll = poll.with(SourceEvent::KeyedReading {
+                source_id: self.id.clone(),
+                key,
+                value,
+                at_epoch: now,
+            });
+        }
+        if !fields.is_empty() {
+            poll = poll.with(SourceEvent::Observation {
+                source_id: self.id.clone(),
+                fields,
+                at_epoch: now,
+            });
+        }
+        Ok(poll)
     }
 }
 
@@ -233,19 +330,6 @@ fn extract_state_number(api_response: &Value, path: &[String]) -> Option<f64> {
     cur.as_f64()
 }
 
-fn form_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        let unreserved = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~');
-        if unreserved {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
-
 #[async_trait]
 impl WeatherSource for Yolink {
     fn id(&self) -> &str {
@@ -278,79 +362,22 @@ impl WeatherSource for Yolink {
         }
     }
 
-    async fn run(
-        self: Arc<Self>,
-        bus: SourceBus,
-        mut shutdown: ShutdownSignal,
-    ) -> anyhow::Result<()> {
-        info!(source_id = %self.id, mapping_n = self.mapping.len(), "YoLink source started");
+    async fn run(self: Arc<Self>, bus: SourceBus, shutdown: ShutdownSignal) -> anyhow::Result<()> {
+        debug!(source_id = %self.id, mapping_n = self.mapping.len(), "YoLink mapping resolved");
         if self.mapping.is_empty() {
             warn!(source_id = %self.id, "YoLink has empty device_field_map; idle");
         }
-        let mut tick = interval(POLL_INTERVAL);
-        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut last_reachable: Option<bool> = None;
-        loop {
-            tokio::select! {
-                _ = tick.tick() => {
-                    let mut fields = Vec::new();
-                    let mut any_ok = false;
-                    for m in &self.mapping {
-                        let method = format!("{}.getState", m.device_type);
-                        match self.api_call(&method, &m.device_id).await {
-                            Ok(resp) => {
-                                any_ok = true;
-                                if let Some(raw) = extract_state_number(&resp, &m.state_path) {
-                                    let v = raw * m.scale + m.offset;
-                                    if let Some(zone) = &m.zone_slug {
-                                        // Per-zone soil channel -> KeyedReading.
-                                        let _ = bus.send(SourceEvent::KeyedReading {
-                                            source_id: self.id.clone(),
-                                            key: crate::sources::bus_recorder::zone_soil_key(zone),
-                                            value: v,
-                                            at_epoch: chrono::Utc::now().timestamp(),
-                                        });
-                                    } else if let Some(f) = m.field {
-                                        fields.push((f, v));
-                                    }
-                                } else {
-                                    debug!(
-                                        source_id = %self.id,
-                                        device_id = m.device_id,
-                                        path = %m.state_path.join("."),
-                                        "yolink state path missing or non-numeric"
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                debug!(source_id = %self.id, device_id = m.device_id, error = %e, "yolink getState failed");
-                            }
-                        }
-                    }
-                    let reach = any_ok;
-                    if last_reachable != Some(reach) {
-                        let _ = bus.send(SourceEvent::Reachability {
-                            source_id: self.id.clone(),
-                            reachable: reach,
-                        });
-                        last_reachable = Some(reach);
-                    }
-                    if !fields.is_empty() {
-                        let _ = bus.send(SourceEvent::Observation {
-                            source_id: self.id.clone(),
-                            fields,
-                            at_epoch: chrono::Utc::now().timestamp(),
-                        });
-                    }
-                }
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        info!(source_id = %self.id, "YoLink shutdown");
-                        return Ok(());
-                    }
-                }
-            }
-        }
+        let id = self.id.clone();
+        run_polling(
+            self,
+            &id,
+            "YoLink",
+            POLL_INTERVAL,
+            bus,
+            shutdown,
+            Self::poll_once,
+        )
+        .await
     }
 }
 
@@ -457,5 +484,16 @@ mod tests {
         assert!(caps.live_current);
         assert!(caps.fields.contains(&WeatherField::AirTempF));
         assert!(caps.fields.contains(&WeatherField::FlowGpm));
+    }
+
+    /// Only the 401 marker asks `with_reauth` for a fresh login; an
+    /// outage-shaped error must not trigger a re-authentication.
+    #[test]
+    fn only_a_401_counts_as_a_rejected_token() {
+        assert!(token_rejected(&anyhow::Error::from(TokenRejected)));
+        assert!(!token_rejected(&anyhow::anyhow!(
+            "yolink api 503 Service Unavailable"
+        )));
+        assert_eq!(TokenRejected.to_string(), "yolink api 401 Unauthorized");
     }
 }

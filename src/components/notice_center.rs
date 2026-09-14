@@ -33,7 +33,7 @@ use crate::components::irrigation::default_budget_banner;
 use crate::components::irrigation::ha_adoption_banner;
 use crate::components::ui::{Button, Sheet};
 use crate::components::units_fmt::{use_unit_prefs, UnitPrefs};
-use crate::ha::snapshot::IrrigationSnapshot;
+use crate::model::IrrigationSnapshot;
 
 /// One popup appearance per page load, across every page that mounts
 /// the center. wasm is single-threaded; the atomic is just a static
@@ -400,7 +400,7 @@ pub fn NoticeCenter(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ha::snapshot::{HaAdoptedHelper, WaterBudget};
+    use crate::model::{HaAdoptedHelper, WaterBudget};
 
     // ---- The soil offer's copy, pinned verbatim ----
 

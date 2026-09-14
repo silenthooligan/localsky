@@ -131,7 +131,7 @@ pub fn SettingsRadar() -> impl IntoView {
                         crate::components::settings_ui::toast_saved(
                             result_msg,
                             result_ok,
-                            "Saved. The radar menu rebuilds on the next dashboard load.",
+                            crate::voice::SAVED_LIVE,
                         );
                     }
                     Err(e) => {
@@ -277,7 +277,7 @@ pub fn SettingsRadar() -> impl IntoView {
             // (RainViewer, NEXRAD, and the rest) are public services that still
             // render, so the map is not blank, only its precipitation overlay.
             <Show when=move || !has_radar_source.get()>
-                <p class="setup-result setup-result--err" role="alert" style="margin-bottom: 1rem">
+                <p class="setup-result setup-result--err" role="alert" class:u-mb4-only=true>
                     "The radar precipitation overlay needs an Open-Meteo source "
                     "with radar turned on. Open Settings -> Devices, add or edit your "
                     "Open-Meteo source, and switch \"Provide radar\" on. It is on by "
@@ -475,19 +475,7 @@ struct RadarUiDraft {
 
 #[cfg(feature = "hydrate")]
 async fn fetch_radar_ui() -> Result<RadarUiDraft, String> {
-    use gloo_net::http::Request;
-    let resp = Request::get("/api/config")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::load_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    let val: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let val = crate::components::config_client::get_config().await?;
     let radar = val.get("ui").and_then(|u| u.get("radar"));
     let str_list = |key: &str| -> Vec<String> {
         radar
@@ -548,12 +536,9 @@ async fn fetch_radar_ui() -> Result<RadarUiDraft, String> {
 
 #[cfg(feature = "hydrate")]
 async fn patch_radar_ui(providers: Vec<String>, default_layers: Vec<String>) -> Result<(), String> {
-    use gloo_net::http::Request;
-    let cur = Request::get("/api/config")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut cfg: serde_json::Value = cur.json().await.map_err(|e| e.to_string())?;
+    // Re-read the live document right before the PUT so the two radar
+    // fields are the only thing this page rewrites.
+    let mut cfg = crate::components::config_client::get_config().await?;
     let root = cfg
         .as_object_mut()
         .ok_or_else(|| "config is not a table".to_string())?;
@@ -571,5 +556,7 @@ async fn patch_radar_ui(providers: Vec<String>, default_layers: Vec<String>) -> 
         .ok_or_else(|| "ui.radar is not a table".to_string())?;
     radar_obj.insert("providers".into(), serde_json::json!(providers));
     radar_obj.insert("default_layers".into(), serde_json::json!(default_layers));
-    crate::components::rules::conditions::save_config(cfg).await
+    crate::components::config_client::put_config(&cfg)
+        .await
+        .map(|_| ())
 }

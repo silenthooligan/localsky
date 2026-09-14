@@ -54,9 +54,9 @@ pub fn help_topic(topic: &str) -> &'static str {
         "verdict-strip" =>
             "Forecast-driven view of whether each of the next 7 days will water, skip, or run extended, using the same skip-check that fires every morning.",
         "water-budget" =>
-            "How much water this week's rain + irrigation has put down vs. what the engine thinks the lawn needed. Negative means the lawn ran short.",
+            "How much water this week's rain + irrigation has put down vs. what the lawn is reckoned to have needed. Negative means the lawn ran short.",
         "soil-sensors" =>
-            "Live soil-moisture percentages from each zone's probe. The engine skips entirely when every zone is at or above its saturation threshold.",
+            "Live soil-moisture percentages from each zone's probe. Watering is skipped entirely when every zone is at or above its saturation threshold.",
         "first-soil-sensor" =>
             "Three ways to add a soil probe: an Ecowitt gateway on the LAN (native), any MQTT-published probe, or a Home Assistant soil entity. Then bind it to a zone.",
         "forecast" =>
@@ -64,15 +64,15 @@ pub fn help_topic(topic: &str) -> &'static str {
         "skip-breakdown" =>
             "Each row shows one skip-rule input next to its threshold. A red bar means that input is currently outside its allowed range and will trip a skip.",
         "advisor" =>
-            "Optional LLM advisor. Reads the same inputs the engine uses and explains the verdict in plain English. Off by default; configure under Settings -> LLM.",
+            "Optional LLM advisor. Reads the same inputs the decision uses and explains the verdict in plain English. Off by default; configure under Settings -> LLM.",
         "location" =>
-            "Where this deployment sits. Latitude, longitude, and elevation feed the solar + ET math; the timezone sets when the nightly verdict runs.",
+            "Where this deployment sits. Latitude, longitude, and elevation feed the solar + ET math; the timezone sets when the next run is judged.",
         "llm" =>
             "Connect an optional LLM provider (Ollama, llama.cpp, or any OpenAI-compatible endpoint) so the advisor can explain verdicts. Leave blank to keep it off.",
         "notifications" =>
             "Outbound channels for run/skip alerts: Web Push, MQTT discovery, ntfy, and Slack. Each is independent; fill in only the ones you use.",
         "history" =>
-            "What actually happened: completed runs and skipped evenings over the selected window. The timeline plots every run per zone; per-zone cards break down minutes, cadence, and recent events.",
+            "What actually happened: completed runs and skipped days over the selected window. The timeline plots every run per zone; per-zone cards break down minutes, cadence, and recent events.",
         "radar" =>
             "Animated precipitation on your station, plus optional alert, storm, lightning, and wind overlays. Providers default by region (Auto); switch to Custom to pick your own.",
         "restrictions" =>
@@ -86,15 +86,21 @@ pub fn help_topic(topic: &str) -> &'static str {
         "schedules" =>
             "Fire a zone at a fixed weekday and time. Override replaces the smart engine for that zone; Floor fires alongside it. Restrictions still gate and cap each run.",
         "skip-rules" =>
-            "The checks the engine runs every morning before watering: rain already fallen + forecast, freeze, wind, and heat-stress. Cross any threshold and tonight's run is skipped. The defaults suit most lawns; tune only if your climate needs it.",
+            "The checks that run before every watering: rain already fallen + forecast, freeze, wind, and heat-stress. Cross any threshold and the next run is skipped. The defaults suit most lawns; tune only if your climate needs it.",
         "sources" =>
             "Where weather data comes in: a local station (Tempest, Ecowitt), a cloud service (Open-Meteo, WeatherKit, NWS), MQTT, or Home Assistant. When several report the same reading, the higher-priority source wins. Add and edit these in Devices.",
         "zones" =>
-            "A zone is one chunk of yard on one valve. Its grass species, soil texture, and area drive how much water the engine schedules; everything else has a sensible default under Advanced.",
+            "A zone is one chunk of yard on one valve. Its grass species, soil texture, and area drive how much water is scheduled; everything else has a sensible default under Advanced.",
         "theme" =>
             "How LocalSky looks on this device: Dark, Light, Auto (follow your system), or High-contrast. Per-browser and applied instantly.",
+        "irrigation-engine" =>
+            "How a run is sized: the scheduling model, cycle-and-soak pacing, and the seasonal water budget. The thresholds that skip a run live on Skip rules.",
+        "zone-math" =>
+            "How this morning's minutes were worked out: the deficit or the weekly target, this zone's throughput, the seasonal adjustment, and the cap that holds it.",
+        "sensors" =>
+            "Every weather and soil reading LocalSky holds, and which source each one came from. A receiver shows its readings the moment they arrive.",
         "units" =>
-            "Imperial or Metric for what you see (temperature, rain, wind, area). The engine works in metric internally, so switching mostly changes what you read. Zone area is the exception: you enter it, so its unit feeds the water math.",
+            "Imperial or Metric for what you see (temperature, rain, wind, area). LocalSky works in metric internally, so switching mostly changes what you read. Zone area is the exception: you enter it, so its unit feeds the water math.",
         _ => "(no help topic configured)",
     }
 }

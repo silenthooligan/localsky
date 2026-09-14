@@ -1,0 +1,1061 @@
+// Tuning-report assembly. The thin I/O layer around engine::tuning: it
+// gathers a window of persisted outcomes (runs, probe series, rain
+// observations, verdicts) plus live snapshot clamp state and the current
+// config, feeds the pure checks, and returns the wire-shaped
+// TuningReport. Consumed by GET /api/v1/irrigation/tuning, by the apply
+// endpoint's stale-recommendation verification, and by the weekly
+// notification scheduler.
+//
+// Day/TZ discipline: every calendar grouping derives from epoch via
+// crate::timeutil (configured timezone), never chrono::Local and never
+// verdict_history.date_local.
+
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
+
+use chrono::{Datelike, NaiveDate};
+use rusqlite::Connection;
+use tokio::sync::Mutex;
+
+use crate::config::schema::{Config, ZoneConfig};
+use crate::config::FileConfigStore;
+use crate::engine::tuning::{
+    self, is_watering_evidence, BackoutInputs, CapClampInputs, CheckOutcome, DriftInputs,
+    IntervalInputs, RunSegment, SkipDayRecord, SoilBinding, ZoneCheckOutcomes,
+};
+use crate::forecast::ForecastStore;
+use crate::history::types::{TuningReport, TuningScorecard};
+use crate::persistence::verdict_history::classify_reason_code;
+use crate::persistence::{ForecastObservationsStore, RunsStore, SensorHistoryStore};
+use crate::ports::config_store::{ConfigStore, ConfigStoreError};
+use crate::refresher::IrrigationStore;
+
+/// Probe rows fetched per zone per report. 14 days of a 30s-cadence
+/// gateway is ~40k rows; the cap keeps a misbehaving chatty source from
+/// ballooning the read.
+const PROBE_SERIES_LIMIT: usize = 50_000;
+
+/// Everything report generation needs. Built once by the boot and
+/// carried in the state of every route that generates a report, and by
+/// the weekly notifier.
+pub struct TuningHandles {
+    pub history_conn: Arc<Mutex<Connection>>,
+    pub cfg_store: Arc<FileConfigStore>,
+    pub irrigation: Arc<IrrigationStore>,
+    pub forecast: Arc<ForecastStore>,
+    /// (lat, lon) from deployment config, for Kc hemisphere resolution.
+    pub location: (f64, f64),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TuningError {
+    #[error("tuning report requires the history database")]
+    NotConfigured,
+    #[error("store: {0}")]
+    Store(String),
+}
+
+/// Generate the tuning report over the last `days` (clamped to the
+/// engine's window bounds). The config is loaded fresh from the store on
+/// every call so an Apply is visible to the immediately following
+/// regeneration.
+pub async fn generate_report(
+    handles: &TuningHandles,
+    days: u32,
+) -> Result<TuningReport, TuningError> {
+    let cfg = match handles.cfg_store.load().await {
+        Ok(c) => c,
+        // A fresh install with no config yet has no zones; the report is
+        // honestly empty rather than an error.
+        Err(ConfigStoreError::NotFound) => Config::default(),
+        Err(e) => return Err(TuningError::Store(e.to_string())),
+    };
+    generate_report_with(handles, &cfg, days).await
+}
+
+/// Report generation against an explicit config (the apply endpoint
+/// verifies against the exact config it is about to mutate).
+pub async fn generate_report_with(
+    handles: &TuningHandles,
+    cfg: &Config,
+    days: u32,
+) -> Result<TuningReport, TuningError> {
+    let days = days.clamp(tuning::MIN_WINDOW_DAYS, tuning::MAX_WINDOW_DAYS);
+    let now = chrono::Utc::now().timestamp();
+    let from_epoch = now - (days as i64) * 86_400;
+    let today = crate::timeutil::now_local().date_naive();
+
+    let runs_store = RunsStore::new(handles.history_conn.clone());
+    let sensor_store = SensorHistoryStore::new(handles.history_conn.clone());
+    let obs_store = ForecastObservationsStore::new(handles.history_conn.clone());
+
+    let run_rows = runs_store
+        .window(from_epoch, now + 1)
+        .await
+        .map_err(|e| TuningError::Store(e.to_string()))?;
+
+    // Rain-day map over the report window (for dry stretches + backout
+    // event hygiene) and the wider scorecard window.
+    let obs_from = today - chrono::Duration::days(tuning::SCORECARD_WINDOW_DAYS as i64 + 3);
+    let obs_rows = obs_store
+        .range(obs_from, today)
+        .await
+        .map_err(|e| TuningError::Store(e.to_string()))?;
+    let obs_by_date: BTreeMap<NaiveDate, (f64, f64)> = obs_rows
+        .iter()
+        .map(|o| (o.date, (o.predicted_in, o.observed_in)))
+        .collect();
+    // Wet-day UTC intervals inside the report window.
+    let wet_day_intervals: Vec<(i64, i64)> = obs_rows
+        .iter()
+        .filter(|o| o.observed_in >= tuning::RAIN_DAY_IN)
+        .filter_map(|o| crate::timeutil::local_day_bounds_utc(o.date))
+        .map(|(a, b)| (a.timestamp(), b.timestamp()))
+        .filter(|(a, b)| *b > from_epoch && *a < now)
+        .collect();
+
+    // Forward daily ETc building blocks from the live forecast: per-day
+    // (et0_mm, heat_multiplier, doy). Kc is per-zone (species) below.
+    let fc = handles.forecast.snapshot();
+    let (lat, lon) = handles.location;
+    let day_terms: Vec<(f64, f64, u16)> = fc
+        .daily
+        .iter()
+        .take(7)
+        .enumerate()
+        .filter_map(|(i, d)| {
+            let doy = (today + chrono::Duration::days(i as i64)).ordinal() as u16;
+            let et0 = d.reference_et0_mm().or_else(|| {
+                crate::assembly::native_et0_mm(
+                    d,
+                    lat,
+                    doy,
+                    cfg.deployment.location.elevation_m.unwrap_or(0.0),
+                )
+            })?;
+            let heat = 1.0; // ET0 already accounts for temperature and atmospheric demand.
+            Some((et0, heat, doy))
+        })
+        .collect();
+
+    // Operator dismissals (snooze / permanent), loaded once per
+    // generation with zone slugs pre-normalized. Silencing is total: a
+    // stripped recommendation never reaches the wire, so cards, counts,
+    // auto-select, and the weekly push all go quiet together.
+    let dismissals: Vec<crate::persistence::DismissalRow> =
+        crate::persistence::TuningDismissalsStore::new(handles.history_conn.clone())
+            .active(now)
+            .await
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|mut d| {
+                        d.zone_slug = d.zone_slug.replace('-', "_");
+                        d
+                    })
+                    .collect()
+            })
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "tuning dismissals read failed; none applied");
+                Vec::new()
+            });
+    // The day-total upsell line is US-only (MRMS coverage).
+    let is_us_install = crate::config::region::region_for(handles.location.0, handles.location.1)
+        == crate::config::region::Region::Us;
+
+    let snap = handles.irrigation.snapshot();
+    // One resolution for the wet-loss factor, the same the soil model
+    // reads. This clamped the raw config value itself, so a zone with the
+    // field unset was reported against the floor while the engine watered
+    // it at the 0.70 default.
+    let capture = crate::engine::water_balance::resolve_capture_efficiency(
+        crate::refresher::WateringPolicy::from_config(cfg).effective_capture_efficiency(),
+    );
+    // The policy derived from the SAME config under verification (never
+    // the live arc-swap handle): the apply endpoint regenerates against
+    // the exact config it is about to mutate, and reading the live handle
+    // could disagree with it mid-write. Pure and cheap; feeds the
+    // raised-cap dispatch-window fit below.
+    let policy = crate::refresher::WateringPolicy::from_config(cfg);
+
+    // Scorecard: morning verdict per configured-tz local day over the
+    // scorecard window, reason code preferring the stored DecisionTrace.
+    let scorecard = build_scorecard(&handles.history_conn, &obs_by_date, today, now).await;
+
+    let mut zones = Vec::with_capacity(cfg.zones.len());
+    for (slug, z) in cfg.zones.iter() {
+        let runtime_slug = slug.replace('-', "_");
+        let zone_rows: Vec<&crate::persistence::RunRow> = run_rows
+            .iter()
+            .filter(|r| r.zone_slug == runtime_slug || r.zone_slug == *slug)
+            .collect();
+        let segments: Vec<RunSegment> = zone_rows
+            .iter()
+            .filter(|r| is_watering_evidence(&r.source, &r.status, r.skip_reason.as_deref()))
+            .map(|r| RunSegment {
+                session_id: r.session_id.clone(),
+                start_epoch: r.start_epoch,
+                end_epoch: r
+                    .end_epoch
+                    .unwrap_or(r.start_epoch + r.duration_s.unwrap_or(0) as i64),
+            })
+            .collect();
+        let events = tuning::cluster_events(&segments);
+        let run_days: HashSet<NaiveDate> = events
+            .iter()
+            .filter_map(|e| crate::timeutil::local_date(e.start_epoch))
+            .collect();
+        let run_day_count = run_days.len() as u32;
+
+        // Model-side numbers.
+        let (root_mm, _mad) =
+            tuning::resolve_root_mad(z.species, z.root_depth_mm, z.mad_pct_override);
+        let taw_mm = crate::engine::taw_mm(z.soil_texture, root_mm);
+        let mean_daily_etc_mm = zone_mean_daily_etc(z, &day_terms, lat);
+
+        // Live clamp state.
+        let math = snap
+            .zones
+            .iter()
+            .find(|s| s.slug == runtime_slug || s.slug == *slug)
+            .and_then(|s| s.math.clone());
+        let budget = snap
+            .water_budgets
+            .iter()
+            .find(|b| b.zone_slug == runtime_slug || b.zone_slug == *slug);
+        let effective_rate =
+            crate::engine::effective_precip_rate_mm_hr(z.sprinkler_type, z.precip_rate_mm_hr);
+        // Which model governs this zone's row. On a soil-governed zone the
+        // row's today figures and session_capped come from the soil plan,
+        // so the cap check reads the DEFICIT arm: the one-shot refill is
+        // what the cap trims, and sessions/budget knobs do not shape it.
+        // Weekly-governed rows keep the session arm exactly as before.
+        let soil_governed = budget
+            .map(|b| b.scheduling_model == "soil")
+            .unwrap_or(false);
+        // The soil model's uncapped refill seconds, from the shadow
+        // depletion the row carries: the run a raised cap would have to
+        // fit on a soil-governed zone.
+        let soil_refill_uncapped_s = budget
+            .filter(|_| soil_governed)
+            .and_then(|b| b.soil_depletion_mm)
+            .map(|dep| {
+                let throughput = math
+                    .as_ref()
+                    .map(|m| m.throughput_mm_hr)
+                    .unwrap_or(effective_rate);
+                crate::engine::water_balance::refill_runtime_seconds(
+                    dep,
+                    throughput,
+                    policy.effective_capture_efficiency(),
+                    u32::MAX,
+                )
+            });
+        // The run length a raised cap would have to fit: the allocator's
+        // session when session-capped (weekly), or the soil model's
+        // uncapped refill (soil). Feeds the dispatch-window fit for the
+        // cap check's raise.
+        let needed_raise_s = if soil_governed {
+            budget
+                .filter(|b| b.session_capped)
+                .and(soil_refill_uncapped_s)
+        } else {
+            budget
+                .filter(|b| b.session_capped)
+                .map(|b| b.seconds_per_session)
+        };
+        let raised_fits_window = needed_raise_s.and_then(|needed| {
+            raised_sequence_fits_window(
+                &policy,
+                &snap.zones,
+                &snap.water_budgets,
+                &runtime_slug,
+                needed,
+                today,
+                lat,
+                lon,
+                crate::timeutil::deployment_calendar(),
+            )
+        });
+        let cap_inputs = CapClampInputs {
+            // The weekly allocator's session arm, weekly-governed rows
+            // only: a soil-governed row's session_capped is the soil
+            // plan's flag and must not read as a weekly session clamp.
+            session_capped: !soil_governed && budget.map(|b| b.session_capped).unwrap_or(false),
+            // The soil model's producer for the deficit arm: the row's
+            // session_capped on a soil-governed zone means the cap
+            // shorted the one-shot refill (SoilZonePlan.session_capped),
+            // and raising the run limit is the only knob that fits it.
+            deficit_cap_binding: soil_governed && budget.map(|b| b.session_capped).unwrap_or(false),
+            // ONLY the allocator's per-session seconds: the deficit refill
+            // is not a weekly session, and the sessions/budget knobs never
+            // feed that chain.
+            desired_seconds: budget
+                .filter(|b| !soil_governed && b.session_capped)
+                .map(|b| b.seconds_per_session),
+            deficit_refill_seconds: soil_refill_uncapped_s,
+            configured_max_run_minutes: z.max_run_minutes,
+            raised_fits_window,
+            // An effective cap tighter than the configured limit means an
+            // active watering restriction is the clamp; the check pauses
+            // its run-length suggestions instead of recommending around a
+            // transient regulatory limit.
+            restriction_clamped: math
+                .as_ref()
+                .map(|m| {
+                    m.max_duration_seconds
+                        < z.max_run_minutes
+                            .unwrap_or(crate::config::schema::DEFAULT_MAX_RUN_MINUTES)
+                            * 60
+                })
+                .unwrap_or(false),
+            // Snapshot math carries the EFFECTIVE cap (restriction-tightened
+            // when one is active); a snapshot without math falls back to the
+            // zone's own configured cap, never a literal.
+            max_duration_s: math.as_ref().map(|m| m.max_duration_seconds).or_else(|| {
+                Some(
+                    z.max_run_minutes
+                        .unwrap_or(crate::config::schema::DEFAULT_MAX_RUN_MINUTES)
+                        * 60,
+                )
+            }),
+            run_days: run_day_count,
+            sessions_per_week: budget
+                .map(|b| b.sessions_per_week)
+                .or(z.sessions_per_week)
+                .unwrap_or(1),
+            configured_sessions: z.sessions_per_week,
+            configured_weekly_budget_in: z.weekly_budget_in,
+            weekly_budget_in: budget
+                .map(|b| b.weekly_budget_in)
+                .or(z.weekly_budget_in)
+                .unwrap_or(0.0),
+            throughput_mm_hr: math
+                .as_ref()
+                .map(|m| m.throughput_mm_hr)
+                .unwrap_or(effective_rate),
+            // The ceiling arm's producer: an explicit weekly target
+            // clamped a soil-governed zone's refill this tick. Inferred
+            // targets never set the wire flag, so they stay silent here
+            // by construction.
+            ceiling_binding: soil_governed
+                && budget.map(|b| b.soil_ceiling_binding).unwrap_or(false),
+            // Gross weekly demand: mean daily crop ET over the forward
+            // window x 7, divided by the capture efficiency the refill
+            // divides by, in inches. Sizes the suggested target. The
+            // effective accessor, not the raw clamp: the refill this
+            // arm advises on falls back to 0.70 on a non-positive
+            // config value, and a target sized against the 0.05 floor
+            // would run up to 14x the refill's own arithmetic.
+            soil_weekly_demand_in: mean_daily_etc_mm
+                .filter(|_| soil_governed)
+                .map(|etc| etc * 7.0 / policy.effective_capture_efficiency() / 25.4),
+            soil_depletion_mm: budget
+                .filter(|_| soil_governed)
+                .and_then(|b| b.soil_depletion_mm),
+            soil_taw_mm: budget.filter(|_| soil_governed).and_then(|b| b.soil_taw_mm),
+        };
+        let cap = tuning::check_cap_clamped(slug, &cap_inputs);
+
+        let interval = tuning::check_interval(
+            slug,
+            &IntervalInputs {
+                species: z.species,
+                soil_texture: z.soil_texture,
+                root_depth_mm_override: z.root_depth_mm,
+                mad_pct_override: z.mad_pct_override,
+                mean_daily_etc_mm,
+            },
+        );
+
+        // Probe-dependent checks.
+        let binding = classify_binding(z.soil_sensor_id.as_deref());
+        let (drift, backout, has_probe_data) = match &binding {
+            BindingKind::Source(sid, key) => {
+                let readings_raw = sensor_store
+                    .series_for_channel(
+                        sid.clone(),
+                        key.clone(),
+                        from_epoch,
+                        now + 1,
+                        PROBE_SERIES_LIMIT,
+                    )
+                    .await
+                    .map_err(|e| TuningError::Store(e.to_string()))?;
+                // Same validity gate as apply_soil_quality: dead-probe zeros
+                // and out-of-band values never enter the math.
+                let readings: Vec<(i64, f64)> = readings_raw
+                    .iter()
+                    .filter(|r| r.value > 0.0 && r.value <= 100.0)
+                    .map(|r| (r.epoch, r.value))
+                    .collect();
+                // Dry stretches: window minus irrigation events (padded with
+                // the settle window) and wet days.
+                let mut busy: Vec<(i64, i64)> = events
+                    .iter()
+                    .map(|e| (e.start_epoch, e.end_epoch + tuning::BACKOUT_SETTLE_MAX_S))
+                    .collect();
+                busy.extend(wet_day_intervals.iter().copied());
+                let stretches =
+                    tuning::dry_stretches(from_epoch, now, &busy, tuning::DRIFT_MIN_STRETCH_S);
+                let modeled_slope = mean_daily_etc_mm
+                    .filter(|_| taw_mm > 0.0)
+                    .map(|etc| etc / taw_mm * 100.0);
+                let backout_inputs = BackoutInputs {
+                    events: &events,
+                    readings: &readings,
+                    wet_day_intervals: &wet_day_intervals,
+                    taw_mm,
+                    capture_efficiency: capture,
+                    effective_rate_mm_hr: effective_rate,
+                    configured_rate_mm_hr: z.precip_rate_mm_hr,
+                };
+                // Probe-scale cross-check BEFORE either check may recommend:
+                // a pure probe scale error moves the drift ratio
+                // (measured/modeled) and the backout ratio (median/effective)
+                // by the same factor in the same direction, and then the
+                // probe, not the config, is the suspect.
+                let (measured, stretch_count) =
+                    tuning::measured_drying_slope(&readings, &stretches);
+                let drift_ratio = match (measured, modeled_slope) {
+                    (Some(m), Some(md))
+                        if stretch_count >= tuning::DRIFT_MIN_STRETCHES && md > 0.0 =>
+                    {
+                        Some(m / md)
+                    }
+                    _ => None,
+                };
+                let backout_samples = tuning::backout_rates(&backout_inputs);
+                let backout_ratio = if backout_samples.len() >= tuning::BACKOUT_MIN_EVENTS
+                    && effective_rate > 0.0
+                {
+                    tuning::median_of(backout_samples).map(|m| m / effective_rate)
+                } else {
+                    None
+                };
+                let (drift, backout) =
+                    match tuning::probe_scale_crosscheck(drift_ratio, backout_ratio) {
+                        Some(line) => (
+                            CheckOutcome::Insufficient(line.clone()),
+                            Some(CheckOutcome::Insufficient(line)),
+                        ),
+                        None => {
+                            let drift = tuning::check_probe_drift(
+                                slug,
+                                &DriftInputs {
+                                    readings: &readings,
+                                    stretches: &stretches,
+                                    modeled_slope_pct_per_day: modeled_slope,
+                                    soil_texture: z.soil_texture,
+                                    species: z.species,
+                                    root_depth_mm_override: z.root_depth_mm,
+                                },
+                            );
+                            // Backout is consulted only when drift did not
+                            // flag the zone this report.
+                            let backout = if matches!(drift, CheckOutcome::Recommend(_)) {
+                                None
+                            } else {
+                                Some(tuning::check_precip_backout(slug, &backout_inputs))
+                            };
+                            (drift, backout)
+                        }
+                    };
+                let has_data = !readings.is_empty();
+                (Some(drift), backout, has_data)
+            }
+            _ => (None, None, false),
+        };
+
+        let outcomes = ZoneCheckOutcomes {
+            cap,
+            interval,
+            drift,
+            backout,
+        };
+        // Balance provenance: one line per term (value + source rung +
+        // window; the specific insufficiency when a rung was skipped).
+        let mut balance_lines: Vec<String> = budget
+            .map(|b| {
+                let upsell =
+                    is_us_install && !matches!(b.observed_rain_source.as_str(), "gauge" | "radar");
+                // The household's units: this panel is assembled here,
+                // where a per-device override is not knowable, so it
+                // follows the deployment setting rather than showing
+                // every metric household inches.
+                let rain_mm = cfg.deployment.units == crate::config::schema::Units::Metric;
+                tuning::balance_term_lines(b, upsell, rain_mm)
+            })
+            .unwrap_or_default();
+        // The soil-vs-weekly comparison, on every zone the weekly plan
+        // governs whose row carries a shadow bucket: what the soil model
+        // would have done this morning against what the weekly plan did.
+        // Soil-governed zones skip it (the soil plan IS the plan there),
+        // and zones with no bucket have nothing to compare. The line
+        // rides `lines` either way; a DIVERGENT line starts with "The
+        // soil model would ", the prefix the zone Tuning panel surfaces
+        // beside the lead instead of filing the one line that sells the
+        // opt-in decision behind the Data-notes disclosure. Agreement
+        // stays a quiet note.
+        if let Some(b) = budget {
+            if !soil_governed && b.soil_depletion_mm.is_some() {
+                let (line, _diverges) =
+                    tuning::soil_comparison_line(b.soil_planned_seconds, b.today_seconds);
+                balance_lines.push(line);
+            }
+        }
+        // Operator silencing for THIS zone, handed into the ranked pick:
+        // a silenced suggestion is skipped (and annotated) while the
+        // next-ranked one still surfaces.
+        let zone_silenced: Vec<tuning::SilencedRec> = dismissals
+            .iter()
+            .filter(|d| d.zone_slug == runtime_slug)
+            .map(|d| tuning::SilencedRec {
+                field: d.field.clone(),
+                rec_id: d.rec_id.clone(),
+                kind: d.kind.clone(),
+                until_epoch: d.until_epoch,
+            })
+            .collect();
+        let mut zt = tuning::assemble_zone(
+            slug,
+            &z.display_name,
+            days,
+            run_day_count,
+            run_day_count > 0 || has_probe_data,
+            match binding {
+                BindingKind::None => SoilBinding::None,
+                BindingKind::Source(..) => SoilBinding::SourceChannel,
+                BindingKind::Ha => SoilBinding::HaEntity,
+            },
+            &outcomes,
+            &balance_lines,
+            &zone_silenced,
+            now,
+            crate::timeutil::deployment_calendar(),
+        );
+        // The numeric breakdown rides the surviving recommendation's
+        // evidence so its numbers are auditable in place.
+        if let Some(b) = budget {
+            if let Some(rec) = zt.recommendation.as_mut() {
+                rec.evidence.push(tuning::balance_breakdown_line(b));
+            }
+        }
+        zones.push(zt);
+    }
+
+    Ok(TuningReport {
+        generated_epoch: now,
+        window_days: days,
+        zones,
+        scorecard,
+    })
+}
+
+/// The hypothetical SESSION-DAY zone list the raised-cap window test
+/// prices: the raised zone at `needed_seconds`, and every idle sibling
+/// (planned_run_seconds == 0: rain-deferred, interval-spaced, or
+/// budget-covered TODAY) at its own session-day run length, the
+/// allocator's session clamped to that zone's cap. Pricing today's zeros
+/// literally would make the verdict (and the recommendation id) flip
+/// with the day the report is generated, and the "finishes before
+/// sunrise" evidence would describe a quiet morning instead of the
+/// co-run session the raise actually has to fit. A sibling with no
+/// budget row keeps its current planned seconds.
+fn raised_session_day_zones(
+    policy: &crate::refresher::WateringPolicy,
+    zones: &[crate::model::ZoneState],
+    budgets: &[crate::model::WaterBudget],
+    runtime_slug: &str,
+    needed_seconds: u32,
+) -> Vec<crate::model::ZoneState> {
+    let norm = |slug: &str| slug.replace('-', "_");
+    zones
+        .iter()
+        .map(|z| {
+            let mut z = z.clone();
+            if norm(&z.slug) == runtime_slug {
+                z.planned_run_seconds = needed_seconds;
+            } else if z.planned_run_seconds == 0 {
+                if let Some(b) = budgets.iter().find(|b| norm(&b.zone_slug) == norm(&z.slug)) {
+                    // The allocator's session_final: pre-cap session
+                    // seconds clamped to this zone's own effective cap.
+                    let cap = z
+                        .math
+                        .as_ref()
+                        .map(|m| m.max_duration_seconds)
+                        .unwrap_or_else(|| {
+                            policy
+                                .zone_runtime
+                                .get(&norm(&z.slug))
+                                .copied()
+                                .unwrap_or_else(crate::refresher::ZoneRuntime::fallback)
+                                .max_duration_s
+                        });
+                    // Price the hypothetical morning the way the morning is
+                    // actually dispatched: through the seasonal dial, then
+                    // the zone's ceiling. Without the dial this asked
+                    // "does the RAW plan fit the window" while the engine
+                    // dispatches the scaled one, so on any yard running a
+                    // dial below 100% the report called a raise unfittable
+                    // that the window had room for.
+                    z.planned_run_seconds = crate::engine::sizing::seasonal_capped(
+                        b.seconds_per_session,
+                        policy.seasonal_adjust_pct,
+                        cap,
+                    );
+                }
+            }
+            z
+        })
+        .collect()
+}
+
+/// Would the smart morning still fit its dispatch window with this
+/// zone's run raised to `needed_seconds`? Rebuilds the hypothetical
+/// session-day zone list (raised_session_day_zones), lays it out with
+/// scheduler::smart_morning::sequence_wall_seconds under the SAME policy
+/// knobs the dispatcher reads (agronomy, soak, interleave), and compares
+/// against engine::sunrise::smart_morning_available_s, the dispatcher's
+/// own overshoot arithmetic. None when an input is missing (zone absent
+/// from the snapshot, polar latitudes): the recommendation proceeds and
+/// the window line is simply omitted from its evidence.
+#[allow(clippy::too_many_arguments)]
+fn raised_sequence_fits_window(
+    policy: &crate::refresher::WateringPolicy,
+    zones: &[crate::model::ZoneState],
+    budgets: &[crate::model::WaterBudget],
+    runtime_slug: &str,
+    needed_seconds: u32,
+    today: NaiveDate,
+    lat: f64,
+    lon: f64,
+    cal: crate::engine::calendar::Calendar,
+) -> Option<bool> {
+    if !zones
+        .iter()
+        .any(|z| z.slug.replace('-', "_") == runtime_slug)
+    {
+        return None;
+    }
+    let hypothetical =
+        raised_session_day_zones(policy, zones, budgets, runtime_slug, needed_seconds);
+    let seq = crate::scheduler::smart_morning::sequence_wall_seconds(
+        &policy.zone_agronomy,
+        &hypothetical,
+        policy.soak_minutes,
+        policy.interleave_cycles,
+        policy.duration_quantum_s,
+    );
+    let available = crate::engine::sunrise::smart_morning_available_s(today, lat, lon, seq, cal)?;
+    Some(seq as i64 <= available)
+}
+
+// Operator silencing happens INSIDE engine::tuning::assemble_zone's
+// ranked pick (a silenced suggestion is skipped and the next-ranked one
+// surfaces); this file only converts the persisted DismissalRows into
+// the engine's SilencedRec shape per zone.
+
+// Watering evidence: the ONE shared definition lives in
+// crate::history::rollup (re-exported through engine::tuning as
+// `is_watering_evidence`, imported above), so the report, the balance's
+// applied term, and the history surfaces can never disagree on what
+// counts as watering.
+
+/// Mean daily crop ET over the forward forecast window for one zone.
+fn zone_mean_daily_etc(z: &ZoneConfig, day_terms: &[(f64, f64, u16)], lat: f64) -> Option<f64> {
+    if day_terms.is_empty() {
+        return None;
+    }
+    let sum: f64 = day_terms
+        .iter()
+        .map(|(et0, heat, doy)| {
+            // ALWAYS the latitude-aware Kc so Southern Hemisphere installs
+            // read their season, not the calendar's.
+            let kc = crate::engine::kc_at_doy_lat(z.species, *doy, lat);
+            crate::engine::etc_mm(*et0, kc, *heat)
+        })
+        .sum();
+    let mean = sum / day_terms.len() as f64;
+    (mean > 0.0).then_some(mean)
+}
+
+enum BindingKind {
+    None,
+    Source(String, String),
+    Ha,
+}
+
+fn classify_binding(spec: Option<&str>) -> BindingKind {
+    match spec {
+        None => BindingKind::None,
+        Some(s) => match s.strip_prefix("source:").and_then(|r| r.split_once(':')) {
+            Some((sid, key)) => BindingKind::Source(sid.to_string(), key.to_string()),
+            // `ha:<entity>` and bare legacy specs read live HA state only;
+            // there is no local history for them.
+            None => BindingKind::Ha,
+        },
+    }
+}
+
+/// Install-wide forecast-skip scorecard: reduce verdict transitions to
+/// the morning verdict per configured-tz day (the accuracy_window
+/// grouping), recover the rule id (DecisionTrace.reason_code when
+/// present, else classify_reason_code), and hand engine::tuning the
+/// window-aware confirmation.
+async fn build_scorecard(
+    conn: &Arc<Mutex<Connection>>,
+    obs_by_date: &BTreeMap<NaiveDate, (f64, f64)>,
+    today: NaiveDate,
+    now: i64,
+) -> TuningScorecard {
+    let from = now - (tuning::SCORECARD_WINDOW_DAYS as i64) * 86_400;
+    let decisions = match crate::persistence::VerdictHistoryStore::new(conn.clone())
+        .window(from, now + 1)
+        .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            .map(crate::history::types::DecisionRecord::from)
+            .collect::<Vec<_>>(),
+        Err(e) => {
+            tracing::warn!(error = %e, "tuning scorecard: decisions read failed");
+            Vec::new()
+        }
+    };
+    let mut by_day: BTreeMap<NaiveDate, (i64, SkipDayRecord)> = BTreeMap::new();
+    for d in decisions {
+        let Some(date) = crate::timeutil::local_date(d.epoch) else {
+            continue;
+        };
+        let code = d
+            .trace
+            .as_ref()
+            .map(|t| t.reason_code.clone())
+            .filter(|c| !c.is_empty())
+            .unwrap_or_else(|| classify_reason_code(&d.verdict, &d.reason));
+        let rec = SkipDayRecord {
+            date,
+            verdict: d.verdict,
+            reason_code: code,
+        };
+        by_day
+            .entry(date)
+            .and_modify(|cur| {
+                if d.epoch < cur.0 {
+                    *cur = (d.epoch, rec.clone());
+                }
+            })
+            .or_insert((d.epoch, rec));
+    }
+    let days: Vec<SkipDayRecord> = by_day.into_values().map(|(_, r)| r).collect();
+    // Yesterday is the most recent day whose observed total is final;
+    // today's is a partial accumulation until local midnight.
+    let last_complete_day = today.pred_opt().unwrap_or(today);
+    tuning::score_forecast_skips(
+        &days,
+        obs_by_date,
+        last_complete_day,
+        tuning::SCORECARD_WINDOW_DAYS,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ZoneState;
+
+    fn one_zone_policy() -> crate::refresher::WateringPolicy {
+        let mut cfg = Config::default();
+        cfg.zones.insert(
+            "front".into(),
+            serde_json::from_value(serde_json::json!({
+                "display_name": "Front",
+                "area_sqft": 1000.0,
+                "species": "bermuda",
+                "soil_texture": "sandy_loam",
+                "sprinkler_type": "spray",
+                "precip_rate_mm_hr": 25.4,
+                "precip_rate_source": "measured",
+                "controller_id": "os_main",
+                "controller_station": "1"
+            }))
+            .unwrap(),
+        );
+        crate::refresher::WateringPolicy::from_config(&cfg)
+    }
+
+    /// The window fit prices the hypothetical morning through the
+    /// seasonal dial, because that is what the dispatcher runs. A yard
+    /// dialled down to 50% has half the morning it would have at 100%, so
+    /// a plan that overshoots at full strength can fit once the dial is
+    /// applied. Before this, the report asked the question against the
+    /// raw plan and told those yards a raise would not fit when it would.
+    #[test]
+    fn raised_fit_prices_the_morning_at_the_seasonal_dial() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 5, 26).unwrap();
+        // Size the fixture against the window the fit will actually
+        // measure, on the SAME pinned calendar it is given. The window
+        // runs local midnight to sunrise, so a hand-picked number of
+        // seconds only holds in one timezone; taking fractions of the
+        // real window holds everywhere. The raised zone takes 35% of it
+        // and its sibling 80%, so the pair overruns at full strength and
+        // fits once the dial halves the sibling.
+        const PROBE_S: u64 = 2 * 86_400;
+        let cal = crate::engine::calendar::Calendar::utc();
+        let window =
+            crate::engine::sunrise::smart_morning_available_s(today, 28.5, -81.4, PROBE_S, cal)
+                .expect("a representable morning") as u32;
+        let raise_s = (window as f64 * 0.35) as u32;
+        let sibling_s = (window as f64 * 0.80) as u32;
+
+        // The same yard twice, differing only in the dial. The run cap is
+        // set well past the window so it never binds and the dial is the
+        // only thing moving.
+        let mut cfg = Config::default();
+        for slug in ["front", "back"] {
+            cfg.zones.insert(
+                slug.into(),
+                serde_json::from_value(serde_json::json!({
+                    "display_name": "Z",
+                    "area_sqft": 1000.0,
+                    "species": "bermuda",
+                    "soil_texture": "sandy_loam",
+                    "sprinkler_type": "spray",
+                    "precip_rate_mm_hr": 25.4,
+                    "precip_rate_source": "measured",
+                    "controller_id": "os_main",
+                    "controller_station": "1",
+                    "max_run_minutes": 720
+                }))
+                .unwrap(),
+            );
+        }
+        let full = crate::refresher::WateringPolicy::from_config(&cfg);
+        cfg.engine.seasonal_adjust_pct = 50;
+        let halved = crate::refresher::WateringPolicy::from_config(&cfg);
+
+        // The RAISED zone is priced at the operator's proposed seconds, so
+        // the dial shows up through the zone beside it: the rest of the
+        // morning is what scales.
+        let zones = vec![
+            ZoneState {
+                slug: "front".into(),
+                planned_run_seconds: 1200,
+                ..Default::default()
+            },
+            // Planned zero: the pricing path fills this zone in from its
+            // budget row, which is where the dial applies.
+            ZoneState {
+                slug: "back".into(),
+                planned_run_seconds: 0,
+                ..Default::default()
+            },
+        ];
+        let budgets = vec![crate::model::WaterBudget {
+            zone_slug: "back".into(),
+            seconds_per_session: sibling_s,
+            ..Default::default()
+        }];
+        let at_full = raised_sequence_fits_window(
+            &full,
+            &zones,
+            &budgets,
+            "front",
+            raise_s,
+            today,
+            28.5,
+            -81.4,
+            crate::engine::calendar::Calendar::utc(),
+        );
+        let at_half = raised_sequence_fits_window(
+            &halved,
+            &zones,
+            &budgets,
+            "front",
+            raise_s,
+            today,
+            28.5,
+            -81.4,
+            crate::engine::calendar::Calendar::utc(),
+        );
+        assert_eq!(
+            at_full,
+            Some(false),
+            "at full strength the morning overruns ({raise_s} + {sibling_s} vs {window})"
+        );
+        assert_eq!(
+            at_half,
+            Some(true),
+            "the dial halves what dispatches, so the same raise fits"
+        );
+    }
+
+    #[test]
+    fn raised_fit_composes_the_dispatcher_window_math() {
+        let policy = one_zone_policy();
+        let zones = vec![ZoneState {
+            slug: "front".into(),
+            planned_run_seconds: 1200,
+            ..Default::default()
+        }];
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 5, 26).unwrap();
+        // A 90 minute run at a mid latitude fits the midnight..sunrise span.
+        let fits = raised_sequence_fits_window(
+            &policy,
+            &zones,
+            &[],
+            "front",
+            5400,
+            today,
+            28.5,
+            -81.4,
+            crate::engine::calendar::Calendar::utc(),
+        );
+        assert_eq!(fits, Some(true), "a 90 min morning fits before sunrise");
+        // A 20 hour run cannot; the same composition reports the overshoot.
+        let no_fit = raised_sequence_fits_window(
+            &policy,
+            &zones,
+            &[],
+            "front",
+            72_000,
+            today,
+            28.5,
+            -81.4,
+            crate::engine::calendar::Calendar::utc(),
+        );
+        assert_eq!(no_fit, Some(false), "a 20 h plan overshoots the window");
+        // A zone missing from the snapshot yields None (line omitted),
+        // never a fabricated verdict.
+        let unknown = raised_sequence_fits_window(
+            &policy,
+            &zones,
+            &[],
+            "ghost",
+            5400,
+            today,
+            28.5,
+            -81.4,
+            crate::engine::calendar::Calendar::utc(),
+        );
+        assert_eq!(unknown, None);
+        // Polar latitudes have no sunrise on this date: also None.
+        let polar = raised_sequence_fits_window(
+            &policy,
+            &zones,
+            &[],
+            "front",
+            5400,
+            chrono::NaiveDate::from_ymd_opt(2026, 6, 21).unwrap(),
+            80.0,
+            0.0,
+            crate::engine::calendar::Calendar::utc(),
+        );
+        assert_eq!(polar, None);
+    }
+
+    fn two_zone_policy() -> crate::refresher::WateringPolicy {
+        let mut cfg = Config::default();
+        for slug in ["front", "side"] {
+            cfg.zones.insert(
+                slug.into(),
+                serde_json::from_value(serde_json::json!({
+                    "display_name": slug,
+                    "area_sqft": 1000.0,
+                    "species": "bermuda",
+                    "soil_texture": "sandy_loam",
+                    "sprinkler_type": "spray",
+                    "precip_rate_mm_hr": 25.4,
+                    "precip_rate_source": "measured",
+                    "controller_id": "os_main",
+                    "controller_station": "1"
+                }))
+                .unwrap(),
+            );
+        }
+        crate::refresher::WateringPolicy::from_config(&cfg)
+    }
+
+    #[test]
+    fn raised_fit_prices_idle_siblings_at_their_session_length() {
+        use crate::model::WaterBudget;
+        let policy = two_zone_policy();
+        // Rain-defer day: the sibling's planned seconds are zero, but its
+        // budget row carries the session it runs on a session day.
+        let defer_day = vec![
+            ZoneState {
+                slug: "front".into(),
+                planned_run_seconds: 1200,
+                ..Default::default()
+            },
+            ZoneState {
+                slug: "side".into(),
+                planned_run_seconds: 0,
+                ..Default::default()
+            },
+        ];
+        let budgets = vec![WaterBudget {
+            zone_slug: "side".into(),
+            seconds_per_session: 30_000,
+            ..Default::default()
+        }];
+        let hyp = raised_session_day_zones(&policy, &defer_day, &budgets, "front", 5400);
+        assert_eq!(
+            hyp[0].planned_run_seconds, 5400,
+            "raised zone at the needed run"
+        );
+        assert_eq!(
+            hyp[1].planned_run_seconds, 3600,
+            "idle sibling priced at its session clamped to its own 60 min cap"
+        );
+        // No budget row: the sibling keeps its current planned seconds.
+        let hyp = raised_session_day_zones(&policy, &defer_day, &[], "front", 5400);
+        assert_eq!(hyp[1].planned_run_seconds, 0);
+        // A sibling already planned today is left alone.
+        let session_day = vec![
+            ZoneState {
+                slug: "front".into(),
+                planned_run_seconds: 1200,
+                ..Default::default()
+            },
+            ZoneState {
+                slug: "side".into(),
+                planned_run_seconds: 3600,
+                ..Default::default()
+            },
+        ];
+        let hyp = raised_session_day_zones(&policy, &session_day, &budgets, "front", 5400);
+        assert_eq!(hyp[1].planned_run_seconds, 3600);
+
+        // The composed verdict is day-independent: the deferred sibling
+        // (priced from its budget row) and the session-day sibling yield
+        // the same fit for the same raise.
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 5, 26).unwrap();
+        let on_defer = raised_sequence_fits_window(
+            &policy,
+            &defer_day,
+            &budgets,
+            "front",
+            5400,
+            today,
+            28.5,
+            -81.4,
+            crate::engine::calendar::Calendar::utc(),
+        );
+        let on_session = raised_sequence_fits_window(
+            &policy,
+            &session_day,
+            &budgets,
+            "front",
+            5400,
+            today,
+            28.5,
+            -81.4,
+            crate::engine::calendar::Calendar::utc(),
+        );
+        assert_eq!(
+            on_defer, on_session,
+            "the window verdict must not depend on the day the report is generated"
+        );
+    }
+}

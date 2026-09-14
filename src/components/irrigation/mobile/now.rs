@@ -11,8 +11,8 @@ use crate::components::irrigation::controls::{OverrideControl, StopAllPanel};
 use crate::components::irrigation::forecast::ForecastPanel;
 use crate::components::irrigation::hero::NextRunHero;
 use crate::components::zones::tuning::{recommendation_count, TuningStrip};
-use crate::ha::snapshot::IrrigationSnapshot;
 use crate::history::types::TuningReport;
+use crate::model::IrrigationSnapshot;
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
 

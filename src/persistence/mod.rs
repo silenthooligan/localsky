@@ -8,7 +8,7 @@
 //
 // Future modules (Phase 4B+):
 //   pool.rs            - Connection wrapper (spawn_blocking entrypoints)
-//   runs.rs            - run history CRUD; replaces history/db.rs
+//   runs.rs            - run history CRUD
 //   sensor_history.rs  - generic source/field/value time series
 //   verdict_history.rs - daily decision log with inputs_json for replay
 //   push_subscriptions.rs - moved from src/push/store.rs
@@ -16,15 +16,18 @@
 
 pub mod active_runs;
 pub mod config_snapshots;
+pub mod daily_irrigation;
 pub mod forecast_observations;
+pub mod history_db;
 pub mod irrigation_control;
+pub(crate) mod restore_probe;
 pub mod runner;
 pub mod runs;
 pub mod sensor_history;
+pub mod soil_decisions;
 pub mod tuning_dismissals;
 pub mod tuning_report;
 pub mod verdict_history;
-pub mod weather_sampler;
 
 pub use active_runs::{ActiveRun, ActiveRunsError, ActiveRunsStore};
 pub use config_snapshots::ConfigSnapshotStore;
@@ -32,7 +35,8 @@ pub use forecast_observations::{
     Et0LedgerDay, ForecastObservationsError, ForecastObservationsStore, ObservedRainDay,
     ObservedRainWindow,
 };
-pub use irrigation_control::{IrrigationControlState, IrrigationControlStore};
+pub use history_db::HistoryDb;
+pub use irrigation_control::IrrigationControlStore;
 pub use runner::{run as run_migrations, Migration, MigrationError, MIGRATIONS};
 pub use runs::{NewRun, RunRow, RunsError, RunsStore};
 pub use sensor_history::{Reading, SensorHistoryError, SensorHistoryStore};
@@ -42,4 +46,5 @@ pub use tuning_dismissals::{
 };
 pub use tuning_report::{TuningReportStateError, TuningReportStateStore};
 pub use verdict_history::{NewVerdict, VerdictHistoryError, VerdictHistoryStore, VerdictRow};
-pub use weather_sampler::spawn_weather_sampler;
+
+pub mod watering_commands;

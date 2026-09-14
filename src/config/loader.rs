@@ -41,17 +41,11 @@ pub fn load_from_path(path: &Path) -> Result<Config, LoadError> {
     Ok(cfg)
 }
 
-/// One-time value normalizations for fields whose persisted value was
-/// never operator intent. Applied on every load (the next save persists
-/// the normalized value), so upgrades cannot silently regress behavior.
-///
-/// Open-Meteo `past_days == 1` rewrites to 3: before 1.21.0 the fetch
-/// HARDCODED 3 past days and ignored this field entirely, while the old
-/// serde default and both UI templates stamped an explicit 1 into nearly
-/// every persisted config. Honoring the field as-written would therefore
-/// drop those installs from a 3-day model archive to 1 on upgrade. A
-/// stored 1 was never a value anyone chose against observed behavior;
-/// any other value (2..7, or a clamped-out-of-band one) is left alone.
+/// Hardening for hand-edited values, applied on every load so one stale
+/// value on disk cannot refuse every unrelated save. These are idempotent
+/// clamps, not migrations: a rewrite that should happen exactly once
+/// belongs in `config::migrate`, recorded in the ledger (Open-Meteo
+/// `past_days` moved there in 0.9.0).
 ///
 /// `sessions_per_week` outside 1..=7 clamps into range. Nothing
 /// constrained the field before 0.7.22, so a hand-edited config can carry
@@ -70,14 +64,6 @@ pub fn load_from_path(path: &Path) -> Result<Config, LoadError> {
 /// reason (its `zone_rain_credit_cap_range` error gates whole-config
 /// writes); a non-finite value drops to None, the derived cap.
 pub fn normalize_legacy_values(cfg: &mut Config) {
-    use crate::config::schema::SourceKind;
-    for src in cfg.sources.iter_mut() {
-        if let SourceKind::OpenMeteo(c) = &mut src.source {
-            if c.past_days == 1 {
-                c.past_days = 3;
-            }
-        }
-    }
     for (slug, z) in cfg.zones.iter_mut() {
         if let Some(n) = z.sessions_per_week {
             if !(1..=7).contains(&n) {
@@ -514,6 +500,11 @@ mod tests {
                 controller: crate::config::schema::ControllerKind::DryRun(Default::default()),
             });
         for (slug, sessions) in [("front", 8u32), ("back", 0), ("side", 3)] {
+            let station = match slug {
+                "front" => "1",
+                "back" => "2",
+                _ => "3",
+            };
             cfg.zones.insert(
                 slug.into(),
                 serde_json::from_value(serde_json::json!({
@@ -523,7 +514,9 @@ mod tests {
                     "soil_texture": "sandy_loam",
                     "sprinkler_type": "rotor",
                     "controller_id": "c1",
-                    "controller_station": "1",
+                    // Each zone its own station: two zones on one station is now
+                    // a validator error of its own.
+                    "controller_station": station,
                     "sessions_per_week": sessions,
                 }))
                 .unwrap(),
@@ -726,41 +719,6 @@ mod tests {
         assert!(matches!(err, LoadError::Validation(_)));
     }
 
-    /// The legacy Open-Meteo past_days: an explicit 1 (the never-honored
-    /// old default every template stamped) normalizes to the 3 the fetch
-    /// always effectively used; any other explicit value is operator
-    /// intent and stays.
-    #[test]
-    fn normalize_rewrites_legacy_open_meteo_past_days() {
-        use crate::config::schema::{OpenMeteoConfig, SourceEntry, SourceKind};
-        let om = |past_days: u32| SourceEntry {
-            id: "open_meteo".into(),
-            priority: 50,
-            max_age_s: None,
-            enabled: true,
-            source: SourceKind::OpenMeteo(OpenMeteoConfig {
-                forecast_days: 7,
-                forecast_hours: 48,
-                past_days,
-                include_radar: true,
-                model: "best_match".into(),
-                endpoint: None,
-            }),
-        };
-        let mut cfg = Config::default();
-        cfg.sources.push(om(1));
-        cfg.sources.push(om(5));
-        normalize_legacy_values(&mut cfg);
-        let days: Vec<u32> = cfg
-            .sources
-            .iter()
-            .map(|s| match &s.source {
-                SourceKind::OpenMeteo(c) => c.past_days,
-                _ => 0,
-            })
-            .collect();
-        assert_eq!(days, vec![3, 5], "1 normalizes to 3; a chosen 5 stays");
-    }
     // ---- controller_station backfill (issue #8) ----
 
     /// A zone whose only distinguishing fields are its controller binding.

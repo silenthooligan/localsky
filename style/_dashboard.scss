@@ -1,0 +1,440 @@
+@use "mixins" as *;
+
+// the weather route: grid and hero
+//
+// Split out of main.scss, which had grown to 11,330 lines.
+// Load order is the cascade: see the @use list in main.scss.
+
+// ─────────────────────────────────────────────────────────────────────
+// Weather dashboard grid (v3)
+//
+// Narrow: a plain stacked flex column (vertical scroll expected).
+// Wide (>=1440px): an area grid -- hero + wind + lightning across the top row,
+//   the four compact metric cards (rain / humidity / pressure / sun) across the
+//   second row, and the radar spanning the full-width bottom.
+// Ultrawide (>=2000px): the grid locks to the viewport height so the whole
+//   dashboard shows without scrolling; the radar absorbs the leftover height
+//   and the forecast strips (.weather-extra) sit just below the fold.
+// Panels are placed by their own root class via grid-template-areas.
+// ─────────────────────────────────────────────────────────────────────
+.weather-grid {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.weather-grid > * {
+  min-width: 0;
+}
+.weather-extra {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+@media (min-width: 1440px) {
+  .weather-grid {
+    display: grid;
+    // Four metric columns on the left + a wide radar column on the right that
+    // spans every row, so the radar stays a tall side panel (the right way to
+    // read a map) while the metrics + forecast fill the rest.
+    grid-template-columns: repeat(4, 1fr) 2.2fr;
+    grid-template-rows: minmax(280px, auto) auto auto;
+    grid-template-areas:
+      "hero hero wind lightning radar"
+      "rain humidity pressure sun  radar"
+      "extra extra extra extra     radar";
+    gap: var(--space-4);
+  }
+  .weather-grid > .hero {
+    grid-area: hero;
+  }
+  .weather-grid > .wind {
+    grid-area: wind;
+  }
+  .weather-grid > .lightning {
+    grid-area: lightning;
+  }
+  .weather-grid > .rain {
+    grid-area: rain;
+  }
+  .weather-grid > .humidity {
+    grid-area: humidity;
+  }
+  .weather-grid > .pressure {
+    grid-area: pressure;
+  }
+  .weather-grid > .solar {
+    grid-area: sun;
+  }
+  .weather-grid > .radar {
+    grid-area: radar;
+    margin-top: 0;
+  }
+  .weather-grid > .weather-extra {
+    grid-area: extra;
+    min-height: 0;
+  }
+  // Every cell's card fills its grid area.
+  .weather-grid > .panel,
+  .weather-grid > .hero,
+  .weather-grid > .radar {
+    height: 100%;
+    min-height: 0;
+  }
+  // The radar map fills its full-height side column instead of a fixed 480px.
+  .weather-grid > .radar,
+  .weather-grid > .radar > .radar-panel,
+  .weather-grid > .radar .radar-map-shell {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    flex: 1;
+  }
+  .weather-grid > .radar .radar-map {
+    flex: 1;
+    height: auto;
+    min-height: 240px;
+  }
+  // Top-row cards center their content vertically so the taller hero row reads
+  // as intentional instead of top-loaded with empty space beneath.
+  .weather-grid > .hero,
+  .weather-grid > .wind,
+  .weather-grid > .lightning {
+    justify-content: center;
+  }
+}
+
+// The radar spans all three grid rows, so its height equals the left column's
+// content height automatically -- its bottom edge lines up with the bottom of
+// the forecast strips. (We deliberately do NOT force the grid to 100vh: that
+// stretched the radar past the shorter left content. A compact dashboard still
+// fits an ultrawide viewport without scrolling.)
+
+// ─────────────────────────────────────────────────────────────────────
+// Header / brand identity
+// ─────────────────────────────────────────────────────────────────────
+
+.header {
+  position: relative;
+  z-index: var(--z-base);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+// .header-brand renders the LOCALSKY wordmark. "LOCAL" inherits text
+// color (so it flips white/ink across themes); "SKY" pulls the brand
+// blue. Optional .header-brand__mark slot for an inline logomark SVG
+// to the left of the wordmark.
+.header-brand {
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  text-decoration: none;
+
+  &__mark {
+    display: inline-flex;
+    align-items: center;
+    width: 28px;
+    height: 28px;
+    flex-shrink: 0;
+    // Inline SVG inside; let it scale to the parent.
+    > svg, > img { width: 100%; height: 100%; display: block; }
+  }
+  &__local { color: inherit; }
+  &__sky   { color: var(--accent); }
+
+}
+
+.live {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.75rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent-good);
+    box-shadow: 0 0 8px var(--accent-good);
+    animation: pulse-scale 1.6s infinite ease-in-out;
+  }
+}
+
+// The two pulse cycles every live dot shares. Tune per consumer with
+// --pulse-min (the dim/small point) and --pulse-max (the bright point).
+@keyframes pulse-scale {
+  0%, 100% { opacity: var(--pulse-max, 1); transform: scale(1); }
+  50% { opacity: var(--pulse-min, 0.55); transform: scale(0.85); }
+}
+@keyframes pulse-fade {
+  0%, 100% { opacity: var(--pulse-max, 1); }
+  50% { opacity: var(--pulse-min, 0.35); }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Hero: dense data strip (the tier-1 surface for the weather route)
+// ─────────────────────────────────────────────────────────────────────
+//
+// Compose:
+//   .hero (panel + is-tier-1)
+//     ├─ .hero-focal     ← row 1: glyph + temp + condition + callouts
+//     └─ .hero-strip     ← row 2: telemetry stats, single horizontal line
+//
+// Target footprint: ~140px tall on desktop, ~180px on mobile (2 rows
+// for the strip). No internal dead space.
+
+.hero {
+  // Hero IS a tier-1 panel, extends the .panel base, so we inherit
+  // the glass surface and the brand gradient accent stripe.
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+}
+
+// Row 1: focal info. Grid columns: glyph (auto), headline (1fr), callouts (auto).
+.hero-focal {
+  // Cluster glyph + temp + condition + feels/UV together so the secondary
+  // stats sit right beside the headline -- not banished to the far right edge
+  // (the old `auto 1fr auto` grid pushed feels/UV off where you couldn't see
+  // them). A trailing auto-margin keeps any extra width on the right, empty.
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3) var(--space-5);
+}
+
+.hero-glyph {
+  font-size: clamp(2.5rem, 5vw, 3.5rem);
+  line-height: 1;
+  filter: drop-shadow(0 2px 8px color-mix(in oklab, currentColor 30%, transparent));
+}
+
+.hero-headline {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;       // allow ellipsis on overflow
+}
+
+.hero-temp {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: var(--text-display);
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-tight);
+  color: var(--text-bright);
+  text-shadow: 0 0 30px color-mix(in oklab, var(--accent) 18%, transparent);
+}
+
+.hero-condition {
+  font-family: var(--font-mono);
+  font-size: var(--text-meta);
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+// Provenance chip on the hero headline: "via {source}". A SOURCE-identity
+// micro-link that deep-links to the data-sources page so the reading's origin
+// is legible at the point of consumption. Entity-source tinting + a quiet
+// dashed underline on hover give it the same affordance grammar as the other
+// in-context provenance links (rain-block-config-link), without shouting over
+// the temperature. The component sets layout via inline style; this rule owns
+// the identity + interaction states (which inline style cannot express).
+.hero-source {
+  width: fit-content;
+  align-self: start;
+  color: var(--text-dim);
+  text-decoration: none;
+  border-bottom: 1px dashed transparent;
+  transition: color var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out);
+
+  &:hover,
+  &:focus-visible {
+    color: var(--entity-source);
+    border-bottom-color: color-mix(in oklab, var(--entity-source) 50%, transparent);
+    outline: none;
+  }
+  &:focus-visible {
+    @include focus-ring(2px);
+  }
+}
+
+.hero-callouts {
+  // Sit inline beside the headline (feels · UV), readable, not a far-right
+  // column. The leading auto-margin pushes them a touch off the condition while
+  // staying clearly visible within the focal cluster.
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2) var(--space-5);
+  font-family: var(--font-mono);
+  font-size: var(--text-body);
+}
+
+.hero-callout {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  &__k {
+    color: var(--text-faint);
+    text-transform: uppercase;
+    font-size: var(--text-micro);
+    letter-spacing: var(--tracking-eyebrow);
+  }
+  &__v {
+    color: var(--text);
+    font-weight: 700;
+  }
+}
+
+// Row 2: telemetry strip. Inline-flex with wrap; each .hero-stat is a
+// {k}{v} pair. Separators between stats render as a thin vertical bar
+// using a border on the right of every item but the last.
+.hero-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  // Even, readable spacing between the six stats so they don't crowd.
+  gap: var(--space-3) var(--space-6);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: var(--text-body);
+  font-variant-numeric: tabular-nums;
+}
+
+// Mobile: stack callouts under the headline; strip wraps freely.
+@media (max-width: 600px) {
+  .hero-focal {
+    grid-template-columns: auto 1fr;
+  }
+  .hero-callouts {
+    grid-column: 1 / -1;
+    flex-direction: row;
+    text-align: left;
+    justify-content: space-between;
+    margin-top: 0;
+  }
+  .hero-temp {
+    font-size: clamp(2.5rem, 12vw, 3.5rem);
+  }
+}
+
+// ---------------- Grid + Panels ----------------
+
+.grid {
+  display: grid;
+  gap: var(--space-4);
+  // FIXED column count (not auto-fit) so a short last row never stretches its
+  // cards full-width -- six panels read as an even 3x2 (then 2-col, then 1-col)
+  // grid where every card is the same width AND height, keeping each value
+  // right next to its label instead of marooned across a stretched card.
+  grid-template-columns: repeat(3, 1fr);
+  grid-auto-rows: 1fr;
+  align-items: stretch;
+}
+@media (max-width: 1100px) {
+  .grid { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 620px) {
+  .grid { grid-template-columns: 1fr; }
+}
+.grid > .panel {
+  justify-content: center;
+}
+
+// Secondary stats inside a panel (e.g. dew point / wet bulb under humidity).
+.panel-substats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-5);
+}
+
+// Liquid Glass panels. Translucent fill over the aurora backdrop, gentle
+// saturation bump so the colors behind read through. The ::before is a
+// faint specular highlight at the top edge, the kind of thing iOS 26's
+// Liquid Glass does to ground glass surfaces in light. Not animated; if
+// it moved it would feel cheap.
+.panel {
+  position: relative;
+  @include surface($background: (var(--glass-bg)), $border: (1px solid var(--glass-border)), $shadow: (var(--shadow),
+    var(--specular)));
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+
+  padding: 1.25rem 1.35rem 1.4rem;
+
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+.panel::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 60%;
+  background: radial-gradient(
+    ellipse at 50% 0%,
+    rgba(255, 255, 255, 0.06),
+    transparent 70%
+  );
+  pointer-events: none;
+  z-index: -1;
+}
+
+// Browsers without backdrop-filter (mostly older mobile WebView) get a
+// solid panel that still reads correctly. Detect via @supports.
+@supports not (backdrop-filter: blur(1px)) {
+  .panel {
+    background: var(--bg-panel);
+  }
+}
+
+// Brand anchor on the weather metric cards: a small gradient tick before the
+// title. Scoped to .weather-grid so it never reaches other .panel-title uses.
+.weather-grid .panel-title {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+.weather-grid .panel-title::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 3px;
+  height: 0.85em;
+  border-radius: 999px;
+  background: var(--grad-flow);
+}
+
+.big-number {
+  font-family: var(--font-mono);
+  font-size: clamp(2rem, 4vw, 2.6rem);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1;
+}
+
+.big-unit {
+  font-size: 0.75em;
+  color: var(--text-dim);
+  margin-left: 0.2em;
+}

@@ -11,15 +11,13 @@
 //
 // Mounted at /api/irrigation/* by api::router.
 
-use crate::config::schema::SkipRuleParams;
 use crate::controllers::registry::ControllerRegistry;
-use crate::ha::rest::HaClient;
-use crate::ha::{IrrigationStore, SnapshotSource};
-use crate::history::db;
+use crate::integrations::home_assistant::rest::HaClient;
 use crate::llm::{AdvisorError, AdvisorState};
-use crate::persistence::runs::{NewRun, RunsStore};
+use crate::persistence::runs::RunsStore;
 use crate::persistence::IrrigationControlStore;
 use crate::ports::irrigation_controller::ControllerError;
+use crate::refresher::{IrrigationStore, SnapshotSource};
 use crate::scheduler::dispatch_gate;
 use axum::{
     extract::{Query, State},
@@ -40,53 +38,28 @@ use tokio::sync::Mutex;
 use tokio_stream::wrappers::WatchStream;
 use tokio_stream::StreamExt;
 
-/// Optional shadow store: when shadow mode is on, the native snapshot
-/// builder writes here each tick (alongside the authoritative HA store) so
-/// it can be compared without ever driving dispatch. Set once at boot.
-static SHADOW_STORE: std::sync::OnceLock<Arc<IrrigationStore>> = std::sync::OnceLock::new();
-
-/// Register the shadow store (called from main at boot when shadow_native).
-pub fn set_shadow_store(s: Arc<IrrigationStore>) {
-    let _ = SHADOW_STORE.set(s);
-}
-
 /// Dispatch plumbing for POST /action zone controls: the controller
-/// registry (hot-swappable; same instance the schedulers use) plus the
-/// runs store for recording manual runs. Set once at boot from main.rs.
-/// Unset (demo mode, or boot before wiring) means the registry route
-/// answers 503 rather than guessing at HA scripts.
-struct DispatchHandles {
-    registry: ControllerRegistry,
-    runs: Option<RunsStore>,
-    /// Deadline ledger (P0-1b): a manual Run arms a persisted shutoff deadline so
-    /// the reaper closes the valve even if this process dies before its timer.
-    active_runs: Option<crate::persistence::ActiveRunsStore>,
+/// registry (hot-swappable; the same instance the schedulers use), the
+/// runs store for recording manual runs, the deadline ledger a manual
+/// Run arms so the reaper closes the valve even if this process dies
+/// before its timer, and the live policy for the zone -> controller
+/// binding. Part of the router's state; absent (demo mode) the zone
+/// actions answer 503 rather than guessing at HA scripts.
+#[derive(Clone)]
+pub struct DispatchState {
+    pub registry: ControllerRegistry,
+    pub runs: Option<RunsStore>,
+    pub active_runs: Option<crate::persistence::ActiveRunsStore>,
+    pub policy: std::sync::Arc<arc_swap::ArcSwap<crate::refresher::WateringPolicy>>,
 }
 
-static DISPATCH: std::sync::OnceLock<DispatchHandles> = std::sync::OnceLock::new();
-
-/// Register the controller registry + runs store + active-run ledger for manual
-/// zone dispatch (called from main at boot).
-pub fn set_dispatch_handles(
-    registry: ControllerRegistry,
-    runs: Option<RunsStore>,
-    active_runs: Option<crate::persistence::ActiveRunsStore>,
-) {
-    let _ = DISPATCH.set(DispatchHandles {
-        registry,
-        runs,
-        active_runs,
-    });
-}
-
-/// Configured engine skip-rule thresholds for the What-If simulator,
-/// from `cfg.engine.skip_rules` (called from main at boot). Unset falls
-/// back to SkipRuleParams::default(), which equals an untouched config.
-static SIM_SKIP_PARAMS: std::sync::OnceLock<SkipRuleParams> = std::sync::OnceLock::new();
-
-/// Register the configured skip params used by POST /simulate.
-pub fn set_sim_skip_params(params: SkipRuleParams) {
-    let _ = SIM_SKIP_PARAMS.set(params);
+/// The What-If simulator's state: the live snapshot for the baseline and
+/// the hot policy handle for the thresholds, so a saved skip-rule change
+/// reaches the simulator with no restart.
+#[derive(Clone)]
+struct SimulateState {
+    store: Arc<IrrigationStore>,
+    policy: Arc<arc_swap::ArcSwap<crate::refresher::WateringPolicy>>,
 }
 
 pub fn router(
@@ -96,7 +69,9 @@ pub fn router(
     source: SnapshotSource,
     sprinkler_prefix: String,
     cfg_store: Arc<crate::config::FileConfigStore>,
-    watering_policy: Arc<arc_swap::ArcSwap<crate::ha::WateringPolicy>>,
+    watering_policy: Arc<arc_swap::ArcSwap<crate::refresher::WateringPolicy>>,
+    dispatch: Option<DispatchState>,
+    tuning: Option<Arc<crate::tuning::TuningHandles>>,
 ) -> Router {
     // POST /action needs the snapshot source, the local control store, and
     // the adoption markers that say where each control's value lives, so it
@@ -110,17 +85,25 @@ pub fn router(
             sprinkler_prefix,
             cfg_store,
             watering_policy,
+            dispatch,
         });
+
+    let simulate_routes =
+        Router::new()
+            .route("/simulate", post(simulate))
+            .with_state(SimulateState {
+                store: store.clone(),
+                policy: watering_policy_for_invite.clone(),
+            });
 
     let read_routes = Router::new()
         .route("/snapshot", get(snapshot))
         .route("/stream", get(stream))
-        .route("/simulate", post(simulate))
-        // Shadow mode: the native (standalone) snapshot built alongside the
-        // HA one for comparison. Empty unless shadow_native is enabled.
+        // DEPRECATED (0.9.0): shadow mode is gone; both answer disabled.
         .route("/shadow/snapshot", get(shadow_snapshot))
         .route("/shadow/diff", get(shadow_diff))
-        .with_state(store.clone());
+        .with_state(store.clone())
+        .merge(simulate_routes);
 
     let advisor_routes = Router::new()
         .route("/explanation", get(explanation))
@@ -147,13 +130,15 @@ pub fn router(
                 store,
                 watering_policy: watering_policy_for_invite,
             });
-        merged.merge(invite_router).merge(
+        let tuning_router = Router::new()
+            .route("/tuning", get(tuning_report))
+            .with_state(tuning);
+        merged.merge(invite_router).merge(tuning_router).merge(
             Router::new()
                 .route("/history", get(history_window))
                 .route("/decisions", get(decisions_window))
                 .route("/export", get(export))
                 .route("/accuracy", get(accuracy))
-                .route("/tuning", get(tuning_report))
                 // Mutating: privileged + CSRF like zones/apply (the auth
                 // middleware lists both paths).
                 .route("/tuning/dismiss", post(tuning_dismiss))
@@ -173,7 +158,7 @@ pub fn router(
 struct SoilInviteApiState {
     history: Arc<Mutex<Connection>>,
     store: Arc<IrrigationStore>,
-    watering_policy: Arc<arc_swap::ArcSwap<crate::ha::WateringPolicy>>,
+    watering_policy: Arc<arc_swap::ArcSwap<crate::refresher::WateringPolicy>>,
 }
 
 /// What the offer names about this yard, derived from the budget rows.
@@ -201,12 +186,12 @@ pub(crate) struct SoilInviteFacts {
 /// evidence lands, so the offer simply waits rather than firing empty.
 pub(crate) fn soil_invite_facts(
     engine_default_weekly: bool,
-    budgets: &[crate::ha::snapshot::WaterBudget],
+    budgets: &[crate::model::WaterBudget],
 ) -> Option<SoilInviteFacts> {
     if !engine_default_weekly {
         return None;
     }
-    let shadow: Vec<&crate::ha::snapshot::WaterBudget> = budgets
+    let shadow: Vec<&crate::model::WaterBudget> = budgets
         .iter()
         .filter(|b| b.scheduling_model == "weekly" && b.soil_depletion_mm.is_some())
         .collect();
@@ -434,8 +419,15 @@ async fn tuning_undismiss(
 /// forecast-skip scorecard. Read-only and unprivileged like the other
 /// history GETs; generation reads the boot-registered tuning handles
 /// (config store + live stores), so the route just carries the days knob.
-async fn tuning_report(Query(q): Query<TuningQuery>) -> impl IntoResponse {
-    match crate::tuning::generate_report(q.days).await {
+async fn tuning_report(
+    State(tuning): State<Option<Arc<crate::tuning::TuningHandles>>>,
+    Query(q): Query<TuningQuery>,
+) -> impl IntoResponse {
+    let report = match tuning.as_deref() {
+        Some(handles) => crate::tuning::generate_report(handles, q.days).await,
+        None => Err(crate::tuning::TuningError::NotConfigured),
+    };
+    match report {
         Ok(report) => (
             StatusCode::OK,
             Json(serde_json::to_value(report).unwrap_or_default()),
@@ -537,59 +529,20 @@ async fn anomalies(State(state): State<AdvisorRouterState>) -> impl IntoResponse
 
 async fn snapshot(
     State(store): State<Arc<IrrigationStore>>,
-) -> Json<crate::ha::snapshot::IrrigationSnapshot> {
+) -> Json<crate::model::IrrigationSnapshot> {
     let s = store.snapshot();
     Json((*s).clone())
 }
 
-/// The native (standalone) snapshot built in shadow alongside HA. Returns
-/// `{"shadow":"disabled"}` when shadow mode is off.
+/// DEPRECATED (0.9.0): shadow-native mode is gone (native is the default
+/// path); the route keeps its v1 shape and always answers disabled.
 async fn shadow_snapshot() -> Json<Value> {
-    match SHADOW_STORE.get() {
-        Some(s) => Json(serde_json::to_value(&*s.snapshot()).unwrap_or(Value::Null)),
-        None => Json(json!({ "shadow": "disabled" })),
-    }
+    Json(json!({ "shadow": "disabled" }))
 }
 
-/// Side-by-side diff of the authoritative (HA) snapshot vs the native
-/// shadow: the aggregate verdict, and per-zone running + planned-seconds.
-/// The planned-seconds delta is expected (the native weekly water balance
-/// vs SI's daily bucket size runs on different evidence) and is shown for
-/// both so it can be judged; verdict + running mismatches are the signal
-/// that native isn't yet equivalent.
-async fn shadow_diff(State(live): State<Arc<IrrigationStore>>) -> Json<Value> {
-    let Some(shadow) = SHADOW_STORE.get() else {
-        return Json(json!({ "shadow": "disabled" }));
-    };
-    let h = live.snapshot();
-    let n = shadow.snapshot();
-    let zones: Vec<Value> = h
-        .zones
-        .iter()
-        .map(|hz| {
-            let nz = n.zones.iter().find(|z| z.slug == hz.slug);
-            json!({
-                "slug": hz.slug,
-                "ha_running": hz.running,
-                "native_running": nz.map(|z| z.running),
-                "native_running_known": nz.map(|z| z.running_known),
-                "ha_planned_s": hz.planned_run_seconds,
-                "native_planned_s": nz.map(|z| z.planned_run_seconds),
-                "ha_verdict": hz.verdict.as_ref().map(|v| v.verdict.clone()),
-                "native_verdict": nz.and_then(|z| z.verdict.as_ref().map(|v| v.verdict.clone())),
-            })
-        })
-        .collect();
-    Json(json!({
-        "ha_verdict": h.skip_check.verdict,
-        "native_verdict": n.skip_check.verdict,
-        "verdict_match": h.skip_check.verdict == n.skip_check.verdict,
-        "ha_reason": h.skip_check.reason,
-        "native_reason": n.skip_check.reason,
-        "ha_master_enable": h.master_enable,
-        "native_master_enable": n.master_enable,
-        "zones": zones,
-    }))
+/// DEPRECATED (0.9.0): see `shadow_snapshot`.
+async fn shadow_diff() -> Json<Value> {
+    Json(json!({ "shadow": "disabled" }))
 }
 
 /// What-If: seed engine Inputs from the live SkipCheck, override the
@@ -597,12 +550,12 @@ async fn shadow_diff(State(live): State<Arc<IrrigationStore>>) -> Json<Value> {
 /// (`decide_traced`) on baseline + hypothetical, return both traces.
 /// Pure read, writes nothing.
 async fn simulate(
-    State(store): State<Arc<IrrigationStore>>,
-    Json(req): Json<crate::ha::snapshot::SimRequest>,
-) -> Json<crate::ha::snapshot::SimResult> {
+    State(st): State<SimulateState>,
+    Json(req): Json<crate::model::SimRequest>,
+) -> Json<crate::model::SimResult> {
     use crate::engine::skip_rules::{decide_traced, inputs_from_skipcheck};
 
-    let snap = store.snapshot();
+    let snap = st.store.snapshot();
     let base = inputs_from_skipcheck(&snap.skip_check);
     let mut hypo = base.clone();
     if let Some(v) = req.temp_now_f {
@@ -618,16 +571,16 @@ async fn simulate(
         hypo.rain_today_in = v;
     }
     if let Some(v) = req.rain_intensity_now_in_hr {
-        hypo.rain_intensity_now_in_hr = v;
+        hypo.rain_intensity_now_in_hr = Some(v);
     }
     if let Some(v) = req.forecast_in {
-        hypo.forecast_in = v;
+        hypo.forecast_in = Some(v);
     }
     if let Some(v) = req.rain_tomorrow_prob_pct {
         hypo.rain_tomorrow_prob_pct = Some(v);
     }
     if let Some(v) = req.rain_next_4h_in {
-        hypo.rain_next_4h_in = v;
+        hypo.rain_next_4h_in = Some(v);
     }
     if let Some(v) = req.wind_max_today_mph {
         hypo.wind_max_today_mph = v;
@@ -636,20 +589,20 @@ async fn simulate(
         hypo.temp_max_3day_f = v;
     }
     if let Some(v) = req.rain_3day_weighted_in {
-        hypo.rain_3day_weighted_in = v;
+        hypo.rain_3day_weighted_in = Some(v);
     }
 
-    // Use the operator's configured skip thresholds (set at boot from
-    // cfg.engine.skip_rules) so the What-If traces match the production
-    // ladder. Falls back to defaults, which equal an untouched config.
-    let p = SIM_SKIP_PARAMS.get().cloned().unwrap_or_default();
+    // The operator's configured skip thresholds, read from the hot policy
+    // so the What-If traces match the production ladder as of the last
+    // save, not as of boot.
+    let p = st.policy.load().skip_rules.clone();
     let baseline = decide_traced(&base, &p);
     let mut hypothetical = decide_traced(&hypo, &p);
 
     // Optional ad-hoc script test: augment-only, same boundary as the
-    // live engine, only consulted when the hypothetical verdict is "run".
+    // live engine, consulted for both normal and heat-extended runs.
     if let Some(src) = req.test_script.as_ref().filter(|s| !s.trim().is_empty()) {
-        if hypothetical.verdict == "run" {
+        if matches!(hypothetical.verdict.as_str(), "run" | "run_extended") {
             use crate::config::schema::ScriptRule;
             use crate::engine::scripting::CompiledScripts;
             let scripts = CompiledScripts::compile(&[ScriptRule {
@@ -665,7 +618,15 @@ async fn simulate(
                 // into the trace's reason_code. The metric is user-defined, so no
                 // canonical engine operands (value/threshold/unit_kind stay None).
                 hypothetical.reason_code = us.id.clone();
-                hypothetical.rules.push(crate::ha::snapshot::RuleEval {
+                // An earlier heat/override rung may have shaped a run, but
+                // the script now decides the hold. The trace has one winner.
+                for rule in &mut hypothetical.rules {
+                    if rule.outcome == "fired" {
+                        rule.outcome = "passed".into();
+                        rule.detail.push_str("; watering held by test script");
+                    }
+                }
+                hypothetical.rules.push(crate::model::RuleEval {
                     id: us.id,
                     label: us.name,
                     category: "script".into(),
@@ -682,7 +643,7 @@ async fn simulate(
         }
     }
 
-    Json(crate::ha::snapshot::SimResult {
+    Json(crate::model::SimResult {
         baseline,
         hypothetical,
     })
@@ -779,11 +740,6 @@ pub enum Action {
     /// A zone override beats the global one; "auto" clears it so the zone
     /// falls back to the global override / engine verdict.
     SetZoneOverride { zone: String, mode: String },
-    /// Tombstone: previously triggered Irrigation Unlimited's full
-    /// sequence via irrigation_unlimited.run_now. IU support has been
-    /// removed; the variant stays deserializable so stale clients get a
-    /// clear 410 instead of a generic parse error.
-    RunSequenceNow,
 }
 
 /// Map a zone slug to the binary_sensor.*_station_running entity ID
@@ -805,41 +761,19 @@ fn running_sensor(zone: &str, prefix: &str) -> Option<String> {
     Some(format!("binary_sensor.{prefix}_{zone}_station_running"))
 }
 
-/// Map a threshold key to the input_number entity ID, for the pre-adoption
-/// path only. Restricts to the three known sliders so a hostile client can't
-/// poke arbitrary HA inputs through this endpoint. One list, shared with the
-/// read gate, so the write and the read can never disagree about which
-/// entity a key means.
-fn threshold_entity(key: &str) -> Option<String> {
-    crate::ha_adopt::threshold_entity(key).map(str::to_string)
-}
-
-/// Map a toggle key to the input_boolean entity ID, same allow-list shape,
-/// same pre-adoption-only role.
-fn toggle_entity(key: &str) -> Option<String> {
-    crate::ha_adopt::toggle_entity(key).map(str::to_string)
-}
-
 /// Defensive cap on Action::Run duration. The mobile UI caps at 120 min;
 /// the server clamps at the same level so a buggy client or hostile
 /// request can't drown the lawn.
-const RUN_SECONDS_MAX: u32 = 7200;
-
-/// HA entity for the vacation-pause expiry helper, for the pre-adoption
-/// write path only. One definition, shared with the read gate.
-const PAUSE_UNTIL_ENTITY: &str = crate::ha_adopt::PAUSE_UNTIL;
-
-/// HA entity for the one-day override (none/skip/run), same role.
-const OVERRIDE_ENTITY: &str = crate::ha_adopt::OVERRIDE_TOMORROW;
+use crate::controllers::dispatch::{
+    self, Arm, Dispatcher, RunOutcome, RunRequest, Source, StopScope,
+};
+use crate::controllers::guard::RUN_SECONDS_MAX;
 
 /// State for the POST /action handler.
 ///
-/// Every control write routes to whichever store the ENGINE will read it
-/// back from, decided by the same adoption markers the refresher uses and
-/// read from the same live handle. That is not a detail: a write that lands
-/// in SQLite while the gate still reads the Home Assistant helper is an owner
-/// tapping vacation pause and getting a watered yard. Read and write flip
-/// together, on one marker.
+/// Every control write lands in LocalSky's own store, the one the engine
+/// reads it back from, on both deployment paths. The Home Assistant helpers
+/// that once held these values are neither read nor written (0.9.0).
 #[derive(Clone)]
 struct ActionState {
     source: SnapshotSource,
@@ -852,37 +786,11 @@ struct ActionState {
     /// Sink for an adopted threshold: `engine.skip_rules` is where the value
     /// lives once the matching `input_number` is retired.
     cfg_store: Arc<crate::config::FileConfigStore>,
-    /// The live policy, for its adoption markers and for swapping a rebuilt
-    /// one in after a threshold write so the change is live on the next tick.
-    watering_policy: Arc<arc_swap::ArcSwap<crate::ha::WateringPolicy>>,
-}
-
-impl ActionState {
-    /// Whether this action's value now lives in LocalSky rather than in the
-    /// Home Assistant helper named by `entity`. True on every native deploy,
-    /// and on a Home Assistant deploy once the adoption pass has handled that
-    /// entity. The refresher gates the matching READ on the identical
-    /// predicate against the identical handle.
-    fn owns(&self, entity: &str) -> bool {
-        self.source == SnapshotSource::Native || self.watering_policy.load().ha_read_retired(entity)
-    }
-}
-
-/// Whether a control write for `entity` lands in LocalSky's own store rather
-/// than the Home Assistant helper.
-///
-/// `owns` says the READ has moved. A mounted store is the other half, and it
-/// is not optional: with no persistence DB, `build_from_map` resolves
-/// `control.filter(..)` to None and the gate reads the entity map again even
-/// for a retired entity, so on a Home Assistant deploy the helper is what has
-/// to be written. Without this, an install that adopted the toggles and later
-/// lost its DB answered 503 to a vacation pause while the engine was reading
-/// `input_boolean.irrigation_pause` and the helper was still writable, which
-/// makes the pause unsettable from LocalSky's own UI on exactly the install
-/// where the DB is already broken. Native keeps the explicit 503 instead of a
-/// phantom call into a Home Assistant that is not there.
-fn routes_to_native_control(st: &ActionState, entity: &str) -> bool {
-    st.owns(entity) && (st.control.is_some() || st.source == SnapshotSource::Native)
+    /// The live policy, for swapping a rebuilt one in after a threshold
+    /// write so the change is live on the next tick.
+    watering_policy: Arc<arc_swap::ArcSwap<crate::refresher::WateringPolicy>>,
+    /// Zone dispatch through the controller registry; None in demo mode.
+    dispatch: Option<DispatchState>,
 }
 
 /// Write one adopted threshold into `engine.skip_rules` and make it live.
@@ -932,8 +840,9 @@ async fn config_threshold_action(
             Json(json!({ "error": format!("config save failed: {e}") })),
         );
     }
-    st.watering_policy
-        .store(Arc::new(crate::ha::WateringPolicy::from_config(&cfg)));
+    st.watering_policy.store(Arc::new(
+        crate::refresher::WateringPolicy::from_config(&cfg).with_ledger(&st.cfg_store.ledger()),
+    ));
     (
         StatusCode::OK,
         Json(json!({ "ok": true, "source": "config", "key": key, "value": value })),
@@ -1104,6 +1013,7 @@ fn controller_error_response(
     mapped_zone_slugs: Vec<String>,
 ) -> (StatusCode, Json<Value>) {
     let status = match &e {
+        ControllerError::Held(_) => StatusCode::SERVICE_UNAVAILABLE,
         ControllerError::ZoneUnknown(_) => StatusCode::BAD_REQUEST,
         ControllerError::Unsupported(_) => StatusCode::NOT_IMPLEMENTED,
         ControllerError::AuthFailed => StatusCode::FAILED_DEPENDENCY,
@@ -1117,6 +1027,7 @@ fn controller_error_response(
     // status, which is what made the old 502 collapse unreadable and what
     // makes 401-vs-424 a trap for anyone who guesses.
     let code = match &e {
+        ControllerError::Held(_) => "watering_held",
         ControllerError::ZoneUnknown(_) => "zone_unknown",
         ControllerError::Unsupported(_) => "controller_unsupported",
         ControllerError::AuthFailed => "controller_auth_failed",
@@ -1194,64 +1105,11 @@ fn controller_error_response(
     (status, Json(body))
 }
 
-/// Dispatch zone Run/Stop/StopAll through the registry's default
-/// controller. Confirmed manual runs are recorded in the runs table
-/// (source "manual") so the history Gantt and scheduler dedupe see
-/// them. Only called with the three zone-action variants.
-/// Shutoff-backstop deadline for a manually dispatched run: planned end plus
-/// the shared enforcement grace (30s; 90s when the controller's only stop is
-/// device-wide). A graceless deadline made the reaper fire the instant the
-/// planned end passed, which on a Rachio-class controller device-stops any
-/// sibling zone started meanwhile.
-fn manual_run_deadline(started_epoch: i64, duration_s: u32, per_zone_stop: bool) -> i64 {
-    started_epoch
-        + duration_s as i64
-        + crate::controllers::reaper::effective_run_grace(per_zone_stop)
-}
-
-/// Ledger + history bookkeeping after a successful manual zone Stop. A
-/// controller with a real per-zone stop is zone-scoped: disarm that zone's
-/// deadline, truncate that zone's open manual row. A DEVICE-WIDE stop
-/// (per_zone_stop=false) halted every zone on the controller, so every
-/// armed row on it clears (a survivor would re-fire another device-wide
-/// stop at its stale deadline) and every open manual row on it truncates
-/// (a sibling's pre-written full-duration row would otherwise credit water
-/// that stopped falling). Other controllers are untouched either way.
-async fn stop_bookkeeping(
-    active_runs: Option<&crate::persistence::ActiveRunsStore>,
-    runs: Option<&RunsStore>,
-    controller_id: &str,
-    zone: &str,
-    device_wide: bool,
-    now_epoch: i64,
-) {
-    if let Some(ar) = active_runs {
-        if device_wide {
-            if let Err(e) = ar.clear_for_controllers(&[controller_id]).await {
-                tracing::warn!(
-                    zone = %zone, controller = %controller_id, error = %e,
-                    "device-wide stop: clearing sibling deadlines failed"
-                );
-            }
-        } else {
-            let _ = ar.disarm(zone).await;
-        }
-    }
-    if let Some(rs) = runs {
-        let truncated = if device_wide {
-            rs.truncate_active_for_controller(controller_id, now_epoch)
-                .await
-        } else {
-            rs.truncate_active(zone, now_epoch).await
-        };
-        if let Err(e) = truncated {
-            tracing::debug!(zone = %zone, error = %e, "manual-row truncate failed");
-        }
-    }
-}
-
-async fn registry_zone_action(body: Action) -> (StatusCode, Json<Value>) {
-    let Some(d) = DISPATCH.get() else {
+async fn registry_zone_action(
+    dispatch: Option<&DispatchState>,
+    body: Action,
+) -> (StatusCode, Json<Value>) {
+    let Some(d) = dispatch else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(
@@ -1259,7 +1117,15 @@ async fn registry_zone_action(body: Action) -> (StatusCode, Json<Value>) {
             ),
         );
     };
-    let Some(controller) = d.registry.default() else {
+    // The zone's own controller for a zone action; any controller at all
+    // for Stop All, which stops every registered one below.
+    let controller = match &body {
+        Action::Run { zone, .. } | Action::Stop { zone } => {
+            d.registry.for_zone(d.policy.load().controller_id_for(zone))
+        }
+        _ => d.registry.default(),
+    };
+    let Some(controller) = controller else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(
@@ -1269,153 +1135,79 @@ async fn registry_zone_action(body: Action) -> (StatusCode, Json<Value>) {
     };
     match body {
         Action::Run { zone, seconds } => {
-            // Serialize concurrent Run actions on the SAME zone: two near-
-            // simultaneous POSTs would otherwise both resolve the controller and
-            // call run_zone, racing the hardware timer (last-writer-wins on OS/
-            // HTTP, two shutoff timers on MQTT closing at the shorter duration) and
-            // double-writing the manual run row. Held only for Run, and keyed by
-            // zone, so a Stop / StopAll is never blocked behind a running zone.
-            let run_lock = crate::controllers::zone_run_lock(&zone);
-            let _run_serialize = run_lock.lock().await;
-            let clamped = seconds.min(RUN_SECONDS_MAX).max(1);
-            if clamped != seconds {
-                tracing::warn!(
-                    "irrigation::Run clamped seconds {} -> {} (max {})",
+            let now_epoch = chrono::Utc::now().timestamp();
+            let dispatcher = Dispatcher::new(
+                d.registry.zone_locks(),
+                d.runs.as_ref(),
+                d.active_runs.as_ref(),
+            );
+            let cap_s = dispatch::ceiling_for_zone(&d.policy.load(), &zone);
+            match dispatcher
+                .run(RunRequest {
+                    session_id: crate::persistence::watering_commands::new_session_id(),
+                    zone: &zone,
+                    zone_name: &zone,
+                    controller: &controller,
                     seconds,
-                    clamped,
-                    RUN_SECONDS_MAX
-                );
-            }
-            match controller.run_zone(&zone, clamped).await {
-                Ok(handle) => {
-                    if let Some(rs) = d.runs.as_ref() {
-                        let row = NewRun {
-                            zone_slug: zone.clone(),
-                            start_epoch: handle.started_epoch,
-                            // Pretend water from a dry-run controller is
-                            // recorded as such (excluded from watering
-                            // evidence), mirroring the run-edge observer:
-                            // a manual Run against a non-simulating
-                            // DryRunController must never credit the
-                            // balance or show as real watering.
-                            source: if controller.simulated() {
-                                "dry_run".into()
-                            } else {
-                                "manual".into()
-                            },
-                            controller_id: handle.controller_id.clone(),
-                            planned_duration_s: clamped,
-                            skip_reason: None,
-                            et0_mm: None,
-                            etc_mm: None,
-                            cycle_index: None,
-                            cycle_count: None,
-                        };
-                        // The controller owns the shutoff timer, so end =
-                        // start + duration matches what the hardware does.
-                        if let Err(e) = rs
-                            .insert_completed(
-                                row,
-                                handle.started_epoch + clamped as i64,
-                                clamped,
-                                None,
-                            )
-                            .await
-                        {
-                            tracing::warn!(zone = %zone, error = %e, "manual run row insert failed");
-                        }
-                    }
-                    // P0-1b: arm the persisted shutoff deadline so the reaper
-                    // closes this valve even if the process dies before the
-                    // controller's own timer fires. The deadline carries the
-                    // shared enforcement grace (30s; 90s on device-wide-stop
-                    // clouds): the controller's own timer is the precise
-                    // shutoff, and a graceless deadline made the reaper fire
-                    // a stop the instant the planned end passed, which on a
-                    // Rachio-class controller is a device-wide stop that
-                    // kills any sibling zone the user started meanwhile.
-                    if let Some(ar) = d.active_runs.as_ref() {
-                        if let Err(e) = ar
-                            .arm(
-                                zone.clone(),
-                                handle.controller_id.clone(),
-                                handle.started_epoch,
-                                manual_run_deadline(
-                                    handle.started_epoch,
-                                    clamped,
-                                    controller.supports().per_zone_stop,
-                                ),
-                            )
-                            .await
-                        {
-                            tracing::warn!(zone = %zone, error = %e, "active-run arm failed");
-                        }
-                    }
-                    (
-                        StatusCode::OK,
-                        Json(json!({
-                            "ok": true,
-                            "dispatched": format!("controller:{}", handle.controller_id),
-                            "zone": zone,
-                            "seconds": clamped,
-                            // How long this controller can take to REPORT the
-                            // change (null when it reads state on demand). The
-                            // UI's confirm window is shorter than a throttled
-                            // cloud poll, so without this a perfectly accepted
-                            // run reads as a controller that never answered.
-                            "confirm_within_s": controller.status_poll_interval_s(),
-                        })),
-                    )
-                }
-                Err(e) => {
-                    // Nothing logged this path, so a failed dispatch left no
-                    // trace on the server at all and the only copy of the
-                    // reason was a response body the client threw away.
-                    tracing::warn!(
-                        controller = %controller.id(), zone = %zone, action = "run", error = %e,
-                        "controller zone action failed"
-                    );
-                    controller_error_response(
-                        e,
-                        controller.rate_limit_remaining(),
-                        controller.mapped_zone_slugs(),
-                    )
-                }
+                    source: Source::Manual,
+                    ceiling_s: Some(cap_s),
+                    arm: Arm::AfterDispatch,
+                    record_row: true,
+                    cycle: None,
+                    // The caller sees the error in the response.
+                    push: None,
+                    now_epoch,
+                })
+                .await
+            {
+                RunOutcome::Dispatched {
+                    handle, seconds, ..
+                } => (
+                    StatusCode::OK,
+                    Json(json!({
+                        "ok": true,
+                        "dispatched": format!("controller:{}", handle.controller_id),
+                        "zone": zone,
+                        "seconds": seconds,
+                        // How long this controller can take to REPORT the
+                        // change (null when it reads state on demand). The
+                        // UI's confirm window is shorter than a throttled
+                        // cloud poll, so without this a perfectly accepted
+                        // run reads as a controller that never answered.
+                        "confirm_within_s": controller.status_poll_interval_s(),
+                    })),
+                ),
+                RunOutcome::Refused(usage) => (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({
+                        "error": crate::controllers::ceiling::refusal_reason(usage),
+                        "used_s": usage.used_s,
+                        "cap_s": usage.cap_s,
+                    })),
+                ),
+                RunOutcome::Failed { error, .. } => controller_error_response(
+                    error,
+                    controller.rate_limit_remaining(),
+                    controller.mapped_zone_slugs(),
+                ),
             }
         }
         Action::Stop { zone } => {
             // On a controller with no per-zone stop (Rachio-class clouds)
             // this zone-stop is a DEVICE-WIDE stop: every running zone on
-            // the device stops. Surface the scope in the log and in the
-            // response so the client's toast can say what really happened.
-            let device_wide = !controller.supports().per_zone_stop;
-            if device_wide {
-                tracing::warn!(
-                    zone = %zone, controller = %controller.id(),
-                    "manual stop: controller has no per-zone stop; stopping ALL watering on the device"
-                );
-            }
-            match controller.stop_zone(&zone).await {
-                Ok(()) => {
-                    // P0-1b: an explicit stop disarms the deadline so the reaper does
-                    // not later re-stop an already-closed valve. A DEVICE-WIDE stop
-                    // (per_zone_stop=false) halted every zone on this controller, so
-                    // its bookkeeping must match the note the response carries:
-                    // every armed row on this controller clears (a survivor would
-                    // re-fire another device-wide stop at its stale deadline), and
-                    // every open manual row on this controller truncates to the
-                    // real span (a sibling's pre-written full-duration row would
-                    // otherwise credit water that stopped falling). Other
-                    // controllers' rows are untouched either way.
-                    stop_bookkeeping(
-                        d.active_runs.as_ref(),
-                        d.runs.as_ref(),
-                        controller.id(),
-                        &zone,
-                        device_wide,
-                        chrono::Utc::now().timestamp(),
-                    )
-                    .await;
+            // the device stops. The response carries the scope so the
+            // client's toast can say what really happened.
+            let dispatcher = Dispatcher::new(
+                d.registry.zone_locks(),
+                d.runs.as_ref(),
+                d.active_runs.as_ref(),
+            );
+            match dispatcher
+                .stop(&controller, &zone, chrono::Utc::now().timestamp())
+                .await
+            {
+                Ok(scope) => {
+                    let device_wide = scope == StopScope::Device;
                     let mut body = json!({
                         "ok": true,
                         "dispatched": format!("controller:{}", controller.id()),
@@ -1432,53 +1224,49 @@ async fn registry_zone_action(body: Action) -> (StatusCode, Json<Value>) {
                     }
                     (StatusCode::OK, Json(body))
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        controller = %controller.id(), zone = %zone, action = "stop", error = %e,
-                        "controller zone action failed"
-                    );
-                    controller_error_response(
-                        e,
-                        controller.rate_limit_remaining(),
-                        controller.mapped_zone_slugs(),
-                    )
-                }
-            }
-        }
-        Action::StopAll => match controller.stop_all().await {
-            Ok(()) => {
-                if let Some(ar) = d.active_runs.as_ref() {
-                    let _ = ar.clear_all().await;
-                }
-                // Same truncation as Stop, across every zone.
-                if let Some(rs) = d.runs.as_ref() {
-                    let now = chrono::Utc::now().timestamp();
-                    if let Err(e) = rs.truncate_active_all(now).await {
-                        tracing::debug!(error = %e, "manual-row truncate failed");
-                    }
-                }
-                (
-                    StatusCode::OK,
-                    Json(json!({
-                        "ok": true,
-                        "dispatched": format!("controller:{}", controller.id()),
-                        "stopped": "all",
-                        "confirm_within_s": controller.status_poll_interval_s(),
-                    })),
-                )
-            }
-            Err(e) => {
-                tracing::warn!(
-                    controller = %controller.id(), action = "stop_all", error = %e,
-                    "controller zone action failed"
-                );
-                controller_error_response(
+                Err(e) => controller_error_response(
                     e,
                     controller.rate_limit_remaining(),
                     controller.mapped_zone_slugs(),
-                )
+                ),
             }
-        },
+        }
+        Action::StopAll => {
+            let now = chrono::Utc::now().timestamp();
+            let report = Dispatcher::new(
+                d.registry.zone_locks(),
+                d.runs.as_ref(),
+                d.active_runs.as_ref(),
+            )
+            .stop_all(&d.registry, now)
+            .await;
+            if report.none_confirmed() {
+                let detail = report
+                    .failed
+                    .iter()
+                    .map(|(id, e)| format!("{id}: {e}"))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({
+                        "error": format!("no controller confirmed the stop ({detail}); their shutoff deadlines stay armed and the reaper keeps retrying"),
+                        "failed": report.failed.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+                    })),
+                );
+            }
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "ok": true,
+                    "dispatched": format!("controller:{}", report.confirmed.join(",")),
+                    "stopped": "all",
+                    "confirmed": report.confirmed,
+                    "failed": report.failed.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+                    "confirm_within_s": controller.status_poll_interval_s(),
+                })),
+            )
+        }
         // Only the three zone-action variants reach this fn.
         _ => unreachable!("registry_zone_action called with non-zone action"),
     }
@@ -1506,12 +1294,13 @@ async fn action(State(st): State<ActionState>, Json(body): Json<Action>) -> impl
         body,
         Action::Run { .. } | Action::Stop { .. } | Action::StopAll
     ) {
-        let has_default = DISPATCH
-            .get()
+        let has_default = st
+            .dispatch
+            .as_ref()
             .map(|d| d.registry.default().is_some())
             .unwrap_or(false);
         if route_via_registry(st.source, has_default) {
-            return registry_zone_action(body).await;
+            return registry_zone_action(st.dispatch.as_ref(), body).await;
         }
     }
 
@@ -1528,116 +1317,23 @@ async fn action(State(st): State<ActionState>, Json(body): Json<Action>) -> impl
         return native_control_action(&st.control, body).await;
     }
 
-    // On a Home Assistant deployment, where a control or threshold write
-    // lands is decided, and the write performed, under the config store's
-    // write guard: the same guard the adoption pass holds from its
-    // commit-time re-read of the helpers through the policy swap that retires
-    // their reads. Without it a tap landing between the pass's answer-set
-    // check and the swap saw the read as live, wrote the helper, and was
-    // retired underneath: the pass had planned from the pre-tap answer, wrote
-    // that into SQLite, and the pause the owner just set was gone with a 200
-    // on screen. Held here, the write either fully precedes the pass, which
-    // then re-reads it (and sees the write counter moved), or fully follows
-    // the swap and routes native below. The guard is released before a native
-    // write, which needs no serialization against the pass and, for a
-    // threshold, takes the guard itself.
-    let mut preadopt_guard = if st.source == SnapshotSource::HomeAssistant
-        && matches!(
-            body,
-            Action::SetThreshold { .. }
-                | Action::Toggle { .. }
-                | Action::SetPauseUntil { .. }
-                | Action::ClearPauseUntil
-                | Action::SetOverrideTomorrow { .. }
-        ) {
-        Some(st.cfg_store.begin_write().await)
-    } else {
-        None
-    };
-
-    // The vacation pause and the one-day override. They route to LocalSky's
-    // own store on every native deploy, and on a Home Assistant deploy once
-    // the matching helper has been adopted. Until then they still write the
-    // helper, because until then the engine still reads it.
-    if st.control.is_some()
-        && matches!(body, Action::SetPauseUntil { .. } | Action::ClearPauseUntil)
-        && st.owns(crate::ha_adopt::PAUSE_UNTIL)
-    {
-        drop(preadopt_guard.take());
-        return native_control_action(&st.control, body).await;
-    }
-    if st.control.is_some()
-        && matches!(body, Action::SetOverrideTomorrow { .. })
-        && st.owns(crate::ha_adopt::OVERRIDE_TOMORROW)
-    {
-        drop(preadopt_guard.take());
-        return native_control_action(&st.control, body).await;
-    }
-    // A native deploy with no persistence DB has nowhere to put a pause. Say
-    // so, rather than falling through to a Home Assistant that is not there.
-    if st.source == SnapshotSource::Native
-        && matches!(
-            body,
-            Action::SetPauseUntil { .. }
-                | Action::ClearPauseUntil
-                | Action::SetOverrideTomorrow { .. }
-        )
-    {
-        return native_control_action(&st.control, body).await;
-    }
-    // The two toggles. Before 0.7.22 these fell through to the Home Assistant
-    // client on every deploy, so on a standalone install the pause toggle
-    // answered 500 and the engine read a value nothing could set.
-    if let Action::Toggle { key, on } = &body {
-        if let Some(entity) = crate::ha_adopt::toggle_entity(key) {
-            if routes_to_native_control(&st, entity) {
-                drop(preadopt_guard.take());
-                return control_toggle_action(&st.control, key, *on).await;
-            }
+    // The pause, the one-day override, the two toggles and the three
+    // thresholds are LocalSky's own on every deployment path (0.9.0 removed
+    // the Home Assistant helpers behind them). A control with no persistence
+    // database mounted answers 503 rather than dropping the write.
+    match &body {
+        Action::SetPauseUntil { .. }
+        | Action::ClearPauseUntil
+        | Action::SetOverrideTomorrow { .. } => {
+            return native_control_action(&st.control, body).await;
         }
-    }
-    // The three thresholds. Once adopted, the dashboard slider and Settings >
-    // Skip rules write the same field, which is the end of two editors for
-    // one number where only one of them was ever in effect.
-    if let Action::SetThreshold { key, value } = &body {
-        if let Some(entity) = crate::ha_adopt::threshold_entity(key) {
-            if st.owns(entity) {
-                // config_threshold_action takes the guard itself.
-                drop(preadopt_guard.take());
-                return config_threshold_action(&st, key, *value).await;
-            }
+        Action::Toggle { key, on } => {
+            return control_toggle_action(&st.control, key, *on).await;
         }
-    }
-
-    // Irrigation Unlimited support has been removed; answer stale
-    // clients with a clear 410 instead of dispatching anything.
-    if matches!(body, Action::RunSequenceNow) {
-        return (
-            StatusCode::GONE,
-            Json(
-                json!({ "error": "run_sequence_now was removed along with Irrigation Unlimited support; use per-zone Run instead" }),
-            ),
-        );
-    }
-
-    // Reaching here with one of these means the write goes to a Home Assistant
-    // helper the adoption pass has not retired yet, so the pass may be about
-    // to read the value this call replaces. Bump BEFORE the service call
-    // fires, not after: a write still in flight when the pass takes its
-    // answer set has to force that commit to re-earn its evidence, or the
-    // pass writes the pre-write value into SQLite and retires the read. The
-    // guard taken above is still held through the service call, so the pass
-    // cannot commit between this bump and the write landing, nor retire the
-    // read underneath it.
-    if matches!(
-        body,
-        Action::SetThreshold { .. }
-            | Action::Toggle { .. }
-            | Action::SetPauseUntil { .. }
-            | Action::ClearPauseUntil
-            | Action::SetOverrideTomorrow { .. }
-    ) {
-        crate::ha_adopt::note_preadopt_write();
+        Action::SetThreshold { key, value } => {
+            return config_threshold_action(&st, key, *value).await;
+        }
+        _ => {}
     }
 
     let client = match HaClient::from_env() {
@@ -1704,92 +1400,6 @@ async fn action(State(st): State<ActionState>, Json(body): Json<Action>) -> impl
                 .map(|_| json!({ "ok": true, "fired": "opensprinkler.stop", "stopped": "all" }))
                 .map_err(|e| e.to_string())
         }
-        Action::SetThreshold { key, value } => {
-            let Some(eid) = threshold_entity(&key) else {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({ "error": format!("unknown threshold: {key}") })),
-                );
-            };
-            client
-                .call_service(
-                    "input_number",
-                    "set_value",
-                    &json!({ "entity_id": eid, "value": value }),
-                )
-                .await
-                .map(|_| json!({ "ok": true, "fired": "input_number.set_value", "key": key, "value": value }))
-                .map_err(|e| e.to_string())
-        }
-        Action::Toggle { key, on } => {
-            let Some(eid) = toggle_entity(&key) else {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({ "error": format!("unknown toggle: {key}") })),
-                );
-            };
-            let service = if on { "turn_on" } else { "turn_off" };
-            client
-                .call_service("input_boolean", service, &json!({ "entity_id": eid }))
-                .await
-                .map(|_| json!({ "ok": true, "fired": format!("input_boolean.{service}"), "key": key }))
-                .map_err(|e| e.to_string())
-        }
-        Action::SetPauseUntil { epoch } => {
-            // input_datetime.set_datetime accepts a `timestamp` field
-            // (UTC epoch seconds). HA stores has_date+has_time and the
-            // helper renders in the local timezone. epoch <= 0 clears.
-            if epoch <= 0 {
-                client
-                    .call_service(
-                        "input_datetime",
-                        "set_datetime",
-                        &json!({ "entity_id": PAUSE_UNTIL_ENTITY, "timestamp": 0 }),
-                    )
-                    .await
-                    .map(|_| json!({ "ok": true, "fired": "input_datetime.set_datetime", "cleared": true }))
-                    .map_err(|e| e.to_string())
-            } else {
-                client
-                    .call_service(
-                        "input_datetime",
-                        "set_datetime",
-                        &json!({ "entity_id": PAUSE_UNTIL_ENTITY, "timestamp": epoch }),
-                    )
-                    .await
-                    .map(|_| json!({ "ok": true, "fired": "input_datetime.set_datetime", "epoch": epoch }))
-                    .map_err(|e| e.to_string())
-            }
-        }
-        Action::ClearPauseUntil => client
-            .call_service(
-                "input_datetime",
-                "set_datetime",
-                &json!({ "entity_id": PAUSE_UNTIL_ENTITY, "timestamp": 0 }),
-            )
-            .await
-            .map(|_| json!({ "ok": true, "fired": "input_datetime.set_datetime", "cleared": true }))
-            .map_err(|e| e.to_string()),
-        Action::SetOverrideTomorrow { mode } => {
-            let opt = match mode.as_str() {
-                "none" | "skip" | "run" => mode.clone(),
-                _ => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({ "error": format!("invalid override mode: {mode}") })),
-                    );
-                }
-            };
-            client
-                .call_service(
-                    "input_select",
-                    "select_option",
-                    &json!({ "entity_id": OVERRIDE_ENTITY, "option": opt }),
-                )
-                .await
-                .map(|_| json!({ "ok": true, "fired": "input_select.select_option", "mode": mode }))
-                .map_err(|e| e.to_string())
-        }
         // Sticky overrides are native-only; they route to native_control_action
         // above whenever a store is mounted. Reaching the HA path means there's
         // no persistence DB to hold them.
@@ -1801,8 +1411,14 @@ async fn action(State(st): State<ActionState>, Json(body): Json<Action>) -> impl
                 })),
             );
         }
-        // Handled by the 410 early-return above; IU is gone.
-        Action::RunSequenceNow => unreachable!("run_sequence_now answered before the HA path"),
+        // Answered before the Home Assistant path above.
+        Action::SetThreshold { .. }
+        | Action::Toggle { .. }
+        | Action::SetPauseUntil { .. }
+        | Action::ClearPauseUntil
+        | Action::SetOverrideTomorrow { .. } => {
+            unreachable!("control writes are answered natively before the HA path")
+        }
     };
 
     match result {
@@ -1813,8 +1429,8 @@ async fn action(State(st): State<ActionState>, Json(body): Json<Action>) -> impl
 
 #[derive(Deserialize)]
 pub struct HistoryQuery {
-    /// Window size in days, counted backward from now. Caps at 365 to
-    /// keep the SVG Gantt renderable on phones.
+    /// Window size in days. History accepts 0 for all retained records;
+    /// chart/accuracy readers retain their own bounded windows.
     #[serde(default = "default_days")]
     days: u32,
 }
@@ -1827,13 +1443,40 @@ async fn history_window(
     State(conn): State<Arc<Mutex<Connection>>>,
     Query(q): Query<HistoryQuery>,
 ) -> impl IntoResponse {
-    let days = q.days.clamp(1, 365);
     let now = chrono::Utc::now().timestamp();
-    let from = now - (days as i64) * 86400;
-    match db::window(conn, from, now).await {
-        Ok(w) => (
+    let from = if q.days == 0 {
+        0
+    } else {
+        now.saturating_sub(i64::from(q.days.min(36_500)) * 86400)
+    };
+    let result = async {
+        let rows = RunsStore::new(conn.clone())
+            .window(from, now)
+            .await
+            .map_err(|e| e.to_string())?;
+        let daily = crate::persistence::daily_irrigation::DailyIrrigationStore::new(conn.clone())
+            .window(from, now)
+            .await?;
+        let decisions = crate::persistence::VerdictHistoryStore::new(conn)
+            .window(from, now)
+            .await
+            .map_err(|e| e.to_string())?;
+        let daily = crate::persistence::daily_irrigation::with_legacy_decisions(daily, decisions);
+        Ok::<_, String>((rows, daily))
+    }
+    .await;
+    match result {
+        Ok((rows, daily)) => (
             StatusCode::OK,
-            Json(serde_json::to_value(w).unwrap_or_default()),
+            Json(
+                serde_json::to_value(crate::history::types::HistoryWindow {
+                    from_epoch: from,
+                    to_epoch: now,
+                    runs: rows.into_iter().map(Into::into).collect(),
+                    daily,
+                })
+                .unwrap_or_default(),
+            ),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1849,10 +1492,20 @@ async fn decisions_window(
     let days = q.days.clamp(1, 365);
     let now = chrono::Utc::now().timestamp();
     let from = now - (days as i64) * 86400;
-    match db::decisions_window(conn, from, now).await {
-        Ok(w) => (
+    match crate::persistence::VerdictHistoryStore::new(conn)
+        .window(from, now)
+        .await
+    {
+        Ok(rows) => (
             StatusCode::OK,
-            Json(serde_json::to_value(w).unwrap_or_default()),
+            Json(
+                serde_json::to_value(crate::history::types::DecisionWindow {
+                    from_epoch: from,
+                    to_epoch: now,
+                    decisions: rows.into_iter().map(Into::into).collect(),
+                })
+                .unwrap_or_default(),
+            ),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1861,7 +1514,7 @@ async fn decisions_window(
     }
 }
 
-/// P3-4: the forecast-accuracy scoreboard for the last `?days=N` (default 30,
+/// The forecast-accuracy scoreboard for the last `?days=N` (default 30,
 /// cap 365). One row per local day pairing the morning verdict with the rain
 /// that actually fell, plus the honest matched/scored tally.
 async fn accuracy(
@@ -1869,9 +1522,10 @@ async fn accuracy(
     Query(q): Query<HistoryQuery>,
 ) -> impl IntoResponse {
     let days = q.days.clamp(1, 365);
-    let from = chrono::Utc::now().timestamp() - (days as i64) * 86400;
+    let now = chrono::Utc::now().timestamp();
+    let from = now - (days as i64) * 86400;
     let store = crate::persistence::verdict_history::VerdictHistoryStore::new(conn);
-    match store.accuracy_window(from).await {
+    match store.accuracy_window(from, now).await {
         Ok(res) => (
             StatusCode::OK,
             Json(serde_json::to_value(res).unwrap_or_default()),
@@ -1883,7 +1537,7 @@ async fn accuracy(
     }
 }
 
-/// P2-11: portable history export over the existing windowed readers.
+/// Portable history export over the existing windowed readers.
 /// `?format=csv` (default) streams the run/skip events as CSV; `?format=json`
 /// returns the full `{runs, decisions}` structured export. `?days=N` bounds the
 /// window (default 365, max 3650). Served under the same gated history routes.
@@ -1911,6 +1565,44 @@ fn csv_field(s: &str) -> String {
     }
 }
 
+/// The run/skip events as CSV: enough columns to explain a water bill.
+/// Who commanded the run, through which controller, which segment of a
+/// cycle it was, how deep it went and how much the meter saw.
+fn runs_csv(runs: &[crate::history::types::RunRecord]) -> String {
+    // Enough columns to explain a water bill: who commanded the run,
+    // through which controller, which segment of a cycle it was, how deep
+    // it went and how much the meter saw.
+    let mut out = String::from(
+        "timestamp_utc,zone,event,duration_s,reason,source,controller,status,cycle_index,cycle_count,applied_mm,volume_gal,note\n",
+    );
+    for r in runs {
+        let ts = chrono::DateTime::from_timestamp(r.start_epoch, 0)
+            .map(|d| d.to_rfc3339())
+            .unwrap_or_default();
+        let (event, reason) = match &r.skip_reason {
+            Some(reason) => ("skip", reason.as_str()),
+            None => ("run", ""),
+        };
+        let opt_u = |v: Option<u32>| v.map(|n| n.to_string()).unwrap_or_default();
+        let opt_f = |v: Option<f64>| v.map(|n| format!("{n:.2}")).unwrap_or_default();
+        out.push_str(&format!(
+            "{ts},{},{event},{},{},{},{},{},{},{},{},{},{}\n",
+            csv_field(&r.zone),
+            r.duration_s,
+            csv_field(reason),
+            csv_field(&r.source),
+            csv_field(r.controller_id.as_deref().unwrap_or("")),
+            csv_field(&r.status),
+            opt_u(r.cycle_index),
+            opt_u(r.cycle_count),
+            opt_f(r.applied_mm),
+            opt_f(r.volume_gal),
+            csv_field(r.note.as_deref().unwrap_or("")),
+        ));
+    }
+    out
+}
+
 async fn export(
     State(conn): State<Arc<Mutex<Connection>>>,
     Query(q): Query<ExportQuery>,
@@ -1920,26 +1612,31 @@ async fn export(
     let from = now - (days as i64) * 86400;
     // JSON error envelope like every other API error path (an integrator's
     // resp.json() error handler must never hit bare text here).
-    let runs = match db::window(conn.clone(), from, now).await {
-        Ok(w) => w.runs,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
-    };
-    let decisions = match db::decisions_window(conn, from, now).await {
-        Ok(w) => w.decisions,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
-    };
+    let runs: Vec<crate::history::types::RunRecord> =
+        match RunsStore::new(conn.clone()).window(from, now).await {
+            Ok(rows) => rows.into_iter().map(Into::into).collect(),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": e.to_string() })),
+                )
+                    .into_response();
+            }
+        };
+    let decisions: Vec<crate::history::types::DecisionRecord> =
+        match crate::persistence::VerdictHistoryStore::new(conn)
+            .window(from, now)
+            .await
+        {
+            Ok(rows) => rows.into_iter().map(Into::into).collect(),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": e.to_string() })),
+                )
+                    .into_response();
+            }
+        };
 
     if q.format.eq_ignore_ascii_case("json") {
         return (
@@ -1960,22 +1657,7 @@ async fn export(
 
     // CSV of run/skip events: the portable "what watered when, and what got
     // skipped and why" log.
-    let mut out = String::from("timestamp_utc,zone,event,duration_s,reason\n");
-    for r in &runs {
-        let ts = chrono::DateTime::from_timestamp(r.start_epoch, 0)
-            .map(|d| d.to_rfc3339())
-            .unwrap_or_default();
-        let (event, reason) = match &r.skip_reason {
-            Some(reason) => ("skip", reason.as_str()),
-            None => ("run", ""),
-        };
-        out.push_str(&format!(
-            "{ts},{},{event},{},{}\n",
-            csv_field(&r.zone),
-            r.duration_s,
-            csv_field(reason),
-        ));
-    }
+    let out = runs_csv(&runs);
     (
         StatusCode::OK,
         [
@@ -1993,117 +1675,6 @@ async fn export(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn action_state(source: SnapshotSource, adopted: &[&str]) -> ActionState {
-        let mut cfg = crate::config::schema::Config::default();
-        for e in adopted {
-            cfg.ha_adoption.push(crate::ha::snapshot::HaAdoptedHelper {
-                entity: (*e).to_string(),
-                outcome: "adopted".to_string(),
-                target: crate::ha_adopt::target_of(e).to_string(),
-                adopted_value: None,
-                observed_value: None,
-                previous_value: None,
-                epoch: 1,
-            });
-        }
-        ActionState {
-            source,
-            control: None,
-            sprinkler_prefix: "opensprinkler".to_string(),
-            cfg_store: Arc::new(crate::config::FileConfigStore::new(
-                std::env::temp_dir().join("localsky-action-state-test.toml"),
-            )),
-            watering_policy: Arc::new(arc_swap::ArcSwap::from_pointee(
-                crate::ha::WateringPolicy::from_config(&cfg),
-            )),
-        }
-    }
-
-    // The write cutover and the read cutover consult one marker, on one live
-    // handle. If they could ever disagree, an owner tapping vacation pause
-    // would write LocalSky's store while the gate still read the Home
-    // Assistant helper, see false, and water the yard.
-    #[test]
-    fn a_control_write_follows_the_same_marker_the_engine_reads() {
-        let before = action_state(SnapshotSource::HomeAssistant, &[]);
-        for e in crate::ha_adopt::ENTITIES {
-            assert!(
-                !before.owns(e),
-                "{e} must still write Home Assistant until it is adopted"
-            );
-        }
-        let after = action_state(SnapshotSource::HomeAssistant, &crate::ha_adopt::ENTITIES);
-        for e in crate::ha_adopt::ENTITIES {
-            assert!(after.owns(e), "{e} must write LocalSky once adopted");
-        }
-    }
-
-    #[test]
-    fn one_adopted_entity_does_not_carry_the_others_with_it() {
-        let st = action_state(
-            SnapshotSource::HomeAssistant,
-            &[crate::ha_adopt::PAUSE_UNTIL],
-        );
-        assert!(st.owns(crate::ha_adopt::PAUSE_UNTIL));
-        assert!(!st.owns(crate::ha_adopt::OVERRIDE_TOMORROW));
-        assert!(!st.owns(crate::ha_adopt::MAX_WIND));
-    }
-
-    #[test]
-    fn a_standalone_deploy_owns_every_control_with_no_migration_at_all() {
-        // Nothing about the migration runs on a native install: the map is
-        // empty, no marker is ever written. The controls are LocalSky's
-        // regardless, which is what makes the pause toggle work there for the
-        // first time.
-        let st = action_state(SnapshotSource::Native, &[]);
-        for e in crate::ha_adopt::ENTITIES {
-            assert!(st.owns(e));
-        }
-    }
-
-    // The toggle branch used to test `owns` alone, so an install that adopted
-    // the toggles and later lost its persistence DB answered 503 while the
-    // engine was reading the helper and the helper was still writable.
-    #[test]
-    fn a_toggle_write_with_no_store_falls_through_to_the_helper_the_engine_reads() {
-        let ha = action_state(SnapshotSource::HomeAssistant, &crate::ha_adopt::ENTITIES);
-        assert!(
-            ha.control.is_none(),
-            "the harness builds an unmounted store"
-        );
-        assert!(
-            !routes_to_native_control(&ha, crate::ha_adopt::PAUSE_TOGGLE),
-            "with no store the write has to go where the read goes: the helper"
-        );
-        // Native has no helper to fall back to, so it keeps the clear 503
-        // rather than a phantom call into a Home Assistant that is not there.
-        let native = action_state(SnapshotSource::Native, &[]);
-        assert!(routes_to_native_control(
-            &native,
-            crate::ha_adopt::PAUSE_TOGGLE
-        ));
-        // And an unadopted toggle on Home Assistant still writes the helper.
-        let unadopted = action_state(SnapshotSource::HomeAssistant, &[]);
-        assert!(!routes_to_native_control(
-            &unadopted,
-            crate::ha_adopt::PAUSE_TOGGLE
-        ));
-    }
-
-    #[test]
-    fn threshold_and_toggle_keys_map_to_the_entities_the_read_gate_uses() {
-        assert_eq!(
-            threshold_entity("max_wind_mph").as_deref(),
-            Some(crate::ha_adopt::MAX_WIND)
-        );
-        assert_eq!(
-            toggle_entity("irrigation_dry_run").as_deref(),
-            Some(crate::ha_adopt::DRY_RUN_TOGGLE)
-        );
-        assert_eq!(threshold_entity("gravity"), None);
-        assert_eq!(toggle_entity("irrigation_launch"), None);
-    }
 
     #[test]
     fn csv_field_escapes_per_rfc4180() {
@@ -2178,6 +1749,10 @@ mod tests {
     #[test]
     fn every_error_body_carries_a_stable_code() {
         for (e, want) in [
+            (
+                ControllerError::Held("Restart required".into()),
+                "watering_held",
+            ),
             (ControllerError::ZoneUnknown("z".into()), "zone_unknown"),
             (
                 ControllerError::Unsupported("op".into()),
@@ -2322,22 +1897,154 @@ mod tests {
         assert!(body["hint"].as_str().is_some());
     }
 
-    #[test]
-    fn run_sequence_now_still_deserializes() {
-        // The tombstone variant must stay parseable so stale clients get
-        // the 410 body rather than a 422 deserialization error.
-        let a: Action = serde_json::from_str(r#"{"kind":"run_sequence_now"}"#).unwrap();
-        assert!(matches!(a, Action::RunSequenceNow));
-    }
-
     // The manual API Run arms its shutoff deadline with the shared grace:
     // base 30s, widened to 90s for device-wide-stop clouds. Zero grace here
     // made the reaper device-stop a sibling the moment a run's planned end
     // passed.
+    /// A saved skip-rule change reaches the What-If simulator on the next
+    /// request: the handler reads the hot policy handle, not a boot copy.
+    #[tokio::test]
+    async fn the_simulator_reads_the_live_thresholds() {
+        use axum::body::Body;
+        use axum::http::{Method, Request};
+        use tower::ServiceExt;
+
+        let store = Arc::new(IrrigationStore::new());
+        // A dry, calm, freezing baseline: only the freeze gate fires.
+        let mut snap = crate::model::IrrigationSnapshot::default();
+        snap.skip_check.days_since_significant_rain = 10;
+        snap.skip_check.rain_skip_in = 0.5;
+        snap.skip_check.min_temp_f = 38.0;
+        snap.skip_check.temp_now_f = 30.0;
+        snap.skip_check.temp_min_24h_f = 30.0;
+        snap.skip_check.temp_max_3day_f = 60.0;
+        snap.skip_check.humidity_now_pct = 50.0;
+        // This test models reported dry weather, not a precipitation outage.
+        snap.skip_check.rain_intensity_now_in_hr = Some(0.0);
+        snap.skip_check.rain_today_forecast_in = Some(0.0);
+        snap.skip_check.rain_next_4h_in = Some(0.0);
+        snap.skip_check.forecast_in = Some(0.0);
+        snap.skip_check.rain_3day_weighted_in = Some(0.0);
+        snap.skip_check.rain_7day_weighted_in = Some(0.0);
+        store.store(snap);
+        let policy = Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::refresher::WateringPolicy::default(),
+        ));
+        let app = Router::new()
+            .route("/simulate", post(simulate))
+            .with_state(SimulateState {
+                store,
+                policy: policy.clone(),
+            });
+        let ask = |app: Router| async move {
+            let req = Request::builder()
+                .method(Method::POST)
+                .uri("/simulate")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{}"#))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            serde_json::from_slice::<crate::model::SimResult>(&bytes).unwrap()
+        };
+        let first = ask(app.clone()).await;
+        assert_eq!(
+            first.baseline.reason_code, "freeze_now",
+            "{}",
+            first.baseline.reason
+        );
+        // The operator disables the freeze rule and saves: no restart.
+        let mut p = crate::refresher::WateringPolicy::default();
+        p.skip_rules.disabled_rules = vec!["freeze_now".into()];
+        policy.store(Arc::new(p));
+        let second = ask(app).await;
+        assert_ne!(
+            second.baseline.reason_code, "freeze_now",
+            "the saved rule set applies without a restart: {}",
+            second.baseline.reason
+        );
+    }
+
+    #[tokio::test]
+    async fn simulator_scripts_hold_heat_runs_and_keep_a_single_trace_winner() {
+        use axum::body::Body;
+        use axum::http::{Method, Request};
+        use tower::ServiceExt;
+        let store = Arc::new(IrrigationStore::new());
+        let mut snap = crate::model::IrrigationSnapshot::default();
+        snap.skip_check.temp_now_f = 80.0;
+        snap.skip_check.temp_min_24h_f = 65.0;
+        snap.skip_check.temp_min_24h_valid = true;
+        snap.skip_check.temp_max_3day_f = 110.0;
+        snap.skip_check.humidity_now_pct = 75.0;
+        snap.skip_check.days_since_significant_rain = 10;
+        snap.skip_check.rain_skip_in = 0.5;
+        snap.skip_check.min_temp_f = 38.0;
+        snap.skip_check.max_wind_mph = 15.0;
+        // This test models reported dry weather, not a precipitation outage.
+        snap.skip_check.rain_intensity_now_in_hr = Some(0.0);
+        snap.skip_check.rain_today_forecast_in = Some(0.0);
+        snap.skip_check.rain_next_4h_in = Some(0.0);
+        snap.skip_check.forecast_in = Some(0.0);
+        snap.skip_check.rain_3day_weighted_in = Some(0.0);
+        snap.skip_check.rain_7day_weighted_in = Some(0.0);
+        store.store(snap);
+        let app = Router::new()
+            .route("/simulate", post(simulate))
+            .with_state(SimulateState {
+                store,
+                policy: Arc::new(arc_swap::ArcSwap::from_pointee(
+                    crate::refresher::WateringPolicy::default(),
+                )),
+            });
+        for humidity in [12.0, 75.0] {
+            for (script, holds) in [
+                ("true", true),
+                ("bad syntax (", true),
+                ("missing_function()", true),
+                ("42", true),
+                ("false", false),
+                ("\"\"", false),
+            ] {
+                let req = Request::builder().method(Method::POST).uri("/simulate")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&serde_json::json!({"test_script": script, "humidity_now_pct": humidity})).unwrap())).unwrap();
+                let resp = app.clone().oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), StatusCode::OK);
+                let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+                    .await
+                    .unwrap();
+                let result: crate::model::SimResult = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(result.baseline.verdict, "run_extended");
+                assert_eq!(
+                    result.hypothetical.verdict,
+                    if holds { "skip" } else { "run_extended" },
+                    "{script:?}"
+                );
+                assert_eq!(
+                    result
+                        .hypothetical
+                        .rules
+                        .iter()
+                        .filter(|r| r.outcome == "fired")
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    result.hypothetical.reason_code,
+                    if holds { "test" } else { "heat_advisory" }
+                );
+            }
+        }
+    }
+
     #[test]
     fn manual_run_deadline_carries_the_shared_grace() {
-        assert_eq!(manual_run_deadline(1000, 600, true), 1000 + 600 + 30);
-        assert_eq!(manual_run_deadline(1000, 600, false), 1000 + 600 + 90);
+        assert_eq!(dispatch::run_deadline(1000, 600, true), 1000 + 600 + 30);
+        assert_eq!(dispatch::run_deadline(1000, 600, false), 1000 + 600 + 90);
     }
 
     fn mem_stores() -> (crate::persistence::ActiveRunsStore, RunsStore) {
@@ -2352,6 +2059,7 @@ mod tests {
 
     fn manual_row(zone: &str, controller: &str, start: i64) -> crate::persistence::runs::NewRun {
         crate::persistence::runs::NewRun {
+            session_id: None,
             zone_slug: zone.into(),
             start_epoch: start,
             source: "manual".into(),
@@ -2363,6 +2071,116 @@ mod tests {
             cycle_index: None,
             cycle_count: None,
         }
+    }
+
+    /// The export carries the columns a water bill needs: source,
+    /// controller, cycle position, applied depth, metered volume, note.
+    #[test]
+    fn the_export_explains_a_run() {
+        let rows = vec![crate::history::types::RunRecord {
+            session_id: None,
+            zone: "front".into(),
+            start_epoch: 1_788_600_000,
+            duration_s: 900,
+            skip_reason: None,
+            source: "smart_morning".into(),
+            status: "aborted".into(),
+            controller_id: Some("os_main".into()),
+            applied_mm: Some(3.75),
+            volume_gal: Some(41.2),
+            note: Some("ended by restart".into()),
+            cycle_index: Some(1),
+            cycle_count: Some(3),
+        }];
+        let csv = runs_csv(&rows);
+        let mut lines = csv.lines();
+        assert_eq!(
+            lines.next().unwrap(),
+            "timestamp_utc,zone,event,duration_s,reason,source,controller,status,cycle_index,cycle_count,applied_mm,volume_gal,note"
+        );
+        let row = lines.next().unwrap();
+        assert!(
+            row.ends_with(
+                ",front,run,900,,smart_morning,os_main,aborted,1,3,3.75,41.20,ended by restart"
+            ),
+            "{row}"
+        );
+    }
+
+    /// Two controllers armed, the second unreachable: Stop All stops the
+    /// first, clears only its rows, and keeps the second's deadline armed
+    /// for the reaper. Clearing the whole ledger here would have removed
+    /// the one backstop that closes the valve nobody could reach.
+    #[tokio::test]
+    async fn stop_all_keeps_an_unreachable_controllers_rows_armed() {
+        use crate::config::schema::DryRunConfig;
+        use crate::controllers::dry_run::DryRunController;
+        use crate::ports::irrigation_controller::{
+            ControllerCaps, ControllerError, ControllerResult, ControllerStatus,
+            IrrigationController, RunHandle, RunRecord,
+        };
+
+        struct Unreachable;
+        #[async_trait::async_trait]
+        impl IrrigationController for Unreachable {
+            fn id(&self) -> &str {
+                "b"
+            }
+            fn supports(&self) -> ControllerCaps {
+                ControllerCaps {
+                    flow_meter: false,
+                    rain_sensor: false,
+                    master_valve: false,
+                    multi_zone_parallel: false,
+                    history_query: false,
+                    remote_program_upload: false,
+                    water_level: false,
+                    per_zone_stop: true,
+                    duration_quantum_s: 1,
+                }
+            }
+            async fn run_zone(&self, _slug: &str, _duration_s: u32) -> ControllerResult<RunHandle> {
+                Err(ControllerError::Offline)
+            }
+            async fn stop_zone(&self, _slug: &str) -> ControllerResult<()> {
+                Err(ControllerError::Offline)
+            }
+            async fn stop_all(&self) -> ControllerResult<()> {
+                Err(ControllerError::Offline)
+            }
+            async fn status(&self) -> ControllerResult<ControllerStatus> {
+                Err(ControllerError::Offline)
+            }
+            async fn run_history(&self, _since_epoch: i64) -> ControllerResult<Vec<RunRecord>> {
+                Ok(vec![])
+            }
+        }
+
+        let registry = ControllerRegistry::new();
+        let a: std::sync::Arc<dyn IrrigationController> =
+            std::sync::Arc::new(DryRunController::new("a", DryRunConfig::default(), None));
+        let b: std::sync::Arc<dyn IrrigationController> = std::sync::Arc::new(Unreachable);
+        registry.set(vec![(a, true), (b, false)]);
+        let (active_runs, runs) = mem_stores();
+        active_runs
+            .arm("front".into(), "a".into(), 1000, 2000)
+            .await
+            .unwrap();
+        active_runs
+            .arm("back".into(), "b".into(), 1000, 2000)
+            .await
+            .unwrap();
+
+        let report = Dispatcher::new(registry.zone_locks(), Some(&runs), Some(&active_runs))
+            .stop_all(&registry, 1500)
+            .await;
+        assert_eq!(report.confirmed, vec!["a".to_string()]);
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].0, "b");
+
+        let armed = active_runs.due(i64::MAX / 2).await.unwrap();
+        let slugs: Vec<&str> = armed.iter().map(|r| r.zone_slug.as_str()).collect();
+        assert_eq!(slugs, vec!["back"], "b's row stays armed for the reaper");
     }
 
     // Finding-7 scenario: front is running a manual 20 minute run on the
@@ -2389,7 +2207,13 @@ mod tests {
             .await
             .unwrap();
 
-        stop_bookkeeping(Some(&ar), Some(&rs), "rachio_main", "back", true, 1300).await;
+        Dispatcher::new(
+            crate::controllers::ZoneLocks::default(),
+            Some(&rs),
+            Some(&ar),
+        )
+        .stop_bookkeeping("rachio_main", "back", StopScope::Device, 1300)
+        .await;
 
         let left = ar.due(10_000).await.unwrap();
         assert_eq!(left.len(), 1, "only the other controller's row survives");
@@ -2422,7 +2246,13 @@ mod tests {
             .await
             .unwrap();
 
-        stop_bookkeeping(Some(&ar), Some(&rs), "os_main", "back", false, 1300).await;
+        Dispatcher::new(
+            crate::controllers::ZoneLocks::default(),
+            Some(&rs),
+            Some(&ar),
+        )
+        .stop_bookkeeping("os_main", "back", StopScope::Zone, 1300)
+        .await;
 
         let left = ar.due(10_000).await.unwrap();
         assert_eq!(left.len(), 1);
@@ -2445,8 +2275,8 @@ mod tests {
         depletion: Option<f64>,
         soil_planned: u32,
         today: u32,
-    ) -> crate::ha::snapshot::WaterBudget {
-        crate::ha::snapshot::WaterBudget {
+    ) -> crate::model::WaterBudget {
+        crate::model::WaterBudget {
             zone_slug: slug.into(),
             zone_name: slug.into(),
             scheduling_model: model.into(),

@@ -13,8 +13,8 @@ use axum::{extract::State, response::Json, routing::get, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::config::FileConfigStore;
-use crate::ha::IrrigationStore;
 use crate::ports::config_store::ConfigStore;
+use crate::refresher::IrrigationStore;
 
 /// Manifest schema version. SemVer-style. Bumped on shape-breaking
 /// changes only; additive fields use the same major.
@@ -163,7 +163,7 @@ async fn manifest(State(state): State<ManifestState>) -> Json<Manifest> {
                 for entry in cfg.sources.iter().filter(|s| s.enabled) {
                     for f in crate::runtime::source_field_names(&cfg, entry) {
                         match f {
-                            "flow_gpm" => flow = true,
+                            "flow_gpm" | "flow_total_gal_today" => flow = true,
                             "leaf_wetness_pct" => leaf = true,
                             "pop" => pop = true,
                             "illuminance" => lux = true,
@@ -224,7 +224,10 @@ async fn manifest(State(state): State<ManifestState>) -> Json<Manifest> {
     // via the refresher, or a live read), mirroring the flow_meter flag.
     let has_water_level = snap.water_level_capable || snap.water_level_pct.is_some();
 
-    push_tempest_weather(&mut entities, has_station, has_lux);
+    // Wet bulb is derived from whatever temperature and humidity the merge
+    // holds, so any install whose merge owns a temperature has one.
+    let has_conditions = snap.field_sources.contains_key("air_temp_f");
+    push_tempest_weather(&mut entities, has_station, has_lux, has_conditions);
     push_irrigation_meta(&mut entities, has_irrigation, has_water_level);
     push_thresholds(&mut entities, has_irrigation);
     push_forecast(&mut entities, has_pop);
@@ -242,7 +245,12 @@ async fn manifest(State(state): State<ManifestState>) -> Json<Manifest> {
 // ─────────────────────────────────────────────────────────────────────
 // Tempest weather scalars (snapshot=tempest)
 // ─────────────────────────────────────────────────────────────────────
-fn push_tempest_weather(out: &mut Vec<EntityDescriptor>, has_station: bool, has_lux: bool) {
+fn push_tempest_weather(
+    out: &mut Vec<EntityDescriptor>,
+    has_station: bool,
+    has_lux: bool,
+    has_conditions: bool,
+) {
     let defs: &[(
         &str,
         &str,
@@ -408,13 +416,27 @@ fn push_tempest_weather(out: &mut Vec<EntityDescriptor>, has_station: bool, has_
             ..Default::default()
         });
     }
-    // Wet bulb, wind lull, and rain-last-minute are computed ONLY by the
-    // Tempest UDP path (apply_obs); no WeatherField variant exists for them,
-    // so no other station kind and no cloud fill can ever write them.
-    // Ungated they gave every non-Tempest install a frozen 0.0 °F "Wet bulb"
-    // (device_class=temperature feeding long-term statistics) plus dead
-    // "Wind lull" / "Rain last minute" sensors, the same phantom class the
-    // battery gate below exists for. Same gate: a live station present.
+    // Wet bulb is derived from the merged temperature and humidity, so it is
+    // real wherever a reading is, cloud-only installs included. Ungated it
+    // gave a brand-new install a frozen 0.0 °F reading with
+    // device_class=temperature, which feeds long-term statistics, so the
+    // gate is "any reading at all" rather than "a station".
+    if has_conditions {
+        out.push(EntityDescriptor {
+            platform: "sensor",
+            id: "wet_bulb_f".to_string(),
+            name: "Wet bulb".to_string(),
+            snapshot: "tempest",
+            path: vec!["wet_bulb_f".to_string()],
+            unit: Some("°F"),
+            device_class: Some("temperature"),
+            state_class: Some("measurement"),
+            ..Default::default()
+        });
+    }
+    // The wind lull and the last minute's rain come only from a station that
+    // reports them itself. Ungated they gave every other install dead
+    // sensors, the same phantom class the battery gate below exists for.
     if has_station {
         let station_only: &[(
             &str,
@@ -423,13 +445,6 @@ fn push_tempest_weather(out: &mut Vec<EntityDescriptor>, has_station: bool, has_
             Option<&'static str>,
             Option<&'static str>,
         )] = &[
-            (
-                "wet_bulb_f",
-                "Wet bulb",
-                Some("°F"),
-                Some("temperature"),
-                Some("measurement"),
-            ),
             (
                 "wind_lull_mph",
                 "Wind lull",
@@ -795,6 +810,8 @@ fn push_provenance_and_flow(out: &mut Vec<EntityDescriptor>, has_flow: bool, has
         group: Some("forecast"),
         ..Default::default()
     });
+    // Stable selected paths: presence can stay advertised through a disconnect,
+    // while each value is nullable and carries only actual meter evidence.
     // Flow rate + cumulative flow today (a flow meter on a controller or a
     // standalone pulse meter). Gated on a flow CAPABILITY actually being
     // present (a controller reporting a meter, or a configured source that
@@ -805,8 +822,8 @@ fn push_provenance_and_flow(out: &mut Vec<EntityDescriptor>, has_flow: bool, has
             platform: "sensor",
             id: "flow_gpm".into(),
             name: "Flow rate".into(),
-            snapshot: "tempest",
-            path: vec!["flow_gpm".into()],
+            snapshot: "irrigation",
+            path: vec!["flow".into(), "rate_gpm".into()],
             unit: Some("gal/min"),
             device_class: Some("volume_flow_rate"),
             state_class: Some("measurement"),
@@ -819,8 +836,8 @@ fn push_provenance_and_flow(out: &mut Vec<EntityDescriptor>, has_flow: bool, has
             platform: "sensor",
             id: "flow_total_gal_today".into(),
             name: "Flow total today".into(),
-            snapshot: "tempest",
-            path: vec!["flow_total_gal_today".into()],
+            snapshot: "irrigation",
+            path: vec!["flow".into(), "total_gal_today".into()],
             unit: Some("gal"),
             device_class: Some("water"),
             state_class: Some("total_increasing"),
@@ -866,7 +883,7 @@ fn push_provenance_and_flow(out: &mut Vec<EntityDescriptor>, has_flow: bool, has
 /// caller fails open and publishes soil for every zone).
 fn soil_equipped_zones(
     cfg_soil: Option<std::collections::BTreeSet<String>>,
-    snap: &crate::ha::snapshot::IrrigationSnapshot,
+    snap: &crate::model::IrrigationSnapshot,
 ) -> Option<std::collections::BTreeSet<String>> {
     cfg_soil.map(|mut set| {
         for z in &snap.zones {
@@ -888,7 +905,7 @@ fn soil_equipped_zones(
 
 fn push_zone_entities(
     out: &mut Vec<EntityDescriptor>,
-    zones: &[crate::ha::snapshot::ZoneState],
+    zones: &[crate::model::ZoneState],
     // Slugs of zones with a soil probe configured (or live soil evidence).
     // `None` = config unreadable: fail open and publish soil for every zone,
     // matching the flow/leaf gates' fail-open posture.
@@ -1031,26 +1048,9 @@ fn push_zone_entities(
             ..Default::default()
         });
 
-        // Today's accumulated run minutes. Same capability gate the soil
-        // bucket gets above: published only when something on this install
-        // actually produced the figure. Nothing does, so this registers
-        // nothing rather than a `total_increasing` sensor that records a
-        // fabricated 0 into Home Assistant's long-term statistics forever.
-        if zone.today_run_minutes.is_some() {
-            out.push(EntityDescriptor {
-                platform: "sensor",
-                id: format!("{slug}_run_today"),
-                name: format!("{pretty} run today"),
-                snapshot: "irrigation",
-                path: vec!["today_run_minutes".into()],
-                unit: Some("min"),
-                device_class: Some("duration"),
-                state_class: Some("total_increasing"),
-                zone_slug: Some(slug.clone()),
-                group: None,
-                ..Default::default()
-            });
-        }
+        // No "run today" sensor: `today_run_minutes` is deprecated (nothing
+        // produces it), and a `total_increasing` sensor recording a fabricated
+        // 0 into Home Assistant's long-term statistics is worse than none.
 
         // Running binary_sensor
         out.push(EntityDescriptor {
@@ -1164,7 +1164,7 @@ mod tests {
     #[test]
     fn a_sensor_descriptor_carries_no_range() {
         let mut out = Vec::new();
-        push_tempest_weather(&mut out, true, true);
+        push_tempest_weather(&mut out, true, true, true);
         assert!(out
             .iter()
             .all(|d| d.min.is_none() && d.max.is_none() && d.step.is_none()));
@@ -1173,7 +1173,7 @@ mod tests {
     #[test]
     fn weather_entities_present() {
         let mut out = Vec::new();
-        push_tempest_weather(&mut out, true, true);
+        push_tempest_weather(&mut out, true, true, true);
         // Minimum set HACS needs to render a weather entity
         let ids: Vec<&str> = out.iter().map(|e| e.id.as_str()).collect();
         for required in ["air_temp_f", "rh_pct", "wind_avg_mph", "pressure_inhg"] {
@@ -1187,38 +1187,46 @@ mod tests {
         // published; a cloud-only / Ecowitt install (no Tempest serial) omits
         // it so HA never shows a phantom 0% battery.
         let mut with_station = Vec::new();
-        push_tempest_weather(&mut with_station, true, true);
+        push_tempest_weather(&mut with_station, true, true, true);
         assert!(with_station.iter().any(|e| e.id == "battery_pct"));
 
         let mut cloud_only = Vec::new();
-        push_tempest_weather(&mut cloud_only, false, false);
+        push_tempest_weather(&mut cloud_only, false, false, true);
         assert!(!cloud_only.iter().any(|e| e.id == "battery_pct"));
     }
 
     #[test]
     fn station_only_scalars_gated_like_battery() {
-        // Wet bulb / wind lull / rain-last-minute exist only in the Tempest
-        // UDP packet; without a station they were frozen 0.0 sensors in HA.
+        // The wind lull and the last minute's rain come only from a station
+        // that reports them; without one they were frozen 0.0 sensors in HA.
         // Illuminance is station-only lux with its own (station OR
-        // lux-capable-source) gate.
+        // lux-capable-source) gate. Wet bulb is NOT in this set: it is
+        // derived from whatever temperature and humidity the merge holds,
+        // so a cloud-only install has a real one.
         let mut cloud_only = Vec::new();
-        push_tempest_weather(&mut cloud_only, false, false);
+        push_tempest_weather(&mut cloud_only, false, false, true);
         let ids: Vec<&str> = cloud_only.iter().map(|e| e.id.as_str()).collect();
-        for absent in [
-            "wet_bulb_f",
-            "wind_lull_mph",
-            "rain_in_last_min",
-            "illuminance_lx",
-        ] {
+        for absent in ["wind_lull_mph", "rain_in_last_min", "illuminance_lx"] {
             assert!(!ids.contains(&absent), "phantom station scalar: {absent}");
         }
+        assert!(
+            ids.contains(&"wet_bulb_f"),
+            "a cloud-only install still has a wet bulb"
+        );
+
+        // An install whose merge owns no temperature has none of it: a
+        // brand-new instance must not publish a 0.0 °F reading into
+        // long-term statistics.
+        let mut nothing_yet = Vec::new();
+        push_tempest_weather(&mut nothing_yet, false, false, false);
+        assert!(!nothing_yet.iter().any(|e| e.id == "wet_bulb_f"));
         // The universal conditions still publish on a cloud-only install.
         assert!(ids.contains(&"air_temp_f"));
         assert!(ids.contains(&"solar_w_m2"));
 
         // With a station present they all return.
         let mut with_station = Vec::new();
-        push_tempest_weather(&mut with_station, true, true);
+        push_tempest_weather(&mut with_station, true, true, true);
         let ids: Vec<&str> = with_station.iter().map(|e| e.id.as_str()).collect();
         for required in [
             "wet_bulb_f",
@@ -1235,10 +1243,13 @@ mod tests {
         // A lux-capable configured source (e.g. Ecowitt) publishes
         // illuminance without a stamped station serial.
         let mut lux_source = Vec::new();
-        push_tempest_weather(&mut lux_source, false, true);
+        push_tempest_weather(&mut lux_source, false, true, true);
         let ids: Vec<&str> = lux_source.iter().map(|e| e.id.as_str()).collect();
         assert!(ids.contains(&"illuminance_lx"));
-        assert!(!ids.contains(&"wet_bulb_f"), "wet bulb stays Tempest-only");
+        assert!(
+            !ids.contains(&"wind_lull_mph"),
+            "the lull still needs a station that reports one"
+        );
     }
 
     #[test]
@@ -1292,6 +1303,30 @@ mod tests {
         for required in ["flow_gpm", "flow_total_gal_today", "leaf_wetness_pct"] {
             assert!(ids.contains(&required), "missing gated entity: {required}");
         }
+        // Stable selectors follow nullable resolved facts. Controller-only
+        // capability cannot point HA at the weather store's default zeros.
+        let rate = both.iter().find(|e| e.id == "flow_gpm").unwrap();
+        let total = both
+            .iter()
+            .find(|e| e.id == "flow_total_gal_today")
+            .unwrap();
+        assert_eq!(rate.snapshot, "irrigation");
+        assert_eq!(rate.path, vec!["flow", "rate_gpm"]);
+        assert_eq!(total.snapshot, "irrigation");
+        assert_eq!(total.path, vec!["flow", "total_gal_today"]);
+        let mut snapshot = crate::model::IrrigationSnapshot {
+            flow_meter: true,
+            ..Default::default()
+        };
+        let unknown = serde_json::to_value(&snapshot).unwrap();
+        assert!(unknown.pointer("/flow/rate_gpm").unwrap().is_null());
+        snapshot.flow.prefer_controller("meter", Some(4.2));
+        let measured = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(
+            measured.pointer("/flow/rate_gpm"),
+            Some(&serde_json::json!(4.2))
+        );
+        assert!(measured.pointer("/flow/total_gal_today").unwrap().is_null());
 
         // The forecast-block scalars carry the "forecast" sub-device hint so
         // the integration files them under the Forecast device. Most ride
@@ -1338,7 +1373,7 @@ mod tests {
 
     #[test]
     fn zone_soil_entities_gated_on_a_configured_probe() {
-        use crate::ha::snapshot::ZoneState;
+        use crate::model::ZoneState;
         let zones = vec![
             ZoneState {
                 slug: "front".into(),
@@ -1406,7 +1441,7 @@ mod tests {
         // is the null key stays gated out, a zone with a real live reading
         // gates in even with no config binding, and a config-bound zone
         // stays in while its probe reads null (offline probe).
-        use crate::ha::snapshot::{IrrigationSnapshot, ZoneState};
+        use crate::model::{IrrigationSnapshot, ZoneState};
         let mut snap = IrrigationSnapshot {
             zones: vec![
                 ZoneState {

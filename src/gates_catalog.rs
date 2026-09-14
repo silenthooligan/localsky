@@ -4,6 +4,9 @@
 // the engine (ssr) and the Rule Lab UI (wasm) compile it; the engine's
 // catalog_covers_every_traced_gate test pins it to the traced ladder.
 
+pub const RESTART_REQUIRED_REASON: &str =
+    "New watering held until LocalSky restarts to apply configuration changes";
+
 /// Catalog of every built-in gate in the decision ladder, in evaluation
 /// order: `(id, label, description, protected)`. The description is a
 /// plain-language statement of what DISABLING the rule means, for the
@@ -11,6 +14,12 @@
 /// them if listed in `disabled_rules`.
 pub fn builtin_rule_catalog() -> &'static [(&'static str, &'static str, &'static str, bool)] {
     &[
+        (
+            "restart_required",
+            "Restart required",
+            "Watering stays held after a change to startup configuration until LocalSky restarts. This safety hold cannot be disabled or overridden.",
+            true,
+        ),
         (
             "override",
             "Manual override",
@@ -39,6 +48,18 @@ pub fn builtin_rule_catalog() -> &'static [(&'static str, &'static str, &'static
             "live_data",
             "Live weather availability",
             "Always on: when there is no station data and no forecast, the engine fails safe with a skip rather than deciding on fabricated values. This safety gate cannot be disabled.",
+            true,
+        ),
+        (
+            "soil_probe",
+            "Soil probe availability",
+            "A configured probe that is missing or untrusted holds its zone until a reliable reading returns. This data hold cannot be disabled or waived by Force.",
+            true,
+        ),
+        (
+            "planning_forecast",
+            "Watering-plan rain availability",
+            "Automatic watering needs complete next-24h rain evidence to plan a session. Missing evidence holds only that zone and cannot be waived by Force.",
             true,
         ),
         (
@@ -74,13 +95,19 @@ pub fn builtin_rule_catalog() -> &'static [(&'static str, &'static str, &'static
         (
             "wind_forecast",
             "Windy day forecast",
-            "Watering can run even when the day's peak forecast wind exceeds your maximum plus slack.",
+            "Watering can run even when the forecast wind during the run exceeds your maximum plus slack. The day's peak is used when no run window is known.",
             false,
         ),
         (
             "already_wet",
             "Already wet today",
             "Watering can run even after measurable rain has already fallen today.",
+            false,
+        ),
+        (
+            "rain_today_forecast",
+            "Rain forecast today",
+            "Watering can run on a day the forecast expects rain but no gauge has measured any yet. This is the modelled twin of \"Already wet today\": it exists so an install with no rain gauge still holds after expected rain, and it says on the card that the figure is expected rather than measured. A soil-governed zone rides through it, because its deficit has already counted that rain.",
             false,
         ),
         (
@@ -120,16 +147,16 @@ pub fn builtin_rule_catalog() -> &'static [(&'static str, &'static str, &'static
             false,
         ),
         (
+            "dry_run",
+            "Hold all watering",
+            "Holds every run while it is on, so nothing waters. If you want LocalSky to keep deciding and show you what it would do without watering, set your controller to Watch only instead. This control cannot be disabled.",
+            true,
+        ),
+        (
             "heat_advisory",
             "Heat advisory",
             "Runs are never extended for hot, humid, dry stretches; planned durations stay unchanged. Has no effect on Soil-model zones: measured water use already charges hot days into their deficits.",
             false,
-        ),
-        (
-            "dry_run",
-            "Dry-run mode",
-            "Dry-run mode always reports a skip so no real watering happens while it is on. This operator control cannot be disabled.",
-            true,
         ),
     ]
 }
@@ -168,17 +195,213 @@ pub fn gate_family(reason_code: &str) -> GateFamily {
         "restrictions" => GateFamily::Restriction,
         "freeze_now" | "overnight_freeze" | "soil_frost" => GateFamily::Freeze,
         "wind_now" | "wind_forecast" => GateFamily::Wind,
-        "rain_now" | "already_wet" | "observed_rain" | "rain_next_4h" | "tomorrow_rain"
-        | "rain_3day" | "soil_saturation" => GateFamily::Water,
-        "paused" | "pause_until" => GateFamily::Pause,
+        "rain_now"
+        | "already_wet"
+        | "rain_today_forecast"
+        | "observed_rain"
+        | "rain_next_4h"
+        | "tomorrow_rain"
+        | "rain_3day"
+        | "soil_saturation" => GateFamily::Water,
+        "paused" | "pause_until" | "restart_required" => GateFamily::Pause,
         "soil_model" => GateFamily::SoilModel,
-        "live_data" => GateFamily::NoData,
+        "live_data" | "soil_probe" | "planning_forecast" => GateFamily::NoData,
         // Both decide a RUN rather than a skip: the dry-soil floor
         // overrides a forecast-rain skip, and the heat advisory extends a
         // run. They carry no skip family, and the coverage test exempts
         // them for that reason rather than by omission.
         "soil_floor" | "heat_advisory" => GateFamily::Other,
         _ => GateFamily::Other,
+    }
+}
+
+/// Which water gate, for the surfaces that word "recent rain", "rain
+/// forecast" and "soil still moist" differently. Every water family code
+/// falls in one of these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaterKind {
+    /// Rain that already fell, or is falling.
+    Recent,
+    /// Rain in the forecast.
+    Forecast,
+    /// The soil already holds the water.
+    Soil,
+}
+
+impl GateFamily {
+    /// The one legacy ladder: classify an older row that carries no reason
+    /// code from the sentence the engine baked. Every surface that used to
+    /// keep its own substring list reads this instead.
+    pub fn from_prose(reason: &str) -> GateFamily {
+        let r = reason.to_ascii_lowercase();
+        if r.contains("no live") || r.contains("no weather data") || r.contains("no data") {
+            GateFamily::NoData
+        } else if r.contains("restrict")
+            || r.contains("allowed day")
+            || r.contains("watering day")
+            || r.contains("forbidden")
+        {
+            GateFamily::Restriction
+        } else if r.contains("freez") || r.contains("frost") {
+            GateFamily::Freeze
+        } else if r.contains("wind") {
+            GateFamily::Wind
+        } else if r.contains("saturat")
+            || r.contains("moist")
+            || r.contains("already wet")
+            || r.contains("rain")
+            || r.contains("wet")
+        {
+            GateFamily::Water
+        } else if r.contains("paus") || r.contains("vacation") {
+            GateFamily::Pause
+        } else {
+            GateFamily::Other
+        }
+    }
+
+    /// The family of a skip: the reason code when the row has one, the
+    /// sentence when it does not.
+    pub fn of(reason_code: &str, reason: &str) -> GateFamily {
+        // Rain rungs retain their scope when their operand is missing. This is
+        // presentation only: do not relabel their unavailable hold as wet weather.
+        if matches!(
+            reason_code,
+            "rain_now" | "rain_today_forecast" | "rain_next_4h" | "tomorrow_rain" | "rain_3day"
+        ) && reason.contains("unavailable")
+        {
+            GateFamily::NoData
+        } else if reason_code.is_empty() {
+            GateFamily::from_prose(reason)
+        } else {
+            gate_family(reason_code)
+        }
+    }
+
+    /// A short noun phrase for the family, the vocabulary every surface
+    /// shares ("high wind", "freeze risk", "watering restrictions").
+    pub fn short_phrase(self) -> &'static str {
+        match self {
+            GateFamily::Restriction => "watering restrictions",
+            GateFamily::Freeze => "freeze risk",
+            GateFamily::Wind => "high wind",
+            GateFamily::Water => "rain",
+            GateFamily::Pause => "paused",
+            GateFamily::SoilModel => "the soil model",
+            GateFamily::NoData => "unavailable weather or sensor data",
+            GateFamily::Other => "current conditions",
+        }
+    }
+
+    /// The one-word suffix a stylesheet modifier or a tally bucket keys on.
+    pub fn css_modifier(self) -> &'static str {
+        match self {
+            GateFamily::Restriction => "law",
+            GateFamily::Freeze => "freeze",
+            GateFamily::Wind => "wind",
+            GateFamily::Water => "rain",
+            GateFamily::Pause => "pause",
+            GateFamily::SoilModel => "soil",
+            GateFamily::NoData => "nodata",
+            GateFamily::Other => "",
+        }
+    }
+}
+
+/// Which water the water family is talking about, from the code when
+/// there is one and from the sentence otherwise.
+pub fn water_kind(reason_code: &str, reason: &str) -> WaterKind {
+    match reason_code {
+        "soil_saturation" => return WaterKind::Soil,
+        "already_wet" | "observed_rain" | "rain_now" => return WaterKind::Recent,
+        "rain_next_4h" | "tomorrow_rain" | "rain_3day" => return WaterKind::Forecast,
+        _ => {}
+    }
+    let r = reason.to_ascii_lowercase();
+    if r.contains("saturat") || r.contains("moist") {
+        WaterKind::Soil
+    } else if r.contains("already wet") || r.contains("currently raining") || r.contains("observed")
+    {
+        WaterKind::Recent
+    } else {
+        WaterKind::Forecast
+    }
+}
+
+/// The noun phrase a skip condenses to on the hero and in the explainer:
+/// the family's phrase, with the water family split into recent rain, a
+/// rain forecast and moist soil.
+pub fn skip_phrase(reason_code: &str, reason: &str) -> &'static str {
+    match GateFamily::of(reason_code, reason) {
+        GateFamily::Water => match water_kind(reason_code, reason) {
+            WaterKind::Recent => "recent rain",
+            WaterKind::Forecast => "rain forecast",
+            WaterKind::Soil => "soil still moist",
+        },
+        f => f.short_phrase(),
+    }
+}
+
+#[cfg(test)]
+mod prose_tests {
+    use super::*;
+
+    #[test]
+    fn the_legacy_ladder_and_the_code_agree() {
+        for (code, sentence) in [
+            ("freeze_now", "Freeze risk now (30F < 38F)"),
+            ("wind_now", "Too windy right now (22 mph)"),
+            (
+                "already_wet",
+                "Already wet (0.30\" rain in the last 2 days)",
+            ),
+            ("soil_saturation", "Soil saturated at 61%"),
+            ("restrictions", "Watering restrictions: not an allowed day"),
+            ("paused", "Paused until Monday (vacation mode)"),
+        ] {
+            assert_eq!(
+                gate_family(code),
+                GateFamily::from_prose(sentence),
+                "{code} / {sentence}"
+            );
+        }
+        assert_eq!(
+            GateFamily::from_prose("Skipping: budget met"),
+            GateFamily::Other
+        );
+    }
+
+    #[test]
+    fn the_phrase_splits_the_water_family() {
+        assert_eq!(skip_phrase("already_wet", ""), "recent rain");
+        assert_eq!(skip_phrase("rain_3day", ""), "rain forecast");
+        assert_eq!(skip_phrase("soil_saturation", ""), "soil still moist");
+        assert_eq!(skip_phrase("", "Currently raining"), "recent rain");
+        assert_eq!(skip_phrase("", "Rain likely tomorrow"), "rain forecast");
+        assert_eq!(skip_phrase("", "Soil moist enough"), "soil still moist");
+        assert_eq!(skip_phrase("wind_forecast", ""), "high wind");
+        assert_eq!(skip_phrase("", "something else"), "current conditions");
+    }
+
+    #[test]
+    fn unavailable_rain_holds_are_not_described_as_rain_forecasts() {
+        for code in [
+            "rain_now",
+            "rain_today_forecast",
+            "rain_next_4h",
+            "tomorrow_rain",
+            "rain_3day",
+            "planning_forecast",
+        ] {
+            assert_eq!(
+                GateFamily::of(code, "Rain forecast unavailable; watering held"),
+                GateFamily::NoData
+            );
+            assert_eq!(
+                skip_phrase(code, "Rain forecast unavailable; watering held"),
+                "unavailable weather or sensor data"
+            );
+        }
     }
 }
 

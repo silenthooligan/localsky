@@ -28,17 +28,18 @@
 //   GET  /sensors/manifest           declarative entity inventory for HACS
 //   GET  /sources/openmeteo/models   Open-Meteo forecast model catalog
 //   GET  /radar/windgrid             U/V wind grid for the map's velocity layer
-//                                    (wired in main.rs: it needs the config
+//                                    (wired in boot::api: it needs the config
 //                                    store for the model + its own cache)
 //   GET  /radar/tropical             all-basin tropical cyclone GeoJSON
 //                                    (NHC/CPHC + JMA + JTWC normalized
-//                                    server-side; wired in main.rs with its
-//                                    own 10-minute cache)
+//                                    server-side; wired in boot::api with
+//                                    its own 10-minute cache)
 
 pub mod auth;
 pub mod backup;
 pub mod config;
 pub mod devices;
+pub mod diagnostics;
 pub mod forecast;
 pub mod health;
 pub mod info;
@@ -60,8 +61,8 @@ pub mod wizard;
 mod snapshot_tests;
 
 use crate::forecast::ForecastStore;
-use crate::ha::{IrrigationStore, SnapshotSource};
 use crate::llm::AdvisorState;
+use crate::refresher::{IrrigationStore, SnapshotSource};
 use crate::tempest::state::TempestStore;
 use axum::{
     extract::State,
@@ -79,31 +80,55 @@ use tokio::sync::Mutex;
 use tokio_stream::wrappers::WatchStream;
 use tokio_stream::StreamExt;
 
-pub fn router(
-    tempest: Arc<TempestStore>,
-    irrigation: Arc<IrrigationStore>,
-    forecast_store: Arc<ForecastStore>,
-    advisor: AdvisorState,
-    history: Option<Arc<Mutex<Connection>>>,
-    // Snapshot source: routes the POST /action vacation-pause + one-day
-    // override to local state (native) vs HA helpers (HA).
-    source: SnapshotSource,
-    // Device topology (gateways/controllers + their sensors/zones) for the
-    // MA-style /devices view.
-    devices: crate::devices::DeviceRegistry,
-    // HA controller entity prefix for the POST /action handler.
-    sprinkler_prefix: String,
-    // Config store for the manifest's capability gates (which source-provided
-    // readings, e.g. flow / leaf wetness, actually exist on this install), and
-    // for POST /action, whose threshold writes land in engine.skip_rules once
-    // the matching helper is adopted.
-    cfg_store: Arc<crate::config::FileConfigStore>,
-    // The live watering policy. POST /action reads the adoption markers off
-    // it, which is the same handle the refresher reads them from, so a control
-    // write and the engine read that consumes it can never disagree about
-    // where the value lives.
-    watering_policy: Arc<arc_swap::ArcSwap<crate::ha::WateringPolicy>>,
-) -> Router {
+/// Everything the core API routers read, built once by the boot and
+/// mounted at both `/api` and `/api/v1` from one `router()` call.
+#[derive(Clone)]
+pub struct ApiState {
+    pub tempest: Arc<TempestStore>,
+    pub irrigation: Arc<IrrigationStore>,
+    pub forecast: Arc<ForecastStore>,
+    pub advisor: AdvisorState,
+    pub history: Option<Arc<Mutex<Connection>>>,
+    /// Routes the POST /action vacation-pause + one-day override to local
+    /// state (native) vs HA helpers (HA).
+    pub source: SnapshotSource,
+    /// Device topology (gateways/controllers + their sensors/zones) for
+    /// the MA-style /devices view.
+    pub devices: crate::devices::DeviceRegistry,
+    /// HA controller entity prefix for the POST /action handler.
+    pub sprinkler_prefix: String,
+    /// Config store for the manifest's capability gates and for POST
+    /// /action's threshold writes.
+    pub cfg_store: Arc<crate::config::FileConfigStore>,
+    /// The live watering policy: POST /action reads the adoption markers
+    /// off the same handle the refresher reads them from.
+    pub watering_policy: Arc<arc_swap::ArcSwap<crate::refresher::WateringPolicy>>,
+    /// Manual zone dispatch plumbing; None in demo mode, where the zone
+    /// actions answer 503.
+    pub dispatch: Option<irrigation::DispatchState>,
+    /// The unified sensor inventory's zone bindings and flow meters;
+    /// None in demo mode.
+    pub inventory: Option<sensors::InventoryState>,
+    /// Tuning report generation; None without a history database.
+    pub tuning: Option<Arc<crate::tuning::TuningHandles>>,
+}
+
+pub fn router(st: ApiState) -> Router {
+    let ApiState {
+        tempest,
+        irrigation,
+        forecast: forecast_store,
+        advisor,
+        history,
+        source,
+        devices,
+        sprinkler_prefix,
+        cfg_store,
+        watering_policy,
+        dispatch,
+        inventory,
+        tuning,
+    } = st;
     let tempest_routes = Router::new()
         .route("/snapshot", get(snapshot))
         .route("/stream", get(stream))
@@ -125,6 +150,8 @@ pub fn router(
                 sprinkler_prefix,
                 cfg_store,
                 watering_policy,
+                dispatch,
+                tuning,
             ),
         )
         .nest(
@@ -140,7 +167,7 @@ pub fn router(
     if let Some(h) = history {
         router = router
             .nest("/weather", weather::router(h.clone()))
-            .nest("/sensors", sensors::router(h));
+            .nest("/sensors", sensors::router(h, inventory));
     }
     router
 }

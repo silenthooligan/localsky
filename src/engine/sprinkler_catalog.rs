@@ -13,7 +13,7 @@ pub fn catalog_precip_rate_mm_hr(t: SprinklerType) -> f64 {
 }
 
 /// Enum -> snake_case slug used by the agronomy catalog + the config wire format.
-fn sprinkler_slug(t: SprinklerType) -> &'static str {
+pub fn sprinkler_slug(t: SprinklerType) -> &'static str {
     use SprinklerType::*;
     match t {
         Rotor => "rotor",

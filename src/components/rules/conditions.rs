@@ -11,8 +11,8 @@
 
 use leptos::prelude::*;
 
-use crate::components::ui::Button;
-use crate::ha::snapshot::IrrigationSnapshot;
+use crate::components::ui::{Button, ConfirmSheet};
+use crate::model::IrrigationSnapshot;
 
 /// (value, label, unit) for every metric a comparison can read. `value`
 /// must match the backend `Metric` serde (snake_case) exactly.
@@ -145,15 +145,53 @@ pub fn ConditionsSection(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView 
     #[cfg(feature = "hydrate")]
     Effect::new(move |_| {
         leptos::task::spawn_local(async move {
-            if let Ok(resp) = gloo_net::http::Request::get("/api/config").send().await {
-                if let Ok(v) = resp.json::<serde_json::Value>().await {
-                    config.set(v);
-                }
+            if let Ok(v) = crate::components::config_client::get_config().await {
+                config.set(v);
             }
         });
     });
     #[cfg(not(feature = "hydrate"))]
     let _ = config;
+
+    // One read-modify-write for every row mutation: apply `f` to the
+    // stored rules array, then PUT the whole config. Lives on the page,
+    // not the row, so the delete confirmation can reach it too.
+    let mutate_save = move |f: &dyn Fn(&mut Vec<serde_json::Value>)| {
+        config.update(|cfg| {
+            if let Some(arr) = cfg
+                .get_mut("conditions")
+                .and_then(|c| c.get_mut("rules"))
+                .and_then(|v| v.as_array_mut())
+            {
+                f(arr);
+            }
+        });
+        let candidate = config.get_untracked();
+        #[cfg(feature = "hydrate")]
+        leptos::task::spawn_local(async move {
+            if let Err(e) = crate::components::config_client::put_config(&candidate).await {
+                crate::components::ui::use_toast().error(format!("Rule save failed: {e}"));
+            }
+        });
+        #[cfg(not(feature = "hydrate"))]
+        let _ = candidate;
+    };
+
+    // Delete asks through the shared ConfirmSheet instead of a native
+    // confirm(): the row stages its index and opens the sheet, the sheet's
+    // on_confirm removes the rule once the sheet has closed.
+    let pending_delete: RwSignal<Option<usize>> = RwSignal::new(None);
+    let delete_open = RwSignal::new(false);
+    let do_delete = Callback::new(move |()| {
+        if let Some(i) = pending_delete.get_untracked() {
+            mutate_save(&|arr| {
+                if i < arr.len() {
+                    arr.remove(i);
+                }
+            });
+        }
+        pending_delete.set(None);
+    });
 
     let rules_view = move || {
         let cfg = config.get();
@@ -178,31 +216,9 @@ pub fn ConditionsSection(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView 
                     .unwrap_or_else(|| "rule".to_string());
                 let enabled = r.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
                 let summary = rule_summary(&r);
-                let mutate_save = move |f: &dyn Fn(&mut Vec<serde_json::Value>)| {
-                    config.update(|cfg| {
-                        if let Some(arr) = cfg.get_mut("conditions").and_then(|c| c.get_mut("rules")).and_then(|v| v.as_array_mut()) {
-                            f(arr);
-                        }
-                    });
-                    let candidate = config.get_untracked();
-                    #[cfg(feature = "hydrate")]
-                    leptos::task::spawn_local(async move {
-                        if let Err(e) = save_config(candidate).await {
-                            crate::components::ui::use_toast().error(format!("Rule save failed: {e}"));
-                        }
-                    });
-                    #[cfg(not(feature = "hydrate"))]
-                    let _ = candidate;
-                };
                 let del = move |_| {
-                    #[cfg(feature = "hydrate")]
-                    {
-                        let ok = web_sys::window()
-                            .and_then(|w| w.confirm_with_message("Delete this rule? This takes effect on the next decision.").ok())
-                            .unwrap_or(false);
-                        if !ok { return; }
-                    }
-                    mutate_save(&|arr| { if idx < arr.len() { arr.remove(idx); } });
+                    pending_delete.set(Some(idx));
+                    delete_open.set(true);
                 };
                 let toggle = move |_| {
                     mutate_save(&|arr| {
@@ -252,7 +268,7 @@ pub fn ConditionsSection(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView 
                     on_click=Callback::new(move |_| editing.set(Some(usize::MAX)))>"+ New rule"</Button>
             </div>
             <p class="sensors-section__hint">
-                "Structured triggers, augment-only: a rule can add a skip, extend, or scale a zone's run; it can never override a safety gate (freeze, wind, restriction, rain). Rules run top to bottom and the first skip wins, so order them by priority with the arrows."
+                "A rule can add a skip, or extend or scale a run. It can never overrule a safety gate. They run top to bottom and the first skip wins."
             </p>
             <ul class="cond-list">{rules_view}</ul>
 
@@ -284,8 +300,8 @@ pub fn ConditionsSection(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView 
                             let candidate = config.get_untracked();
                             #[cfg(feature = "hydrate")]
                             leptos::task::spawn_local(async move {
-                                match save_config(candidate).await {
-                                    Ok(()) => crate::components::ui::use_toast().success("Rule added and live. Tune it with Edit."),
+                                match crate::components::config_client::put_config(&candidate).await {
+                                    Ok(_) => crate::components::ui::use_toast().success("Rule added and live. Tune it with Edit."),
                                     Err(e) => crate::components::ui::use_toast().error(format!("Add failed: {e}")),
                                 }
                             });
@@ -322,27 +338,19 @@ pub fn ConditionsSection(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView 
                     />
                 }
             })}
+
+            // Deleting a rule is destructive, so it asks first. Mounted
+            // unconditionally, outside the row loop: the sheet hides itself.
+            <ConfirmSheet
+                visible=delete_open
+                title="Delete this rule?"
+                body=Signal::derive(|| "This takes effect on the next decision.".to_string())
+                confirm_label=Signal::derive(|| "Delete".to_string())
+                danger=true
+                on_confirm=do_delete
+            />
         </section>
     }
-}
-
-#[cfg(feature = "hydrate")]
-pub(crate) async fn save_config(cfg: serde_json::Value) -> Result<(), String> {
-    use gloo_net::http::Request;
-    let resp = Request::put("/api/config")
-        .json(&cfg)
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::save_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    Ok(())
 }
 
 #[component]
@@ -525,7 +533,7 @@ fn ConditionRuleEditor(
         let candidate = config.get_untracked();
         #[cfg(feature = "hydrate")]
         leptos::task::spawn_local(async move {
-            let _ = save_config(candidate).await;
+            let _ = crate::components::config_client::put_config(&candidate).await;
         });
         #[cfg(not(feature = "hydrate"))]
         let _ = candidate;
@@ -578,6 +586,10 @@ fn ConditionRuleEditor(
             pct: None,
             saturation_pct: 0.0,
             target_min_pct: 0.0,
+            probe_configured: false,
+            governed_by_soil_model: false,
+            planning_forecast_unavailable: false,
+            sprinkler_type: Default::default(),
         };
         let ctx = ConditionCtx {
             i: &inputs,
@@ -645,10 +657,13 @@ fn ConditionRuleEditor(
                         }
                     }).collect_view()
                 }}
-                <button type="button" class="setup-footer__btn setup-footer__btn--ghost"
-                    on:click=move |_| rows.update(|r| r.push(Row{metric:"rain_prob_tomorrow".into(), op:"gt".into(), value:60.0}))>
+                <crate::components::ui::Button
+    variant="ghost"
+    size="md"
+    on_click=Callback::new(move |_| rows.update(|r| r.push(Row{metric:"rain_prob_tomorrow".into(), op:"gt".into(), value:60.0})))
+    class="setup-footer__btn setup-footer__btn--ghost">
                     "+ Add condition"
-                </button>
+                </crate::components::ui::Button>
             </div>
 
             <div class="cond-editor__match">

@@ -44,7 +44,7 @@ If a scan finds nothing, the gateway may not be on the same subnet, or it may no
 
 ## Per-reading source priority and backup chains
 
-Each headline reading (temperature, humidity, wind, rain, pressure, solar/UV) has its own ordered chain of sources. The first source in the chain that is reporting fresh data owns the reading; if it goes quiet the next takes over, so a reading is never lost while any source in its chain is fresh. "Automatic" is the smart default order for your region and enabled sources. To customize it, open Settings > Devices > Data sources and drag a reading's source rows into the order you want (or use the up and down arrow keys); that becomes "Custom". The order you set is exactly the priority the engine uses for that reading. A one-source chain behaves like a single hard pin.
+Each headline reading (temperature, humidity, wind, rain, pressure, solar/UV) has its own ordered chain of sources. The first source in the chain that is reporting fresh data owns the reading; if it goes quiet the next takes over, so a reading is never lost while any source in its chain is fresh. "Automatic" is the smart default order for your region and enabled sources. To customize it, open Settings > Devices, find the section titled **Which source provides each reading**, and drag a reading's source rows into the order you want (or use the up and down arrow keys); that becomes "Custom". The order you set is exactly the priority the engine uses for that reading. A one-source chain behaves like a single hard pin.
 
 ## Where to go next
 

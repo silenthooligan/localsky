@@ -10,7 +10,9 @@
 use leptos::prelude::*;
 
 use crate::components::settings_ui::SettingsResult;
-use crate::components::ui::{Button, FormField, Icon, Panel, SecretInput, SkeletonRows};
+use crate::components::ui::{
+    Button, ConfirmSheet, FormField, Icon, Panel, SecretInput, SkeletonRows,
+};
 
 #[cfg(feature = "hydrate")]
 async fn fetch_json(url: &str) -> Option<serde_json::Value> {
@@ -190,23 +192,22 @@ pub fn SettingsAccount() -> impl IntoView {
         }
     };
 
-    let revoke = move |id: i64| {
-        #[cfg(feature = "hydrate")]
-        {
-            // Revoking cuts off whatever is using the token immediately
-            // and can't be undone, so gate it on an explicit confirm.
-            let confirmed = web_sys::window()
-                .map(|w| {
-                    w.confirm_with_message(
-                        "Revoke this token? Anything still using it (the Home \
-                         Assistant add-on, scripts) loses access immediately.",
-                    )
-                    .unwrap_or(false)
-                })
-                .unwrap_or(false);
-            if !confirmed {
-                return;
-            }
+    // Revoking cuts off whatever is using the token immediately and can't
+    // be undone, so it stages behind the shared ConfirmSheet (danger).
+    // pending_revoke holds the token id awaiting confirmation; None = idle.
+    let pending_revoke: RwSignal<Option<i64>> = RwSignal::new(None);
+    let revoke_open = RwSignal::new(false);
+
+    // In the row: ask, don't act.
+    let ask_revoke = move |id: i64| {
+        pending_revoke.set(Some(id));
+        revoke_open.set(true);
+    };
+
+    let do_revoke = Callback::new(move |()| {
+        if let Some(id) = pending_revoke.get_untracked() {
+            pending_revoke.set(None);
+            #[cfg(feature = "hydrate")]
             leptos::task::spawn_local(async move {
                 let result = async {
                     let resp = gloo_net::http::Request::delete(&format!("/api/auth/tokens/{id}"))
@@ -234,10 +235,10 @@ pub fn SettingsAccount() -> impl IntoView {
                     }
                 }
             });
+            #[cfg(not(feature = "hydrate"))]
+            let _ = id;
         }
-        #[cfg(not(feature = "hydrate"))]
-        let _ = id;
-    };
+    });
 
     view! {
         <div class="settings-page">
@@ -282,7 +283,7 @@ pub fn SettingsAccount() -> impl IntoView {
                                         autocomplete="new-password"
                                         on_input=Callback::new(move |v: String| password.set(v))/>
                                 </FormField>
-                                <div class="settings-form-actions" style="justify-content:flex-start">
+                                <div class="settings-form-actions" class:u-justify-start=true>
                                     <Button
                                         variant="primary"
                                         loading=Signal::derive(move || busy.get())
@@ -363,11 +364,11 @@ pub fn SettingsAccount() -> impl IntoView {
                                 <li class="token-list__row">
                                     <span class="token-list__name">{name}</span>
                                     <span class="token-list__meta">{last_label}</span>
-                                    <button
-                                        type="button"
-                                        class="token-list__revoke"
-                                        on:click=move |_| revoke(id)
-                                    >"Revoke"</button>
+                                    <crate::components::ui::Button
+    variant="danger"
+    size="sm"
+    on_click=Callback::new(move |_| ask_revoke(id))
+    class="token-list__revoke">"Revoke"</crate::components::ui::Button>
                                 </li>
                             }
                         }).collect_view().into_any()
@@ -376,6 +377,21 @@ pub fn SettingsAccount() -> impl IntoView {
             </Panel>
 
             <SettingsResult result_msg result_ok/>
+
+            // Always mounted, outside the token list: the row handler only
+            // stages an id, the delete lands on Confirm.
+            <ConfirmSheet
+                visible=revoke_open
+                title="Revoke this token?"
+                body=Signal::derive(|| {
+                    "Anything still using it (the Home Assistant add-on, scripts) \
+                     loses access immediately."
+                        .to_string()
+                })
+                confirm_label=Signal::derive(|| "Revoke".to_string())
+                danger=true
+                on_confirm=do_revoke
+            />
         </div>
     }
 }

@@ -8,14 +8,18 @@
 // iconography).
 
 pub mod model_catalog;
+pub(crate) mod precip;
 pub mod snapshot;
 
 #[cfg(feature = "ssr")]
-pub mod refresher;
+pub mod open_meteo;
 #[cfg(feature = "ssr")]
 pub mod store;
 
 #[cfg(feature = "ssr")]
-pub use refresher::spawn_forecast_refresher;
+pub use open_meteo::spawn_forecast_refresher;
 #[cfg(feature = "ssr")]
 pub use store::ForecastStore;
+
+#[cfg(test)]
+mod et0_evidence_tests;

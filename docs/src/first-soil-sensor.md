@@ -88,7 +88,7 @@ How the engine uses a bound probe:
 - **Inside the band**: healthy; scheduled runs still apply unless the saturation threshold says otherwise.
 - **At or above saturation**: the zone skips on its own, even when the day's overall verdict is Run, and the skip reason names the zone's moisture reading and the saturation threshold (for example, "Soil saturated (76% ≥ 65% threshold)").
 
-If a bound probe goes offline, the zone simply loses its soil gate. Nothing blocks; a missing probe never stops a run, and run sizing is unaffected because the weekly water balance never reads a probe. If a probe reads as a wild outlier versus its neighbours, or goes offline entirely, the irrigation and zones views flag it as an anomaly so you know to check the hardware.
+If a bound probe goes offline, the zone simply loses its soil gate. Nothing blocks; a missing probe never stops a run, and run sizing is unaffected because the weekly water balance never reads a probe. If a probe reads as a wild outlier versus its neighbors, or goes offline entirely, the irrigation and zones views flag it as an anomaly so you know to check the hardware.
 
 ## A note on flow meters: capable vs connected
 

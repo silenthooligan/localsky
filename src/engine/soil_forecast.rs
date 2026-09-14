@@ -10,7 +10,7 @@
 // refresher.rs (v0.1) or move to a config-driven enumeration (v2+).
 
 use crate::forecast::snapshot::ForecastSnapshot;
-use crate::ha::snapshot::SoilForecast;
+use crate::model::SoilForecast;
 
 #[derive(Debug, Clone)]
 pub struct ZoneSoilInputs {
@@ -24,6 +24,9 @@ pub struct ZoneSoilInputs {
     pub soil_depth_mm: f64,
     /// Live sensor reading (%). None = probe offline / unconfigured.
     pub current_pct: Option<f64>,
+    /// True only when the input percent is calibrated volumetric water
+    /// content. Consumer relative probe scales cannot be advanced in mm.
+    pub volumetric: bool,
     pub target_min_pct: f64,
     pub target_max_pct: f64,
 }
@@ -60,25 +63,30 @@ pub fn project_zone(
     let mut moisture = start_pct;
     series.push(moisture);
 
-    // Day 0 = today (current reading); deltas start at day 1 using
-    // daily[N]'s rain projection.
-    //
-    // KNOWN LIMITATION (#4b, display-only; do NOT "fix" the math here):
-    // `start_pct` is a probe reading on a RELATIVE scale (the sensor's own
-    // 0-100% calibration), but the daily deltas are derived from absolute mm of
-    // water (rain mm captured minus ET mm lost) converted to a percent of
-    // `soil_depth_mm` of VWC. Adding an absolute-VWC delta onto a relative-scale
-    // baseline is a unit mismatch: only correct if the probe's % happens to be
-    // true volumetric water content, which most consumer probes are not. The
-    // longer the horizon, the more the curve can drift from reality. This is
-    // acceptable because the projection is advisory ("if I did nothing all week")
-    // and never gates a real watering decision (the live skip ladder reads the
-    // probe directly). A future pass should anchor both to the same scale (e.g.
-    // derive deltas in the probe's relative units, or calibrate the probe to
-    // VWC); until then, treat the 7-day curve as a trend, not a measurement.
+    if !zone.volumetric {
+        return SoilForecast {
+            zone_slug: zone.slug.clone(),
+            zone_name: zone.name.clone(),
+            current_pct: Some(start_pct),
+            target_min_pct: zone.target_min_pct,
+            target_max_pct: zone.target_max_pct,
+            predicted_pct: series,
+            min_predicted_pct: start_pct,
+            max_predicted_pct: start_pct,
+            days_below_target: 0,
+            days_above_max: 0,
+            status: "uncalibrated".into(),
+        };
+    }
+    // Day 0 is the live reading. Future deltas require a volumetric baseline.
     for d in fc.daily.iter().take(n_days).skip(1) {
         // Probability-less days weight at full value (DailyEntry::precip_weight).
-        let rain_effective_mm = d.precip_sum_in * 25.4 * d.precip_weight();
+        // Once rainfall is unknown the rest of the trend cannot claim a
+        // quantified moisture projection. Keep only the evidenced prefix.
+        let Some(rain) = d.precip_sum_in else {
+            break;
+        };
+        let rain_effective_mm = crate::units::in_to_mm(rain) * d.precip_weight();
         let captured_mm = rain_effective_mm * capture_efficiency;
         let et_loss_mm = daily_et_mm * zone.kc;
         let delta_mm = captured_mm - et_loss_mm;
@@ -102,7 +110,9 @@ pub fn project_zone(
 
     // Status: "wet" wins over "dry" so a saturated start isn't flagged
     // dry from a forecast dry stretch that hasn't arrived yet.
-    let status = if max_predicted >= zone.target_max_pct {
+    let status = if series.len() < n_days.min(fc.daily.len()) {
+        "no_data"
+    } else if max_predicted >= zone.target_max_pct {
         "wet"
     } else if min_predicted <= zone.target_min_pct || days_below >= 2 {
         "dry"
@@ -137,6 +147,7 @@ mod tests {
             kc: 0.8,
             soil_depth_mm: 150.0,
             current_pct: Some(60.0),
+            volumetric: true,
             target_min_pct: 30.0,
             target_max_pct: 70.0,
         }
@@ -147,7 +158,10 @@ mod tests {
         ForecastSnapshot {
             daily: (0..7i64)
                 .map(|i| DailyEntry {
-                    time_epoch: 1_750_000_000 + i * 86_400,
+                    day_marker: crate::engine::clock::DayMarker::inside_local_day(
+                        1_750_000_000 + i * 86_400,
+                    ),
+                    precip_sum_in: Some(0.0),
                     ..Default::default()
                 })
                 .collect(),
@@ -177,5 +191,27 @@ mod tests {
             tiny_decline < 1.0,
             "regression-scale decline = {tiny_decline}"
         );
+    }
+}
+
+#[cfg(test)]
+mod calibration_tests {
+    use super::*;
+    #[test]
+    fn relative_probe_keeps_reading_without_fabricating_vwc_deltas() {
+        let zone = ZoneSoilInputs {
+            slug: "orchard".into(),
+            name: "Orchard".into(),
+            kc: 0.8,
+            soil_depth_mm: 300.0,
+            current_pct: Some(55.0),
+            volumetric: false,
+            target_min_pct: 30.0,
+            target_max_pct: 70.0,
+        };
+        let forecast = project_zone(&zone, &ForecastSnapshot::default(), 10.0, 0.7, 7);
+        assert_eq!(forecast.current_pct, Some(55.0));
+        assert_eq!(forecast.predicted_pct, vec![55.0]);
+        assert_eq!(forecast.status, "uncalibrated");
     }
 }

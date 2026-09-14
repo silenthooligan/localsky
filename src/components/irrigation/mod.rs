@@ -9,16 +9,19 @@
 pub mod advisor;
 pub mod anomaly_banner;
 pub mod controls;
+pub mod daily;
 pub mod default_budget_banner;
 pub mod forecast;
 pub mod ha_adoption_banner;
 pub mod hero;
 pub mod mobile;
+pub mod overview;
+pub mod plan;
 pub mod running_banner;
 pub mod verdict_strip;
 
 use crate::components::ui::EmptyState;
-use crate::ha::snapshot::IrrigationSnapshot;
+use crate::model::IrrigationSnapshot;
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
 
@@ -30,6 +33,20 @@ use hero::NextRunHero;
 use mobile::MobileIrrigation;
 use running_banner::RunningBanner;
 use verdict_strip::VerdictStrip;
+
+#[component]
+pub fn WateringDecisionsPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
+    daily::provide_morning_history(snap);
+    view! {
+        <div class="ir-stack">
+            <header class="watering-decisions-heading">
+                <a href=crate::base::url("/irrigation")>"← Irrigation"</a>
+                <h1>"Watering decisions"</h1>
+            </header>
+            <hero::WateringDecisions snap/>
+        </div>
+    }
+}
 
 /// No-hardware empty state for the irrigation page. A zero-zone install has no
 /// controller/zones, so the hero + Stop-All + rain-delay + override would all be
@@ -44,15 +61,17 @@ fn NoZonesEmpty() -> impl IntoView {
         <EmptyState
             icon="controllers"
             title="No zones yet".to_string()
-            body="Irrigation is idle: no controllers or zones are configured, so there is nothing to schedule, skip, or stop. Add a controller, then your zones. The weather home works without any of this.".to_string()
+            body=crate::voice::idle::NO_ZONES.to_string()
             cta_label="Add a controller".to_string()
-            cta_href="/settings/controllers".to_string()
+            cta_href="/settings?section=devices".to_string()
         />
     }
 }
 
 #[component]
 pub fn IrrigationPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
+    daily::provide_morning_history(snap);
+    let override_confirmation = controls::provide_override_actions();
     let is_mobile = use_context::<RwSignal<bool>>();
     // The app-level tuning report (one fetch, provided by App()); the
     // desktop and mobile branches share it, and the strip placement below
@@ -67,20 +86,24 @@ pub fn IrrigationPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         crate::components::zones::tuning::refresh_tuning_report();
     });
 
+    let has_zones = Memo::new(move |_| !snap.get().zones.is_empty());
+    let has_suggestions = Memo::new(move |_| {
+        tuning_report
+            .get()
+            .map(|r| crate::components::zones::tuning::recommendation_count(&r) > 0)
+            .unwrap_or(false)
+    });
     let body = move || {
         // No controller/zones: every irrigation primitive below acts on nothing,
         // so swap the whole control surface for a no-hardware CTA instead of
         // rendering inert hero/Stop-All/rain-delay/override controls.
-        if snap.get().zones.is_empty() {
+        if !has_zones.get() {
             return view! { <NoZonesEmpty/> }.into_any();
         }
         // Attention precedes data: with a recommendation pending the strip
         // renders ABOVE the data columns; a scorecard-only strip keeps the
         // quiet bottom slot.
-        let has_suggestions = tuning_report
-            .get()
-            .map(|r| crate::components::zones::tuning::recommendation_count(&r) > 0)
-            .unwrap_or(false);
+        let has_suggestions = has_suggestions.get();
         let mobile = is_mobile.map(|s| s.get()).unwrap_or(false);
         if mobile {
             view! { <MobileIrrigation snap report=tuning_report/> }.into_any()
@@ -130,5 +153,6 @@ pub fn IrrigationPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         // centralized popup and leave the page clear; nothing sits here.
         <NoticeCenter snap/>
         {body}
+        {override_confirmation}
     }
 }

@@ -4,7 +4,7 @@
 // small screens so phone users get the whole 48h without zooming.
 
 use crate::components::forecast::glyph::weather_code_glyph;
-use crate::components::units_fmt::{fmt_temp_short, use_unit_prefs, UnitPrefs};
+use crate::components::units_fmt::{fmt_optional_temp_short, use_unit_prefs, UnitPrefs};
 use crate::forecast::snapshot::{ForecastSnapshot, HourlyEntry};
 use crate::timefmt::{format_hm, format_wday_short};
 use leptos::prelude::*;
@@ -37,7 +37,8 @@ pub fn HourlyForecast(snap: ReadSignal<ForecastSnapshot>) -> impl IntoView {
                     }}
                 </span>
             </header>
-            <div class="hourly-scroll">
+            // Horizontally scrollable, so it is focusable for a keyboard.
+            <div class="hourly-scroll" tabindex="0" role="region" aria-label="Hourly forecast">
                 {move || {
                     let s = snap.get();
                     let tz = s.timezone.clone();
@@ -65,16 +66,8 @@ fn HourlyChart(entries: Vec<HourlyEntry>, prefs: UnitPrefs, tz: String) -> impl 
     let rain_h: f64 = 50.0;
     let total_h = header_h + temp_h + rain_h + 10.0;
 
-    let temps: Vec<f64> = entries.iter().map(|e| e.temp_f).collect();
-    let temp_min = temps.iter().cloned().fold(f64::INFINITY, f64::min);
-    let temp_max = temps.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let temp_span = (temp_max - temp_min).max(1.0);
-
-    let temp_to_y = move |t: f64| {
-        let pad = 12.0;
-        let usable = temp_h - pad * 2.0;
-        header_h + pad + usable * (1.0 - (t - temp_min) / temp_span)
-    };
+    let temps: Vec<Option<f64>> = entries.iter().map(|e| e.temp_f).collect();
+    let (temp_path, temp_area) = temperature_paths(&temps, col_w, header_h, temp_h);
 
     // Header glyphs + temps per hour. 24-hour, deployment-local (e.g. "14:00").
     let header_cells: Vec<_> = entries.iter().enumerate().map(|(i, e)| {
@@ -106,38 +99,11 @@ fn HourlyChart(entries: Vec<HourlyEntry>, prefs: UnitPrefs, tz: String) -> impl 
                     inner_html=crate::components::ui::icon::paths_for(g)
                 ></svg>
                 <text x={x.to_string()} y="62" text-anchor="middle" class="hourly-temp">
-                    {fmt_temp_short(e.temp_f, prefs)}
+                    {fmt_optional_temp_short(e.temp_f, prefs)}
                 </text>
             </g>
         }.into_any()
     }).collect();
-
-    // Temperature line path.
-    let temp_path = {
-        let mut d = String::new();
-        for (i, e) in entries.iter().enumerate() {
-            let x = col_w * (i as f64) + col_w / 2.0;
-            let y = temp_to_y(e.temp_f);
-            if i == 0 {
-                d.push_str(&format!("M {x:.2} {y:.2}"));
-            } else {
-                d.push_str(&format!(" L {x:.2} {y:.2}"));
-            }
-        }
-        d
-    };
-
-    // #3: filled area under the temperature line so the curve reads as a shape,
-    // not a thin wire. Reuse the line path, then close it down to the temp-band
-    // baseline and back, filled with a top-down warm gradient.
-    let temp_area = if entries.is_empty() {
-        String::new()
-    } else {
-        let baseline = header_h + temp_h;
-        let first_x = col_w / 2.0;
-        let last_x = col_w * ((entries.len() - 1) as f64) + col_w / 2.0;
-        format!("{temp_path} L {last_x:.2} {baseline:.2} L {first_x:.2} {baseline:.2} Z")
-    };
 
     // Rain probability bars.
     let rain_baseline = header_h + temp_h;
@@ -147,21 +113,24 @@ fn HourlyChart(entries: Vec<HourlyEntry>, prefs: UnitPrefs, tz: String) -> impl 
         .map(|(i, e)| {
             let bar_w = col_w * 0.5;
             let x = col_w * (i as f64) + (col_w - bar_w) / 2.0;
-            // An hour without a reported probability draws no probability bar
-            // (there is nothing measured to draw) and the tooltip drops the
-            // percent claim; a reported 0% stays an honest empty bar.
-            let prob = e.precip_probability;
-            let frac = prob.map(|p| p as f64 / 100.0).unwrap_or(0.0);
+            // Missing probability is a visible gap, distinct from reported 0%.
+            // A known probability can still be shown when its separate QPF
+            // amount is unknown; the chart measures chance, not accumulation.
+            let Some(prob) = e.precip_probability else {
+                return view! {
+                    <text x={(x + bar_w / 2.0).to_string()}
+                        y={(rain_baseline + rain_h / 2.0).to_string()}
+                        text-anchor="middle" class="hourly-time">
+                        <title>{format!("Rain chance unknown at {}", format_local_hour(e.time_epoch, &tz))}</title>
+                        "—"
+                    </text>
+                }.into_any();
+            };
+            let frac = prob as f64 / 100.0;
             let h = rain_h * frac;
             let y = rain_baseline + (rain_h - h);
             let opacity = 0.35 + 0.65 * frac;
-            let title = match prob {
-                Some(p) => format!("{p}% rain at {}", format_local_hour(e.time_epoch, &tz)),
-                None => format!(
-                    "rain chance unknown at {}",
-                    format_local_hour(e.time_epoch, &tz)
-                ),
-            };
+            let title = format!("{prob}% rain at {}", format_local_hour(e.time_epoch, &tz));
             view! {
                 <rect
                     x={x.to_string()}
@@ -219,8 +188,133 @@ fn HourlyChart(entries: Vec<HourlyEntry>, prefs: UnitPrefs, tz: String) -> impl 
     }
 }
 
+/// Each contiguous set of known temperatures gets its own line and closed
+/// area. Connecting across a missing hour would invent a temperature trend;
+/// an entirely unknown series has neither a range nor any path to draw.
+fn temperature_paths(
+    temps: &[Option<f64>],
+    col_w: f64,
+    header_h: f64,
+    temp_h: f64,
+) -> (String, String) {
+    let known: Vec<f64> = temps
+        .iter()
+        .flatten()
+        .copied()
+        .filter(|t| t.is_finite())
+        .collect();
+    let Some(first) = known.first().copied() else {
+        return (String::new(), String::new());
+    };
+    let temp_min = known.iter().copied().fold(first, f64::min);
+    let temp_max = known.iter().copied().fold(first, f64::max);
+    // Halve before subtraction so even finite extreme inputs cannot overflow
+    // the range into infinity and then generate NaN SVG coordinates.
+    let half_span = (temp_max / 2.0 - temp_min / 2.0).max(0.5);
+    let baseline = header_h + temp_h;
+    let mut lines = Vec::new();
+    let mut areas = Vec::new();
+    let mut segment: Vec<(f64, f64)> = Vec::new();
+    let finish =
+        |points: &mut Vec<(f64, f64)>, lines: &mut Vec<String>, areas: &mut Vec<String>| {
+            let (Some((first_x, _)), Some((last_x, _))) = (points.first(), points.last()) else {
+                return;
+            };
+            let line = points
+                .iter()
+                .enumerate()
+                .map(|(i, (x, y))| {
+                    let verb = if i == 0 { "M" } else { "L" };
+                    format!("{verb} {x:.2} {y:.2}")
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            areas.push(format!(
+                "{line} L {last_x:.2} {baseline:.2} L {first_x:.2} {baseline:.2} Z"
+            ));
+            lines.push(line);
+            points.clear();
+        };
+    for (i, temp) in temps.iter().enumerate() {
+        if let Some(t) = temp.filter(|t| t.is_finite()) {
+            let x = col_w * i as f64 + col_w / 2.0;
+            let frac = (t / 2.0 - temp_min / 2.0) / half_span;
+            let y = header_h + 12.0 + (temp_h - 24.0) * (1.0 - frac);
+            segment.push((x, y));
+        } else {
+            finish(&mut segment, &mut lines, &mut areas);
+        }
+    }
+    finish(&mut segment, &mut lines, &mut areas);
+    (lines.join(" "), areas.join(" "))
+}
+
 /// Weekday + 24-hour clock in the deployment timezone (e.g. "Sun 14:00"),
 /// for the rain-bar tooltip. Empty / invalid tz -> browser-local (hydrate).
 fn format_local_hour(epoch: i64, tz: &str) -> String {
     format!("{} {}", format_wday_short(epoch, tz), format_hm(epoch, tz))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::temperature_paths;
+
+    #[test]
+    fn missing_hour_breaks_both_temperature_line_and_area_without_erasing_zero() {
+        let (line, area) = temperature_paths(
+            &[Some(0.0), Some(10.0), None, Some(20.0), Some(30.0)],
+            56.0,
+            70.0,
+            90.0,
+        );
+        assert_eq!(
+            line,
+            "M 28.00 148.00 L 84.00 126.00 M 196.00 104.00 L 252.00 82.00"
+        );
+        assert_eq!(area.matches('M').count(), 2);
+        assert_eq!(area.matches('Z').count(), 2);
+        assert!(area.contains("L 84.00 160.00 L 28.00 160.00 Z M 196.00"));
+        assert!(
+            !area.contains("140.00"),
+            "the missing hour has no invented point"
+        );
+    }
+
+    #[test]
+    fn all_missing_or_nonfinite_temperatures_draw_no_paths() {
+        for values in [
+            vec![],
+            vec![
+                None,
+                Some(f64::NAN),
+                Some(f64::INFINITY),
+                Some(f64::NEG_INFINITY),
+            ],
+        ] {
+            assert_eq!(
+                temperature_paths(&values, 56.0, 70.0, 90.0),
+                (String::new(), String::new())
+            );
+        }
+    }
+
+    #[test]
+    fn flat_and_extreme_finite_temperatures_produce_finite_coordinates() {
+        for values in [
+            vec![Some(0.0), Some(0.0)],
+            vec![Some(-f64::MAX), Some(f64::MAX)],
+        ] {
+            let (line, area) = temperature_paths(&values, 56.0, 70.0, 90.0);
+            assert_eq!(line.matches('M').count(), 1);
+            assert_eq!(area.matches('Z').count(), 1);
+            for path in [line, area] {
+                for coordinate in path
+                    .split_whitespace()
+                    .filter_map(|word| word.parse::<f64>().ok())
+                {
+                    assert!(coordinate.is_finite());
+                }
+            }
+        }
+    }
 }

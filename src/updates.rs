@@ -8,12 +8,18 @@
 // upgrade mechanism. The manifest mirrors the GitHub release shape
 // (tag_name + html_url) so the comparison logic is source-agnostic.
 
-use std::sync::OnceLock;
+use std::sync::Arc;
 
 use serde::Serialize;
 use tokio::sync::RwLock;
 
 const RELEASES_URL: &str = "https://localsky.io/latest.json";
+
+/// The only identifier that rides along: package + version, deliberately
+/// NOT `sources::derived_user_agent` (which carries the per-install
+/// instance id) so the manifest host sees aggregate version counts and
+/// nothing per-install.
+const USER_AGENT: &str = concat!("localsky/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct UpdateStatus {
@@ -25,18 +31,31 @@ pub struct UpdateStatus {
     pub check_enabled: bool,
 }
 
-fn cache() -> &'static RwLock<UpdateStatus> {
-    static CACHE: OnceLock<RwLock<UpdateStatus>> = OnceLock::new();
-    CACHE.get_or_init(|| {
-        RwLock::new(UpdateStatus {
-            current: env!("CARGO_PKG_VERSION").to_string(),
-            ..Default::default()
-        })
-    })
+/// The cached comparison, shared by the checker task and the handler.
+#[derive(Clone)]
+pub struct Updates {
+    cache: Arc<RwLock<UpdateStatus>>,
 }
 
-pub async fn status() -> UpdateStatus {
-    cache().read().await.clone()
+impl Default for Updates {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Updates {
+    pub fn new() -> Self {
+        Self {
+            cache: Arc::new(RwLock::new(UpdateStatus {
+                current: env!("CARGO_PKG_VERSION").to_string(),
+                ..Default::default()
+            })),
+        }
+    }
+
+    pub async fn status(&self) -> UpdateStatus {
+        self.cache.read().await.clone()
+    }
 }
 
 fn newer(latest: &str, current: &str) -> bool {
@@ -47,13 +66,10 @@ fn newer(latest: &str, current: &str) -> bool {
     }
 }
 
-async fn check_once(client: &reqwest::Client) {
+async fn check_once(cache: &RwLock<UpdateStatus>, client: &reqwest::Client) {
     let resp = client
         .get(RELEASES_URL)
-        .header(
-            "User-Agent",
-            concat!("localsky/", env!("CARGO_PKG_VERSION")),
-        )
+        .header("User-Agent", USER_AGENT)
         .header("Accept", "application/json")
         .send()
         .await;
@@ -69,7 +85,7 @@ async fn check_once(client: &reqwest::Client) {
         .get("html_url")
         .and_then(|u| u.as_str())
         .map(str::to_string);
-    let mut c = cache().write().await;
+    let mut c = cache.write().await;
     c.checked_at_epoch = Some(chrono::Utc::now().timestamp());
     if let Some(tag) = tag {
         c.update_available = newer(&tag, &c.current);
@@ -79,22 +95,22 @@ async fn check_once(client: &reqwest::Client) {
 }
 
 /// Spawn the daily checker (only call when [updates].check_enabled).
-pub fn spawn() {
+/// Start the daily check. Only called when `[updates].check_enabled`;
+/// the handle answers "check disabled" until then.
+pub fn spawn(updates: &Updates) {
+    let cache = updates.cache.clone();
     tokio::spawn(async move {
         {
-            cache().write().await.check_enabled = true;
+            cache.write().await.check_enabled = true;
         }
-        let Ok(client) = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-        else {
-            return;
-        };
+        // client_with, not client: the derived identity would leak the
+        // instance id to the manifest host (see USER_AGENT).
+        let client = crate::net::client_with(std::time::Duration::from_secs(15), USER_AGENT);
         // First check shortly after boot, then daily with PID-seeded
         // jitter so a fleet doesn't thundering-herd GitHub.
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         loop {
-            check_once(&client).await;
+            check_once(&cache, &client).await;
             let jitter = u64::from(std::process::id() % 1800);
             tokio::time::sleep(std::time::Duration::from_secs(86_400 + jitter)).await;
         }
@@ -102,8 +118,10 @@ pub fn spawn() {
 }
 
 /// GET /api/v1/updates handler.
-pub async fn updates_handler() -> axum::Json<UpdateStatus> {
-    axum::Json(status().await)
+pub async fn updates_handler(
+    axum::extract::State(updates): axum::extract::State<Updates>,
+) -> axum::Json<UpdateStatus> {
+    axum::Json(updates.status().await)
 }
 
 #[cfg(test)]

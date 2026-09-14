@@ -12,7 +12,7 @@ use crate::components::ui::{Button, Slider};
 use crate::components::units_fmt::{
     depth_unit, f_to_c, in_to_mm, mph_to_kph, temp_unit, use_unit_prefs, wind_unit, UnitPrefs,
 };
-use crate::ha::snapshot::{IrrigationSnapshot, SimResult};
+use crate::model::{IrrigationSnapshot, SimResult};
 
 /// Which physical quantity a simulator slider drives, so the editable
 /// control can convert its value + bounds to the user's display unit
@@ -44,9 +44,9 @@ impl SimUnit {
     /// Display-unit (edited) value -> stored internal (imperial) value.
     fn to_stored(self, display: f64, p: UnitPrefs) -> f64 {
         match self {
-            SimUnit::Wind if p.wind_metric => display / 1.609_344,
+            SimUnit::Wind if p.wind_metric => crate::units::kph_to_mph(display),
             SimUnit::Temp if p.temp_c => display * 9.0 / 5.0 + 32.0,
-            SimUnit::Depth if p.rain_mm => display / 25.4,
+            SimUnit::Depth if p.rain_mm => crate::units::mm_to_in(display),
             _ => display,
         }
     }
@@ -98,6 +98,7 @@ pub fn SimulatorPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     let wind = RwSignal::new(5.0);
     let rain_today = RwSignal::new(0.0);
     let rain_tomorrow = RwSignal::new(0.0);
+    let rain_tomorrow_known = RwSignal::new(false);
     let prob_tomorrow = RwSignal::new(0.0);
     let heat_3day = RwSignal::new(85.0);
     let test_script = RwSignal::new(String::new());
@@ -116,7 +117,10 @@ pub fn SimulatorPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         humidity.set(s.humidity_now_pct);
         wind.set(s.wind_now_mph);
         rain_today.set(s.rain_today_in);
-        rain_tomorrow.set(s.forecast_in);
+        rain_tomorrow_known.set(s.forecast_in.is_some());
+        if let Some(amount) = s.forecast_in {
+            rain_tomorrow.set(amount);
+        }
         // Unreported probability seeds the slider at 100: the engine weights
         // the amount at full value, so the What-If baseline matches it.
         prob_tomorrow.set(f64::from(s.rain_tomorrow_prob_pct.unwrap_or(100)));
@@ -136,12 +140,12 @@ pub fn SimulatorPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
 
         // Re-run the simulation whenever a slider moves (after seeding).
         Effect::new(move |_| {
-            let req = crate::ha::snapshot::SimRequest {
+            let req = crate::model::SimRequest {
                 temp_now_f: Some(temp.get()),
                 humidity_now_pct: Some(humidity.get()),
                 wind_now_mph: Some(wind.get()),
                 rain_today_in: Some(rain_today.get()),
-                forecast_in: Some(rain_tomorrow.get()),
+                forecast_in: rain_tomorrow_known.get().then(|| rain_tomorrow.get()),
                 rain_tomorrow_prob_pct: Some(prob_tomorrow.get() as u32),
                 temp_max_3day_f: Some(heat_3day.get()),
                 test_script: {
@@ -181,9 +185,9 @@ pub fn SimulatorPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
 
     view! {
         <div class="sim-page">
-            <header class="sim-page__header">
-                <p class="sim-page__eyebrow">"Analyze"</p>
-                <h1 class="sim-page__title">"Simulator"</h1>
+            <header class="page-head">
+                <p class="page-eyebrow">"Analyze"</p>
+                <h1 class="page-title">"Simulator"</h1>
                 <p class="sim-page__sub">"Move a slider, see how today\u{2019}s decision would change. Same engine as the real morning run."</p>
             </header>
 
@@ -193,7 +197,20 @@ pub fn SimulatorPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                     <SimSlider label="Humidity" kind=SimUnit::Percent prefs value=humidity min=0.0 max=100.0 step=1.0/>
                     <SimSlider label="Wind now" kind=SimUnit::Wind prefs value=wind min=0.0 max=45.0 step=1.0/>
                     <SimSlider label="Rain today" kind=SimUnit::Depth prefs value=rain_today min=0.0 max=2.0 step=0.05 precision=2/>
-                    <SimSlider label="Rain tomorrow" kind=SimUnit::Depth prefs value=rain_tomorrow min=0.0 max=2.0 step=0.05 precision=2/>
+                    {move || if rain_tomorrow_known.get() {
+                        view! { <SimSlider label="Rain tomorrow" kind=SimUnit::Depth prefs value=rain_tomorrow min=0.0 max=2.0 step=0.05 precision=2/> }.into_any()
+                    } else {
+                        view! {
+                            <div class="sim-slider">
+                                <p>"Tomorrow's rain amount is unknown."</p>
+                                <crate::components::ui::Button variant="ghost" on_click=Callback::new(move |_| {
+                                    // An explicit hypothetical input, never a claim about the forecast.
+                                    rain_tomorrow.set(0.0);
+                                    rain_tomorrow_known.set(true);
+                                })>"Set a hypothetical rain amount"</crate::components::ui::Button>
+                            </div>
+                        }.into_any()
+                    }}
                     <SimSlider label="Tomorrow chance" kind=SimUnit::Percent prefs value=prob_tomorrow min=0.0 max=100.0 step=5.0/>
                     <SimSlider label="3-day high" kind=SimUnit::Temp prefs value=heat_3day min=40.0 max=115.0 step=1.0/>
 
@@ -263,7 +280,7 @@ pub fn SimulatorPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                                 <crate::components::ui::Icon name="simulator" size=34/>
                                 <p class="sim-result__empty-title">"Move a slider to run a what-if"</p>
                                 <p class="sim-result__empty-body">
-                                    "The engine re-decides instantly with your hypothetical "
+                                    "The verdict is redecided instantly with your hypothetical "
                                     "weather and shows the verdict diff against today."
                                 </p>
                             </div>

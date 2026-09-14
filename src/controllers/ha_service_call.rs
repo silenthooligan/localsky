@@ -112,6 +112,7 @@ impl IrrigationController for HaServiceCall {
             remote_program_upload: false,
             water_level: false,
             per_zone_stop: true,
+            duration_quantum_s: 1,
         }
     }
 
@@ -182,6 +183,7 @@ impl IrrigationController for HaServiceCall {
             Err(_) => false,
         };
         Ok(ControllerStatus {
+            observed_epoch: None,
             reachable,
             master_enabled: None,
             water_level_pct: None,

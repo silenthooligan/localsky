@@ -36,7 +36,7 @@ pub fn spawn(
             sources = live_current.len(),
             "snapshot bridge started (non-Tempest sources -> live snapshot)"
         );
-        // P0-8 class supervisor: for a non-Tempest install this bridge IS the
+        // Supervisor: for an install with no LAN station this bridge IS the
         // dashboard + engine data path, so a panic inside one event (a merge
         // edge in apply_source_fields) must not kill it for the process
         // lifetime. catch_unwind logs + restarts the recv loop; the receiver
@@ -53,8 +53,12 @@ pub fn spawn(
                             fields,
                             at_epoch,
                         }) => {
+                            if at_epoch <= 0 || at_epoch > chrono::Utc::now().timestamp() {
+                                debug!(source_id = %source_id, "discarding observation with invalid future or absent timestamp");
+                                continue;
+                            }
                             let lc = live_current.get(&source_id).copied().unwrap_or(false);
-                            store.apply_source_fields(&fields, at_epoch, lc, &source_id);
+                            store.apply_received_fields(&fields, at_epoch, chrono::Utc::now().timestamp(), lc, &source_id);
                             debug!(
                                 source_id = %source_id,
                                 fields = fields.len(),
@@ -62,8 +66,24 @@ pub fn spawn(
                                 "snapshot bridge applied source fields"
                             );
                         }
-                        // KeyedReading (zone-bound soil channels) + Reachability are not
-                        // global snapshot fields; the bus_recorder / health layer own them.
+                        Ok(SourceEvent::Strikes { strikes, .. }) => {
+                            store.apply_strikes(&strikes);
+                        }
+                        Ok(SourceEvent::Reachability {
+                            source_id,
+                            reachable: false,
+                        }) => {
+                            store.invalidate_flow_source(&source_id);
+                        }
+                        Ok(SourceEvent::Identity {
+                            station_serial,
+                            hub_serial,
+                            ..
+                        }) => {
+                            store.apply_identity(&station_serial, &hub_serial);
+                        }
+                        // KeyedReading (zone-bound soil channels) and positive
+                        // reachability edges carry no new global field value.
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(n)) => {
                             debug!(

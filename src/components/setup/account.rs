@@ -137,7 +137,7 @@ pub fn AccountStep() -> impl IntoView {
             {move || (!already.get()).then(|| view! {
                 <Panel title="How will you reach LocalSky?".to_string()>
                     <div class="setup-access-choice" role="radiogroup" aria-label="How will you reach LocalSky?">
-                        <label style="display:flex; gap:0.5rem; align-items:flex-start; min-height:44px">
+                        <label class:u-touch-row-top=true>
                             <input
                                 type="radio"
                                 name="access-context"
@@ -151,7 +151,7 @@ pub fn AccountStep() -> impl IntoView {
                                 </span>
                             </span>
                         </label>
-                        <label style="display:flex; gap:0.5rem; align-items:flex-start; min-height:44px">
+                        <label class:u-touch-row-top=true>
                             <input
                                 type="radio"
                                 name="access-context"
@@ -172,7 +172,7 @@ pub fn AccountStep() -> impl IntoView {
             // LAN-only answer: confirm the no-auth outcome explicitly, so
             // skipping is a stated decision, not an unmarked default.
             {move || (!already.get() && access.get() == "lan").then(|| view! {
-                <p class="setup-test-result is-ok" style="padding-left:0">
+                <p class="setup-test-result is-ok" class:u-pl0=true>
                     "Got it: no login needed. Skip this step (use Next), or add one anyway below. "
                     "You can always set a login later in Settings if that changes."
                 </p>
@@ -181,7 +181,7 @@ pub fn AccountStep() -> impl IntoView {
             {move || if already.get() {
                 view! {
                     <Panel title="Account ready".to_string()>
-                        <p class="setup-step__body" style="margin-bottom:0">
+                        <p class="setup-step__body" class:u-mb0=true>
                             "An owner account exists and login will be required once setup "
                             "finishes. Manage it (and create API tokens for Home Assistant) "
                             "under Settings after the wizard."
@@ -230,7 +230,7 @@ pub fn AccountStep() -> impl IntoView {
                                 on_input=Callback::new(move |v: String| confirm.set(v))
                             />
                         </FormField>
-                        <div class="settings-form-actions" style="justify-content:flex-start">
+                        <div class="settings-form-actions" class:u-justify-start=true>
                             <Button
                                 variant="primary"
                                 disabled=Signal::derive(move || busy.get())
@@ -247,7 +247,7 @@ pub fn AccountStep() -> impl IntoView {
                 let m = msg.get();
                 (!m.is_empty()).then(|| {
                     let cls = if ok.get() { "setup-test-result is-ok" } else { "setup-test-result is-err" };
-                    view! { <p class=cls style="padding-left:0">{m}</p> }
+                    view! { <p class=cls class:u-pl0=true>{m}</p> }
                 })
             }}
 

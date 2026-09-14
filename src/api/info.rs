@@ -8,7 +8,7 @@
 //   patch  - bug fix to data correctness, no shape change
 //
 // Bumping requires editing API_VERSION below + adding the migration note
-// to docs/api.md.
+// to docs/src/api.md.
 
 use axum::{response::Json, routing::get, Router};
 use serde::{Deserialize, Serialize};
@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 /// endpoint family.
 /// 1.7.0 (additive): SkipCheck.temp_min_24h_valid, DecisionTrace.degraded,
 /// GET /api/v1/config/snapshots + POST rollback {ts}, ha.hacs_streaming;
-/// action kind run_sequence_now retired (410 Gone).
+/// action kind run_sequence_now retired (410 Gone; unknown since 0.9.0).
 /// 1.8.0 (additive): IrrigationSnapshot.soil_probe_faults +
 /// /health.soil_probe_faults (configured soil probes with no valid
 /// reading for 24h+; non-empty degrades /health status).
@@ -337,7 +337,41 @@ use serde::{Deserialize, Serialize};
 /// names), and POST /irrigation/soil-invite/dismiss {kind: "snooze" |
 /// "permanent"} records the choice server side (privileged, same
 /// posture as tuning/dismiss). No existing response shape changes.
-pub const API_VERSION: &str = "1.27.0";
+/// 1.29.0 (0.9.0): additive fields, and the v1 deprecation record.
+/// On the irrigation snapshot: `today_window` (the chosen watering
+/// window: start, finish, kind pre_dawn | post_sunrise, min_temp_f),
+/// `next_run_state` (at | no_legal_day | no_sunrise | no_location) and
+/// `next_run_day_offset`, `restriction_allowed_days`; on `skip_check`:
+/// `wind_window_max_mph`, `run_window`, `window_min_temp_f`,
+/// `watered_days`; on `water_budgets[]`: `dormant`; on `zones[]`:
+/// `controller_id`, `throughput_mm_hr`, `ledger_running`; on runs:
+/// `note`, `volume_gal`, `controller_id`, `applied_mm`, `cycle_index`,
+/// `cycle_count`. `GET /info` gains `location_configured`; `GET /health`
+/// gains `location_configured` and per-source `note`, and answers 503
+/// with `?strict=1` unless ok. New: `GET /diagnostics`. Deprecated on
+/// v1 (kept, documented in api.md with what v2 does): `zones[].hex`,
+/// `iu_enabled`, `iu_suspended`, `ha_reachable`,
+/// `override_helpers_present`, `ha_adoption_awaiting_config`.
+/// 1.30.0 (0.9.0): additive. `skip_check.rain_today_forecast_in`, the
+/// day's MODELLED rain, alongside `rain_today_in`, which now carries
+/// only what a gauge measured. They used to be blended with max() and
+/// the blend fed the `already_wet` gate, so a forecast could be
+/// reported as rain that had fallen. New rule id `rain_today_forecast`
+/// appears in the gate catalog and in decision traces; the
+/// `already_wet` reason now reads "measured today".
+/// 1.31.0: info includes the compiled build_revision so a local candidate can
+/// be verified independently of the package version shared by all 0.9.0 builds.
+/// Irrigation adds persistent restart state, resolved nullable flow/provenance,
+/// actual meter connectivity, and independent configured-probe hold metadata.
+/// 2.0.0: missing forecast temperature, wind, humidity and precipitation,
+/// including irrigation summaries, rain rollups and expected_rain_mm, are
+/// nullable. Numeric zero remains a real reading; missing intervals cannot
+/// become freezing, calm or dry weather. planning_forecast_unavailable names
+/// zones whose automatic plan lacks complete next-24h rain evidence.
+/// Endpoint URLs remain in the /api/v1 route family; this version describes
+/// their response contract, as documented above.
+/// 2.1.0: nullable session_id on History run records, preserving job identity.
+pub const API_VERSION: &str = "2.1.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {
@@ -347,6 +381,9 @@ pub struct Info {
     /// integrators (HACS, MQTT, etc.) so they can compare against the
     /// minimum-required version they were built for.
     pub service_version: &'static str,
+    /// Source revision compiled into this binary; "dev" for unlabelled builds.
+    #[serde(default)]
+    pub build_revision: &'static str,
     /// SemVer of the /api/v1 contract.
     pub api_version: &'static str,
     /// Where /api/v1 is mounted. Always "/api/v1". Lets a client confirm
@@ -389,6 +426,12 @@ pub struct Info {
     /// `#[serde(default)]` so an older payload (pre-1.13.0) still decodes.
     #[serde(default)]
     pub nerd_mode_default: bool,
+    /// A real place is configured (config present and not at 0,0). The
+    /// home page renders its setup empty state and the forecast panels
+    /// stop waiting on a provider while this is false. `#[serde(default)]`
+    /// so an older payload still decodes (as false).
+    #[serde(default)]
+    pub location_configured: bool,
 }
 
 pub fn router() -> Router {
@@ -405,15 +448,19 @@ fn env_flag(name: &str) -> bool {
 /// boot path uses. A missing/unparseable config (fresh install) yields the
 /// safe defaults (no irrigation, Simple mode), exactly what a weather-only or
 /// pre-wizard install should report.
-async fn config_signals() -> (bool, bool) {
+async fn config_signals() -> (bool, bool, bool) {
     use crate::ports::config_store::ConfigStore;
     let path = std::env::var("CONFIG_PATH").unwrap_or_else(|_| "/data/localsky.toml".to_string());
     match crate::config::FileConfigStore::new(&path).load().await {
         Ok(cfg) => {
             let has_irrigation = !cfg.controllers.is_empty() || !cfg.zones.is_empty();
-            (has_irrigation, cfg.features.nerd_mode_default)
+            (
+                has_irrigation,
+                cfg.features.nerd_mode_default,
+                cfg.deployment.location.is_set(),
+            )
         }
-        Err(_) => (false, false),
+        Err(_) => (false, false, false),
     }
 }
 
@@ -423,10 +470,16 @@ async fn info(req: axum::http::Request<axum::body::Body>) -> Json<Info> {
         .get::<crate::auth::middleware::AuthRequired>()
         .map(|a| a.0)
         .unwrap_or(false);
-    let (has_irrigation, nerd_mode_default) = config_signals().await;
-    Json(Info {
+    Json(build_info(auth_required).await)
+}
+
+/// The info answer, shared by the handler and the diagnostics bundle.
+pub async fn build_info(auth_required: bool) -> Info {
+    let (has_irrigation, nerd_mode_default, location_configured) = config_signals().await;
+    Info {
         service: "localsky",
         service_version: env!("CARGO_PKG_VERSION"),
+        build_revision: option_env!("GIT_SHA").unwrap_or("dev"),
         api_version: API_VERSION,
         api_prefix: "/api/v1",
         license: "Apache-2.0",
@@ -437,7 +490,8 @@ async fn info(req: axum::http::Request<axum::body::Body>) -> Json<Info> {
         uuid: crate::instance::get().map(str::to_string),
         has_irrigation,
         nerd_mode_default,
-    })
+        location_configured,
+    }
 }
 
 #[cfg(test)]
@@ -466,6 +520,10 @@ mod tests {
         assert!(
             !body.nerd_mode_default,
             "no config -> Simple mode default (nerd_mode_default=false)"
+        );
+        assert!(
+            !body.location_configured,
+            "no config -> nowhere to forecast for (location_configured=false)"
         );
     }
 }

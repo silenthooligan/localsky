@@ -26,10 +26,13 @@ rain, forecast credit, remainder, remaining sessions) are on the API at
 
 **The target** is a flat weekly depth per zone, in inches including rain.
 It comes from the zone's `weekly_budget_in` setting, or, when you have not
-set one, from a default set by the zone's species: its peak crop
-coefficient against reference turf, so warm-season turf starts at 1.00 in
-over 2 sessions and established shrubs at 0.55 in over 1. It does not move
-with the season, and nothing recomputes it from ET0
+set one, from a default set by the species you declared on the zone: its
+peak crop coefficient against a reference peak of 1.00, so warm-season
+turf starts at 0.85 in over 2 sessions and established shrubs at 0.55 in
+over 1. A zone with no zone config declares no species, so its default
+comes from the zone's name instead: 0.50 in over 1 session when the slug
+carries shrub, garden or bed, and 1.00 in over 2 otherwise. The target
+does not move with the season, and nothing recomputes it from ET0
 or the species coefficient. ET0, Kc and ETc are computed and displayed, and
 the [tuning report](tuning-report.md) will suggest a different
 `weekly_budget_in` when the zone cannot deliver the one it has, but the
@@ -69,20 +72,39 @@ the throughput and whether the run hit its cap. Persistently soggy means
 rain is doing the work and the engine should be skipping more, or the
 precipitation rate is set too low.
 
-This budget is what decides watering for weekly-governed zones, which is
-every zone on the default settings. Its per-zone remainder sizes each
-session, and when the remainder reaches zero, or forecast rain is imminent,
-or the session spacing has not elapsed, the zone plans zero seconds for the
-day and says which of those it was. A zone in that state reads ON HOLD on
-the zone card and detail with the reason beside it.
+This budget is what decides watering for weekly-governed zones. Its
+per-zone remainder sizes each session, and when the remainder reaches zero,
+or forecast rain is imminent, or the session spacing has not elapsed, the
+zone plans zero seconds for the day and says which of those it was. A zone
+in that state reads ON HOLD on the zone card and detail with the reason
+beside it.
 
-The [soil model](irrigation-engine.md#the-soil-model) is the selectable
-alternative: a zone it governs waters when its own soil deficit crosses
-the trigger and each run refills the deficit, so both the trigger and the
-size come from the soil instead of this weekly ledger.
-`engine.scheduling_model` picks the default and the zone editor pins it
-per zone. Under the soil model, a Weekly target you set by hand stays
-honored as a rolling-7-day delivery ceiling, and Sessions per week stops
-steering because cadence follows soil texture and roots. The soil deficit
-itself computes on every zone whichever model governs; the zone detail's
-Soil model block shows what it plans.
+The session length that remainder buys is not the last word. The seasonal
+dial, `engine.seasonal_adjust_pct`, scales it before the zone's maximum run
+time clamps the result, so the planned minutes you see already carry the
+dial. At 100% you get the depth this ledger computed, and you turn the dial
+down for a wet stretch or up for a heat wave instead of re-editing every
+weekly target; the full treatment is under
+[the seasonal water budget](irrigation-engine.md#seasonal-water-budget).
+
+The [soil model](irrigation-engine.md#the-soil-model) is the other
+scheduling model, and the shipped default: a zone it governs waters when
+its own soil deficit crosses the trigger and each run refills the deficit,
+so both the trigger and the size come from the soil instead of this weekly
+ledger. `engine.scheduling_model` picks the default and the zone editor
+pins it per zone, so a weekly-governed zone is one you pinned to weekly,
+one on an install whose `engine.scheduling_model` is weekly that carries
+no per-zone pin, or one with no zone config at all: an env-var install, or
+a controller zone you never configured in LocalSky. That last kind has no
+texture and no species to size a bucket from, so it stays on this ledger
+whatever the engine default says. Under the soil model, a Weekly target
+you set by hand stays honored as a rolling-7-day delivery ceiling, and
+Sessions per week stops steering because cadence
+follows soil texture and roots. The soil deficit computes for a zone that
+has a zone config, whichever model governs it, once its trailing window
+carries at least three evidenced days (a resolved ET0 day, a rain day, or
+a completed run); below that the zone publishes no soil fields and the
+weekly ledger sizes it, which is where a fresh install starts. A zone
+with no zone config gets no soil fields at all, and no zone gets them on
+a tick where the runs read failed. The zone detail's Soil model block
+shows what it plans.

@@ -1,0 +1,616 @@
+@use "mixins" as *;
+
+// the v2 UI kit: Button, StatTile, Sparkline, Toast
+//
+// Split out of main.scss, which had grown to 11,330 lines.
+// Load order is the cascade: see the @use list in main.scss.
+
+// ═══════════════════════════════════════════════════════════════════════
+// v2 UI PRIMITIVE KIT
+// ═══════════════════════════════════════════════════════════════════════
+// Styles for the evolved component kit (Button, StatTile, Sparkline,
+// LineChart, Stepper, ListItem, Toast). These read the v2 elevation /
+// motion / verdict tokens and work across dark / light / hc unchanged.
+
+// ── Button ─────────────────────────────────────────────────────────────
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  position: relative;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-sans);
+  font-weight: 600;
+  line-height: 1;
+  text-decoration: none;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    transform var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out);
+
+  &:active { transform: translateY(1px); }
+  &:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+  &:focus-visible {
+    @include focus-ring(2px);
+    box-shadow: var(--focus-halo);
+  }
+
+  .btn__icon { display: inline-flex; }
+  .btn__label { display: inline-flex; align-items: center; }
+  .btn__spinner { display: none; }
+}
+.btn--sm { padding: 0.4rem 0.7rem; font-size: var(--text-meta); }
+// md/lg are primary action sizes -> 44px touch target.
+.btn--md { padding: 0.55rem 0.95rem; font-size: var(--text-body-sm); min-height: 44px; }
+.btn--lg { padding: 0.75rem 1.25rem; font-size: var(--text-body); min-height: 44px; }
+.btn--block { display: flex; width: 100%; }
+
+// Primary CTA. Backed by --grad-flow-cta (the AA-safe deepened flow), NOT plain
+// --grad-flow: on dark, white text on --grad-flow is only ~3.4:1 (fails WCAG AA
+// for this 0.92rem/600 label). --grad-flow-cta clears 4.5:1 in every theme.
+.btn--primary {
+  background: var(--grad-flow-cta);
+  color: #fff;
+  box-shadow: var(--specular), var(--shadow-1);
+  &:hover:not(:disabled) { box-shadow: var(--specular), var(--shadow-2); filter: brightness(1.06); transform: translateY(-1px); }
+}
+.btn--secondary {
+  background: var(--elev-2);
+  color: var(--text);
+  border-color: var(--elev-border);
+  &:hover:not(:disabled) { border-color: var(--elev-border-strong); background: var(--elev-3); }
+}
+.btn--ghost {
+  background: transparent;
+  color: var(--text-dim);
+  &:hover:not(:disabled) { background: var(--surface-soft); color: var(--text); }
+}
+.btn--danger {
+  background: color-mix(in oklab, var(--accent-danger) 16%, var(--elev-2));
+  color: var(--accent-danger);
+  border-color: color-mix(in oklab, var(--accent-danger) 35%, transparent);
+  &:hover:not(:disabled) { background: color-mix(in oklab, var(--accent-danger) 26%, var(--elev-2)); }
+}
+// Positive "go / confirm / install" actions. Solid green, same prominent
+// treatment as --primary so it reads as a real call-to-action (replaces the
+// legacy .btn-clay-good). Deepened to teal-600 -> teal-700: white on the old
+// teal-500 endpoint was only 3.39:1 (failed WCAG AA for this 0.92rem/600
+// label); teal-600 -> teal-700 gives min 4.81:1 white across the sweep. The raw
+// brand palette is not re-themed, so this stays a dark teal in HC too, where
+// white text is correct (4.81 - 6.92:1) - do NOT add it to the HC black-text
+// list (black on this dark teal is only 3.0 - 4.4:1, a regression).
+.btn--success {
+  background: linear-gradient(135deg, var(--brand-teal-600), var(--brand-teal-700));
+  color: #fff;
+  box-shadow: var(--specular), var(--shadow-1);
+  &:hover:not(:disabled) { box-shadow: var(--specular), var(--shadow-2); filter: brightness(1.06); transform: translateY(-1px); }
+}
+
+.btn--loading {
+  .btn__label, .btn__icon { visibility: hidden; }
+  .btn__spinner {
+    display: block;
+    position: absolute;
+    width: 1em; height: 1em;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: btn-spin 0.7s linear infinite;
+  }
+}
+@keyframes btn-spin { to { transform: rotate(360deg); } }
+
+// ── Card ────────────────────────────────────────────────────────────────
+// The standard grouped-content surface (components/ui/card.rs): a half step
+// off the page on the elevation ramp, with the signature specular lit edge.
+// ── StatTile ───────────────────────────────────────────────────────────
+// The <ListItem/> COMPONENT was deleted in C6 as unused. These rules
+// are NOT: the settings rows write these class names by hand, so
+// deleting them took the settings page below AA on contrast. The
+// axe suite caught it; scss_classes could not, because it fails on
+// CSS with no markup, not on markup with no CSS.
+.ui-list-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--elev-line);
+  color: var(--text);
+  text-decoration: none;
+  &:last-child { border-bottom: none; }
+}
+.ui-list-item--link {
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-out);
+  &:hover { background: var(--surface-soft); }
+}
+.ui-list-item__icon { display: inline-flex; color: var(--text-dim); flex: 0 0 auto; }
+.ui-list-item__text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.ui-list-item__title { font-weight: 600; color: var(--text-bright); }
+.ui-list-item__subtitle { font-size: var(--text-meta); color: var(--text-faint); }
+.ui-list-item__trail {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+  color: var(--text-dim);
+}
+
+.stat-tile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  @include surface($radius: (var(--radius)), $shadow: (inset 0 2px 0 var(--tile-accent, var(--accent)), var(--shadow-1)));
+
+  // Each tile wears its assigned accent as a 2px top stripe, lifting the KPI row
+  // above supporting panels and giving each metric a glance-able identity.
+
+  min-width: 0;
+}
+.stat-tile__head { display: flex; align-items: center; gap: var(--space-2); }
+.stat-tile__icon { display: inline-flex; }
+.stat-tile__label {
+  font-size: var(--text-meta);
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-weight: 600;
+}
+.stat-tile__value-row { display: flex; align-items: baseline; gap: 0.35rem; flex-wrap: wrap; }
+.stat-tile__value {
+  font-family: var(--font-mono);
+  font-size: var(--text-stat);
+  font-weight: 700;
+  letter-spacing: var(--tracking-tight);
+  color: var(--text-bright);
+  line-height: var(--leading-tight);
+}
+.stat-tile__unit { font-size: var(--text-body-sm); color: var(--text-dim); }
+.stat-tile__spark { margin-top: auto; }
+
+.stat-tile__detail { color: var(--text-dim); font-size: var(--text-meta); }
+.stat-tile--compact, .stat-tile--inline, .stat-tile--hero {
+  padding: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  gap: var(--space-1);
+}
+.stat-tile--compact .stat-tile__value { font-size: var(--text-h3); }
+.stat-tile--compact .stat-tile__detail { color: var(--tile-accent, var(--text-dim)); }
+.stat-tile--inline {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+.stat-tile--inline .stat-tile__label { color: var(--text-dim); }
+.stat-tile--inline .stat-tile__value { font-size: var(--text-body-sm); font-weight: 600; }
+.stat-tile--inline .stat-tile__value-row { flex-wrap: nowrap; }
+.stat-tile--hero .stat-tile__head { order: 2; }
+.stat-tile--hero .stat-tile__value-row { order: 1; }
+.stat-tile--hero .stat-tile__value { font-size: var(--text-stat); }
+
+// ── Sparkline ──────────────────────────────────────────────────────────
+.ui-sparkline {
+  display: block;
+  width: 100%;
+  overflow: visible;
+  .ui-sparkline__line {
+    fill: none;
+    stroke: var(--spark-accent);
+    stroke-width: 1.6;
+    vector-effect: non-scaling-stroke;
+  }
+  .ui-sparkline__area {
+    fill: var(--spark-accent);
+    opacity: 0.12;
+    stroke: none;
+  }
+}
+
+// ── LineChart ──────────────────────────────────────────────────────────
+.ui-line-chart { display: flex; flex-direction: column; gap: var(--space-3); }
+.ui-line-chart__plot { position: relative; width: 100%; touch-action: pan-y; }
+.ui-line-chart__cross { position: absolute; top: 0; bottom: 0; width: 1px; background: color-mix(in oklab, var(--text-bright) 35%, transparent); pointer-events: none; }
+.ui-line-chart__tip { position: absolute; top: 6px; z-index: var(--z-raised); display: flex; flex-direction: column; gap: 3px; padding: var(--space-2) var(--space-3); background: var(--elev-3); border: 1px solid var(--elev-border-strong); border-radius: var(--radius-md); box-shadow: var(--shadow-2); pointer-events: none; min-width: 8rem; max-width: 16rem; }
+.ui-line-chart__tip-head { font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint); }
+.ui-line-chart__tip-row { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-meta); color: var(--text); }
+.ui-line-chart__tip-label { color: var(--text-dim); margin-right: auto; }
+.ui-line-chart__tip-val { font-family: var(--font-mono); color: var(--text-bright); }
+.ui-line-chart__svg { display: block; width: 100%; overflow: visible; }
+.ui-line-chart__grid { stroke: var(--elev-line); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.ui-line-chart__line {
+  fill: none;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.ui-line-chart__line--dashed { opacity: 0.55; stroke-dasharray: 4 4; }
+.ui-line-chart__yaxis {
+  position: absolute;
+  top: 0; right: 0; bottom: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 2px 4px;
+  pointer-events: none;
+  span { font-family: var(--font-mono); font-size: var(--text-micro); color: var(--text-faint); }
+}
+.ui-line-chart__legend { display: flex; flex-wrap: wrap; gap: var(--space-4); }
+.ui-line-chart__legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-meta);
+  color: var(--text-dim);
+}
+.ui-line-chart__swatch { width: 14px; height: 3px; border-radius: 2px; }
+.ui-line-chart__swatch--dashed { opacity: 0.55; }
+
+// ── Stepper ────────────────────────────────────────────────────────────
+.ui-stepper {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--elev-1);
+}
+.ui-stepper__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.2rem;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-out);
+  &:hover { background: var(--surface-soft); color: var(--text); }
+}
+.ui-stepper__value {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.2rem;
+  min-width: 3rem;
+  padding: 0.4rem 0.5rem;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--text-bright);
+  border-left: 1px solid var(--elev-line);
+  border-right: 1px solid var(--elev-line);
+}
+.ui-stepper__suffix { font-size: var(--text-micro); color: var(--text-faint); font-weight: 500; }
+
+// ── ListItem ───────────────────────────────────────────────────────────
+// ── Toast ──────────────────────────────────────────────────────────────
+.ui-toast-viewport {
+  position: fixed;
+  bottom: var(--space-5);
+  right: var(--space-5);
+  z-index: var(--z-toast);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  pointer-events: none;
+  max-width: min(92vw, 360px);
+}
+// The two permanently-mounted live-region containers (toast.rs): plain
+// flex wrappers so toasts keep the stacked-column layout. Intentionally
+// NOT display:contents, which some browser/AT pairs still mishandle on
+// elements carrying live-region semantics. Empty regions collapse to
+// zero height.
+.ui-toast-region {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.ui-toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--elev-3);
+  border: 1px solid var(--elev-border);
+  border-left-width: 3px;
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-3);
+  color: var(--text);
+  animation: toast-in var(--motion-base) var(--ease-spring);
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+.ui-toast__icon { display: inline-flex; flex: 0 0 auto; }
+.ui-toast__msg { font-size: var(--text-body-sm); flex: 1; }
+.ui-toast__close {
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  // WCAG 2.5.8 floor on every pointer (the icon alone is ~18px);
+  // pointer:coarse raises this to 44px further down.
+  min-width: 24px;
+  min-height: 24px;
+  &:hover { color: var(--text); }
+}
+.ui-toast--info { border-left-color: var(--accent); .ui-toast__icon { color: var(--accent); } }
+.ui-toast--success { border-left-color: var(--accent-good); .ui-toast__icon { color: var(--accent-good); } }
+.ui-toast--warn { border-left-color: var(--accent-warn); .ui-toast__icon { color: var(--accent-warn); } }
+.ui-toast--error { border-left-color: var(--accent-danger); .ui-toast__icon { color: var(--accent-danger); } }
+
+@include phone {
+  .ui-toast-viewport { left: var(--space-4); right: var(--space-4); bottom: calc(var(--space-4) + 64px); max-width: none; }
+}
+
+// ── Feature stub (placeholder marquee screens) ─────────────────────────
+// ── Mobile "More" overflow sheet ───────────────────────────────────────
+// Reset the MoreTab <button> so it matches the anchor tabs exactly.
+button.mobile-tab {
+  background: none;
+  border: none;
+  font: inherit;
+  cursor: pointer;
+}
+.mobile-more { display: flex; flex-direction: column; }
+.mobile-more__link {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  color: var(--text);
+  text-decoration: none;
+  border-bottom: 1px solid var(--elev-line);
+  &:last-child { border-bottom: none; }
+  &:active { background: var(--surface-soft); }
+}
+.mobile-more__icon { display: inline-flex; color: var(--text-dim); }
+.mobile-more__label { flex: 1; font-weight: 600; }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Zones: KPI summary + rich card grid (marquee feature 3)
+// ═══════════════════════════════════════════════════════════════════════
+.zones-page { display: flex; flex-direction: column; gap: var(--space-4); }
+.zones-page__sub { margin: 0; color: var(--text-dim); }
+
+// Zones KPI strip: content-sized stat chips clustered left (value right
+// beside its label, nothing stretched to fill the row), with a hairline
+// rule separating the summary from the zones below.
+.zones-kpis {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding-bottom: var(--space-4);
+  border-bottom: 1px solid var(--elev-border);
+}
+.zones-kpis .stat-tile {
+  flex: 0 0 auto;
+  width: max-content;
+  flex-direction: row;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+}
+.zones-kpis .stat-tile__head { order: 2; }
+.zones-kpis .stat-tile__value-row { order: 1; flex-wrap: nowrap; }
+.zones-kpis .stat-tile__value { font-size: var(--text-h3); }
+.zones-kpis .stat-tile__label { font-size: var(--text-micro); }
+.zones-kpis .stat-tile__icon { align-self: center; }
+
+// Master-detail: cards column (left) + detail pane (right).
+.zones-shell {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  gap: var(--space-6);
+  align-items: start;
+}
+.zones-cards { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+.zones-detail {
+  min-width: 0;
+  position: sticky;
+  top: var(--space-5);
+  // Visual seam between the card rail and the slide-out detail.
+  border-left: 1px solid var(--elev-border-strong);
+  padding-left: var(--space-6);
+}
+@include phone {
+  // Phones: cards navigate to /zones/:slug (full-screen detail), so the
+  // inline pane is hidden rather than dumped below the fold.
+  .zones-shell { grid-template-columns: 1fr; }
+  .zones-detail { display: none; }
+}
+
+.zone-card {
+  // MUST be a positioning context: the .zone-card__hit click overlay is
+  // position:absolute; inset:0. Without this, every card's overlay escapes to
+  // the nearest positioned ancestor and they stack, so a click lands on the
+  // WRONG card's overlay (clicking back_yard selected front_yard). This anchors
+  // each overlay to its own card.
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  flex-direction: column;
+  background: var(--elev-1);
+  border: 1px solid var(--elev-border);
+  // Entity identity, not status: the left stripe is always the zone color so an
+  // idle zone still reads as a zone (it was gray = "dead sensor" before). Live
+  // status lives on the dot / pill / running glow (--zc).
+  border-left: 3px solid var(--entity-zone);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-1);
+  overflow: hidden;
+  cursor: pointer;
+  transition: box-shadow var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out);
+  // Match the foundation's .is-interactive signature (lift + hairline ring).
+  &:hover { box-shadow: var(--shadow-2), var(--hover-ring); transform: translateY(-1px); }
+}
+.zone-card.is-selected { box-shadow: var(--shadow-2), inset 0 0 0 1px var(--zc); border-left-width: 4px; }
+// Running = water flowing NOW: the most operationally-significant state. A
+// breathing --zc glow (plus the existing dot scale-pulse) makes it impossible to
+// miss, vs the old flat 40% ring. Reduced-motion settles it to the bright frame.
+.zone-card--running {
+  box-shadow:
+    var(--shadow-1),
+    0 0 0 1px color-mix(in oklab, var(--zc) 55%, transparent),
+    0 0 18px color-mix(in oklab, var(--zc) 20%, transparent);
+  animation: zone-breathe 2.6s var(--ease-out) infinite;
+}
+@keyframes zone-breathe {
+  0%, 100% {
+    box-shadow:
+      var(--shadow-1),
+      0 0 0 1px color-mix(in oklab, var(--zc) 50%, transparent),
+      0 0 12px color-mix(in oklab, var(--zc) 14%, transparent);
+  }
+  50% {
+    box-shadow:
+      var(--shadow-1),
+      0 0 0 1px color-mix(in oklab, var(--zc) 70%, transparent),
+      0 0 26px color-mix(in oklab, var(--zc) 30%, transparent);
+  }
+}
+@include reduced-motion {
+  .zone-card--running { animation: none; }
+}
+.zone-card__photo {
+  height: 84px;
+  background-size: cover;
+  background-position: center;
+  border-bottom: 1px solid var(--elev-line);
+}
+.zone-card__body { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-4); flex: 1; }
+// flex-wrap: the optional attention pill (a zone with a tuning
+// suggestion) rides after the verdict pill and must wrap on narrow
+// cards instead of overflowing the head row.
+.zone-card__head { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.zone-card__dot { width: 9px; height: 9px; border-radius: 50%; background: var(--zc); flex: 0 0 auto; }
+.zone-card--running .zone-card__dot { --pulse-min: 0.3; animation: pulse-fade 1.6s var(--ease-out) infinite; }
+.zone-card__name { flex: 1; font-weight: 700; color: var(--text-bright); min-width: 0; }
+.zone-card__pill {
+  display: inline-flex; align-items: center;
+  font-family: var(--font-mono); font-size: var(--text-micro); font-weight: 700; letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  // Lift the status ink above its tinted background; scheduled blue alone
+  // measured 4.25:1 at this small label size (AA requires 4.5:1).
+  color: color-mix(in oklab, var(--zc) 70%, var(--text-bright)); padding: 2px var(--space-2); border-radius: 999px;
+  background: color-mix(in oklab, var(--zc) 16%, transparent); white-space: nowrap;
+}
+.zone-card__verdict {
+  display: inline-flex; align-items: center;
+  font-family: var(--font-mono); font-size: var(--text-micro); font-weight: 700; letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--vc); padding: 2px var(--space-2); border-radius: 999px;
+  background: color-mix(in oklab, var(--vc) 16%, transparent); white-space: nowrap; margin-left: auto;
+}
+.zone-card__reason {
+  font-size: var(--text-meta); color: var(--text-faint); line-height: 1.3;
+  margin: calc(-1 * var(--space-1)) 0 var(--space-1);
+}
+// Budget and Override-schedule notes reuse the reason row's geometry; the
+// suppression note sits quieter than the engine's own "why" line.
+.zone-card__reason--budget { color: var(--text-soft); }
+.zone-card__reason--suppressed { color: var(--text-faint); }
+// auto-fit, not a fixed 3: every agronomy zone now carries a live
+// Deficit and any probed zone adds the Soil stat, so the four-stat card
+// is the common case and a fixed 3-column grid wrapped the fourth stat
+// alone onto a ragged second row.
+.zone-card__stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(72px, 1fr)); gap: var(--space-2); }
+// The scheduling-model chip, mixed installs only (a zone whose model
+// differs from the engine default). Cool accent so it reads as a fact
+// tag, not a live status.
+.zone-card__model {
+  display: inline-flex; align-items: center;
+  font-family: var(--font-mono); font-size: var(--text-micro); font-weight: 700; letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--accent-cool);
+  padding: 2px var(--space-2); @include surface($background: (color-mix(in oklab, var(--accent-cool) 10%, transparent)), $border: (1px solid color-mix(in oklab, var(--accent-cool) 45%, transparent)), $radius: (999px), $shadow: null);
+
+}
+
+// Per-zone override row on the master-detail card. Label + compact segmented
+// Auto/Skip/Force; the card content layer sits above the hit overlay
+// so it stays tappable without selecting the card.
+.zone-card__override { display: flex; align-items: center; gap: var(--space-3); }
+.zone-card__override-label {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  font-weight: 700;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.zone-card__override .override-ctl--compact { flex: 1; }
+
+.zone-card__foot { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-3); margin-top: auto; }
+.zone-card__stop {
+  display: inline-flex; align-items: center; gap: 4px; margin-right: auto;
+  font: inherit; font-size: var(--text-meta); font-weight: 600;
+  color: var(--accent-danger);
+  @include surface($background: (color-mix(in oklab, var(--accent-danger) 14%, transparent)), $border: (1px solid color-mix(in oklab, var(--accent-danger) 30%, transparent)), $radius: (var(--radius-sm)), $shadow: null);
+
+   padding: 0.3rem 0.6rem; cursor: pointer;
+  position: relative; z-index: var(--z-base);
+  &:hover { background: color-mix(in oklab, var(--accent-danger) 24%, transparent); }
+  &:disabled { opacity: 0.6; cursor: progress; }
+}
+
+// Full-card select affordance: a real <button> overlay so keyboard and
+// assistive tech get proper semantics without nesting interactives.
+//
+// Keep the content above the details button in the card's local stack.
+// Non-interactive content lets clicks through to details; Auto/Skip/Force
+// and Stop opt back in. Both layers are necessary: pointer-events alone
+// cannot make a control clickable when the details button paints over it.
+// The sibling buttons retain their native keyboard and focus semantics.
+.zone-card > button.zone-card__hit {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  @include surface($background: (none), $border: (none), $radius: (inherit), $shadow: null);
+
+  cursor: pointer;
+
+  padding: 0;
+}
+.zone-card > :not(.zone-card__hit) {
+  position: relative;
+  z-index: var(--z-base);
+  pointer-events: none;
+}
+.zone-card .zone-card__stop,
+.zone-card .override-seg__btn { pointer-events: auto; }
+
+.zone-card:has(.zone-card__hit:focus-visible) {
+  @include focus-ring(2px);
+}
+
+@include phone {
+  .zones-kpis .stat-tile {
+    flex: 1 1 40%;
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-1);
+  }
+  .zones-kpis .stat-tile__head { order: 1; }
+  .zones-kpis .stat-tile__value-row { order: 2; margin-top: auto; }
+}
+
+.page-head { display: flex; flex-direction: column; gap: var(--space-2); }
+.page-eyebrow { margin: 0; font-size: var(--text-meta); letter-spacing: var(--tracking-eyebrow); text-transform: uppercase; color: var(--accent); font-weight: 700; }
+.page-title { margin: 0; font-size: var(--text-h1); letter-spacing: var(--tracking-display); color: var(--text-bright); }
+.btn--danger-solid { background: var(--accent-danger); color: var(--on-danger); font-weight: 700; text-transform: uppercase; }

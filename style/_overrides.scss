@@ -1,0 +1,686 @@
+@use "mixins" as *;
+
+// theme-scoped fixes and late overrides
+//
+// Split out of main.scss, which had grown to 11,330 lines.
+// Load order is the cascade: see the @use list in main.scss.
+
+// ─────────────────────────────────────────────────────────────────────
+// High-contrast control-text fix (a11y / punch-list #16e).
+// ─────────────────────────────────────────────────────────────────────
+// In [data-theme="hc"], --grad-flow resolves to a solid brand-blue-300,
+// a LIGHT fill, and these controls paint #fff on it: about 1.9:1.
+//
+// This list used to be twice as long. Everything painted from --accent
+// now reads --on-accent instead, which carries the right foreground in
+// all three themes rather than patching one. What is left is the
+// --grad-flow family, which has not been moved onto a token yet; C5 owns
+// the button families and should retire the rest of this block with them.
+[data-theme="hc"] {
+  .ui-empty__cta,
+  .btn--primary,
+  .hist-range.is-on {
+    color: #000;
+  }
+}
+
+// The danger equivalent of the block above is gone entirely: the
+// Stop-All button, its disabled state and the armed icon all read
+// --on-danger now, which is black in high-contrast and black in dark
+// (where #ffffff on the danger fill was also failing) and white in
+// light. Nothing here needed a theme-scoped patch any more.
+//
+// .btn--danger and .setup-footer__btn--danger were deliberately never in
+// that list and still are not: they paint red TEXT on a near-black
+// tinted fill, so a black foreground would erase the label.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cloud weather (no hardware): the honest no-station customer experience. The
+// catalog mounts as the top fold of the Devices hub + the wizard weather step.
+// Every fact is rendered VERBATIM from /api/config/source_catalog; the styles
+// only encode the HONESTY grammar (the data-nature badge color, the live-rain
+// raindrop, the capability matrix lit/dim, the key flag) so a customer can judge
+// the watering risk at a glance.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// A right-aligned "most people never open this" hint inside a fold summary.
+.settings-section-fold__hint {
+  margin-left: auto;
+  font-weight: 400;
+  font-size: var(--text-meta);
+  color: var(--text-faint);
+}
+
+// The cloud-weather section: a first-class block at the top of the Devices hub
+// (and a co-equal section in the wizard). Separation is STRUCTURAL now (heading
+// + "N live, M available" count + whitespace + subtle elevation), NOT an accent
+// tint WALL. The old accent-30% border + accent-4% background made this read as
+// a hero that outranked its peers; a neutral bordered surface lets it sit as an
+// equal section.
+.cloud-weather.settings-prominent-section {
+  margin: 0 0 var(--space-6); // one larger between-section gap
+  padding: var(--space-4);
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius-md);
+  background: var(--elev-1);
+  box-shadow: var(--shadow-1);
+}
+
+.cloud-weather__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-4);
+  margin: 0 0 var(--space-2);
+}
+.cloud-weather__heading {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--accent);
+}
+// Section title: same rung as .settings-section__title so the cloud block
+// reads as a peer section, not a sub-label.
+.cloud-weather__title {
+  margin: 0;
+  font-size: var(--text-h2);
+  font-weight: 700;
+  color: var(--text);
+}
+// LEAD WITH THE DATA: the HERO CARD. The loudest element in the section, a
+// prominent bordered card that answers "is it raining on my yard, and how do I
+// know" before any provider scroll. Promoted from the old dim one-liner: a clear
+// 3-line block (label / reading / rollup chip) with the framing copy demoted to
+// quiet subtext. Never red here; the worst case is the calm "forecast backup".
+.cloud-hero {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0 0 var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  @include surface($background: (var(--elev-2)), $radius: (var(--radius-md)));
+  // Tint WALL removed: the accent gradient + accent-35% border made this the
+  // loudest element on a page where it is often the least relevant. It is now a
+  // calm elevated surface; the reading itself (status color on __reading) does
+  // the talking, not a blue backdrop.
+
+  // Line 1: the question, an eyebrow-weight label.
+  &__label {
+    font-size: var(--text-meta);
+    font-weight: 700;
+    letter-spacing: var(--tracking-eyebrow);
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+
+  // Line 2: the active reading. The plain source name leads, loud and clear,
+  // then the trust word, then the age.
+  &__reading {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--space-1) var(--space-2);
+    font-size: var(--text-body);
+    color: var(--text);
+  }
+  &__owner {
+    font-size: var(--text-h3, 1.1rem);
+    font-weight: 700;
+    color: var(--text-bright, var(--text));
+  }
+  &__ago { color: var(--text-faint); font-size: var(--text-meta); }
+
+  // The ONE trust word (Measured / Radar / Forecast), drawn from rain_nature:
+  // green for a measured or radar reading, amber for a forecast. The single
+  // honesty cue on the hero line, same grammar as the row rain badge.
+  &__trust {
+    padding: 0.05rem 0.5rem;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-meta);
+    font-weight: 700;
+    white-space: nowrap;
+    border: 1px solid transparent;
+
+    &--measures,
+    &--radar {
+      color: var(--accent-good);
+      background: color-mix(in oklab, var(--accent-good) 16%, transparent);
+      border-color: color-mix(in oklab, var(--accent-good) 45%, transparent);
+    }
+    &--forecast {
+      color: var(--accent-warn);
+      background: color-mix(in oklab, var(--accent-warn) 16%, transparent);
+      border-color: color-mix(in oklab, var(--accent-warn) 45%, transparent);
+    }
+  }
+
+  // Line 3: the single calm rollup chip. Green dot "All readings covered" when a
+  // measured/radar source owns rain; calm blue "Rain on forecast backup" when a
+  // model is covering. Never red here.
+  &__rollup {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    align-self: flex-start;
+    margin-top: var(--space-1);
+    font-size: var(--text-meta);
+    font-weight: 700;
+
+    &::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+    &--covered { color: var(--accent-good); }
+    &--backup { color: var(--accent); }
+  }
+
+  &__subtext {
+    margin: var(--space-1) 0 0;
+    color: var(--text-dim);
+    font-size: var(--text-meta);
+    line-height: 1.5;
+  }
+
+  // The pre-load / warming posture: a calm placeholder reading, never a fault.
+  &--warming &__reading {
+    color: var(--text-dim);
+    font-style: italic;
+  }
+}
+
+// The scannable provider LIST. Each provider is one compact ROW; clicking the
+// chevron expands it to the full details. Width-friendly: rows span the section
+// rather than tiling into narrow cards, so the quick hits read at a glance.
+// Peer-row gap is --space-3, the ONE rhythm shared with .settings-card-list so
+// cloud rows and device cards breathe alike.
+.cloud-weather-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: var(--space-3) 0;
+  padding: 0;
+  list-style: none;
+}
+
+// REGION CLUTTER: the collapsed "More providers (N)" fold holds the paid + the
+// region-inappropriate sources. Closed by default so a US user sees only the
+// recommended set (Open-Meteo, NWS, NOAA MRMS, Pirate) until they open it.
+.cloud-weather__more {
+  margin: var(--space-3) 0 0;
+
+  &[open] .cloud-weather__more-summary svg {
+    transform: rotate(90deg);
+  }
+
+  .cloud-weather-list {
+    margin-top: var(--space-2);
+  }
+}
+.cloud-weather__more-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+  list-style: none;
+  padding: var(--space-2) var(--space-3);
+  background: var(--elev-2);
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: var(--text-body-sm);
+  font-weight: 600;
+
+  &::-webkit-details-marker { display: none; }
+
+  svg { transition: transform 0.12s ease; color: var(--text-faint); }
+
+  &:hover { border-color: var(--elev-border-strong); background: var(--elev-3); }
+}
+.cloud-weather__more-hint {
+  color: var(--text-faint);
+  font-weight: 400;
+  font-size: var(--text-caption);
+}
+
+.cloud-row {
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius-md);
+  background: var(--elev-1);
+  overflow: hidden;
+
+  &--enabled {
+    border-color: color-mix(in oklab, var(--accent-good) 45%, transparent);
+    background: color-mix(in oklab, var(--accent-good) 5%, var(--elev-1));
+  }
+  &--gated {
+    opacity: 0.72;
+  }
+  &--open {
+    border-color: color-mix(in oklab, var(--accent) 40%, var(--elev-border));
+  }
+
+  // The always-visible COMPACT row: chevron, identity (name + tiny default dot +
+  // ONE rain badge + ONE status word), control. The 1px extra left padding clears
+  // the entity-stripe rail. Marker count is down to two (rain badge + status
+  // word) so color is no longer overloaded.
+  &__main {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+    padding: var(--space-2) var(--space-4);
+    padding-left: calc(var(--space-4) + 3px);
+  }
+
+  &__chevron {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.2rem;
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    transition: transform 0.12s ease, color 0.12s ease;
+
+    &:hover { color: var(--text); background: var(--elev-2); }
+  }
+  &--open &__chevron {
+    transform: rotate(90deg);
+  }
+
+  // The identity is the compact quick-hit row: it is itself click-to-expand
+  // (.is-interactive), so the whole name area opens the row, not just the
+  // chevron. A single wrapping flex line keeps density low and scannable. We
+  // suppress the .is-interactive lift/shadow here (a wide in-row target should
+  // tint on hover, not jump) and keep only the background cue + pointer.
+  &__identity {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
+    min-width: 0;
+    padding: 0.2rem var(--space-2);
+    border-radius: var(--radius-sm);
+    background: none;
+
+    &.is-interactive {
+      &:hover {
+        background-color: var(--surface-interactive-hover-bg);
+        box-shadow: none;
+        transform: none;
+      }
+      &:active {
+        transform: none;
+        box-shadow: none;
+      }
+    }
+  }
+  &__title {
+    font-weight: 700;
+    color: var(--text);
+  }
+
+  // The "Default for you" 6px dot: a single quiet accent dot (tooltip-only
+  // rationale), replacing the wordy "On by default here" pill so the eyebrow
+  // carries no extra word. Sits right after the name.
+  &__default-dot {
+    width: 6px;
+    height: 6px;
+    flex: 0 0 auto;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: help;
+  }
+
+  // The single status WORD container. The word itself is `.cloud-word`, weighted
+  // plain text in one semantic color (no pill), so it never competes with the
+  // rain badge. Pushed to the right of the identity line so the eyebrow reads
+  // name + badge ... state.
+  &__status {
+    display: inline-flex;
+    margin-left: auto;
+  }
+
+  &__control {
+    display: inline-flex;
+    align-items: center;
+    justify-self: end;
+    gap: var(--space-2);
+  }
+  &__control-note {
+    font-size: var(--text-caption);
+    color: var(--text-dim);
+  }
+
+  // The expanded DETAILS body: the compact capability summary + honesty lines +
+  // the Pirate upgrade line + the key form.
+  &__details {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: 0 var(--space-4) var(--space-4)
+      calc(var(--space-4) + 1.4rem);
+    border-top: 1px solid var(--elev-border);
+    padding-top: var(--space-3);
+  }
+  // The rain nature as PLAIN PROSE (moved off the eyebrow badge's hover): the one
+  // sentence that says whether this source's rain is measured or a forecast.
+  &__nature {
+    margin: 0;
+    color: var(--text);
+    font-size: var(--text-caption);
+    line-height: 1.45;
+  }
+  // The CALM "who is covering" line for a standby / watching / quiet source: it
+  // names the source feeding rain right now so a backup reads as handled, never
+  // as the user's problem. A soft accent rail, not a warning.
+  &__cover {
+    margin: 0;
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-sm);
+    border-left: 2px solid color-mix(in oklab, var(--accent) 55%, transparent);
+    background: color-mix(in oklab, var(--accent) 6%, var(--elev-2));
+    color: var(--text-dim);
+    font-size: var(--text-caption);
+    line-height: 1.45;
+  }
+  // The honest Pirate upgrade line (verbatim catalog copy): a calm, accented
+  // note explaining the free-key temp/wind upgrade without implying its rain is
+  // measured.
+  &__upgrade {
+    margin: 0;
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-sm);
+    background: color-mix(in oklab, var(--accent) 8%, var(--elev-2));
+    border: 1px solid color-mix(in oklab, var(--accent) 30%, transparent);
+    color: var(--text);
+    font-size: var(--text-caption);
+    line-height: 1.45;
+  }
+  &__meta {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    margin: 0;
+  }
+  &__meta-row {
+    display: flex;
+    gap: var(--space-2);
+    font-size: var(--text-caption);
+    line-height: 1.4;
+
+    dt {
+      flex: 0 0 5.5rem;
+      color: var(--text-faint);
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+    dd {
+      margin: 0;
+      color: var(--text-dim);
+    }
+  }
+  &__risk {
+    margin: var(--space-1) 0 0;
+    color: var(--text);
+    font-size: var(--text-meta);
+    line-height: 1.45;
+  }
+  &__note {
+    margin: 0;
+    color: var(--accent-warn);
+    font-size: var(--text-caption);
+  }
+
+  // The KEY TIER line, now in the expand next to the actionable control (the
+  // eyebrow key chip is retired). One plain line: "Key: <tier>" with a short
+  // caution. The cost word carries a single semantic tint, not a pill.
+  &__keytier {
+    margin: var(--space-1) 0 0;
+    font-size: var(--text-caption);
+    font-weight: 600;
+    color: var(--text);
+
+    &--free { color: var(--accent-good); }
+    &--freekey { color: var(--accent); }
+    &--paid { color: var(--accent-warn); }
+  }
+  &__keytier-label {
+    color: var(--text-faint);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    margin-right: var(--space-1);
+  }
+  &__keytier-note {
+    display: block;
+    margin-top: 0.15rem;
+    color: var(--text-dim);
+    font-weight: 400;
+  }
+}
+
+// On a phone the row stacks: identity over control, chevron stays at the start.
+@media (max-width: 32rem) {
+  .cloud-row__main {
+    grid-template-columns: auto 1fr;
+  }
+  .cloud-row__control {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+}
+
+// THE ONE STATUS WORD: the single calm homeowner state on a row, rendered as
+// plain WEIGHTED TEXT (no pill, no background) in ONE semantic color, so it never
+// competes with the rain badge and color stops being overloaded. Five slugs:
+//   --owner   good/green "Feeding rain now" / "Feeding wind now" (this is feeding)
+//   --neutral text      "On, standby" / "Watching, no rain" / "Quiet here ..."
+//   --warn    amber     "Add key to turn on" (the one action-needed word)
+//   --dim     text-dim  "Off" / "Not in your area" (calm, no action)
+//   --fault   danger    "Not reachable right now" (a genuine fault, the ONLY red)
+// The retired per-state pill backgrounds + the key chip + the default-here pill
+// are gone: their cost/key/region facts moved into the expand.
+.cloud-word {
+  font-size: var(--text-meta);
+  font-weight: 700;
+  white-space: nowrap;
+
+  &--owner { color: var(--accent-good); } // feeding-now = healthy/good
+  &--neutral { color: var(--text); }
+  &--warn { color: var(--accent-warn); }
+  &--dim { color: var(--text-dim); }
+  &--fault { color: var(--accent-danger); }
+}
+
+// The keyed-enable affordance (expander + SecretInput + get-a-key link).
+.cloud-keyed {
+  &__form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-3);
+    border: 1px solid var(--elev-border);
+    border-radius: var(--radius-sm);
+    background: var(--elev-2);
+  }
+  &__label {
+    font-size: var(--text-caption);
+    font-weight: 600;
+    color: var(--text-dim);
+  }
+  &__getkey {
+    align-self: flex-start;
+    color: var(--accent);
+    font-size: var(--text-caption);
+    white-space: nowrap;
+  }
+}
+
+// ActiveChain: the read-only priority ladder + per-field ownership strip.
+.cloud-chain {
+  margin-top: var(--space-5);
+  padding: var(--space-4);
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius-md);
+  background: var(--elev-1);
+
+  &__title {
+    margin: 0 0 var(--space-1);
+    font-size: var(--text-meta);
+    font-weight: 700;
+    color: var(--text);
+  }
+  &__lede {
+    margin: 0 0 var(--space-3);
+    color: var(--text-dim);
+    font-size: var(--text-caption);
+  }
+  &__empty {
+    margin: 0;
+    color: var(--text-dim);
+    font-size: var(--text-caption);
+  }
+
+  // Per-field BACKUP CHAINS: each canonical reading on its own line, with a
+  // left field label and a one-line arrow chain of the enabled sources behind
+  // it, by priority. The live owner is bolded; the terminal local station is
+  // tinted teal "(last resort)". "no backup" reads only when nothing stands
+  // behind the owner.
+  &__strip {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+  &__field {
+    display: grid;
+    grid-template-columns: 5rem 1fr;
+    gap: var(--space-2) var(--space-3);
+    align-items: baseline;
+    font-size: var(--text-caption);
+    padding: var(--space-1) 0;
+    border-top: 1px dashed var(--elev-border);
+
+    &:first-child { border-top: none; }
+  }
+  &__field-name {
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  // The arrow chain itself: a wrapping run of source names joined by arrows.
+  &__links {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.15rem;
+    color: var(--text-dim);
+  }
+  &__link {
+    color: var(--text-dim);
+
+    // The live owner of the reading, bolded so the eye lands on it first.
+    &--owner {
+      color: var(--text);
+      font-weight: 700;
+    }
+    // The terminal local station: tinted teal so "your own station is the last
+    // resort" reads as the safety net, never as a missing backup.
+    &--station {
+      color: var(--accent-good);
+      font-weight: 600;
+    }
+  }
+  &__arrow {
+    color: var(--text-faint);
+  }
+  // Only shown when there is genuinely nothing behind the owner.
+  &__nobackup {
+    color: var(--text-faint);
+    font-style: italic;
+  }
+}
+
+// LOCAL-FIRST IA bands (spec 4b): the cloud-weather panel splits its providers
+// into a LOCAL identity band (green/teal station identity, "strongest signal")
+// and a CLOUD identity band (blue cloud identity, gap-fillers + downtime). The
+// bands carry the entity-identity STRIPE (reused .entity-stripe--sensor /
+// --source), so the ranked picture reads at a glance: local outranks cloud.
+.cloud-band {
+  margin: var(--space-3) 0 0;
+  padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+
+  // Structural separation (D3): the uppercase eyebrow + whitespace group the
+  // band; no colored backdrop needed. The band still carries the entity STRIPE
+  // on the rows inside it, which is the quiet category cue that survives.
+  &__title {
+    margin: 0 0 var(--space-1);
+    font-size: var(--text-meta);
+    font-weight: 700;
+    letter-spacing: var(--tracking-eyebrow);
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+  &__sub {
+    margin: 0 0 var(--space-2);
+    color: var(--text-dim);
+    font-size: var(--text-caption);
+    line-height: 1.5;
+  }
+  // The location-unset callout: config saves are refused while location is
+  // 0,0, so this must read as a blocking condition, not a footnote.
+  &__sub--warn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    color: var(--verdict-wind);
+    a {
+      color: var(--accent);
+      font-weight: 600;
+    }
+  }
+
+  // Tint WALLS removed: the LOCAL (teal 6%) and CLOUD (blue 5%) background fills
+  // were two of the big color walls. Both bands now share the plain surface;
+  // local-vs-cloud is carried by the eyebrow label + row stripes, not a wash.
+  &--cloud {
+    background: var(--elev-1);
+  }
+
+}
+
+// The "see the full capability comparison" link to the provider-matrix guide,
+// sitting just under the hero. The verified wide reading matrix is too wide for
+// this narrow panel, so it lives in the guide; this calm accent link points
+// there. Same grammar as the other in-app doc links.
+.cloud-weather__matrix-link {
+  display: inline-block;
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-caption);
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+  white-space: nowrap;
+
+  &:hover { text-decoration: underline; }
+}
+
+// The Advanced disclosure on the data-sources page (the raw override map +
+// forecast pin), and its KV block.
+.data-source-advanced__kvs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: var(--space-2) 0 0;
+}

@@ -4,6 +4,112 @@ All notable changes to LocalSky are documented here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-13
+
+Update the LocalSky Home Assistant integration to 0.9.0 with this release.
+The API contract is now 2.1.0; existing `/api/v1` URLs stay the same.
+Back up your data before upgrading.
+
+### Fixed
+
+- NWS observations refresh independently of forecasts, retain provider report
+  times and select available nearby measurements. Current wind selection,
+  irrigation inputs and UI evidence share source, age and measured/model nature;
+  missing gust, direction and rapid wind remain unknown.
+- HA WeatherFlow minute-rain mappings accumulate each physical report once,
+  using its period identity rather than HA poll time. Restart restores the
+  source's recorded daily total and last minute before irrigation starts.
+  Already-daily mappings remain available; unreceived minutes cannot be inferred.
+
+- HA passthrough preserves each entity's report time, including unchanged but
+  freshly reported readings. Repeated polls cannot renew frozen weather or soil
+  data. Arbitration checks age at arrival, irrigation uses the same configured
+  source-age limits, and cloud takeover clears displaced station timestamps and
+  names the actual temperature source.
+
+- Current weather uses one source bus and field-level priority arbitration.
+  Tempest measurements retain their configured priority; stale or partial
+  readings cannot silently overwrite fresh evidence. The Tempest listener
+  follows configured bindings and filters, and releases its port when removed.
+- Source switches persist user changes directly; rebuilding a device card
+  cannot discard its save callback or turn a config reload into another save.
+  Source save, disable and removal confirmations honor the server's restart
+  requirement. HA weather mappings expose illuminance, lightning count and
+  lightning distance. The migration guide explains Tempest socket handoff,
+  source preferences and native accumulation of HA WeatherFlow minute rain.
+- Missing temperature, humidity, wind, rain, ET and flow remain unknown.
+  Reported zero stays zero. Old forecast caches cannot reintroduce placeholder
+  zeros as observations. Measured rain and expected rain remain separate.
+- Watering eligibility, displayed decisions and unattended dispatch use the
+  same rules. Zone exemptions and overrides respect their scope, while Force
+  preserves operator and safety holds. Failed enabled scripts hold watering.
+- Forecast days, rainfall, sunrise windows, restrictions, pause expiry and
+  midnight recovery follow the configured location's calendar, including DST,
+  fractional offsets and southern-hemisphere seasonal rules. The first calendar
+  tile and its decision agree with the current local day.
+- Reference ET uses provider evidence or appropriate FAO-56 meteorology, with
+  daily means distinguished from peaks. Seasonal crop demand no longer receives
+  a second heat-index multiplier. Zero ET and incomplete ET curves stay distinct.
+- Soil replay exposes an initial deficit only after bounded starting states
+  converge with sufficient evidence. Dormancy remains a hold during initialization.
+  Relative probe readings cannot produce unsupported volumetric forecasts.
+- Forecast accuracy leaves unfinished and future local days ungraded; partial
+  rain totals cannot count as final forecast misses. Raw evidence remains visible
+  in the API until the local day completes.
+- Brief partial watering earns spacing proportional to delivered depth. History
+  counts explicit watering sessions across cycle/soak and overnight work while
+  physical interval union prevents duplicate water credit or credit for soak time.
+  Charts divide delivered water at actual local midnight.
+- Controller state and flow require current interpretable evidence. Commands
+  share ordering, duration caps and shutoff bookkeeping. Interrupted runs cannot
+  retain credit for unperformed watering; uncertain recovery is reported clearly.
+- Setup saves the selected geography, rules and controller bindings. Changes
+  requiring startup wiring retain a visible watering hold until restart. Zone
+  editors, dirty-form confirmation and override controls survive live updates.
+- Desktop and phone layouts share action and metric components. Phone summary
+  labels fit their cards, zone override buttons remain clickable, and restore
+  file selection works from the keyboard. Radar fallback and base-map loading
+  no longer depend on the retired unauthenticated CARTO endpoint.
+
+### Changed
+
+- Irrigation shows today's recorded outcome and tomorrow's projection in a
+  compact status card, with the water plan and zone evidence on a separate page.
+  Planning carries rain, delivered watering and soil drainage across days and
+  can defer watering or supply a smaller bridge ahead of useful forecast rain.
+- History separates Run log and Daily log, including morning skips and reasons.
+  All Months shows the full selected history. Zone editors open in place and
+  include Cancel beside Save.
+
+- The API response contract is **2.1.0** at the existing `/api/v1` URLs.
+  Nullable evidence is the API-major-2 migration; session identity and ET
+  availability metadata are additive 2.1 fields. Clients must handle unknown
+  explicitly. The Home Assistant companion supports API major 2.
+- Watering command intent is journaled before actuation. Confirmed commands
+  and uniquely attributable observer records share durable session identity.
+  History exposes grouped sessions with expandable raw records; legacy rows
+  without identity are preserved without invented session membership.
+- Restore uses immutable, hashed before/after file sets and a restartable
+  transaction journal. Boot resumes verified interrupted publication or
+  activation. A receipt written before SQLite opens prevents a later boot from
+  overwriting post-activation writes. Unknown or tampered evidence holds startup.
+- Configuration schema 2 and its migration ledger remain the source of install
+  settings. Backups carry config, ledger and database together. Config-only
+  restores apply immediately through the same recovery protocol.
+- Shared UI primitives, surface recipes, headings, focus/breakpoint mixins and
+  layout utilities replace repeated implementations. Production-image browser
+  gates cover persisted setup, accessibility, editor/action behavior, actual
+  rendering, radar fallback and fixed desktop/phone references.
+- Strict health returns HTTP 503 when degraded. Structured logs, source fetch
+  metrics and secret-scrubbed diagnostics support operations and recovery.
+- Home Assistant remains optional. Retired helper reads and Irrigation Unlimited
+  actions are removed; native sources, controllers and standalone operation use
+  the same engine. Discovery validates instance identity before moving an endpoint.
+- The manual documents calibration assumptions, delivery limits, source
+  provenance and API migration. Leaflet assets are served locally; enabled
+  external weather, map, controller and notification services remain documented.
+
+
 ## [0.8.1] - 2026-09-04
 
 ### Fixed
@@ -56,7 +162,7 @@ LocalSky stops reading Home Assistant to decide anything and carries the seven h
 - **`sessions_per_week` is now held to 1 through 7.** Above 7 the spacing between sessions worked out to less than a day, which stopped the gate that keeps a zone from watering twice in one day. Values outside the range are refused when you save, with the range in the message. A value already in your config file is clamped into range as it loads, so the file still loads AND your other settings still save: the refusal gates whole-config writes, so without the clamp one stale value would have refused every unrelated save until you found it by hand.
 - **An install with both Home Assistant and a controller of its own never recorded that it had watered.** With `HA_URL` set and a Rachio, an OpenSprinkler, or any other controller configured, LocalSky sent Run and Stop to the controller but read each zone's running state from a `binary_sensor.opensprinkler_*` entity that does not exist on that install. Running was permanently false, so no run was ever written to History and the weekly water balance credited none of the water applied. A controller that reports its own state is now what the running state comes from, per zone. Until this release the missing rows changed no run length on that install: run lengths on a Home Assistant deployment were sized by the Smart Irrigation entity and by nothing else, and the weekly balance was computed and shown there but sized nothing. From this release the balance sizes every run on every deployment, and it needs those rows: it credits the water already applied against the week's target and paces sessions off the last recorded run, so without them every session would have been sized as if the week were untouched and a zone could have planned a session on every morning it was otherwise clear to water. The fix lands with the change that needs it. Check each zone's Weekly target and Sessions per week under Settings, then Zones, if the cadence is not what you want.
 
-  One further change comes with it. History rows are how LocalSky knows a morning was already handled, so on an install where the Smart Irrigation entity had it dispatching at all, a restart inside the watering window re-ran the morning because no row said it had happened. Now that runs are recorded, a restart after two or more zones have watered leaves the rest of that morning alone.
+  One further change comes with it. History rows are how LocalSky knows a morning was already handled, so on an install where the Smart Irrigation entity had it dispatching at all, a restart inside the watering window re-ran the morning because no row said it had happened. Now that runs are recorded, a restart inside the window judges each zone on its own evidence: a zone that already received its planned water is left alone, and a zone that did not is dispatched for the remainder.
 
   Master enable and water level on that install now come from the controller too. Neither reaches the watering decision; the indicator simply changes where it is read from.
 - **Rain delay on a Home Assistant deployment with no pause helper silently did nothing.** The 24h, 48h and 72h buttons wrote to `input_datetime.irrigation_pause_until`, and on an install that never created that helper the write went nowhere, no error was shown, and the next tick read no pause. Tapping Rain delay and then watching the yard water is now not possible: the pause is kept by LocalSky.

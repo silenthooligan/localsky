@@ -20,7 +20,7 @@
 // CURRENT OBSERVATIONS: separately from the forecast, NWS exposes the
 // latest METAR-style observation from the nearest ASOS/AWOS station. We
 // resolve that station id once (points -> observationStations collection ->
-// first/nearest feature) and cache it, then each poll GET
+// nearest station collection) and cache it, then every five minutes GET
 // /stations/{id}/observations/latest and map properties to live current
 // scalars (temperature -> AirTempF, relativeHumidity -> RhPct, windSpeed ->
 // WindMph, windGust -> WindGustMph, windDirection -> WindBearingDeg,
@@ -45,7 +45,7 @@
 // Unit notes: NWS /forecast and /forecast/hourly already return imperial
 // (temperature in F, windSpeed strings in mph). No conversion needed for
 // the FORECAST values we read. There is no QPF precip amount in /forecast, so
-// daily precip_sum_in stays 0. NWS has no reliable UV / cloud-cover /
+// daily precip_sum_in is unknown until gridpoint QPF covers its period. NWS has no reliable UV / cloud-cover /
 // apparent-temp in these endpoints, so those default. WMO weather codes
 // are mapped loosely from the shortForecast text (else 0; the UI has a
 // glyph fallback). The CURRENT /observations/latest feed is the opposite:
@@ -53,7 +53,11 @@
 // explicit per-field unitCode, so each scalar is routed through
 // units::to_canonical to reach LocalSky's canonical imperial unit.
 
-use std::sync::Arc;
+use futures::{FutureExt, StreamExt};
+use std::sync::{
+    atomic::{AtomicI64, Ordering},
+    Arc,
+};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -61,17 +65,20 @@ use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashSet;
 use tokio::sync::Mutex;
-use tokio::time::{interval, MissedTickBehavior};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::config::schema::{Location, NwsConfig};
 use crate::forecast::snapshot::{DailyEntry, ForecastSnapshot, HourlyEntry};
 use crate::ports::weather_source::{
     ShutdownSignal, SourceBus, SourceCaps, SourceEvent, WeatherField, WeatherSource,
 };
+use crate::sources::poll::{run_polling, Poll};
 
 const API_BASE: &str = "https://api.weather.gov";
-const POLL_INTERVAL: Duration = Duration::from_secs(30 * 60); // 30 min
+const POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const FORECAST_INTERVAL_S: i64 = 30 * 60;
+// Bound API work while allowing a nearby station to fill a missing field.
+const OBSERVATION_STATION_LIMIT: usize = 6;
 
 pub struct Nws {
     id: String,
@@ -80,6 +87,7 @@ pub struct Nws {
     config: NwsConfig,
     location: Location,
     client: Client,
+    api_base: String,
     /// Cached (gridId, gridX, gridY) from /points/{lat},{lon}.
     grid_cache: Arc<Mutex<Option<GridPoint>>>,
     /// Cached observation-station ids, nearest-first (e.g. ["KNYC", "KJFK",
@@ -89,6 +97,7 @@ pub struct Nws {
     /// /observations/latest is empty (a station that reports no scalars this
     /// hour), we fall through to the next-nearest instead of going silent.
     station_cache: Arc<Mutex<Option<Vec<String>>>>,
+    last_forecast_epoch: AtomicI64,
 }
 
 #[derive(Debug, Clone)]
@@ -157,7 +166,7 @@ struct PopObj {
 /// Raw gridpoint payload (`/gridpoints/{id}/{x},{y}`, no `/forecast` suffix).
 /// This is the only NWS endpoint that carries quantitative precipitation (QPF),
 /// which the human `/forecast` text feed omits. Without it an NWS-owned forecast
-/// reports zero rain and the engine's forecast-rain skips never fire.
+/// has unknown rain amounts; missing QPF cannot be treated as dry weather.
 #[derive(Debug, Deserialize)]
 struct RawGridResponse {
     properties: RawGridProperties,
@@ -171,6 +180,7 @@ struct RawGridProperties {
 
 #[derive(Debug, Deserialize)]
 struct QpfBlock {
+    uom: Option<String>,
     /// Each value covers an ISO8601 interval (`validTime = "<start>/<duration>"`)
     /// and carries mm of liquid over that interval (uom `wmoUnit:mm`).
     #[serde(default)]
@@ -186,7 +196,7 @@ struct QpfValue {
 
 /// Observation-stations collection (`GET {observationStations}`): a GeoJSON
 /// FeatureCollection ordered nearest-first, each feature carrying a
-/// `stationIdentifier` (e.g. "KNYC"). We take the first (nearest) station.
+/// `stationIdentifier` (e.g. "KNYC"). Nearby stations fill missing fields.
 #[derive(Debug, Deserialize)]
 struct StationsResponse {
     #[serde(default)]
@@ -215,6 +225,7 @@ struct ObservationResponse {
 
 #[derive(Debug, Deserialize)]
 struct ObservationProperties {
+    timestamp: Option<String>,
     temperature: Option<Measured>,
     dewpoint: Option<Measured>,
     #[serde(rename = "relativeHumidity")]
@@ -275,24 +286,24 @@ fn nws_unit_label(unit_code: Option<&str>) -> Option<&'static str> {
 
 impl Nws {
     pub fn new(id: impl Into<String>, config: NwsConfig, location: Location) -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(15))
-            // api.weather.gov requires an operator-identifying UA. An empty
-            // or historical-placeholder value ("you@example.com") derives the
-            // real instance identity at request time; the config is never
-            // rewritten (see sources::resolve_outbound_user_agent).
-            .user_agent(crate::sources::resolve_outbound_user_agent(
-                &config.user_agent,
-            ))
-            .build()
-            .expect("reqwest client construction");
+        // api.weather.gov requires an operator-identifying UA. An empty or
+        // historical-placeholder value ("you@example.com") derives the real
+        // instance identity at request time; the config is never rewritten
+        // (see sources::resolve_outbound_user_agent). That contact string is
+        // why this is `client_with` and not the derived-UA `client`.
+        let client = crate::net::client_with(
+            Duration::from_secs(15),
+            &crate::sources::resolve_outbound_user_agent(&config.user_agent),
+        );
         Self {
             id: id.into(),
             config,
             location,
             client,
+            api_base: API_BASE.into(),
             grid_cache: Arc::new(Mutex::new(None)),
             station_cache: Arc::new(Mutex::new(None)),
+            last_forecast_epoch: AtomicI64::new(0),
         }
     }
 
@@ -301,7 +312,8 @@ impl Nws {
             return Ok(cached);
         }
         let url = format!(
-            "{API_BASE}/points/{lat},{lon}",
+            "{}/points/{lat},{lon}",
+            self.api_base,
             lat = self.location.lat,
             lon = self.location.lon
         );
@@ -325,8 +337,8 @@ impl Nws {
 
     async fn fetch_forecast(&self, grid: &GridPoint) -> anyhow::Result<ForecastResponse> {
         let url = format!(
-            "{API_BASE}/gridpoints/{}/{},{}/forecast",
-            grid.grid_id, grid.grid_x, grid.grid_y
+            "{}/gridpoints/{}/{},{}/forecast",
+            self.api_base, grid.grid_id, grid.grid_x, grid.grid_y
         );
         let resp: ForecastResponse = self
             .client
@@ -342,8 +354,8 @@ impl Nws {
 
     async fn fetch_hourly(&self, grid: &GridPoint) -> anyhow::Result<ForecastResponse> {
         let url = format!(
-            "{API_BASE}/gridpoints/{}/{},{}/forecast/hourly",
-            grid.grid_id, grid.grid_x, grid.grid_y
+            "{}/gridpoints/{}/{},{}/forecast/hourly",
+            self.api_base, grid.grid_id, grid.grid_x, grid.grid_y
         );
         let resp: ForecastResponse = self
             .client
@@ -361,8 +373,8 @@ impl Nws {
     /// `/forecast` because only the raw endpoint carries quantitativePrecipitation.
     async fn fetch_raw_grid(&self, grid: &GridPoint) -> anyhow::Result<RawGridResponse> {
         let url = format!(
-            "{API_BASE}/gridpoints/{}/{},{}",
-            grid.grid_id, grid.grid_x, grid.grid_y
+            "{}/gridpoints/{}/{},{}",
+            self.api_base, grid.grid_id, grid.grid_x, grid.grid_y
         );
         let resp: RawGridResponse = self
             .client
@@ -390,7 +402,8 @@ impl Nws {
         // The points payload carries the stations-collection URL. Reuse the
         // same /points endpoint resolve_grid hits, but read observationStations.
         let url = format!(
-            "{API_BASE}/points/{lat},{lon}",
+            "{}/points/{lat},{lon}",
+            self.api_base,
             lat = self.location.lat,
             lon = self.location.lon
         );
@@ -422,55 +435,116 @@ impl Nws {
         Ok(ids)
     }
 
-    /// Fetch the latest mapped current scalars for this location, walking the
-    /// nearest-first station list until one yields a non-empty mapping. NWS
-    /// routinely returns an /observations/latest with every scalar null at a
-    /// given station (a co-op site that only reports on the hour), so the
-    /// nearest station can be empty while the next one over has a live reading.
-    /// Returns an empty Vec when no station produced any field (the caller then
-    /// emits no Observation; never zeros, never a panic). A per-station fetch
-    /// error is logged and we continue to the next station.
-    async fn fetch_current_fields(&self, station_ids: &[String]) -> Vec<(WeatherField, f64)> {
-        for station_id in station_ids {
-            match self.fetch_latest_observation(station_id).await {
-                Ok(obs) => {
-                    let fields = map_current_observation(&obs.properties);
-                    if !fields.is_empty() {
-                        debug!(
-                            source_id = %self.id,
-                            station = %station_id,
-                            fields_n = fields.len(),
-                            "NWS current observation updated"
-                        );
-                        return fields;
-                    }
-                    debug!(
-                        source_id = %self.id,
-                        station = %station_id,
-                        "NWS station reported no scalars; trying next-nearest"
-                    );
+    /// Fetch a bounded nearby set concurrently. Preserve provider report times
+    /// and choose each field once; a station missing wind cannot hide a nearby
+    /// report. The common arbiter applies the configured report-age limit.
+    async fn fetch_current_fields(&self, station_ids: &[String]) -> Poll {
+        let requests: Vec<_> = station_ids
+            .iter()
+            .take(OBSERVATION_STATION_LIMIT)
+            .enumerate()
+            .map(|(rank, station)| {
+                let station = station.clone();
+                let client = self.client.clone();
+                let api_base = self.api_base.clone();
+                async move {
+                    let response =
+                        Self::fetch_latest_observation(client, api_base, station.clone()).await;
+                    (rank, station, response)
                 }
-                Err(e) => {
-                    warn!(
-                        source_id = %self.id,
-                        station = %station_id,
-                        error = %e,
-                        "NWS latest-observation fetch failed; trying next-nearest"
-                    );
+                .boxed()
+            })
+            .collect();
+        let responses = futures::stream::iter(requests)
+            .buffer_unordered(3)
+            .collect::<Vec<_>>()
+            .await;
+        // Select each field once before publishing, so two stations reporting
+        // at the same epoch cannot disagree between history and the live store.
+        let now = chrono::Utc::now().timestamp();
+        let mut poll = Poll::none().unreachable();
+        let mut reports = Vec::new();
+        for (rank, station, response) in responses {
+            match response {
+                Ok(obs) => {
+                    poll.reachable = Some(true);
+                    debug!(source_id = %self.id, %station, "NWS observed fields received");
+                    reports.push((rank, obs.properties));
+                }
+                Err(error) => {
+                    warn!(source_id = %self.id, %station, %error, "NWS observation fetch failed")
                 }
             }
         }
-        Vec::new()
+        poll.events = merge_current_observations(&self.id, &reports, now);
+        poll
+    }
+
+    async fn poll_once(&self) -> Poll {
+        // Current observations are independent of forecast availability and
+        // cadence. A forecast outage must not discard measured wind.
+        let mut poll = match self.resolve_stations().await {
+            Ok(stations) if !stations.is_empty() => self.fetch_current_fields(&stations).await,
+            Ok(_) => Poll::none(),
+            Err(error) => {
+                warn!(source_id = %self.id, %error, "NWS station lookup failed");
+                Poll::none().unreachable()
+            }
+        };
+        let now = chrono::Utc::now().timestamp();
+        if forecast_due(self.last_forecast_epoch.load(Ordering::Relaxed), now) {
+            match self.poll_forecast().await {
+                Ok(snapshot) => {
+                    let at_epoch = chrono::Utc::now().timestamp();
+                    self.last_forecast_epoch.store(at_epoch, Ordering::Relaxed);
+                    poll.reachable = Some(true);
+                    poll.events.push(SourceEvent::Forecast {
+                        source_id: self.id.clone(),
+                        snapshot,
+                        at_epoch,
+                    });
+                }
+                Err(error) => {
+                    warn!(source_id = %self.id, error = %format!("{error:#}"), "NWS forecast fetch failed; retaining current observations")
+                }
+            }
+        }
+        poll
+    }
+
+    async fn poll_forecast(&self) -> anyhow::Result<ForecastSnapshot> {
+        let grid = self.resolve_grid().await?;
+        let forecast = self.fetch_forecast(&grid).await?;
+        let hourly = match self.fetch_hourly(&grid).await {
+            Ok(value) => Some(value),
+            Err(error) => {
+                warn!(source_id = %self.id, %error, "NWS hourly fetch failed");
+                None
+            }
+        };
+        let qpf = match self.fetch_raw_grid(&grid).await {
+            Ok(value) => Some(value),
+            Err(error) => {
+                warn!(source_id = %self.id, %error, "NWS QPF fetch failed");
+                None
+            }
+        };
+        Ok(self.build_snapshot(
+            &forecast,
+            hourly.as_ref(),
+            qpf.as_ref(),
+            chrono::Utc::now().timestamp(),
+        ))
     }
 
     /// Fetch the latest observation for a resolved station id.
     async fn fetch_latest_observation(
-        &self,
-        station_id: &str,
+        client: Client,
+        api_base: String,
+        station_id: String,
     ) -> anyhow::Result<ObservationResponse> {
-        let url = format!("{API_BASE}/stations/{station_id}/observations/latest");
-        let resp: ObservationResponse = self
-            .client
+        let url = format!("{api_base}/stations/{station_id}/observations/latest");
+        let resp: ObservationResponse = client
             .get(&url)
             .header("Accept", "application/geo+json")
             .send()
@@ -480,6 +554,54 @@ impl Nws {
             .await?;
         Ok(resp)
     }
+}
+
+fn forecast_due(last_success: i64, now: i64) -> bool {
+    last_success <= 0
+        || last_success > now
+        || now.saturating_sub(last_success) >= FORECAST_INTERVAL_S
+}
+
+fn merge_current_observations(
+    id: &str,
+    reports: &[(usize, ObservationProperties)],
+    now: i64,
+) -> Vec<SourceEvent> {
+    use std::collections::{BTreeMap, HashMap};
+    let mut selected: HashMap<WeatherField, (i64, usize, f64)> = HashMap::new();
+    for (rank, props) in reports {
+        let epoch = parse_epoch(props.timestamp.as_deref());
+        if epoch <= 0 || epoch > now {
+            continue;
+        }
+        for (field, value) in map_current_observation(props) {
+            if !value.is_finite() {
+                continue;
+            }
+            // Freshest nearby report; nearest station breaks equal-time ties.
+            if selected
+                .get(&field)
+                .is_none_or(|(old, old_rank, _)| epoch > *old || (epoch == *old && rank < old_rank))
+            {
+                selected.insert(field, (epoch, *rank, value));
+            }
+        }
+    }
+    let mut batches: BTreeMap<i64, Vec<_>> = BTreeMap::new();
+    for (field, (epoch, _, value)) in selected {
+        batches.entry(epoch).or_default().push((field, value));
+    }
+    batches
+        .into_iter()
+        .map(|(at_epoch, mut fields)| {
+            fields.sort_by_key(|(field, _)| field.name());
+            SourceEvent::Observation {
+                source_id: id.into(),
+                fields,
+                at_epoch,
+            }
+        })
+        .collect()
 }
 
 /// Convert an NWS `precipitationLastHour` reading to inches, honoring the
@@ -537,8 +659,17 @@ fn map_current_observation(props: &ObservationProperties) -> Vec<(WeatherField, 
     fn push(fields: &mut Vec<(WeatherField, f64)>, field: WeatherField, m: Option<&Measured>) {
         if let Some(meas) = m {
             if let Some(v) = meas.value {
-                let unit = nws_unit_label(meas.unit_code.as_deref());
-                fields.push((field, crate::sources::units::to_canonical(field, v, unit)));
+                let Some(unit) = nws_unit_label(meas.unit_code.as_deref()) else {
+                    return;
+                };
+                let converted = crate::sources::units::to_canonical(field, v, Some(unit));
+                if converted.is_finite()
+                    && (!matches!(field, WeatherField::WindMph | WeatherField::WindGustMph)
+                        || converted >= 0.0)
+                    && (field != WeatherField::RhPct || (0.0..=100.0).contains(&converted))
+                {
+                    fields.push((field, converted));
+                }
             }
         }
     }
@@ -608,101 +739,73 @@ fn parse_epoch(start_time: Option<&str>) -> i64 {
         .unwrap_or(0)
 }
 
-/// Local calendar-day ordinal for an epoch, so QPF buckets into the same day
-/// rows `parse_daily` produces (both keyed off the local date).
-fn local_day_ord(epoch: i64) -> i32 {
-    use chrono::{Datelike, TimeZone};
-    match chrono::Local.timestamp_opt(epoch, 0).single() {
-        Some(dt) => dt.date_naive().num_days_from_ce(),
-        None => (epoch / 86400) as i32,
-    }
+/// NWS gridpoint intervals use integral day/hour durations. Unsupported or
+/// malformed durations remain unknown; never invent a one-hour interval.
+fn iso_duration_hours(s: &str) -> Option<i64> {
+    let rest = s.strip_prefix('P')?;
+    let (date, time) = rest.split_once('T').unwrap_or((rest, ""));
+    let days = if date.is_empty() {
+        0
+    } else {
+        date.strip_suffix('D')?.parse::<i64>().ok()?
+    };
+    let hours = if time.is_empty() {
+        0
+    } else {
+        time.strip_suffix('H')?.parse::<i64>().ok()?
+    };
+    let total = days.checked_mul(24)?.checked_add(hours)?;
+    (days >= 0 && hours >= 0 && total > 0).then_some(total)
 }
 
-/// Hours in an ISO8601 duration like `PT6H` / `PT1H` / `P1DT6H` (NWS QPF
-/// interval durations). Days + hours only; minimum 1.
-fn iso_duration_hours(s: &str) -> i64 {
-    let s = s.trim_start_matches('P');
-    let (date_part, time_part) = s.split_once('T').unwrap_or((s, ""));
-    let days = date_part
-        .strip_suffix('D')
-        .and_then(|d| d.parse::<i64>().ok())
-        .unwrap_or(0);
-    let hours = time_part
-        .strip_suffix('H')
-        .and_then(|h| h.parse::<i64>().ok())
-        .unwrap_or(0);
-    (days * 24 + hours).max(1)
-}
-
-/// Parse a QPF `validTime` (`"<rfc3339 start>/<iso duration>"`) into
-/// (hour-aligned start epoch, duration hours).
+/// Preserve the exact start and end; rounding would claim uncovered minutes.
 fn parse_qpf_interval(valid_time: &str) -> Option<(i64, i64)> {
     let (start, dur) = valid_time.split_once('/')?;
-    let start_epoch = chrono::DateTime::parse_from_rfc3339(start)
+    let start = chrono::DateTime::parse_from_rfc3339(start)
         .ok()?
         .timestamp();
-    let start_epoch = start_epoch - start_epoch.rem_euclid(3600);
-    Some((start_epoch, iso_duration_hours(dur)))
+    let end = start.checked_add(iso_duration_hours(dur)?.checked_mul(3600)?)?;
+    Some((start, end))
 }
 
-/// Build (local-day -> inches, hour-epoch -> inches) precip maps from the QPF
-/// block. mm -> in; each interval's total is spread evenly over its hours, so
-/// hourly rows get a per-hour share and daily rows get the day's sum.
-#[allow(clippy::type_complexity)]
-fn build_qpf_maps(
-    qpf: &QpfBlock,
-) -> (
-    std::collections::HashMap<i32, f64>,
-    std::collections::HashMap<i64, f64>,
-) {
-    let mut daily: std::collections::HashMap<i32, f64> = std::collections::HashMap::new();
-    let mut hourly: std::collections::HashMap<i64, f64> = std::collections::HashMap::new();
-    for v in &qpf.values {
-        let (Some(vt), Some(mm)) = (v.valid_time.as_deref(), v.value) else {
-            continue;
-        };
-        if mm <= 0.0 {
-            continue;
-        }
-        let Some((start, dur_h)) = parse_qpf_interval(vt) else {
-            continue;
-        };
-        let per_hour = (mm / 25.4) / dur_h as f64;
-        for h in 0..dur_h {
-            let hour_epoch = start + h * 3600;
-            *hourly.entry(hour_epoch).or_insert(0.0) += per_hour;
-            *daily.entry(local_day_ord(hour_epoch)).or_insert(0.0) += per_hour;
-        }
+fn qpf_intervals(qpf: &QpfBlock) -> Vec<(i64, i64, Option<f64>)> {
+    if qpf.uom.as_deref() != Some("wmoUnit:mm") {
+        return Vec::new();
     }
-    (daily, hourly)
+    qpf.values
+        .iter()
+        .filter_map(|v| {
+            let (start, end) = parse_qpf_interval(v.valid_time.as_deref()?)?;
+            let amount = v
+                .value
+                .filter(|v| crate::forecast::precip::valid_amount(*v))
+                .map(crate::units::mm_to_in);
+            Some((start, end, amount))
+        })
+        .collect()
 }
 
 /// Parse the max sustained wind from an NWS wind string. NWS reports
 /// `windSpeed` as text: `"10 mph"`, `"5 to 10 mph"`, `"15 to 25 mph"`,
 /// occasionally `""`. We take the LARGEST integer in the string (the
-/// upper bound of a range), already in mph. Returns 0.0 when no number
-/// is present.
-fn parse_wind_max_mph(s: Option<&str>) -> f64 {
-    let Some(s) = s else { return 0.0 };
-    let mut max: f64 = 0.0;
-    let mut cur = String::new();
-    let mut saw_digit = false;
-    // Walk char-by-char, accumulating digit runs into numbers.
-    for ch in s.chars().chain(std::iter::once(' ')) {
-        if ch.is_ascii_digit() {
-            cur.push(ch);
-            saw_digit = true;
-        } else if saw_digit {
-            if let Ok(n) = cur.parse::<f64>() {
-                if n > max {
-                    max = n;
-                }
-            }
-            cur.clear();
-            saw_digit = false;
-        }
+/// upper bound of a range), already in mph. Missing or malformed values
+/// stay unknown. An explicit "Calm" or "0 mph" is a real zero.
+fn parse_wind_max_mph(s: Option<&str>) -> Option<f64> {
+    let text = s?.trim().to_ascii_lowercase();
+    if text == "calm" {
+        return Some(0.0);
     }
-    max
+    let values: Vec<_> = text.strip_suffix("mph")?.split_whitespace().collect();
+    let number = |text: &str| {
+        text.parse::<f64>()
+            .ok()
+            .filter(|w| w.is_finite() && *w >= 0.0)
+    };
+    match values.as_slice() {
+        [value] => number(value),
+        [low, "to", high] => Some(number(low)?.max(number(high)?)),
+        _ => None,
+    }
 }
 
 /// Convert an NWS compass `windDirection` abbreviation ("N", "NNE",
@@ -771,7 +874,7 @@ fn wmo_from_short(s: Option<&str>) -> u32 {
 /// following night period carries the low. We anchor each DailyEntry on
 /// a daytime period and fold in the next period when it's nighttime.
 ///
-/// `precip_sum_in` stays 0 (the /forecast endpoint has no QPF amount).
+/// `precip_sum_in` stays unknown (the /forecast endpoint has no QPF amount).
 fn parse_daily(periods: &[ForecastPeriod]) -> Vec<DailyEntry> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -781,13 +884,17 @@ fn parse_daily(periods: &[ForecastPeriod]) -> Vec<DailyEntry> {
         // its own day with only a min temp.
         if !p.is_daytime {
             out.push(DailyEntry {
-                time_epoch: parse_epoch(p.start_time.as_deref()),
+                // NWS stamps the period start: 06:00 local for a daytime
+                // period, 18:00 for a lone night row.
+                day_marker: crate::engine::clock::DayMarker::inside_local_day(parse_epoch(
+                    p.start_time.as_deref(),
+                )),
                 weather_code: wmo_from_short(p.short_forecast.as_deref()),
-                temp_max_f: 0.0,
-                temp_min_f: p.temperature.unwrap_or(0.0),
+                temp_max_f: None,
+                temp_min_f: p.temperature.filter(|t| t.is_finite()),
                 // Lone night period; backfill_daily_humidity fills from hourly.
-                humidity_pct: 0,
-                precip_sum_in: 0.0,
+                humidity_pct: None,
+                precip_sum_in: None,
                 // An absent POP stays None (NWS omits it on dry periods AND
                 // on gaps); a reported value, 0 included, is kept.
                 precip_probability_max: p
@@ -808,20 +915,24 @@ fn parse_daily(periods: &[ForecastPeriod]) -> Vec<DailyEntry> {
 
         // Daytime period: high temp, drives the day's code + wind.
         let mut entry = DailyEntry {
-            time_epoch: parse_epoch(p.start_time.as_deref()),
+            // NWS stamps the period start: 06:00 local for a daytime
+            // period, 18:00 for a lone night row.
+            day_marker: crate::engine::clock::DayMarker::inside_local_day(parse_epoch(
+                p.start_time.as_deref(),
+            )),
             weather_code: wmo_from_short(p.short_forecast.as_deref()),
-            temp_max_f: p.temperature.unwrap_or(0.0),
-            temp_min_f: 0.0,
+            temp_max_f: p.temperature.filter(|t| t.is_finite()),
+            temp_min_f: None,
             // The daytime period's RH co-occurs with the day's high temp, so
-            // it's the right pairing for the heat-index calc. 0 (no value) lets
+            // it's the right pairing for the heat-index calc. None lets
             // backfill_daily_humidity fall back to the hourly window.
             humidity_pct: p
                 .relative_humidity
                 .as_ref()
                 .and_then(|o| o.value)
-                .map(|v| v.round().clamp(0.0, 100.0) as u32)
-                .unwrap_or(0),
-            precip_sum_in: 0.0,
+                .filter(|rh| rh.is_finite() && (0.0..=100.0).contains(rh))
+                .map(|rh| rh.round() as u32),
+            precip_sum_in: None,
             precip_probability_max: p
                 .pop
                 .as_ref()
@@ -838,7 +949,7 @@ fn parse_daily(periods: &[ForecastPeriod]) -> Vec<DailyEntry> {
         // Fold in the paired night period for the low temp + max POP.
         if let Some(night) = periods.get(i + 1) {
             if !night.is_daytime {
-                entry.temp_min_f = night.temperature.unwrap_or(0.0);
+                entry.temp_min_f = night.temperature.filter(|t| t.is_finite());
                 // Max of the day/night POPs; either side absent defers to the
                 // other, both absent stays None.
                 let night_pop = night
@@ -851,9 +962,12 @@ fn parse_daily(periods: &[ForecastPeriod]) -> Vec<DailyEntry> {
                     (a, b) => a.or(b),
                 };
                 let night_wind = parse_wind_max_mph(night.wind_speed.as_deref());
-                if night_wind > entry.wind_max_mph {
-                    entry.wind_max_mph = night_wind;
-                }
+                // Both periods contribute to this peak. A known calm half
+                // cannot establish a safe daily maximum over an unknown half.
+                entry.wind_max_mph = entry
+                    .wind_max_mph
+                    .zip(night_wind)
+                    .map(|(day, night)| day.max(night));
                 i += 2;
                 out.push(entry);
                 continue;
@@ -869,17 +983,17 @@ fn parse_daily(periods: &[ForecastPeriod]) -> Vec<DailyEntry> {
 /// Map NWS hourly periods to HourlyEntry rows. The hourly endpoint
 /// returns one period per hour, all daytime/nighttime flagged, with
 /// temperature (F), POP, windSpeed string, windDirection, and
-/// relativeHumidity.value. apparent_temp / precip amount / cloud cover
-/// are not reliably present and default to 0.
+/// relativeHumidity.value. Rain amounts need separate QPF coverage;
+/// apparent temperature and cloud cover retain their advisory defaults.
 fn parse_hourly(periods: &[ForecastPeriod]) -> Vec<HourlyEntry> {
     periods
         .iter()
         .map(|p| HourlyEntry {
             time_epoch: parse_epoch(p.start_time.as_deref()),
             weather_code: wmo_from_short(p.short_forecast.as_deref()),
-            temp_f: p.temperature.unwrap_or(0.0),
+            temp_f: p.temperature.filter(|t| t.is_finite()),
             apparent_temp_f: 0.0,
-            precip_in: 0.0,
+            precip_in: None,
             precip_probability: p
                 .pop
                 .as_ref()
@@ -891,8 +1005,8 @@ fn parse_hourly(periods: &[ForecastPeriod]) -> Vec<HourlyEntry> {
                 .relative_humidity
                 .as_ref()
                 .and_then(|o| o.value)
-                .unwrap_or(0.0)
-                .round() as u32,
+                .filter(|rh| rh.is_finite() && (0.0..=100.0).contains(rh))
+                .map(|rh| rh.round() as u32),
             cloud_cover_pct: 0,
             ..Default::default()
         })
@@ -916,27 +1030,50 @@ impl Nws {
             .map(|h| parse_hourly(&h.properties.periods))
             .unwrap_or_default();
         if let Some(block) = qpf.and_then(|r| r.properties.qpf.as_ref()) {
-            let (daily_p, hourly_p) = build_qpf_maps(block);
+            let cal = crate::timeutil::deployment_calendar();
+            let intervals = qpf_intervals(block);
             for d in &mut daily {
-                if let Some(p) = daily_p.get(&local_day_ord(d.time_epoch)) {
-                    d.precip_sum_in = *p;
+                let Some((start, end)) = cal
+                    .day_of(d.day_marker)
+                    .and_then(|day| cal.day_bounds_utc(day))
+                else {
+                    continue;
+                };
+                // Day zero forecasts the remaining day, as NWS does not send
+                // past QPF. Full future civil days require complete coverage,
+                // including a 23/25-hour day across a clock change.
+                if end > now {
+                    d.precip_sum_in = crate::forecast::precip::total_over(
+                        intervals.iter().copied(),
+                        start.max(now),
+                        end,
+                    );
                 }
             }
             for h in &mut hourly {
-                let hour = h.time_epoch - h.time_epoch.rem_euclid(3600);
-                if let Some(p) = hourly_p.get(&hour) {
-                    h.precip_in = *p;
-                }
+                h.precip_in = crate::forecast::precip::total_over(
+                    intervals.iter().copied(),
+                    h.time_epoch,
+                    h.time_epoch.saturating_add(3600),
+                );
             }
         }
         let mut snap = ForecastSnapshot {
             last_refresh_epoch: now,
             source_reachable: true,
             source_label: "NWS".to_string(),
-            // NWS doesn't echo an IANA tz in these endpoints; times are
-            // already absolute epochs, so the consumer's local display
-            // is correct without a tz string.
-            timezone: String::new(),
+            // NWS does not echo an IANA zone, so resolve it from the
+            // point we are fetching for.
+            //
+            // This shipped as String::new() under a comment arguing the
+            // field was unnecessary because the epochs are absolute. The
+            // epochs are absolute; the field is not for display. The
+            // extended-series graft uses it as its location-safety gate,
+            // and an empty string disarms that gate on every default US
+            // install, which is exactly the population that relies on the
+            // graft.
+            timezone: crate::timeutil::tz_name_for(self.location.lat, self.location.lon)
+                .unwrap_or_default(),
             daily,
             past_daily: vec![],
             hourly,
@@ -944,7 +1081,7 @@ impl Nws {
         };
         // Backfill any daily entry still missing RH from the hourly window
         // (the daytime period's relativeHumidity already populates most).
-        snap.backfill_daily_humidity();
+        snap.backfill_daily_humidity(crate::timeutil::deployment_calendar());
         snap
     }
 }
@@ -1013,151 +1150,170 @@ impl WeatherSource for Nws {
         }
     }
 
-    async fn run(
-        self: Arc<Self>,
-        bus: SourceBus,
-        mut shutdown: ShutdownSignal,
-    ) -> anyhow::Result<()> {
-        info!(source_id = %self.id, "NWS source started");
-        let mut tick = interval(POLL_INTERVAL);
-        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut last_reachable: Option<bool> = None;
-        loop {
-            tokio::select! {
-                _ = tick.tick() => {
-                    let grid = match self.resolve_grid().await {
-                        Ok(g) => g,
-                        Err(e) => {
-                            warn!(source_id = %self.id, error = %e, "NWS grid lookup failed");
-                            if last_reachable != Some(false) {
-                                let _ = bus.send(SourceEvent::Reachability {
-                                    source_id: self.id.clone(),
-                                    reachable: false,
-                                });
-                                last_reachable = Some(false);
-                            }
-                            continue;
-                        }
-                    };
-                    match self.fetch_forecast(&grid).await {
-                        Ok(forecast) => {
-                            if last_reachable != Some(true) {
-                                let _ = bus.send(SourceEvent::Reachability {
-                                    source_id: self.id.clone(),
-                                    reachable: true,
-                                });
-                                last_reachable = Some(true);
-                            }
-                            // Emit REAL current observations from the nearest
-                            // station, falling through to the next-nearest when
-                            // a station reports no scalars (best-effort + US-only:
-                            // a station-resolve or fetch failure, e.g. a 404/403
-                            // outside the US, logs and yields no current; it does
-                            // NOT flip reachability or panic, since the forecast
-                            // feed is the source's primary reachability signal).
-                            match self.resolve_stations().await {
-                                Ok(station_ids) if !station_ids.is_empty() => {
-                                    let fields =
-                                        self.fetch_current_fields(&station_ids).await;
-                                    if !fields.is_empty() {
-                                        let _ = bus.send(SourceEvent::Observation {
-                                            source_id: self.id.clone(),
-                                            fields,
-                                            at_epoch: chrono::Utc::now().timestamp(),
-                                        });
-                                    } else {
-                                        debug!(
-                                            source_id = %self.id,
-                                            stations_n = station_ids.len(),
-                                            "NWS stations reported no current scalars this cycle"
-                                        );
-                                    }
-                                }
-                                Ok(_) => {
-                                    debug!(
-                                        source_id = %self.id,
-                                        "NWS has no observation station for this point; no current"
-                                    );
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        source_id = %self.id,
-                                        error = %e,
-                                        "NWS station resolve failed; no current this cycle"
-                                    );
-                                }
-                            }
-
-                            // Pull the hourly feed (best-effort: a failure
-                            // here still ships a daily-only snapshot).
-                            let hourly = match self.fetch_hourly(&grid).await {
-                                Ok(h) => Some(h),
-                                Err(e) => {
-                                    warn!(
-                                        source_id = %self.id,
-                                        error = %e,
-                                        "NWS hourly fetch failed; emitting daily-only forecast"
-                                    );
-                                    None
-                                }
-                            };
-
-                            // Pull QPF (precip amount) from the raw gridpoint
-                            // feed (best-effort: without it precip stays 0).
-                            let qpf = match self.fetch_raw_grid(&grid).await {
-                                Ok(q) => Some(q),
-                                Err(e) => {
-                                    warn!(
-                                        source_id = %self.id,
-                                        error = %e,
-                                        "NWS QPF fetch failed; forecast precip will be 0"
-                                    );
-                                    None
-                                }
-                            };
-
-                            // Build + emit the full forecast snapshot.
-                            let now = chrono::Utc::now().timestamp();
-                            let snapshot =
-                                self.build_snapshot(&forecast, hourly.as_ref(), qpf.as_ref(), now);
-                            debug!(
-                                source_id = %self.id,
-                                daily = snapshot.daily.len(),
-                                hourly = snapshot.hourly.len(),
-                                "NWS forecast snapshot built"
-                            );
-                            let _ = bus.send(SourceEvent::Forecast {
-                                source_id: self.id.clone(),
-                                snapshot,
-                                at_epoch: now,
-                            });
-                        }
-                        Err(e) => {
-                            warn!(source_id = %self.id, error = %e, "NWS forecast fetch failed");
-                            if last_reachable != Some(false) {
-                                let _ = bus.send(SourceEvent::Reachability {
-                                    source_id: self.id.clone(),
-                                    reachable: false,
-                                });
-                                last_reachable = Some(false);
-                            }
-                        }
-                    }
-                }
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        info!(source_id = %self.id, "NWS source shutdown");
-                        return Ok(());
-                    }
-                }
-            }
-        }
+    async fn run(self: Arc<Self>, bus: SourceBus, shutdown: ShutdownSignal) -> anyhow::Result<()> {
+        let id = self.id.clone();
+        run_polling(
+            self,
+            &id,
+            "NWS",
+            POLL_INTERVAL,
+            bus,
+            shutdown,
+            |source: Arc<Nws>| async move { Ok(source.poll_once().await) },
+        )
+        .await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn report(epoch: i64, fields: serde_json::Value) -> ObservationProperties {
+        let mut fields = fields;
+        fields["timestamp"] = serde_json::json!(chrono::DateTime::from_timestamp(epoch, 0)
+            .unwrap()
+            .to_rfc3339());
+        serde_json::from_value(fields).unwrap()
+    }
+
+    #[tokio::test]
+    async fn forecast_http_failure_does_not_discard_measured_current_wind() {
+        let now = chrono::Utc::now().timestamp();
+        let payload = serde_json::json!({"properties": {
+            "timestamp": chrono::DateTime::from_timestamp(now - 300, 0).unwrap().to_rfc3339(),
+            "windSpeed": {"value": 9.252, "unitCode": "wmoUnit:km_h-1"}
+        }});
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = axum::Router::new()
+            .route(
+                "/stations/TEST/observations/latest",
+                axum::routing::get(move || {
+                    let payload = payload.clone();
+                    async move { axum::Json(payload) }
+                }),
+            )
+            .fallback(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let config = serde_json::from_str("{}").unwrap();
+        let mut source = Nws::new("weather", config, Location::default());
+        source.api_base = format!("http://{addr}");
+        *source.station_cache.lock().await = Some(vec!["TEST".into()]);
+        *source.grid_cache.lock().await = Some(GridPoint {
+            grid_id: "TEST".into(),
+            grid_x: 1,
+            grid_y: 1,
+        });
+        let poll = source.poll_once().await;
+        server.abort();
+        assert_eq!(poll.reachable, Some(true));
+        assert_eq!(poll.events.len(), 1);
+        let SourceEvent::Observation {
+            fields, at_epoch, ..
+        } = &poll.events[0]
+        else {
+            panic!("observation")
+        };
+        assert_eq!(*at_epoch, now - 300);
+        assert!((fields[0].1 - 5.7489).abs() < 0.001);
+        assert_eq!(source.last_forecast_epoch.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn unrecognized_units_or_invalid_wind_cannot_claim_a_measurement() {
+        for (value, unit) in [(8.0, "unknown"), (-1.0, "wmoUnit:m_s-1")] {
+            let props = report(
+                1_700_000_000,
+                serde_json::json!({"windSpeed":{"value":value,"unitCode":unit}}),
+            );
+            assert!(map_current_observation(&props).is_empty());
+        }
+    }
+
+    #[test]
+    fn observations_preserve_report_age_and_fill_missing_fields_from_nearby_stations() {
+        let now = 1_700_000_000;
+        let reports = vec![
+            (
+                0,
+                report(
+                    now - 600,
+                    serde_json::json!({"temperature":{"value":20,"unitCode":"wmoUnit:degC"}}),
+                ),
+            ),
+            (
+                1,
+                report(
+                    now - 300,
+                    serde_json::json!({"windSpeed":{"value":18,"unitCode":"wmoUnit:km_h-1"}}),
+                ),
+            ),
+        ];
+        let events = merge_current_observations("weather", &reports, now);
+        assert_eq!(events.len(), 2);
+        let mut actual = std::collections::HashMap::new();
+        for event in events {
+            let SourceEvent::Observation {
+                fields, at_epoch, ..
+            } = event
+            else {
+                panic!("observation")
+            };
+            for (field, value) in fields {
+                actual.insert(field, (value, at_epoch));
+            }
+        }
+        assert_eq!(actual[&WeatherField::AirTempF], (68.0, now - 600));
+        assert!((actual[&WeatherField::WindMph].0 - 11.18468).abs() < 0.001);
+        assert_eq!(actual[&WeatherField::WindMph].1, now - 300);
+    }
+
+    #[test]
+    fn freshest_report_wins_and_equal_time_uses_nearest_without_duplicate_history_keys() {
+        let now = 1_700_000_000;
+        let wind =
+            |value| serde_json::json!({"windSpeed":{"value":value,"unitCode":"wmoUnit:m_s-1"}});
+        let reports = vec![
+            (0, report(now - 600, wind(10))),
+            (2, report(now - 300, wind(5))),
+            (1, report(now - 300, wind(0))),
+        ];
+        let events = merge_current_observations("weather", &reports, now);
+        assert_eq!(events.len(), 1);
+        let SourceEvent::Observation {
+            fields, at_epoch, ..
+        } = &events[0]
+        else {
+            panic!("observation")
+        };
+        assert_eq!(fields, &vec![(WeatherField::WindMph, 0.0)]);
+        assert_eq!(*at_epoch, now - 300);
+    }
+
+    #[test]
+    fn unknown_and_future_report_times_cannot_become_current_nws_observations() {
+        let now = 1_700_000_000;
+        let fields = serde_json::json!({"windSpeed":{"value":5,"unitCode":"wmoUnit:m_s-1"}});
+        let missing = serde_json::from_value(fields.clone()).unwrap();
+        assert!(merge_current_observations(
+            "weather",
+            &[(0, missing), (1, report(now + 60, fields))],
+            now
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn current_poll_does_not_require_a_forecast_fetch_each_time() {
+        let now = 1_700_000_000;
+        assert!(forecast_due(0, now));
+        assert!(!forecast_due(now - POLL_INTERVAL.as_secs() as i64, now));
+        assert!(forecast_due(now - FORECAST_INTERVAL_S, now));
+        assert!(forecast_due(now + 1, now));
+    }
 
     fn nws_test() -> Nws {
         Nws::new(
@@ -1220,11 +1376,23 @@ mod tests {
 
     #[test]
     fn wind_string_parsing() {
-        assert_eq!(parse_wind_max_mph(Some("10 mph")), 10.0);
-        assert_eq!(parse_wind_max_mph(Some("5 to 10 mph")), 10.0);
-        assert_eq!(parse_wind_max_mph(Some("15 to 25 mph")), 25.0);
-        assert_eq!(parse_wind_max_mph(Some("")), 0.0);
-        assert_eq!(parse_wind_max_mph(None), 0.0);
+        assert_eq!(parse_wind_max_mph(Some("10 mph")), Some(10.0));
+        assert_eq!(parse_wind_max_mph(Some("5 to 10 mph")), Some(10.0));
+        assert_eq!(parse_wind_max_mph(Some("15 to 25 mph")), Some(25.0));
+        assert_eq!(parse_wind_max_mph(Some("0 mph")), Some(0.0));
+        assert_eq!(parse_wind_max_mph(Some("Calm")), Some(0.0));
+        assert_eq!(parse_wind_max_mph(Some("4.5 mph")), Some(4.5));
+        for invalid in [
+            None,
+            Some(""),
+            Some("-5 mph"),
+            Some("NaN mph"),
+            Some("inf mph"),
+            Some("10 km/h"),
+            Some("unknown 10 mph"),
+        ] {
+            assert_eq!(parse_wind_max_mph(invalid), None);
+        }
     }
 
     #[test]
@@ -1322,22 +1490,110 @@ mod tests {
 
         let d0 = &daily[0];
         // High from the daytime period, low from the paired night.
-        assert_eq!(d0.temp_max_f, 84.0);
-        assert_eq!(d0.temp_min_f, 67.0);
+        assert_eq!(d0.temp_max_f, Some(84.0));
+        assert_eq!(d0.temp_min_f, Some(67.0));
         // Max POP across the pair (day 20, night 40 -> 40).
         assert_eq!(d0.precip_probability_max, Some(40));
         // Max sustained wind across the pair (day max 10, night max 15).
-        assert_eq!(d0.wind_max_mph, 15.0);
+        assert_eq!(d0.wind_max_mph, Some(15.0));
         // Code from the daytime shortForecast ("Mostly Sunny" -> 2).
         assert_eq!(d0.weather_code, 2);
         // Epoch is the daytime period start (sane, > 2026-01-01).
-        assert!(d0.time_epoch > 1_767_225_600);
+        assert!(d0.day_marker.provenance_epoch_not_an_instant().unwrap_or(0) > 1_767_225_600);
 
         // Trailing standalone day (no night to pair): high only.
         let d1 = &daily[1];
-        assert_eq!(d1.temp_max_f, 80.0);
-        assert_eq!(d1.temp_min_f, 0.0);
+        assert_eq!(d1.temp_max_f, Some(80.0));
+        assert_eq!(d1.temp_min_f, None);
         assert_eq!(d1.weather_code, 0); // "Sunny"
+    }
+
+    #[test]
+    fn missing_periods_and_temperatures_remain_unknown() {
+        // The live after-dark failure: tonight's 75°F low became a day
+        // with a fabricated 0°F high. Preserve the actual low alone.
+        let mut fc: ForecastResponse = serde_json::from_str(FORECAST_SAMPLE).unwrap();
+        let night = &mut fc.properties.periods[1];
+        night.temperature = Some(75.0);
+        let daily = parse_daily(std::slice::from_ref(night));
+        assert_eq!(daily[0].temp_max_f, None);
+        assert_eq!(daily[0].temp_min_f, Some(75.0));
+        let json = serde_json::to_value(&daily[0]).unwrap();
+        assert!(json["temp_max_f"].is_null());
+        assert_eq!(json["temp_min_f"], 75.0);
+
+        // A real freezing reading is evidence, including precisely zero.
+        fc.properties.periods[0].temperature = Some(0.0);
+        let day = parse_daily(&fc.properties.periods[..1]);
+        assert_eq!(day[0].temp_max_f, Some(0.0));
+        assert_eq!(day[0].temp_min_f, None);
+        assert_eq!(
+            parse_hourly(&fc.properties.periods[..1])[0].temp_f,
+            Some(0.0)
+        );
+
+        for invalid in [
+            None,
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+            Some(f64::NEG_INFINITY),
+        ] {
+            fc.properties.periods[0].temperature = invalid;
+            fc.properties.periods[1].temperature = invalid;
+            let daily = parse_daily(&fc.properties.periods[..2]);
+            assert_eq!(daily[0].temp_max_f, None);
+            assert_eq!(daily[0].temp_min_f, None);
+            assert_eq!(parse_hourly(&fc.properties.periods[..1])[0].temp_f, None);
+            assert_eq!(
+                parse_daily(&fc.properties.periods[1..2])[0].temp_min_f,
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_wind_period_and_humidity_cannot_become_calm_dry_day() {
+        let mut fc: ForecastResponse = serde_json::from_str(FORECAST_SAMPLE).unwrap();
+        fc.properties.periods[0].wind_speed = Some("Calm".into());
+        fc.properties.periods[1].wind_speed = None;
+        let daily = parse_daily(&fc.properties.periods[..2]);
+        assert_eq!(
+            daily[0].wind_max_mph, None,
+            "half a calm day is not a known daily peak"
+        );
+        assert_eq!(parse_hourly(&fc.properties.periods)[0].wind_mph, Some(0.0));
+        assert_eq!(parse_hourly(&fc.properties.periods)[1].wind_mph, None);
+        fc.properties.periods[1].wind_speed = Some("0 mph".into());
+        assert_eq!(
+            parse_daily(&fc.properties.periods[..2])[0].wind_max_mph,
+            Some(0.0)
+        );
+        for invalid in [
+            None,
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+            Some(-1.0),
+            Some(101.0),
+        ] {
+            fc.properties.periods[0].relative_humidity = Some(PopObj { value: invalid });
+            assert_eq!(
+                parse_daily(&fc.properties.periods[..1])[0].humidity_pct,
+                None
+            );
+            assert_eq!(
+                parse_hourly(&fc.properties.periods[..1])[0].humidity_pct,
+                None
+            );
+        }
+        fc.properties.periods[0].relative_humidity = Some(PopObj { value: Some(0.0) });
+        assert_eq!(
+            parse_daily(&fc.properties.periods[..1])[0].humidity_pct,
+            Some(0)
+        );
+        assert_eq!(
+            parse_hourly(&fc.properties.periods[..1])[0].humidity_pct,
+            Some(0)
+        );
     }
 
     #[test]
@@ -1348,11 +1604,11 @@ mod tests {
         assert_eq!(hourly.len(), 2);
 
         let h0 = &hourly[0];
-        assert_eq!(h0.temp_f, 72.0); // already Fahrenheit
+        assert_eq!(h0.temp_f, Some(72.0)); // already Fahrenheit
         assert_eq!(h0.precip_probability, Some(15));
-        assert_eq!(h0.wind_mph, 8.0);
+        assert_eq!(h0.wind_mph, Some(8.0));
         assert_eq!(h0.wind_dir_deg, 248); // WSW
-        assert_eq!(h0.humidity_pct, 62);
+        assert_eq!(h0.humidity_pct, Some(62));
         assert_eq!(h0.weather_code, 2); // "Partly Cloudy"
         assert!(h0.time_epoch > 1_767_225_600);
     }
@@ -1376,11 +1632,13 @@ mod tests {
 
     #[test]
     fn iso_duration_parsing() {
-        assert_eq!(iso_duration_hours("PT1H"), 1);
-        assert_eq!(iso_duration_hours("PT6H"), 6);
-        assert_eq!(iso_duration_hours("P1DT6H"), 30);
-        assert_eq!(iso_duration_hours("P1D"), 24);
-        assert_eq!(iso_duration_hours("garbage"), 1); // floor of 1
+        assert_eq!(iso_duration_hours("PT1H"), Some(1));
+        assert_eq!(iso_duration_hours("PT6H"), Some(6));
+        assert_eq!(iso_duration_hours("P1DT6H"), Some(30));
+        assert_eq!(iso_duration_hours("P1D"), Some(24));
+        assert_eq!(iso_duration_hours("garbage"), None);
+        assert_eq!(iso_duration_hours("PT0H"), None);
+        assert_eq!(iso_duration_hours("PT-1H"), None);
     }
 
     #[test]
@@ -1394,17 +1652,23 @@ mod tests {
         ]}}}"#;
         let raw: RawGridResponse = serde_json::from_str(qpf_json).unwrap();
         let block = raw.properties.qpf.as_ref().unwrap();
-        let (daily, hourly) = build_qpf_maps(block);
-        // 12h of rain at this start lands in (at most) two local days; their
-        // total equals 0.5 + 1.0 = 1.5" regardless of the day split.
-        let total: f64 = daily.values().sum();
-        assert!((total - 1.5).abs() < 1e-6, "daily total = {total}");
-        // First hour of the first interval gets 0.5"/6 = 0.0833".
-        let h0 = hourly
-            .get(&(parse_from_rfc3339_secs("2024-06-01T12:00:00+00:00")))
-            .copied()
-            .unwrap_or(0.0);
-        assert!((h0 - 0.5 / 6.0).abs() < 1e-6, "hour0 = {h0}");
+        let intervals = qpf_intervals(block);
+        let start = parse_from_rfc3339_secs("2024-06-01T12:00:00+00:00");
+        let total = crate::forecast::precip::total_over(
+            intervals.iter().copied(),
+            start,
+            start + 12 * 3600,
+        )
+        .unwrap();
+        assert!((total - 1.5).abs() < 1e-6);
+        let hour =
+            crate::forecast::precip::total_over(intervals.iter().copied(), start, start + 3600)
+                .unwrap();
+        assert!((hour - 0.5 / 6.0).abs() < 1e-6);
+        assert_eq!(
+            crate::forecast::precip::total_over(intervals, start, start + 24 * 3600),
+            None
+        );
     }
 
     fn parse_from_rfc3339_secs(s: &str) -> i64 {
@@ -1599,5 +1863,77 @@ mod tests {
             p.properties.observation_stations.as_deref(),
             Some("https://api.weather.gov/gridpoints/OKX/33,35/stations")
         );
+    }
+    #[test]
+    fn missing_qpf_keeps_fresh_forecast_rain_unknown() {
+        let fc: ForecastResponse = serde_json::from_str(FORECAST_SAMPLE).unwrap();
+        let hourly: ForecastResponse = serde_json::from_str(HOURLY_SAMPLE).unwrap();
+        let snapshot = nws_test().build_snapshot(&fc, Some(&hourly), None, 1700000000);
+        assert!(snapshot.source_reachable);
+        assert!(snapshot.daily.iter().all(|d| d.precip_sum_in.is_none()));
+        assert!(snapshot.hourly.iter().all(|h| h.precip_in.is_none()));
+        assert_eq!(
+            snapshot.next_n_hours_precip_in(4, snapshot.hourly[0].time_epoch),
+            None
+        );
+    }
+
+    #[test]
+    fn qpf_zero_has_coverage_while_null_invalid_and_duplicate_intervals_do_not() {
+        let start = parse_from_rfc3339_secs("2026-06-24T10:00:00Z");
+        let mut block: QpfBlock = serde_json::from_value(serde_json::json!({
+            "uom":"wmoUnit:mm", "values":[{"validTime":"2026-06-24T10:00:00Z/PT6H", "value":0.0}]
+        }))
+        .unwrap();
+        assert_eq!(
+            crate::forecast::precip::total_over(qpf_intervals(&block), start, start + 6 * 3600),
+            Some(0.0)
+        );
+        assert_eq!(
+            crate::forecast::precip::total_over(qpf_intervals(&block), start, start + 7 * 3600),
+            None
+        );
+        for value in [None, Some(-1.0), Some(f64::NAN), Some(f64::INFINITY)] {
+            block.values[0].value = value;
+            assert_eq!(
+                crate::forecast::precip::total_over(qpf_intervals(&block), start, start + 3600),
+                None
+            );
+        }
+        block.values[0].value = Some(0.0);
+        block.values.push(QpfValue {
+            valid_time: block.values[0].valid_time.clone(),
+            value: Some(0.0),
+        });
+        assert_eq!(
+            crate::forecast::precip::total_over(qpf_intervals(&block), start, start + 3600),
+            None
+        );
+        block.values.truncate(1);
+        block.uom = Some("unknown".into());
+        assert!(qpf_intervals(&block).is_empty());
+    }
+
+    #[test]
+    fn qpf_daily_total_requires_remaining_today_and_complete_future_day() {
+        let fc: ForecastResponse = serde_json::from_str(FORECAST_SAMPLE).unwrap();
+        let cal = crate::timeutil::deployment_calendar();
+        let day = cal
+            .day_of(parse_daily(&fc.properties.periods)[0].day_marker)
+            .unwrap();
+        let (start, end) = cal.day_bounds_utc(day).unwrap();
+        let now = start + 12 * 3600;
+        let stamp = chrono::DateTime::from_timestamp(now, 0)
+            .unwrap()
+            .to_rfc3339();
+        let qpf: RawGridResponse = serde_json::from_value(serde_json::json!({"properties":{
+            "quantitativePrecipitation":{"uom":"wmoUnit:mm", "values":[
+                {"validTime":format!("{stamp}/PT{}H", (end-now)/3600),"value":0.0}
+            ]}
+        }}))
+        .unwrap();
+        let snapshot = nws_test().build_snapshot(&fc, None, Some(&qpf), now);
+        assert_eq!(snapshot.daily[0].precip_sum_in, Some(0.0));
+        assert_eq!(snapshot.daily[1].precip_sum_in, None);
     }
 }

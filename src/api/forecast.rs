@@ -22,7 +22,7 @@ use serde::Serialize;
 use serde_json::json;
 use std::{convert::Infallible, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
-use tokio_stream::wrappers::WatchStream;
+use tokio_stream::wrappers::{IntervalStream, WatchStream};
 use tokio_stream::StreamExt;
 
 #[derive(Clone)]
@@ -48,15 +48,33 @@ async fn snapshot(
     State(state): State<ForecastApiState>,
 ) -> Json<crate::forecast::snapshot::ForecastSnapshot> {
     let s = state.store.snapshot();
-    Json((*s).clone())
+    Json(current_calendar_view(&s))
+}
+
+fn current_calendar_view(
+    s: &crate::forecast::snapshot::ForecastSnapshot,
+) -> crate::forecast::snapshot::ForecastSnapshot {
+    let cal = crate::timeutil::deployment_calendar();
+    match cal.date_of(chrono::Utc::now().timestamp()) {
+        Some(day) => s.for_day(cal, day),
+        None => s.clone(),
+    }
 }
 
 async fn stream(
     State(state): State<ForecastApiState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let rx = state.store.subscribe();
-    let s = WatchStream::new(rx).map(|snap| {
-        let payload = serde_json::to_string(&*snap).unwrap_or_else(|_| "{}".into());
+    // A quiet provider must not leave an open browser on yesterday's labels.
+    // Re-project the cached facts periodically without refreshing their age.
+    let interval = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_secs(30),
+        Duration::from_secs(30),
+    );
+    let rollover = IntervalStream::new(interval).map(move |_| state.store.snapshot());
+    let s = WatchStream::new(rx).merge(rollover).map(|snap| {
+        let payload =
+            serde_json::to_string(&current_calendar_view(&snap)).unwrap_or_else(|_| "{}".into());
         Ok(Event::default().event("snapshot").data(payload))
     });
     Sse::new(s).keep_alive(KeepAlive::new().interval(Duration::from_secs(30)))

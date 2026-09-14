@@ -24,36 +24,9 @@ use crate::components::ui::{Button, HelpHint, Icon, Panel};
 use crate::components::units_fmt::{temp_unit, temp_value, use_unit_prefs, UnitPrefs};
 use crate::docs::doc_url;
 
-// ---------------------------------------------------------------------------
-// HTTP (hydrate-only; SSR never runs these).
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "hydrate")]
-async fn fetch_draft() -> Option<serde_json::Value> {
-    let resp = gloo_net::http::Request::get("/api/wizard/draft")
-        .send()
-        .await
-        .ok()?;
-    resp.json::<serde_json::Value>().await.ok()
-}
-
-#[cfg(feature = "hydrate")]
-async fn save_draft(draft: serde_json::Value) -> Result<(), String> {
-    let resp = gloo_net::http::Request::put("/api/wizard/draft")
-        .json(&draft)
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::save_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    Ok(())
-}
+// The draft document itself is read and written through the wizard's shared
+// client (`crate::components::setup::draft`); only the soil probe call below
+// is this step's own HTTP.
 
 // ---------------------------------------------------------------------------
 // Draft projections (plain serde_json reads, identical to the other steps).
@@ -62,21 +35,8 @@ async fn save_draft(draft: serde_json::Value) -> Result<(), String> {
 /// A zone option for the bind dropdown: (config key / slug, display name).
 type ZoneOpt = (String, String);
 
-/// Friendly label for a source kind (snake_case slug from the draft),
-/// mirroring the Settings Sensors `kind_label` so a newcomer never sees the
-/// bare slug. Only `ecowitt_gw_poll` reaches this step today, but the others
-/// are kept so the mapping stays in lockstep with Settings.
 fn kind_label(kind: &str) -> String {
-    match kind {
-        "ecowitt_gw_poll" | "ecowitt" => "Ecowitt gateway".to_string(),
-        "ecowitt_push" => "Ecowitt push".to_string(),
-        "mqtt" => "MQTT".to_string(),
-        "home_assistant" | "ha" => "Home Assistant".to_string(),
-        "opensprinkler" => "OpenSprinkler".to_string(),
-        "esphome" => "ESPHome".to_string(),
-        "" => "Gateway".to_string(),
-        other => other.replace('_', " "),
-    }
+    crate::config::kind_labels::gateway_kind_label(kind, "Gateway")
 }
 
 /// Human title for a gateway card: the friendly kind plus the host in parens
@@ -212,7 +172,7 @@ pub fn SensorsStep() -> impl IntoView {
     #[cfg(feature = "hydrate")]
     Effect::new(move |_| {
         leptos::task::spawn_local(async move {
-            if let Some(d) = fetch_draft().await {
+            if let Some(d) = crate::components::setup::draft::fetch().await {
                 let gws = draft_gateways(&d);
                 draft.set(d);
                 probe_all(gws, probes, probing, probe_err).await;
@@ -278,8 +238,8 @@ pub fn SensorsStep() -> impl IntoView {
         saving.set(true);
         #[cfg(feature = "hydrate")]
         leptos::task::spawn_local(async move {
-            match save_draft(candidate).await {
-                Ok(()) => toast.success("Binding saved."),
+            match crate::components::setup::draft::save(&candidate).await {
+                Ok(()) => toast.success(crate::voice::SAVED_LIVE),
                 Err(e) => toast.error(format!("Could not save binding: {e}")),
             }
             saving.set(false);
@@ -327,11 +287,11 @@ pub fn SensorsStep() -> impl IntoView {
 
         view! {
             <Panel title="Soil probes on your gateway".to_string()>
-                <p class="sensors-section__hint" style="margin-bottom: var(--space-4)">
+                <p class="sensors-section__hint" class:u-mb4-only=true>
                     "Read live off each gateway you added in the Weather step. Bind a probe "
                     "to a zone to let it drive that zone's skip decision once setup is applied."
                 </p>
-                <p class="sensors-section__hint" style="margin-bottom: var(--space-4)">
+                <p class="sensors-section__hint" class:u-mb4-only=true>
                     "With fewer than 3 reporting probes, LocalSky cannot cross-check one probe "
                     "against its siblings, so a single odd-but-nonzero reading is trusted as-is."
                 </p>
@@ -347,7 +307,7 @@ pub fn SensorsStep() -> impl IntoView {
             <h2 class="setup-step__title">"Match probes to zones"<HelpHint topic="soil-sensors"/></h2>
             <p class="setup-step__body">
                 "If you have soil-moisture probes on an Ecowitt gateway, tell LocalSky which "
-                "zone each one sits in. A bound probe lets the engine skip a zone that is "
+                "zone each one sits in. A bound probe skips a zone that is "
                 "already wet enough, instead of relying on the weather model alone. This is "
                 "optional, you can do it any time under Settings, Sensors."
             </p>
@@ -489,7 +449,7 @@ fn gateway_card(
                     <span class="soil-card__name">{title}</span>
                     <span class="source-health__kind">{kind}</span>
                 </div>
-                <div class="source-health__status" style="display:flex; align-items:center; gap:0.5rem">
+                <div class="source-health__status" class:u-row=true>
                     <Icon name="refresh" size=14/>
                     <span>"Reading probes…"</span>
                 </div>
@@ -525,10 +485,10 @@ fn gateway_card(
                 <span class="soil-card__name">{title}</span>
                 <span class="source-health__kind">{kind}</span>
             </div>
-            <div class="source-health__status" style="display:flex; align-items:center; gap:0.5rem">
+            <div class="source-health__status" class:u-row=true>
                 <span class="source-health__dot" style="background: var(--verdict-run)"></span>
                 <span>{host}</span>
-                <span style="color: var(--text-faint)">"·"</span>
+                <span class:u-faint=true>"·"</span>
                 <span>{count_label}</span>
             </div>
             <div class="soil-grid">
@@ -605,7 +565,7 @@ fn soil_probe_row(
             <div class="zone-soil-live" style="margin-top:0; flex-wrap:wrap">
                 {chips}
             </div>
-            <label class="sensor-readout__k" style="margin-top:0.4rem">"Bound zone"</label>
+            <label class="sensor-readout__k" class:u-mt2=true>"Bound zone"</label>
             <select
                 class="ui-input"
                 on:change=move |ev| {
@@ -631,12 +591,12 @@ fn soil_probe_row(
 /// nudge to plug a probe in, then re-read.
 fn no_probes_hint() -> impl IntoView {
     view! {
-        <p class="sensors-section__hint" style="margin-top: var(--space-3)">
+        <p class="sensors-section__hint" class:u-mt3=true>
             "No soil probes are reporting on your gateway(s) yet. Make sure each soil "
             "probe is paired to the gateway (in the Ecowitt WS View app) and reading, then use "
             "Re-read probes above. You can also bind them later under Settings, Sensors. "
             <a href=doc_url("first-soil-sensor") target="_blank" rel="noopener noreferrer"
-                style="color: var(--accent)">
+                class:u-accent=true>
                 "Add your first soil sensor"
             </a>
             "."
@@ -649,13 +609,13 @@ fn no_gateway_state() -> impl IntoView {
     view! {
         <Panel title="Soil probes".to_string()>
             <div class="sensors-empty">
-                <p style="margin:0 0 var(--space-3); color: var(--text-bright); font-weight: 600">
+                <p class:u-section-label=true>
                     "No soil gateway added, that's fine."
                 </p>
-                <p style="margin:0 0 var(--space-3)">
+                <p class:u-mb3=true>
                     "A soil probe never connects to LocalSky directly: it rides in through a "
                     "source. Add one and its probes show up here, ready to bind to a zone. "
-                    "Without a probe, the engine schedules from the weather model alone, which "
+                    "Without a probe, watering is scheduled from the weather model alone, which "
                     "works well. Three ways in:"
                 </p>
                 <ul class="sensors-empty__ways">
@@ -675,11 +635,11 @@ fn no_gateway_state() -> impl IntoView {
                         "automatically. Doable after setup under Settings."
                     </li>
                 </ul>
-                <p style="margin: var(--space-3) 0 0">
-                    <a href="/setup/sources" style="color: var(--accent)">"← Back to Weather sources"</a>
+                <p class:u-mt3-only=true>
+                    <a href="/setup/sources" class:u-accent=true>"← Back to Weather sources"</a>
                     "  ·  "
                     <a href=doc_url("first-soil-sensor") target="_blank" rel="noopener noreferrer"
-                        style="color: var(--accent)">
+                        class:u-accent=true>
                         "Add your first soil sensor"
                     </a>
                 </p>
@@ -693,18 +653,18 @@ fn no_zones_state() -> impl IntoView {
     view! {
         <Panel title="Soil probes".to_string()>
             <div class="sensors-empty">
-                <p style="margin:0 0 var(--space-3); color: var(--text-bright); font-weight: 600">
+                <p class:u-section-label=true>
                     "Define a zone first."
                 </p>
-                <p style="margin:0 0 var(--space-3)">
+                <p class:u-mb3=true>
                     "Probes bind to zones, so there is nothing to bind to until you add at least "
                     "one zone. You can add probes any time later under Settings, Sensors."
                 </p>
-                <p style="margin: var(--space-3) 0 0">
-                    <a href="/setup/zones" style="color: var(--accent)">"← Back to Zones"</a>
+                <p class:u-mt3-only=true>
+                    <a href="/setup/zones" class:u-accent=true>"← Back to Zones"</a>
                     "  ·  "
                     <a href=doc_url("first-soil-sensor") target="_blank" rel="noopener noreferrer"
-                        style="color: var(--accent)">
+                        class:u-accent=true>
                         "Add your first soil sensor"
                     </a>
                 </p>

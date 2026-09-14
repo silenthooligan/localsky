@@ -11,6 +11,15 @@
 // settings/restrictions.rs: `editing_id: Option<String>` switches the
 // form panel between Add and Edit, the Save button label flips, and on
 // submit the matching entry in the Vec is replaced in-place.
+//
+// This page also owns the UI half of the per-schedule weather waiver
+// (`ignore_weather_safety`): the checkbox that arms it, the ConfirmSheet
+// that gates arming it, and the danger badge that keeps an armed
+// schedule visible in the list without opening its editor. The other
+// half, letting a waived schedule dispatch past the freeze, wind,
+// rain-now and live-data holds, is the scheduler's
+// (src/scheduler/manual.rs); this file only states the choice and shows
+// it. A schedule the scheduler does not understand simply stays gated.
 
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
@@ -18,7 +27,9 @@ use leptos::tachys::view::any_view::IntoAny;
 use crate::components::settings_ui::{
     BadgeTone, SettingsBadge, SettingsCard, SettingsKv, SettingsResult,
 };
-use crate::components::ui::{Button, FormField, HelpHint, Panel, SegmentedControl, Toggle};
+use crate::components::ui::{
+    Button, ConfirmSheet, FormField, HelpHint, Panel, SegmentedControl, Sheet, SheetVariant, Toggle,
+};
 
 /// Replace em-dashes, en-dashes, and the Latin-1-decoded UTF-8 mojibake
 /// of either with a plain hyphen so old toml entries written before the
@@ -27,6 +38,67 @@ fn sanitize_name(raw: &str) -> String {
     raw.replace(['\u{2014}', '\u{2013}'], "-")
         .replace("\u{00e2}\u{0080}\u{0094}", "-")
         .replace("\u{00e2}\u{0080}\u{0093}", "-")
+}
+
+/// Config key for the per-schedule weather waiver. Named once so the
+/// checkbox that writes it and the list badge that reads it cannot drift
+/// apart, and so a rename is one edit.
+const WAIVER_KEY: &str = "ignore_weather_safety";
+
+/// The badge an armed schedule wears in the list.
+const WAIVER_BADGE: &str = "Ignores weather";
+
+/// Is this saved schedule armed to water through the weather holds?
+///
+/// Only a literal `true` counts. A missing key (every schedule written
+/// before the waiver existed), a null, a string, a number: all read as
+/// OFF. A config shape this page cannot make sense of must never be the
+/// reason a valve opens into a freeze, so every ambiguity fails toward
+/// NOT watering.
+fn schedule_waives_weather(schedule: &serde_json::Value) -> bool {
+    schedule
+        .get(WAIVER_KEY)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// The list marker for an armed schedule: `Some(label)` when the waiver
+/// is on, `None` otherwise. The marker is the whole point of the badge.
+/// Someone scanning this list six months from now has to see which
+/// schedule ignores a freeze without opening each editor.
+fn waiver_badge_label(schedule: &serde_json::Value) -> Option<&'static str> {
+    if schedule_waives_weather(schedule) {
+        Some(WAIVER_BADGE)
+    } else {
+        None
+    }
+}
+
+/// Does moving the waiver checkbox from `current` to `requested` need
+/// the confirmation sheet?
+///
+/// Only arming it does. Turning it back off makes the schedule safer,
+/// and a confirmation in front of the safer choice is just practice at
+/// clicking through confirmations.
+fn waiver_needs_confirm(current: bool, requested: bool) -> bool {
+    requested && !current
+}
+
+/// Write the waiver onto a schedule entry about to be saved. Always
+/// writes the key, armed or not, so a saved schedule states its weather
+/// stance outright instead of leaving it to be inferred from an absent
+/// key.
+fn stamp_waiver(entry: &mut serde_json::Value, waived: bool) {
+    entry[WAIVER_KEY] = serde_json::Value::Bool(waived);
+}
+
+/// The "Weather gates" details row for a schedule card.
+fn waiver_effect_line(waived: bool) -> &'static str {
+    if waived {
+        "WAIVED - fires in freeze, wind, rain, and with no live weather data"
+    } else {
+        "Freeze, wind, rain and missing-data holds all stop this schedule"
+    }
 }
 
 #[component]
@@ -44,6 +116,28 @@ pub fn SettingsSchedules() -> impl IntoView {
     let new_start_minute = RwSignal::new(0u32);
     let new_duration = RwSignal::new(30u32);
     let new_mode = RwSignal::new("override".to_string());
+    // The weather waiver starts OFF on every draft. Arming it is always
+    // a deliberate act taken inside the editor, never a default and
+    // never inherited from the schedule edited before this one.
+    let new_ignore_weather = RwSignal::new(false);
+    // A waiver must never survive a drawer the operator walked away from.
+    // The "+ Add schedule" toggle resets the draft, but the drawer's own
+    // three exits (its X, Escape, the scrim) do not, so an armed checkbox
+    // that was confirmed and then abandoned came back armed on the next
+    // Add. Disarm on the closing edge, whichever exit produced it. An
+    // edit rehydrates the real value when it opens, so this cannot erase
+    // a saved waiver.
+    //
+    // In the component body, NOT inside view!: an Effect written as a
+    // bare block there renders as a node on one side of hydration and
+    // panics the renderer.
+    Effect::new(move |was_open: Option<bool>| {
+        let open = add_open.get();
+        if was_open == Some(true) && !open {
+            new_ignore_weather.set(false);
+        }
+        open
+    });
 
     let saving = RwSignal::new(false);
     let result_msg = RwSignal::new(String::new());
@@ -61,12 +155,15 @@ pub fn SettingsSchedules() -> impl IntoView {
         #[cfg(feature = "hydrate")]
         {
             wasm_bindgen_futures::spawn_local(async move {
-                match save_config(cfg).await {
+                match crate::components::config_client::put_config(&cfg)
+                    .await
+                    .map(|_| ())
+                {
                     Ok(()) => {
                         crate::components::settings_ui::toast_saved(
                             result_msg,
                             result_ok,
-                            "Saved. The scheduler picks up changes on the next tick.",
+                            crate::voice::SAVED_LIVE,
                         );
                     }
                     Err(e) => {
@@ -88,7 +185,7 @@ pub fn SettingsSchedules() -> impl IntoView {
     {
         Effect::new(move |_| {
             wasm_bindgen_futures::spawn_local(async move {
-                if let Ok(cfg) = fetch_config().await {
+                if let Ok(cfg) = crate::components::config_client::get_config().await {
                     // Pre-select the first zone in cfg.zones for the form's
                     // zone picker; falls back to empty if no zones yet.
                     if let Some(slug) = cfg
@@ -102,21 +199,9 @@ pub fn SettingsSchedules() -> impl IntoView {
                 }
             });
         });
-        Effect::new(move |_| {
-            let open = add_open.get();
-            let _ = editing_id.get();
-            if !open {
-                return;
-            }
-            if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
-                if let Some(elt) = doc.get_element_by_id("schedule-form-panel") {
-                    let opts = web_sys::ScrollIntoViewOptions::new();
-                    opts.set_behavior(web_sys::ScrollBehavior::Smooth);
-                    opts.set_block(web_sys::ScrollLogicalPosition::Start);
-                    elt.scroll_into_view_with_scroll_into_view_options(&opts);
-                }
-            }
-        });
+        // The scroll-into-view that used to live here is gone with the
+        // panel it chased: the form opened below the list, so it could
+        // open somewhere off screen. A drawer opens where it opens.
     }
 
     let schedules_view = move || {
@@ -159,6 +244,7 @@ pub fn SettingsSchedules() -> impl IntoView {
                         new_start_minute=new_start_minute
                         new_duration=new_duration
                         new_mode=new_mode
+                        new_ignore_weather=new_ignore_weather
                         editing_id=editing_id
                         add_open=add_open
                         persist=persist
@@ -180,7 +266,7 @@ pub fn SettingsSchedules() -> impl IntoView {
                     "manual schedules just like they do to smart runs: a blocked "
                     "dispatch logs a skip row with the rule's reason."
                 </p>
-                <p class="settings-page__subtitle" style="margin-top: 0.5rem">
+                <p class="settings-page__subtitle" class:u-mt2=true>
                     <strong>"Override"</strong>
                     " (default) replaces the smart engine for the zone: on the days this "
                     "schedule covers, smart watering will not run for that zone at all. "
@@ -193,11 +279,11 @@ pub fn SettingsSchedules() -> impl IntoView {
 
             <Panel title="Configured schedules".to_string()>
                 <ul class="settings-card-list">{schedules_view}</ul>
-                <button
-                    type="button"
-                    class="setup-footer__btn setup-footer__btn--primary"
-                    style="margin-top: 1rem"
-                    on:click=move |_| {
+                <crate::components::ui::Button variant="primary" size="sm"
+
+                    class="setup-footer__btn setup-footer__btn--primary u-mt4"
+
+                    on_click=Callback::new(move |_| {
                         let now_open = add_open.get();
                         add_open.set(!now_open);
                         if now_open {
@@ -210,10 +296,10 @@ pub fn SettingsSchedules() -> impl IntoView {
                                 new_start_hour,
                                 new_start_minute,
                                 new_mode,
+                                new_ignore_weather,
                             );
                         }
-                    }
-                >
+                    })>
                     {move || {
                         if add_open.get() {
                             if editing_id.get().is_some() {
@@ -225,10 +311,17 @@ pub fn SettingsSchedules() -> impl IntoView {
                             "+ Add schedule"
                         }
                     }}
-                </button>
+                </crate::components::ui::Button>
             </Panel>
 
-            <Show when=move || add_open.get()>
+            <Sheet
+                open=add_open
+                title=Signal::derive(move || match editing_id.get() {
+                    Some(id) => format!("Editing {id}"),
+                    None => "Add a schedule".to_string(),
+                })
+                variant=SheetVariant::Drawer
+            >
                 <ScheduleForm
                     config_json=config_json
                     new_id=new_id
@@ -240,13 +333,14 @@ pub fn SettingsSchedules() -> impl IntoView {
                     new_start_minute=new_start_minute
                     new_duration=new_duration
                     new_mode=new_mode
+                    new_ignore_weather=new_ignore_weather
                     editing_id=editing_id
                     add_open=add_open
                     result_msg=result_msg
                     result_ok=result_ok
                     persist=persist
                 />
-            </Show>
+            </Sheet>
 
             <SettingsResult result_msg=result_msg result_ok=result_ok/>
         </div>
@@ -272,6 +366,7 @@ fn ScheduleForm(
     new_start_minute: RwSignal<u32>,
     new_duration: RwSignal<u32>,
     new_mode: RwSignal<String>,
+    new_ignore_weather: RwSignal<bool>,
     editing_id: RwSignal<Option<String>>,
     add_open: RwSignal<bool>,
     result_msg: RwSignal<String>,
@@ -290,8 +385,16 @@ fn ScheduleForm(
         }
     };
 
+    // The waiver's confirmation, on the shared ConfirmSheet idiom: the
+    // sheet is always mounted at the bottom of this form and its
+    // visibility is owned here. The checkbox only opens it; `arm_waiver`
+    // is the single thing that turns the draft flag on, and it runs from
+    // the sheet's Confirm.
+    let waiver_confirm = RwSignal::new(false);
+    let arm_waiver = Callback::new(move |()| new_ignore_weather.set(true));
+
     let on_add = move |_| {
-        let id = new_id.get().trim().to_lowercase().replace(' ', "_");
+        let id = crate::text::slugify(&new_id.get());
         if id.is_empty() {
             result_ok.set(false);
             result_msg.set("ID is required (snake_case)".into());
@@ -318,7 +421,7 @@ fn ScheduleForm(
         } else {
             new_name.get()
         };
-        let entry = serde_json::json!({
+        let mut entry = serde_json::json!({
             "id": id,
             "name": name,
             "zone_slug": new_zone.get(),
@@ -329,6 +432,9 @@ fn ScheduleForm(
             "duration_minutes": new_duration.get(),
             "mode": new_mode.get(),
         });
+        // Written on every save, armed or not: an edit that clears the
+        // box has to persist as a stated "no", not as a missing key.
+        stamp_waiver(&mut entry, new_ignore_weather.get());
 
         let was_edit = editing_id.get().is_some();
         config_json.update(|cfg| {
@@ -363,6 +469,7 @@ fn ScheduleForm(
             new_start_hour,
             new_start_minute,
             new_mode,
+            new_ignore_weather,
         );
         add_open.set(false);
         // Commit immediately instead of staging for a separate "Save".
@@ -379,6 +486,7 @@ fn ScheduleForm(
             new_start_hour,
             new_start_minute,
             new_mode,
+            new_ignore_weather,
         );
         add_open.set(false);
     };
@@ -386,7 +494,7 @@ fn ScheduleForm(
     view! {
         <div id="schedule-form-panel"><Panel title="Schedule form".to_string()>
             <Show when=move || editing_id.get().is_some()>
-                <p class="settings-page__subtitle" style="margin: 0 0 0.75rem">
+                <p class="settings-page__subtitle" class:u-mb3=true>
                     "Editing "
                     <code>{move || editing_id.get().unwrap_or_default()}</code>
                     ". Save below applies to this id; the id field is read-only."
@@ -454,7 +562,7 @@ fn ScheduleForm(
                 {weekday_checkboxes(new_weekdays)}
             </FormField>
 
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem">
+            <div class:u-grid-two=true>
                 <FormField
                     label="Start hour (0-23, local time)".to_string()
                     helptext="24-hour. 5 = 05:00. Watering restrictions can still block this hour; the dispatch logs a skip if so.".to_string()
@@ -518,7 +626,7 @@ fn ScheduleForm(
 
             <FormField
                 label="Mode".to_string()
-                helptext="Override stops smart watering for this zone on the days below. Floor fires the schedule and lets smart add runs on top.".to_string()
+                helptext="Override replaces smart watering on these days. Floor runs alongside it.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 <SegmentedControl
@@ -529,6 +637,46 @@ fn ScheduleForm(
                     ]
                     aria_label="Schedule mode".to_string()
                 />
+            </FormField>
+
+            // The weather waiver. Last field in the form, and the only
+            // control on this page that can open a valve into a freeze,
+            // so it is the only one with a confirmation in front of it.
+            <FormField
+                label="Weather holds".to_string()
+                helptext="Weather normally stops this schedule. Check the box only if it must run regardless.".to_string()
+                error=Signal::derive(|| None::<String>)
+            >
+                <label class:u-touch-row=true>
+                    <input
+                        type="checkbox"
+                        prop:checked=move || {
+                            // Reading the sheet's signal here is what snaps
+                            // the box back off when a turn-on is cancelled:
+                            // the click checked the DOM element without
+                            // changing the draft, so this property has to be
+                            // rewritten every time the sheet opens or closes.
+                            // The box therefore reads OFF while the question
+                            // is on screen, which is the truth: nothing has
+                            // been armed yet.
+                            let _asking = waiver_confirm.get();
+                            new_ignore_weather.get()
+                        }
+                        on:change=move |ev| {
+                            let requested = event_target_checked(&ev);
+                            if waiver_needs_confirm(new_ignore_weather.get_untracked(), requested) {
+                                // The box asks; the sheet decides. Nothing
+                                // is armed on this path.
+                                waiver_confirm.set(true);
+                            } else {
+                                // Clearing it, or a no-op. Making a schedule
+                                // safer is never worth an interruption.
+                                new_ignore_weather.set(requested);
+                            }
+                        }
+                    />
+                    "Water even in freezing or windy weather"
+                </label>
             </FormField>
 
             <div class="settings-form-actions">
@@ -549,6 +697,24 @@ fn ScheduleForm(
                     }}
                 </Button>
             </div>
+
+            // Arming the waiver is a two-step. Cancel leaves the draft
+            // (and the box) off; only Confirm arms it. Clearing the
+            // waiver never opens this sheet.
+            <ConfirmSheet
+                visible=waiver_confirm
+                title="Water even in freezing or windy weather?"
+                body=Signal::derive(|| {
+                    "Watering in a freeze can damage plants and burst pipes. \
+                     While this is on, this schedule fires anyway: in a freeze \
+                     or on frozen ground, in high wind, in rain, and when live \
+                     weather data is missing."
+                        .to_string()
+                })
+                confirm_label=Signal::derive(|| "Yes, water anyway".to_string())
+                danger=true
+                on_confirm=arm_waiver
+            />
         </Panel></div>
     }
 }
@@ -557,6 +723,11 @@ fn ScheduleForm(
 /// state. Shared by the page's Cancel toggle and the form's post-add
 /// cleanup so the two stay in sync. Leaves `new_zone` and `new_enabled`
 /// untouched, matching the original inline reset behavior.
+///
+/// The weather waiver IS cleared here, unlike those two. A draft that
+/// kept the last edited schedule's waiver would arm the next schedule to
+/// water through a freeze without anyone having chosen that, which is
+/// the one mistake the confirmation exists to make impossible.
 fn reset_schedule_draft(
     editing_id: RwSignal<Option<String>>,
     new_id: RwSignal<String>,
@@ -566,6 +737,7 @@ fn reset_schedule_draft(
     new_start_hour: RwSignal<u32>,
     new_start_minute: RwSignal<u32>,
     new_mode: RwSignal<String>,
+    new_ignore_weather: RwSignal<bool>,
 ) {
     editing_id.set(None);
     new_id.set(String::new());
@@ -575,6 +747,7 @@ fn reset_schedule_draft(
     new_start_hour.set(5);
     new_start_minute.set(0);
     new_mode.set("override".to_string());
+    new_ignore_weather.set(false);
 }
 
 fn weekday_short(d: u8) -> &'static str {
@@ -601,7 +774,7 @@ fn weekday_checkboxes(value: RwSignal<Vec<u8>>) -> impl IntoView {
         (6, "Sat"),
     ];
     view! {
-        <div style="display: flex; flex-wrap: wrap; gap: 0.4rem">
+        <div class:u-wrap-row=true>
             {labels
                 .iter()
                 .map(|(idx, label)| {
@@ -640,44 +813,6 @@ fn weekday_checkboxes(value: RwSignal<Vec<u8>>) -> impl IntoView {
     }
 }
 
-#[cfg(feature = "hydrate")]
-async fn fetch_config() -> Result<serde_json::Value, String> {
-    use gloo_net::http::Request;
-    let resp = Request::get("/api/config")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::load_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    resp.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[cfg(feature = "hydrate")]
-async fn save_config(cfg: serde_json::Value) -> Result<(), String> {
-    use gloo_net::http::Request;
-    let resp = Request::put("/api/config")
-        .json(&cfg)
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::save_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    Ok(())
-}
-
 /// Single manual-schedule row. Own component so its view tree is
 /// contained inside one monomorphization boundary.
 #[component]
@@ -694,6 +829,7 @@ fn ScheduleCard(
     new_start_minute: RwSignal<u32>,
     new_duration: RwSignal<u32>,
     new_mode: RwSignal<String>,
+    new_ignore_weather: RwSignal<bool>,
     editing_id: RwSignal<Option<String>>,
     add_open: RwSignal<bool>,
     persist: Callback<()>,
@@ -731,6 +867,10 @@ fn ScheduleCard(
         .and_then(|v| v.as_str())
         .unwrap_or("override")
         .to_string();
+    // Both Copy, so the badge closure reads them without cloning the
+    // whole schedule into itself.
+    let waives_weather = schedule_waives_weather(&schedule);
+    let waiver_badge = waiver_badge_label(&schedule);
     let weekdays = schedule
         .get("weekdays")
         .and_then(|v| v.as_array())
@@ -753,6 +893,7 @@ fn ScheduleCard(
     let time_kv = format!("{h:02}:{m:02}");
     let dur_kv = format!("{dur} min");
     let mode_kv = mode.clone();
+    let waiver_kv = waiver_effect_line(waives_weather).to_string();
     // An Override schedule suppresses smart watering for its zone on its
     // days. That was the unlabelled default and nothing said it out loud,
     // so a schedule added as a workaround silently locked smart out.
@@ -817,6 +958,10 @@ fn ScheduleCard(
                 .unwrap_or("override")
                 .to_string(),
         );
+        // Loaded through the same reader the badge uses, so an editor
+        // opened on an armed schedule shows the box already checked and
+        // saving it again does not silently disarm it.
+        new_ignore_weather.set(schedule_waives_weather(s));
         editing_id.set(Some(id_for_edit.clone()));
         add_open.set(true);
     };
@@ -845,6 +990,12 @@ fn ScheduleCard(
                     } else {
                         view! { <SettingsBadge label="Disabled".into() tone=BadgeTone::Muted/> }.into_any()
                     }}
+                    // The waiver's persistent marker. It rides the card
+                    // itself, not the editor, so a schedule armed to
+                    // ignore a freeze is legible while scanning the list.
+                    {waiver_badge.map(|label| view! {
+                        <SettingsBadge label=label.to_string() tone=BadgeTone::Danger/>
+                    })}
                 }.into_any())
                 details=Box::new(move || view! {
                     <SettingsKv label="ID" value=id_kv/>
@@ -853,6 +1004,7 @@ fn ScheduleCard(
                     <SettingsKv label="Start time" value=time_kv/>
                     <SettingsKv label="Duration" value=dur_kv/>
                     <SettingsKv label="Mode" value=mode_kv/>
+                    <SettingsKv label="Weather gates" value=waiver_kv/>
                     <SettingsKv label="Effect on smart" value=suppression_kv/>
                 }.into_any())
                 actions=Box::new(move || view! {
@@ -873,5 +1025,89 @@ fn ScheduleCard(
                 }.into_any())
             />
         </li>
+    }
+}
+
+#[cfg(test)]
+mod waiver_tests {
+    use super::{
+        schedule_waives_weather, stamp_waiver, waiver_badge_label, waiver_effect_line,
+        waiver_needs_confirm, WAIVER_BADGE,
+    };
+
+    /// Only a literal `true` arms the waiver.
+    ///
+    /// Everything else reads as OFF: a schedule written before the
+    /// waiver existed, a null, the STRING "true", a 1. This is the
+    /// direction the ambiguity has to fail in, and it is the reason the
+    /// page never tests the key inline: one `!= false` written somewhere
+    /// in a view would arm every legacy schedule at once.
+    #[test]
+    fn only_a_literal_true_arms_the_waiver() {
+        let armed = serde_json::json!({ "id": "back_yard", "ignore_weather_safety": true });
+        assert!(schedule_waives_weather(&armed));
+
+        for ambiguous in [
+            serde_json::json!({ "id": "back_yard" }),
+            serde_json::json!({ "ignore_weather_safety": null }),
+            serde_json::json!({ "ignore_weather_safety": "true" }),
+            serde_json::json!({ "ignore_weather_safety": 1 }),
+            serde_json::json!({ "ignore_weather_safety": false }),
+        ] {
+            assert!(
+                !schedule_waives_weather(&ambiguous),
+                "{ambiguous} must not arm the waiver"
+            );
+        }
+    }
+
+    /// An armed schedule is marked in the LIST, not only in its editor.
+    ///
+    /// This is the assertion that fails against the page as it was: the
+    /// card rendered exactly two badges, Enabled and Disabled, so a
+    /// schedule set to water through a freeze looked identical to one
+    /// that would hold, and the only way to find it was to open every
+    /// editor in turn.
+    #[test]
+    fn an_armed_schedule_is_marked_in_the_list() {
+        let armed = serde_json::json!({ "id": "back_yard", "ignore_weather_safety": true });
+        assert_eq!(waiver_badge_label(&armed), Some(WAIVER_BADGE));
+        assert!(waiver_effect_line(true).starts_with("WAIVED"));
+
+        let normal = serde_json::json!({ "id": "back_yard" });
+        assert_eq!(waiver_badge_label(&normal), None);
+        assert!(!waiver_effect_line(false).contains("WAIVED"));
+    }
+
+    /// Arming asks; disarming does not.
+    ///
+    /// Fails against the shape every other boolean in this form uses:
+    /// Enabled is a plain Toggle bound straight to its draft signal, and
+    /// a waiver wired that way would arm on the click itself, with no
+    /// question in front of it and nothing to cancel.
+    #[test]
+    fn arming_asks_and_disarming_does_not() {
+        assert!(waiver_needs_confirm(false, true), "arming must ask");
+        assert!(
+            !waiver_needs_confirm(true, false),
+            "disarming must not interrupt"
+        );
+        assert!(!waiver_needs_confirm(true, true));
+        assert!(!waiver_needs_confirm(false, false));
+    }
+
+    /// A save states the waiver either way, so clearing the box persists
+    /// as a stated "no" rather than as an absent key.
+    #[test]
+    fn a_save_states_the_waiver_either_way() {
+        let mut entry = serde_json::json!({ "id": "back_yard", "mode": "override" });
+
+        stamp_waiver(&mut entry, true);
+        assert_eq!(entry["ignore_weather_safety"], serde_json::json!(true));
+        assert!(schedule_waives_weather(&entry));
+
+        stamp_waiver(&mut entry, false);
+        assert_eq!(entry["ignore_weather_safety"], serde_json::json!(false));
+        assert!(!schedule_waives_weather(&entry));
     }
 }

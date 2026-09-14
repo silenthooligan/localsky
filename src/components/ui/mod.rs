@@ -6,14 +6,12 @@
 //   icon.rs       - single app-wide inline-SVG registry (currentColor)
 //   button.rs     - primary/secondary/ghost/danger button, sizes, loading
 //   panel.rs      - container with optional title + badge
-//   card.rs       - raised surface, optional clickable
 //   sheet.rs      - viewport-aware bottom-sheet (mobile) / centered modal
 //   toggle.rs     - iOS-style switch with label + helptext
 //   slider.rs     - range + value chip with suffix
 //   stepper.rs    - +/- integer-ish spinner
 //   segmented.rs  - horizontal pill picker (radiogroup)
 //   form_field.rs - label + helptext + error wrapper
-//   list_item.rs  - icon + title + subtitle + trailing control/chevron
 //   empty_state.rs - icon + title + body + CTA for empty pages
 //   skeleton.rs   - shimmering ghost placeholders for first-load states
 //   stat_tile.rs  - label + big number + delta + inline sparkline
@@ -25,14 +23,13 @@
 //   secret_input.rs - masked input + show/hide reveal toggle
 
 pub mod button;
-pub mod card;
 pub mod confirm_sheet;
 pub mod empty_state;
+pub mod field_labels;
 pub mod form_field;
 pub mod help_hint;
 pub mod icon;
 pub mod line_chart;
-pub mod list_item;
 pub mod panel;
 pub mod photo_field;
 pub mod secret_input;
@@ -47,23 +44,21 @@ pub mod toast;
 pub mod toggle;
 
 pub use button::Button;
-pub use card::Card;
 pub use confirm_sheet::ConfirmSheet;
 pub use empty_state::EmptyState;
 pub use form_field::FormField;
 pub use help_hint::HelpHint;
-pub use icon::{weather_glyph, Icon};
+pub use icon::Icon;
 pub use line_chart::{LineChart, Series};
-pub use list_item::ListItem;
 pub use panel::Panel;
 pub use photo_field::PhotoField;
 pub use secret_input::SecretInput;
 pub use segmented::SegmentedControl;
-pub use sheet::Sheet;
+pub use sheet::{Sheet, SheetVariant};
 pub use skeleton::{Skeleton, SkeletonRows};
 pub use slider::Slider;
 pub use sparkline::Sparkline;
-pub use stat_tile::{DeltaSense, StatTile};
+pub use stat_tile::StatTile;
 pub use stepper::Stepper;
 pub use toast::{use_toast, ToastHub, ToastKind, ToastViewport};
 pub use toggle::Toggle;

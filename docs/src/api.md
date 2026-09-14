@@ -1,6 +1,6 @@
 # API reference
 
-LocalSky exposes a REST + SSE API mounted at **`/api/v1/`** (canonical) and **`/api/`** (legacy alias). New clients should target `/api/v1/*`; the bare `/api/*` paths exist for backwards compatibility with v0.1 and will be removed in a future major release. A few newer endpoint families (`/api/v1/backup`, `/api/v1/updates`) exist only under `/api/v1`.
+LocalSky exposes a REST + SSE API mounted at **`/api/v1/`** (canonical) and **`/api/`** (legacy alias). New clients should target `/api/v1/*`. These historical route names are independent of the response contract version reported by `/api/v1/info`: the local 0.9.0 candidate uses **API 2.1.0** at the existing URLs. A few newer endpoint families (`/api/v1/backup`, `/api/v1/updates`, `/api/v1/diagnostics`) exist only under `/api/v1`.
 
 **On this page**
 
@@ -23,21 +23,85 @@ LocalSky exposes a REST + SSE API mounted at **`/api/v1/`** (canonical) and **`/
 
 ## Versioning
 
-The `/api/v1` namespace is the stable contract. Version semantics:
+Read `/api/v1/info.api_version` before consuming snapshots. Its SemVer contract is independent of `service_version` and the route prefix:
 
-- **major** (`v1` -> `v2`): breaking change to any response shape or required field. Both versions ship in parallel during the deprecation window.
+- **major**: breaking change to a response shape or required field. API 2.0.0 makes previously fabricated weather values nullable; clients must handle this migration, including the separately maintained Home Assistant integration. The route prefix does not change, and there is no parallel endpoint returning fabricated values for API 1 clients. Deprecated compatibility fields remain in this release; removing them or the legacy alias requires a separately documented future migration.
 - **minor**: additive field on a response, or new endpoint. No bump to the path prefix; integrators can rely on extra fields being ignorable.
 - **patch**: data-correctness fix with no shape change.
 
 The shape of each `/api/v1/*` GET response is locked at build time by `insta` snapshot tests in `src/api/snapshot_tests.rs`. Any change that mutates the JSON body fails CI until a maintainer acknowledges the diff, which is the moment `api_version` gets bumped. A collection's per-entry shape is locked only where a fixture populates an entry; `zones[]` is locked by its own fixture, which carries both an empty zone and a fully populated one, and `water_budgets[]` likewise by a fixture carrying a default row and a populated one.
 
+### Deprecated on v1
+
+These compatibility fields were deprecated during API 1 and remain in API 2.0.0. Snapshot fields carry a `DEPRECATED (0.9.0)` note in `src/model/snapshot.rs`; a test pins their reader counts so they cannot gain new consumers. The last column records intended future removal, not a change in API 2.0.0.
+
+| field | on | what it says now | future removal |
+|---|---|---|---|
+| `zones[].hex` | `/irrigation/snapshot` | always `""`; the original deployment's OpenSprinkler MAC suffix | dropped |
+| `iu_enabled` | `/irrigation/snapshot` | always `false`; Irrigation Unlimited is gone | dropped |
+| `iu_suspended` | `/irrigation/snapshot` | always `false`; the engine's hold is `skip_check.is_paused` and `pause_until_epoch` | dropped |
+| `ha_reachable` | `/irrigation/snapshot` | last Home Assistant poll succeeded; always `true` on the native path | dropped; per-source reachability is `GET /health` `sources[].status`, the snapshot's age is `last_refresh_epoch` |
+| `override_helpers_present` | `/irrigation/snapshot` | a persistence database is mounted (the name predates 0.7.22) | dropped; `controls_persisted` says the same |
+| `ha_adoption_awaiting_config` | `/irrigation/snapshot` | always `false` since 0.9.0 removed the adoption pass | dropped |
+| `water_budgets[].mode_active` | `/irrigation/snapshot` | always `true` | dropped |
+| `zones[].today_run_minutes` | `/irrigation/snapshot` | always `null`; nothing produces it | dropped |
+| `/irrigation/shadow/snapshot`, `/irrigation/shadow/diff` | endpoints | always `{"shadow":"disabled"}`; shadow-native mode is gone | absent |
+| `deployment.shadow_native` | config | read by nothing | dropped |
+| `run_sequence_now` | `POST /irrigation/action` kind | unknown since 0.9.0 (answers `400`) | absent |
+| `POST /wizard/test_source` | endpoint | structural validation only; nothing in the UI calls it | absent |
+
 ### Migration notes
 
-**1.27.0** (the soil scheduling model). Minor, following the 1.25.0 precedent: additive fields, and a behavior change only for zones opted into the soil model. `zones[].bucket_mm` and `zones[].math.bucket_mm` gain their producer: the soil model's evidence replay computes the deficit for every zone with a species and a soil texture, whichever model governs, and publishes it under the field's documented sign (negative = needs water). `null` still means no bucket could be derived (a `LOCALSKY_ZONES` list with no per-zone agronomy), so the 1.25.0 rule stands: `null` is the unknown, never a fabricated zero. The manifest's capability-gated `<slug>_soil_bucket` descriptor and the MQTT bucket sensor publish again on zones that carry a value; manifest schema is unchanged, because the gate was already value-based.
+**2.1.0** (local 0.9.0 completion candidate). History run records add nullable
+`session_id`. One watering job retains its identity across cycle/soak segments,
+observer reconciliation, and morning catch-up after restart. Legacy records
+remain null; proximity in time does not prove they belong to the same job.
+Clients may ignore the new field. When computing applied water, use the union
+of valve-open intervals per zone; summing session or observer records can count
+overlapping water twice. Command provenance is stored separately and supplies
+no applied-water credit.
+
+
+
+Daily and hourly forecast entries add `et0_reported`. A positive legacy
+`et0_in` remains valid; zero is supported only when `et0_reported` is true.
+This preserves old numeric response shapes and does not reinterpret missing
+zeros in existing caches. Daily entries also add nullable `wind_mean_2m_ms`
+and `humidity_mean_pct`; peak wind and afternoon RH retain their separate fields.
+The legacy heat multiplier fields now remain 1.0 because reference ET already
+contains atmospheric demand. Soil-forecast status `uncalibrated` retains the
+relative probe reading but supplies no unsupported future percentage curve.
+
+**2.0.0** (local 0.9.0 candidate). Breaking response change: missing weather evidence is `null`, including precipitation. Clients must accept null, render unknown, and exclude it from calculations. A reported 0°F, calm wind, zero humidity, or a fully covered dry rain interval remains numeric zero.
+
+| Response object | Newly nullable numeric fields |
+|---|---|
+| Forecast snapshot `daily[]` | `temp_max_f`, `temp_min_f`, `wind_max_mph`, `humidity_pct`, `precip_sum_in` |
+| Forecast snapshot `hourly[]` | `temp_f`, `wind_mph`, `humidity_pct`, `precip_in` |
+| Irrigation `forecast` | `wind_max_today_mph`, `temp_min_24h_f`, `temp_max_3day_f`, `humidity_now_pct`, `heat_index_now_f`, `heat_index_max_3day_f`, `rain_today_om_in`, `rain_tomorrow_in`, `rain_3day_in`, `rain_3day_weighted_in`, `rain_7day_weighted_in`, `rain_next_4h_in`, `rain_intensity_in_hr` |
+| Irrigation `skip_check` | `forecast_in`, `rain_today_forecast_in`, `rain_3day_weighted_in`, `rain_7day_weighted_in`, `rain_next_4h_in`, `rain_intensity_now_in_hr` |
+| Irrigation `seven_day_verdicts[]` | `temp_max_f`, `temp_min_f`, `precip_in` |
+| Irrigation `water_budgets[]` | `expected_rain_mm` |
+
+Rain totals require valid amounts covering their requested intervals; gaps, overlaps, and missing samples cannot prove a dry window. Multi-day totals align to the configured local calendar and use the provider's available daily horizon. Temperature and wind safety windows likewise require coverage. Incomplete current conditions hold watering. An enabled rain gate with missing amount evidence reports that absence; measured-dry soil retains its documented ability to demote soft forecast recommendations.
+
+The additive `skip_check.planning_forecast_unavailable` lists zones whose automatic watering plan lacks complete next-24-hour rain evidence. Their protected `planning_forecast` gate applies to both weekly and soil scheduling and survives convenience Force. Explicit manual durations retain the separate manual-run and schedule-waiver policy. `seven_day_verdicts[].rain_evidence_incomplete` identifies incomplete rain evidence, and `water_budgets[].soil_deferred_kind` may now be `"forecast_unavailable"`. Soil projections stop at unknown evidence. `forecast_credit_mm` remains a numeric amount actually applied to the balance: zero with source `"unavailable"` when required rain evidence is missing, accompanied by the planning hold where applicable; source `"none"` still means no forecast credit was requested.
+
+Today's measured rain and recent measured-rain backstops accept observation-grade gauge or radar evidence. Forecast totals and model archives remain separately identified; neither can turn the hard measured-rain gate on. Rhai forecast-rain inputs use `()` for missing evidence rather than zero. A script that cannot handle its inputs holds watering with the script's reason.
+
+Endpoint URLs remain under `/api/v1`. Install a LocalSky Home Assistant companion supporting API major 2 before the service upgrade, then reload that integration to refresh manifest paths. The private forecast cache now uses schema **3**; bare caches and schema 1/2 caches are discarded because their synthetic zeros cannot be distinguished from real readings. Forecast-dependent decisions remain unavailable until fresh usable evidence arrives. This cache refresh does not rewrite recorded watering history.
+
+The unreleased 1.31.0 additions below are included in 2.0.0.
+**1.31.0** (intermediate local candidate). Additive: `/info.build_revision` identifies the compiled source. The irrigation snapshot adds `restart_required` and `restart_reasons` for a persistent hold that clears on process restart, `flow_connected` for actual meter evidence, and `flow` with nullable `rate_gpm`, `rate_source_id`, `total_gal_today`, and `total_source_id`. A supported but unwired meter supplies no reading; an instantaneous rate does not imply a cumulative total. HACS flow descriptors use these resolved paths; existing installations need one LocalSky integration reload to pick up the changed descriptor paths. `skip_check.soil_probe_configured` records probe bindings, and `soil_probe_holds` carries independent per-zone data holds even when another gate wins the headline. `skip_check.script_hold` is `null` or an object with `id`, `name`, and `reason` for the first enabled script hold, including a script evaluation failure. It remains available when an earlier gate wins the headline and still binds manual schedules with a weather waiver. Existing v1 fields retain their types.
+
+**1.29.0** (0.9.0). Minor: additive fields and the deprecation record above. On the irrigation snapshot: `today_window` (`start`, `finish`, `kind` of `pre_dawn` or `post_sunrise`, `min_temp_f`; the watering window chosen for today, after sunrise on a freezing dawn), `next_run_state` (`at`, `no_legal_day`, `no_sunrise`, `no_location`) with `next_run_day_offset`, `restriction_allowed_days` (the weekdays the rules allow, Sun=0); on `skip_check`: `wind_window_max_mph`, `run_window`, `window_min_temp_f`, `watered_days`; on `water_budgets[]`: `dormant`; on `zones[]`: `controller_id`, `throughput_mm_hr`, `ledger_running`, `running_observed_epoch` (when the controller took the `running` reading, `null` when it was read on demand). Manifest: `wet_bulb_f` now publishes on any install whose merge owns a temperature, not only one with a LAN station, because it is derived from the merged temperature and humidity whoever owns them; `wind_lull_mph` and `rain_in_last_min` still need a station that reports them. on run records: `note`, `volume_gal`, `controller_id`, `applied_mm`, `cycle_index`, `cycle_count`. `GET /info` gains `location_configured`. `GET /health` gains `location_configured` and a per-source `note`, and `?strict=1` answers `503` unless the status is `ok`. New endpoint: `GET /diagnostics`. Config: `schema_version` is `2` (see [Configuration](configuration.md#migrations)).
+
+
+**1.27.0** (the soil scheduling model). Minor, following the 1.25.0 precedent: additive fields, and a behavior change only for zones opted into the soil model. `zones[].bucket_mm` and `zones[].math.bucket_mm` gain their producer: the soil model's evidence replay computes the deficit for every zone with a species and a soil texture, whichever model governs, and publishes it under the field's documented sign (negative = needs water). `null` still means no bucket could be derived (a the environment zone list (removed in 0.9.0) list with no per-zone agronomy), so the 1.25.0 rule stands: `null` is the unknown, never a fabricated zero. The manifest's capability-gated `<slug>_soil_bucket` descriptor and the MQTT bucket sensor publish again on zones that carry a value; manifest schema is unchanged, because the gate was already value-based.
 
 Additive fields on each `water_budgets[]` row: `scheduling_model` (`"weekly"` or `"soil"`; empty string on JSON from an older producer), `soil_depletion_mm` / `soil_taw_mm` / `soil_raw_mm` (the replayed deficit and the zone's capacity and trigger, mm; `null` where no bucket could be derived), `soil_due` (depletion crossed the trigger), `soil_planned_seconds` (under the weekly model, the shadow figure: what the soil model would water today; under the soil model, what `today_seconds` starts from, with window admission already applied: 0 on a window-deferred morning, `soil_deferred_reason` carrying the hold, while the pre-admission refill desire stays recoverable from `soil_depletion_mm`), `soil_deferred_reason` (the hold that zeroed a due soil zone), and `soil_ceiling_binding` (an operator-set weekly target clamped today's refill).
 
-Additive config: `engine.scheduling_model` (`weekly` or `soil`; an absent key means the operator never chose, and the install follows the shipped default, `weekly` today. The key is omitted from `GET /config` while unset, so a round-tripped body cannot stamp the default in as an explicit choice; the setup wizard writes `soil` for new installs at apply time) and `ZoneConfig.scheduling_model` (`null` = the engine default), both on `GET`/`PUT /api/config`, the config schema, and the per-field apply path. The behavior change is scoped to zones the soil model governs: their `today_seconds` / `today_reason` / `session_capped` come from the soil plan (refill sizing, defer by deficit, window admission, the weekly-ceiling clamp), and three forward-rain gates plus the heat-advisory extension are inert for them. Weekly-governed rows are byte-identical to 1.26.0 apart from the additive fields and one declared value change, with the sizing math golden-pinned in `src/engine/budget.rs`: the run-evidence fetch widened from 8 to 15 days to cover the soil replay window, and `last_run_epoch` (on the `water_budgets[]` row, on `zones[]`, and behind the zone detail's last-ran line) reduces over all fetched rows, so a zone whose newest run ended 8-15 days ago now reports that run's end where it read `0`. Planned seconds, reasons, session spacing, and the forecast credit are unchanged (the session interval is at most 7 days). No HACS integration change is required: the new fields are ignorable, and the returning `<slug>_soil_bucket` entity is the same manifest descriptor 1.25.0 documented.
+Additive config: `engine.scheduling_model` (`weekly` or `soil`; an absent key means the operator never chose, and the install follows the shipped default, `soil` today. The key is omitted from `GET /config` while unset, so a round-tripped body cannot stamp the default in as an explicit choice; the setup wizard writes `soil` for new installs at apply time) and `ZoneConfig.scheduling_model` (`null` = the engine default), both on `GET`/`PUT /api/config`, the config schema, and the per-field apply path. The behavior change is scoped to zones the soil model governs: their `today_seconds` / `today_reason` / `session_capped` come from the soil plan (refill sizing, defer by deficit, window admission, the weekly-ceiling clamp), and three forward-rain gates plus the heat-advisory extension are inert for them. Weekly-governed rows are byte-identical to 1.26.0 apart from the additive fields and one declared value change, with the sizing math golden-pinned in `src/engine/budget.rs`: the run-evidence fetch widened from 8 to 15 days to cover the soil replay window, and `last_run_epoch` (on the `water_budgets[]` row, on `zones[]`, and behind the zone detail's last-ran line) reduces over all fetched rows, so a zone whose newest run ended 8-15 days ago now reports that run's end where it read `0`. Planned seconds, reasons, session spacing, and the forecast credit are unchanged (the session interval is at most 7 days). No HACS integration change is required: the new fields are ignorable, and the returning `<slug>_soil_bucket` entity is the same manifest descriptor 1.25.0 documented.
 
 **1.26.0** (single-day rain stops out-crediting the soil). Minor, following the 1.25.0 precedent. Three additive fields on each `water_budgets[]` row: `observed_rain_credited_mm` (the trailing observed rain the balance actually offset against the weekly target, each day held to the cap before summing; equal to `observed_rain_mm` whenever no single day exceeded it), `rain_credit_cap_mm` (the per-day rain-credit cap in effect, mm; `0` on JSON from an older producer means unknown/legacy, no cap applied), and `rain_cap_inferred` (`true` when the cap was derived from the zone's soil texture and root depth rather than set by the operator). `observed_rain_mm` keeps carrying the RAW trailing 7-day sum, unchanged.
 
@@ -45,7 +109,7 @@ The behavior change, with no shape change: each day of observed rain, and each d
 
 Additive config: `ZoneConfig.rain_credit_cap_in` (inches, `0.05..=5.0`, `null` = derived from soil texture and root depth) rides `GET`/`PUT /api/config` and the config schema, with the zone editor field to match. New validation error `zone_rain_credit_cap_range` gates whole-config writes; `POST /api/v1/config/zones/apply` accepts the field with the same band; a value already on disk is clamped into range at load, the `sessions_per_week` treatment. No HACS integration change is required: no manifest entity carries a balance term, and the additive fields are ignorable.
 
-**1.25.0** (the engine stops reading Home Assistant; the soil deficit stops being fabricated). Minor, following the 1.18.0 honest-unknowns precedent. Adds `ha_adoption[]` to the irrigation snapshot, one entry per retired Home Assistant helper; empty on every standalone install. Each entry carries `entity`, `outcome`, `target`, `adopted_value`, `previous_value`, `epoch`, and the additive `observed_value`, which is set only where a threshold helper sat outside the range LocalSky can represent and was adopted at the nearest end. `outcome` is one of `adopted`, `not_found`, `unreadable` or `kept_local` (LocalSky's own store already held an operator answer). Every outcome retires that entity's read. Additive `controls_persisted` on the same snapshot: true when a persistence database is mounted, i.e. the four operator controls have somewhere to land. The migration notice reads it to tell a control that can never be adopted here apart from one that was not answering when the pass looked; absent reads false. Additive `ha_adoption_awaiting_config` on the same snapshot: true while the pass cannot run because the install has no `localsky.toml` to record it in (zones from `LOCALSKY_ZONES`, no config file), so every helper read is still live; absent reads false.
+**1.25.0** (the engine stops reading Home Assistant; the soil deficit stops being fabricated). Minor, following the 1.18.0 honest-unknowns precedent. Adds `ha_adoption[]` to the irrigation snapshot, one entry per retired Home Assistant helper; empty on every standalone install. Each entry carries `entity`, `outcome`, `target`, `adopted_value`, `previous_value`, `epoch`, and the additive `observed_value`, which is set only where a threshold helper sat outside the range LocalSky can represent and was adopted at the nearest end. `outcome` is one of `adopted`, `not_found`, `unreadable` or `kept_local` (LocalSky's own store already held an operator answer). Every outcome retires that entity's read. Additive `controls_persisted` on the same snapshot: true when a persistence database is mounted, i.e. the four operator controls have somewhere to land. The migration notice reads it to tell a control that can never be adopted here apart from one that was not answering when the pass looked; absent reads false. Additive `ha_adoption_awaiting_config` on the same snapshot: true while the pass cannot run because the install has no `localsky.toml` to record it in (zones from the environment zone list (removed in 0.9.0), no config file), so every helper read is still live; absent reads false.
 
 Three fields become nullable on the irrigation snapshot: `zones[].bucket_mm`, `zones[].math.bucket_mm` and `zones[].today_run_minutes`. The two bucket fields' only producer was the Home Assistant entity `sensor.smart_irrigation_<slug>`, which the engine no longer reads for any purpose, so the old bare number published a hardcoded `0.0` on every install as though it were a measurement. `today_run_minutes` has no producer on any install either: nothing sums a zone's valve-open minutes since local midnight, so it is `null` everywhere. `null` is the documented unknown; all three fields are still present in the response. A client that treated the old `0.00` as data was reading a defect.
 
@@ -61,7 +125,7 @@ Behavior changes with no shape change:
 - `water_budgets[]` no longer lets HA `input_number` helpers outrank LocalSky's own `weekly_budget_in` and `sessions_per_week`.
 - The 24-hour rain-defer gate weights forecast rain by precipitation probability, and reads the configured `engine.session_rain_defer_in` instead of a compile-time constant. Both make `water_budgets[].today_seconds` and `today_reason` move for the same weather.
 - A smart-morning dispatch that fails now writes a `skipped` run row carrying the controller's error text, so `GET /api/v1/history/runs` shows failed mornings. That row is excluded from the boot dedupe, so a restart inside the catch-up window can still dispatch a morning whose every row is a dispatch failure. A scheduler skip row (a per-zone verdict, a manual stop, a missed window) is not excluded and still marks the morning handled. The dedupe's other arm is unchanged and day-wide: two or more zones with a completed row still mark the whole morning handled, so a sequence that failed partway through does not re-dispatch its remaining zones until the next window.
-- Dispatch skips any zone whose snapshot reports `running == true` with `running_known == true`, on the scheduled path and the catch-up path alike, so an open valve is never commanded open again. `running_known == false` (a fire-and-forget controller such as `mqtt_command`) is not treated as running.
+- Dispatch skips any zone whose snapshot reports `running == true` with `running_known == true`, on the scheduled path and the catch-up path alike, so an open valve is never commanded open again. `running_known == false` (a fire-and-forget controller such as `mqtt_command`) is not treated as running. The claim is confirmed against the controller before the zone is dropped from the morning: a cloud controller is polled on the interval it declares, so a zone whose run ended in the minute before would otherwise be skipped for the day. A controller that cannot answer keeps the claim.
 - `ZoneConfig.sessions_per_week` is constrained to `1..=7`. `PUT /api/config` answers `422` with the new validation error `zone_sessions_per_week_range`, and `POST /api/v1/config/zones/apply` refuses an out-of-range value the way it refuses other out-of-band fields. Sessions space at `floor(7 / sessions_per_week)` days, so a larger value yielded a zero-day interval and disabled the gate that stops a zone watering twice in one day. A value already on disk is clamped at read time rather than made unloadable.
 - `zones[].math.cap_binding` now reports that the per-run ceiling is what set tonight's minutes: `scheduled_seconds` equals `max_duration_seconds` and some stage wanted more than that (the weekly allocator's ideal session, the seasonal dial, or a condition-rule multiplier). It is `false` whenever no run is planned, so a zone held at zero by spacing, a rain defer, budget mode off, or an Override schedule does not read as shorted by its cap. Before this release the field was `raw_seconds > max_duration_seconds`, and `raw_seconds` came only from the Smart Irrigation soil deficit, so it could go true only on a Home Assistant install carrying `sensor.smart_irrigation_<slug>`; a standalone install read the absent entity as a `0.0` deficit and the field was always `false`.
 
@@ -97,13 +161,14 @@ An operator upgrading a Home Assistant install should check the boot log once. A
 
 ### `GET /api/v1/info`
 
-Returns the running service version, the API contract version, and the mount prefix. Hit it first when probing a LocalSky instance. Always public, even when authentication is required.
+Returns the running service version, compiled source revision, API contract version, and mount prefix. Hit it first when probing a LocalSky instance. Always public, even when authentication is required. `build_revision` is the exact source commit when the build supplies `GIT_SHA`, otherwise `dev`.
 
 ```json
 {
   "service": "localsky",
   "service_version": "0.7.0",
-  "api_version": "1.15.0",
+  "build_revision": "example-source-revision",
+  "api_version": "{{LOCALSKY_API_VERSION}}",
   "api_prefix": "/api/v1",
   "license": "Apache-2.0",
   "repository": "https://github.com/silenthooligan/localsky",
@@ -363,7 +428,7 @@ Used during first-run; always mounted, and **public only until the first account
 | `/api/v1/wizard/apply` | POST | Validate the draft and write it as the live config |
 | `/api/v1/wizard/state` | GET | Wizard progress state |
 | `/api/v1/wizard/seed_current` | POST | Seed the draft from the current live config (re-running the wizard) |
-| `/api/v1/wizard/test_source` | POST | `{ "source": <SourceEntry> }`; structural validation of the entry. No live probe per kind yet: receiver sources confirm via live readings on the Sensors hub, polled sources within one cycle after apply |
+| `/api/v1/wizard/test_source` | POST | Deprecated since 0.9.0 (see the table above). `{ "source": <SourceEntry> }`; structural validation only, answers ok for any well-formed entry. Receiver sources confirm via live readings on the Sensors hub, polled sources within one cycle after apply |
 | `/api/v1/wizard/test_controller` | POST | `{ "controller": <ControllerEntry> }`; live connect + status read. Returns `{ ok, reachable, master_enabled, water_level_pct, zone_count, firmware }`, `502` if unreachable, `422` if unsupported. Rachio entries add `discovered_device` (the account's first device, resolved when the entry has a token but no device id) and `rate_limit_remaining`; redacted secrets in the posted entry are restored from the stored config by entry id (`400 unmatched_redacted_secret` when unresolvable) |
 | `/api/v1/wizard/test_llm` | POST | `{ "llm": <LlmConfig> }`; live probe of the configured LLM provider |
 | `/api/v1/wizard/scan_zones` | POST | `{ "controller": <ControllerEntry> }`; zone discovery for controllers that support it. Returns `{ "zones": [ { "station_id", "name" } ] }`. Callers use it to offer the controller's own zones as choices: the zone editor's station picker, the controller editor's bind table, and the setup wizard's zone import. A redacted secret in the posted entry is restored from the stored config by entry id (`400 unmatched_redacted_secret` when no stored value matches). `422 controller_unsupported` when the kind is not probeable at all (`mqtt_command`, `ha_service_call`, `esphome_native`); `502 zone_scan_failed` when the controller is unreachable, rejects the credential, is rate limited, **or has no zone-discovery endpoint** (`hydrawise`, `bhyve`, `rainbird`, whose detail reads "operation not supported by this controller"). A client cannot tell "this kind cannot enumerate" from "this controller is offline" by status alone, so gate on the kind before calling: only `rachio`, `opensprinkler_direct`, `http_generic` and `dry_run` can enumerate |
@@ -433,11 +498,32 @@ A failed dispatch answers `{ "error": "<what happened>", "code": "<stable discri
 
 A cloud controller's zone map is keyed by the slugified vendor zone name, while dispatch looks it up by the LocalSky zone slug, and nothing forces the two to agree. That is what `mapped_zones` exists for: on a `zone_unknown` it shows exactly which keys the controller can dispatch, next to the slug that missed. The lookup is deliberately exact, with no name-similarity fallback, because guessing which valve a near-match meant risks opening the wrong one.
 
-> `run_sequence_now` was removed along with Irrigation Unlimited support. The action still deserializes so an old client gets a clear **`410 Gone`** (`{"error": "run_sequence_now was removed along with Irrigation Unlimited support; use per-zone Run instead"}`) rather than a parse error. Use a per-zone `run` instead.
+> `run_sequence_now` (the Irrigation Unlimited sequence action) is gone. From 0.9.0 the kind is unknown to the parser and answers `400`; use a per-zone `run` instead.
+
+### `GET /api/v1/health?strict=1`
+
+`/api/v1/health` always answers `200` with the status in the body (`ok`, `degraded`, `wizard`). Add `?strict=1` and the status code follows the status: `503` unless it is `ok`, for monitors that alert on the code alone. `location_configured` says whether a place is set; each source carries a `note` when LocalSky is not polling it by its own choice.
+
+### `GET /api/v1/diagnostics`
+
+One JSON bundle for a bug report: `info`, `health` (full detail), `config` with secrets redacted, the current `decision_trace`, and `logs` (the last 300 lines). Every secret value the config redaction knows is scrubbed from the whole bundle, log lines included. Privileged like the config surface.
+
+### `GET /metrics`
+
+Prometheus exposition. Besides the refresh, verdict and controller counters, every poll-style source records `localsky_source_fetch_total{source,outcome}` and the latency histogram `localsky_source_fetch_seconds{source}`. `LOCALSKY_LOG_FORMAT=json` switches the process log to one JSON object per line.
+
+The local 0.9.0 snapshot also adds `water_plan[]`: a progressive daily scenario
+with date, optional start/finish, forecast and expected rain, evidence quality,
+and per-zone runtimes, reasons, depletion bounds and plant demand. Forecast water
+in these rows never becomes an observed ledger entry. When no positive run is
+projected, `next_run_state` is `no_water_planned`, `next_run_epoch` is zero and
+`next_run_day_offset` is null. A zero-minute finish boundary is not a watering start.
+`water_budgets[].soil_depletion_range_mm` preserves uncertain initial-state bounds;
+`soil_depletion_mm` remains null until the point converges.
 
 ### `GET /api/v1/irrigation/history?days=30`
 
-Run history window, counted backward from now. `days` defaults to 30 and clamps to 1..365.
+Run and daily-decision history. `days` defaults to 30; `days=0` returns all retained records. Positive ranges are bounded to 36,500 days. The chart and accuracy endpoints keep their own shorter limits.
 
 ```json
 {
@@ -449,17 +535,33 @@ Run history window, counted backward from now. `days` defaults to 30 and clamps 
 }
 ```
 
-Rows with a non-null `skip_reason` are skip events rather than completed runs. `source` and `status` (1.21.0, additive) carry the row's provenance so clients can reduce watering minutes the way the engine does: watering evidence is `status = "completed"` with source `ha_refresher`, `manual`, or `manual:<id>`; `dry_run` (and `dry_run:<id>`) rows are pretend water and `smart_morning` rows are skip markers. A manually started run appears twice (the request row and the observed hardware activity); minute totals should cluster overlapping rows rather than sum them, which is exactly what the app's own charts do.
+Rows with a non-null `skip_reason` are skip events. Delivered water is recorded
+by completed or aborted runs, including `smart_morning`, manual and observer
+sources. Use session identities and interval unions to avoid counting the request
+and hardware observation twice. `dry_run` records never represent applied water.
+
+The additive `daily` array contains `{ date_local, epoch, kind, zones }`.
+Each zone carries its slug/name, planned seconds, reason code, reason and water-need
+explanation. `kind` is `scheduled`, `scheduled_legacy`, `missed_window`, or
+`recorded_decision`. These are planning evidence; actual run rows determine water
+delivered. Generic legacy weather holds cannot prove a valve dispatch was skipped.
 
 ### `GET /api/v1/irrigation/decisions?days=30`
 
-Verdict-transition history: one record per change of the skip-check verdict, so you can answer "did we actually skip on day X, and why" weeks later. Same `days` parameter semantics as `/history`.
+Verdict-transition history: records changes in the continuously evaluated engine
+verdict. `days` defaults to 30 and clamps to 1..365. These records describe the
+engine's decision at the recorded instant; the daily journal and run log provide
+the scheduled morning and delivery evidence.
 
 ### `GET /api/v1/irrigation/export?days=365&format=csv`
 
 Portable history export. `format=csv` (the default) streams the run/skip events as `timestamp_utc,zone,event,duration_s,reason` rows; `format=json` returns the full `{ from_epoch, to_epoch, runs, decisions }` structure. `days` defaults to 365 and clamps to 1..3650. Served with a `Content-Disposition: attachment` header, so a browser hit downloads a file.
 
 ### `GET /api/v1/irrigation/accuracy?days=30`
+
+Only completed days in the deployment timezone enter the matched/scored tally.
+Today and future-dated records retain their forecast and observed-so-far values
+with `correct: null` until the local day ends; partial rain is never a final miss.
 
 The forecast-accuracy scoreboard: one row per local day pairing that morning's verdict with the rain that actually fell, plus the matched/scored tally. `days` defaults to 30 and clamps to 1..365. Like `/history` and `/decisions`, this mounts only when the history database is available.
 
@@ -494,16 +596,16 @@ The per-zone tuning report: a window of recorded outcomes reduced to at most one
     "scored_days": 4,
     "confirmed_days": 3,
     "min_scored_days": 3,
-    "line": "Skipped 4 days for forecast rain in the last 30; rain came 3 of 4.",
+    "line": "Forecast rain prompted hold verdicts on 4 days in the last 30; rain followed on 3 of 4.",
     "reactive_days": 2,
-    "reactive_line": "Skipped 2 day(s) for rain already falling or on the ground in the last 30."
+    "reactive_line": "Hold verdicts for rain already falling or on the ground: 2 days in the last 30."
   }
 }
 ```
 
 - `status` is `recommendation`, `ok`, or `insufficient_data`; `lines` carries the cadence line, the water-balance term lines (observed rain, applied irrigation, forecast credit, each with its source rung), and each check's specific not-enough-data state.
 - `current_value` / `suggested_value` are JSON values; `null` as a suggestion means "clear the override" (restore the default).
-- `scorecard.scored_days` / `confirmed_days` cover FORECAST rain skips only (rain expected within 4 hours, tomorrow rain, 3-day rain) and are `null` until at least `min_scored_days` such days could be judged. Reactive rain skips (rain already falling or already on the ground) confirm themselves, so they are never scored; they ride `reactive_days` / `reactive_line` as a separate count (`null` / empty until one exists).
+- The scorecard reduces decision history to the first recorded verdict per configured local day. It evaluates rain-related hold verdicts, not actual watering or skipped automatic runs; use the run log for recorded outcomes. `scored_days` / `confirmed_days` cover forecast rain (within 4 hours, tomorrow, or 3 days) and are `null` until at least `min_scored_days` can be judged. Reactive holds for rain already falling or on the ground are counted separately in `reactive_days` / `reactive_line` (`null` / empty until one exists).
 - Applying a recommendation from a non-default window must echo the report's `window_days` (see the apply endpoint below): window-dependent checks derive different suggestions at different windows.
 - `dismissed: true` (1.21.0) marks a zone with at least one snoozed or dismissed suggestion. The silenced suggestion is skipped inside the ranked pick, so a lower-ranked suggestion may still occupy `recommendation`; the last entry of `lines` is the muted annotation, and `dismissed_fields` names the silenced config fields for the undismiss call.
 
@@ -517,7 +619,7 @@ What-if evaluation of the skip-check against a supplied scenario, without touchi
 
 ### `GET /api/v1/irrigation/shadow/snapshot` and `GET /api/v1/irrigation/shadow/diff`
 
-Shadow mode: the native (standalone) snapshot built alongside the Home Assistant one for comparison. Empty unless `shadow_native` is enabled.
+Deprecated since 0.9.0. Shadow mode (the native snapshot built beside the Home Assistant one) is gone; both routes keep their shape and always answer `{"shadow":"disabled"}`. See the deprecation table above.
 
 ### `GET /api/v1/irrigation/explanation`
 
@@ -615,7 +717,7 @@ Liveness + readiness, always reachable. Authenticated (or auth-disabled) callers
   "status": "ok",
   "config_present": true,
   "version": "0.7.0",
-  "schema_version": 1,
+  "schema_version": 2,
   "uptime_s": 1234,
   "subsystems": { "config_store": "ok", "persistence": "ok" },
   "sources": [
@@ -720,3 +822,17 @@ else:
 ```
 
 JavaScript / shell / Rust clients follow the same shape.
+
+
+The irrigation snapshot's additive `current_weather` map carries the selected
+current temperature (`air_temp_f`), sustained wind (`wind_mph`) and humidity
+(`rh_pct`), plus reported gust, lull, rapid wind and direction fields. Each entry includes `value`, `source_id`, `observed_epoch`,
+`max_age_s`, `measured` and `selection_reason`. Age uses the provider's report
+time, not the HTTP poll. NWS station reports are measured despite arriving over
+the internet; modeled current intervals remain estimated. If a selected report
+expires, the engine can use available current-hour forecast fields and marks
+`live_data` degraded. Incomplete current evidence holds irrigation.
+
+A populated current response supplies `current_weather` as an object; an empty
+object means no accepted reports. `null` or an absent field means the producer
+has not supplied this evidence (including older response versions).

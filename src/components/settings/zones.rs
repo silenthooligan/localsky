@@ -20,6 +20,7 @@ use crate::components::settings_ui::{
 };
 use crate::components::ui::{
     Button, ConfirmSheet, FormField, HelpHint, Panel, PhotoField, SegmentedControl, Sheet,
+    SheetVariant,
 };
 use crate::components::units_fmt::{
     area_unit, depth_unit, depth_value_mm, fmt_area_sqft, fmt_rain_amount, fmt_rain_rate_mm,
@@ -51,10 +52,21 @@ fn parse_zone_form_state(search: &str) -> FormState {
 
 #[component]
 pub fn SettingsZones() -> impl IntoView {
+    view! { <ZoneEditorHost show_list=true/> }
+}
+
+/// The same editor on Settings and Zones. Mount once at page scope so live
+/// zone updates cannot replace an open draft or its save notification.
+#[component]
+pub fn ZoneEditorHost(#[prop(default = false)] show_list: bool) -> impl IntoView {
     let config_json = RwSignal::new(serde_json::Value::Null);
+    let accepted_config = RwSignal::new(serde_json::Value::Null);
+    #[cfg(not(feature = "hydrate"))]
+    let _ = accepted_config;
     let saving = RwSignal::new(false);
     let result_msg = RwSignal::new(String::new());
     let result_ok = RwSignal::new(false);
+    let save_completed = RwSignal::new(0u64);
     // Persistent, dismissible restart-required banner (the controllers-page
     // pattern). Zone add/remove and station remaps are boot-wired, so their
     // saves return restart_reasons; scalar edits (including the run limit)
@@ -79,20 +91,23 @@ pub fn SettingsZones() -> impl IntoView {
         #[cfg(feature = "hydrate")]
         {
             wasm_bindgen_futures::spawn_local(async move {
-                match save_config(candidate).await {
-                    Ok(reasons) => {
+                match crate::components::config_client::put_config(&candidate).await {
+                    Ok(outcome) => {
+                        accepted_config.set(candidate);
                         crate::components::settings_ui::toast_saved(
                             result_msg,
                             result_ok,
-                            "Saved. Engine picks up changes on next tick.",
+                            outcome.save_confirmation(),
                         );
                         // A zone-set or station-binding change is boot-wired:
                         // surface the server's restart reasons; an empty list
                         // (hot-reloaded change) clears the banner.
                         restart_dismissed.set(false);
-                        restart_reasons.set(reasons);
+                        restart_reasons.set(outcome.restart_reasons);
+                        save_completed.update(|n| *n += 1);
                     }
                     Err(e) => {
+                        config_json.set(accepted_config.get_untracked());
                         result_ok.set(false);
                         result_msg.set(e);
                     }
@@ -137,6 +152,11 @@ pub fn SettingsZones() -> impl IntoView {
     // navigates (URL) instead of poking `add_open` directly. The wizard omits
     // it and keeps the direct-signal behavior.
     let close_form: Callback<()> = Callback::new(move |()| nav_form.run(FormState::Closed));
+    Effect::new(move |_| {
+        if save_completed.get() > 0 {
+            close_form.run(());
+        }
+    });
     let add_open = RwSignal::new(false);
     // The real config key being edited (resolved from the URL slug by the
     // seeding Effect; hyphen/underscore-normalized). The form reads this for
@@ -176,6 +196,39 @@ pub fn SettingsZones() -> impl IntoView {
     let new_soil_sensor = RwSignal::new(String::new());
     let new_soil_min = RwSignal::new(30.0f64);
     let new_soil_sat = RwSignal::new(70.0f64);
+
+    // Everything the form holds, in one shape, so "has this been edited"
+    // is a comparison rather than eighteen separate checks.
+    let draft_state = move || {
+        vec![
+            new_slug.get(),
+            new_display_name.get(),
+            new_species.get(),
+            new_soil.get(),
+            new_area.get().to_string(),
+            new_sprinkler.get(),
+            new_precip.get(),
+            new_max_run.get(),
+            new_weekly_budget.get(),
+            new_sessions.get(),
+            new_rain_cap.get(),
+            new_sched_model.get(),
+            new_controller.get(),
+            new_station.get(),
+            new_photo_url.get(),
+            new_soil_sensor.get(),
+            new_soil_min.get().to_string(),
+            new_soil_sat.get().to_string(),
+        ]
+    };
+    // The draft as the seeding left it. Empty means no open form to
+    // compare against. Set one line after the reset that produces it, so
+    // it can never be taken mid-seed.
+    let baseline: RwSignal<Vec<String>> = RwSignal::new(Vec::new());
+    let form_is_dirty = Signal::derive(move || {
+        let base = baseline.get();
+        !base.is_empty() && draft_state() != base
+    });
     // Soil channels from /api/v1/sensors/soil: (id, label, current_pct, source).
     // current_pct + source let the zone show the assigned sensor's live reading
     // and whether it's native or HA-bridged.
@@ -196,6 +249,7 @@ pub fn SettingsZones() -> impl IntoView {
             match &state {
                 FormState::Closed => {
                     add_open.set(false);
+                    baseline.set(Vec::new());
                     if seeded_key.get_untracked().is_some() {
                         seeded_key.set(None);
                         editing_slug.set(None);
@@ -222,6 +276,7 @@ pub fn SettingsZones() -> impl IntoView {
                             new_soil_sat,
                         );
                         seeded_key.set(Some(state));
+                        baseline.set(draft_state());
                     }
                 }
                 FormState::Edit(url_slug) => {
@@ -304,6 +359,9 @@ pub fn SettingsZones() -> impl IntoView {
                     editing_slug.set(Some(slug));
                     add_open.set(true);
                     seeded_key.set(Some(state));
+                    // Same rule as the add path: the baseline is taken one
+                    // line after the seeding that produces it.
+                    baseline.set(draft_state());
                 }
             }
         });
@@ -336,6 +394,9 @@ pub fn SettingsZones() -> impl IntoView {
     #[cfg(feature = "hydrate")]
     {
         Effect::new(move |_| {
+            if !show_list && form_state.get() == FormState::Closed {
+                return;
+            }
             wasm_bindgen_futures::spawn_local(async move {
                 if let Ok(resp) = gloo_net::http::Request::get("/api/v1/sensors/soil")
                     .send()
@@ -363,19 +424,32 @@ pub fn SettingsZones() -> impl IntoView {
         });
         Effect::new(move |_| {
             let _ = load_retry.get();
+            if !show_list && form_state.get() == FormState::Closed {
+                return;
+            }
             wasm_bindgen_futures::spawn_local(async move {
-                match fetch_config().await {
+                match crate::components::config_client::get_config().await {
                     Ok(cfg) => {
                         // Pre-select first available controller for new zones.
+                        // This lands AFTER the draft was seeded, so it moves
+                        // a field out from under the dirty baseline. Carry
+                        // the baseline with it, but only while the form
+                        // still matches it: a default arriving late must
+                        // not quietly absolve edits already typed.
                         if let Some(ctrl) = cfg
                             .get("controllers")
                             .and_then(|v| v.as_array())
                             .and_then(|a| a.first())
                         {
                             if let Some(id) = ctrl.get("id").and_then(|v| v.as_str()) {
+                                let untouched = draft_state() == baseline.get_untracked();
                                 new_controller.set(id.to_string());
+                                if untouched {
+                                    baseline.set(draft_state());
+                                }
                             }
                         }
+                        accepted_config.set(cfg.clone());
                         config_json.set(cfg);
                         load_error.set(None);
                     }
@@ -415,16 +489,49 @@ pub fn SettingsZones() -> impl IntoView {
     // being edited. Out: dismissing the sheet (its X, the backdrop, Escape)
     // routes back through `close_form`, so the URL and the draft reset the
     // same way Cancel does.
-    let add_sheet_open = RwSignal::new(false);
+    // One drawer for both jobs. Editing used to render the same form
+    // inline under its zone card, which is what the deleted
+    // `.zone-edit-inline` rule and the form's own second Cancel existed
+    // for.
+    let editor_open = RwSignal::new(false);
     Effect::new(move |_| {
-        add_sheet_open.set(add_open.get() && editing_slug.get().is_none());
+        editor_open.set(add_open.get() || editing_slug.get().is_some());
     });
     Effect::new(move |_| {
-        if !add_sheet_open.get()
-            && add_open.get_untracked()
-            && editing_slug.get_untracked().is_none()
+        if !editor_open.get()
+            && (add_open.get_untracked() || editing_slug.get_untracked().is_some())
         {
             close_form.run(());
+        }
+    });
+    // The drawer names what is being edited, so the title is reactive.
+    let editor_title = Signal::derive(move || match editing_slug.get() {
+        Some(slug) => {
+            let label = config_json
+                .get()
+                .get("zones")
+                .and_then(|z| z.get(&slug))
+                .and_then(|z| z.get("display_name"))
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+                .unwrap_or(slug);
+            format!("Editing {label}")
+        }
+        None => "Add a zone".to_string(),
+    });
+
+    let discard_open = RwSignal::new(false);
+    let ask_discard = Callback::new(move |()| discard_open.set(true));
+    let do_discard = Callback::new(move |()| {
+        editor_open.set(false);
+        close_form.run(());
+    });
+    let cancel_form = Callback::new(move |()| {
+        if form_is_dirty.get_untracked() {
+            ask_discard.run(());
+        } else {
+            do_discard.run(());
         }
     });
 
@@ -444,19 +551,6 @@ pub fn SettingsZones() -> impl IntoView {
                     .get(&slug)
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
-                // The editor for THIS zone renders directly beneath its own
-                // row, so clicking Edit opens something the operator can see
-                // without scrolling past the rest of the yard.
-                let editing_this = {
-                    let slug = slug.clone();
-                    move || editing_slug.get().as_deref() == Some(slug.as_str())
-                };
-                let zone_label = zone
-                    .get("display_name")
-                    .and_then(|v| v.as_str())
-                    .filter(|v| !v.is_empty())
-                    .unwrap_or(slug.as_str())
-                    .to_string();
                 view! {
                     <ZoneCard
                         slug=slug
@@ -466,62 +560,31 @@ pub fn SettingsZones() -> impl IntoView {
                         persist=persist
                         prefs=p
                     />
-                    <Show when=editing_this.clone()>
-                        <li class="settings-card-list__item zone-edit-inline">
-                            <ZoneForm
-                                panel_title=format!("Editing {zone_label}")
-                                config_json=config_json
-                                new_slug=new_slug
-                                new_display_name=new_display_name
-                                new_species=new_species
-                                new_soil=new_soil
-                                new_area=new_area
-                                new_sprinkler=new_sprinkler
-                                new_precip=new_precip
-                                new_max_run=new_max_run
-                                new_weekly_budget=new_weekly_budget
-                                new_sessions=new_sessions
-                                new_rain_cap=new_rain_cap
-                                new_sched_model=new_sched_model
-                                new_controller=new_controller
-                                new_station=new_station
-                                new_photo_url=new_photo_url
-                                new_soil_sensor=new_soil_sensor
-                                new_soil_min=new_soil_min
-                                new_soil_sat=new_soil_sat
-                                soil_sensor_opts=soil_sensor_opts
-                                editing_slug=editing_slug
-                                add_open=add_open
-                                on_close=close_form
-                                result_msg=result_msg
-                                result_ok=result_ok
-                                persist=persist
-                            />
-                        </li>
-                    </Show>
                 }
             })
             .collect_view()
     };
 
     view! {
-        <div class="settings-page">
+        <div class=if show_list { "settings-page" } else { "zone-editor-host" }>
+            <Show when=move || show_list>
             <header class="settings-page__header">
                 <a class="settings-page__back" href="/settings">"← Settings"</a>
                 <h1 class="settings-page__title">"Zones"<HelpHint topic="zones"/></h1>
                 <p class="settings-page__subtitle">
-                    "One zone = one chunk of yard tied to one valve. The weekly water balance decides when it waters and how much; the measured precip rate turns that depth into minutes, and the soil texture sets cycle-and-soak. Species and soil also feed the ET math shown on the zone page. "
+                    "One zone is one chunk of yard on one valve. What you plant, the soil, and the measured precip rate decide how long it runs. "
                     "See "
                     <a href=doc_url("grass-species")
                         target="_blank" rel="noopener noreferrer"
-                        style="color: var(--accent)">"the species catalog"</a>
+                        class:u-accent=true>"the species catalog"</a>
                     " and "
                     <a href=doc_url("soil-textures")
                         target="_blank" rel="noopener noreferrer"
-                        style="color: var(--accent)">"soil textures"</a>
+                        class:u-accent=true>"soil textures"</a>
                     " for reference."
                 </p>
             </header>
+            </Show>
 
             <crate::components::settings::RestartBanner reasons=restart_reasons dismissed=restart_dismissed/>
 
@@ -529,6 +592,7 @@ pub fn SettingsZones() -> impl IntoView {
                 when=move || load_error.get().is_none()
                 fallback=move || view! { <SettingsLoadError error=load_error retry=load_retry/> }
             >
+            <Show when=move || show_list>
             <Panel title="Configured zones".to_string()>
                 <ul class="settings-card-list">
                     {zones_view}
@@ -559,18 +623,21 @@ pub fn SettingsZones() -> impl IntoView {
                 </Button>
                 </div>
             </Panel>
+            </Show>
 
-            // ADD only. An EDIT renders inline, directly under the zone it
-            // belongs to (see `zones_view`): a form that opened below every
-            // zone left the operator scrolling past the whole yard to find
-            // the editor they just asked for, and on a fourteen-zone yard it
-            // was off screen entirely.
-            // Mounted only when nothing is being edited. The sheet keeps its
-            // children in the DOM while it animates closed, so leaving it
-            // mounted during an edit would put two #zone-form-panel ids on
-            // the page and the scroll-into-view would find the hidden one.
-            <Show when=move || editing_slug.get().is_none()>
-            <Sheet open=add_sheet_open title="Add a zone" aria_label="Add a zone">
+            // Add and edit share a viewport-sized drawer in either page.
+            // Route roots animate with transforms, which establish a containing
+            // block even for fixed descendants. Mount the editor at the viewport
+            // so neither the page's width nor its scroll height can trap it.
+            <leptos::portal::Portal>
+            <div class="zone-editor-host">
+            <Sheet
+                open=editor_open
+                title=editor_title
+                variant=SheetVariant::Drawer
+                dirty=form_is_dirty
+                on_dismiss_request=ask_discard
+            >
                 <ZoneForm
                     panel_title=String::new()
                     config_json=config_json
@@ -596,12 +663,26 @@ pub fn SettingsZones() -> impl IntoView {
                     editing_slug=editing_slug
                     add_open=add_open
                     on_close=close_form
+                    on_cancel=cancel_form
+                    defer_close=true
+                    saving=Signal::derive(move || saving.get())
                     result_msg=result_msg
                     result_ok=result_ok
                     persist=persist
                 />
             </Sheet>
-            </Show>
+            <ConfirmSheet
+                visible=discard_open
+                title="Discard this zone?"
+                body=Signal::derive(|| {
+                    "You have typed something that has not been saved.".to_string()
+                })
+                confirm_label=Signal::derive(|| "Discard".to_string())
+                danger=true
+                on_confirm=do_discard
+            />
+            </div>
+            </leptos::portal::Portal>
             </Show>
 
             <SettingsResult result_msg=result_msg result_ok=result_ok/>
@@ -615,7 +696,7 @@ pub fn SettingsZones() -> impl IntoView {
 /// instead of nesting into the page. Owns the "add to in-memory config"
 /// handler; the page still owns the load (Effect) and the persist (Save
 /// all changes -> PUT).
-/// Shared by the settings page and the first-run wizard (P2-1). The wizard
+/// Shared by the settings page and the first-run wizard. The wizard
 /// passes its draft `config` object as `config_json` and a draft-saving
 /// `persist`, so the same form creates a zone in onboarding as in settings.
 #[component]
@@ -652,6 +733,11 @@ pub fn ZoneForm(
     /// to setting `add_open` directly (its old behavior).
     #[prop(optional)]
     on_close: Option<Callback<()>>,
+    /// Explicit Cancel uses the host's same dirty-draft check as X / Escape.
+    #[prop(optional)]
+    on_cancel: Option<Callback<()>>,
+    #[prop(default = false)] defer_close: bool,
+    #[prop(optional, into)] saving: Signal<bool>,
     result_msg: RwSignal<String>,
     result_ok: RwSignal<bool>,
     persist: Callback<()>,
@@ -672,10 +758,8 @@ pub fn ZoneForm(
     // is exactly the "cache for the editing session" the vendor request
     // budget wants.
     let station_scan: RwSignal<StationScan> = RwSignal::new(StationScan::default());
-    // The selected controller's kind, tracked REACTIVELY. controller_options()
-    // is called non-reactively at mount, so switching controllers has to be
-    // observed here or the picker would keep showing the previous
-    // controller's zones.
+    // Track the selected controller's kind independently of the asynchronously
+    // loaded option list, so switching controllers invalidates its zone scan.
     let selected_kind = Signal::derive(move || {
         let id = new_controller.get();
         config_json.with(|cfg| {
@@ -717,30 +801,32 @@ pub fn ZoneForm(
                 zones.insert(slug, entry);
             }
         });
-        reset_zone_draft(
-            editing_slug,
-            new_slug,
-            new_display_name,
-            new_area,
-            new_precip,
-            new_max_run,
-            new_weekly_budget,
-            new_sessions,
-            new_rain_cap,
-            new_sched_model,
-            new_station,
-            new_photo_url,
-            new_soil_sensor,
-            new_soil_min,
-            new_soil_sat,
-        );
-        close();
+        if !defer_close {
+            reset_zone_draft(
+                editing_slug,
+                new_slug,
+                new_display_name,
+                new_area,
+                new_precip,
+                new_max_run,
+                new_weekly_budget,
+                new_sessions,
+                new_rain_cap,
+                new_sched_model,
+                new_station,
+                new_photo_url,
+                new_soil_sensor,
+                new_soil_min,
+                new_soil_sat,
+            );
+            close();
+        }
         // Commit immediately -- persist this change now instead of staging it
         // for a separate "Save" the user might never click.
         persist.run(());
     };
     let on_add = move |_| {
-        let slug = new_slug.get().trim().to_lowercase().replace(' ', "_");
+        let slug = crate::text::slugify(&new_slug.get());
         if slug.is_empty() {
             result_ok.set(false);
             result_msg.set("Zone slug is required".into());
@@ -767,9 +853,7 @@ pub fn ZoneForm(
         }
         if new_controller.get().is_empty() {
             result_ok.set(false);
-            result_msg.set(
-                "Controller is required; configure one under /settings/controllers first".into(),
-            );
+            result_msg.set("Controller is required; add one on the Devices page first".into());
             return;
         }
         let area = new_area.get();
@@ -1211,28 +1295,7 @@ pub fn ZoneForm(
         }
     };
 
-    let on_cancel = move |_| {
-        reset_zone_draft(
-            editing_slug,
-            new_slug,
-            new_display_name,
-            new_area,
-            new_precip,
-            new_max_run,
-            new_weekly_budget,
-            new_sessions,
-            new_rain_cap,
-            new_sched_model,
-            new_station,
-            new_photo_url,
-            new_soil_sensor,
-            new_soil_min,
-            new_soil_sat,
-        );
-        close();
-    };
-
-    // P2-4: presets show their work. The chosen species' FAO-56 params and the
+    // Presets show their work. The chosen species' FAO-56 params and the
     // sprinkler-derived precip estimate render inline, so the three expert knobs
     // (species / sprinkler / precip) become one confident click with the numbers
     // visible. Reads the shared, slug-keyed agronomy catalog (the same source the
@@ -1293,7 +1356,7 @@ pub fn ZoneForm(
     view! {
         <div id="zone-form-panel"><Panel title=panel_title>
             <Show when=move || editing_slug.get().is_some()>
-                <p class="settings-page__subtitle" style="margin: 0 0 0.75rem">
+                <p class="settings-page__subtitle" class:u-mb3=true>
                     "Editing "
                     <code>{move || editing_slug.get().unwrap_or_default()}</code>
                     ". Save below applies to this slug; the slug field is read-only."
@@ -1316,7 +1379,7 @@ pub fn ZoneForm(
                         let v = event_target_value(&ev);
                         new_display_name.set(v.clone());
                         if editing_slug.get().is_none() {
-                            new_slug.set(slugify(&v));
+                            new_slug.set(crate::text::slugify(&v));
                         }
                     }
                 />
@@ -1324,7 +1387,7 @@ pub fn ZoneForm(
 
             <FormField
                 label="Grass species".to_string()
-                helptext="Picks the Kc seasonal curve, root depth, and MAD threshold.".to_string()
+                helptext="Sets how much water the planting uses, how deep it roots, and how dry it may get before watering.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 <SegmentedControl
@@ -1379,7 +1442,7 @@ pub fn ZoneForm(
                 // imperial unit sourced from the helper (always "sq ft"), not a
                 // pref-reactive label that would desync from the stored value.
                 label=format!("Area ({})", area_unit(UnitPrefs::default()))
-                helptext="Approximate; doesn't have to be exact. Used by leak detection + flow validation when a flow meter is configured.".to_string()
+                helptext="Rough is fine. Used for leak detection and flow checks when a meter is configured.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 <input
@@ -1398,10 +1461,10 @@ pub fn ZoneForm(
 
             <FormField
                 label="Controller".to_string()
-                helptext="Which controller fires this zone. Configure controllers under /settings/controllers first.".to_string()
+                helptext="Which controller fires this zone. Add controllers on the Devices page first.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
-                <SegmentedControl
+                {move || view! { <SegmentedControl
                     value=new_controller
                     options=controller_options()
                     aria_label="Controller id".to_string()
@@ -1420,12 +1483,12 @@ pub fn ZoneForm(
                         new_station.set(String::new());
                         station_scan.set(StationScan::default());
                     })
-                />
+                /> }}
             </FormField>
 
             <FormField
                 label="Controller station".to_string()
-                helptext="Which of the controller's own zones this one fires. Pick it from the list where the controller can be asked; otherwise enter the id it uses.".to_string()
+                helptext="Which of the controller's own zones this one fires. Pick from the list, or enter the id it uses.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 // The picker, only once a real list is in hand. It shows the
@@ -1600,7 +1663,7 @@ pub fn ZoneForm(
             // reads as a fact instead of a pointer to another page.
             <FormField
                 label="Scheduling model".to_string()
-                helptext="Engine default follows the setting on the Engine page. Weekly waters toward the weekly target in sessions. Soil waters when this zone's soil deficit crosses its trigger and refills it; cadence follows soil texture and roots, and a set weekly target acts as a ceiling.".to_string()
+                helptext="Engine default follows the Engine page. Weekly waters toward the weekly target; Soil waters when this zone's deficit crosses its trigger.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 {move || {
@@ -1612,13 +1675,13 @@ pub fn ZoneForm(
                             cfg.get("engine")
                                 .and_then(|e| e.get("scheduling_model"))
                                 .and_then(|v| v.as_str())
-                                .unwrap_or("weekly")
+                                .unwrap_or("soil")
                                 .to_string(),
                         )
                     });
                     let default_label = match engine_model.as_deref() {
-                        Some("soil") => "Engine default (Soil)",
-                        Some(_) => "Engine default (Weekly)",
+                        Some("weekly") => "Engine default (Weekly)",
+                        Some(_) => "Engine default (Soil)",
                         // Before the config loads, the plain label; the
                         // resolved one takes over on load.
                         None => "Engine default",
@@ -1628,8 +1691,8 @@ pub fn ZoneForm(
                             value=new_sched_model
                             options=vec![
                                 ("".into(), default_label.into()),
-                                ("weekly".into(), "Weekly".into()),
                                 ("soil".into(), "Soil".into()),
+                                ("weekly".into(), "Weekly".into()),
                             ]
                             aria_label="Scheduling model".to_string()
                         />
@@ -1637,56 +1700,147 @@ pub fn ZoneForm(
                 }}
             </FormField>
 
-            <FormField
-                label="Weekly target (inches a week)".to_string()
-                helptext="Gross weekly depth this zone should receive. Weekly model: sizes every run, and rain counts toward the target. Soil model: a value set here becomes a ceiling on sprinkler water delivered over the trailing 7 days; rain does not count against the ceiling, and a blank or inferred target caps nothing. Blank = the starting value taken from this zone's species, shown in the box.".to_string()
-                error=Signal::derive(|| None::<String>)
-            >
-                <input
-                    type="number"
-                    class="ui-input"
-                    min="0.05"
-                    max="10"
-                    step="0.05"
-                    placeholder=move || format!("(blank for the default {:.2})", inferred_target().0)
-                    prop:value=move || new_weekly_budget.get()
-                    on:input=move |ev| new_weekly_budget.set(event_target_value(&ev))
-                />
-            </FormField>
+            // Which model governs THIS zone once the pin and the engine
+            // default are resolved. The two weekly-only knobs follow it:
+            // under soil the target is a ceiling and sessions do not
+            // exist, so the page shows the one and not the other rather
+            // than two conditionals in a helptext.
+            {
+                let soil_governed = move || {
+                    let pin = new_sched_model.get();
+                    if !pin.is_empty() {
+                        return pin == "soil";
+                    }
+                    config_json.with(|cfg| {
+                        cfg.get("engine")
+                            .and_then(|e| e.get("scheduling_model"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("soil")
+                            == "soil"
+                    })
+                };
+                let target_field = move || {
+                    // The stored string is inches, the engine's unit; a metric
+                    // viewer sees and types millimeters at this edge.
+                    let p = prefs.get();
+                    let dim = crate::components::units_fmt::Dimension::Depth;
+                    let unit = dim.unit(p);
+                    let (label, help, hint) = if soil_governed() {
+                        (
+                            format!("Weekly delivery ceiling ({unit} a week, optional)"),
+                            "The most sprinkler water this zone may receive over any \
+                             trailing 7 days. The soil deficit decides when and how much \
+                             to water; this only caps it. Rain does not count against the \
+                             ceiling. Blank = no ceiling.",
+                            "(blank for no ceiling)".to_string(),
+                        )
+                    } else {
+                        (
+                            format!("Weekly target ({unit} a week)"),
+                            "Gross weekly depth this zone should receive. Sizes every \
+                             run, and rain counts toward the target. Blank = the starting \
+                             value taken from this zone's species, shown in the box.",
+                            format!(
+                                "(blank for the default {:.*})",
+                                dim.precision(p),
+                                dim.to_display(inferred_target().0, p)
+                            ),
+                        )
+                    };
+                    let shown = move || {
+                        new_weekly_budget
+                            .get()
+                            .trim()
+                            .parse::<f64>()
+                            .map(|v| format!("{:.*}", dim.precision(p), dim.to_display(v, p)))
+                            .unwrap_or_default()
+                    };
+                    view! {
+                        <FormField
+                            label=label
+                            helptext=help.to_string()
+                            error=Signal::derive(|| None::<String>)
+                        >
+                            <input
+                                type="number"
+                                class="ui-input"
+                                min=format!("{:.*}", dim.precision(p), dim.to_display(0.05, p))
+                                max=format!("{:.*}", dim.precision(p), dim.to_display(10.0, p))
+                                step=format!("{:.*}", dim.precision(p), dim.to_display(0.05, p))
+                                placeholder=hint
+                                prop:value=shown
+                                on:input=move |ev| {
+                                    let raw = event_target_value(&ev);
+                                    new_weekly_budget.set(match raw.trim().parse::<f64>() {
+                                        Ok(v) => format!("{:.2}", dim.to_stored(v, p)),
+                                        Err(_) => raw,
+                                    })
+                                }
+                            />
+                        </FormField>
+                    }
+                };
+                view! {
+                    {target_field}
 
-            <FormField
-                label="Sessions per week".to_string()
-                helptext="How many mornings the weekly target is split across, 1 to 7. Sessions space at floor(7 / sessions) days apart. Weekly model only: a soil-governed zone sets its own cadence from soil texture and root depth. Blank = the starting value taken from this zone's species, shown in the box.".to_string()
-                error=Signal::derive(|| None::<String>)
-            >
-                <input
-                    type="number"
-                    class="ui-input"
-                    min="1"
-                    max="7"
-                    step="1"
-                    placeholder=move || format!("(blank for the default {})", inferred_target().1)
-                    prop:value=move || new_sessions.get()
-                    on:input=move |ev| new_sessions.set(event_target_value(&ev))
-                />
-            </FormField>
+                    <Show when=move || !soil_governed()>
+                        <FormField
+                            label="Sessions per week".to_string()
+                            helptext="How many mornings the weekly target is split across, 1 to 7, spaced evenly. Blank uses this zone's species default, shown in the box.".to_string()
+                            error=Signal::derive(|| None::<String>)
+                        >
+                            <input
+                                type="number"
+                                class="ui-input"
+                                min="1"
+                                max="7"
+                                step="1"
+                                placeholder=move || format!("(blank for the default {})", inferred_target().1)
+                                prop:value=move || new_sessions.get()
+                                on:input=move |ev| new_sessions.set(event_target_value(&ev))
+                            />
+                        </FormField>
+                    </Show>
+                }
+            }
 
-            <FormField
-                label="Rain the soil can bank per day (inches)".to_string()
-                helptext="The most rain one day can count against the weekly target. Rain beyond it in one day drains past the roots and does not count. Under the soil model the same cap limits how much of one day's rain the soil deficit credits. Blank = derived from this zone's soil texture and root depth, shown in the box; sandy soils want it low.".to_string()
-                error=Signal::derive(|| None::<String>)
-            >
-                <input
-                    type="number"
-                    class="ui-input"
-                    min="0.05"
-                    max="5"
-                    step="0.05"
-                    placeholder=move || format!("(blank for the derived {:.2})", derived_rain_cap())
-                    prop:value=move || new_rain_cap.get()
-                    on:input=move |ev| new_rain_cap.set(event_target_value(&ev))
-                />
-            </FormField>
+            {move || {
+                let p = prefs.get();
+                let dim = crate::components::units_fmt::Dimension::Depth;
+                let prec = dim.precision(p);
+                let shown = move || {
+                    new_rain_cap
+                        .get()
+                        .trim()
+                        .parse::<f64>()
+                        .map(|v| format!("{:.*}", prec, dim.to_display(v, p)))
+                        .unwrap_or_default()
+                };
+                view! {
+                    <FormField
+                        label=format!("Rain the soil can bank per day ({})", dim.unit(p))
+                        helptext="The most rain one day can count toward the weekly target; the rest drains past the roots. Blank follows soil texture and roots; sandy soils want it low.".to_string()
+                        error=Signal::derive(|| None::<String>)
+                    >
+                        <input
+                            type="number"
+                            class="ui-input"
+                            min=format!("{:.*}", prec, dim.to_display(0.05, p))
+                            max=format!("{:.*}", prec, dim.to_display(5.0, p))
+                            step=format!("{:.*}", prec, dim.to_display(0.05, p))
+                            placeholder=move || format!("(blank for the derived {:.*})", prec, dim.to_display(derived_rain_cap(), p))
+                            prop:value=shown
+                            on:input=move |ev| {
+                                let raw = event_target_value(&ev);
+                                new_rain_cap.set(match raw.trim().parse::<f64>() {
+                                    Ok(v) => format!("{:.2}", dim.to_stored(v, p)),
+                                    Err(_) => raw,
+                                })
+                            }
+                        />
+                    </FormField>
+                }
+            }}
 
             // Everything below is fine-tuning with a sensible default; a
             // beginner can add a working zone with just the fields above.
@@ -1695,7 +1849,7 @@ pub fn ZoneForm(
 
                 <FormField
                     label="Internal id (slug)".to_string()
-                    helptext="Auto-generated from the name and permanent. Run history, soil sensor bindings, Home Assistant entity ids and this zone's links are all stored under it, so it never changes. Rename the zone by editing Name above; the slug stays.".to_string()
+                    helptext="Made from the name, and permanent: run history, sensor bindings and entity ids are stored under it. Rename with Name above; this stays.".to_string()
                     error=Signal::derive(|| None::<String>)
                 >
                     <input
@@ -1728,7 +1882,7 @@ pub fn ZoneForm(
 
                 <FormField
                     label="Measured precip rate (mm/hr)".to_string()
-                    helptext="Catch-cup measurement; leave blank for catalog default per sprinkler type. Calibration improves runtime accuracy substantially.".to_string()
+                    helptext="Catch-cup measurement. Blank uses the catalog default for the sprinkler type.".to_string()
                     error=Signal::derive(|| None::<String>)
                 >
                     <input
@@ -1747,7 +1901,7 @@ pub fn ZoneForm(
 
                 <FormField
                     label="Max run time (minutes)".to_string()
-                    helptext="Longest single watering this zone may run. Blank = 60. Values above 60 ask for confirmation when you save; long runs are still cycle-and-soaked against runoff.".to_string()
+                    helptext="Longest single run for this zone. Blank = 60. Over 60 asks for confirmation; long runs are still cycle-and-soaked.".to_string()
                     error=Signal::derive(|| None::<String>)
                 >
                     <input
@@ -1764,7 +1918,7 @@ pub fn ZoneForm(
 
             <FormField
                 label="Photo (optional)".to_string()
-                helptext="Drop or browse for an image to upload; it lands under /site/photos. You can also paste an off-site URL.".to_string()
+                helptext="Drop or browse an image, or paste a URL.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 <PhotoField value=new_photo_url/>
@@ -1772,7 +1926,7 @@ pub fn ZoneForm(
 
             <FormField
                 label="Soil moisture sensor (optional)".to_string()
-                helptext="Assign a sensor to drive this zone's skip decision. The dropdown lists every discovered soil channel, both Home Assistant entities and LocalSky native sources (incl. a zone-bound MQTT probe's channel). Or type an id below. Blank = no measured soil gate; the zone waters on the weekly water balance alone.".to_string()
+                helptext="The sensor that gates this zone's watering. Blank waters on the water balance alone.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 <select
@@ -1826,20 +1980,20 @@ pub fn ZoneForm(
                 <input
                     type="text"
                     class="ui-input"
-                    style="margin-top: 0.4rem"
+                    class:u-mt2=true
                     placeholder="or type any id (e.g. ha:sensor.back_yard_soil_moisture)"
                     prop:value=move || new_soil_sensor.get()
                     on:input=move |ev| new_soil_sensor.set(event_target_value(&ev))
                 />
-                <a
-                    class="setup-footer__btn setup-footer__btn--ghost"
+                <crate::components::ui::Button variant="secondary" size="sm"
+                    class="setup-footer__btn setup-footer__btn--ghost u-mt2"
                     href="/settings?section=devices&add=source"
                     target="_blank"
-                    rel="noopener"
-                    style="margin-top: 0.4rem; display: inline-flex"
+
+
                 >
                     "+ Add a sensor"
-                </a>
+                </crate::components::ui::Button>
             </FormField>
 
             <FormField
@@ -1884,14 +2038,15 @@ pub fn ZoneForm(
             </details>
 
             <div class="settings-form-actions">
-                <Button
-                    variant="ghost"
-                    on_click=Callback::new(on_cancel)
-                >
-                    "Cancel"
-                </Button>
+                <Button variant="secondary" disabled=saving on_click=Callback::new(move |_| {
+                    match on_cancel {
+                        Some(cancel) => cancel.run(()),
+                        None => close(),
+                    }
+                })>"Cancel"</Button>
                 <Button
                     variant="primary"
+                    disabled=saving
                     on_click=Callback::new(on_add)
                 >
                     {move || if editing_slug.get().is_some() {
@@ -1901,6 +2056,9 @@ pub fn ZoneForm(
                     }}
                 </Button>
             </div>
+            <Show when=move || !result_ok.get() && !result_msg.get().is_empty()>
+                <p role="alert" class="settings-form-error">{move || result_msg.get()}</p>
+            </Show>
 
             // Override-style confirmation for a run limit raised past 60:
             // the save is staged in pending_commit and lands only on
@@ -2208,20 +2366,6 @@ pub(crate) fn binding_display(ctrl_id: &str, station: &str, vendor_name: Option<
     }
 }
 
-/// Turn a human zone name into a stable snake_case slug ("Back Yard" ->
-/// "back_yard") so a beginner never has to type an identifier by hand.
-fn slugify(s: &str) -> String {
-    let mut out = String::new();
-    for c in s.trim().to_lowercase().chars() {
-        if c.is_ascii_alphanumeric() {
-            out.push(c);
-        } else if !out.is_empty() && !out.ends_with('_') {
-            out.push('_');
-        }
-    }
-    out.trim_end_matches('_').to_string()
-}
-
 /// Reset the zone draft signals back to a blank "new zone" state.
 /// Shared by the page's Cancel toggle and the form's post-add cleanup
 /// so the two stay in sync. Mirrors the original inline reset: clears
@@ -2246,11 +2390,11 @@ pub fn inferred_weekly_target(species_slug: &str) -> (f64, u32) {
 pub fn derived_rain_cap_in(soil_slug: &str, root_depth_mm: f64) -> f64 {
     // The engine's own function, called directly. Not a mirror of it.
     let texture = crate::config::schema::SoilTexture::from_slug(soil_slug);
-    crate::engine::taw_mm(texture, root_depth_mm) / 25.4
+    crate::units::mm_to_in(crate::engine::taw_mm(texture, root_depth_mm))
 }
 
 #[allow(clippy::too_many_arguments)]
-fn reset_zone_draft(
+pub(crate) fn reset_zone_draft(
     editing_slug: RwSignal<Option<String>>,
     new_slug: RwSignal<String>,
     new_display_name: RwSignal<String>,
@@ -2727,69 +2871,6 @@ mod tests {
         // Clearing back to the default stays quiet.
         assert!(!cap_raise_needs_confirm(None, Some(120)));
     }
-}
-
-#[cfg(feature = "hydrate")]
-async fn fetch_config() -> Result<serde_json::Value, String> {
-    use gloo_net::http::Request;
-    let resp = Request::get("/api/config")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    // A JSON error body must not be mistaken for the config.
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::load_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    resp.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
-}
-
-/// PUT the candidate config. Returns the restart_reasons the PUT response
-/// carried (empty when the change hot-reloaded), the controllers.rs
-/// pattern: this page previously discarded the response body, so a zone
-/// add/remove never surfaced its restart requirement. A missing/old field
-/// reads as "no restart", the safe default.
-#[cfg(feature = "hydrate")]
-async fn save_config(cfg: serde_json::Value) -> Result<Vec<String>, String> {
-    use gloo_net::http::Request;
-    let resp = Request::put("/api/config")
-        .json(&cfg)
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::save_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    let reasons = resp
-        .json::<serde_json::Value>()
-        .await
-        .ok()
-        .filter(|v| {
-            v.get("restart_required")
-                .and_then(|r| r.as_bool())
-                .unwrap_or(false)
-        })
-        .and_then(|v| {
-            v.get("restart_reasons")
-                .and_then(|r| r.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(str::to_string))
-                        .collect()
-                })
-        })
-        .unwrap_or_default();
-    Ok(reasons)
 }
 
 /// Lookup table that maps a species slug to its display label.

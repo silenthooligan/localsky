@@ -40,7 +40,7 @@
 // dismissal, all unchanged from the page-strip era so a dismissal recorded
 // then still holds.
 
-use crate::ha::snapshot::{HaAdoptedHelper, IrrigationSnapshot};
+use crate::model::{HaAdoptedHelper, IrrigationSnapshot};
 
 /// localStorage key holding the adopted set the operator dismissed.
 #[cfg(feature = "hydrate")]
@@ -78,24 +78,19 @@ pub(crate) fn store_dismissed(key: &str) {
 /// header, one line per handled helper, any live holds, then the
 /// derived closing sentences.
 pub(crate) fn lines(s: &IrrigationSnapshot) -> Vec<String> {
-    if awaiting_config(s) {
-        return vec![awaiting_config_line()];
-    }
     let tz = s.timezone.clone();
     let mut lines = vec![header_line(&s.ha_adoption)];
     lines.extend(s.ha_adoption.iter().map(|h| helper_line(h, &tz)));
     lines.extend(hold_lines(&s.ha_adoption, s.last_refresh_epoch, &tz));
     lines.extend(still_exist_line(&s.ha_adoption));
-    lines.extend(still_live_line(&s.ha_adoption, s.controls_persisted));
+    lines.extend(not_carried_line(&s.ha_adoption, s.controls_persisted));
     lines.extend(automation_line(&s.ha_adoption));
     lines
 }
 
-/// The four operator controls. They only adopt when a persistence database is
-/// mounted, so an install without one keeps reading them and the notice has to
-/// say so. This component compiles for the browser, where the planner's module
-/// does not, so it carries its own copy; an ssr-only test pins the two lists
-/// together.
+/// The four operator controls. This component compiles for the browser,
+/// where the catalog module does not, so it carries its own copy; an
+/// ssr-only test pins the two lists together.
 const CONTROLS: [&str; 4] = [
     "input_datetime.irrigation_pause_until",
     "input_select.irrigation_override_tomorrow",
@@ -114,23 +109,7 @@ const PAUSE_TOGGLE: &str = "input_boolean.irrigation_pause";
 /// notice used to require a helper to have been PRESENT, which silenced it on
 /// exactly the install where the pass concluded the most from the least.
 pub(crate) fn worth_showing(s: &IrrigationSnapshot) -> bool {
-    !s.ha_adoption.is_empty() || awaiting_config(s)
-}
-
-/// The migration has not run because this install has no config file to
-/// record it in. Every helper is still deciding there, so the notice speaks
-/// even though nothing was adopted: silence would leave the release notes'
-/// invitation to delete the helpers standing over a live pause.
-fn awaiting_config(s: &IrrigationSnapshot) -> bool {
-    s.ha_adoption_awaiting_config && s.ha_adoption.is_empty()
-}
-
-fn awaiting_config_line() -> String {
-    "LocalSky has not migrated your Home Assistant helpers: this install has no localsky.toml \
-     to record the migration in, so all seven helpers are still deciding, exactly as before this \
-     release. Do not delete them. Finishing the setup wizard writes the file, and the migration \
-     runs on its own after that."
-        .to_string()
+    !s.ha_adoption.is_empty()
 }
 
 /// True when this record is about an entity that was in Home Assistant.
@@ -188,10 +167,7 @@ fn hold_lines(recs: &[HaAdoptedHelper], now: i64, tz: &str) -> Vec<String> {
             "kept_local" => {
                 if let Some(epoch) = live_epoch(rec.previous_value.as_deref()) {
                     out.push(format!(
-                        "Watering is held by a Rain delay LocalSky already had in its own \
-                         storage from before this install talked to Home Assistant, {}. That \
-                         value was stored but never read on a Home Assistant deployment, and it \
-                         decides from this release. Release it under Rain delay on this page.",
+                        "Watering is held by a Rain delay set here before this install talked to Home Assistant, {}. It was ignored then and decides now. Release it under Rain delay.",
                         render_value(PAUSE_UNTIL, &epoch.to_string(), tz)
                     ));
                 }
@@ -208,10 +184,7 @@ fn hold_lines(recs: &[HaAdoptedHelper], now: i64, tz: &str) -> Vec<String> {
                     .to_string()
             }
             "kept_local" if rec.previous_value.as_deref() == Some("on") => {
-                "Watering is held by the pause switch in LocalSky's own storage, set before this \
-                 install talked to Home Assistant. That value was stored but never read on a \
-                 Home Assistant deployment, and it decides from this release. Clear it from the \
-                 Vacation pause toggle on this page."
+                "Watering is held by a pause set here before this install talked to Home Assistant. It was ignored then and decides now. Clear it under Vacation pause."
                     .to_string()
             }
             _ => {
@@ -231,50 +204,33 @@ fn still_exist_line(recs: &[HaAdoptedHelper]) -> Option<String> {
         .find(|h| h.entity == PAUSE_TOGGLE)
         .or(present.first())?;
     Some(format!(
-        "The helpers listed above that exist in Home Assistant were not deleted and will not be. \
-         They no longer do anything: writing to {} will not change anything here. Delete those \
-         when you are ready, or leave them where they are.",
+        "Those Home Assistant helpers still exist and are untouched, but nothing reads them now: writing to {} changes nothing here. Delete those when you are ready.",
         example.entity
     ))
 }
 
-/// A control missing from the record set is still deciding, so it must not be
-/// deleted. There are two reasons it can be missing and they need different
-/// sentences.
-///
-/// No persistence database: the control has nowhere to land, so it can never
-/// be adopted here and the owner has something to fix.
-///
-/// A DEFERRAL: the helper exists and was answering `unavailable`, `unknown` or
-/// `restored` when the pass looked, which is what a Home Assistant restart or
-/// a helpers reload looks like, so it was left alone while the rest of the set
-/// committed. Nothing is wrong and there is nothing to do. Telling that owner
-/// their /data mount is missing and to restart is false, and the restart it
-/// prescribes resets the pass's own stability counter.
-///
-/// The records cannot tell the two apart, so the snapshot carries the bit.
-fn still_live_line(recs: &[HaAdoptedHelper], controls_persisted: bool) -> Option<String> {
-    let live: Vec<&str> = CONTROLS
+/// Controls the migration did not record are not read either: 0.9.0
+/// removed every helper read. A value one of them held did not carry
+/// over, and the owner has to be told where to set it now.
+fn not_carried_line(recs: &[HaAdoptedHelper], controls_persisted: bool) -> Option<String> {
+    let missed: Vec<&str> = CONTROLS
         .iter()
         .copied()
         .filter(|e| !recs.iter().any(|h| h.entity == *e))
         .collect();
-    if live.is_empty() {
+    if missed.is_empty() {
         return None;
     }
-    let cause = if controls_persisted {
-        "These were not answering when LocalSky looked, which is what a Home Assistant restart \
-         or a helpers reload looks like, so it left them alone rather than taking over a value \
-         nobody set. It takes them over on its own as soon as they answer, with nothing for you \
-         to do."
+    let now = if controls_persisted {
+        "Set the pause, the one-day override and dry run in LocalSky; they are its own now."
     } else {
-        "LocalSky has no persistence database mounted, so it has nowhere to keep their values \
-         and did not take them over. Mount /data and restart to finish."
+        "LocalSky has no persistence database mounted, so it has nowhere to keep them: mount \
+         /data and restart, then set them in LocalSky."
     };
     Some(format!(
-        "These helpers are still live and still deciding: {}. {cause} Do not delete these: \
-         deleting {PAUSE_UNTIL} while a pause is set drops the pause with nothing on screen.",
-        live.join(", ")
+        "LocalSky no longer reads {}, and their values did not carry over. {now} A pause set \
+         in {PAUSE_UNTIL} is not in effect.",
+        missed.join(", ")
     ))
 }
 
@@ -413,11 +369,6 @@ fn render_value(entity: &str, raw: &str, tz: &str) -> String {
 /// silencing one migration never silences a different one: if a later release
 /// retires another read, the key changes and the notice speaks up again.
 pub(crate) fn adopted_key(s: &IrrigationSnapshot) -> String {
-    if awaiting_config(s) {
-        // Distinct from the empty set's key, which is what "nothing to show"
-        // looks like: the empty key would read as already dismissed.
-        return "awaiting-config".to_string();
-    }
     let mut parts: Vec<String> = s
         .ha_adoption
         .iter()
@@ -679,54 +630,30 @@ mod tests {
         assert_eq!(automation_line(&s.ha_adoption), None);
     }
 
-    // The specific hazard finding 18 names: with no persistence database the
-    // four controls were never taken over, so telling the owner they are dead
-    // and inviting deletion drops a live pause.
+    // A control the migration never recorded is not read any more either
+    // (0.9.0 removed every helper read), so its value did not carry over.
+    // The notice says which, says where to set it now, and never invites
+    // deleting it under the impression it is still deciding.
     #[test]
-    fn a_no_database_install_is_told_which_helpers_are_still_live() {
+    fn an_unrecorded_control_is_reported_as_not_carried_over() {
         let recs: Vec<HaAdoptedHelper> = every_helper_adopted()
             .into_iter()
             .filter(|h| h.entity.starts_with("input_number"))
             .collect();
-        let live = still_live_line(&recs, false).expect("the four controls are still live");
+        let line = not_carried_line(&recs, false).expect("four controls were not recorded");
         for id in CONTROLS {
-            assert!(live.contains(id), "{id} not named as still live");
+            assert!(line.contains(id), "{id} not named");
         }
-        assert!(live.contains("Do not delete these"), "{live}");
-        assert!(live.contains("Mount /data and restart"), "{live}");
+        assert!(line.contains("did not carry over"), "{line}");
+        assert!(line.contains("mount /data and restart"), "{line}");
+        assert!(!line.contains("still deciding"), "{line}");
+        let with_db = not_carried_line(&recs, true).unwrap();
+        assert!(with_db.contains("its own now"), "{with_db}");
+        assert!(!with_db.contains("/data"), "{with_db}");
         let exists = still_exist_line(&recs).unwrap();
         assert!(
             !CONTROLS.iter().any(|c| exists.contains(c)),
-            "the delete invitation must never name a helper that is still deciding: {exists}"
-        );
-        let auto = automation_line(&recs).unwrap();
-        assert!(
-            !auto.contains("POST /api/irrigation/action"),
-            "the controls were not handled, so there is nothing to repoint at that endpoint"
-        );
-    }
-
-    // The mirror image of the no-database case, and the one the hardcoded
-    // diagnosis got wrong. A control that DEFERRED is absent from the record
-    // set too, while the other six commit in the same pass, so an install with
-    // /data mounted and a Home Assistant mid-helpers-reload was told its mount
-    // was missing and to restart. The restart resets the pass's own stability
-    // counter, so the advice made it worse.
-    #[test]
-    fn a_deferred_control_is_not_told_to_mount_data() {
-        let recs: Vec<HaAdoptedHelper> = every_helper_adopted()
-            .into_iter()
-            .filter(|h| h.entity != PAUSE_TOGGLE)
-            .collect();
-        let live = still_live_line(&recs, true).expect("the deferred control is still live");
-        assert!(live.contains(PAUSE_TOGGLE), "{live}");
-        assert!(
-            !live.contains("no persistence database") && !live.contains("Mount /data"),
-            "an install with /data mounted must never be told to mount /data: {live}"
-        );
-        assert!(
-            live.contains("Do not delete these"),
-            "the helper is still deciding either way: {live}"
+            "the delete invitation names only what was handled: {exists}"
         );
     }
 
@@ -736,7 +663,7 @@ mod tests {
     #[test]
     fn a_complete_migration_invites_deletion_and_names_a_real_entity() {
         let recs = every_helper_adopted();
-        assert_eq!(still_live_line(&recs, true), None);
+        assert_eq!(not_carried_line(&recs, true), None);
         let exists = still_exist_line(&recs).unwrap();
         assert!(
             exists.contains("input_boolean.irrigation_pause"),
@@ -865,33 +792,13 @@ mod tests {
         let lines = hold_lines(&recs, 1, "UTC");
         let line = lines
             .iter()
-            .find(|l| l.contains("pause switch"))
+            .find(|l| l.contains("Vacation pause"))
             .expect("the switch hold is named");
         assert!(
-            line.starts_with("Watering is held by the pause switch"),
+            line.starts_with("Watering is held by a pause set here"),
             "{line}"
         );
-        assert!(line.contains("Vacation pause toggle"), "{line}");
-    }
-
-    // An install with no config file has not run the migration at all, and
-    // every helper is still deciding. The notice must speak there, and the
-    // empty-set dismissal key must not silence it.
-    #[test]
-    fn an_install_with_no_config_file_is_told_the_helpers_still_decide() {
-        let mut s = IrrigationSnapshot::default();
-        assert!(!worth_showing(&s));
-        s.ha_adoption_awaiting_config = true;
-        assert!(worth_showing(&s));
-        assert_ne!(
-            adopted_key(&s),
-            "",
-            "the empty key would read as already dismissed"
-        );
-        let line = awaiting_config_line();
-        assert!(line.contains("localsky.toml"), "{line}");
-        assert!(line.contains("still deciding"), "{line}");
-        assert!(line.contains("Do not delete them"), "{line}");
+        assert!(line.contains("Clear it under Vacation pause"), "{line}");
     }
 
     #[test]

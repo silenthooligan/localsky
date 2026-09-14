@@ -3,9 +3,12 @@
 A zone is one chunk of yard on one valve. LocalSky schedules each zone on
 its own: you describe the grass, the soil, and the area, and the engine
 computes the crop evapotranspiration (ETc), the weekly water balance, and
-the runtime from there. Edit zones under Settings, then Zones; each save
-round-trips through the full config, so the engine picks up changes on the
-next tick.
+the runtime from there. Select a zone on **Zones** and choose **Edit zone**
+to open its editor on that page. Settings → Zones uses the same editor.
+**Cancel** sits beside **Save zone changes** and asks before discarding edits.
+A failed save keeps the draft available to retry. Scalar changes apply on the
+next tick; changes to zone membership or controller bindings show a restart
+message when the server requires one.
 
 ## The core fields
 
@@ -79,7 +82,16 @@ just the fields above:
   to use the catalog default for the sprinkler type; measuring it improves
   runtime accuracy substantially.
 - **Max run time**: the longest single watering the zone may run, in
-  minutes. 60 unless you change it; every session is held to it.
+  minutes. 60 unless you change it, and the field takes 5 to 360; every
+  session is held to it. A save that raises the limit past 60 asks you to
+  confirm first, so a stray keystroke cannot leave a valve open for six
+  hours unattended. Only a raise past 60 asks: lowering it, or re-saving a
+  zone already set to 90, stays quiet. Raising it does not switch off
+  cycle-and-soak. When a zone's heads put water down faster than its soil
+  takes it, a run longer than one cycle is still split into cycles with
+  soak gaps between them, and a longer session just means more of them. A
+  run that fits inside one cycle applies in a single pass with no soak. See
+  [cycle-and-soak](irrigation-engine.md#cycle-and-soak).
 - **Weekly target** and **Sessions per week**: the two numbers that size
   every run. The target is a gross depth in inches a week, rain included;
   the sessions are how many mornings it is split across, 1 to 7, spaced
@@ -96,6 +108,17 @@ just the fields above:
 - **Healthy band low %** and **Saturation %**: the zone's soil thresholds.
   Below the low band the zone reads "dry" on the Sensors page; at or above
   the saturation percentage the zone skips watering.
+- **Photo** (optional): a picture of the zone, shown on its zone card.
+  Drop an image onto the field or browse for one, and LocalSky uploads it,
+  writes the file into its photos directory (`/data/site/photos` unless
+  `LOCALSKY_PHOTOS_DIR` points elsewhere), and fills the field in with the
+  URL it serves the file back at, `/site/photos/<filename>`. JPG, PNG, GIF,
+  and WebP up to 10 MB are accepted; SVG is not, because an SVG can carry
+  script. If the picture already lives somewhere else, paste its address
+  into the URL box under the drop zone and nothing is uploaded. Uploaded
+  photos sit outside the config, so they are not in the backup bundle; copy
+  `/data/site/photos` yourself if they matter to you.
+  See [backup and restore](backup-restore.md).
 
 Each zone card has a **Test run** button that fires the valve for 30
 seconds, so you can confirm water actually comes out before trusting the

@@ -96,11 +96,10 @@ impl Default for TropicalState {
 
 impl TropicalState {
     pub fn new() -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(FETCH_TIMEOUT)
-            .user_agent(USER_AGENT)
-            .build()
-            .unwrap_or_default();
+        // Explicit UA (not the derived per-install identity): the header
+        // above commits this handler to a project-URL-only string toward
+        // the agencies, so `client_with` rather than `client`.
+        let client = crate::net::client_with(FETCH_TIMEOUT, USER_AGENT);
         Self {
             client,
             cache: Arc::new(Mutex::new(None)),

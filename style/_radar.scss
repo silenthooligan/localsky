@@ -1,0 +1,2041 @@
+@use "mixins" as *;
+
+// radar and its Leaflet overrides
+//
+// Split out of main.scss, which had grown to 11,330 lines.
+// Load order is the cascade: see the @use list in main.scss.
+
+// ─────────────────────────────────────────────────────────────────────────
+// Radar mobile polish. Leaflet ships light-theme controls by default
+// (white-background buttons, black borders) which look harsh on top of
+// the dark map at phone widths. Dark-theme the chrome and bump touch
+// target sizes for the zoom control.
+// ─────────────────────────────────────────────────────────────────────────
+
+.radar-map .leaflet-bar a,
+.radar-map .leaflet-control-attribution {
+  background: var(--surface-frosted-strong);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  backdrop-filter: var(--blur-overlay);
+  color: var(--text-bright);
+  border-color: var(--glass-border);
+}
+
+.radar-map .leaflet-bar a {
+  color: var(--text-bright);
+  border-bottom: 1px solid var(--glass-border);
+}
+
+.radar-map .leaflet-bar a:hover,
+.radar-map .leaflet-bar a:focus {
+  background: rgba(74, 200, 255, 0.18);
+  color: var(--text-bright);
+}
+
+.radar-map .leaflet-bar a.leaflet-disabled {
+  background: var(--glass-bg);
+  color: var(--text-dim);
+}
+
+.radar-map .leaflet-control-attribution {
+  font-size: 9px;
+  padding: 1px 5px;
+  color: var(--text-dim);
+}
+
+.radar-map .leaflet-control-attribution a {
+  color: var(--text-dim);
+}
+
+@include phone {
+  // Bigger touch targets for zoom +/- on mobile (Leaflet's default 26px
+  // is below the HIG/Material 44px floor).
+  .radar-map .leaflet-bar a {
+    width: 40px !important;
+    height: 40px !important;
+    line-height: 40px !important;
+    font-size: 1.25rem;
+  }
+  .radar-controls {
+    flex-wrap: wrap;
+    padding: 0.5rem 0.85rem 0.7rem;
+    gap: 0.55rem;
+    font-size: 0.72rem;
+  }
+  .radar-time {
+    flex-basis: 100%;
+    order: 3;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Phase 4: schedule-tab control cards (vacation pause, override tomorrow,
+// run sequence now). Each is a glass card with header / control body /
+// help-text footer.
+// ─────────────────────────────────────────────────────────────────────────
+
+// ============================================================
+// Design system primitives (Phase 9). All token-driven so
+// [data-theme="..."] switching applies automatically.
+// ============================================================
+
+// ---- .sheet (viewport-aware bottom-sheet / modal) ----
+.sheet {
+  position: fixed;
+  inset: 0;
+  // The closed drawer's entrance transform must not widen the document.
+  // Scrolling belongs to the panel body, within the viewport-sized sheet.
+  overflow: clip;
+  z-index: var(--z-modal);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  // Closed. Not `display: none`: a display change cannot be
+  // transitioned, so the old sheet had no exit motion at all whatever
+  // duration was set. visibility is what makes it unfocusable and
+  // click-proof, and its transition is DELAYED by the full duration so
+  // it flips only after the fade has finished.
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity var(--motion-base, 0.18s) var(--ease-out),
+    visibility 0s linear var(--motion-base, 0.18s);
+}
+.sheet--open {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition-delay: 0s;
+}
+.sheet__panel {
+  transform: translateY(8px);
+  transition: transform var(--motion-base, 0.18s) var(--ease-out);
+}
+.sheet--open .sheet__panel { transform: translateY(0); }
+
+// The drawer variant. On a phone it is the same bottom sheet, because a
+// side panel on a 390px screen is a modal that wastes an edge.
+@include desk {
+  .sheet--drawer { align-items: stretch; justify-content: flex-end; }
+  .sheet--drawer .sheet__panel {
+    width: min(100%, 480px);
+    max-height: none;
+    height: 100%;
+    border-radius: 0;
+    border-right: none;
+    border-top: none;
+    border-bottom: none;
+    transform: translateX(16px);
+  }
+  .sheet--drawer.sheet--open .sheet__panel { transform: translateX(0); }
+}
+
+.sheet__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  -webkit-backdrop-filter: var(--blur-scrim);
+  backdrop-filter: var(--blur-scrim);
+}
+.sheet__panel {
+  position: relative;
+  @include surface($background: (var(--bg-panel)), $border: (1px solid var(--border)), $radius: (var(--radius-lg) var(--radius-lg) 0 0), $shadow: (var(--shadow)));
+
+  width: min(100%, 560px);
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  // env(safe-area-inset-bottom) so the last action clears the home indicator on
+  // gesture-nav phones. Matches the pattern already on .bottom-sheet.
+  padding: 1rem 1.25rem calc(1rem + env(safe-area-inset-bottom));
+
+}
+@include desk {
+  .sheet { align-items: center; }
+  .sheet__panel {
+    border-radius: var(--radius-lg);
+    max-height: 80vh;
+  }
+}
+.sheet__header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+.sheet__handle {
+  width: 36px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--text-faint);
+  margin-right: auto;
+}
+@include desk { .sheet__handle { display: none; } }
+.sheet__title { margin: 0; font-size: 1.1rem; color: var(--text); }
+.sheet__close {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: 1.6rem;
+  line-height: 1;
+  padding: 0 0.25rem;
+  cursor: pointer;
+  min-height: 44px;
+  min-width: 44px;
+}
+.sheet__close:hover { color: var(--text); }
+.sheet__body {
+  padding-top: 0.85rem;
+  overflow-y: auto;
+}
+
+// ---- .ui-toggle ----
+.ui-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 0;
+}
+.ui-toggle__label-block { flex: 1; cursor: pointer; }
+.ui-toggle__label-text { display: flex; flex-direction: column; gap: 0.2rem; }
+.ui-toggle__label { color: var(--text); font-weight: 500; }
+.ui-toggle__helptext { color: var(--text-dim); font-size: 0.85rem; }
+.ui-toggle__switch {
+  position: relative;
+  width: 48px;
+  height: 28px;
+  border-radius: 999px;
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  cursor: pointer;
+  transition: background 0.18s ease;
+}
+.ui-toggle__switch--on { background: var(--accent); border-color: var(--accent); }
+.ui-toggle__thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--text);
+  transition: transform 0.18s ease, background 0.18s ease;
+}
+.ui-toggle__switch--on .ui-toggle__thumb {
+  transform: translateX(20px);
+  background: var(--bg-deep);
+}
+.ui-toggle--disabled { opacity: 0.5; pointer-events: none; }
+
+// ---- .ui-slider ----
+.ui-slider {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 0.4rem 0;
+}
+.ui-slider__input {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-panel-soft);
+  appearance: none;
+  cursor: pointer;
+}
+.ui-slider__input::-webkit-slider-thumb {
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--accent);
+  border: 2px solid var(--bg-deep);
+  cursor: pointer;
+}
+.ui-slider__input::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--accent);
+  border: 2px solid var(--bg-deep);
+  cursor: pointer;
+}
+// Editable value box sitting to the right of the range track. The
+// number input is the manual-entry counterpart to dragging the slider;
+// both drive the same signal. Suffix (unit) renders verbatim beside it.
+.ui-slider__entry {
+  --control-h: var(--control-h-dense);
+  display: flex;
+  align-items: baseline;
+  flex: none;
+}
+.ui-slider__num {
+  font-family: var(--font-mono);
+  color: var(--accent);
+  width: 4.5em;
+  text-align: right;
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: var(--radius-sm);
+  padding: 0.25rem 0.4rem;
+  min-height: var(--control-h);
+  -moz-appearance: textfield;
+}
+.ui-slider__num::-webkit-outer-spin-button,
+.ui-slider__num::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.ui-slider__num:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.ui-slider__suffix {
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  white-space: pre;
+  margin-left: 0.15rem;
+}
+
+// ---- .ui-segmented ----
+//
+// Wraps to multiple rows when the option set is too wide for the
+// container. Buttons keep their label on a single line (white-space:
+// nowrap) so we never get the "B-/hyve" / "Rain/ Bird" hyphenation
+// shown in the v1 controllers page. The control fills its parent
+// inline-flex so we use the full width of a settings panel.
+.ui-segmented {
+  display: flex;
+  flex-wrap: wrap;
+  align-self: stretch;
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 10px;
+  padding: 4px;
+  gap: 2px;
+}
+.ui-segmented__option {
+  flex: 1 1 auto;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  padding: 0.55rem 0.85rem;
+  border-radius: 7px;
+  font-size: var(--text-body-sm);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+  min-height: 38px;
+  text-align: center;
+}
+.ui-segmented__option--active {
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+.ui-segmented__option:hover:not(.ui-segmented__option--active) {
+  color: var(--text);
+  background: color-mix(in oklab, var(--accent) 8%, transparent);
+}
+
+// ---- .ui-form-field ----
+.ui-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: 1.1rem;
+}
+.ui-form-field__label { color: var(--text); font-weight: 500; font-size: 0.95rem; }
+.ui-form-field__helptext { color: var(--text-dim); font-size: 0.85rem; }
+.ui-form-field__input { display: block; }
+.ui-form-field__error { color: var(--accent-danger); font-size: 0.85rem; }
+.ui-form-field--error .ui-form-field__input :is(input, select, textarea) {
+  border-color: var(--accent-danger);
+  box-shadow: 0 0 0 1px var(--accent-danger);
+}
+
+// ---- .ui-skel (loading skeletons) ----
+.ui-skel {
+  position: relative;
+  overflow: hidden;
+  background: var(--elev-2);
+  border-radius: var(--radius-sm);
+}
+.ui-skel::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, color-mix(in oklab, var(--text-bright) 7%, transparent), transparent);
+  animation: ui-skel-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes ui-skel-shimmer {
+  100% { transform: translateX(100%); }
+}
+.ui-skel--line { height: 0.9rem; width: 100%; }
+.ui-skel--block { height: 8rem; width: 100%; border-radius: var(--radius-md); }
+.ui-skel--tile { height: 5.25rem; width: 100%; border-radius: var(--radius-md); }
+.ui-skel--chart { height: 13rem; width: 100%; border-radius: var(--radius-md); }
+.ui-skel--row { height: 3.25rem; width: 100%; border-radius: var(--radius-md); }
+.ui-skel-rows { display: flex; flex-direction: column; gap: var(--space-2); }
+@include reduced-motion {
+  .ui-skel::after { animation: none; }
+}
+[data-theme="hc"] .ui-skel { background: var(--elev-2); border: 1px solid var(--elev-border); }
+[data-theme="hc"] .ui-skel::after { animation: none; background: none; }
+
+// ---- <ConditionCards/> ("Heads up" condition-aware strip) ----
+// Cards exist only while their condition holds; the whole section
+// disappears on a calm day. .is-alert escalates the border/title.
+.condition-cards { margin-bottom: var(--space-4); }
+.condition-cards-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 0.6rem;
+}
+.condition-card {
+  @include surface($radius: (var(--radius-md)), $shadow: null);
+
+  padding: 0.7rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+.condition-card__head {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--text);
+  font-weight: 600;
+}
+.condition-card__rows {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  .kv {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-3);
+    align-items: baseline;
+  }
+  .k { color: var(--text-dim); font-size: var(--text-body-sm); }
+  .v {
+    color: var(--text-bright);
+    font-family: var(--font-mono);
+    font-size: var(--text-body-sm);
+    text-align: right;
+  }
+}
+.condition-card.is-alert {
+  border-color: color-mix(in oklab, var(--accent-warn) 55%, transparent);
+  .condition-card__head { color: var(--accent-warn); }
+}
+
+// ---- <ForecastPending/> ----
+// Skeleton-then-honest-note for the forecast panels (48h chart, 7-day row,
+// verdict strip). The ghost wrapper uses display:contents so its 7 tiles
+// become direct children of the surrounding 7-col grid / phone flex rail
+// and size exactly like the real cells.
+.forecast-pending-ghosts { display: contents; }
+.forecast-pending {
+  // Span the full band whether the parent is a grid or a flex rail.
+  grid-column: 1 / -1;
+  flex: 1 0 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  align-items: flex-start;
+  padding: 1rem 1.15rem;
+  border-radius: var(--radius-md);
+  background: var(--elev-1);
+  border: 1px dashed var(--elev-border);
+  color: var(--text-dim);
+}
+.forecast-pending__title { color: var(--text); font-weight: 600; }
+.forecast-pending__body { font-size: 0.9rem; line-height: 1.45; max-width: 60ch; }
+.forecast-pending__link {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+}
+.forecast-pending__link:hover { text-decoration: underline; }
+.forecast-pending__link:focus-visible { @include focus-ring(2px); }
+
+// ---- .ui-empty ----
+.ui-empty {
+  text-align: center;
+  padding: 2.5rem 1.5rem;
+  color: var(--text-dim);
+}
+.ui-empty__icon { font-size: 2.5rem; margin-bottom: 0.75rem; color: var(--text-faint); display: flex; justify-content: center; }
+.ui-empty__title { color: var(--text); margin: 0.25rem 0 0.5rem; }
+.ui-empty__body { margin: 0 0 1.25rem; line-height: 1.5; }
+.ui-empty__cta {
+  display: inline-block;
+  // AA-safe deepened flow for white button text (plain --grad-flow is ~3.4:1
+  // white-on-dark). Same fix as .btn--primary.
+  background: var(--grad-flow-cta);
+  color: #fff;
+  padding: 0.65rem 1.4rem;
+  border-radius: var(--radius-sm);
+  text-decoration: none;
+  font-weight: 600;
+  min-height: 44px;
+  line-height: 1.8;
+  box-shadow: var(--specular), var(--shadow-1);
+  transition: filter var(--motion-base) var(--ease-out),
+    box-shadow var(--motion-base) var(--ease-out),
+    transform var(--motion-base) var(--ease-out);
+}
+.ui-empty__cta:hover { filter: brightness(1.06); box-shadow: var(--specular), var(--shadow-2); transform: translateY(-1px); }
+.ui-empty__cta:active { transform: translateY(1px); }
+.ui-empty__cta:focus-visible { @include focus-ring(2px); box-shadow: var(--focus-halo); }
+
+// ---- Settings UI ----
+.settings-page {
+  // Use available width up to a wide-enough cap to comfortably show a
+  // segmented control with 8 options + a populated form column without
+  // hyphenating button labels. Below 1280px we use whatever's there;
+  // 60ch caps apply per-element (subtitle, helptext) to keep paragraphs
+  // readable without starving form widgets of horizontal space.
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: var(--space-5) var(--space-6) var(--space-9);
+  // Stack header + panels with breathing room so each section reads as
+  // its own block instead of a continuous slab of glass. Per-element
+  // margin-bottom on the header is reset below so this gap is the only
+  // source of vertical rhythm here.
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+.settings-page > .settings-page__header {
+  margin-bottom: 0;
+}
+
+// Section anchors inside settings panels. The default <h2> + a tiny
+// eyebrow felt the same across every panel; bumping the title weight
+// and pulling a faint hairline under the header anchors each section
+// so the page reads as distinct blocks at a glance.
+:is(.settings-page, .zone-editor-host) .panel__title {
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  color: var(--text-bright);
+  line-height: 1.2;
+  margin: 0;
+}
+:is(.settings-page, .zone-editor-host) .panel__header {
+  padding-bottom: var(--space-3);
+  margin-bottom: var(--space-1);
+  border-bottom: 1px solid color-mix(in oklab, var(--text-bright) 6%, transparent);
+}
+// When the edit form is open, give its panel a faint accent tint on
+// the left edge so it reads as an active editing surface vs the
+// surrounding read-only panels.
+:is(.settings-page, .zone-editor-host) [id$="-form-panel"] > .panel {
+  border-left: 2px solid color-mix(in oklab, var(--accent) 55%, transparent);
+  box-shadow:
+    var(--shadow),
+    var(--specular),
+    inset 2px 0 0 0 color-mix(in oklab, var(--accent) 18%, transparent);
+}
+
+// Field grid for the single-form settings pages. Denser than the
+// default .grid (240px vs 320px min) so short threshold fields pack
+// 3-4 per row inside the 1280px page cap instead of stretching one
+// wide field per line, the tall-skinny-column problem on wide screens.
+.settings-field-grid {
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--space-4) var(--space-5);
+}
+// P3-10: the "+ Add X" toggle button under a settings list (replaces ad-hoc
+// inline margin-top on those migrated buttons; tokenized + reusable).
+.settings-add-btn { margin-top: var(--space-4); }
+// P2-6: seasonal trust dial.
+.seasonal-dial {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+.seasonal-dial .slider-clay {
+  flex: 1;
+}
+.seasonal-dial__value {
+  min-width: 3.4rem;
+  text-align: right;
+  font-weight: 700;
+  font-size: 1.15rem;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.seasonal-dial__effect {
+  margin: 0.5rem 0 0;
+  font-size: var(--text-body-sm);
+  color: var(--text-dim);
+}
+// Block-agnostic dynamic-effect line under a form control ("what this
+// setting does right now"). Same geometry as the dial's effect line,
+// without coupling a dial-free panel to the dial block's future edits.
+.form-effect {
+  margin: 0.5rem 0 0;
+  font-size: var(--text-body-sm);
+  color: var(--text-dim);
+}
+
+// Action row at the bottom of a settings form (Save / Reset).
+.push-device {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--elev-border);
+}
+.push-device__status { display: flex; flex-direction: column; gap: 2px; min-width: 12rem; }
+.push-device__label { font-size: var(--text-caption); font-weight: 600; color: var(--text-dim); }
+.push-device__state { color: var(--text); }
+.push-device__actions { margin-left: auto; }
+.push-device__msg { flex-basis: 100%; margin: 0; font-size: var(--text-meta); color: var(--text-dim); }
+
+.settings-actions {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-top: var(--space-6);
+}
+// Data sources page: one row per overrideable field: label + live owner on the
+// left, source picker on the right. Stacks on narrow screens.
+.data-source-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.data-source-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  padding: var(--space-3);
+  @include surface($background: (var(--elev-2)), $radius: (var(--radius-sm)), $shadow: null);
+
+}
+.data-source-row__label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+.data-source-row__field {
+  color: var(--text-bright);
+  font-weight: 600;
+  font-size: var(--text-body);
+}
+.data-source-row__owner {
+  color: var(--text-dim);
+  font-size: var(--text-caption);
+}
+.data-source-row__picker {
+  min-width: 14rem;
+  max-width: 100%;
+}
+@media (max-width: 540px) {
+  .data-source-row { align-items: stretch; }
+  .data-source-row__picker { min-width: 0; width: 100%; }
+}
+
+// Per-field source TIER chips + plain-language explainers. A source tier is
+// "Your device" (a local physical sensor), "Cloud service" (a cloud weather
+// service supplying a current value), or "Forecast" (forecast only). The chip
+// colors the distinction so a usable cloud current source no longer reads as
+// forecast-only jargon.
+.source-tier-chip {
+  display: inline-block;
+  padding: 0.05rem 0.5rem;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-caption);
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+.source-tier-chip--cloud {
+  color: var(--accent-2, var(--accent));
+  background: color-mix(in oklab, var(--accent-2, var(--accent)) 14%, transparent);
+  border-color: color-mix(in oklab, var(--accent-2, var(--accent)) 40%, transparent);
+}
+
+// The cloud invite shown for a field with no local sensor (e.g. "No rain
+// sensor? Use a cloud weather service for rain.").
+.data-source-row__cloud-invite {
+  margin: 0 0 var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  color: var(--text);
+  font-size: var(--text-caption);
+  @include surface($background: (color-mix(in oklab, var(--accent-2, var(--accent)) 8%, transparent)), $border: (1px dashed color-mix(in oklab, var(--accent-2, var(--accent)) 45%, transparent)), $radius: (var(--radius-sm)), $shadow: null);
+
+}
+.data-source-row__explain {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+// Per-field ORDERED PRIORITY + BACKUP CHAIN editor. Each reading is a card with
+// a header (name + Automatic/Custom tag + reset) and an ordered list of its
+// candidate sources; the top source that is reporting wins, the rest are the
+// backup chain. Drag a row (or use the up/down arrows) to reorder. Matches the
+// entity-stripe / Catppuccin vocabulary (source stripe on each row).
+.data-source-row--chain {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-2);
+}
+.data-source-chain-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+.data-source-chain-head__title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+// The Automatic / Custom tag: an uppercase micro-label, dim for the region
+// default, accented once the user has authored a custom order.
+.data-source-chain__tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px var(--space-2);
+  border-radius: 999px;
+  font-size: var(--text-micro);
+  font-weight: 700;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--text-dim);
+  background: var(--elev-1);
+  border: 1px solid var(--elev-border);
+  white-space: nowrap;
+}
+.data-source-chain__tag--custom {
+  color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 14%, transparent);
+  border-color: color-mix(in oklab, var(--accent) 40%, transparent);
+}
+.data-source-chain__reset { flex: 0 0 auto; }
+
+// The ordered chain itself: an <ol> of source rows.
+.data-source-chain {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.data-source-chain__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+  background: var(--elev-1);
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius-sm);
+
+  // The live owner: a stronger surface so the eye lands on who is reporting.
+  &--owner {
+    background: color-mix(in oklab, var(--accent-good) 10%, var(--elev-1));
+    border-color: color-mix(in oklab, var(--accent-good) 35%, transparent);
+  }
+  // A disabled / removed source still in the chain: struck through, dimmed, so
+  // it is never silently dropped.
+  &--off {
+    opacity: 0.7;
+    --entity-color: var(--text-faint);
+
+    .data-source-chain__name {
+      text-decoration: line-through;
+      color: var(--text-faint);
+    }
+  }
+}
+.data-source-chain__handle {
+  cursor: grab;
+  color: var(--text-faint);
+  font-size: 1rem;
+  line-height: 1;
+  user-select: none;
+
+  &:active { cursor: grabbing; }
+}
+.data-source-chain__ordinal {
+  flex: 0 0 auto;
+  min-width: 1.4rem;
+  height: 1.4rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  font-size: var(--text-caption);
+  font-weight: 700;
+  color: var(--text-dim);
+  background: var(--elev-2);
+  border: 1px solid var(--elev-border);
+}
+.data-source-chain__name {
+  color: var(--text-bright);
+  font-weight: 600;
+  min-width: 0;
+}
+// Measured vs model nature badge, honest at the point of ordering.
+.data-source-chain__nature {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px var(--space-2);
+  border-radius: 999px;
+  font-size: var(--text-micro);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+.data-source-chain__nature--measured {
+  color: var(--accent-good);
+  background: color-mix(in oklab, var(--accent-good) 14%, transparent);
+  border-color: color-mix(in oklab, var(--accent-good) 40%, transparent);
+}
+.data-source-chain__nature--model {
+  color: var(--text-dim);
+  background: var(--elev-2);
+  border-color: var(--elev-border);
+}
+.data-source-chain__nature--nowcast {
+  color: var(--accent-2, var(--accent));
+  background: color-mix(in oklab, var(--accent-2, var(--accent)) 14%, transparent);
+  border-color: color-mix(in oklab, var(--accent-2, var(--accent)) 40%, transparent);
+}
+// Live-now marker: reporting-now (green), standby/backstop (dim), off (faint).
+.data-source-chain__live {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-caption);
+  white-space: nowrap;
+
+  &::before {
+    content: "";
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 999px;
+    background: currentColor;
+  }
+}
+.data-source-chain__live--now { color: var(--accent-good); font-weight: 700; }
+.data-source-chain__live--standby { color: var(--text-dim); }
+.data-source-chain__live--off { color: var(--text-faint); }
+.data-source-chain__off-note {
+  color: var(--text-faint);
+  font-size: var(--text-caption);
+  font-style: italic;
+}
+.data-source-chain__warn {
+  color: var(--accent-warn);
+  font-size: var(--text-caption);
+  font-weight: 600;
+}
+// Up / down keyboard reorder controls (a11y: reorder is not mouse-only).
+.data-source-chain__moves {
+  flex: 0 0 auto;
+  display: inline-flex;
+  gap: 2px;
+}
+.data-source-chain__move { width: 1.6rem; height: 1.6rem; }
+.data-source-chain__caption {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--text-caption);
+}
+.data-source-chain__empty {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: var(--text-caption);
+  font-style: italic;
+}
+// Soil cross-link note: soil is governed per-zone, a different axis.
+.data-source-chain__soil-note {
+  margin: var(--space-3) 0 0;
+  color: var(--text-dim);
+  font-size: var(--text-caption);
+}
+.data-source-chain__soil-link {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+// The cloud-service descriptor line under the wizard kind picker (the shared
+// free/paid + key + coverage facts), set off with the tier chip.
+.source-pick__cloud {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin: var(--space-2) 0 0;
+  color: var(--text-dim);
+  font-size: var(--text-caption);
+  line-height: var(--leading-normal);
+}
+
+.settings-page__header { margin-bottom: var(--space-6); }
+.settings-page__back {
+  display: inline-block;
+  color: var(--accent);
+  text-decoration: none;
+  font-size: var(--text-body);
+  margin-bottom: var(--space-2);
+  &:hover { text-decoration: underline; }
+}
+.settings-page__title {
+  margin: var(--space-1) 0 var(--space-2);
+  color: var(--text-bright);
+  font-size: var(--text-h1);
+  font-weight: 700;
+  letter-spacing: var(--tracking-tight);
+}
+.settings-page__subtitle {
+  color: var(--text-dim);
+  font-size: var(--text-body);
+  line-height: var(--leading-normal);
+  max-width: 60ch;
+}
+
+// (legacy .settings-group padding removed, the v2 SettingsShell defines
+// .settings-group as a flush flex column below; the stale 16px top padding
+// here was pushing the left column's group headers down out of alignment
+// with the detail pane's "Configuration" header.)
+
+.settings-group__title {
+  margin: 0;
+  font-size: var(--text-h3);
+  color: var(--text-bright);
+  font-weight: 700;
+  letter-spacing: var(--tracking-tight);
+}
+
+.settings-list__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-2);
+  border-radius: var(--radius-sm);
+  text-decoration: none;
+  color: var(--text);
+  min-height: 56px;
+  transition: background 120ms ease, color 80ms ease;
+  position: relative;
+
+  &:hover {
+    background: color-mix(in oklab, var(--accent) 7%, transparent);
+    .settings-list__icon { transform: scale(1.05); }
+  }
+  &:focus-visible {
+    background: color-mix(in oklab, var(--accent) 10%, transparent);
+  }
+}
+.settings-list__icon {
+  font-size: 1.4rem;
+  width: 32px;
+  text-align: center;
+  flex-shrink: 0;
+  transition: transform 200ms cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+.settings-list__text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+}
+.settings-list__label {
+  color: var(--text-bright);
+  font-weight: 600;
+  font-size: var(--text-body);
+}
+.settings-list__helptext {
+  color: var(--text-dim);
+  font-size: var(--text-body-sm);
+  line-height: var(--leading-snug);
+  // Truncate long helptext lines on very narrow viewports so the
+  // list-row height stays steady.
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+// ============================================================
+// Settings UI kit: polished list items for the configuration
+// pages. SettingsCard / SettingsBadge / SettingsKv components in
+// src/components/settings_ui.rs render against these classes.
+//
+// Goals (driven by user feedback that the old list-item-with-edit
+// pattern "looked cheap and felt cheap"):
+//   - Click row to expand details inline, no edit mode required.
+//   - Status visible at a glance via color-coded badges.
+//   - Edit / Delete / Make-default sit alongside the read-only
+//     view, not behind a separate edit button.
+//   - Glass surface + per-state accent stripe for visual rhythm
+//     matching the rest of the app.
+// ============================================================
+
+.settings-card-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  // Canonical peer-card gap. --space-3 is the ONE within-section rhythm shared
+  // by .cloud-weather-list; between-section gap is the larger --space-6 on
+  // section margins.
+  gap: var(--space-3);
+}
+
+// The zone editor, opened in place beneath the row it belongs to. It reads as
+// an open drawer hanging off that zone rather than another card in the list:
+// an accent rail down the left ties it to the row above, the inset ground and
+// the step in from the edge say "this is a form, not a peer", and the whole
+// thing is unmistakably attached to one zone rather than floating under all of
+// them. Before this the editor rendered after the entire list, flat and
+// card-shaped, so on a long yard the operator clicked Edit and nothing they
+// could see happened.
+
+@media (max-width: 640px) {
+  // Screen width is scarcer than the visual tie-in; keep the rail, lose the
+  // indent.
+}
+
+// "Add a device" bar on the Devices hub: the two create actions grouped on the
+// left, the "scan the network" discovery action clearly separated on the right,
+// so what-does-what is obvious. A defined card with real breathing room below it
+// before the device list starts.
+// First-run "Finish setting up" checklist on the settings overview pane.
+.settings-checklist {
+  margin-bottom: var(--space-5);
+  padding: var(--space-4);
+  border: 1px solid color-mix(in oklab, var(--accent) 30%, var(--border));
+  border-radius: var(--radius-lg);
+  background: color-mix(in oklab, var(--accent) 5%, transparent);
+}
+.settings-checklist__title {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-h3);
+  font-weight: 700;
+  color: var(--text-bright);
+}
+.settings-checklist__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+.settings-checklist__head .settings-checklist__title { margin: 0; }
+.settings-checklist__count {
+  font-family: var(--font-mono);
+  font-size: var(--text-body-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+.settings-checklist__bar {
+  height: 6px;
+  margin: var(--space-3) 0 var(--space-4);
+  border-radius: 999px;
+  background: var(--elev-2);
+  overflow: hidden;
+}
+.settings-checklist__bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--grad-flow);
+  transition: width var(--motion-base) var(--ease-out);
+}
+
+.settings-checklist__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.settings-checklist__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--text-body-sm);
+  color: var(--text);
+}
+.settings-checklist__mark {
+  display: inline-flex;
+  width: 1.4em;
+  justify-content: center;
+  font-weight: 700;
+  color: var(--text-faint);
+}
+.settings-checklist__label {
+  flex: 1;
+}
+.settings-checklist__item.is-done {
+  color: var(--text-dim);
+  .settings-checklist__mark {
+    color: var(--accent-good);
+  }
+  .settings-checklist__label {
+    text-decoration: line-through;
+    text-decoration-color: var(--text-faint);
+  }
+}
+
+// The entity model taught in one band: Source -> Sensors -> Zones <- Controller,
+// in the four entity colors. Reuses the .entity-badge chips from the cards below.
+.entity-pipeline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  margin: var(--space-2) 0 var(--space-5);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-softer);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+.entity-pipeline__rel {
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+// Inline feedback next to a zone card's "Test run" button.
+.zone-test-msg {
+  display: inline-flex;
+  align-items: center;
+  margin-left: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-meta);
+  color: var(--accent-rain);
+}
+
+// Grouped bands within a settings page (e.g. Advanced's "This device" vs
+// "Maintenance & danger"). The danger band gets a warm-tinted enclosure so a
+// beginner sees at a glance that the tools inside change server-side state.
+.settings-band {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+}
+.settings-band__head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.settings-band__title {
+  margin: 0;
+  font-size: var(--text-h3);
+  font-weight: 700;
+  letter-spacing: var(--tracking-tight);
+  color: var(--text-bright);
+}
+.settings-band__sub {
+  margin: 0;
+  font-size: var(--text-meta);
+  color: var(--text-dim);
+}
+.settings-band--danger {
+  padding: var(--space-5);
+  border: 1px solid color-mix(in oklab, var(--accent-warm) 35%, transparent);
+  border-radius: var(--radius-lg);
+  background: color-mix(in oklab, var(--accent-warm) 5%, transparent);
+  .settings-band__title {
+    color: var(--accent-warm);
+  }
+}
+
+// "Advanced options" disclosure in the zone form (and reusable for any form
+// that collapses fine-tuning fields under a beginner-friendly essentials set).
+// P2-4: inline "presets show their work" facts (species FAO-56 params, precip
+// estimate) under the relevant zone-form field.
+.zone-form__facts {
+  margin: -0.4rem 0 0.9rem;
+  padding: 0.4rem 0.7rem;
+  border-left: 2px solid var(--accent);
+  background: color-mix(in oklab, var(--accent) 7%, transparent);
+  color: var(--text-dim);
+  font-size: var(--text-body-sm);
+  line-height: 1.45;
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+}
+.zone-form-advanced {
+  margin-top: var(--space-4);
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-2);
+}
+.zone-form-advanced__summary {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+  font-size: var(--text-meta);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-eyebrow);
+  color: var(--text-dim);
+  user-select: none;
+  list-style: none;
+  &::-webkit-details-marker {
+    display: none;
+  }
+  &::before {
+    content: "\25B8";
+    transition: transform 160ms ease;
+  }
+  &:hover {
+    color: var(--text-bright);
+  }
+}
+.zone-form-advanced[open] > .zone-form-advanced__summary {
+  margin-bottom: var(--space-4);
+  &::before {
+    transform: rotate(90deg);
+  }
+}
+
+.device-add-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin: var(--space-5) 0 var(--space-6);
+  padding: var(--space-5);
+  background: var(--elev-1);
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
+
+  &__group {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-3);
+  }
+  // The discovery action reads as a secondary "or" path, set apart from the
+  // primary create buttons.
+  &__group--end {
+    gap: var(--space-3);
+  }
+  &__label {
+    font-weight: 600;
+    color: var(--text);
+    margin-right: var(--space-1);
+  }
+  &__or {
+    color: var(--text-faint);
+    font-size: var(--text-meta);
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-eyebrow);
+  }
+}
+
+// Co-located foldable section inside a settings pane (design #4): the Devices
+// hub folds the per-field source + priority picker under the device list. The
+// summary reads as a section header; the body holds the embedded picker.
+.settings-section-fold {
+  margin-top: var(--space-6);
+  border: 1px solid var(--elev-border);
+  border-radius: var(--radius-lg);
+  background: var(--elev-1);
+  box-shadow: var(--shadow-1);
+  overflow: hidden;
+
+  &__summary {
+    cursor: pointer;
+    list-style: none;
+    padding: var(--space-4) var(--space-5);
+    font-weight: 600;
+    color: var(--text);
+    user-select: none;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+
+    &::-webkit-details-marker { display: none; }
+    &::before {
+      content: "\25B8"; // right-pointing triangle, rotates open
+      color: var(--text-faint);
+      transition: transform 0.15s ease;
+    }
+    &:hover { background: var(--elev-2); }
+  }
+  &[open] > &__summary::before { transform: rotate(90deg); }
+
+  &__body {
+    padding: 0 var(--space-5) var(--space-5);
+    border-top: 1px solid var(--elev-border);
+  }
+}
+
+// Embedded variant of the Data sources picker (no standalone page chrome): it
+// drops the `.settings-page` width/padding wrapper because the host pane (the
+// Devices hub) already provides them, so the panels sit flush in the fold.
+.data-sources-embedded {
+  display: block;
+
+  // The first child Panel/banner should not add a top gap inside the fold body.
+  > :first-child { margin-top: 0; }
+}
+
+// Devices panel (Phase D). Section intro + the per-device child list.
+.settings-section-head {
+  margin-bottom: var(--space-4);
+}
+.settings-section-head__sub {
+  margin: 0;
+  color: var(--text-dim);
+  max-width: 70ch;
+  line-height: var(--leading-normal);
+}
+.settings-section__title {
+  margin: var(--space-1) 0 var(--space-2);
+  color: var(--text-bright);
+  font-size: var(--text-h2);
+  font-weight: 700;
+  letter-spacing: var(--tracking-tight);
+}
+.settings-empty {
+  color: var(--text-dim);
+  padding: var(--space-4) 0;
+}
+.device-child-list {
+  list-style: none;
+  margin: 0;
+  // A defined, recessed container so the child sensors read as one grouped
+  // unit with breathing room, not a cramped run of borderless rows.
+  padding: var(--space-1) var(--space-3);
+  background: var(--surface-softer);
+  border: 1px solid var(--elev-line);
+  border-radius: var(--radius-sm);
+  display: flex;
+  flex-direction: column;
+}
+.device-child {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--elev-line);
+
+  &:last-child {
+    border-bottom: none;
+  }
+}
+.device-child-empty {
+  color: var(--text-dim);
+  margin: 0;
+}
+// Managed soil rows on a device card: the probe is bound / removed right
+// where it is listed. Aligns center (a select + button are taller than the
+// text chips) and lets the controls hug the right edge.
+.device-child--soil {
+  align-items: center;
+  flex-wrap: wrap;
+
+  .device-child__label {
+    flex: 1 1 auto;
+  }
+}
+// In-app restart wait state: full-screen scrim while the process cycles;
+// the page hard-reloads itself when the server answers again.
+.restart-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-blocking);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--bg-deep) 82%, transparent);
+  -webkit-backdrop-filter: var(--blur-scrim);
+  backdrop-filter: var(--blur-scrim);
+}
+.restart-overlay__card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-5) var(--space-6);
+  @include surface($background: (var(--surface-soft)), $border: (1px solid var(--elev-line)), $radius: (var(--radius-md)), $shadow: null);
+
+  color: var(--text-bright);
+  text-align: center;
+
+  span { color: var(--text-dim); font-size: var(--text-meta); }
+}
+.health-banner__error {
+  color: var(--accent-danger, #e66);
+  margin-top: var(--space-1);
+}
+
+.device-soil__bind {
+  background: var(--surface-soft);
+  color: var(--text);
+  border: 1px solid var(--elev-line);
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-size: 0.85em;
+  padding: 2px var(--space-2);
+  max-width: 12rem;
+
+  &:focus-visible {
+    @include focus-ring(2px);
+  }
+}
+
+// The SettingsCard component (settings_ui.rs). Owns this selector outright now
+// that the settings hub's nav-list is .settings-nav-card -- previously a second
+// flat .settings-card rule collided here, winning bg/border/radius/shadow at
+// equal specificity and (because it had no transition) deadening the hover +
+// expand animation. Tokens are the elev values the component already rendered.
+.settings-card {
+  @include surface;
+
+  overflow: hidden;
+  transition: border-color 120ms ease, box-shadow 200ms ease;
+
+  &:hover {
+    border-color: color-mix(in oklab, var(--accent) 32%, var(--elev-border));
+  }
+
+  &.is-expanded {
+    border-color: color-mix(in oklab, var(--accent) 48%, var(--elev-border));
+    box-shadow: var(--shadow-2);
+  }
+}
+
+.settings-card__header {
+  // Flex (not a 4-col grid): icon | flexible text column | chevron. The badges
+  // live INSIDE the text column (below the title), so on a narrow viewport they
+  // wrap onto their own line instead of stealing width from the title and
+  // colliding with it. align-items:flex-start keeps the icon level with the
+  // title when the text column grows to two or three lines.
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  background: transparent;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+
+  // Clear, unmistakable hover so the header reads as the clickable target.
+  &:hover {
+    background: var(--surface-interactive-hover-bg);
+    box-shadow: var(--hover-ring);
+  }
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+}
+
+.settings-card__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-sm);
+  font-size: 1.2rem;
+  background: color-mix(in oklab, var(--text-bright) 4%, transparent);
+  color: var(--accent);
+}
+
+// On an entity card, tint the icon chip + the expanded border to the entity
+// color so the identity reads from the stripe, badge, AND icon together.
+.entity-stripe {
+  .settings-card__icon {
+    color: var(--entity-color, var(--accent));
+    background: color-mix(in oklab, var(--entity-color, var(--accent)) 12%, transparent);
+  }
+  &.is-expanded {
+    border-color: color-mix(in oklab, var(--entity-color, var(--accent)) 48%, var(--glass-border));
+  }
+}
+
+.settings-card__head-text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+// Card title: sans, one notch above body, so it reads as a heading and not as
+// tabular data. --font-mono is reserved for the id/value in the expanded KV
+// grid; a device NAME is prose, not a code.
+.settings-card__title {
+  color: var(--text-bright);
+  font-weight: 600;
+  font-size: 1.05rem;
+  letter-spacing: var(--tracking-tight);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-card__subtitle {
+  color: var(--text-dim);
+  font-size: var(--text-body-sm);
+  font-family: var(--font-mono);
+  letter-spacing: 0.02em;
+}
+
+.settings-card__badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.settings-card__chevron {
+  color: var(--text-faint);
+  font-size: 1.4rem;
+  transition: color 80ms ease, transform 180ms cubic-bezier(0.2, 0.8, 0.3, 1);
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  align-self: center;
+
+  &.is-open {
+    color: var(--accent);
+    transform: rotate(90deg);
+  }
+}
+
+.settings-card__body {
+  // CSS-only collapse. The body has two direct children (the KV grid
+  // and the action row); the earlier grid-template-rows trick was
+  // single-row and let the action row leak through in implicit row 2,
+  // and the multi-row variant resolved both rows to 0 in the open
+  // state. Using max-height + opacity clips both children uniformly
+  // when collapsed and reveals them together when expanded.
+  max-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: max-height 260ms ease, opacity 200ms ease;
+}
+
+.settings-card.is-expanded .settings-card__body {
+  // Cap is intentionally generous so any realistic card (long KV
+  // list + several action buttons) fits without being clipped.
+  max-height: 1600px;
+  opacity: 1;
+}
+
+.settings-card__kvs {
+  margin: 0;
+  padding: var(--space-2) var(--space-4) var(--space-4);
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-2) var(--space-5);
+  border-top: 1px solid color-mix(in oklab, var(--text-bright) 6%, transparent);
+}
+
+.settings-kv {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.settings-kv__label {
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin: 0;
+}
+
+.settings-kv__value {
+  font-family: var(--font-mono);
+  font-size: var(--text-body-sm);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  margin: 0;
+  word-break: break-word;
+}
+
+.settings-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: 0 var(--space-4) var(--space-4);
+  &:empty { display: none; }
+}
+
+// Semantic status pills. Same tokens used by .source-status-pill etc.
+// but with the polished card-internal sizing.
+.settings-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  font-weight: 700;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--text-bright) 6%, transparent);
+  color: var(--text-dim);
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.settings-badge--accent {
+  color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 14%, transparent);
+  border-color: color-mix(in oklab, var(--accent) 35%, transparent);
+}
+.settings-badge--good {
+  color: var(--accent-good);
+  background: color-mix(in oklab, var(--accent-good) 14%, transparent);
+  border-color: color-mix(in oklab, var(--accent-good) 35%, transparent);
+}
+.settings-badge--muted {
+  color: var(--text-faint);
+}
+.settings-badge--warm {
+  color: var(--accent-warm);
+  background: color-mix(in oklab, var(--accent-warm) 14%, transparent);
+  border-color: color-mix(in oklab, var(--accent-warm) 35%, transparent);
+}
+.settings-badge--danger {
+  color: var(--accent-danger);
+  background: color-mix(in oklab, var(--accent-danger) 14%, transparent);
+  border-color: color-mix(in oklab, var(--accent-danger) 35%, transparent);
+}
+
+// ---- Theme picker grid ----
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 1rem;
+  margin-top: 1.25rem;
+}
+.theme-card {
+  @include surface($background: (var(--bg-panel)), $border: (2px solid var(--border)), $radius: (var(--radius)), $shadow: null);
+
+  padding: 1rem;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, transform 0.1s ease;
+}
+.theme-card:hover { border-color: var(--text-dim); }
+.theme-card--active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+.theme-card__swatch {
+  position: relative;
+  width: 100%;
+  height: 70px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 0.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.theme-card__swatch-accent {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+}
+.theme-card__swatch-text {
+  font-size: 1.6rem;
+  font-weight: 600;
+  font-family: var(--font-sans);
+}
+.theme-card__label { color: var(--text); font-weight: 600; margin-bottom: 0.15rem; }
+.theme-card__helptext { color: var(--text-dim); font-size: 0.85rem; line-height: 1.45; }
+
+// ---- Setup wizard ----
+.setup-shell {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 1.5rem 1rem 5rem;
+}
+.setup-shell__header { margin-bottom: 1.5rem; }
+.setup-shell__title { margin: 0 0 0.4rem; color: var(--text); font-size: 1.8rem; }
+.setup-shell__subtitle { color: var(--text-dim); line-height: 1.55; max-width: 60ch; }
+
+// Wizard species gallery: a responsive grid of cards, each with an
+// optional photo + name + Kc range + root depth + MAD + short note.
+// Photos live under public/grass-species/<slug>.jpg; missing photos
+// degrade gracefully (the <img> hides itself via onerror).
+.species-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.85rem;
+  margin-top: 0.5rem;
+}
+
+.species-card {
+  display: flex;
+  flex-direction: column;
+  @include surface($background: (var(--glass-bg)), $border: (1px solid var(--glass-border)), $radius: (var(--radius-md)), $shadow: null);
+
+  overflow: hidden;
+}
+
+.species-card__photo-wrap {
+  aspect-ratio: 3 / 2;
+  background:
+    linear-gradient(135deg,
+      rgba(120, 200, 255, 0.06),
+      rgba(80, 120, 80, 0.10));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.species-card__photo {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.species-card__body { padding: 0.7rem 0.85rem 0.85rem; }
+
+.species-card__name {
+  margin: 0 0 0.25rem;
+  font-size: 0.95rem;
+  color: var(--text);
+  font-family: var(--font-display);
+}
+
+.species-card__meta {
+  margin: 0 0 0.45rem;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.03em;
+}
+
+.species-card__desc {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.setup-step { padding: 0.5rem 0 1rem; }
+.setup-step__title { margin: 0 0 0.6rem; color: var(--text); font-size: 1.3rem; }
+// When a sub-line follows the title, the sub owns the spacing below the pair, so
+// the title drops its own bottom margin (no double gap).
+.setup-step__title:has(+ .setup-step__sub) { margin-bottom: 0; }
+// P2-1: list of zones already added in the wizard.
+.setup-zone-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.setup-zone-list li {
+  padding: 0.45rem 0.7rem;
+  border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--verdict-run) 10%, transparent);
+  color: var(--text);
+}
+.setup-zone-list code {
+  color: var(--text-dim);
+  font-size: 0.85em;
+}
+// P2-1: non-blocking zero-zone warning on the Review step.
+.setup-zero-zone-warn {
+  margin: 0 0 1rem;
+  padding: 0.7rem 0.9rem;
+  border-radius: var(--radius-md);
+  color: var(--accent-warm);
+  background: color-mix(in oklab, var(--accent-warm) 12%, transparent);
+  border: 1px solid color-mix(in oklab, var(--accent-warm) 35%, transparent);
+  line-height: 1.5;
+}
+.setup-step__body {
+  color: var(--text-dim);
+  line-height: 1.6;
+  max-width: 60ch;
+  margin: 0 0 1.5rem;
+}
+// One-line subtitle under a step title: tighter + closer to the title than
+// the full body paragraph, so the heading reads as a two-line unit.
+.setup-step__sub {
+  color: var(--text-dim);
+  line-height: 1.5;
+  max-width: 60ch;
+  margin: 0 0 var(--space-4);
+}
+// The two co-equal first-class sections on the wizard sources step: CLOUD
+// (the interactive provider list) and LOCAL hardware (scan + add a station).
+// Each is a clear section so a hardware user sees their station path alongside
+// cloud, and a no-hardware user sees cloud as the primary path.
+.setup-sources-block {
+  margin: 0 0 1.5rem;
+
+  &__head {
+    margin: 0 0 0.75rem;
+  }
+  &__title {
+    margin: 0 0 0.3rem;
+    font-size: var(--text-section, 1.05rem);
+    font-weight: 700;
+    color: var(--text);
+  }
+  &__lede {
+    margin: 0;
+    color: var(--text-dim);
+    line-height: 1.55;
+    max-width: 62ch;
+  }
+}
+// Per-source capability summary shown under the kind picker (and on each
+// added source). The badge states what the source provides; the note frames
+// the mixed-device -> zones flow. Capability text comes from kind_caps().
+.source-caps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem 0.55rem;
+  margin: 0.5rem 0 0;
+}
+.source-caps__badge {
+  display: inline-block;
+  padding: 0.12rem 0.5rem;
+  border-radius: var(--radius-pill, 999px);
+  background: color-mix(in oklab, var(--accent) 14%, transparent);
+  border: 1px solid color-mix(in oklab, var(--accent) 30%, transparent);
+  color: var(--text);
+  font-size: var(--text-meta);
+  font-weight: 600;
+  white-space: nowrap;
+}
+// The kind picker's vendor/protocol name shown beside the caps badge.
+.source-caps__name {
+  color: var(--text-dim);
+  font-size: var(--text-meta);
+  font-weight: 500;
+}
+
+// ---- Grouped source-kind picker ----
+//
+// The 24 source kinds, grouped by the user's mental model (forecast / local
+// station / cloud station / bridges / advanced) instead of a flat pill strip.
+// Each group is a labeled section with a short caption answering "is this me?";
+// its kinds render as a responsive grid of selectable tiles.
+.source-kind-picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.source-kind-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.source-kind-group__head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+.source-kind-group__title {
+  color: var(--text-bright);
+  font-size: var(--text-body-sm);
+  font-weight: 600;
+}
+.source-kind-group__caption {
+  color: var(--text-faint);
+  font-size: var(--text-meta);
+  line-height: 1.4;
+  max-width: 64ch;
+}
+.source-kind-group__options {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: var(--space-2);
+}
+.source-kind-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+  min-height: var(--control-h);
+  padding: 0.55rem 0.7rem;
+  @include surface($background: (var(--input-bg)), $border: (1px solid var(--input-border)), $radius: (var(--radius-sm)), $shadow: null);
+
+  color: var(--text-dim);
+  font-size: var(--text-body-sm);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.source-kind-tile:hover:not(.source-kind-tile--active) {
+  color: var(--text);
+  border-color: var(--border-strong);
+  background: color-mix(in oklab, var(--accent) 8%, var(--bg-panel-soft));
+}
+.source-kind-tile--active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+// The recommended zero-config default reads as the obvious starting point even
+// before it's selected.
+.source-kind-tile--recommended:not(.source-kind-tile--active) {
+  border-color: color-mix(in oklab, var(--accent) 45%, var(--border));
+}
+.source-kind-tile__label { line-height: 1.25; }
+.source-kind-tile__tag {
+  font-size: var(--text-micro);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--accent-cool);
+}
+.source-kind-tile--active .source-kind-tile__tag { color: var(--on-accent); }
+
+// ---- "What this does" panel under the picker ----
+.source-pick {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+.source-pick__blurb {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--text-body-sm);
+  line-height: 1.5;
+  max-width: 64ch;
+}
+.source-pick__zero-config {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem 0.55rem;
+  margin: 0;
+  padding: var(--space-3);
+  border-left: 3px solid var(--accent-good);
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--accent-good) 10%, transparent);
+  color: var(--text);
+  font-size: var(--text-body-sm);
+  line-height: 1.5;
+  max-width: 64ch;
+}
+.source-pick__zero-config-tag {
+  font-size: var(--text-micro);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--accent-good);
+}
+
+// ---- "Where to get this ->" credential link under a field ----
+.source-field-doc {
+  display: inline-block;
+  margin-top: 0.2rem;
+  color: var(--accent);
+  font-size: var(--text-meta);
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+  &:hover { text-decoration: underline; }
+}
+// P4-6: the "enable login for remote access" callout.
+.setup-step__nudge {
+  border-left: 3px solid var(--accent);
+  padding-left: var(--space-3);
+}
+.setup-step__hint {
+  margin-top: 0.6rem;
+  color: var(--accent-warm);
+  font-size: 0.9rem;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.setup-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--elev-border);
+}
+// Legacy button family, now visually unified with the canonical .btn system
+// (same gradient primary, secondary/ghost/danger treatments, focus halo). Kept
+// as separate selectors so existing call sites need no markup change; new code
+// should still prefer <Button>.
+.setup-footer__btn { min-height: 44px; }
+
+// Secondary / Cancel: bordered surface (maps to .btn--secondary).
+
+// Primary: the signature blue->teal flow gradient (matches .btn--primary).
+.setup-footer__btn--primary { margin-left: auto; }
+
+// Action row at the bottom of a settings *form panel* (add/edit form).
+// Cancel sits on the left, the primary commit (Add to list / Save X
+// changes) on the right, paired so the user does not have to scroll
+// up to reach Cancel as they did when the only Cancel lived in the
+// top toggle.
+.settings-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-top: var(--space-4);
+}
+// Cancel/Save sit next to each other on the right of the row. The
+// global `.setup-footer__btn--primary` rule has `margin-left:auto`
+// for the setup-wizard footer layout, which here would push Save to
+// the far right edge and leave Cancel stranded on the left. Reset it
+// in this context so the gap between them is just the row's gap.
+.settings-form-actions .setup-footer__btn--primary { margin-left: 0; }

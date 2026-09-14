@@ -40,7 +40,8 @@ use std::time::{Duration, Instant};
 
 use crate::config::FileConfigStore;
 use crate::forecast::model_catalog::DEFAULT_MODEL;
-use crate::forecast::refresher::configured_open_meteo_model;
+use crate::forecast::open_meteo::configured_open_meteo_model;
+use crate::net;
 use crate::ports::config_store::ConfigStore;
 
 /// Grid points per axis: 8x8 = 64 upstream locations, comfortably
@@ -73,14 +74,10 @@ pub struct WindGridState {
 
 impl WindGridState {
     pub fn new(cfg_store: Option<Arc<FileConfigStore>>) -> Self {
-        // Same HTTP discipline as the forecast refresher: bounded
-        // timeout, identifying user agent. 15s because the batched
+        // Same HTTP discipline as precip: bounded timeout, the derived
+        // per-install User-Agent (net::client). 15s because the batched
         // 64-point call is heavier than the single-point forecast.
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .user_agent("localsky/windgrid")
-            .build()
-            .unwrap_or_default();
+        let client = net::client(Duration::from_secs(15));
         Self {
             client,
             cfg_store,

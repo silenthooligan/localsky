@@ -18,11 +18,6 @@
 /// Public site root (marketing / landing). Genuinely external.
 pub const SITE_BASE: &str = "https://localsky.io";
 
-/// Public docs site root. Retained for any reference that explicitly
-/// wants the hosted copy; in-app help links use `doc_url` instead so
-/// they resolve against the bundled, same-origin docs.
-pub const DOCS_BASE: &str = "https://localsky.io/docs";
-
 /// Public GitHub repo (issues, releases, source).
 pub const REPO_URL: &str = "https://github.com/silenthooligan/localsky";
 

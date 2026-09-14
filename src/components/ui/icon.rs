@@ -47,29 +47,6 @@ pub fn Icon(
     }
 }
 
-/// Resolve a weather condition glyph name from a free-text condition
-/// string. Replaces the emoji ladder in hero.rs. Falls back to "cloud".
-pub fn weather_glyph(condition: &str) -> &'static str {
-    let c = condition.to_ascii_lowercase();
-    if c.contains("thunder") || c.contains("lightning") {
-        "cloud-lightning"
-    } else if c.contains("snow") || c.contains("sleet") || c.contains("flurr") {
-        "cloud-snow"
-    } else if c.contains("rain") || c.contains("shower") || c.contains("drizzle") {
-        "cloud-rain"
-    } else if c.contains("fog") || c.contains("mist") || c.contains("haze") {
-        "cloud-fog"
-    } else if c.contains("partly") || c.contains("mostly sunny") || c.contains("few cloud") {
-        "cloud-sun"
-    } else if c.contains("clear") || c.contains("sunny") || c.contains("fair") {
-        "sun"
-    } else if c.contains("wind") {
-        "wind"
-    } else {
-        "cloud"
-    }
-}
-
 /// Raw inner-SVG path data for a registry name. Public for the rare case
 /// where a glyph must be embedded inside an existing <svg> scene (e.g. the
 /// hourly chart) instead of through the <Icon/> component.
@@ -83,6 +60,11 @@ pub fn paths_for(name: &str) -> &'static str {
         // ── Primary nav ──────────────────────────────────────────────
         "weather" => r#"<path d="M17.5 19a4.5 4.5 0 1 0-1.7-8.66 7 7 0 1 0-11.6 6.66"/>"#,
         "droplet" => r#"<path d="M12 2.69 5.64 9.05a9 9 0 1 0 12.72 0Z"/>"#,
+        // Irrigation action glyphs: the same sprinkler, spraying or held.
+        "sprinkler" => {
+            r#"<path d="M3 21h18M10 21v-5h4v5M9 16h6M12 12V8M7 12 4 9M17 12l3-3M8 7 6 5M16 7l2-2M12 4V2"/>"#
+        }
+        "sprinkler-off" => r#"<path d="M3 21h18M10 21v-5h4v5M9 16h6M12 12V8M3 3l18 18"/>"#,
         "zones" => {
             r#"<path d="M12 21V8"/><path d="M7 21V11"/><path d="M17 21V11"/><path d="M12 8a4 4 0 0 0-4-4 4 4 0 0 0-4 4c0 2 1 4 4 4"/><path d="M12 8a4 4 0 0 1 4-4 4 4 0 0 1 4 4c0 2-1 4-4 4"/>"#
         }

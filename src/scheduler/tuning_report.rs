@@ -24,7 +24,11 @@ const MORNING_END_HOUR: u32 = 10;
 /// Spawn the weekly tuning-report notifier. Ticks hourly for the process
 /// lifetime; every decision below re-reads persisted state, so restarts
 /// need no boot reconciliation (the dedupe IS the DB row).
-pub fn spawn(state: TuningReportStateStore, push: PushDispatcher) {
+pub fn spawn(
+    state: TuningReportStateStore,
+    push: PushDispatcher,
+    tuning: std::sync::Arc<crate::tuning::TuningHandles>,
+) {
     tracing::info!(
         interval_days = NOTIFY_INTERVAL_DAYS,
         "tuning report notifier: spawning hourly tick"
@@ -38,7 +42,7 @@ pub fn spawn(state: TuningReportStateStore, push: PushDispatcher) {
         loop {
             tick.tick().await;
             use futures::FutureExt;
-            let outcome = std::panic::AssertUnwindSafe(run_once(&state, &push))
+            let outcome = std::panic::AssertUnwindSafe(run_once(&state, &push, &tuning))
                 .catch_unwind()
                 .await;
             if outcome.is_err() {
@@ -48,7 +52,11 @@ pub fn spawn(state: TuningReportStateStore, push: PushDispatcher) {
     });
 }
 
-async fn run_once(state: &TuningReportStateStore, push: &PushDispatcher) {
+async fn run_once(
+    state: &TuningReportStateStore,
+    push: &PushDispatcher,
+    tuning: &crate::tuning::TuningHandles,
+) {
     let now_local = crate::timeutil::now_local();
     if !(MORNING_START_HOUR..MORNING_END_HOUR).contains(&now_local.hour()) {
         return;
@@ -65,7 +73,9 @@ async fn run_once(state: &TuningReportStateStore, push: &PushDispatcher) {
         }
     }
     let report =
-        match crate::tuning::generate_report(crate::engine::tuning::DEFAULT_WINDOW_DAYS).await {
+        match crate::tuning::generate_report(tuning, crate::engine::tuning::DEFAULT_WINDOW_DAYS)
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 tracing::debug!(error = %e, "tuning report notifier: generation unavailable");

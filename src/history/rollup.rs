@@ -7,21 +7,18 @@
 
 use crate::history::types::RunRecord;
 
-/// Segments closer than this gap (previous end to next start) merge
-/// into one irrigation event: cycle-soak splits one morning's watering
-/// into several valve-open windows.
-pub const EVENT_CLUSTER_GAP_S: i64 = 2 * 3600;
-
 /// One valve-open interval from the runs history.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RunSegment {
+    pub session_id: Option<String>,
     pub start_epoch: i64,
     pub end_epoch: i64,
 }
 
-/// A same-morning cluster of run segments: one irrigation event.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// One explicit watering session, or one overlapping legacy interval.
+#[derive(Debug, Clone, PartialEq)]
 pub struct IrrigationEvent {
+    pub session_id: Option<String>,
     /// First segment's start.
     pub start_epoch: i64,
     /// Last segment's end.
@@ -38,8 +35,18 @@ pub struct IrrigationEvent {
 /// backfill) stays excluded until an ingest path actually produces it;
 /// revisit this filter when wiring one.
 pub fn is_watering_row(source: &str, status: &str) -> bool {
-    status == "completed"
-        && (source == "ha_refresher" || source == "manual" || source.starts_with("manual:"))
+    // A run cut short (a restart, the reaper at the deadline) still
+    // applied water for its duration: `aborted` counts. The dispatcher's
+    // own rows for controllers with no state readback (`smart_morning`)
+    // and the boot pass's rows for runs a restart ended (`restart`) are
+    // watering too; without them the balance credited nothing for a
+    // morning that plainly happened.
+    (status == "completed" || status == "aborted")
+        && (source == "ha_refresher"
+            || source == "manual"
+            || source.starts_with("manual:")
+            || source == "smart_morning"
+            || source == "restart")
 }
 
 /// [`is_watering_row`] plus the LEGACY fallbacks, the form every real
@@ -67,32 +74,23 @@ pub fn is_watering_record(r: &RunRecord) -> bool {
     is_watering_evidence(&r.source, &r.status, r.skip_reason.as_deref())
 }
 
-/// Cluster watering segments into same-morning irrigation events.
-/// Segments closer than `EVENT_CLUSTER_GAP_S` (measured from the previous
-/// segment's end to the next segment's start) merge into one event.
-///
-/// valve_open_s is the interval-UNION coverage of the cluster, not a raw
-/// sum: a manual run is persisted twice (the manual completed row plus
-/// the run-edge observer's row for the same physical valve activity),
-/// and summing both would double the minutes and halve every backed-out
-/// rate. Segments are sorted by start, so counting only the portion past
-/// the cluster's current end is exactly the union length; disjoint
-/// cycle/soak observer segments still sum as before.
-pub fn cluster_events(segments: &[RunSegment]) -> Vec<IrrigationEvent> {
-    let mut segs: Vec<RunSegment> = segments
+/// Physical valve-open union, independent of job identity. Never count the
+/// same physical seconds twice, even when distinct commands overlap.
+pub fn union_intervals(segments: &[RunSegment]) -> Vec<IrrigationEvent> {
+    let mut segs: Vec<&RunSegment> = segments
         .iter()
-        .copied()
-        .filter(|s| s.end_epoch >= s.start_epoch)
+        .filter(|s| s.end_epoch > s.start_epoch)
         .collect();
     segs.sort_by_key(|s| s.start_epoch);
     let mut events: Vec<IrrigationEvent> = Vec::new();
     for s in segs {
         match events.last_mut() {
-            Some(ev) if s.start_epoch - ev.end_epoch <= EVENT_CLUSTER_GAP_S => {
+            Some(ev) if s.start_epoch <= ev.end_epoch => {
                 ev.valve_open_s += (s.end_epoch - s.start_epoch.max(ev.end_epoch)).max(0);
                 ev.end_epoch = ev.end_epoch.max(s.end_epoch);
             }
             _ => events.push(IrrigationEvent {
+                session_id: None,
                 start_epoch: s.start_epoch,
                 end_epoch: s.end_epoch,
                 valve_open_s: s.end_epoch - s.start_epoch,
@@ -100,6 +98,61 @@ pub fn cluster_events(segments: &[RunSegment]) -> Vec<IrrigationEvent> {
         }
     }
     events
+}
+
+/// Group by persisted session identity. Cycle/soak gaps can be any duration;
+/// unrelated jobs remain separate even a second apart. Legacy rows have no
+/// recoverable job identity and merge only where their physical spans overlap.
+/// Session counts and physical coverage are deliberately separate reductions.
+pub fn cluster_events(segments: &[RunSegment]) -> Vec<IrrigationEvent> {
+    let mut groups: std::collections::BTreeMap<&str, Vec<RunSegment>> = Default::default();
+    let mut legacy = Vec::new();
+    for segment in segments.iter().filter(|s| s.end_epoch > s.start_epoch) {
+        match segment.session_id.as_deref().filter(|id| !id.is_empty()) {
+            Some(id) => groups.entry(id).or_default().push(segment.clone()),
+            None => legacy.push(segment.clone()),
+        }
+    }
+    let mut events = union_intervals(&legacy);
+    for (id, group) in groups {
+        let spans = union_intervals(&group);
+        if let (Some(first), Some(last)) = (spans.first(), spans.last()) {
+            events.push(IrrigationEvent {
+                session_id: Some(id.to_string()),
+                start_epoch: first.start_epoch,
+                end_epoch: last.end_epoch,
+                valve_open_s: spans.iter().map(|e| e.valve_open_s).sum(),
+            });
+        }
+    }
+    events.sort_by(|a, b| (a.start_epoch, &a.session_id).cmp(&(b.start_epoch, &b.session_id)));
+    events
+}
+
+/// Preserve audit records inside explicit sessions. Legacy rows stay separate.
+pub fn group_run_records(rows: &[RunRecord]) -> Vec<Vec<RunRecord>> {
+    let mut groups: Vec<Vec<RunRecord>> = Vec::new();
+    let mut indices: std::collections::BTreeMap<(String, String), usize> = Default::default();
+    for row in rows {
+        let key = row
+            .session_id
+            .as_ref()
+            .filter(|id| !id.is_empty())
+            .map(|id| (row.zone.replace('-', "_"), id.clone()));
+        if let Some(index) = key.as_ref().and_then(|k| indices.get(k)).copied() {
+            groups[index].push(row.clone());
+        } else {
+            if let Some(key) = key {
+                indices.insert(key, groups.len());
+            }
+            groups.push(vec![row.clone()]);
+        }
+    }
+    for group in &mut groups {
+        group.sort_by_key(|r| r.start_epoch);
+    }
+    groups.sort_by_key(|g| std::cmp::Reverse(g[0].start_epoch));
+    groups
 }
 
 /// The applied-irrigation evidence inside a window: union valve-open
@@ -127,6 +180,7 @@ pub fn applied_in_window(
             let start = s.start_epoch.max(window_start);
             let end = s.end_epoch.min(window_end);
             (end > start).then_some(RunSegment {
+                session_id: s.session_id.clone(),
                 start_epoch: start,
                 end_epoch: end,
             })
@@ -134,7 +188,10 @@ pub fn applied_in_window(
         .collect();
     let events = cluster_events(&truncated);
     WindowedApplied {
-        valve_open_s: events.iter().map(|e| e.valve_open_s).sum(),
+        valve_open_s: union_intervals(&truncated)
+            .iter()
+            .map(|e| e.valve_open_s)
+            .sum(),
         events: events.len() as u32,
     }
 }
@@ -164,8 +221,22 @@ pub fn applied_per_day(segments: &[RunSegment], day_bounds: &[(i64, i64)]) -> Ve
 /// The minutes any surface derives from these agree with the balance's
 /// applied-irrigation credit (same filter, same union), so the history
 /// charts can never show more watering than the balance counts.
-pub fn watering_events_per_zone(
+pub fn watering_intervals_per_zone(
     runs: &[RunRecord],
+) -> std::collections::BTreeMap<String, Vec<IrrigationEvent>> {
+    watering_by_zone(runs, union_intervals)
+}
+
+/// Counts explicit sessions independently of their physical valve intervals.
+pub fn watering_sessions_per_zone(
+    runs: &[RunRecord],
+) -> std::collections::BTreeMap<String, Vec<IrrigationEvent>> {
+    watering_by_zone(runs, cluster_events)
+}
+
+fn watering_by_zone(
+    runs: &[RunRecord],
+    reduce: fn(&[RunSegment]) -> Vec<IrrigationEvent>,
 ) -> std::collections::BTreeMap<String, Vec<IrrigationEvent>> {
     let mut segments: std::collections::BTreeMap<String, Vec<RunSegment>> =
         std::collections::BTreeMap::new();
@@ -177,13 +248,14 @@ pub fn watering_events_per_zone(
             .entry(r.zone.replace('-', "_"))
             .or_default()
             .push(RunSegment {
+                session_id: r.session_id.clone(),
                 start_epoch: r.start_epoch,
                 end_epoch: r.start_epoch + r.duration_s.max(0),
             });
     }
     segments
         .into_iter()
-        .map(|(zone, segs)| (zone, cluster_events(&segs)))
+        .map(|(zone, segs)| (zone, reduce(&segs)))
         .collect()
 }
 
@@ -191,8 +263,60 @@ pub fn watering_events_per_zone(
 mod tests {
     use super::*;
 
+    #[test]
+    fn sessions_survive_long_soaks_and_separate_adjacent_jobs() {
+        let mut a = seg(100, 20);
+        a.session_id = Some("a".into());
+        let mut b = seg(121, 10);
+        b.session_id = Some("b".into());
+        let mut later = seg(20_000, 30);
+        later.session_id = a.session_id.clone();
+        let events = cluster_events(&[a, b, later]);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].valve_open_s, 50);
+        assert_eq!(events[0].end_epoch, 20_030);
+        assert_eq!(events[1].valve_open_s, 10);
+        assert_eq!(
+            cluster_events(&[seg(100, 20), seg(121, 10)]).len(),
+            2,
+            "legacy data cannot recover a job from a short gap"
+        );
+    }
+
+    #[test]
+    fn overlapping_distinct_jobs_do_not_duplicate_applied_water() {
+        let mut a = seg(100, 60);
+        a.session_id = Some("a".into());
+        let mut b = seg(130, 60);
+        b.session_id = Some("b".into());
+        let applied = applied_in_window(&[a, b], 0, 1000);
+        assert_eq!(applied.events, 2);
+        assert_eq!(applied.valve_open_s, 90);
+    }
+
+    #[test]
+    fn audit_groups_preserve_every_record_and_isolate_zones() {
+        let row = RunRecord {
+            session_id: Some("job".into()),
+            zone: "one".into(),
+            ..Default::default()
+        };
+        let other = RunRecord {
+            zone: "two".into(),
+            ..row.clone()
+        };
+        let legacy = RunRecord {
+            session_id: None,
+            ..row.clone()
+        };
+        let groups = group_run_records(&[row.clone(), row, other, legacy.clone(), legacy]);
+        assert_eq!(groups.len(), 4);
+        assert_eq!(groups.iter().map(Vec::len).sum::<usize>(), 5);
+    }
+
     fn seg(start: i64, dur: i64) -> RunSegment {
         RunSegment {
+            session_id: None,
             start_epoch: start,
             end_epoch: start + dur,
         }
@@ -287,6 +411,7 @@ mod tests {
             skip_reason: None,
             source: "ha_refresher".into(),
             status: "completed".into(),
+            ..Default::default()
         };
         assert!(is_watering_record(&watering));
         let dry = RunRecord {
@@ -341,18 +466,20 @@ mod tests {
     }
 
     /// Surface agreement on a manual+observer fixture: the minutes any
-    /// history surface derives from `watering_events_per_zone` equal the
+    /// history surface derives from `watering_intervals_per_zone` equal the
     /// valve seconds `applied_in_window` credits to the balance for the
     /// same rows and window. One filter, one clustering, one total.
     #[test]
     fn history_buckets_equal_the_balance_credit() {
         let mk = |start: i64, dur: i64, source: &str| RunRecord {
+            session_id: Some(format!("fixture-day-{}", start / 86_400)),
             zone: "back_yard".into(),
             start_epoch: start,
             duration_s: dur,
             skip_reason: None,
             source: source.into(),
             status: "completed".into(),
+            ..Default::default()
         };
         let runs = vec![
             // A manual run and its observer twin.
@@ -365,7 +492,7 @@ mod tests {
             // Pretend water: excluded on both sides.
             mk(300_000, 900, "dry_run"),
         ];
-        let chart_seconds: i64 = watering_events_per_zone(&runs)
+        let chart_seconds: i64 = watering_intervals_per_zone(&runs)
             .values()
             .flatten()
             .map(|e| e.valve_open_s)
@@ -374,6 +501,7 @@ mod tests {
             .iter()
             .filter(|r| is_watering_record(r))
             .map(|r| RunSegment {
+                session_id: r.session_id.clone(),
                 start_epoch: r.start_epoch,
                 end_epoch: r.start_epoch + r.duration_s,
             })
@@ -393,6 +521,7 @@ mod tests {
             skip_reason: None,
             source: source.into(),
             status: "completed".into(),
+            ..Default::default()
         };
         let runs = vec![
             mk("back_yard", 1_000, 1200, "manual"),
@@ -400,7 +529,7 @@ mod tests {
             mk("front_yard", 1_000, 600, "ha_refresher"),
             mk("front_yard", 500_000, 600, "ha_refresher"),
         ];
-        let by_zone = watering_events_per_zone(&runs);
+        let by_zone = watering_intervals_per_zone(&runs);
         let back = &by_zone["back_yard"];
         assert_eq!(back.len(), 1);
         assert_eq!(back[0].valve_open_s, 1210, "union, not the 2400 sum");

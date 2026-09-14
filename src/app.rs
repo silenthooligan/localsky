@@ -8,7 +8,6 @@
 use crate::components::{
     footer::Footer,
     forecast::{DailyForecast, HourlyForecast},
-    hero::Hero,
     humidity::HumidityPanel,
     install_prompt::InstallPrompt,
     irrigation::IrrigationPage,
@@ -20,10 +19,11 @@ use crate::components::{
     rain::RainPanel,
     sidebar::Sidebar,
     solar::SolarPanel,
+    weather_hero::Hero,
     wind::WindPanel,
 };
 use crate::forecast::snapshot::ForecastSnapshot;
-use crate::ha::snapshot::IrrigationSnapshot;
+use crate::model::IrrigationSnapshot;
 use crate::tempest::state::Snapshot;
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
@@ -83,7 +83,7 @@ pub struct NerdMode(pub RwSignal<bool>);
 /// SSR/hydrate DOM trees identical. `use_unit_prefs` reads this only inside its
 /// hydrate Effect, never at SSR.
 #[derive(Clone, Copy)]
-pub struct HouseholdUnits(pub Signal<crate::ha::snapshot::Units>);
+pub struct HouseholdUnits(pub Signal<crate::model::Units>);
 
 /// Whether this deployment has any irrigation hardware configured (at least one
 /// controller OR zone), read once at app root from `GET /api/v1/info`'s
@@ -102,6 +102,14 @@ pub struct HouseholdUnits(pub Signal<crate::ha::snapshot::Units>);
 /// fetch resolves.
 #[derive(Clone, Copy)]
 pub struct HasIrrigation(pub RwSignal<bool>);
+
+/// Whether a real place is configured, from `/api/v1/info`'s
+/// `location_configured`. `None` until the deferred fetch lands, so SSR
+/// and hydrate's first frame both render the normal page; `Some(false)`
+/// turns the home page into its setup empty state and tells the forecast
+/// panels to stop waiting on a provider that was never asked.
+#[derive(Clone, Copy)]
+pub struct Located(pub RwSignal<Option<bool>>);
 
 /// Target for the legacy `/settings/{sources,data-sources,controllers}`
 /// aliases that redirect into the unified devices hub.
@@ -134,17 +142,13 @@ pub fn App() -> impl IntoView {
     let (tempest, set_tempest) = signal(initial_tempest_ssr());
     #[allow(unused_variables)]
     let (irrigation, set_irrigation) = signal(initial_irrigation_ssr());
+    provide_context(
+        crate::components::settings::data_sources::RuntimeRestartPending(Signal::derive(
+            move || irrigation.get().restart_required,
+        )),
+    );
     #[allow(unused_variables)]
     let (forecast, set_forecast) = signal(initial_forecast_ssr());
-
-    // Nav debug ring buffer is preserved as a developer affordance, log_nav()
-    // calls scattered through the app no-op when the sink isn't installed, so
-    // we can re-enable the in-page strip by reinstalling install_sink() and
-    // re-rendering <NavLogStrip/> in the view tree below if we ever need it.
-    // The visible strip was a debug build artifact; intentionally not rendered
-    // in prod.
-    let (nav_debug, _set_nav_debug) = signal::<Vec<String>>(Vec::new());
-    provide_context(nav_debug);
 
     // Household display-unit default, derived from the irrigation snapshot and
     // shared via context so `use_unit_prefs` resolves household-vs-device units
@@ -193,15 +197,26 @@ pub fn App() -> impl IntoView {
     // client-only fetch lands. See `HasIrrigation` for the SSR-match rationale.
     let has_irrigation: RwSignal<bool> = RwSignal::new(true);
     provide_context(HasIrrigation(has_irrigation));
+    let located: RwSignal<Option<bool>> = RwSignal::new(None);
+    provide_context(Located(located));
     #[cfg(feature = "hydrate")]
     {
         leptos::task::spawn_local(async move {
-            // Defer past the initial hydration sweep, same trick as the
-            // nav_log "hydrated" line. If we set is_mobile synchronously,
+            // Defer past the initial hydration sweep. If we set is_mobile
+            // synchronously,
             // the irrigation page's mobile/desktop branch can flip mid-walk
             // and trigger the same tachys::hydration mismatch the rest of
             // the file works to avoid.
             gloo_timers::future::TimeoutFuture::new(0).await;
+            // The hydration sweep is over: say so on <html> for anything
+            // that must not type into a page before its handlers exist
+            // (the e2e suite waits on this attribute).
+            if let Some(html) = web_sys::window()
+                .and_then(|w| w.document())
+                .and_then(|d| d.document_element())
+            {
+                let _ = html.set_attribute("data-hydrated", "true");
+            }
             if let Some(win) = web_sys::window() {
                 if let Ok(Some(mql)) = win.match_media("(max-width: 760px)") {
                     is_mobile.set(mql.matches());
@@ -316,8 +331,15 @@ pub fn App() -> impl IntoView {
                 .get("nerd_mode_default")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            // A server too old to say is assumed located: the page it
+            // serves is the one it always served.
+            let location_configured = val
+                .get("location_configured")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
 
             has_irrigation.set(irrigation);
+            located.set(Some(location_configured));
             // Seed nerd mode from the server default ONLY for a device with no
             // explicit prior choice. The localStorage read above has already run
             // (both are spawn_local'd after the same 0ms defer, and this one then
@@ -409,11 +431,17 @@ pub fn App() -> impl IntoView {
                     <InstallPrompt/>
                     <PageHeader/>
                     <crate::components::health_banner::HealthBanner/>
+                    <crate::components::settings::data_sources::RuntimeRestartBanner snap=irrigation/>
                 <Routes fallback=|| view! { <NotFound/> }>
                     <Route path=path!("/")
                         view=move || view! {
                             <Title text="LocalSky · Weather"/>
                             <WeatherHome snap=tempest forecast=forecast irrigation=irrigation/>
+                        }/>
+                    <Route path=path!("/irrigation/decisions")
+                        view=move || view! {
+                            <Title text="LocalSky · Watering decisions"/>
+                            <crate::components::irrigation::WateringDecisionsPage snap=irrigation/>
                         }/>
                     <Route path=path!("/irrigation")
                         view=move || view! {
@@ -669,8 +697,25 @@ fn WeatherHome(
     // own root class (.wind, .rain, ...) via grid-template-areas, so the order
     // here is just DOM order: hero+wind+lightning, the four metric cards, the
     // radar (which spans the full height on the right), then the forecast strips
-    // tucked under the metric cards.
-    view! {
+    // tucked under the metric cards.    // Nothing configured: one setup card instead of a dashboard of
+    // skeletons for nowhere. SSR never lands here (the setup gate sends
+    // an unconfigured install to /setup); this is the client's answer
+    // once /api/v1/info says the config has no place in it.
+    let located = use_context::<Located>().map(|l| l.0);
+    move || {
+        if located.is_some_and(|l| l.get() == Some(false)) {
+            return view! {
+                <crate::components::ui::EmptyState
+                    icon="map-pin"
+                    title="Set up LocalSky"
+                    body="Tell it where the yard is and it starts forecasting in about a minute. Sprinklers are optional."
+                    cta_label="Start setup"
+                    cta_href="/setup"
+                />
+            }
+            .into_any();
+        }
+        view! {
         {view! { <crate::components::welcome_card::WelcomeCard/> }.into_any()}
         // Front-door watering verdict (design #4): a compact, persistent strip
         // above the weather grid for irrigation deployments, so the product's
@@ -679,7 +724,7 @@ fn WeatherHome(
         {view! { <HomeWateringVerdict snap=irrigation/> }.into_any()}
         <div class="weather-grid">
             {render_hero(snap, forecast).into_any()}
-            {view! { <WindPanel snap/> }.into_any()}
+            {view! { <WindPanel snap irrigation/> }.into_any()}
             {view! { <LightningPanel snap/> }.into_any()}
             {view! { <RainPanel snap/> }.into_any()}
             {view! { <HumidityPanel snap/> }.into_any()}
@@ -697,6 +742,8 @@ fn WeatherHome(
             </div>
         </div>
         {render_footer(snap).into_any()}
+        }
+        .into_any()
     }
 }
 
@@ -735,7 +782,7 @@ fn render_footer(snap: ReadSignal<Snapshot>) -> impl IntoView {
 /// SSE swap only changes text, never the child count, keeping hydration sound.
 #[component]
 fn HomeWateringVerdict(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
-    use crate::components::irrigation::hero::{resolve_next_run, skip_tag_string};
+    use crate::components::irrigation::hero::{resolve_next_run, skip_tag_string_with_rules};
     use crate::components::units_fmt::use_unit_prefs;
     use crate::components::verdict::{verdict_label, verdict_token};
     use crate::reason_render::render_skip_reason;
@@ -752,28 +799,19 @@ fn HomeWateringVerdict(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     // even when resolve_next_run says the slot skips).
     let state = move || {
         let s = snap.get();
-        if !s.ha_reachable {
-            "off"
-        } else if s.zones.iter().any(|z| z.running) {
-            "run-now"
-        } else if s.skip_check.will_skip
-            && crate::ha::snapshot::is_pause_code(&s.skip_check.reason_code)
-        {
-            "paused"
-        } else if s.skip_check.will_skip && s.next_run_epoch <= 0 {
-            "skip"
-        } else if s.next_run_epoch > 0 {
-            // Theme by what the NEXT SLOT actually does (same call the hero
-            // makes): a slot predicted to water is a run, a slot predicted to
-            // skip is a skip, so the strip never claims water is coming for a
-            // slot the engine will skip.
-            if resolve_next_run(&s).slot_skips {
-                "skip"
-            } else {
-                "run"
-            }
-        } else {
-            "run"
+        // The hero's phase ladder, so the home strip and the hero can never
+        // disagree about what the yard is doing.
+        use crate::components::irrigation::hero::{resolve_phase, HeroPhase};
+        match resolve_phase(&s) {
+            HeroPhase::Offline => "off",
+            HeroPhase::Running => "run-now",
+            HeroPhase::Paused => "paused",
+            HeroPhase::OpenSkip | HeroPhase::SlotSkips(_) => "skip",
+            HeroPhase::SlotRuns(_) => "run",
+            // No morning to name: a setup step, a polar night or a fortnight
+            // the district refuses. Not a run.
+            HeroPhase::NoRun if s.next_run_state != crate::model::NextRunState::At => "none",
+            HeroPhase::NoRun => "run",
         }
     };
 
@@ -788,6 +826,8 @@ fn HomeWateringVerdict(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         // skip, so word it as one. The run branch keeps the engine verdict so a
         // run_extended slot can read "WATER +".
         "skip" => verdict_label("skip").to_string(),
+        "none" => crate::components::irrigation::hero::no_run_eyebrow(snap.get().next_run_state)
+            .to_string(),
         // verdict_label maps the engine verdict string to WATER / WATER + / SKIP.
         _ => verdict_label(&snap.get().skip_check.verdict).to_string(),
     };
@@ -798,6 +838,7 @@ fn HomeWateringVerdict(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         // Blue skip token, matching the honest skip word above and the hero's
         // blue skip theming, instead of coloring off the morning verdict.
         "skip" => verdict_token("skip").to_string(),
+        "none" => "var(--text-faint)".to_string(),
         _ => verdict_token(&snap.get().skip_check.verdict).to_string(),
     };
 
@@ -809,13 +850,16 @@ fn HomeWateringVerdict(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
         match state() {
             "off" => "Irrigation backend unreachable".to_string(),
             "run-now" => {
-                if let Some(z) = s.zones.iter().find(|z| z.running) {
+                if let Some(z) = s.zones.iter().find(|z| z.is_running()) {
                     format!("{} running now", z.name)
                 } else {
                     "A zone is running now".to_string()
                 }
             }
             "paused" => render_skip_reason(&s.skip_check, prefs.get()),
+            "none" => crate::components::irrigation::hero::no_run_tag(s.next_run_state)
+                .unwrap_or("")
+                .to_string(),
             "skip" => {
                 // A skipping state has two shapes that must read honestly:
                 //   - an OPEN-ENDED skip (no scheduled slot): the morning
@@ -827,7 +871,11 @@ fn HomeWateringVerdict(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
                 //     "Next run". Reuses the hero's skip_tag_string so the strip
                 //     and the hero word the skip identically.
                 if s.next_run_epoch > 0 {
-                    skip_tag_string(&resolve_next_run(&s), &s.timezone)
+                    skip_tag_string_with_rules(
+                        &resolve_next_run(&s),
+                        &s.timezone,
+                        s.allowed_days_phrase().as_deref(),
+                    )
                 } else {
                     render_skip_reason(&s.skip_check, prefs.get())
                 }
@@ -1059,9 +1107,13 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 // sets both env vars (used by the hosted public demo, useful
                 // for anyone running a public instance). Unset = no tag.
                 {analytics_tag()}
-                <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-                    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
-                    crossorigin=""/>
+                // Leaflet 1.9.4, vendored under /vendor/leaflet and served
+                // by us (BSD-2, see NOTICE), so a LAN-only install renders
+                // the map with no script fetched from anyone else. The
+                // files are byte-identical to the published release: the
+                // SRI hashes the unpkg tags used to carry are recorded in
+                // NOTICE.
+                <link rel="stylesheet" href=crate::base::url("/vendor/leaflet/leaflet.css")/>
                 // Leaflet + radar.js load once at app boot, not per-route.
                 // When these were inside RadarPanel's view, every route
                 // swap re-inserted the script tags and the browser
@@ -1070,10 +1122,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 // sometimes showed a dead map until reload. The IIFE's
                 // existing observer (in /public/radar.js) handles mount/
                 // unmount of #radar-map on its own once it's set up once.
-                <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-                    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
-                    crossorigin=""
-                    defer></script>
+                <script src=crate::base::url("/vendor/leaflet/leaflet.js") defer></script>
                 // leaflet-velocity 2.1.4 (the wind feature's particle
                 // layer), vendored under /vendor/ and served by us:
                 // local-first like everything else (CSIRO BSD-style +

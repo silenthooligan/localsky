@@ -7,17 +7,21 @@ Everything LocalSky knows lives in the `/data` directory you mounted at install 
 | File | What it holds |
 |---|---|
 | `localsky.toml` | Your entire configuration: location, sources, controllers, zones, schedules, restrictions, notification channels |
+| `localsky.ledger.toml` | LocalSky's own record beside the config: which config migrations have run, which forecast authorities it seeded, the Home Assistant helper migration. Not for editing |
 | `irrigation.db` | The SQLite database: run history, sensor history, verdict history, decision traces, web push subscriptions, and (when auth is enabled) accounts, sessions, and API tokens |
 | `irrigation.db-wal`, `irrigation.db-shm` | SQLite write-ahead-log sidecars; present while the container runs |
+| `*.restore`, `irrigation.db.restore-state.json` | Pending restore files and the durable record that identifies a complete staged set; preserve them if startup reports an interrupted restore |
+| `localsky.toml.restore-hot-apply.pending` | Present during a config-only restore; a leftover means the apply did not finish and startup requires recovery |
+| `*.pre-restore.<transaction>` | Prior live files retained during restore activation, including the old database's journal sidecars |
 | `localsky.toml.draft` | First-run wizard progress, if you saved mid-wizard; deleted when the wizard finishes |
 | `instance-id` | A stable random identity used for mDNS and Home Assistant pairing |
 | `site/photos/` | Zone photos uploaded through the zone editor |
 
-The database runs in WAL mode, so even an unclean shutdown rolls back to a consistent state on the next boot.
+The database runs in WAL mode, so SQLite can recover interrupted database transactions. Replacing the config, ledger, and database is a separate operation: an interrupted restore refuses startup until you recover a complete set.
 
 ## Built-in backup (recommended)
 
-LocalSky can produce a consistent backup bundle while running: a `.tar.gz` containing `localsky.toml`, a point-in-time copy of `irrigation.db` (made with SQLite's `VACUUM INTO`, safe against concurrent writes), and a small `manifest.json` recording the version and timestamp.
+LocalSky can produce a consistent backup bundle while running: a `.tar.gz` containing `localsky.toml`, `localsky.ledger.toml` (the server-owned migration and seeding record beside it), a point-in-time copy of `irrigation.db` (made with SQLite's `VACUUM INTO`, safe against concurrent writes), and a small `manifest.json` recording the version and timestamp.
 
 **From the UI:** Settings -> Advanced -> Backup and restore -> **Download backup**.
 
@@ -56,6 +60,7 @@ No API needed; plain files work too.
 sqlite3 /opt/localsky/data/irrigation.db \
   ".backup '/backup/localsky/irrigation-$(date +%F).db'"
 cp /opt/localsky/data/localsky.toml /backup/localsky/localsky-$(date +%F).toml
+cp /opt/localsky/data/localsky.ledger.toml /backup/localsky/localsky-$(date +%F).ledger.toml
 
 # Named volume instead? The files live under Docker's volume root:
 sqlite3 /var/lib/docker/volumes/localsky-data/_data/irrigation.db \
@@ -110,45 +115,58 @@ docker restart localsky
 
 What the restore does, exactly:
 
-- The **config** is validated first (a broken file is rejected with a 422 and changes nothing), then applied immediately.
-- The **database** is not swapped live. It is staged next to the real one as `irrigation.db.restore`; on the next container start, LocalSky moves the current database aside (kept as `irrigation.db.pre-restore.<timestamp>`, so a restore is reversible) and swaps the staged one in. That is why the response says `"restart_required": true` whenever a database was uploaded.
+- **Validate every uploaded part before changing live or staged files.** Config and ledger must parse and the config must be supported by this release. A database must pass SQLite integrity checks, match a supported LocalSky migration history and schema, and successfully run pending migrations on a disposable copy. Malformed uploads and unsupported or inconsistent databases are rejected; the original uploaded database bytes stay unchanged.
+- **Stage database-bearing restores for restart.** The supplied config, ledger, and database become `localsky.toml.restore`, `localsky.ledger.toml.restore`, and `irrigation.db.restore`. A synced `irrigation.db.restore-state.json` records their paths, hashes, and which optional parts are absent. It moves from `publishing` to `ready` only after the complete set is published. A DB-only restore replaces any earlier pending set without inheriting its stale config or ledger stages.
+- **Hold new watering.** Accepting a database-bearing restore, including DB-only, latches the shared restart hold before staging changes. Manual runs and overrides cannot bypass it, and another settings save cannot clear it. Already-running controller timers may finish; the hold does not stop an active valve. Use Stop if you need to stop current watering. The response reports `restart_required` and its reasons.
+- **Verify and activate at boot.** Before opening the database or registering controllers, LocalSky verifies the complete `ready` set and its compatibility again, then records `applying`. Prior config, ledger, and database files are retained as `.pre-restore.<transaction>` copies; the old database's WAL, SHM and rollback-journal files move with its recovery copy. The marker clears only after all replacements succeed, the database opens, and the config loads. Any failure refuses startup.
 
-You can also restore the pieces individually: `-F config=@localsky.toml` applies just a config (no restart needed), `-F db=@irrigation.db` stages just a database.
+These are separate file replacements, **not an atomic multi-file restore**. Ordinary staging errors attempt to restore the previous stages. Power loss, process termination, or an uncertain rollback can leave a partial set; the durable marker prevents a new process from running against it. An interrupted `publishing` or `applying` marker, mismatched files, or an older release's unmarked `.restore` files require [manual recovery](#a-restore-was-interrupted).
+
+A **config-only** upload applies through the normal config and runtime path. Threshold-only changes can take effect immediately. Changes to startup connections or deployment settings require restart and hold new watering. During the apply, `localsky.toml.restore-hot-apply.pending` protects the config/ledger pair; it clears only after saving both and publishing the runtime change. A failed or interrupted apply leaves recovery required rather than claiming the previous config was restored.
+
+You can also restore pieces individually: `-F config=@localsky.toml` applies a config, while `-F db=@irrigation.db` stages only a database. Read the response's `restart_required` and `restart_reasons` fields after either request. A disconnected HTTP client does not cancel an already accepted restore; check its state before submitting another.
 
 ### From plain file copies
 
 ```bash
 docker stop localsky
 cp /backup/localsky/irrigation-2026-06-01.db /opt/localsky/data/irrigation.db
-rm -f /opt/localsky/data/irrigation.db-wal /opt/localsky/data/irrigation.db-shm
+rm -f /opt/localsky/data/irrigation.db-wal /opt/localsky/data/irrigation.db-shm /opt/localsky/data/irrigation.db-journal
 cp /backup/localsky/localsky-2026-06-01.toml /opt/localsky/data/localsky.toml
+cp /backup/localsky/localsky-2026-06-01.ledger.toml /opt/localsky/data/localsky.ledger.toml
 docker start localsky
 ```
 
-Remove the `-wal`/`-shm` sidecars when replacing the database file; stale ones belong to the old database. Restoring a database from an older release is fine: boot replays whatever schema migrations it is missing.
+This example assumes no interrupted restore or pending stages; otherwise follow [manual recovery](#a-restore-was-interrupted) first. Keep the config and its ledger together. Remove stale `-wal`, `-shm` and `-journal` sidecars only when replacing the database with a self-contained SQLite backup; preserve the original files elsewhere first. The restore endpoint checks whether an older database can migrate to the current release before accepting it. Plain file copying bypasses that upload validation.
 
 ## Test your restore
 
-A backup you have never restored is a hope, not a backup. Five minutes proves yours works, without touching production:
+A restore test needs a separate data directory and an instance that cannot reach your controllers. Demo mode rejects privileged restore requests, so use a normal instance with networking disabled. The following test exposes no host port; access it through `docker exec`. Select the image version you intend to restore into and provide any environment variables referenced by your config.
 
 ```bash
-mkdir -p /tmp/localsky-restore-test
-docker run -d --name localsky-test \
-  -p 8091:8090 \
-  -v /tmp/localsky-restore-test:/data \
-  -e LOCALSKY_DEMO=1 \
-  ghcr.io/silenthooligan/localsky:latest
+restore_test_dir=$(mktemp -d /tmp/localsky-restore-test.XXXXXX)
+docker run -d --name localsky-test --network none \
+  -v "$restore_test_dir:/data" \
+  -e LOCALSKY_SMART_DRY_RUN=1 \
+  -e LLM_ADVISOR_DISABLED=1 \
+  ghcr.io/silenthooligan/localsky:VERSION_YOU_ARE_TESTING
 
-# Push the bundle into the test instance, then restart to swap the DB in:
-curl -f -X POST -F bundle=@localsky-backup-....tar.gz \
-  http://localhost:8091/api/v1/backup/restore
+# Wait until the fresh process responds, then upload from inside its network namespace:
+docker exec localsky-test curl -f http://127.0.0.1:8090/api/v1/health
+docker cp localsky-backup-....tar.gz localsky-test:/tmp/restore-bundle.tar.gz
+docker exec localsky-test curl -f -X POST \
+  -F bundle=@/tmp/restore-bundle.tar.gz \
+  http://127.0.0.1:8090/api/v1/backup/restore
 docker restart localsky-test
+docker logs localsky-test
+docker exec localsky-test curl -f http://127.0.0.1:8090/api/v1/health
 ```
 
-Open `http://localhost:8091` and check that your zones, settings, and run history are all there. `LOCALSKY_DEMO=1` keeps the test instance's live data paths switched off, so it will not poll your weather sources, and weather shown is synthetic; it exists only to prove the bundle restores. Even so, the restored config names your real irrigation controller, so do not press run buttons on the test instance. Tear it down when satisfied:
+Check the startup log for successful restore activation, then use `docker exec` and the read-only config, irrigation snapshot, and history endpoints to check your zones, settings, and history. After restart, authentication follows the restored config and database; provide a valid restored API token if required. Unreachable sources and controllers are expected with networking disabled. This proves restore and loading, not physical device operation. Keep the network disabled and do not issue run actions. Remove the test container when finished; its isolated data directory remains available for inspection:
 
 ```bash
-docker rm -f localsky-test && rm -rf /tmp/localsky-restore-test
+docker rm -f localsky-test
+printf 'Test data retained at %s\n' "$restore_test_dir"
 ```
 
 ## Recovery patterns
@@ -162,7 +180,17 @@ curl -f -X POST -F config=@localsky-good.toml \
   http://localhost:8090/api/v1/backup/restore
 ```
 
-A note on config snapshots: the database has a snapshot table and a `POST /api/v1/config/rollback?to=<version>` endpoint (snapshots listed at `GET /api/v1/backup/snapshots`), but in this beta saves do not record snapshots yet, so the list stays empty and rollback returns 404. Until that lands, your backup bundles are the config history.
+Config saves retain the previous document in the config directory's `snapshots/` folder, keeping the newest 20. List them at `GET /api/v1/config/snapshots` or `GET /api/v1/backup/snapshots`, and restore one with `POST /api/v1/config/rollback` and JSON `{"ts": <snapshot timestamp>}`. Rollback uses the normal validation and runtime apply path; inspect its restart requirement. These config snapshots do not replace database backups.
+
+### "A restore was interrupted"
+
+If the log reports an incomplete restore, repeated restarts will not finish or undo it automatically. LocalSky refuses to register controllers or start schedulers against an uncertain set. Recover with the process stopped:
+
+1. Preserve the complete data directory, startup error, marker, `.restore` stages, `.pre-restore.<transaction>` files and any `.restore.previous-<pid>-<sequence>` copies. For a config-only failure, preserve `localsky.toml.restore-hot-apply.pending` too. Do not delete a marker merely to bypass the startup check.
+2. Choose one complete, verified recovery set: a known-good backup, or the matching pre-restore files. A partially activated restore can contain a mixture of old and new live files; do not select each file independently by its timestamp. A database recovery copy may depend on the WAL journal archived beside it.
+3. Restore the selected config, its ledger, and database together while LocalSky is stopped. Keep that database's own journal files when recovering a WAL-based copy; exclude unrelated journals when restoring a self-contained backup. Validate the config and database with the intended LocalSky version in an isolated instance before returning it to service.
+4. Only after the selected live set is complete and verified, archive the obsolete marker and pending stages outside their watched paths. Do not fabricate a `ready` marker or edit its hashes to make a partial set pass. Unmarked `.restore` files left by an older release need this same deliberate recovery.
+5. Start LocalSky and check the startup log, health, configuration, zones and history. A fresh process clears the runtime restart hold; successful loading and the expected bindings still need verification before resuming watering.
 
 ### "Nothing loads at all"
 

@@ -29,10 +29,8 @@
 // over constants. The subscription message is a fixed token; nothing
 // identifying is ever sent (no User-Agent, no Origin, no account).
 //
-// Like ecowitt_gw_poll, this is intentionally NOT a `WeatherSource`:
-// that trait's run loop only gets the merge bus, and strikes feed the
-// TempestStore display buffer instead. main.rs spawns it directly and
-// it runs until the process exits (same contract as the refreshers).
+// This WeatherSource publishes strikes and connection verdicts on the bus;
+// the snapshot bridge alone updates the display buffer.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,9 +46,10 @@ use tracing::{debug, info, warn};
 use crate::config::schema::{
     default_blitzortung_hosts, BlitzortungConfig, BlitzortungMqtt, BlitzortungTransport,
 };
-use crate::sources::bus_recorder::SourceLastSeen;
+use crate::ports::weather_source::{
+    ShutdownSignal, SourceBus, SourceCaps, SourceEvent, WeatherField, WeatherSource,
+};
 use crate::tempest::packets::{StrikeEvent, STRIKE_SOURCE_BLITZORTUNG};
-use crate::tempest::state::TempestStore;
 
 /// Fixed subscription token the blitzortung.org web client sends after
 /// connect. Carries no identity and is the entire handshake.
@@ -421,41 +420,104 @@ pub fn effective_hosts(configured: &[String]) -> Vec<String> {
     }
 }
 
-/// Spawn the feed. No-op unless the config-level opt-in is set (the
-/// caller already filters on the entry-level `enabled`). Runs until
-/// the process exits, like the other main.rs-spawned loops.
-pub fn spawn(
+/// The community lightning network as a source. It publishes strikes and
+/// nothing else: no current-conditions field, and never an irrigation
+/// input. The dashboard and the radar layer read the strike ring.
+pub struct Blitzortung {
     id: String,
     config: BlitzortungConfig,
-    store: Arc<TempestStore>,
     station: (f64, f64),
-    last_seen: Option<SourceLastSeen>,
-) {
-    if !config.enabled {
-        info!(
-            source_id = %id,
-            "blitzortung: configured but not opted in (config.enabled=false); not connecting"
-        );
-        return;
-    }
-    tokio::spawn(run(id, config, store, station, last_seen));
 }
 
-async fn run(
-    id: String,
-    config: BlitzortungConfig,
-    store: Arc<TempestStore>,
-    station: (f64, f64),
-    last_seen: Option<SourceLastSeen>,
-) {
-    // Miles -> km once; both transports share the local radius filter.
-    let radius_km = config.radius_mi.max(0.0) * 1.609_344;
-    match config.transport {
-        BlitzortungTransport::WebSocket => {
-            run_websocket(id, &config, store, station, radius_km, last_seen).await
+impl Blitzortung {
+    pub fn new(id: String, config: BlitzortungConfig, station: (f64, f64)) -> Self {
+        Self {
+            id,
+            config,
+            station,
         }
-        BlitzortungTransport::Mqtt => {
-            run_mqtt(id, &config, store, station, radius_km, last_seen).await
+    }
+}
+
+#[async_trait::async_trait]
+impl WeatherSource for Blitzortung {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn capabilities(&self) -> SourceCaps {
+        // Strikes are their own event, not a merged field, so this source
+        // owns nothing in the current-conditions arbitration.
+        SourceCaps::default()
+    }
+
+    fn priority(&self, _field: WeatherField) -> i32 {
+        i32::MIN
+    }
+
+    async fn run(
+        self: Arc<Self>,
+        bus: SourceBus,
+        mut shutdown: ShutdownSignal,
+    ) -> anyhow::Result<()> {
+        // Double opt-in: the entry is enabled AND the config's own switch
+        // is on. The caller filters the first; this is the second.
+        if !self.config.enabled {
+            info!(
+                source_id = %self.id,
+                "blitzortung: configured but not opted in (config.enabled=false); not connecting"
+            );
+            return Ok(());
+        }
+        // Miles -> km once; both transports share the local radius filter.
+        let radius_km = crate::units::mi_to_km(self.config.radius_mi.max(0.0));
+        let stream = async {
+            match self.config.transport {
+                BlitzortungTransport::WebSocket => {
+                    run_websocket(&self.id, &self.config, &bus, self.station, radius_km).await
+                }
+                BlitzortungTransport::Mqtt => {
+                    run_mqtt(&self.id, &self.config, &bus, self.station, radius_km).await
+                }
+            }
+        };
+        tokio::select! {
+            () = stream => Ok(()),
+            _ = shutdown.changed() => Ok(()),
+        }
+    }
+}
+
+/// How often a healthy feed refreshes its reachability.
+///
+/// The feed proves it is alive by delivering frames, not by delivering
+/// strikes near the station: hours pass with nothing inside the radius
+/// while the connection is perfectly healthy. So a frame is the liveness
+/// signal, throttled, because the global firehose would otherwise put
+/// thousands of events a minute on the bus for one bit of information.
+const HEARTBEAT: Duration = Duration::from_secs(60);
+
+#[derive(Default)]
+struct Heartbeat {
+    last: Option<tokio::time::Instant>,
+}
+
+impl Heartbeat {
+    fn disconnected(&mut self, bus: &SourceBus, id: &str) {
+        self.last = None;
+        let _ = bus.send(SourceEvent::Reachability {
+            source_id: id.to_string(),
+            reachable: false,
+        });
+    }
+
+    fn beat(&mut self, bus: &SourceBus, id: &str) {
+        if self.last.is_none_or(|t| t.elapsed() >= HEARTBEAT) {
+            self.last = Some(tokio::time::Instant::now());
+            let _ = bus.send(SourceEvent::Reachability {
+                source_id: id.to_string(),
+                reachable: true,
+            });
         }
     }
 }
@@ -463,13 +525,13 @@ async fn run(
 /// Legacy public web-map firehose: rotate ws1/ws2/ws7/ws8 on failure
 /// with jittered exponential backoff.
 async fn run_websocket(
-    id: String,
+    id: &str,
     config: &BlitzortungConfig,
-    store: Arc<TempestStore>,
+    bus: &SourceBus,
     station: (f64, f64),
     radius_km: f64,
-    last_seen: Option<SourceLastSeen>,
 ) {
+    let mut beat = Heartbeat::default();
     let hosts = effective_hosts(&config.hosts);
     // Shuffled start so a fleet of instances doesn't pile onto ws1.
     let mut host_idx = rand::rng().random_range(0..hosts.len());
@@ -484,17 +546,10 @@ async fn run_websocket(
     loop {
         let url = &hosts[host_idx % hosts.len()];
         let mut frames: u64 = 0;
-        let err = connect_and_stream(
-            url,
-            &id,
-            &store,
-            station,
-            radius_km,
-            last_seen.as_ref(),
-            &mut frames,
-        )
-        .await
-        .unwrap_err(); // the stream loop only returns by failing
+        let err = connect_and_stream(url, id, bus, station, radius_km, &mut beat, &mut frames)
+            .await
+            .unwrap_err(); // the stream loop only returns by failing
+        beat.disconnected(bus, id);
         if frames > 0 {
             // The connection was healthy before it died; reconnect fast.
             backoff = BACKOFF_MIN;
@@ -520,13 +575,13 @@ async fn run_websocket(
 /// Dedicated Blitzortung MQTT broker: a single durable subscription with
 /// the same jittered backoff discipline (no host rotation; one broker).
 async fn run_mqtt(
-    id: String,
+    id: &str,
     config: &BlitzortungConfig,
-    store: Arc<TempestStore>,
+    bus: &SourceBus,
     station: (f64, f64),
     radius_km: f64,
-    last_seen: Option<SourceLastSeen>,
 ) {
+    let mut beat = Heartbeat::default();
     let mqtt = &config.mqtt;
     let mut backoff = BACKOFF_MIN;
     let mut was_streaming = true;
@@ -540,17 +595,11 @@ async fn run_mqtt(
     );
     loop {
         let mut frames: u64 = 0;
-        let err = connect_and_stream_mqtt(
-            mqtt,
-            &id,
-            &store,
-            station,
-            radius_km,
-            last_seen.as_ref(),
-            &mut frames,
-        )
-        .await
-        .unwrap_err(); // the stream loop only returns by failing
+        let err =
+            connect_and_stream_mqtt(mqtt, id, bus, station, radius_km, &mut beat, &mut frames)
+                .await
+                .unwrap_err(); // the stream loop only returns by failing
+        beat.disconnected(bus, id);
         if frames > 0 {
             backoff = BACKOFF_MIN;
             was_streaming = true;
@@ -577,10 +626,10 @@ async fn run_mqtt(
 async fn connect_and_stream(
     url: &str,
     id: &str,
-    store: &Arc<TempestStore>,
+    bus: &SourceBus,
     station: (f64, f64),
     radius_km: f64,
-    last_seen: Option<&SourceLastSeen>,
+    beat: &mut Heartbeat,
     frames: &mut u64,
 ) -> anyhow::Result<()> {
     let (mut ws, _) = connect_async(url).await.context("websocket connect")?;
@@ -593,18 +642,18 @@ async fn connect_and_stream(
     loop {
         let msg = match tokio::time::timeout(FRAME_SILENCE, ws.next()).await {
             Err(_) => {
-                flush(store, &mut pending);
+                flush(bus, id, &mut pending);
                 anyhow::bail!(
                     "no frames for {}s (global feed never goes quiet; treating as dead)",
                     FRAME_SILENCE.as_secs()
                 );
             }
             Ok(None) => {
-                flush(store, &mut pending);
+                flush(bus, id, &mut pending);
                 anyhow::bail!("stream closed by server");
             }
             Ok(Some(Err(e))) => {
-                flush(store, &mut pending);
+                flush(bus, id, &mut pending);
                 return Err(anyhow::Error::from(e).context("stream error"));
             }
             Ok(Some(Ok(m))) => m,
@@ -613,11 +662,7 @@ async fn connect_and_stream(
             continue; // ping/pong/binary
         };
         *frames += 1;
-        // Every decoded frame proves liveness for /api/health, even
-        // when no strike lands inside the radius for hours.
-        if let Some(ls) = last_seen {
-            ls.record(id, chrono::Utc::now().timestamp());
-        }
+        beat.beat(bus, id);
         // Decode the LZW frame, then parse + radius-filter on the shared
         // path (serde fast path, tolerant fallback). WebSocket frames are
         // the `complete` shape so serde succeeds; the fallback only ever
@@ -629,7 +674,7 @@ async fn connect_and_stream(
             debug!(source_id = %id, "blitzortung frame did not parse");
         }
         if !pending.is_empty() && last_flush.elapsed() >= FLUSH_INTERVAL {
-            flush(store, &mut pending);
+            flush(bus, id, &mut pending);
             last_flush = tokio::time::Instant::now();
         }
     }
@@ -666,10 +711,10 @@ fn ingest_text(
 async fn connect_and_stream_mqtt(
     cfg: &BlitzortungMqtt,
     id: &str,
-    store: &Arc<TempestStore>,
+    bus: &SourceBus,
     station: (f64, f64),
     radius_km: f64,
-    last_seen: Option<&SourceLastSeen>,
+    beat: &mut Heartbeat,
     frames: &mut u64,
 ) -> anyhow::Result<()> {
     let mut opts = MqttOptions::new(format!("localsky-{id}"), &cfg.host, cfg.port);
@@ -688,14 +733,14 @@ async fn connect_and_stream_mqtt(
     loop {
         let event = match tokio::time::timeout(FRAME_SILENCE, eventloop.poll()).await {
             Err(_) => {
-                flush(store, &mut pending);
+                flush(bus, id, &mut pending);
                 anyhow::bail!(
                     "no frames for {}s (global feed never goes quiet; treating as dead)",
                     FRAME_SILENCE.as_secs()
                 );
             }
             Ok(Err(e)) => {
-                flush(store, &mut pending);
+                flush(bus, id, &mut pending);
                 return Err(anyhow::Error::from(e).context("mqtt eventloop"));
             }
             Ok(Ok(event)) => event,
@@ -721,11 +766,7 @@ async fn connect_and_stream_mqtt(
             }
             Event::Incoming(Packet::Publish(p)) => {
                 *frames += 1;
-                // Every message proves liveness for /api/health, even when
-                // no strike lands inside the radius for hours.
-                if let Some(ls) = last_seen {
-                    ls.record(id, chrono::Utc::now().timestamp());
-                }
+                beat.beat(bus, id);
                 let payload = String::from_utf8_lossy(&p.payload);
                 let text = if is_lzw {
                     decode_frame(&payload)
@@ -736,7 +777,7 @@ async fn connect_and_stream_mqtt(
                     debug!(source_id = %id, "blitzortung mqtt message did not parse");
                 }
                 if !pending.is_empty() && last_flush.elapsed() >= FLUSH_INTERVAL {
-                    flush(store, &mut pending);
+                    flush(bus, id, &mut pending);
                     last_flush = tokio::time::Instant::now();
                 }
             }
@@ -745,17 +786,41 @@ async fn connect_and_stream_mqtt(
     }
 }
 
-fn flush(store: &Arc<TempestStore>, pending: &mut Vec<StrikeEvent>) {
+fn flush(bus: &SourceBus, id: &str, pending: &mut Vec<StrikeEvent>) {
     if pending.is_empty() {
         return;
     }
-    store.apply_strikes(pending);
-    pending.clear();
+    let _ = bus.send(SourceEvent::Strikes {
+        source_id: id.to_string(),
+        strikes: std::mem::take(pending),
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconnect_publishes_success_immediately_after_a_disconnect() {
+        let (bus, mut rx) = tokio::sync::broadcast::channel(8);
+        let mut beat = Heartbeat::default();
+        beat.beat(&bus, "lightning");
+        beat.disconnected(&bus, "lightning");
+        // A reconnect inside the one-minute throttle must clear the failure.
+        beat.beat(&bus, "lightning");
+        for expected in [true, false, true] {
+            match rx.try_recv().unwrap() {
+                SourceEvent::Reachability {
+                    source_id,
+                    reachable,
+                } => {
+                    assert_eq!(source_id, "lightning");
+                    assert_eq!(reachable, expected);
+                }
+                other => panic!("expected reachability, got {other:?}"),
+            }
+        }
+    }
 
     /// LZW compressor mirroring decode_frame (and the JS client's
     /// encoder): emits single chars literally and dictionary strings

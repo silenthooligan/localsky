@@ -9,7 +9,6 @@
 // is computed from use_location.
 
 use crate::components::ui::Icon;
-use crate::nav_log::log_nav;
 use leptos::prelude::*;
 use leptos_router::hooks::{use_location, use_navigate};
 use leptos_router::NavigateOptions;
@@ -19,7 +18,7 @@ pub fn Sidebar() -> impl IntoView {
     view! {
         // Mobile top bar: brand only. Mobile navigation lives in the bottom
         // tab-bar (MobileNav) + its accessible "More" sheet. The old hamburger
-        // drawer was a redundant, a11y-broken second nav and was removed (P3-5);
+        // drawer was a redundant, a11y-broken second nav and was removed;
         // the sidebar below is desktop-only (hidden under 760px via SCSS).
         <div class="mobile-app-bar">
             <a href="/" class="header-brand" aria-label="LocalSky home">
@@ -182,7 +181,6 @@ fn NavLink(
 
     let navigate = use_navigate();
     let on_click = move |ev: leptos::ev::MouseEvent| {
-        log_nav(format!("sidebar click {href}"));
         if ev.ctrl_key() || ev.meta_key() || ev.shift_key() || ev.button() != 0 {
             return;
         }

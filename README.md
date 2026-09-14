@@ -31,13 +31,24 @@ LocalSky is two products in one Docker container.
 
 **A self-hosted weather dashboard** that reads your Tempest or Ecowitt station over the LAN, blends in worldwide and regional forecasts with per-field provenance (Open-Meteo everywhere, with NWS, MET Norway, OpenWeather, and Pirate Weather as alternatives), and renders it in a fast, installable PWA in metric or imperial units. The built-in radar map is global: worldwide precipitation playback, high-resolution national reflectivity (United States, Canada, Germany, Finland, and more), tropical-cyclone tracking across every basin, animated wind flow, and lightning. Useful on its own, even if you never irrigate anything.
 
-**A smart irrigation engine** that pairs the same weather data with peer-reviewed agronomy (FAO-56 reference ET, USDA soil textures, species-aware Kc curves, a 17-rule skip ladder) and drives OpenSprinkler, ESPHome, or Home Assistant. Optional. Off until you wire a controller.
+**A smart irrigation engine** that pairs the same weather data with peer-reviewed agronomy (FAO-56 reference ET, USDA soil textures, species-aware Kc curves, a 24-rule skip ladder) and drives OpenSprinkler, Rachio, MQTT/HTTP valves, or Home Assistant. Optional. Off until you wire a controller.
 
-Home Assistant is supported as a peer, never required. Everything runs on your own hardware. A worldwide forecast (Open-Meteo) is the only optional outbound call, and you can choose the national weather model behind it, swap it for NWS (US), MET Norway, OpenWeather, or Pirate Weather, or blend several sources with per-field provenance.
+Home Assistant is supported as a peer, never required. Everything runs on your own hardware. Internet requests depend on the integrations you enable: forecasts, map and radar layers, cloud controllers, notifications, or a remote advisor. LocalSky requires no cloud account or telemetry service. You can choose Open-Meteo, NWS (US), MET Norway, OpenWeather, or Pirate Weather, or blend several sources with per-field provenance.
+
+## New in 0.9.0
+
+- A compact Today/Tomorrow watering summary, with the full water plan one click away.
+- Rain, delivered watering, ET and soil drainage carried across days when planning.
+- Daily history with recorded skips and reasons, plus grouped watering sessions.
+- HA WeatherFlow input with report-age checks and native minute-rain accumulation.
+- Measured/model weather provenance, NWS observation fixes and interrupted-restore recovery.
+
+Upgrading with Home Assistant? Update the LocalSky integration to **0.9.0** too.
+The server now uses API contract 2.1.0. Back up your data before upgrading.
 
 ## Why LocalSky
 
-Most hyperlocal weather products are cloud tethered. Tempest's web app, Ambient Weather Network, Weather Underground, Ecowitt's ecowitt.net, all of them want an account, an internet connection, and an indefinite right to your station's data. LocalSky reads the same hardware over UDP or LAN, persists every observation locally, and renders the dashboard from your own browser, all without phoning home.
+Most hyperlocal weather products are cloud tethered. Tempest's web app, Ambient Weather Network, Weather Underground, Ecowitt's ecowitt.net, all of them want an account, an internet connection, and an indefinite right to your station's data. LocalSky reads the same hardware over UDP or LAN, stores received observations locally, and renders the dashboard from your own browser, all without phoning home.
 
 Most home irrigation systems are either dumb timers or cloud tethered too. The cloud ones see weather radar but not your sprinkler's actual flow rate, your soil texture, your grass species, or the specific shade your back fence throws across the side yard at 3 p.m. on a midsummer afternoon. LocalSky is built around the assumption that *you* know your yard, and the software's job is to listen to your live sensors, apply published meteorological and soil science, and give you a clear answer to "should I water tonight?"
 
@@ -49,8 +60,8 @@ Most home irrigation systems are either dumb timers or cloud tethered too. The c
 </p>
 
 <p align="center">
-  <img src="docs/assets/screenshots/irrigation-desktop.png" alt="Irrigation dashboard with 7-day verdict strip, next-run card, and live forecast intelligence" width="92%"><br>
-  <em>Irrigation page (optional): 7-day verdict strip, next-run card, full skip-rule breakdown, water budget, and live forecast intelligence</em>
+  <img src="docs/assets/screenshots/irrigation-desktop.png" alt="Irrigation dashboard with Today and Tomorrow status and a seven-day outlook" width="92%"><br>
+  <em>Irrigation page (optional): Today and Tomorrow status, zone controls and a seven-day outlook. Open Watering decisions for the plan and reasons.</em>
 </p>
 
 <p align="center">
@@ -61,7 +72,7 @@ Most home irrigation systems are either dumb timers or cloud tethered too. The c
 <table>
   <tr>
     <td align="center" width="50%">
-      <img src="docs/assets/screenshots/settings-skip-rules.png" alt="Settings page editing the 17-rule skip ladder thresholds" width="100%"><br>
+      <img src="docs/assets/screenshots/settings-skip-rules.png" alt="Settings page editing skip ladder thresholds" width="100%"><br>
       <em>Override every threshold in the skip ladder: rain, wind, freeze, soil frost, extreme heat (heat-index threshold). Defaults shown inline; engine picks up new values on the next tick.</em>
     </td>
     <td align="center" width="50%">
@@ -79,7 +90,7 @@ Most home irrigation systems are either dumb timers or cloud tethered too. The c
     </td>
     <td align="center" width="50%">
       <img src="docs/assets/screenshots/mobile-irrigation.png" alt="Mobile irrigation main view" width="62%"><br>
-      <em>Mobile irrigation page: next-run hero, advisor card, forecast breakdown</em>
+      <em>Mobile irrigation page: Today and Tomorrow status, zone controls and forecast outlook</em>
     </td>
   </tr>
 </table>
@@ -99,17 +110,17 @@ Most home irrigation systems are either dumb timers or cloud tethered too. The c
 
 - **Native FAO-56 Penman-Monteith** reference ET with ASCE-EWRI 2005 simplified and Hargreaves-Samani 1985 fallbacks
 - **Weekly water balance** per zone: a gross weekly target settled against observed rain, water already applied, and a probability-weighted forecast credit, with the remainder split across the sessions still expected this week
-- **FAO-56 single-bucket model** (TAW / RAW / MAD per zone) implemented and tested, but not yet wired to any watering decision. See [the irrigation engine docs](https://localsky.io/docs/irrigation-engine) for what governs today
+- **FAO-56 single-bucket soil model** (TAW / RAW / MAD per zone) is the default scheduling model for new installs: a zone waters when its modelled deficit says so, sized to the refill, with the weekly target as a ceiling. See [the irrigation engine docs](https://localsky.io/docs/irrigation-engine)
 - **Cycle-and-soak** infiltration splitter that respects soil texture and slope
 - **13-species grass catalog** with monthly, hemisphere-shifted Kc curves: warm-season (Bermuda, Zoysia, Kikuyu, St. Augustine, Bahia, Centipede), cool-season (Kentucky bluegrass, tall fescue, perennial ryegrass), plus ornamental shrubs, vegetable garden, and drip / xeriscape
 - **7-class soil texture catalog** (USDA texture classes, the standard used internationally) with field capacity, wilting point, available water, and slope-graded infiltration
-- **17-rule skip ladder** with configurable thresholds: rain now, rain next 4 h, probability-weighted 3-day and 7-day rollups, freeze, soil saturation, soil frost, extreme heat (heat-index threshold), high wind
+- **24-rule skip ladder** with configurable thresholds and protected data-availability checks: measured and forecast rain, freeze, soil saturation, soil frost, heat and high wind
 - **7-day forward verdict strip**, the same engine that decides today, projected forward
 - **Results-based tuning report**: two weeks of recorded outcomes reduced to at most one plain-language suggestion per zone (session caps, soil texture drift, the sprinkler's real precipitation rate backed out of probe rises), each applied from the report through the validated config path, plus a scorecard of how often rain skips paid off
 
 ### Controllers and integrations
 
-- **Multi-controller HAL**: OpenSprinkler direct, HA service call, ESPHome native (community), Rachio cloud (planned), DryRun for demo and tests
+- **Multi-controller HAL**: OpenSprinkler direct, HA service call, Rachio, Rain Bird, Hydrawise and B-hyve cloud, MQTT and generic HTTP valves, DryRun for demo and tests
 - **Flow metering**: reads a controller's flow sensor and shows live GPM during a run, with a capable / connected / live distinction so it only reports a meter you have actually wired
 - **Home Assistant optional**: a native [HACS integration](https://localsky.io/docs/hacs) with zeroconf discovery and sub-second push entities, plus outbound MQTT discovery for integration-free setups
 - **Standalone sensor paths** (no HA needed): MQTT subscribe with JSON-path extraction, Ecowitt gateway local POST, and a generic HTTP webhook ingester for ESPHome or custom scripts
@@ -177,15 +188,19 @@ On Home Assistant OS or Supervised, the LocalSky server itself can also run as a
 | Controller | OpenSprinkler firmware 2.1.9+ | Tested |
 | Controller | OpenSprinkler Pi | Tested |
 | Controller | HA Irrigation Unlimited passthrough | Tested |
-| Controller | ESPHome sprinkler component | Community |
-| Controller | Rachio Gen 2 / 3 cloud | Planned |
+| Controller | ESPHome through MQTT or Home Assistant | Supported bridge; native API deferred |
+| Controller | Rachio Gen 2 / 3 cloud | Tested |
+| Controller | Rain Bird LNK / LNK2 | Community |
+| Controller | Hunter Hydrawise cloud | Community |
+| Controller | Orbit B-hyve cloud | Community |
+| Controller | Any valve over MQTT or a generic HTTP endpoint | Tested |
 | LLM | Ollama (any tool-capable model) | Tested |
 | LLM | llama.cpp HTTP server | Community |
 | LLM | OpenAI / Anthropic compatible | Tested |
 | LLM | vLLM | Tested |
 | LLM | LM Studio | Community |
 | Push | Web Push (VAPID) | Tested |
-| Push | ntfy.sh / Slack webhook | Planned |
+| Push | ntfy.sh / Slack webhook | Tested |
 
 Promote to **Tested** only when CI fixture or maintainer-confirmed run exists.
 
@@ -222,9 +237,9 @@ components/    Leptos UI primitives plus the irrigation, forecast, weather, and 
 
 ## Roadmap
 
-**Shipped**: the full weather dashboard (Tempest UDP, Ecowitt LAN, Open-Meteo plus regional forecast sources with selectable weather models); a global radar map (worldwide precipitation, national high-resolution reflectivity, tropical-cyclone tracking, wind flow, alerts, and community lightning); the FAO-56 irrigation engine driving OpenSprinkler, ESPHome, and Home Assistant; the results-based tuning report with built-in apply; local LLM advisor; built-in authentication, network discovery, and backup and restore; an installable PWA with push; and a published Home Assistant integration.
+**Shipped**: the full weather dashboard (Tempest UDP, Ecowitt LAN, Open-Meteo plus regional forecast sources with selectable weather models); a global radar map (worldwide precipitation, national high-resolution reflectivity, tropical-cyclone tracking, wind flow, alerts, and community lightning); the FAO-56 irrigation engine driving OpenSprinkler, Rachio, MQTT/HTTP valves, and Home Assistant; the results-based tuning report with built-in apply; local LLM advisor; built-in authentication, network discovery, and backup and restore; an installable PWA with push; and a published Home Assistant integration.
 
-**Planned**: Rachio cloud controller, ntfy and Slack notification sinks, an in-app forecast-model picker, and broader regional radar coverage. Contributions of new weather sources, radar providers, grass species, and controllers are especially welcome.
+**Planned**: broader regional radar coverage and more grass species. Contributions of new weather sources, radar providers, grass species, and controllers are especially welcome.
 
 ## Acknowledgements
 

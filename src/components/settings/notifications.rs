@@ -1,7 +1,6 @@
-// SettingsNotifications. Edit cfg.notifications. Web Push toggles +
-// MQTT broker host + ntfy URL + Slack URL. Web Push subscription
-// itself is a per-device action handled elsewhere; this page only
-// edits server-side enablement.
+// SettingsNotifications. Edit cfg.notifications: the Web Push server
+// switch plus this device's own subscription, MQTT broker host, ntfy
+// URL and Slack URL.
 
 use leptos::prelude::*;
 
@@ -23,6 +22,49 @@ pub fn SettingsNotifications() -> impl IntoView {
     let slack_webhook = RwSignal::new(String::new());
 
     let web_push_enabled = RwSignal::new(false);
+
+    // This device's push subscription. Read from the browser on mount;
+    // Subscribe asks for permission, subscribes against the server's
+    // VAPID key and registers the endpoint; Unsubscribe tears both down.
+    let device_state = RwSignal::new(DeviceState::Unknown);
+    let device_busy = RwSignal::new(false);
+    let device_msg = RwSignal::new(String::new());
+    #[cfg(feature = "hydrate")]
+    {
+        leptos::task::spawn_local(async move {
+            device_state.set(read_device_state().await);
+        });
+    }
+    let on_subscribe = move |_| {
+        device_busy.set(true);
+        device_msg.set(String::new());
+        #[cfg(feature = "hydrate")]
+        leptos::task::spawn_local(async move {
+            match crate::push_client::subscribe().await {
+                Ok(()) => device_msg.set("This device will get alerts.".into()),
+                Err(e) => device_msg.set(e),
+            }
+            device_state.set(read_device_state().await);
+            device_busy.set(false);
+        });
+        #[cfg(not(feature = "hydrate"))]
+        device_busy.set(false);
+    };
+    let on_unsubscribe = move |_| {
+        device_busy.set(true);
+        device_msg.set(String::new());
+        #[cfg(feature = "hydrate")]
+        leptos::task::spawn_local(async move {
+            match crate::push_client::unsubscribe().await {
+                Ok(()) => device_msg.set("This device stopped getting alerts.".into()),
+                Err(e) => device_msg.set(e),
+            }
+            device_state.set(read_device_state().await);
+            device_busy.set(false);
+        });
+        #[cfg(not(feature = "hydrate"))]
+        device_busy.set(false);
+    };
 
     let saving = RwSignal::new(false);
     let result_msg = RwSignal::new(String::new());
@@ -74,7 +116,7 @@ pub fn SettingsNotifications() -> impl IntoView {
                         crate::components::settings_ui::toast_saved(
                             result_msg,
                             result_ok,
-                            "Saved. New channels engage on next event.",
+                            crate::voice::SAVED_LIVE,
                         );
                     }
                     Err(e) => {
@@ -137,9 +179,8 @@ pub fn SettingsNotifications() -> impl IntoView {
                 <a class="settings-page__back" href="/settings">"← Settings"</a>
                 <h1 class="settings-page__title">"Notifications"</h1>
                 <p class="settings-page__subtitle">
-                    "Outbound channels for zone-start, zone-stop, daily verdict, "
-                    "and anomaly events. Each channel is independent. Web Push "
-                    "subscription is per-device and handled from the dashboard."
+                    "Where alerts go: zone start and stop, the daily verdict, "
+                    "and anomalies. Each channel is independent."
                 </p>
             </header>
 
@@ -151,12 +192,47 @@ pub fn SettingsNotifications() -> impl IntoView {
                 meaning=Signal::derive(hero_meaning)
             />
 
-            <Panel title="Web Push (per device)".to_string() help_topic="notifications">
+            <Panel title="Web Push".to_string() help_topic="notifications">
                 <Toggle
                     checked=web_push_enabled
-                    label="Server-side push enabled".to_string()
-                    helptext="Requires a VAPID keypair set via env vars or /data/keys/. Each device subscribes from the dashboard.".to_string()
+                    label="Send push alerts".to_string()
+                    helptext="Needs a VAPID keypair (env vars or /data/keys/). Then each device subscribes below.".to_string()
                 />
+                <div class="push-device">
+                    <div class="push-device__status">
+                        <span class="push-device__label">"This device"</span>
+                        <span class="push-device__state">{move || device_state.get().label()}</span>
+                    </div>
+                    <div class="push-device__actions">
+                        {move || match device_state.get() {
+                            DeviceState::Subscribed => view! {
+                                <Button
+                                    variant="secondary"
+                                    size="sm"
+                                    disabled=Signal::derive(move || device_busy.get())
+                                    on_click=Callback::new(on_unsubscribe)
+                                >
+                                    "Unsubscribe"
+                                </Button>
+                            }.into_any(),
+                            DeviceState::Unsupported | DeviceState::Blocked => ().into_any(),
+                            _ => view! {
+                                <Button
+                                    variant="primary"
+                                    size="sm"
+                                    disabled=Signal::derive(move || device_busy.get())
+                                    on_click=Callback::new(on_subscribe)
+                                >
+                                    "Subscribe this device"
+                                </Button>
+                            }.into_any(),
+                        }}
+                    </div>
+                    {move || {
+                        let m = device_msg.get();
+                        (!m.is_empty()).then(|| view! { <p class="push-device__msg">{m}</p> })
+                    }}
+                </div>
             </Panel>
 
             <Panel title="MQTT (HA discovery)".to_string() help_topic="notifications">
@@ -303,7 +379,7 @@ pub fn SettingsNotifications() -> impl IntoView {
 }
 
 #[derive(Clone, Default)]
-#[allow(dead_code)]
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
 struct NotificationsDraft {
     mqtt_host: String,
     mqtt_port: u16,
@@ -319,12 +395,7 @@ struct NotificationsDraft {
 
 #[cfg(feature = "hydrate")]
 async fn fetch_notifications() -> Result<NotificationsDraft, String> {
-    use gloo_net::http::Request;
-    let resp = Request::get("/api/config")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    let val: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let val = crate::components::config_client::get_config().await?;
     let n = val
         .get("notifications")
         .cloned()
@@ -366,12 +437,7 @@ fn get_str<'a>(v: &'a serde_json::Value, key: &str) -> &'a str {
 
 #[cfg(feature = "hydrate")]
 async fn save_notifications(d: NotificationsDraft) -> Result<(), String> {
-    use gloo_net::http::Request;
-    let cur = Request::get("/api/config")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut cfg: serde_json::Value = cur.json().await.map_err(|e| e.to_string())?;
+    let mut cfg = crate::components::config_client::get_config().await?;
 
     let mqtt = if d.mqtt_host.is_empty() {
         serde_json::Value::Null
@@ -410,22 +476,51 @@ async fn save_notifications(d: NotificationsDraft) -> Result<(), String> {
         // web_push retained from existing config if present; otherwise null.
         // VAPID keypair config is operator-side env/file, not editable here.
         "web_push": cfg.get("notifications").and_then(|n| n.get("web_push")).cloned().unwrap_or(serde_json::Value::Null),
-        "email": cfg.get("notifications").and_then(|n| n.get("email")).cloned().unwrap_or(serde_json::Value::Null),
     });
     cfg["notifications"] = notifications;
 
-    let resp = Request::put("/api/config")
-        .json(&cfg)
-        .map_err(|e| e.to_string())?
-        .send()
+    crate::components::config_client::put_config(&cfg)
         .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::save_error_message(
-            resp.status(),
-            &body,
-        ));
+        .map(|_| ())
+}
+
+/// What the browser says about this device's subscription.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
+enum DeviceState {
+    /// Not read yet (server render, or the query is in flight).
+    Unknown,
+    /// The browser has no push support or no service worker (plain HTTP).
+    Unsupported,
+    /// Notifications are blocked in the browser; only the browser can lift it.
+    Blocked,
+    NotSubscribed,
+    Subscribed,
+}
+
+impl DeviceState {
+    fn label(self) -> &'static str {
+        match self {
+            DeviceState::Unknown => "Checking",
+            DeviceState::Unsupported => "Not available here (push needs HTTPS)",
+            DeviceState::Blocked => "Blocked in the browser",
+            DeviceState::NotSubscribed => "Not subscribed",
+            DeviceState::Subscribed => "Subscribed",
+        }
     }
-    Ok(())
+}
+
+#[cfg(feature = "hydrate")]
+async fn read_device_state() -> DeviceState {
+    match crate::push_client::permission_state() {
+        Err(_) => DeviceState::Unsupported,
+        Ok(p) if p == "denied" => DeviceState::Blocked,
+        Ok(_) => {
+            if crate::push_client::is_subscribed().await {
+                DeviceState::Subscribed
+            } else {
+                DeviceState::NotSubscribed
+            }
+        }
+    }
 }

@@ -14,10 +14,10 @@ use leptos_router::hooks::{use_location, use_navigate};
 
 use super::help::SettingsHelp;
 use super::{
-    SettingsAccount, SettingsAdvanced, SettingsControllers, SettingsDataSources, SettingsDevices,
-    SettingsEngine, SettingsHomeAssistant, SettingsLlm, SettingsLocation, SettingsNotifications,
-    SettingsRadar, SettingsRestrictions, SettingsSchedules, SettingsSensors, SettingsSkipRules,
-    SettingsTheme, SettingsUnits, SettingsZones,
+    SettingsAccount, SettingsAdvanced, SettingsDataSources, SettingsDevices, SettingsEngine,
+    SettingsHomeAssistant, SettingsLlm, SettingsLocation, SettingsNotifications, SettingsRadar,
+    SettingsRestrictions, SettingsSchedules, SettingsSensors, SettingsSkipRules, SettingsTheme,
+    SettingsUnits, SettingsZones,
 };
 use crate::components::ui::Icon;
 
@@ -108,7 +108,7 @@ const GROUPS: &[SectionGroup] = &[
             SectionLink {
                 key: "schedules",
                 label: "Schedules",
-                helptext: "Manual programs that override the engine",
+                helptext: "Manual programs that override smart watering",
                 icon: "calendar",
                 entity: None,
             },
@@ -187,7 +187,6 @@ fn section_key(s: &str) -> Option<&'static str> {
         "sensors",
         "home-assistant",
         "zones",
-        "controllers",
         "location",
         "skip-rules",
         "engine",
@@ -252,9 +251,9 @@ pub fn SettingsHome() -> impl IntoView {
 
     view! {
         <div class="settings-page-wrap">
-            <header class="settings-hub__header">
-                <p class="settings-hub__eyebrow">"Configure"</p>
-                <h1 class="settings-hub__title">"Settings"</h1>
+            <header class="page-head">
+                <p class="page-eyebrow">"Configure"</p>
+                <h1 class="page-title">"Settings"</h1>
                 <p class="settings-hub__sub">
                     "Per-deployment config lives in Hardware + Logic. Per-device "
                     "preferences (theme, units, nerd mode) are App-group items."
@@ -312,7 +311,7 @@ pub fn SettingsHome() -> impl IntoView {
                 <div class="settings-group__head">
                     <h2 class="settings-group__title">"Configuration"</h2>
                     <p class="settings-group__sub">
-                        "Edit the selected section here. Changes save to your LocalSky config (and deploy on push)."
+                        "Edit the selected section here. Saves apply to this LocalSky instance; changes that need a restart say so."
                     </p>
                 </div>
 
@@ -320,14 +319,14 @@ pub fn SettingsHome() -> impl IntoView {
                     None => view! { <SettingsOverview go=go/> }.into_any(),
                     Some(key) => view! {
                         <div class="settings-shell__pane">
-                            <button
-                                type="button"
-                                class="settings-shell__back"
-                                on:click=move |_| go_home.run(())
-                            >
+                            <crate::components::ui::Button
+    variant="ghost"
+    size="sm"
+    on_click=Callback::new(move |_| go_home.run(()))
+    class="settings-shell__back">
                                 <Icon name="chevron-right" size=16 class="settings-shell__back-icon".to_string()/>
                                 "Back"
-                            </button>
+                            </crate::components::ui::Button>
                             <div class="settings-shell__pane-body">
                                 {section_view(key)}
                             </div>
@@ -493,8 +492,11 @@ fn SettingsOverview(go: Callback<&'static str>) -> impl IntoView {
                                 </span>
                                 <span class="settings-checklist__label">"Add a weather source"</span>
                                 {(!has_source).then(|| view! {
-                                    <button type="button" class="settings-overview__jump settings-checklist__go"
-                                        on:click=move |_| go.run("devices")>"Set up"</button>
+                                    <crate::components::ui::Button
+    variant="secondary"
+    size="sm"
+    on_click=Callback::new(move |_| go.run("devices"))
+    class="settings-overview__jump settings-checklist__go">"Set up"</crate::components::ui::Button>
                                 })}
                             </li>
                             <li class=if has_controller { "settings-checklist__item is-done" } else { "settings-checklist__item" }>
@@ -503,8 +505,11 @@ fn SettingsOverview(go: Callback<&'static str>) -> impl IntoView {
                                 </span>
                                 <span class="settings-checklist__label">"Add a controller"</span>
                                 {(!has_controller).then(|| view! {
-                                    <button type="button" class="settings-overview__jump settings-checklist__go"
-                                        on:click=move |_| go.run("devices")>"Set up"</button>
+                                    <crate::components::ui::Button
+    variant="secondary"
+    size="sm"
+    on_click=Callback::new(move |_| go.run("devices"))
+    class="settings-overview__jump settings-checklist__go">"Set up"</crate::components::ui::Button>
                                 })}
                             </li>
                             <li class=if has_default { "settings-checklist__item is-done" } else { "settings-checklist__item" }>
@@ -513,26 +518,20 @@ fn SettingsOverview(go: Callback<&'static str>) -> impl IntoView {
                                 </span>
                                 <span class="settings-checklist__label">"Pick a default controller"</span>
                                 {(!has_default).then(|| view! {
-                                    <button type="button" class="settings-overview__jump settings-checklist__go"
-                                        on:click=move |_| go.run("devices")>"Set up"</button>
+                                    <crate::components::ui::Button
+    variant="secondary"
+    size="sm"
+    on_click=Callback::new(move |_| go.run("devices"))
+    class="settings-overview__jump settings-checklist__go">"Set up"</crate::components::ui::Button>
                                 })}
                             </li>
                         </ul>
                     </div>
                 })}
                 <div class="settings-overview__stats">
-                    <div class="settings-overview__stat">
-                        <span class="settings-overview__stat-label">"Status"</span>
-                        <span class=status_tone>{status}</span>
-                    </div>
-                    <div class="settings-overview__stat">
-                        <span class="settings-overview__stat-label">"Version"</span>
-                        <span class="settings-overview__stat-value">{version}</span>
-                    </div>
-                    <div class="settings-overview__stat">
-                        <span class="settings-overview__stat-label">"Uptime"</span>
-                        <span class="settings-overview__stat-value">{uptime}</span>
-                    </div>
+                    <crate::components::ui::StatTile layout="compact" label="Status" value=status value_class=status_tone/>
+                    <crate::components::ui::StatTile layout="compact" label="Version" value=version/>
+                    <crate::components::ui::StatTile layout="compact" label="Uptime" value=uptime/>
                 </div>
 
                 <div class="settings-overview__section">
@@ -578,7 +577,6 @@ fn section_view(key: &str) -> leptos::prelude::AnyView {
         "home-assistant" => view! { <SettingsHomeAssistant/> }.into_any(),
         "help" => view! { <SettingsHelp/> }.into_any(),
         "zones" => view! { <SettingsZones/> }.into_any(),
-        "controllers" => view! { <SettingsControllers/> }.into_any(),
         "location" => view! { <SettingsLocation/> }.into_any(),
         "skip-rules" => view! { <SettingsSkipRules/> }.into_any(),
         "engine" => view! { <SettingsEngine/> }.into_any(),

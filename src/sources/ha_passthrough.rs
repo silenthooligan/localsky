@@ -29,16 +29,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
-use tokio::time::{interval, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
 use crate::config::schema::HaPassthroughConfig;
 use crate::ports::weather_source::{
     ShutdownSignal, SourceBus, SourceCaps, SourceEvent, WeatherField, WeatherSource,
 };
+use crate::sources::poll::{run_polling, Poll};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
 /// Per-request budget for the HA REST poll. Matches the previous persistent
@@ -53,7 +52,7 @@ pub struct HaPassthrough {
     mapping: Vec<(WeatherField, String)>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 struct StateEntry {
     entity_id: String,
     state: String,
@@ -61,6 +60,54 @@ struct StateEntry {
     /// Used to normalize the reading to LocalSky's canonical imperial unit;
     /// None means "no declared unit, assume already canonical".
     unit: Option<String>,
+    at_epoch: Option<i64>,
+    rain_at_epoch: Option<i64>,
+    restored: bool,
+}
+
+impl StateEntry {
+    fn from_value(v: Value) -> Option<Self> {
+        // last_changed is the time the VALUE changed, not its last report.
+        // Modern HA reports unchanged readings through last_reported. Older
+        // HA versions only expose last_updated; preserve that age rather than
+        // inventing a fresh observation from a successful HTTP request.
+        let at_epoch = v
+            .get("last_reported")
+            .or_else(|| v.get("last_updated"))
+            .and_then(Value::as_str)
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|t| t.timestamp());
+        Some(Self {
+            entity_id: v.get("entity_id")?.as_str()?.into(),
+            state: v.get("state")?.as_str()?.into(),
+            unit: v
+                .get("attributes")
+                .and_then(|a| a.get("unit_of_measurement"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            at_epoch,
+            // WeatherFlow identifies the physical observation period with
+            // last_reset. HA republishing a state must not invent another minute.
+            rain_at_epoch: match v.get("attributes").and_then(|a| a.get("last_reset")) {
+                Some(value) => value
+                    .as_str()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|t| t.timestamp()),
+                None => at_epoch,
+            },
+            restored: v
+                .get("attributes")
+                .and_then(|a| a.get("restored"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        })
+    }
+
+    fn reading(&self, now: i64) -> Option<(f64, i64)> {
+        let epoch = self.at_epoch?;
+        let value = self.state.parse::<f64>().ok()?;
+        (!self.restored && epoch > 0 && epoch <= now && value.is_finite()).then_some((value, epoch))
+    }
 }
 
 impl HaPassthrough {
@@ -89,28 +136,70 @@ impl HaPassthrough {
             .send()
             .await?
             .error_for_status()?;
-        // HA returns the full attribute blob per entity but we only need
-        // entity_id + state. Deserialize::deny_unknown_fields is off so
-        // the extra fields just get ignored.
         let arr: Vec<Value> = crate::net::safe_fetch::read_json_capped(resp).await?;
-        let mut out = Vec::with_capacity(arr.len());
-        for v in arr {
-            if let (Some(entity_id), Some(state)) = (
-                v.get("entity_id").and_then(|x| x.as_str()),
-                v.get("state").and_then(|x| x.as_str()),
-            ) {
-                out.push(StateEntry {
-                    entity_id: entity_id.to_string(),
-                    state: state.to_string(),
-                    unit: v
-                        .get("attributes")
-                        .and_then(|a| a.get("unit_of_measurement"))
-                        .and_then(|u| u.as_str())
-                        .map(|s| s.to_string()),
-                });
+        Ok(arr.into_iter().filter_map(StateEntry::from_value).collect())
+    }
+
+    /// Transport reachability and measurement freshness are separate facts.
+    /// Only the HTTP request happens now; each reading retains its HA age.
+    async fn poll_once(self: Arc<Self>) -> anyhow::Result<Poll> {
+        let states = self.fetch_states().await?;
+        Ok(self.observations(&states, chrono::Utc::now().timestamp()))
+    }
+
+    fn observations(&self, states: &[StateEntry], now: i64) -> Poll {
+        let by_id: std::collections::HashMap<_, _> =
+            states.iter().map(|s| (s.entity_id.as_str(), s)).collect();
+        // Batch only readings with the SAME report time. A fresh temperature
+        // must not refresh an old rain total or a zone's stale soil channel.
+        let mut batches: BTreeMap<i64, Vec<(WeatherField, f64)>> = BTreeMap::new();
+        for (field, entity_id) in &self.mapping {
+            let Some(state) = by_id.get(entity_id.as_str()) else {
+                debug!(source_id = %self.id, entity_id, "ha_passthrough entity not present in /api/states");
+                continue;
+            };
+            let Some((value, report_epoch)) = state.reading(now) else {
+                debug!(source_id = %self.id, entity_id, "ha_passthrough entity has no valid current report");
+                continue;
+            };
+            let epoch = if *field == WeatherField::RainLastMinIn {
+                let Some(epoch) = state.rain_at_epoch.filter(|e| *e > 0 && *e <= report_epoch)
+                else {
+                    continue;
+                };
+                epoch
+            } else {
+                report_epoch
+            };
+            let value = crate::sources::units::to_canonical(*field, value, state.unit.as_deref());
+            if value.is_finite() {
+                batches.entry(epoch).or_default().push((*field, value));
             }
         }
-        Ok(out)
+        let mut poll = Poll::none();
+        for (at_epoch, fields) in batches {
+            poll.events
+                .extend(Poll::observation(&self.id, fields, at_epoch).events);
+        }
+        for (entity_id, zone) in &self.config.soil_zone_map {
+            let zone = zone.trim();
+            if zone.is_empty() {
+                continue;
+            }
+            let Some(state) = by_id.get(entity_id.as_str()) else {
+                continue;
+            };
+            let Some((value, at_epoch)) = state.reading(now) else {
+                continue;
+            };
+            poll = poll.with(SourceEvent::KeyedReading {
+                source_id: self.id.clone(),
+                key: crate::sources::bus_recorder::zone_soil_key(zone),
+                value,
+                at_epoch,
+            });
+        }
+        poll
     }
 }
 
@@ -146,6 +235,7 @@ fn parse_weather_field(name: &str) -> Option<WeatherField> {
         "illuminance" | "illuminancelx" => WeatherField::Illuminance,
         "pressureinhg" | "barometricinhg" => WeatherField::PressureInHg,
         "raintodayin" | "dailyrainin" => WeatherField::RainTodayIn,
+        "rainlastminin" | "raininlastmin" => WeatherField::RainLastMinIn,
         "rainintensityinhr" | "hourlyrainin" => WeatherField::RainIntensityInHr,
         "lightningcount" => WeatherField::LightningCount,
         "lightningdistancemi" => WeatherField::LightningDistanceMi,
@@ -167,6 +257,9 @@ impl WeatherSource for HaPassthrough {
         let mut fields = HashSet::new();
         for (f, _) in &self.mapping {
             fields.insert(*f);
+            if *f == WeatherField::RainLastMinIn {
+                fields.insert(WeatherField::RainTodayIn);
+            }
         }
         SourceCaps {
             // Live values forwarded from whatever the HA entity reports.
@@ -184,121 +277,36 @@ impl WeatherSource for HaPassthrough {
         // OTHER source's data. Priority 30: above raw forecast (25), well
         // below any direct adapter (60+). Users who want HA to win should
         // remove the conflicting native adapter from cfg.sources.
-        if self.mapping.iter().any(|(f, _)| *f == field) {
+        if self.capabilities().fields.contains(&field) {
             30
         } else {
             i32::MIN
         }
     }
 
-    async fn run(
-        self: Arc<Self>,
-        bus: SourceBus,
-        mut shutdown: ShutdownSignal,
-    ) -> anyhow::Result<()> {
+    async fn run(self: Arc<Self>, bus: SourceBus, shutdown: ShutdownSignal) -> anyhow::Result<()> {
+        // The shared loop logs the start; this line carries the mapping
+        // size an operator needs when the source stays quiet.
         info!(
             source_id = %self.id,
             mapping_n = self.mapping.len(),
-            "HaPassthrough source started",
+            soil_zones = self.config.soil_zone_map.len(),
+            "HaPassthrough polling /api/states",
         );
         if self.mapping.is_empty() && self.config.soil_zone_map.is_empty() {
             warn!(source_id = %self.id, "HaPassthrough has empty field_map + soil_zone_map; idle");
         }
-        let mut tick = interval(POLL_INTERVAL);
-        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut last_reachable: Option<bool> = None;
-        loop {
-            tokio::select! {
-                _ = tick.tick() => {
-                    match self.fetch_states().await {
-                        Ok(states) => {
-                            if last_reachable != Some(true) {
-                                let _ = bus.send(SourceEvent::Reachability {
-                                    source_id: self.id.clone(),
-                                    reachable: true,
-                                });
-                                last_reachable = Some(true);
-                            }
-                            // O(states * mapping) on every tick, both
-                            // are small (HA: a few hundred entities;
-                            // mapping: handful of fields). Building a
-                            // HashMap pays for itself once mapping > 1.
-                            let mut by_id: std::collections::HashMap<&str, (&str, Option<&str>)> =
-                                std::collections::HashMap::with_capacity(states.len());
-                            for s in &states {
-                                by_id.insert(
-                                    s.entity_id.as_str(),
-                                    (s.state.as_str(), s.unit.as_deref()),
-                                );
-                            }
-                            let mut fields = Vec::new();
-                            for (field, entity_id) in &self.mapping {
-                                let Some((raw, unit)) = by_id.get(entity_id.as_str()).copied() else {
-                                    debug!(source_id = %self.id, entity_id, "ha_passthrough entity not present in /api/states");
-                                    continue;
-                                };
-                                // HA encodes unavailable / unknown as
-                                // string literals; only parse if numeric.
-                                let Ok(v) = raw.parse::<f64>() else {
-                                    debug!(source_id = %self.id, entity_id, value = %raw, "ha_passthrough entity state not numeric");
-                                    continue;
-                                };
-                                // Normalize the HA sensor's unit (°C, km/h, hPa,
-                                // mm...) to LocalSky's canonical imperial unit.
-                                let v = crate::sources::units::to_canonical(*field, v, unit);
-                                fields.push((*field, v));
-                            }
-                            if !fields.is_empty() {
-                                debug!(source_id = %self.id, fields_n = fields.len(), "HaPassthrough updated");
-                                let _ = bus.send(SourceEvent::Observation {
-                                    source_id: self.id.clone(),
-                                    fields,
-                                    at_epoch: chrono::Utc::now().timestamp(),
-                                });
-                            }
-                            // Per-zone soil probes: each mapped HA entity becomes
-                            // a KeyedReading under soilmoisture_<zone_slug> so a
-                            // zone binds it like a native soil channel.
-                            for (entity_id, zone) in &self.config.soil_zone_map {
-                                let zone = zone.trim();
-                                if zone.is_empty() {
-                                    continue;
-                                }
-                                let Some((raw, _unit)) = by_id.get(entity_id.as_str()).copied()
-                                else {
-                                    continue;
-                                };
-                                let Ok(v) = raw.parse::<f64>() else {
-                                    continue;
-                                };
-                                let _ = bus.send(SourceEvent::KeyedReading {
-                                    source_id: self.id.clone(),
-                                    key: crate::sources::bus_recorder::zone_soil_key(zone),
-                                    value: v,
-                                    at_epoch: chrono::Utc::now().timestamp(),
-                                });
-                            }
-                        }
-                        Err(e) => {
-                            warn!(source_id = %self.id, error = %e, "HaPassthrough fetch failed");
-                            if last_reachable != Some(false) {
-                                let _ = bus.send(SourceEvent::Reachability {
-                                    source_id: self.id.clone(),
-                                    reachable: false,
-                                });
-                                last_reachable = Some(false);
-                            }
-                        }
-                    }
-                }
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        info!(source_id = %self.id, "HaPassthrough shutdown");
-                        return Ok(());
-                    }
-                }
-            }
-        }
+        let id = self.id.clone();
+        run_polling(
+            self,
+            &id,
+            "HaPassthrough",
+            POLL_INTERVAL,
+            bus,
+            shutdown,
+            Self::poll_once,
+        )
+        .await
     }
 }
 
@@ -316,6 +324,184 @@ mod tests {
             bearer_token: "t".into(),
             field_map: fm,
             soil_zone_map: Default::default(),
+        }
+    }
+
+    fn state(entity: &str, value: &str, epoch: i64) -> Value {
+        serde_json::json!({"entity_id": entity, "state": value,
+            "last_reported": chrono::DateTime::from_timestamp(epoch, 0).unwrap().to_rfc3339(),
+            "attributes": {"unit_of_measurement": "°C"}})
+    }
+
+    #[test]
+    fn weatherflow_minute_identity_survives_ha_republication_and_counts_equal_new_minutes() {
+        let source = HaPassthrough::new("ha", cfg_with_map(&[("RainLastMinIn", "sensor.rain")]));
+        assert!(source
+            .capabilities()
+            .fields
+            .contains(&WeatherField::RainTodayIn));
+        let now = 1_700_000_100;
+        let store = crate::weather::LiveWeatherStore::new();
+        for (report, period, amount, expected) in [
+            (now, now, "2.54", 0.1),
+            (now + 30, now, "2.54", 0.1),
+            (now + 60, now + 60, "2.54", 0.2),
+            (now + 120, now + 120, "0", 0.2),
+        ] {
+            let mut v = state("sensor.rain", amount, report);
+            v["attributes"]["unit_of_measurement"] = serde_json::json!("mm");
+            v["attributes"]["last_reset"] =
+                serde_json::json!(chrono::DateTime::from_timestamp(period, 0)
+                    .unwrap()
+                    .to_rfc3339());
+            let poll = source.observations(&[StateEntry::from_value(v).unwrap()], report);
+            for event in poll.events {
+                let SourceEvent::Observation {
+                    source_id,
+                    fields,
+                    at_epoch,
+                } = event
+                else {
+                    panic!("observation")
+                };
+                assert_eq!(at_epoch, period);
+                store.apply_received_fields(&fields, at_epoch, report, true, &source_id);
+            }
+            assert!((store.snapshot().rain_in_today - expected).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn invalid_minute_period_cannot_become_new_rain() {
+        let source = HaPassthrough::new("ha", cfg_with_map(&[("RainLastMinIn", "sensor.rain")]));
+        let now = 1_700_000_100;
+        for period in [
+            serde_json::json!("bad"),
+            serde_json::Value::Null,
+            serde_json::json!(chrono::DateTime::from_timestamp(now + 1, 0)
+                .unwrap()
+                .to_rfc3339()),
+        ] {
+            let mut v = state("sensor.rain", "0.1", now);
+            v["attributes"]["last_reset"] = period;
+            assert!(source
+                .observations(&[StateEntry::from_value(v).unwrap()], now)
+                .events
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn polling_a_frozen_ha_sensor_does_not_refresh_its_observation() {
+        let source = HaPassthrough::new("ha", cfg_with_map(&[("AirTempF", "sensor.temp")]));
+        let old = 1_700_000_000;
+        let states = vec![StateEntry::from_value(state("sensor.temp", "25", old)).unwrap()];
+        for now in [old + 86_400, old + 86_430] {
+            let poll = source.observations(&states, now);
+            assert_eq!(poll.events.len(), 1);
+            let SourceEvent::Observation {
+                fields, at_epoch, ..
+            } = &poll.events[0]
+            else {
+                panic!("observation")
+            };
+            assert_eq!(*at_epoch, old);
+            assert_eq!(fields, &vec![(WeatherField::AirTempF, 77.0)]);
+        }
+    }
+
+    #[test]
+    fn unchanged_values_use_the_new_report_not_the_old_value_change() {
+        let now = 1_700_000_100;
+        let mut v = state("sensor.temp", "25", now);
+        v["last_updated"] = serde_json::json!("2000-01-01T00:00:00Z");
+        v["last_changed"] = v["last_updated"].clone();
+        let entry = StateEntry::from_value(v).unwrap();
+        assert_eq!(entry.reading(now), Some((25.0, now)));
+    }
+
+    #[test]
+    fn weather_and_soil_entities_keep_independent_report_times() {
+        let now = 1_700_000_100;
+        let mut cfg = cfg_with_map(&[("AirTempF", "sensor.temp"), ("RhPct", "sensor.rh")]);
+        cfg.soil_zone_map
+            .insert("sensor.soil".into(), "orchard".into());
+        let source = HaPassthrough::new("ha", cfg);
+        let states: Vec<_> = [
+            state("sensor.temp", "25", now),
+            state("sensor.rh", "50", now - 3600),
+            state("sensor.soil", "30", now - 7200),
+        ]
+        .into_iter()
+        .filter_map(StateEntry::from_value)
+        .collect();
+        let poll = source.observations(&states, now);
+        assert_eq!(poll.events.len(), 3);
+        let mut seen = BTreeMap::new();
+        for event in poll.events {
+            match event {
+                SourceEvent::Observation {
+                    fields, at_epoch, ..
+                } => {
+                    for (field, _) in fields {
+                        seen.insert(format!("{field:?}"), at_epoch);
+                    }
+                }
+                SourceEvent::KeyedReading { key, at_epoch, .. } => {
+                    seen.insert(key, at_epoch);
+                }
+                _ => panic!("only observations"),
+            }
+        }
+        assert_eq!(seen["AirTempF"], now);
+        assert_eq!(seen["RhPct"], now - 3600);
+        assert_eq!(seen["soilmoisture_orchard"], now - 7200);
+    }
+
+    #[test]
+    fn older_ha_reports_use_last_updated_without_inventing_freshness() {
+        let now = 1_700_000_100;
+        let mut v = state("sensor.temp", "0", now - 600);
+        let report = v.as_object_mut().unwrap().remove("last_reported").unwrap();
+        v["last_updated"] = report;
+        assert_eq!(
+            StateEntry::from_value(v.clone()).unwrap().reading(now),
+            Some((0.0, now - 600))
+        );
+        v["last_reported"] = serde_json::json!("malformed");
+        assert_eq!(StateEntry::from_value(v).unwrap().reading(now), None);
+    }
+
+    #[test]
+    fn absent_future_or_restored_reports_cannot_supply_current_weather() {
+        let now = 1_700_000_100;
+        let mut missing = state("sensor.temp", "25", now);
+        missing.as_object_mut().unwrap().remove("last_reported");
+        let mut restored = state("sensor.temp", "25", now);
+        restored["attributes"]["restored"] = serde_json::json!(true);
+        for v in [
+            missing,
+            restored,
+            state("sensor.temp", "25", now + 1),
+            state("sensor.temp", "25", 0),
+        ] {
+            assert_eq!(StateEntry::from_value(v).unwrap().reading(now), None);
+        }
+    }
+
+    #[test]
+    fn unavailable_and_nonfinite_ha_states_emit_neither_weather_nor_soil() {
+        let now = 1_700_000_100;
+        let mut cfg = cfg_with_map(&[("AirTempF", "sensor.temp")]);
+        cfg.soil_zone_map
+            .insert("sensor.temp".into(), "orchard".into());
+        let source = HaPassthrough::new("ha", cfg);
+        for value in ["unknown", "unavailable", "NaN", "inf", "-inf"] {
+            let entries = vec![StateEntry::from_value(state("sensor.temp", value, now)).unwrap()];
+            assert!(
+                source.observations(&entries, now).events.is_empty(),
+                "{value}"
+            );
         }
     }
 

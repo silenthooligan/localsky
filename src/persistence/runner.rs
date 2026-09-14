@@ -109,6 +109,26 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "et0_ledger",
         sql: include_str!("migrations/M0018_et0_ledger.sql"),
     },
+    Migration {
+        version: "M0019",
+        name: "run_audit",
+        sql: include_str!("migrations/M0019_run_audit.sql"),
+    },
+    Migration {
+        version: "M0020",
+        name: "soil_morning_decisions",
+        sql: include_str!("migrations/M0020_soil_morning_decisions.sql"),
+    },
+    Migration {
+        version: "M0021",
+        name: "watering_sessions",
+        sql: include_str!("migrations/M0021_watering_sessions.sql"),
+    },
+    Migration {
+        version: "M0022",
+        name: "daily_irrigation",
+        sql: include_str!("migrations/M0022_daily_irrigation.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]
@@ -278,6 +298,10 @@ mod tests {
                 "M0016".to_string(),
                 "M0017".to_string(),
                 "M0018".to_string(),
+                "M0019".to_string(),
+                "M0020".to_string(),
+                "M0021".to_string(),
+                "M0022".to_string(),
             ]
         );
     }

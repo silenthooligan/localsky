@@ -47,7 +47,7 @@ pub fn controller_kind_options() -> Vec<(String, String)> {
         ("hydrawise".into(), "Hydrawise".into()),
         ("bhyve".into(), "B-hyve".into()),
         ("rainbird".into(), "Rain Bird".into()),
-        ("dry_run".into(), "No hardware (simulate)".into()),
+        ("dry_run".into(), crate::voice::watch_only::LABEL.into()),
     ]
 }
 
@@ -151,10 +151,7 @@ pub fn controller_blurb(kind: &str) -> &'static str {
             "Your Rain Bird controller, driven through the Rain Bird cloud. Signs in with your \
              Rain Bird account email and password."
         }
-        "dry_run" => {
-            "No irrigation hardware? This simulates watering so you can explore scheduling and the \
-             skip rules without firing a single valve. Add real hardware later in Settings."
-        }
+        "dry_run" => crate::voice::watch_only::BLURB,
         _ => "Fires your irrigation valves.",
     }
 }
@@ -549,7 +546,7 @@ pub fn ControllerEditorPanel(
         <div id="controller-form-panel"><Panel title="Controller details".to_string()>
             <FormField
                 label="ID".to_string()
-                helptext="A short slug you control (e.g. os_main, ha_backup). Anything you type is normalized to snake_case as you go. Used by zones to reference this controller. You CAN rename it while editing: the rename repoints every zone that fires from this controller to the new id automatically, so nothing breaks.".to_string()
+                helptext="A short name you control, like os_main. Zones refer to it. Renaming it here is safe: every zone that fires from it follows.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
                 <input
@@ -565,7 +562,12 @@ pub fn ControllerEditorPanel(
             </FormField>
 
             <FormField
-                label=(if editing { "Type" } else { "What runs your sprinklers?" }).to_string()
+                label=(if editing {
+                    "Type"
+                } else {
+                    crate::voice::WHAT_RUNS_YOUR_SPRINKLERS
+                })
+                .to_string()
                 helptext=(if editing {
                     ""
                 } else {
@@ -599,11 +601,11 @@ pub fn ControllerEditorPanel(
                         </p>
                     })}
                 </div>
-                <p class="ui-form-field__helptext" style="margin-top: 0.4rem">
+                <p class="ui-form-field__helptext" class:u-mt2=true>
                     "See the "
                     <a href=doc_url("controllers")
                         target="_blank" rel="noopener noreferrer"
-                        style="color: var(--accent)">"controller docs"</a>
+                        class:u-accent=true>"controller docs"</a>
                     " for the capabilities of each."
                 </p>
             </FormField>
@@ -613,7 +615,7 @@ pub fn ControllerEditorPanel(
                 helptext="If checked, other controllers lose default status. Zones without an explicit controller_id use the default.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
-                <label style="display: flex; gap: 0.5rem; align-items: center; min-height: 44px;">
+                <label class:u-touch-row=true>
                     <input
                         type="checkbox"
                         prop:checked=move || default_flag.get()
@@ -628,7 +630,7 @@ pub fn ControllerEditorPanel(
                 helptext="Unchecked controllers stay in the config but don't dispatch.".to_string()
                 error=Signal::derive(|| None::<String>)
             >
-                <label style="display: flex; gap: 0.5rem; align-items: center; min-height: 44px;">
+                <label class:u-touch-row=true>
                     <input
                         type="checkbox"
                         prop:checked=move || enabled.get()
@@ -736,7 +738,7 @@ pub fn ControllerEditorPanel(
                 <div class="settings-section-fold__body">
                     <FormField
                         label="Config (JSON)".to_string()
-                        helptext="Escape hatch for keys not in the labeled Connection form above, mainly the per-zone maps (zone_command_map, zone_*_map). Stays in sync both ways. For cloud controllers (Rachio, Hydrawise, B-hyve, Rain Bird), \"Scan zones\" fills the zone map here; other kinds bind their zones on the Zones page instead.".to_string()
+                        helptext="For keys the Connection form has no field for, mainly the per-zone maps. On a cloud controller, Scan zones fills them; other kinds bind on the Zones page.".to_string()
                         error=Signal::derive(|| None::<String>)
                     >
                         <textarea

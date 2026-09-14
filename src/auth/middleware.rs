@@ -254,7 +254,7 @@ fn is_info(path: &str) -> bool {
     path == "/api/info" || path == "/api/v1/info"
 }
 
-/// P4-1: the Prometheus exposition endpoint. Public like /api/health: it carries
+/// The Prometheus exposition endpoint. Public like /api/health: it carries
 /// only aggregate operational counters (verdict mix, refresh/degraded counts,
 /// controller/cloud error counts, last-fetch latency) -- no secrets, config, or
 /// PII -- so a scraper (the monitoring host) reaches it without credentials. A deployment
@@ -541,6 +541,12 @@ fn is_privileged_path(method: &Method, path: &str) -> bool {
         return true;
     }
 
+    // The diagnostics bundle carries the (redacted) config, the health
+    // topology and recent logs: the same bar as the config surface.
+    if path == "/api/diagnostics" || path.starts_with("/api/diagnostics/") {
+        return true;
+    }
+
     // In-app restart: kills and relaunches the process. Same bar as a config
     // write; an anonymous internet caller must never bounce the service.
     if path == "/api/system/restart" {
@@ -592,7 +598,7 @@ fn is_privileged_path(method: &Method, path: &str) -> bool {
         return true;
     }
 
-    // AuthMode-Disabled hardening (LS-REC-05): in the shipped default an
+    // AuthMode-Disabled hardening: in the shipped default an
     // anonymous internet caller could otherwise seed push subscriptions
     // (POST /push/subscribe) or fill disk with photo uploads (POST
     // /zones/photo). Neither is a benign read, so both clear the same
@@ -757,12 +763,12 @@ fn unauthorized_api_with_hint(hint: &str) -> Response {
     resp
 }
 
-/// One-shot guard for the P4-6 exposure warning (see `enforce`): the
+/// One-shot guard for the exposure warning (see `enforce`): the
 /// "public IP while auth Disabled" warning fires at most once per process.
 static EXPOSED_WHILE_OPEN_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Store-independent gate for the no-history-DB boot (LS-REC-05 fail-closed).
+/// Store-independent gate for the no-history-DB boot; fail-closed.
 ///
 /// When no history DB is mounted there is no [`AuthStore`], so the full
 /// [`enforce`] middleware (which needs the store to validate credentials) was
@@ -932,7 +938,7 @@ pub async fn enforce(
     let path = req.uri().path().to_string();
     req.extensions_mut().insert(AuthRequired(policy.required));
 
-    // P4-6 posture nudge: on the shipped default (auth Disabled), a request that
+    // Posture nudge: on the shipped default (auth Disabled), a request that
     // arrives from a PUBLIC source IP means this instance is very likely exposed
     // to the internet with no login. Warn once per process so the operator sees
     // it without spamming a line per request. After it fires, the steady-state
@@ -1092,7 +1098,7 @@ pub async fn enforce(
         // If a reverse proxy is in front but unconfigured, the peer is the
         // proxy, not the client: drop the Disabled-mode private-IP vouching so
         // an internet caller forwarded by that proxy cannot reach backup/config.
-        // Loopback / trusted_networks still pass. (LS-REC-05 proxy hardening.)
+        // Loopback / trusted_networks still pass. (Proxy hardening.)
         let proxied = proxied_but_unconfigured(req.headers(), &policy);
         let trusted_ip = client.map(|ip| privileged_caller_vouched_proxied(&ip, &policy, proxied));
         if trusted_ip == Some(true) {
@@ -1515,7 +1521,7 @@ mod tests {
 
     #[test]
     fn unconfigured_proxy_drops_private_ip_vouching_on_privileged_gate() {
-        // LS-REC-05 proxy hardening. In the shipped default (Disabled, no
+        // Proxy hardening. In the shipped default (Disabled, no
         // trusted_proxies) a reverse proxy in front makes every forwarded
         // request arrive with the PROXY's private peer IP. Without the proxy
         // caveat, that peer would be vouched as a LAN owner and hand an

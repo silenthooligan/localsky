@@ -7,8 +7,11 @@
 //
 // Works against InfluxDB 1.x (db + optional basic-auth) and 2.x (org + token via
 // the v1-compatible /query endpoint). JSON results only -- no Flux/CSV, so no
-// new dependency. Rides the merge bus like every other source, and outbound
-// requests go through net::safe_fetch (SSRF-hardened).
+// new dependency. Rides the merge bus like every other source on the shared
+// `sources::poll::run_polling` loop (tick, fetch metric, reachability edges,
+// shutdown), and outbound requests go through net::safe_fetch (SSRF-hardened:
+// the operator names the host, so the client pins DNS and refuses redirects
+// rather than using the plain `net::client`).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +19,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::collections::HashSet;
-use tokio::time::{interval, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
 use crate::config::schema::InfluxDbConfig;
@@ -24,6 +26,7 @@ use crate::ports::weather_source::{
     ShutdownSignal, SourceBus, SourceCaps, SourceEvent, WeatherField, WeatherSource,
 };
 use crate::sources::mqtt_subscribe::parse_weather_field;
+use crate::sources::poll::{run_polling, Poll};
 
 const INFLUX_TIMEOUT: Duration = Duration::from_secs(10);
 const MIN_INTERVAL_S: u64 = 10;
@@ -110,6 +113,68 @@ impl InfluxDb {
         let resp: InfluxResp = crate::net::safe_fetch::read_json_capped(http).await?;
         latest_value(&resp).ok_or_else(|| anyhow::anyhow!("query returned no value: {influxql}"))
     }
+
+    /// One poll: run every configured query and map each answer to a global
+    /// field or a per-zone soil reading. The reachability verdict is the one
+    /// the adapter always had: reachable when at least one query answered, or
+    /// when there was nothing to ask; unreachable only when every query
+    /// failed. A failed query is logged here with its text; the all-failed
+    /// case is the poll's Err, so the shared loop records the fetch as failed
+    /// and sends the offline edge.
+    async fn poll_once(self: Arc<Self>) -> anyhow::Result<Poll> {
+        let now = chrono::Utc::now().timestamp();
+        let mut poll = Poll::none();
+        let mut fields: Vec<(WeatherField, f64)> = Vec::new();
+        let mut any_ok = false;
+        let mut failed = 0usize;
+        for q in &self.config.queries {
+            match self.query(&q.query).await {
+                Ok(raw) => {
+                    any_ok = true;
+                    let value = raw * q.scale + q.offset;
+                    if let Some(zone) = q
+                        .zone_slug
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|z| !z.is_empty())
+                    {
+                        poll = poll.with(SourceEvent::KeyedReading {
+                            source_id: self.id.clone(),
+                            key: crate::sources::bus_recorder::zone_soil_key(zone),
+                            value,
+                            at_epoch: now,
+                        });
+                    } else if let Some(wf) = parse_weather_field(&q.field) {
+                        fields.push((wf, value));
+                    } else {
+                        debug!(source_id = %self.id, field = q.field, "unknown field name");
+                    }
+                }
+                Err(e) => {
+                    failed += 1;
+                    warn!(
+                        source_id = %self.id,
+                        query = q.query,
+                        error = %e,
+                        "InfluxDb query failed"
+                    );
+                }
+            }
+        }
+        if failed > 0 && !any_ok {
+            anyhow::bail!("all {failed} queries failed");
+        }
+        // Zone readings ride ahead of the global Observation, as they always
+        // did; the loop publishes them in this order.
+        if !fields.is_empty() {
+            poll = poll.with(SourceEvent::Observation {
+                source_id: self.id.clone(),
+                fields,
+                at_epoch: now,
+            });
+        }
+        Ok(poll)
+    }
 }
 
 #[async_trait]
@@ -150,85 +215,31 @@ impl WeatherSource for InfluxDb {
         }
     }
 
-    async fn run(
-        self: Arc<Self>,
-        bus: SourceBus,
-        mut shutdown: ShutdownSignal,
-    ) -> anyhow::Result<()> {
+    async fn run(self: Arc<Self>, bus: SourceBus, shutdown: ShutdownSignal) -> anyhow::Result<()> {
         let interval_s = self.config.poll_interval_s.max(MIN_INTERVAL_S);
+        // The shared loop logs the start; this line names the endpoint, the
+        // cadence and the query count an operator needs when it goes quiet.
         info!(
             source_id = %self.id,
             url = %self.config.url,
             interval_s,
             queries = self.config.queries.len(),
-            "InfluxDb source started"
+            "InfluxDb polling InfluxQL endpoint"
         );
         if self.config.queries.is_empty() {
             warn!(source_id = %self.id, "InfluxDb has no queries; idle");
         }
-        let mut tick = interval(Duration::from_secs(interval_s));
-        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut last_reachable: Option<bool> = None;
-        loop {
-            tokio::select! {
-                _ = tick.tick() => {
-                    let now = chrono::Utc::now().timestamp();
-                    let mut fields: Vec<(WeatherField, f64)> = Vec::new();
-                    let mut any_ok = false;
-                    let mut any_err = false;
-                    for q in &self.config.queries {
-                        match self.query(&q.query).await {
-                            Ok(raw) => {
-                                any_ok = true;
-                                let value = raw * q.scale + q.offset;
-                                if let Some(zone) = q
-                                    .zone_slug
-                                    .as_deref()
-                                    .map(str::trim)
-                                    .filter(|z| !z.is_empty())
-                                {
-                                    let _ = bus.send(SourceEvent::KeyedReading {
-                                        source_id: self.id.clone(),
-                                        key: crate::sources::bus_recorder::zone_soil_key(zone),
-                                        value,
-                                        at_epoch: now,
-                                    });
-                                } else if let Some(wf) = parse_weather_field(&q.field) {
-                                    fields.push((wf, value));
-                                } else {
-                                    debug!(source_id = %self.id, field = q.field, "unknown field name");
-                                }
-                            }
-                            Err(e) => {
-                                any_err = true;
-                                warn!(source_id = %self.id, query = q.query, error = %e, "InfluxDb query failed");
-                            }
-                        }
-                    }
-                    if !fields.is_empty() {
-                        let _ = bus.send(SourceEvent::Observation {
-                            source_id: self.id.clone(),
-                            fields,
-                            at_epoch: now,
-                        });
-                    }
-                    let reachable = any_ok || !any_err;
-                    if last_reachable != Some(reachable) {
-                        let _ = bus.send(SourceEvent::Reachability {
-                            source_id: self.id.clone(),
-                            reachable,
-                        });
-                        last_reachable = Some(reachable);
-                    }
-                }
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        info!(source_id = %self.id, "InfluxDb shutdown");
-                        return Ok(());
-                    }
-                }
-            }
-        }
+        let id = self.id.clone();
+        run_polling(
+            self,
+            &id,
+            "InfluxDb",
+            Duration::from_secs(interval_s),
+            bus,
+            shutdown,
+            Self::poll_once,
+        )
+        .await
     }
 }
 

@@ -155,9 +155,12 @@ pub fn RadarPanel() -> impl IntoView {
             // dialog. The drawer overlays the map; the map itself never
             // resizes when it slides in.
             <div class="radar-map-shell">
+                // An interactive map (Leaflet adds its own zoom controls
+                // inside), so `application`, not `img`: an image cannot
+                // contain controls.
                 <div id="radar-map"
                     class="radar-map"
-                    role="img"
+                    role="application"
                     aria-label="Precipitation radar centered on the station"
                     data-lat=inputs.lat.to_string()
                     data-lon=inputs.lon.to_string()
@@ -169,7 +172,7 @@ pub fn RadarPanel() -> impl IntoView {
                 </div>
             </div>
             <div class="radar-controls">
-                <button id="radar-play" class="radar-btn">"⏸ pause"</button>
+                <crate::components::ui::Button id="radar-play" class="radar-btn" variant="secondary" size="sm">"⏸ pause"</crate::components::ui::Button>
                 <span id="radar-time" class="radar-time"></span>
                 <span id="radar-attributions" class="radar-attr">{attribution}</span>
             </div>

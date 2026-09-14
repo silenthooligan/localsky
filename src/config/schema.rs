@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 fn default_schema_version() -> u32 {
     CURRENT_SCHEMA_VERSION
@@ -27,10 +27,10 @@ fn default_schema_version() -> u32 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct Config {
-    /// Bumped on every breaking schema change; defaults to
+    /// Bumped by a recorded migration (`config::migrate`); defaults to
     /// CURRENT_SCHEMA_VERSION when a hand-edited TOML omits it (so a
-    /// missing key does not fail the whole parse and silently drop into
-    /// env_compat synthesis). v1 is the only version today.
+    /// missing key does not fail the whole parse). v2 (0.9.0) moved the
+    /// server-owned records into `localsky.ledger.toml`.
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     #[serde(default)]
@@ -99,26 +99,6 @@ pub struct Config {
     /// so a pin never blanks the forecast.
     #[serde(default)]
     pub forecast_provider: Option<String>,
-    /// Source ids the boot-time region seeding has ALREADY handled, so it
-    /// never re-adds one the user has since deleted. The upgrade path for
-    /// pre-existing installs: a config written before the region keyless
-    /// authorities existed (or before the hardware-install seeding policy
-    /// of 2026-07) gets its region's keyless forecast authority (NWS in the
-    /// US, Met.no in the Nordics) appended ONCE at boot, and the id is
-    /// recorded here whether it was appended or already present. Deleting
-    /// the source afterwards therefore sticks forever: seeding consults
-    /// this list before the source list. ADDITIVE: empty on old configs
-    /// (serde default) and omitted from the TOML until first used.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub seeded_source_ids: Vec<String>,
-    /// Source ids the one-time flat-default priority repair has already
-    /// evaluated (see `region::repair_flat_default_priorities`): a source
-    /// predating the region ranking that still sat at the flat default (50)
-    /// is lifted to its researched region rank ONCE and recorded here, so a
-    /// user who later sets it back keeps their choice. ADDITIVE: empty on
-    /// old configs and omitted from the TOML until first used.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub priority_repaired_ids: Vec<String>,
     #[serde(default)]
     pub controllers: Vec<ControllerEntry>,
     #[serde(default)]
@@ -159,24 +139,6 @@ pub struct Config {
     /// defaults only; per-browser overrides persist in localStorage.
     #[serde(default)]
     pub ui: UiConfig,
-    /// Home Assistant helper entities the one-time 0.7.22 adoption pass has
-    /// already handled, with what it did to each. Recorded whether or not a
-    /// value was carried across, so the pass runs at most once per entity and
-    /// a later Settings edit is never overwritten, and so the notice can name
-    /// every entity rather than only the ones that had a value.
-    ///
-    /// Idempotency rests on this list and never on inspecting a config value:
-    /// a save writes every default out explicitly, so "max_wind_mph is present
-    /// in the TOML" says nothing about whether a human typed it. Same rule as
-    /// `seeded_source_ids` above.
-    ///
-    /// ADDITIVE: empty on old configs (serde default) and omitted from the
-    /// TOML until first used, so no existing config file changes shape. Last
-    /// in the struct because an array of tables must serialize after every
-    /// scalar field, or `toml::to_string_pretty` writes a document it cannot
-    /// read back.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ha_adoption: Vec<crate::ha::snapshot::HaAdoptedHelper>,
 }
 
 impl Default for Config {
@@ -189,8 +151,6 @@ impl Default for Config {
             field_source_overrides: BTreeMap::new(),
             field_source_chains: BTreeMap::new(),
             forecast_provider: None,
-            seeded_source_ids: Vec::new(),
-            priority_repaired_ids: Vec::new(),
             controllers: Vec::new(),
             zones: BTreeMap::new(),
             llm: None,
@@ -204,7 +164,6 @@ impl Default for Config {
             updates: UpdatesConfig::default(),
             persistence: PersistenceConfig::default(),
             ui: UiConfig::default(),
-            ha_adoption: Vec::new(),
         }
     }
 }
@@ -414,13 +373,12 @@ pub struct ConditionsConfig {
 
 // ----- User scripting (Rhai) -----
 //
-// Augment-only custom skip rules. The engine consults these ONLY when the
-// built-in deterministic ladder already returned "run", so a script can
-// add a skip but can never clear a freeze / wind / restriction gate. A
-// rule returns `true` (skip with its name as the reason) or a non-empty
-// string (skip with that reason); anything else (false, errors, invalid
-// syntax) is a no-op (fail-safe). Scripts are sandboxed: no I/O, no
-// imports, bounded operation count.
+// Augment-only custom skip rules. The engine computes a script hold even
+// when a built-in gate wins, so a manual weather waiver cannot waive it.
+// A script never clears another gate. True or a non-empty string adds a
+// hold; false or an empty string is a no-op. Compilation/evaluation errors
+// and unsupported results hold watering. Scripts are sandboxed: no I/O,
+// imports, or unbounded operation count. Changes require a restart.
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "ssr", derive(JsonSchema))]
@@ -457,6 +415,17 @@ pub struct ScriptRule {
 // dispatch (wrong weekday, forbidden hour), the run is skipped with a
 // reason logged to the runs table.
 //
+// They respect two more things, and the split between them is the point.
+// The operator's own holds bind unconditionally -- Rain delay, the vacation
+// pause, the Skip overrides, the hold-all switch. The engine's WEATHER
+// SAFETY gates -- freeze, overnight freeze, wind now, wind forecast, rain
+// falling now, and the live-data fail-safe -- bind too, but they are the
+// ones `ignore_weather_safety` can waive per schedule. What a schedule
+// never consults, waiver or not, is the rain-forecast and soil gates: a
+// schedule exists because the owner wants water at a time of their
+// choosing, and holding it because the soil model thinks the zone is
+// already fine would defeat the whole point of setting one.
+//
 // `ManualMode::Override` is the default: smart-irrigation dispatch is
 // suppressed for any zone with an enabled override schedule today.
 // Smart math still computes for nerd visibility. `Floor` runs both
@@ -491,6 +460,39 @@ pub struct ManualSchedule {
     /// Override vs Floor; see module-level note above.
     #[serde(default)]
     pub mode: ManualMode,
+    /// Water this schedule even when the weather says it is unsafe to.
+    /// Default `false`, and it belongs there unless you have a reason.
+    ///
+    /// THE RISK, plainly. With this on, the schedule opens valves in a hard
+    /// freeze. Water on plants and standing in lines at freezing temperatures
+    /// kills the plants and bursts the pipes, and a burst line floods whatever
+    /// it runs through until someone notices. It also sprays into high wind,
+    /// which puts the water on the street instead of the yard, and it waters
+    /// through rain that is falling right now. Worst of all, it waters when
+    /// LocalSky has NO live weather at all, which means it cannot tell you
+    /// which of those is happening while it does it.
+    ///
+    /// WHAT IT TURNS OFF, and nothing beyond this list: the freeze-now,
+    /// overnight-freeze, wind-now, wind-forecast and rain-now gates, the
+    /// live-data fail-safe, and the stale-snapshot hold that stands in for the
+    /// fail-safe when the engine has published no verdict at all. Each of those
+    /// is a gate the smart morning would stop on.
+    ///
+    /// WHAT IT DOES NOT TOUCH. It never beats an operator hold. Rain delay, the
+    /// vacation pause (timed or toggle), a per-zone or global Skip override and
+    /// the hold-all switch all still stop this schedule with the flag on. Those
+    /// are you saying stop NOW; this flag is something you set weeks ago, and a
+    /// weeks-old setting must not beat a live instruction. It does not touch
+    /// watering restrictions either, which are law, not weather. And it has
+    /// nothing to say about the rain-forecast and soil gates: a manual schedule
+    /// never consulted those to begin with, because it exists to put water down
+    /// at a time you chose.
+    ///
+    /// Every dispatch this flag actually rescues writes a History row naming the
+    /// gate it overrode. A waiver that leaves no trace is how someone forgets it
+    /// is on.
+    #[serde(default)]
+    pub ignore_weather_safety: bool,
 }
 
 fn default_true_schedule() -> bool {
@@ -538,9 +540,9 @@ pub struct Deployment {
     /// a path. See `resolve_snapshot_source`.
     #[serde(default)]
     pub mode: DeploymentMode,
-    /// When true (and HA is authoritative), also run the native snapshot
-    /// builder in shadow and expose its output + a diff for comparison,
-    /// without it ever driving dispatch. Env: `LOCALSKY_SHADOW_NATIVE=1`.
+    /// DEPRECATED (0.9.0): read by nothing. Shadow-native mode (build the
+    /// native snapshot beside the HA one and diff them) is gone; the field
+    /// stays so existing files still parse.
     #[serde(default)]
     pub shadow_native: bool,
     /// HA-mode only: the entity-id prefix of the OpenSprinkler (or other)
@@ -595,17 +597,30 @@ pub struct Location {
     pub elevation_m: Option<f64>,
 }
 
-// `Units` is defined in the both-features `ha::snapshot` module (so the hydrate
+impl Location {
+    /// Whether a real place has been entered. Exactly (0, 0) is the
+    /// unset marker: a point in the Gulf of Guinea nobody irrigates, and
+    /// the value every legacy path left behind when nothing was set.
+    /// Nothing in LocalSky fetches weather for it.
+    pub fn is_set(&self) -> bool {
+        !(self.lat == 0.0 && self.lon == 0.0)
+    }
+}
+
+// `Units` is defined in the both-features `crate::model` module (so the hydrate
 // client can deserialize it off the irrigation snapshot) and re-exported here so
 // `deployment.units`, the wizard, and the settings UI keep their existing
 // `config::schema::Units` path.
-pub use crate::ha::snapshot::Units;
+pub use crate::model::Units;
 
 // ----- Feature toggles -----
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct Features {
+    /// True on a demo install. A readout, not a switch: demo mode is
+    /// enabled with `LOCALSKY_DEMO=1`, and the seeded demo config sets
+    /// this so the Advanced page's status line says so.
     #[serde(default)]
     pub demo_mode: bool,
     #[serde(default = "default_true")]
@@ -757,6 +772,25 @@ pub enum SourceKind {
 }
 
 impl SourceKind {
+    /// Sources that fetch for the deployment's coordinates. With no
+    /// location set they are not polled at all: the alternative was a
+    /// forecast for open ocean presented as the yard's.
+    pub fn needs_location(&self) -> bool {
+        matches!(
+            self,
+            SourceKind::Nws(_)
+                | SourceKind::MetNorway(_)
+                | SourceKind::NoaaMrms(_)
+                | SourceKind::OpenWeather(_)
+                | SourceKind::PirateWeather(_)
+                | SourceKind::Synoptic(_)
+                | SourceKind::WeatherKit(_)
+                | SourceKind::OpenMeteo(_)
+        )
+    }
+}
+
+impl SourceKind {
     /// True for the forecast-model cloud kinds that emit a whole
     /// `SourceEvent::Forecast` snapshot (daily/hourly arrays) into the
     /// forecast pipeline: Open-Meteo, NWS, MET Norway, OpenWeather, Pirate
@@ -787,7 +821,7 @@ impl SourceKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ssr", derive(JsonSchema))]
 pub struct TempestUdpConfig {
     #[serde(default = "default_tempest_bind")]
@@ -2146,7 +2180,7 @@ pub enum SunExposure {
     Shade,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "ssr", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SprinklerType {
@@ -2155,6 +2189,7 @@ pub enum SprinklerType {
     MpRotator,
     Drip,
     Bubbler,
+    #[default]
     Other,
 }
 
@@ -2302,8 +2337,6 @@ pub struct Notifications {
     pub ntfy: Option<NtfyConfig>,
     #[serde(default)]
     pub slack: Option<SlackConfig>,
-    #[serde(default)]
-    pub email: Option<EmailConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2351,29 +2384,11 @@ pub struct SlackConfig {
     pub webhook_url: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ssr", derive(JsonSchema))]
-pub struct EmailConfig {
-    pub smtp_host: String,
-    #[serde(default = "default_smtp_port")]
-    pub smtp_port: u16,
-    pub username: String,
-    pub password: String,
-    pub from_address: String,
-    pub to_address: String,
-    #[serde(default = "default_true")]
-    pub starttls: bool,
-}
-
-fn default_smtp_port() -> u16 {
-    587
-}
-
 // ----- Engine parameters -----
 //
-// Every constant that used to live inline in src/ha/skip_logic.rs and
-// src/refresher.rs becomes a typed config field with documented
-// default. Operators rarely tune these, but the option is there.
+// Every threshold the engine decides on is a typed config field with a
+// documented default rather than a constant compiled into the decision.
+// Operators rarely tune these, but the option is there.
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ssr", derive(JsonSchema))]
@@ -2402,8 +2417,14 @@ pub struct EngineParams {
     /// weighted by precipitation probability, reach this depth.
     #[serde(default = "default_session_rain_defer_in")]
     pub session_rain_defer_in: f64,
-    /// Default soak duration between cycles (min). Per-zone override
-    /// available in ZoneConfig (Phase 3+).
+    /// Shortest soak between a zone's cycles, in minutes.
+    ///
+    /// The soak itself is derived per zone from how much water a cycle
+    /// leaves standing and how fast that soil drains it
+    /// (`engine::cycle_soak`). This is a floor on it, for an operator who
+    /// knows their surface needs longer than the catalog says. It used to
+    /// be the soak, one number for every soil, and the default of 30 was
+    /// clay's answer applied to sand.
     #[serde(default = "default_soak_minutes")]
     pub soak_minutes: u32,
     /// Interleave cycle-and-soak across zones in the smart-morning sequence:
@@ -2441,9 +2462,11 @@ pub struct EngineParams {
     /// Which model sizes and schedules smart-morning runs: the weekly
     /// water balance or the FAO-56 soil bucket. `null`/absent means the
     /// operator never chose and the install follows the shipped default
-    /// (`weekly` today), resolved at read time by
+    /// (`soil` since 0.9.0; `weekly` before it), resolved at read time by
     /// `effective_scheduling_model`; a value present in the file is a
-    /// deliberate choice and persists as one. The field skips
+    /// deliberate choice and persists as one. An install that wants the
+    /// weekly allocator pins it here or per zone, and nothing about the
+    /// allocator changed: its golden rows are the same. The field skips
     /// serializing when unset so a GET-PUT round trip (or any unrelated
     /// save) cannot stamp the default in as if the operator picked it,
     /// which would strand every install off a later default flip.
@@ -2517,6 +2540,68 @@ pub struct WateringRestriction {
     /// multiple restrictions specify a cap.
     #[serde(default)]
     pub max_minutes_per_zone: Option<u32>,
+    /// Weekdays allowed for EVERY address, `0 = Sun .. 6 = Sat`, for a
+    /// rule that does not depend on parity. Empty = no such gate.
+    #[serde(default)]
+    pub allowed_weekdays: Vec<u8>,
+    /// Calendar-date rotation. Some jurisdictions rotate by the DATE
+    /// rather than the weekday: odd addresses on odd-numbered dates, even
+    /// on even, and usually nobody on the 31st so the rotation stays fair
+    /// across a 31-day month followed by the 1st.
+    #[serde(default)]
+    pub date_parity: DateParity,
+    /// Nobody waters on the 31st. Usually paired with a date-parity rule
+    /// but honored on its own.
+    #[serde(default)]
+    pub skip_31st: bool,
+    /// At most this many days in a Sunday-to-Saturday week may have a
+    /// run. Judged against the days that already watered this week.
+    #[serde(default)]
+    pub max_days_per_week: Option<u8>,
+    /// Heads this rule does not apply to. Drip and bubbler exemptions
+    /// are common: low-volume irrigation is usually outside a schedule.
+    #[serde(default)]
+    pub exempt_sprinklers: Vec<SprinklerType>,
+    /// Zones this rule applies to, by slug. Empty = every zone.
+    #[serde(default)]
+    pub zones: Vec<String>,
+}
+
+impl Default for WateringRestriction {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            enabled: true,
+            effective: EffectiveWindow::AllYear,
+            allowed_weekdays_odd: Vec::new(),
+            allowed_weekdays_even: Vec::new(),
+            forbidden_hour_start: None,
+            forbidden_hour_end: None,
+            max_minutes_per_zone: None,
+            allowed_weekdays: Vec::new(),
+            date_parity: DateParity::Off,
+            skip_31st: false,
+            max_days_per_week: None,
+            exempt_sprinklers: Vec::new(),
+            zones: Vec::new(),
+        }
+    }
+}
+
+/// How a restriction rotates by calendar date, if it does.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum DateParity {
+    #[default]
+    Off,
+    /// Odd addresses on odd-numbered dates, even addresses on even.
+    MatchAddress,
+    /// Everyone on odd-numbered dates.
+    OddDates,
+    /// Everyone on even-numbered dates.
+    EvenDates,
 }
 
 /// When a `WateringRestriction` applies. DST/Standard windows handle
@@ -2529,9 +2614,16 @@ pub struct WateringRestriction {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EffectiveWindow {
     AllYear,
-    /// 2nd Sunday of March → 1st Sunday of November (US DST rules).
+    /// 2nd Sunday of March → 1st Sunday of November.
+    ///
+    /// Those are the UNITED STATES daylight saving dates, in code, for
+    /// everyone. A district in New South Wales whose summer rule runs
+    /// October to April gets a window that is very nearly the inverse of
+    /// its own summer. Kept as a variant so existing configs keep
+    /// parsing byte for byte, but it now delegates to `FloatingRange`
+    /// rather than carrying its own copy of the arithmetic.
     DstOnly,
-    /// Complement of `DstOnly`.
+    /// Complement of `DstOnly`, and the same caveat.
     StandardOnly,
     DateRange {
         start_month: u8,
@@ -2539,6 +2631,53 @@ pub enum EffectiveWindow {
         end_month: u8,
         end_day: u8,
     },
+    /// A window between two floating dates, each named the way ordinances
+    /// and timezone rules actually name them: "the first Sunday in
+    /// October", "the last Sunday in March".
+    ///
+    /// This is what `DstOnly` should always have been. A jurisdiction
+    /// states its own dates instead of inheriting Washington's, so a
+    /// southern-hemisphere summer window works, and so does the European
+    /// rule, which `DateRange` cannot express because its edges float and
+    /// `DstOnly` cannot express because it is not the US.
+    FloatingRange {
+        start: NthWeekday,
+        end: NthWeekday,
+        /// True when the window WRAPS the new year, which is what a
+        /// southern-hemisphere summer does.
+        #[serde(default)]
+        wraps_year: bool,
+    },
+}
+
+/// A floating date: "the second Sunday in March", "the last Sunday in
+/// October".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
+pub struct NthWeekday {
+    /// 1-12.
+    pub month: u8,
+    /// 0 = Sunday, matching the weekday numbering the allowed-days lists
+    /// already use.
+    pub weekday: u8,
+    pub nth: Nth,
+}
+
+/// Which occurrence of a weekday in a month.
+///
+/// `Last` is not a convenience. A count cannot express it: March has four
+/// Sundays in some years and five in others, so "the last Sunday in
+/// March", which is when Europe changes its clocks, has no fixed
+/// ordinal.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum Nth {
+    First,
+    Second,
+    Third,
+    Fourth,
+    Last,
 }
 
 fn default_capture_eff() -> f64 {
@@ -2548,7 +2687,9 @@ fn default_session_rain_defer_in() -> f64 {
     0.10
 }
 fn default_soak_minutes() -> u32 {
-    30
+    // Low enough never to bind on its own: the texture floor and the
+    // derived drain time govern unless the operator raises this.
+    5
 }
 
 /// Which model sizes and schedules smart-morning runs. `Weekly` is the
@@ -2568,8 +2709,13 @@ fn default_soak_minutes() -> u32 {
 #[cfg_attr(feature = "ssr", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SchedulingModel {
-    #[default]
+    /// The weekly water balance: a target depth split into sessions,
+    /// rain counted against it. The original model, kept for installs
+    /// that pin it, with its golden rows intact.
     Weekly,
+    /// The FAO-56 soil bucket: water when the zone's own deficit crosses
+    /// its trigger, refill what is missing. The default since 0.9.0.
+    #[default]
     Soil,
 }
 
@@ -2684,7 +2830,7 @@ impl Default for SkipRuleParams {
 }
 
 fn default_already_wet_in() -> f64 {
-    0.05
+    crate::engine::WET_DAY_IN
 }
 fn default_rain_now_in_hr() -> f64 {
     0.01
@@ -2787,9 +2933,11 @@ mod tests {
     fn engine_scheduling_model_round_trips_absent_vs_chosen() {
         let cfg = Config::default();
         assert_eq!(cfg.engine.scheduling_model, None);
+        // The shipped default is the soil bucket since 0.9.0; this is
+        // exactly the flip the absent-vs-chosen distinction was kept for.
         assert_eq!(
             cfg.engine.effective_scheduling_model(),
-            SchedulingModel::Weekly
+            SchedulingModel::Soil
         );
         let toml_str = toml::to_string_pretty(&cfg).unwrap();
         assert!(
@@ -2981,5 +3129,34 @@ mod tests {
             }
         }
         assert_eq!(cases.len(), 10, "every ControllerKind variant is covered");
+    }
+}
+
+#[cfg(test)]
+mod scheduling_model_default_tests {
+    use super::*;
+
+    /// A config with no scheduling_model loads as Soil. The key stays
+    /// absent on the way back out, so a round trip cannot stamp the
+    /// default in as a choice.
+    #[test]
+    fn an_install_that_never_chose_runs_the_soil_model() {
+        let cfg: Config = toml::from_str("").expect("an empty config loads");
+        assert_eq!(cfg.engine.scheduling_model, None);
+        assert_eq!(
+            cfg.engine.effective_scheduling_model(),
+            SchedulingModel::Soil
+        );
+        let back = toml::to_string(&cfg).expect("serializes");
+        assert!(
+            !back.contains("scheduling_model"),
+            "an unset model must not be written as if chosen:\n{back}"
+        );
+        // A pinned weekly install stays weekly.
+        let pinned: Config = toml::from_str("[engine]\nscheduling_model = \"weekly\"\n").unwrap();
+        assert_eq!(
+            pinned.engine.effective_scheduling_model(),
+            SchedulingModel::Weekly
+        );
     }
 }

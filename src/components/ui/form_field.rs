@@ -33,62 +33,50 @@ pub fn FormField(
     // describedby wiring is a hydrate effect), so the SSR counter
     // diverging is irrelevant.
     let fid = FIELD_SEQ.fetch_add(1, Ordering::Relaxed);
+    let label_id = format!("ui-ff-{fid}-label");
     let err_id = format!("ui-ff-{fid}-err");
     let err_id_for_div = err_id.clone();
-    let input_id = format!("ui-ff-{fid}-input");
     let root: NodeRef<leptos::html::Div> = NodeRef::new();
 
     #[cfg(feature = "hydrate")]
-    Effect::new(move |_| {
-        let has_error = error.get().is_some();
-        let Some(div) = root.get() else {
-            return;
-        };
-        let el: &web_sys::Element = div.as_ref();
-        let Ok(Some(input)) = el.query_selector("input, select, textarea") else {
-            return;
-        };
-        if has_error {
-            let _ = input.set_attribute("aria-describedby", &err_id);
-            let _ = input.set_attribute("aria-invalid", "true");
-        } else {
-            let _ = input.remove_attribute("aria-describedby");
-            let _ = input.remove_attribute("aria-invalid");
-        }
-    });
-    // Associate the label with the wrapped control so the field has an
-    // accessible NAME (screen readers announce it; clicking the label focuses
-    // the control). Hydrate-only + idempotent to match the error wiring above
-    // (SSR markup untouched, no SSR/hydrate id mismatch). Skips a control that
-    // already carries its own name (id / non-empty aria-label / aria-labelledby)
-    // so a caller-provided one always wins.
-    #[cfg(feature = "hydrate")]
     {
-        let input_id = input_id.clone();
+        use wasm_bindgen::{closure::Closure, JsCast};
+        // Read the NodeRef reactively: a field constructed inside Show can
+        // run before its DOM node is attached. Current Zones effects are
+        // verified to run in both standalone and settings-shell routes.
         Effect::new(move |_| {
-            let Some(div) = root.get() else {
+            let invalid = error.get().is_some();
+            let Some(div) = root.get() else { return };
+            let field: &web_sys::Element = div.as_ref();
+            super::field_labels::bind(field, &label_id, &err_id, invalid);
+            let field = field.clone();
+            let label_id = label_id.clone();
+            let err_id = err_id.clone();
+            let callback =
+                Closure::<dyn FnMut(js_sys::Array, web_sys::MutationObserver)>::new(move |_, _| {
+                    super::field_labels::bind(&field, &label_id, &err_id, invalid)
+                });
+            let Ok(observer) = web_sys::MutationObserver::new(callback.as_ref().unchecked_ref())
+            else {
                 return;
             };
-            let el: &web_sys::Element = div.as_ref();
-            let Ok(Some(input)) = el.query_selector("input, select, textarea") else {
-                return;
-            };
-            let has_name = input.get_attribute("id").is_some()
-                || input
-                    .get_attribute("aria-label")
-                    .is_some_and(|s| !s.is_empty())
-                || input.get_attribute("aria-labelledby").is_some();
-            if has_name {
-                return;
-            }
-            let _ = input.set_attribute("id", &input_id);
-            if let Ok(Some(label)) = el.query_selector("label.ui-form-field__label") {
-                let _ = label.set_attribute("for", &input_id);
-            }
+            let options = web_sys::MutationObserverInit::new();
+            options.set_child_list(true);
+            options.set_subtree(true);
+            let _ = observer.observe_with_options(div.as_ref(), &options);
+            let resources = StoredValue::new_local(Some((observer, callback)));
+            on_cleanup(move || {
+                if let Some((observer, callback)) =
+                    resources.try_update_value(Option::take).flatten()
+                {
+                    observer.disconnect();
+                    drop(callback);
+                }
+            });
         });
     }
     #[cfg(not(feature = "hydrate"))]
-    let _ = (&err_id, &input_id);
+    let _ = (label_id, err_id);
 
     view! {
         <div

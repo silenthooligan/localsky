@@ -37,18 +37,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashSet;
 use tokio::sync::Mutex;
-use tokio::time::{interval, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
 use crate::config::schema::NetatmoConfig;
 use crate::ports::weather_source::{
-    ShutdownSignal, SourceBus, SourceCaps, SourceEvent, WeatherField, WeatherSource,
+    ShutdownSignal, SourceBus, SourceCaps, WeatherField, WeatherSource,
 };
+use crate::sources::auth::{with_reauth, TokenCache};
+use crate::sources::poll::{run_polling, Poll};
+use crate::units::c_to_f;
+use crate::units::{hpa_to_inhg, kph_to_mph};
 use serde::Serialize;
 
 const API_BASE: &str = "https://api.netatmo.com";
@@ -58,26 +61,44 @@ pub struct Netatmo {
     id: String,
     config: NetatmoConfig,
     client: Client,
-    /// (access_token, refresh_token). Both rotate over the source's
-    /// lifetime; refresh_token starts from config (or the persisted
-    /// rotation state) and is replaced on every successful
-    /// /oauth2/token round-trip.
-    tokens: Mutex<NetatmoTokens>,
+    /// GET /api/getstationsdata for the configured device; fixed for the
+    /// source's lifetime.
+    station_url: String,
+    /// The access token: exchanged from the refresh token on first use,
+    /// reused until Netatmo rejects it (401/403), then exchanged once
+    /// more for the retry.
+    access: TokenCache,
+    /// The refresh token. Starts from config (or the persisted rotation
+    /// state) and is replaced on every successful /oauth2/token
+    /// round-trip, because Netatmo invalidates the old one on rotation.
+    refresh_token: Mutex<String>,
     /// Sidecar file rotated refresh tokens are persisted to. None
     /// disables persistence (tests).
     state_path: Option<std::path::PathBuf>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct NetatmoTokens {
-    access_token: Option<String>,
-    refresh_token: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
     access_token: String,
     refresh_token: String,
+}
+
+/// A 401/403 from the station endpoint: the access token expired or was
+/// revoked. `with_reauth` re-exchanges the refresh token once on this
+/// error and on nothing else (an outage is not a bad token).
+#[derive(Debug)]
+struct TokenRejected(StatusCode);
+
+impl std::fmt::Display for TokenRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Netatmo rejected the access token ({})", self.0)
+    }
+}
+
+impl std::error::Error for TokenRejected {}
+
+fn token_rejected(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<TokenRejected>().is_some()
 }
 
 impl Netatmo {
@@ -93,10 +114,7 @@ impl Netatmo {
         state_path: Option<std::path::PathBuf>,
     ) -> Self {
         let id = id.into();
-        let client = Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .expect("reqwest client construction");
+        let client = crate::net::client(Duration::from_secs(15));
         // Resume a previously rotated refresh token when the sidecar
         // entry descends from the SAME config token; a changed config
         // token means the operator re-authorized, so config wins.
@@ -107,33 +125,36 @@ impl Netatmo {
                 refresh_token = current;
             }
         }
-        let initial = NetatmoTokens {
-            access_token: None,
-            refresh_token,
-        };
+        let station_url = format!(
+            "{API_BASE}/api/getstationsdata?device_id={dev}",
+            dev = config.device_id,
+        );
         Self {
             id,
             config,
             client,
-            tokens: Mutex::new(initial),
+            station_url,
+            access: TokenCache::new(),
+            refresh_token: Mutex::new(refresh_token),
             state_path,
         }
     }
 
+    /// Exchange the refresh token for an access token, rotating (and
+    /// persisting) the refresh token when Netatmo issues a new one. This
+    /// is the auth step of `with_reauth`; the access token it returns is
+    /// cached by `self.access`, never here.
     async fn refresh_access(&self) -> anyhow::Result<String> {
         let url = format!("{API_BASE}/oauth2/token");
-        let refresh_token = {
-            let t = self.tokens.lock().await;
-            t.refresh_token.clone()
-        };
+        let refresh_token = self.refresh_token.lock().await.clone();
         // OAuth2 spec mandates application/x-www-form-urlencoded; we
         // build it by hand so we don't need reqwest's serde-urlencoded
         // feature.
         let body = format!(
             "grant_type=refresh_token&refresh_token={rt}&client_id={cid}&client_secret={cs}",
-            rt = form_encode(&refresh_token),
-            cid = form_encode(&self.config.client_id),
-            cs = form_encode(&self.config.client_secret),
+            rt = crate::text::form_value(&refresh_token),
+            cid = crate::text::form_value(&self.config.client_id),
+            cs = crate::text::form_value(&self.config.client_secret),
         );
         let resp: TokenResponse = self
             .client
@@ -149,10 +170,9 @@ impl Netatmo {
             .json()
             .await?;
         let rotated = {
-            let mut t = self.tokens.lock().await;
-            t.access_token = Some(resp.access_token.clone());
-            let changed = t.refresh_token != resp.refresh_token;
-            t.refresh_token = resp.refresh_token.clone();
+            let mut t = self.refresh_token.lock().await;
+            let changed = *t != resp.refresh_token;
+            *t = resp.refresh_token.clone();
             changed
         };
         // Netatmo invalidates the old refresh token on rotation, so the
@@ -179,28 +199,45 @@ impl Netatmo {
         Ok(resp.access_token)
     }
 
-    async fn current_access(&self) -> anyhow::Result<String> {
-        if let Some(at) = self.tokens.lock().await.access_token.clone() {
-            return Ok(at);
-        }
-        self.refresh_access().await
-    }
-
-    async fn fetch_station(&self) -> anyhow::Result<Value> {
-        let url = format!(
-            "{API_BASE}/api/getstationsdata?device_id={dev}",
-            dev = self.config.device_id,
-        );
-        let mut access = self.current_access().await?;
-        let mut resp = self.client.get(&url).bearer_auth(&access).send().await?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
-            || resp.status() == reqwest::StatusCode::FORBIDDEN
-        {
-            access = self.refresh_access().await?;
-            resp = self.client.get(&url).bearer_auth(&access).send().await?;
+    /// One GET of the station tree with `access`. A 401/403 is reported
+    /// as `TokenRejected` so the re-auth wrapper can tell a stale token
+    /// from an outage; every other bad status is the plain HTTP error.
+    async fn get_station(&self, access: String) -> anyhow::Result<Value> {
+        let resp = self
+            .client
+            .get(&self.station_url)
+            .bearer_auth(&access)
+            .send()
+            .await?;
+        let status = resp.status();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Err(TokenRejected(status).into());
         }
         let v: Value = resp.error_for_status()?.json().await?;
         Ok(v)
+    }
+
+    /// The station tree, with one re-exchange of the refresh token and
+    /// one retry when the access token is rejected.
+    async fn fetch_station(&self) -> anyhow::Result<Value> {
+        with_reauth(
+            &self.access,
+            || self.refresh_access(),
+            token_rejected,
+            |access| self.get_station(access),
+        )
+        .await
+    }
+
+    /// One poll: the station body as the observation it yields (nothing
+    /// when no module carried a readable field).
+    async fn poll_once(&self) -> anyhow::Result<Poll> {
+        let body = self.fetch_station().await?;
+        Ok(Poll::observation(
+            &self.id,
+            extract_fields(&body),
+            chrono::Utc::now().timestamp(),
+        ))
     }
 }
 
@@ -237,7 +274,7 @@ fn extract_fields(station: &Value) -> Vec<(WeatherField, f64)> {
             .or_else(|| d.get("AbsolutePressure").and_then(|v| v.as_f64()))
         {
             // 1 mbar = 0.02953 inHg
-            out.push((WeatherField::PressureInHg, p_mbar * 0.02953));
+            out.push((WeatherField::PressureInHg, hpa_to_inhg(p_mbar)));
         }
     }
 
@@ -274,10 +311,10 @@ fn extract_fields(station: &Value) -> Vec<(WeatherField, f64)> {
                 "NAModule2" => {
                     if let Some(w) = d.get("WindStrength").and_then(|v| v.as_f64()) {
                         // km/h -> mph
-                        out.push((WeatherField::WindMph, w * 0.6213712));
+                        out.push((WeatherField::WindMph, kph_to_mph(w)));
                     }
                     if let Some(g) = d.get("GustStrength").and_then(|v| v.as_f64()) {
-                        out.push((WeatherField::WindGustMph, g * 0.6213712));
+                        out.push((WeatherField::WindGustMph, kph_to_mph(g)));
                     }
                     if let Some(a) = d.get("WindAngle").and_then(|v| v.as_f64()) {
                         out.push((WeatherField::WindBearingDeg, a));
@@ -288,10 +325,6 @@ fn extract_fields(station: &Value) -> Vec<(WeatherField, f64)> {
         }
     }
     out
-}
-
-fn c_to_f(c: f64) -> f64 {
-    c * 9.0 / 5.0 + 32.0
 }
 
 // ----- Rotated refresh-token persistence -----
@@ -368,22 +401,6 @@ fn persist_rotated_token(
     Ok(())
 }
 
-/// Minimal application/x-www-form-urlencoded encoder for the four
-/// fields we send to /oauth2/token. Encodes everything outside of the
-/// unreserved set (RFC 3986 ALPHA / DIGIT / -._~) as %HH.
-fn form_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        let unreserved = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~');
-        if unreserved {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
-
 #[async_trait]
 impl WeatherSource for Netatmo {
     fn id(&self) -> &str {
@@ -425,57 +442,18 @@ impl WeatherSource for Netatmo {
         }
     }
 
-    async fn run(
-        self: Arc<Self>,
-        bus: SourceBus,
-        mut shutdown: ShutdownSignal,
-    ) -> anyhow::Result<()> {
-        info!(source_id = %self.id, "Netatmo source started");
-        let mut tick = interval(POLL_INTERVAL);
-        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut last_reachable: Option<bool> = None;
-        loop {
-            tokio::select! {
-                _ = tick.tick() => {
-                    match self.fetch_station().await {
-                        Ok(body) => {
-                            if last_reachable != Some(true) {
-                                let _ = bus.send(SourceEvent::Reachability {
-                                    source_id: self.id.clone(),
-                                    reachable: true,
-                                });
-                                last_reachable = Some(true);
-                            }
-                            let fields = extract_fields(&body);
-                            if !fields.is_empty() {
-                                debug!(source_id = %self.id, fields_n = fields.len(), "Netatmo updated");
-                                let _ = bus.send(SourceEvent::Observation {
-                                    source_id: self.id.clone(),
-                                    fields,
-                                    at_epoch: chrono::Utc::now().timestamp(),
-                                });
-                            }
-                        }
-                        Err(e) => {
-                            warn!(source_id = %self.id, error = %e, "Netatmo fetch failed");
-                            if last_reachable != Some(false) {
-                                let _ = bus.send(SourceEvent::Reachability {
-                                    source_id: self.id.clone(),
-                                    reachable: false,
-                                });
-                                last_reachable = Some(false);
-                            }
-                        }
-                    }
-                }
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        info!(source_id = %self.id, "Netatmo shutdown");
-                        return Ok(());
-                    }
-                }
-            }
-        }
+    async fn run(self: Arc<Self>, bus: SourceBus, shutdown: ShutdownSignal) -> anyhow::Result<()> {
+        let id = self.id.clone();
+        run_polling(
+            self,
+            &id,
+            "Netatmo",
+            POLL_INTERVAL,
+            bus,
+            shutdown,
+            |s: Arc<Self>| async move { s.poll_once().await },
+        )
+        .await
     }
 }
 
@@ -561,8 +539,29 @@ mod tests {
             },
             Some(path),
         );
-        let tokens = n.tokens.blocking_lock();
-        assert_eq!(tokens.refresh_token, "rotated-current");
+        let refresh = n.refresh_token.blocking_lock();
+        assert_eq!(refresh.as_str(), "rotated-current");
+    }
+
+    #[test]
+    fn only_a_rejected_token_triggers_reauth() {
+        // 401 and 403 both mean "exchange the refresh token and retry".
+        let unauthorized: anyhow::Error = TokenRejected(StatusCode::UNAUTHORIZED).into();
+        assert!(token_rejected(&unauthorized));
+        let forbidden: anyhow::Error = TokenRejected(StatusCode::FORBIDDEN).into();
+        assert!(token_rejected(&forbidden));
+        // An outage (or any other error) is not a bad token: the refresh
+        // token must not be burned on it.
+        assert!(!token_rejected(&anyhow::anyhow!("connection timed out")));
+    }
+
+    #[test]
+    fn station_url_targets_the_configured_device() {
+        let n = nt_test();
+        assert_eq!(
+            n.station_url,
+            "https://api.netatmo.com/api/getstationsdata?device_id=70:ee:50:00:11:22"
+        );
     }
 
     #[test]

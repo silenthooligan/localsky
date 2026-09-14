@@ -4,14 +4,13 @@
 // IrrigationSnapshot.
 
 pub mod about;
+pub mod config_client;
 pub mod connection;
 pub mod controllers_form;
-pub mod feature_stub;
 pub mod feedback;
 pub mod footer;
 pub mod forecast;
 pub mod health_banner;
-pub mod hero;
 pub mod historyview;
 pub mod humidity;
 pub mod install_prompt;
@@ -38,6 +37,7 @@ pub mod ui;
 pub mod units_fmt;
 pub mod verdict;
 pub mod watering_week;
+pub mod weather_hero;
 pub mod welcome_card;
 pub mod wind;
 pub mod zones;

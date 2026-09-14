@@ -1,73 +1,120 @@
-// Cross-task cancellation gate for in-flight irrigation dispatch.
+// The stop gate between the API and a smart-morning sequence in flight.
 //
-// The smart-morning dispatcher runs a multi-zone sequence with long
-// tokio sleeps between cycle-soak segments. A manual Stop / Stop All /
-// vacation pause from the dashboard must interrupt that sequence, not
-// just stop the currently-open valve: without a gate the loop happily
-// dispatches the NEXT segment seconds after the operator hit Stop.
+// A Stop or Stop All tapped while the dispatcher is walking a sequence
+// has to abandon the rest of it. The gate is a monotonic generation: a
+// cycle snapshots the generation when it starts, every stop request
+// bumps it, and the cycle checks between steps whether it moved. Order
+// is the only thing that matters, and a counter cannot be wrong about
+// order.
 //
-// The gate is a process-wide epoch of the most recent stop request.
-// Writers (the POST /api/irrigation/action handler) call request_stop();
-// the dispatcher snapshots the wall clock when a watering cycle begins
-// and checks stop_requested_since(cycle_start) before every segment
-// dispatch and inside every soak/run wait. Monotonic and race-tolerant:
-// a stop that lands in the same second as the cycle start counts as a
-// stop, which is the fail-safe direction for irrigation.
+// It used to be a wall-clock epoch kept with fetch_max, compared
+// against the epoch the cycle started at. On a host without a real-time
+// clock the wall clock steps: it boots in 1970 or in the far future and
+// lands on the right time once NTP answers. A Stop tapped while the
+// clock read the future stamped a future epoch, and every cycle that
+// started afterwards, at the correct time, read that stamp as "a stop
+// after my start" and abandoned itself as "Stopped manually". A counter
+// does not know what time it is and cannot be fooled by it.
 
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
-static LAST_STOP_EPOCH: AtomicI64 = AtomicI64::new(0);
+/// A monotonic stop counter.
+pub struct StopGate(AtomicU64);
 
-/// Record a stop request at the current wall-clock epoch.
+impl StopGate {
+    pub const fn new() -> Self {
+        Self(AtomicU64::new(0))
+    }
+}
+
+impl Default for StopGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The process-wide gate the API bumps and the dispatcher reads.
+static GLOBAL: StopGate = StopGate::new();
+
+tokio::task_local! {
+    /// A private gate for one task tree, so tests that dispatch in
+    /// parallel inside one process cannot stop each other's mornings.
+    static SCOPED: Arc<StopGate>;
+}
+
+fn with_gate<R>(f: impl FnOnce(&StopGate) -> R) -> R {
+    // Resolve the gate first, then call once: the closure is FnOnce.
+    let scoped: Option<Arc<StopGate>> = SCOPED.try_with(|g| g.clone()).ok();
+    match scoped {
+        Some(g) => f(&g),
+        None => f(&GLOBAL),
+    }
+}
+
+/// A Stop or Stop All was requested. Every cycle that started before
+/// this call sees it; a cycle that starts after it does not.
 pub fn request_stop() {
-    note_stop_at(chrono::Utc::now().timestamp());
+    with_gate(|g| {
+        g.0.fetch_add(1, Ordering::SeqCst);
+    });
 }
 
-/// Record a stop request at an explicit epoch. `fetch_max` keeps the
-/// gate monotonic even if the wall clock steps backward between calls.
-pub fn note_stop_at(epoch: i64) {
-    LAST_STOP_EPOCH.fetch_max(epoch, Ordering::SeqCst);
+/// The generation a cycle snapshots when it starts.
+pub fn generation() -> u64 {
+    with_gate(|g| g.0.load(Ordering::SeqCst))
 }
 
-/// True when a stop has been requested at or after `epoch`.
-pub fn stop_requested_since(epoch: i64) -> bool {
-    LAST_STOP_EPOCH.load(Ordering::SeqCst) >= epoch
+/// Whether a stop has been requested since a cycle that snapshotted
+/// `at_start` began.
+pub fn stop_requested_since(at_start: u64) -> bool {
+    generation() > at_start
+}
+
+/// Compatibility for the callers that stamped wall-clock epochs. The
+/// epoch is not consulted: a stop is a request, not a time, and the
+/// generation decides what it applies to.
+pub fn note_stop_at(_epoch: i64) {
+    request_stop();
+}
+
+/// Run `fut` against a gate private to its task tree. Nested calls
+/// share the outer gate, so a test can wrap a dispatch and a stopper
+/// together and have them see each other.
+pub async fn isolated<F: Future>(fut: F) -> F::Output {
+    if SCOPED.try_with(|_| ()).is_ok() {
+        return fut.await;
+    }
+    SCOPED.scope(Arc::new(StopGate::new()), fut).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // The gate is a process-wide static shared by every test in the
-    // binary, so assertions are phrased relative to "now" rather than
-    // absolute values: they hold no matter what other tests do.
-
+    /// A stop after a cycle started is visible to it; a stop before the
+    /// cycle started is not, whatever the wall clock said at either
+    /// moment. The generation is the whole story.
     #[test]
-    fn stop_visible_to_earlier_cycle_start() {
-        let now = chrono::Utc::now().timestamp();
+    fn a_stop_is_visible_only_to_cycles_already_running() {
+        let earlier = generation();
         request_stop();
-        // A cycle that started a minute ago sees the stop.
-        assert!(stop_requested_since(now - 60));
-        // Same-second start also sees it (fail-safe direction).
-        assert!(stop_requested_since(now));
+        assert!(stop_requested_since(earlier));
+        let later = generation();
+        assert!(!stop_requested_since(later));
     }
 
+    /// The case that used to abandon every later morning: a stop stamped
+    /// while the host's clock read the future, followed by a cycle that
+    /// starts at the correct, earlier time. The cycle proceeds.
     #[test]
-    fn future_cycle_start_does_not_see_past_stop() {
+    fn a_future_epoch_stop_does_not_abandon_a_later_cycle() {
+        note_stop_at(4_102_444_800); // 2100-01-01, a clock that has not synced
+        let cycle = generation();
+        assert!(!stop_requested_since(cycle));
+        // And a real stop during that cycle still lands.
         request_stop();
-        let now = chrono::Utc::now().timestamp();
-        // A cycle starting well in the future is not cancelled by an
-        // old stop request.
-        assert!(!stop_requested_since(now + 10_000));
-    }
-
-    #[test]
-    fn note_stop_is_monotonic() {
-        let now = chrono::Utc::now().timestamp();
-        note_stop_at(now + 100);
-        // An older stop epoch cannot roll the gate backward.
-        note_stop_at(now - 1_000_000);
-        assert!(stop_requested_since(now + 100));
-        assert!(!stop_requested_since(now + 101));
+        assert!(stop_requested_since(cycle));
     }
 }

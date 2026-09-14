@@ -8,32 +8,13 @@ use leptos::prelude::*;
 use leptos_router::hooks::{use_location, use_navigate};
 
 use crate::components::sources_form::SourceEditorPanel;
-use crate::components::ui::{Button, Sparkline};
+use crate::components::ui::{Button, ConfirmSheet, HelpHint, Sparkline};
 use crate::components::units_fmt::{
     fmt_distance_mi, fmt_pressure, fmt_rain_amount, fmt_rain_rate, fmt_temp_short, fmt_wind,
     temp_unit, temp_value, use_unit_prefs, UnitPrefs,
 };
-use crate::ha::snapshot::{IrrigationSnapshot, SoilForecast};
+use crate::model::{IrrigationSnapshot, SoilForecast};
 use crate::tempest::state::Snapshot;
-
-#[cfg(feature = "hydrate")]
-async fn save_config(cfg: serde_json::Value) -> Result<(), String> {
-    use gloo_net::http::Request;
-    let resp = Request::put("/api/config")
-        .json(&cfg)
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.ok() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(crate::components::settings_ui::save_error_message(
-            resp.status(),
-            &body,
-        ));
-    }
-    Ok(())
-}
 
 /// Local-network data sources (the ones that matter as "sensors") vs cloud
 /// data providers. Local = data physically on your LAN; cloud = a fetched
@@ -226,15 +207,6 @@ async fn load_health(sources: RwSignal<Vec<SourceRow>>, conditions: RwSignal<Vec
     }
 }
 
-#[cfg(feature = "hydrate")]
-async fn load_config(config: RwSignal<serde_json::Value>) {
-    if let Ok(resp) = gloo_net::http::Request::get("/api/config").send().await {
-        if let Ok(v) = resp.json::<serde_json::Value>().await {
-            config.set(v);
-        }
-    }
-}
-
 #[component]
 pub fn SensorsPage(
     snap: ReadSignal<IrrigationSnapshot>,
@@ -265,7 +237,11 @@ pub fn SensorsPage(
             leptos::task::spawn_local(async move { load_health(sources, conditions).await });
         });
         Effect::new(move |_| {
-            leptos::task::spawn_local(async move { load_config(config).await });
+            leptos::task::spawn_local(async move {
+                if let Ok(v) = crate::components::config_client::get_config().await {
+                    config.set(v);
+                }
+            });
         });
         Effect::new(move |_| {
             leptos::task::spawn_local(async move {
@@ -343,9 +319,12 @@ pub fn SensorsPage(
         let candidate = config.get_untracked();
         #[cfg(feature = "hydrate")]
         leptos::task::spawn_local(async move {
-            match save_config(candidate).await {
+            match crate::components::config_client::put_config(&candidate)
+                .await
+                .map(|_| ())
+            {
                 Ok(()) => {
-                    toast.success(format!("Saved {id}. Reloads on the next tick."));
+                    toast.success(format!("{id}: {}", crate::voice::SAVED_LIVE));
                     // try_run, NOT run: this continuation outlives the page if
                     // the user navigates away while the save is in flight, and
                     // Callback::run on the disposed StoredValue panics and
@@ -364,46 +343,47 @@ pub fn SensorsPage(
     // that zone's offline warning with it) and, when the gateway login is set
     // on the source, unregisters the sensor on the gateway too. Same endpoint
     // + semantics as the Devices card and the soil-probe manager.
+    //
+    // Destructive, so it stages behind the shared ConfirmSheet (danger
+    // variant) instead of a native confirm(): the row asks, the sheet's
+    // on_confirm acts. The probe the sheet is about is parked here; None =
+    // nothing pending.
+    let pending_probe: RwSignal<Option<String>> = RwSignal::new(None);
+    let remove_open = RwSignal::new(false);
     let remove_probe = Callback::new(move |probe_id: String| {
+        pending_probe.set(Some(probe_id));
+        remove_open.set(true);
+    });
+    let do_remove_probe = Callback::new(move |()| {
+        let Some(probe_id) = pending_probe.get_untracked() else {
+            return;
+        };
+        pending_probe.set(None);
         #[cfg(feature = "hydrate")]
-        {
-            let confirmed = web_sys::window()
-                .map(|w| {
-                    w.confirm_with_message(
-                        "Remove this soil probe? Its zone binding is cleared, and if the \
-                         gateway login is set on the source it is unregistered from the \
-                         gateway as well.",
-                    )
-                    .unwrap_or(false)
-                })
-                .unwrap_or(false);
-            if !confirmed {
-                return;
-            }
-            leptos::task::spawn_local(async move {
-                match crate::components::settings::sensors::remove_soil_probe(probe_id, true).await
-                {
-                    Ok(r) => {
-                        toast.success(format!(
-                            "Probe removed ({} zone binding{} cleared). {}",
-                            r.zones_unbound,
-                            if r.zones_unbound == 1 { "" } else { "s" },
-                            r.detail
-                        ));
-                        // The removed probe's zone card no longer has a probe
-                        // to inspect; land back on the overview and refresh
-                        // the page's config so bindings re-derive.
-                        load_config(config).await;
-                        // try_run: the gateway unregister can take ~16s against
-                        // an unreachable gateway; if the user left the page in
-                        // the meantime, run() would panic on the disposed
-                        // callback and abort the wasm app.
-                        nav_to.try_run(Sel::Tempest);
+        leptos::task::spawn_local(async move {
+            match crate::components::settings::sensors::remove_soil_probe(probe_id, true).await {
+                Ok(r) => {
+                    toast.success(format!(
+                        "Probe removed ({} zone binding{} cleared). {}",
+                        r.zones_unbound,
+                        if r.zones_unbound == 1 { "" } else { "s" },
+                        r.detail
+                    ));
+                    // The removed probe's zone card no longer has a probe
+                    // to inspect; land back on the overview and refresh
+                    // the page's config so bindings re-derive.
+                    if let Ok(v) = crate::components::config_client::get_config().await {
+                        config.set(v);
                     }
-                    Err(e) => toast.error(format!("Remove failed: {e}")),
+                    // try_run: the gateway unregister can take ~16s against
+                    // an unreachable gateway; if the user left the page in
+                    // the meantime, run() would panic on the disposed
+                    // callback and abort the wasm app.
+                    nav_to.try_run(Sel::Tempest);
                 }
-            });
-        }
+                Err(e) => toast.error(format!("Remove failed: {e}")),
+            }
+        });
         #[cfg(not(feature = "hydrate"))]
         let _ = probe_id;
     });
@@ -425,7 +405,10 @@ pub fn SensorsPage(
         let candidate = config.get_untracked();
         #[cfg(feature = "hydrate")]
         leptos::task::spawn_local(async move {
-            match save_config(candidate).await {
+            match crate::components::config_client::put_config(&candidate)
+                .await
+                .map(|_| ())
+            {
                 Ok(()) => {
                     toast.success(if want { "Enabled." } else { "Disabled." });
                     load_health(sources, conditions).await;
@@ -439,10 +422,10 @@ pub fn SensorsPage(
 
     view! {
         <div class="sensors-page">
-            <header class="sensors-page__header">
+            <header class="page-head">
                 <div class="sensors-page__heading">
-                    <p class="sensors-page__eyebrow">"Integrate"</p>
-                    <h1 class="sensors-page__title">"Sensors"</h1>
+                    <p class="page-eyebrow">"Integrate"</p>
+                    <h1 class="page-title">"Sensors"<HelpHint topic="sensors"/></h1>
                 </div>
                 <p class="sensors-page__sub">
                     "Every sensor LocalSky can use, from both Home Assistant and its own native sources, with the live readings flowing from them. Soil moisture feeds the per-zone skip decision; weather feeds ET."
@@ -452,7 +435,7 @@ pub fn SensorsPage(
                     <div class="sensors-howto__body">
                         <p><strong>"It doesn't matter where a device lives."</strong>" LocalSky and Home Assistant mirror each other, so a sensor added in either place shows up in both. You don't add probes here one by one."</p>
                         <p><strong>"From Home Assistant:"</strong>" anything HA already sees, Ecowitt soil probes, a Tempest, any weather or moisture entity, is imported automatically and appears here and on the "<a href="/settings?section=devices">"Devices"</a>" page. Pair a new probe in its own app first (for Ecowitt that's the Ecowitt / WS View app); once HA sees it, it shows up with no per-probe setup. Assign soil probes to zones in the "<a href="/settings?section=zones">"zone editor"</a>"."</p>
-                        <p><strong>"From LocalSky directly:"</strong>" add a source LocalSky talks to itself, a LAN Ecowitt gateway, a webhook, MQTT, with \"Add a data source\" below. Receiver sources show live readings here the moment data arrives, so you can confirm it's working. Discovered gateways and controllers are listed on the "<a href="/settings?section=devices">"Devices"</a>" page."</p>
+                        <p><strong>"From LocalSky directly:"</strong>" add a source LocalSky reads itself, with \"Add a data source\" below. A receiver shows its readings here the moment they arrive. Discovered hardware is listed on the "<a href="/settings?section=devices">"Devices"</a>" page."</p>
                     </div>
                 </details>
                 <div class="sensors-page__actions">
@@ -504,7 +487,7 @@ pub fn SensorsPage(
                             return view! { <p class="sensors-section__hint">"Looking for connected devices…"</p> }.into_any();
                         };
                         if obj.is_empty() {
-                            return view! { <p class="sensors-section__hint">"No Home Assistant sensors found (or HA isn't connected). Add a data source below, or check the ha_passthrough bridge."</p> }.into_any();
+                            return view! { <p class="sensors-section__hint">"No Home Assistant sensors found, or Home Assistant is not connected. Add a weather or soil source below, or check the Home Assistant connection under Settings."</p> }.into_any();
                         }
                         obj.iter().map(|(role, items)| {
                             let count = items.as_array().map(|a| a.len()).unwrap_or(0);
@@ -743,6 +726,22 @@ pub fn SensorsPage(
                     }}
                 </div>
             </div>
+
+            // Always mounted, outside the detail match: the soil card's
+            // Remove opens it, it hides itself, and the removal runs from
+            // its on_confirm.
+            <ConfirmSheet
+                visible=remove_open
+                title="Remove this soil probe?"
+                body=Signal::derive(|| {
+                    "Its zone binding is cleared, and if the gateway login is set on the \
+                     source it is unregistered from the gateway as well."
+                        .to_string()
+                })
+                confirm_label=Signal::derive(|| "Remove probe".to_string())
+                danger=true
+                on_confirm=do_remove_probe
+            />
         </div>
     }
 }
@@ -884,7 +883,7 @@ fn SoilDetail(
     let name = z.zone_name.clone();
     // The band comes from the wire type's own classifier, which uses the
     // engine's gate comparisons. This card used to repeat them inline.
-    use crate::ha::snapshot::SoilBand;
+    use crate::model::SoilBand;
     let (cur, status, color) = match (z.current_band(), z.current_pct) {
         (SoilBand::Offline, _) | (_, None) => {
             ("offline".to_string(), "OFFLINE", "var(--verdict-off)")
@@ -894,6 +893,7 @@ fn SoilDetail(
         (SoilBand::Healthy, Some(c)) => (format!("{c:.0}%"), "HEALTHY", "var(--verdict-run)"),
     };
     let proj = z.predicted_pct.clone();
+    let uncalibrated = z.status == "uncalibrated";
     // Entity identity + .is-control: the card itself is not clickable but
     // hosts the Remove/manage actions below. The moisture pill keeps its
     // word (SATURATED/DRY/HEALTHY/OFFLINE), so state never reads from
@@ -915,6 +915,7 @@ fn SoilDetail(
                     <F k="Saturation (skip)" v=format!("{:.0} %", z.target_max_pct)/>
                 </FieldGroup>
             </div>
+            {uncalibrated.then(|| view! { <p class="muted">"This probe reports relative moisture. A water-volume calibration is needed for a percentage forecast."</p> })}
             {(proj.len() > 1).then(|| view! {
                 <section class="sensor-group">
                     <h3 class="sensor-group__title">"7-day projection (rain + ET, no watering)"</h3>
@@ -1143,7 +1144,7 @@ fn SourceDetail(
                 <FieldGroup title="Zone assignment">
                     {if assigned.is_empty() {
                         view! {
-                            <p class="sensors-section__hint" style="margin:0">
+                            <p class="sensors-section__hint" class:u-m0=true>
                                 "Not assigned to any zone. Open a zone's settings and pick "
                                 "this source as its soil sensor to drive per-zone skip rules."
                             </p>

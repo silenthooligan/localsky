@@ -11,6 +11,9 @@ use leptos::prelude::*;
 
 #[component]
 pub fn Button(
+    #[prop(into, optional)] id: String,
+    #[prop(into, optional)] target: Option<String>,
+    #[prop(default = false)] download: bool,
     /// primary | secondary | ghost | danger
     #[prop(into, default = "primary".to_string())]
     variant: String,
@@ -37,11 +40,14 @@ pub fn Button(
     on_click: Option<Callback<MouseEvent>>,
     /// aria-label when the button has no readable text (icon-only).
     #[prop(into, optional)]
-    aria_label: String,
+    aria_label: Signal<String>,
     /// Extra classes (layout / positioning) appended after the btn classes, so a
     /// caller can keep a flex/grid placement class while adopting the primitive.
     #[prop(into, optional)]
-    class: String,
+    class: Signal<String>,
+    #[prop(into, optional)] title: Signal<String>,
+    #[prop(optional)] aria_pressed: Option<Signal<String>>,
+    #[prop(optional)] aria_expanded: Option<Signal<String>>,
     children: Children,
 ) -> impl IntoView {
     let class = move || {
@@ -49,9 +55,9 @@ pub fn Button(
         if block {
             c.push_str(" btn--block");
         }
-        if !class.is_empty() {
+        if !class.get().is_empty() {
             c.push(' ');
-            c.push_str(&class);
+            c.push_str(&class.get());
         }
         c
     };
@@ -60,23 +66,33 @@ pub fn Button(
     );
 
     if let Some(href) = href {
-        let cls = class();
+        let cls = class;
         view! {
-            <a class=cls href=href aria-label=aria_label.clone()>
+            <a id=id target=target rel="noopener" download=download.then_some("") class=cls href=move || (!disabled.get() && !loading.get()).then(|| href.clone())
+                aria-label=move || aria_label.get() title=move || title.get()
+                aria-disabled=move || disabled.get() || loading.get()
+                tabindex=move || if disabled.get() || loading.get() { "-1" } else { "0" }
+                on:click=move |ev: MouseEvent| {
+                    if disabled.get() || loading.get() { ev.prevent_default(); return; }
+                    if let Some(cb) = on_click { cb.run(ev); }
+                }>
                 {icon_view}
                 <span class="btn__label">{children()}</span>
             </a>
         }
         .into_any()
     } else {
-        let cls = class();
+        let cls = class;
         let handler = on_click;
         view! {
             <button
                 type="button"
+                id=id
                 class=cls
                 class:btn--loading=move || loading.get()
-                aria-label=aria_label.clone()
+                aria-label=move || aria_label.get() title=move || title.get()
+                aria-pressed=move || aria_pressed.map(|v| v.get().to_string())
+                aria-expanded=move || aria_expanded.map(|v| v.get().to_string())
                 disabled=move || disabled.get() || loading.get()
                 on:click=move |ev| {
                     if disabled.get() || loading.get() { return; }

@@ -17,12 +17,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use std::collections::HashSet;
-use tokio::time::{interval, Duration};
+use tokio::time::Duration;
 use tracing::info;
 
 use crate::config::schema::DemoReplayConfig;
 use crate::ports::weather_source::{
-    ShutdownSignal, SourceBus, SourceCaps, SourceEvent, WeatherField, WeatherSource,
+    ShutdownSignal, SourceBus, SourceCaps, WeatherField, WeatherSource,
 };
 
 pub struct DemoReplay {
@@ -99,38 +99,33 @@ impl WeatherSource for DemoReplay {
         100
     }
 
-    async fn run(
-        self: Arc<Self>,
-        bus: SourceBus,
-        mut shutdown: ShutdownSignal,
-    ) -> anyhow::Result<()> {
+    async fn run(self: Arc<Self>, bus: SourceBus, shutdown: ShutdownSignal) -> anyhow::Result<()> {
         info!(
             source = self.id,
             rate = self.config.rate,
             "demo_replay starting"
         );
-        let mut ticker = interval(Duration::from_secs(3));
         let started_real = now_epoch();
-        loop {
-            tokio::select! {
-                _ = ticker.tick() => {
-                    let elapsed_real = now_epoch() - started_real;
-                    let t_sim = (elapsed_real as f64 * self.config.rate) % 86400.0;
-                    let fields = self.synthesize(t_sim);
-                    let _ = bus.send(SourceEvent::Observation {
-                        source_id: self.id.clone(),
-                        fields,
-                        at_epoch: now_epoch(),
-                    });
-                }
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        info!(source = self.id, "demo_replay shutting down");
-                        return Ok(());
-                    }
-                }
-            }
-        }
+        let id = self.id.clone();
+        crate::sources::poll::run_polling(
+            self,
+            &id,
+            "demo_replay",
+            Duration::from_secs(3),
+            bus,
+            shutdown,
+            move |s: Arc<Self>| async move {
+                let elapsed_real = now_epoch() - started_real;
+                let t_sim = (elapsed_real as f64 * s.config.rate) % 86400.0;
+                let fields = s.synthesize(t_sim);
+                Ok(crate::sources::poll::Poll::observation(
+                    &s.id,
+                    fields,
+                    now_epoch(),
+                ))
+            },
+        )
+        .await
     }
 }
 

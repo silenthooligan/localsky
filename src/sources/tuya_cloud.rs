@@ -25,8 +25,12 @@
 // Some codes return integers scaled by 10 or 100, user provides the
 // scale + offset per mapping to normalize.
 //
-// 60s poll. Token cached and refreshed on expiry / 401.
+// 60s poll on `sources::poll::run_polling`. Token lives in
+// `sources::auth::TokenCache`, dropped early on expiry and replaced once
+// on a 401 through `with_reauth`.
 
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,32 +44,48 @@ use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
-use tokio::sync::Mutex;
-use tokio::time::{interval, MissedTickBehavior};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::config::schema::{TuyaCloudConfig, TuyaFieldMap};
 use crate::ports::weather_source::{
     ShutdownSignal, SourceBus, SourceCaps, SourceEvent, WeatherField, WeatherSource,
 };
+use crate::sources::auth::{with_reauth, TokenCache};
 use crate::sources::mqtt_subscribe::parse_weather_field;
+use crate::sources::poll::{run_polling, Poll};
 use crate::sources::yolink::parse_camel as parse_camel_field;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(60);
+/// Drop the access_token this long before Tuya says it expires, so a poll
+/// never starts on a token that dies mid-request.
+const TOKEN_REFRESH_MARGIN_MS: i64 = 60_000;
 
 pub struct TuyaCloud {
     id: String,
     config: TuyaCloudConfig,
     mapping: Vec<ResolvedMapping>,
-    tokens: Mutex<TokenCache>,
+    tokens: TokenCache,
+    /// Unix-ms when the cached access_token expires. `TokenCache` keeps no
+    /// clock of its own, so the expiry rides alongside it and
+    /// `drop_expiring_token` invalidates the cache when it comes due.
+    token_expires_at_ms: AtomicI64,
 }
 
-#[derive(Debug, Default)]
-struct TokenCache {
-    access_token: Option<String>,
-    /// Unix-ms when the access_token expires; refresh when within 60s.
-    expires_at_ms: i64,
+/// Tuya answered 401 to a signed request: the access_token is bad, not the
+/// upstream. `with_reauth` reads this as "log in again and retry once".
+#[derive(Debug)]
+struct TokenRejected;
+
+impl std::fmt::Display for TokenRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("tuya rejected the access_token (401)")
+    }
+}
+
+impl std::error::Error for TokenRejected {}
+
+fn token_rejected(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<TokenRejected>().is_some()
 }
 
 #[derive(Debug, Clone)]
@@ -117,7 +137,7 @@ impl TuyaCloud {
     pub fn new(id: impl Into<String>, config: TuyaCloudConfig) -> Self {
         let id = id.into();
         let mapping = build_mapping(&id, &config.device_field_map);
-        // P4-7: no stored client. Each request builds an SSRF-hardened client
+        // No stored client. Each request builds an SSRF-hardened client
         // pinned to the (operator-overridable) base_url's resolved host via
         // safe_fetch, so a base_url pointed at a private/loopback address is
         // refused instead of probed.
@@ -125,7 +145,8 @@ impl TuyaCloud {
             id,
             config,
             mapping,
-            tokens: Mutex::new(TokenCache::default()),
+            tokens: TokenCache::new(),
+            token_expires_at_ms: AtomicI64::new(0),
         }
     }
 
@@ -153,6 +174,9 @@ impl TuyaCloud {
         sig.to_ascii_uppercase()
     }
 
+    /// Log in: fetch a fresh access_token. The token itself is what the
+    /// `TokenCache` stores (this is its `auth` fn); the expiry Tuya quotes
+    /// is recorded here as a side effect.
     async fn refresh_token(&self) -> anyhow::Result<String> {
         let path = "/v1.0/token?grant_type=1";
         let url = format!("{}{path}", self.config.base_url.trim_end_matches('/'));
@@ -180,61 +204,139 @@ impl TuyaCloud {
         let r = resp
             .result
             .ok_or_else(|| anyhow::anyhow!("tuya token response missing 'result'"))?;
-        let mut cache = self.tokens.lock().await;
-        cache.access_token = Some(r.access_token.clone());
-        cache.expires_at_ms = chrono::Utc::now().timestamp_millis() + r.expire_time * 1000;
+        self.token_expires_at_ms.store(
+            chrono::Utc::now().timestamp_millis() + r.expire_time * 1000,
+            Ordering::Relaxed,
+        );
         Ok(r.access_token)
     }
 
-    async fn current_token(&self) -> anyhow::Result<String> {
-        {
-            let cache = self.tokens.lock().await;
-            if let Some(t) = cache.access_token.clone() {
-                let now = chrono::Utc::now().timestamp_millis();
-                // Refresh 60s before expiry to avoid mid-request 401.
-                if cache.expires_at_ms > now + 60_000 {
-                    return Ok(t);
+    /// Forget a token that is within the refresh margin of expiry so the
+    /// next request logs in again instead of failing mid-flight.
+    async fn drop_expiring_token(&self) {
+        let now = chrono::Utc::now().timestamp_millis();
+        if self.token_expires_at_ms.load(Ordering::Relaxed) <= now + TOKEN_REFRESH_MARGIN_MS {
+            self.tokens.invalidate().await;
+        }
+    }
+
+    /// A device's DP status with the cached token; on a 401 the token is
+    /// replaced and the request made once more.
+    async fn fetch_device_status(&self, device_id: &str) -> anyhow::Result<Vec<StatusItem>> {
+        self.drop_expiring_token().await;
+        with_reauth(
+            &self.tokens,
+            || self.refresh_token(),
+            token_rejected,
+            |token| async move { self.device_status_with(device_id, &token).await },
+        )
+        .await
+    }
+
+    /// One signed GET of a device's DP status with the given access_token.
+    /// A 401 comes back as `TokenRejected` so `with_reauth` can re-auth.
+    async fn device_status_with(
+        &self,
+        device_id: &str,
+        token: &str,
+    ) -> anyhow::Result<Vec<StatusItem>> {
+        let path = format!("/v1.0/iot-03/devices/{device_id}/status");
+        let url = format!("{}{path}", self.config.base_url.trim_end_matches('/'));
+        let t = chrono::Utc::now().timestamp_millis();
+        let sig = self.sign("GET", &path, "", t, token);
+        let (client, safe_url) =
+            crate::net::safe_fetch::build_safe_client(&url, Duration::from_secs(15)).await?;
+        let resp = client
+            .get(safe_url)
+            .header("client_id", &self.config.client_id)
+            .header("access_token", token)
+            .header("sign", &sig)
+            .header("t", t.to_string())
+            .header("sign_method", "HMAC-SHA256")
+            .send()
+            .await?;
+        if resp.status() == StatusCode::UNAUTHORIZED {
+            return Err(TokenRejected.into());
+        }
+        let http = resp.error_for_status()?;
+        let body: StatusResponse = crate::net::safe_fetch::read_json_capped(http).await?;
+        if !body.success {
+            return Err(anyhow::anyhow!(
+                "tuya status response failed: {}",
+                body.msg.unwrap_or_else(|| "<no message>".into())
+            ));
+        }
+        Ok(body.result)
+    }
+
+    /// One poll: every mapped device's DP status, batched by device_id so a
+    /// device with many mapped codes costs one request. A device that fails
+    /// is logged and skipped; the poll is reachable when at least one device
+    /// answered and an error (the loop's warn + offline edge) when none did.
+    /// No mapped devices at all is an idle source: nothing to fetch, and
+    /// nothing to call reachable.
+    async fn poll_once(self: Arc<Self>) -> anyhow::Result<Poll> {
+        let mut by_device: HashMap<&str, Vec<&ResolvedMapping>> = HashMap::new();
+        for m in &self.mapping {
+            by_device.entry(m.device_id.as_str()).or_default().push(m);
+        }
+        if by_device.is_empty() {
+            return Ok(Poll::none().unreachable());
+        }
+        let mut poll = Poll::none();
+        let mut fields = Vec::new();
+        let mut any_ok = false;
+        let mut last_err = None;
+        for (device_id, mappings) in &by_device {
+            let items = match self.fetch_device_status(device_id).await {
+                Ok(items) => items,
+                Err(e) => {
+                    debug!(source_id = %self.id, device_id, error = %e, "tuya device status failed");
+                    last_err = Some(e);
+                    continue;
+                }
+            };
+            any_ok = true;
+            for m in mappings {
+                let Some(item) = items.iter().find(|i| i.code == m.status_code) else {
+                    debug!(source_id = %self.id, device_id, code = m.status_code, "tuya status_code not present on device");
+                    continue;
+                };
+                let Some(raw) = value_as_number(&item.value) else {
+                    debug!(source_id = %self.id, device_id, code = m.status_code, "tuya value not numeric");
+                    continue;
+                };
+                let value = raw * m.scale + m.offset;
+                // Per-zone soil channel -> KeyedReading.
+                if let Some(zone) = &m.zone_slug {
+                    poll = poll.with(SourceEvent::KeyedReading {
+                        source_id: self.id.clone(),
+                        key: crate::sources::bus_recorder::zone_soil_key(zone),
+                        value,
+                        at_epoch: chrono::Utc::now().timestamp(),
+                    });
+                    continue;
+                }
+                if let Some(f) = m.field {
+                    fields.push((f, value));
                 }
             }
         }
-        self.refresh_token().await
-    }
-
-    async fn fetch_device_status(&self, device_id: &str) -> anyhow::Result<Vec<StatusItem>> {
-        let path = format!("/v1.0/iot-03/devices/{device_id}/status");
-        let url = format!("{}{path}", self.config.base_url.trim_end_matches('/'));
-        let mut token = self.current_token().await?;
-        for attempt in 0..2 {
-            let t = chrono::Utc::now().timestamp_millis();
-            let sig = self.sign("GET", &path, "", t, &token);
-            let (client, safe_url) =
-                crate::net::safe_fetch::build_safe_client(&url, Duration::from_secs(15)).await?;
-            let resp = client
-                .get(safe_url)
-                .header("client_id", &self.config.client_id)
-                .header("access_token", &token)
-                .header("sign", &sig)
-                .header("t", t.to_string())
-                .header("sign_method", "HMAC-SHA256")
-                .send()
-                .await?;
-            if resp.status() == StatusCode::UNAUTHORIZED && attempt == 0 {
-                // Force token refresh and retry once.
-                self.tokens.lock().await.access_token = None;
-                token = self.refresh_token().await?;
-                continue;
-            }
-            let http = resp.error_for_status()?;
-            let body: StatusResponse = crate::net::safe_fetch::read_json_capped(http).await?;
-            if !body.success {
-                return Err(anyhow::anyhow!(
-                    "tuya status response failed: {}",
-                    body.msg.unwrap_or_else(|| "<no message>".into())
-                ));
-            }
-            return Ok(body.result);
+        if !any_ok {
+            let e = last_err.unwrap_or_else(|| anyhow::anyhow!("no tuya device answered"));
+            return Err(e.context(format!(
+                "none of {} tuya device(s) answered",
+                by_device.len()
+            )));
         }
-        Err(anyhow::anyhow!("tuya status retry exhausted"))
+        if !fields.is_empty() {
+            poll = poll.with(SourceEvent::Observation {
+                source_id: self.id.clone(),
+                fields,
+                at_epoch: chrono::Utc::now().timestamp(),
+            });
+        }
+        Ok(poll)
     }
 }
 
@@ -314,88 +416,22 @@ impl WeatherSource for TuyaCloud {
         }
     }
 
-    async fn run(
-        self: Arc<Self>,
-        bus: SourceBus,
-        mut shutdown: ShutdownSignal,
-    ) -> anyhow::Result<()> {
-        info!(source_id = %self.id, mapping_n = self.mapping.len(), "TuyaCloud source started");
+    async fn run(self: Arc<Self>, bus: SourceBus, shutdown: ShutdownSignal) -> anyhow::Result<()> {
+        debug!(source_id = %self.id, mapping_n = self.mapping.len(), "TuyaCloud mapping resolved");
         if self.mapping.is_empty() {
             warn!(source_id = %self.id, "TuyaCloud has empty device_field_map; idle");
         }
-        let mut tick = interval(POLL_INTERVAL);
-        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut last_reachable: Option<bool> = None;
-        loop {
-            tokio::select! {
-                _ = tick.tick() => {
-                    // One device may have many mapped fields; batch
-                    // requests by device_id to halve the API call count.
-                    let mut by_device: std::collections::HashMap<&str, Vec<&ResolvedMapping>> =
-                        std::collections::HashMap::new();
-                    for m in &self.mapping {
-                        by_device.entry(m.device_id.as_str()).or_default().push(m);
-                    }
-                    let mut fields = Vec::new();
-                    let mut any_ok = false;
-                    for (device_id, mappings) in &by_device {
-                        match self.fetch_device_status(device_id).await {
-                            Ok(items) => {
-                                any_ok = true;
-                                for m in mappings {
-                                    let Some(item) = items.iter().find(|i| i.code == m.status_code) else {
-                                        debug!(source_id = %self.id, device_id, code = m.status_code, "tuya status_code not present on device");
-                                        continue;
-                                    };
-                                    let Some(raw) = value_as_number(&item.value) else {
-                                        debug!(source_id = %self.id, device_id, code = m.status_code, "tuya value not numeric");
-                                        continue;
-                                    };
-                                    let value = raw * m.scale + m.offset;
-                                    // Per-zone soil channel -> KeyedReading.
-                                    if let Some(zone) = &m.zone_slug {
-                                        let _ = bus.send(SourceEvent::KeyedReading {
-                                            source_id: self.id.clone(),
-                                            key: crate::sources::bus_recorder::zone_soil_key(zone),
-                                            value,
-                                            at_epoch: chrono::Utc::now().timestamp(),
-                                        });
-                                        continue;
-                                    }
-                                    if let Some(f) = m.field {
-                                        fields.push((f, value));
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                debug!(source_id = %self.id, device_id, error = %e, "tuya device status failed");
-                            }
-                        }
-                    }
-                    let reach = any_ok;
-                    if last_reachable != Some(reach) {
-                        let _ = bus.send(SourceEvent::Reachability {
-                            source_id: self.id.clone(),
-                            reachable: reach,
-                        });
-                        last_reachable = Some(reach);
-                    }
-                    if !fields.is_empty() {
-                        let _ = bus.send(SourceEvent::Observation {
-                            source_id: self.id.clone(),
-                            fields,
-                            at_epoch: chrono::Utc::now().timestamp(),
-                        });
-                    }
-                }
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        info!(source_id = %self.id, "TuyaCloud shutdown");
-                        return Ok(());
-                    }
-                }
-            }
-        }
+        let id = self.id.clone();
+        run_polling(
+            self,
+            &id,
+            "TuyaCloud",
+            POLL_INTERVAL,
+            bus,
+            shutdown,
+            Self::poll_once,
+        )
+        .await
     }
 }
 
@@ -472,5 +508,38 @@ mod tests {
             zone_slug: None,
         }];
         assert!(build_mapping("test", &bad).is_empty());
+    }
+
+    /// Only the 401 marker means "re-auth"; an outage or a Tuya-side
+    /// `success: false` is left alone so `with_reauth` does not log in
+    /// again on every transport error.
+    #[test]
+    fn only_the_401_marker_counts_as_a_rejected_token() {
+        assert!(token_rejected(&anyhow::Error::from(TokenRejected)));
+        assert!(token_rejected(
+            &anyhow::Error::from(TokenRejected).context("status fetch")
+        ));
+        assert!(!token_rejected(&anyhow::anyhow!("request timed out")));
+    }
+
+    /// The cache has no clock; the adapter drops a token inside the refresh
+    /// margin so the next request logs in again, and keeps one with time
+    /// left.
+    #[tokio::test]
+    async fn a_token_near_expiry_is_dropped_and_a_fresh_one_kept() {
+        let t = TuyaCloud::new("tc", cfg());
+        let now = chrono::Utc::now().timestamp_millis();
+
+        t.tokens.set("soon-dead".into()).await;
+        t.token_expires_at_ms
+            .store(now + TOKEN_REFRESH_MARGIN_MS / 2, Ordering::Relaxed);
+        t.drop_expiring_token().await;
+        assert_eq!(t.tokens.peek().await, None);
+
+        t.tokens.set("fresh".into()).await;
+        t.token_expires_at_ms
+            .store(now + 2 * TOKEN_REFRESH_MARGIN_MS, Ordering::Relaxed);
+        t.drop_expiring_token().await;
+        assert_eq!(t.tokens.peek().await.as_deref(), Some("fresh"));
     }
 }

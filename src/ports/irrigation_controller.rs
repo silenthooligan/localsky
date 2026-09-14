@@ -7,6 +7,9 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ControllerError {
+    /// Local dispatch is intentionally held before contacting the controller.
+    #[error("{0}")]
+    Held(String),
     #[error("controller offline")]
     Offline,
     #[error("zone unknown: {0}")]
@@ -72,6 +75,20 @@ pub struct ControllerCaps {
     /// deserializing as "per-zone stop works", the pre-existing behavior.
     #[serde(default = "default_true_cap")]
     pub per_zone_stop: bool,
+    /// The smallest run length the controller can be told, in seconds.
+    ///
+    /// 1 for anything that takes seconds. 60 for B-hyve and Rain Bird,
+    /// whose cloud APIs take whole minutes and round up. The sequence
+    /// planner rounds every segment to it so the plan says what will
+    /// actually run, and those adapters report the rounded figure in
+    /// `RunHandle.planned_duration_s` so the executor waits for it.
+    /// `#[serde(default)]` keeps older serialized caps deserializing.
+    #[serde(default = "default_quantum_s")]
+    pub duration_quantum_s: u32,
+}
+
+fn default_quantum_s() -> u32 {
+    1
 }
 
 fn default_true_cap() -> bool {
@@ -120,6 +137,18 @@ pub struct ControllerStatus {
     #[serde(default)]
     pub flow_connected: bool,
     pub firmware: Option<String>,
+    /// When this reading was actually taken, if anything in the chain
+    /// knows. `None` means it was read on demand, so the caller's own
+    /// clock is its time.
+    ///
+    /// A reading and the moment it is used are not the same instant. A
+    /// cloud adapter serves its last known state when a fetch fails, and
+    /// the registry's `guard::Throttled` serves a cached reading for the
+    /// interval the adapter declares, so "is this zone running" can be a
+    /// minute old by the time it decides anything. Whoever credits water
+    /// or judges a valve reads this rather than their own clock.
+    #[serde(default)]
+    pub observed_epoch: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,6 +220,16 @@ pub trait IrrigationController: Send + Sync {
     async fn stop_zone(&self, slug: &str) -> ControllerResult<()>;
     async fn stop_all(&self) -> ControllerResult<()>;
     async fn status(&self) -> ControllerResult<ControllerStatus>;
+    /// A reading taken NOW, going past any cache in front of the adapter.
+    ///
+    /// The default is `status`: an adapter that is read on demand is
+    /// already answering live. Only the decisions a stale answer would
+    /// get wrong pay for this: the reaper's verify-before-device-stop and
+    /// the smart morning's already-open check, both of which act on
+    /// "is this valve open right now".
+    async fn status_fresh(&self) -> ControllerResult<ControllerStatus> {
+        self.status().await
+    }
     /// Backfill from the controller's own history if it supports the query.
     /// Adapters that can't query history return an empty Vec.
     async fn run_history(&self, since_epoch: i64) -> ControllerResult<Vec<RunRecord>>;

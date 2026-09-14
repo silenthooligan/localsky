@@ -79,7 +79,7 @@ pub fn LightningPanel(snap: ReadSignal<Snapshot>) -> impl IntoView {
                         <p class="panel-empty" style="color:var(--text-dim);font-size:0.85rem;line-height:1.4;margin:auto;text-align:center;">
                             "Add a weather station for live lightning detection."
                             <br/>
-                            <a href="/settings/data-sources" style="color:var(--accent);text-decoration:none;">
+                            <a href="/settings?section=devices" style="color:var(--accent);text-decoration:none;">
                                 "Connect a station →"
                             </a>
                         </p>
@@ -104,7 +104,7 @@ pub fn LightningPanel(snap: ReadSignal<Snapshot>) -> impl IntoView {
                     {move || {
                         let p = prefs.get();
                         strikes.get().into_iter().map(move |s| {
-                        let mi = s.distance_km * 0.621371;
+                        let mi = crate::units::km_to_mi(s.distance_km);
                         // Ring geometry stays in miles (MAX_RADIUS_MI rings).
                         let r = (mi / MAX_RADIUS_MI * 48.0).min(48.0);
                         // We don't know the bearing, Tempest only reports distance.

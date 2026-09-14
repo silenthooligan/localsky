@@ -22,7 +22,7 @@
 // Data: reads the same IrrigationSnapshot signal everything else uses. Links
 // to /sensors so a tap goes straight to the probe inventory.
 
-use crate::ha::snapshot::{IrrigationSnapshot, SoilProbeFault};
+use crate::model::{IrrigationSnapshot, SoilProbeFault};
 use leptos::prelude::*;
 
 #[component]
@@ -77,12 +77,12 @@ pub fn AnomalyBanner(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
 }
 
 /// Build the one-line suspect summary for a quarantined zone. Prefers the
-/// engine's canonical reason (parsed to the pre-"inferred" half so it reads
+/// engine's canonical reason (parsed to the diagnostic half so it reads
 /// "Back Yard probe suspect: 28% vs yard 73%"); falls back to a generic line
 /// when the reason is missing or doesn't match the expected shape.
 fn suspect_line(name: &str, reason: Option<&str>) -> String {
     if let Some(r) = reason {
-        // Canonical engine form: "Soil probe suspect (28% vs yard 73%); inferred ..."
+        // Canonical engine form: "Soil probe suspect (28% vs yard 73%); watering held ..."
         if let Some(rest) = r.strip_prefix("Soil probe suspect (") {
             if let Some((inner, _)) = rest.split_once(')') {
                 // inner = "28% vs yard 73%" (or "offline vs yard 73%")
@@ -90,7 +90,7 @@ fn suspect_line(name: &str, reason: Option<&str>) -> String {
             }
         }
     }
-    format!("{name} probe suspect: watering decided from neighbors")
+    format!("{name} probe suspect: watering held until the probe is reliable")
 }
 
 /// Build the one-line offline summary for a faulted soil probe. Names the

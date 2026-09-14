@@ -21,14 +21,15 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use serde::Deserialize;
 use std::collections::HashSet;
-use tokio::time::{interval, MissedTickBehavior};
-use tracing::{debug, info, warn};
+use tracing::debug;
 
 use crate::config::schema::{Location, WeatherKitConfig};
 use crate::forecast::snapshot::{DailyEntry, ForecastSnapshot, HourlyEntry};
 use crate::ports::weather_source::{
     ShutdownSignal, SourceBus, SourceCaps, SourceEvent, WeatherField, WeatherSource,
 };
+use crate::sources::poll::{run_polling, Poll};
+use crate::units::{c_to_f, kph_to_mph, mm_to_in};
 
 const API_BASE: &str = "https://weatherkit.apple.com/api/v1/weather";
 const POLL_INTERVAL: Duration = Duration::from_secs(10 * 60); // 10 min
@@ -45,15 +46,6 @@ pub struct WeatherKit {
 }
 
 // ---- unit helpers ----
-fn c_to_f(c: f64) -> f64 {
-    c * 9.0 / 5.0 + 32.0
-}
-fn kmh_to_mph(k: f64) -> f64 {
-    k * 0.621_371
-}
-fn mm_to_in(mm: f64) -> f64 {
-    mm / 25.4
-}
 fn mb_to_inhg(mb: f64) -> f64 {
     mb * 0.029_53
 }
@@ -233,12 +225,9 @@ fn wmo_opt(code: &Option<String>) -> u32 {
 
 /// Build a ForecastSnapshot from a WeatherKit response.
 ///
-/// Optional precip fields (precipitationAmount/Chance) that are absent read as
-/// 0 (mirrors OpenWeather and the rest of the forecast sources). Apple reliably
-/// populates these across the forecast window, so an absent field means "no
-/// precip" in practice rather than "no data"; `absent_precip_reads_as_zero`
-/// pins this intentional behavior. (Unlike the NWS/Met.no NO-GO class, this is a
-/// per-field fallback, not a structurally missing QPF in the endpoint.)
+/// Missing rain amounts remain unknown. WeatherKit's daily amount is required
+/// by its schema; neither an incomplete response nor an optional hourly field
+/// constitutes an explicit dry forecast.
 fn build_snapshot(resp: &WkResponse, timezone: &str, now_epoch: i64) -> ForecastSnapshot {
     let daily: Vec<DailyEntry> = resp
         .forecast_daily
@@ -249,18 +238,27 @@ fn build_snapshot(resp: &WkResponse, timezone: &str, now_epoch: i64) -> Forecast
                 .map(|d| {
                     let part = d.daytime_forecast.as_ref();
                     DailyEntry {
-                        time_epoch: d.forecast_start.as_deref().map(iso_to_epoch).unwrap_or(0),
+                        // WeatherKit stamps forecastStart.
+                        day_marker: crate::engine::clock::DayMarker::inside_local_day(
+                            d.forecast_start.as_deref().map(iso_to_epoch).unwrap_or(0),
+                        ),
                         weather_code: wmo_opt(&d.condition_code),
-                        temp_max_f: c_to_f(d.temperature_max.unwrap_or(0.0)),
-                        temp_min_f: c_to_f(d.temperature_min.unwrap_or(0.0)),
+                        temp_max_f: d.temperature_max.map(c_to_f).filter(|t| t.is_finite()),
+                        temp_min_f: d.temperature_min.map(c_to_f).filter(|t| t.is_finite()),
                         // The daily DayPart we deserialize carries no RH; filled
                         // from hourly by backfill_daily_humidity below.
-                        humidity_pct: 0,
-                        precip_sum_in: mm_to_in(d.precipitation_amount.unwrap_or(0.0)),
+                        humidity_pct: None,
+                        precip_sum_in: d
+                            .precipitation_amount
+                            .filter(|v| crate::forecast::precip::valid_amount(*v))
+                            .map(mm_to_in),
                         // Absent chance stays None, not a fabricated 0%.
                         precip_probability_max: d.precipitation_chance.map(frac_to_pct),
-                        wind_max_mph: kmh_to_mph(part.and_then(|p| p.wind_speed).unwrap_or(0.0)),
-                        wind_gust_max_mph: kmh_to_mph(
+                        wind_max_mph: part
+                            .and_then(|p| p.wind_speed)
+                            .map(kph_to_mph)
+                            .filter(|w| w.is_finite() && *w >= 0.0),
+                        wind_gust_max_mph: kph_to_mph(
                             part.and_then(|p| p.wind_gust_speed_max).unwrap_or(0.0),
                         ),
                         uv_index_max: d.max_uv_index.unwrap_or(0.0),
@@ -282,14 +280,23 @@ fn build_snapshot(resp: &WkResponse, timezone: &str, now_epoch: i64) -> Forecast
                 .map(|h| HourlyEntry {
                     time_epoch: h.forecast_start.as_deref().map(iso_to_epoch).unwrap_or(0),
                     weather_code: wmo_opt(&h.condition_code),
-                    temp_f: c_to_f(h.temperature.unwrap_or(0.0)),
+                    temp_f: h.temperature.map(c_to_f).filter(|t| t.is_finite()),
                     apparent_temp_f: c_to_f(h.temperature_apparent.unwrap_or(0.0)),
-                    precip_in: mm_to_in(h.precipitation_amount.unwrap_or(0.0)),
+                    precip_in: h
+                        .precipitation_amount
+                        .filter(|v| crate::forecast::precip::valid_amount(*v))
+                        .map(mm_to_in),
                     precip_probability: h.precipitation_chance.map(frac_to_pct),
-                    wind_mph: kmh_to_mph(h.wind_speed.unwrap_or(0.0)),
+                    wind_mph: h
+                        .wind_speed
+                        .map(kph_to_mph)
+                        .filter(|w| w.is_finite() && *w >= 0.0),
                     wind_dir_deg: (h.wind_direction.unwrap_or(0.0).round() as i64).rem_euclid(360)
                         as u32,
-                    humidity_pct: frac_to_pct(h.humidity.unwrap_or(0.0)),
+                    humidity_pct: h
+                        .humidity
+                        .filter(|rh| rh.is_finite() && (0.0..=1.0).contains(rh))
+                        .map(frac_to_pct),
                     cloud_cover_pct: frac_to_pct(h.cloud_cover.unwrap_or(0.0)),
                     ..Default::default()
                 })
@@ -308,7 +315,7 @@ fn build_snapshot(resp: &WkResponse, timezone: &str, now_epoch: i64) -> Forecast
         ..Default::default()
     };
     // Pair each day's high temp with THAT day's afternoon humidity (hourly).
-    snap.backfill_daily_humidity();
+    snap.backfill_daily_humidity(crate::timeutil::deployment_calendar());
     snap
 }
 
@@ -329,10 +336,10 @@ fn current_fields(resp: &WkResponse) -> Vec<(WeatherField, f64)> {
         f.push((WeatherField::PressureInHg, mb_to_inhg(v)));
     }
     if let Some(v) = c.wind_speed {
-        f.push((WeatherField::WindMph, kmh_to_mph(v)));
+        f.push((WeatherField::WindMph, kph_to_mph(v)));
     }
     if let Some(v) = c.wind_gust {
-        f.push((WeatherField::WindGustMph, kmh_to_mph(v)));
+        f.push((WeatherField::WindGustMph, kph_to_mph(v)));
     }
     if let Some(v) = c.wind_direction {
         f.push((WeatherField::WindBearingDeg, v));
@@ -465,76 +472,51 @@ impl WeatherSource for WeatherKit {
         }
     }
 
-    async fn run(
-        self: Arc<Self>,
-        bus: SourceBus,
-        mut shutdown: ShutdownSignal,
-    ) -> anyhow::Result<()> {
-        info!(source_id = %self.id, "WeatherKit source started");
-        let mut tick = interval(POLL_INTERVAL);
-        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut last_reachable: Option<bool> = None;
-        loop {
-            tokio::select! {
-                _ = tick.tick() => {
-                    match self.fetch().await {
-                        Ok(resp) => {
-                            if last_reachable != Some(true) {
-                                let _ = bus.send(SourceEvent::Reachability {
-                                    source_id: self.id.clone(),
-                                    reachable: true,
-                                });
-                                last_reachable = Some(true);
-                            }
-                            let now = chrono::Utc::now().timestamp();
-                            let fields = current_fields(&resp);
-                            if !fields.is_empty() {
-                                let _ = bus.send(SourceEvent::Observation {
-                                    source_id: self.id.clone(),
-                                    fields,
-                                    at_epoch: now,
-                                });
-                            }
-                            let has_fc = resp
-                                .forecast_daily
-                                .as_ref()
-                                .map(|d| !d.days.is_empty())
-                                .unwrap_or(false)
-                                || resp
-                                    .forecast_hourly
-                                    .as_ref()
-                                    .map(|h| !h.hours.is_empty())
-                                    .unwrap_or(false);
-                            if has_fc {
-                                let snapshot = build_snapshot(&resp, &self.timezone, now);
-                                debug!(source_id = %self.id, daily_n = snapshot.daily.len(), hourly_n = snapshot.hourly.len(), "WeatherKit forecast");
-                                let _ = bus.send(SourceEvent::Forecast {
-                                    source_id: self.id.clone(),
-                                    snapshot,
-                                    at_epoch: now,
-                                });
-                            }
-                        }
-                        Err(e) => {
-                            warn!(source_id = %self.id, error = %e, "WeatherKit fetch failed");
-                            if last_reachable != Some(false) {
-                                let _ = bus.send(SourceEvent::Reachability {
-                                    source_id: self.id.clone(),
-                                    reachable: false,
-                                });
-                                last_reachable = Some(false);
-                            }
-                        }
-                    }
+    async fn run(self: Arc<Self>, bus: SourceBus, shutdown: ShutdownSignal) -> anyhow::Result<()> {
+        // The loop (tick, missed-tick policy, fetch metric, reachability
+        // edges in both directions, shutdown) is `run_polling`'s; this
+        // closure is one poll: mint a JWT + fetch, map currentWeather, build
+        // the forecast snapshot from the SAME response.
+        let id = self.id.clone();
+        run_polling(
+            self,
+            &id,
+            "WeatherKit",
+            POLL_INTERVAL,
+            bus,
+            shutdown,
+            |s: Arc<Self>| async move {
+                let resp = s.fetch().await?;
+                let now = chrono::Utc::now().timestamp();
+                let mut poll = Poll::observation(&s.id, current_fields(&resp), now);
+                let has_fc = resp
+                    .forecast_daily
+                    .as_ref()
+                    .map(|d| !d.days.is_empty())
+                    .unwrap_or(false)
+                    || resp
+                        .forecast_hourly
+                        .as_ref()
+                        .map(|h| !h.hours.is_empty())
+                        .unwrap_or(false);
+                if has_fc {
+                    let snapshot = build_snapshot(&resp, &s.timezone, now);
+                    debug!(
+                        source_id = %s.id,
+                        daily_n = snapshot.daily.len(),
+                        hourly_n = snapshot.hourly.len(),
+                        "WeatherKit forecast"
+                    );
+                    poll = poll.with(SourceEvent::Forecast {
+                        source_id: s.id.clone(),
+                        snapshot,
+                        at_epoch: now,
+                    });
                 }
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        info!(source_id = %self.id, "WeatherKit shutdown");
-                        return Ok(());
-                    }
-                }
-            }
-        }
+                Ok(poll)
+            },
+        )
+        .await
     }
 }
 
@@ -586,6 +568,70 @@ mod tests {
     }
 
     #[test]
+    fn missing_or_invalid_temperatures_do_not_become_32_fahrenheit() {
+        let mut resp: WkResponse = serde_json::from_value(json!({
+            "forecastDaily": { "days": [{ "forecastStart": "2026-06-24T00:00:00Z" }] },
+            "forecastHourly": { "hours": [{ "forecastStart": "2026-06-24T01:00:00Z" }] }
+        }))
+        .unwrap();
+        for invalid in [None, Some(f64::NAN), Some(f64::INFINITY), Some(f64::MAX)] {
+            let day = &mut resp.forecast_daily.as_mut().unwrap().days[0];
+            day.temperature_max = invalid;
+            day.temperature_min = invalid;
+            resp.forecast_hourly.as_mut().unwrap().hours[0].temperature = invalid;
+            let snapshot = build_snapshot(&resp, "UTC", 1000);
+            assert_eq!(snapshot.daily[0].temp_max_f, None);
+            assert_eq!(snapshot.daily[0].temp_min_f, None);
+            assert_eq!(snapshot.hourly[0].temp_f, None);
+        }
+        resp.forecast_daily.as_mut().unwrap().days[0].temperature_max = Some(0.0);
+        resp.forecast_hourly.as_mut().unwrap().hours[0].temperature = Some(0.0);
+        let snapshot = build_snapshot(&resp, "UTC", 1000);
+        assert_eq!(snapshot.daily[0].temp_max_f, Some(32.0));
+        assert_eq!(snapshot.hourly[0].temp_f, Some(32.0));
+    }
+
+    #[test]
+    fn absent_invalid_and_zero_wind_and_humidity_stay_distinct() {
+        let mut resp: WkResponse = serde_json::from_value(json!({
+            "forecastDaily": { "days": [{ "daytimeForecast": {} }] },
+            "forecastHourly": { "hours": [{}] }
+        }))
+        .unwrap();
+        for invalid in [None, Some(-1.0), Some(f64::NAN), Some(f64::INFINITY)] {
+            resp.forecast_daily.as_mut().unwrap().days[0]
+                .daytime_forecast
+                .as_mut()
+                .unwrap()
+                .wind_speed = invalid;
+            let hour = &mut resp.forecast_hourly.as_mut().unwrap().hours[0];
+            hour.wind_speed = invalid;
+            hour.humidity = invalid;
+            let snapshot = build_snapshot(&resp, "UTC", 1000);
+            assert_eq!(snapshot.daily[0].wind_max_mph, None);
+            assert_eq!(snapshot.hourly[0].wind_mph, None);
+            assert_eq!(snapshot.hourly[0].humidity_pct, None);
+        }
+        resp.forecast_hourly.as_mut().unwrap().hours[0].humidity = Some(1.1);
+        assert_eq!(
+            build_snapshot(&resp, "UTC", 1000).hourly[0].humidity_pct,
+            None
+        );
+        resp.forecast_daily.as_mut().unwrap().days[0]
+            .daytime_forecast
+            .as_mut()
+            .unwrap()
+            .wind_speed = Some(0.0);
+        let hour = &mut resp.forecast_hourly.as_mut().unwrap().hours[0];
+        hour.wind_speed = Some(0.0);
+        hour.humidity = Some(0.0);
+        let snapshot = build_snapshot(&resp, "UTC", 1000);
+        assert_eq!(snapshot.daily[0].wind_max_mph, Some(0.0));
+        assert_eq!(snapshot.hourly[0].wind_mph, Some(0.0));
+        assert_eq!(snapshot.hourly[0].humidity_pct, Some(0));
+    }
+
+    #[test]
     fn build_snapshot_converts_units() {
         let resp: WkResponse = serde_json::from_value(json!({
             "currentWeather": { "temperature": 20.0, "humidity": 0.5, "windSpeed": 16.0934 },
@@ -607,26 +653,29 @@ mod tests {
         let s = build_snapshot(&resp, "America/New_York", 1000);
         assert_eq!(s.source_label, "WeatherKit");
         let d = &s.daily[0];
-        assert!((d.temp_max_f - 86.0).abs() < 0.01, "30C -> 86F");
-        assert!((d.temp_min_f - 50.0).abs() < 0.01, "10C -> 50F");
-        assert!((d.precip_sum_in - 1.0).abs() < 0.01, "25.4mm -> 1in");
+        assert!((d.temp_max_f.unwrap() - 86.0).abs() < 0.01, "30C -> 86F");
+        assert!((d.temp_min_f.unwrap() - 50.0).abs() < 0.01, "10C -> 50F");
+        assert!(
+            (d.precip_sum_in.unwrap() - 1.0).abs() < 0.01,
+            "25.4mm -> 1in"
+        );
         assert_eq!(d.precip_probability_max, Some(40));
         assert!(
-            (d.wind_max_mph - 10.0).abs() < 0.05,
+            (d.wind_max_mph.unwrap() - 10.0).abs() < 0.05,
             "16.0934 km/h -> 10 mph"
         );
         assert!((d.wind_gust_max_mph - 20.0).abs() < 0.1);
         assert_eq!(d.weather_code, 63);
         let h = &s.hourly[0];
-        assert!((h.temp_f - 77.0).abs() < 0.01, "25C -> 77F");
-        assert_eq!(h.humidity_pct, 60);
+        assert!((h.temp_f.unwrap() - 77.0).abs() < 0.01, "25C -> 77F");
+        assert_eq!(h.humidity_pct, Some(60));
         assert_eq!(h.cloud_cover_pct, 75);
         assert_eq!(h.precip_probability, Some(20));
-        assert!((h.precip_in - 0.1).abs() < 0.01, "2.54mm -> 0.1in");
+        assert!((h.precip_in.unwrap() - 0.1).abs() < 0.01, "2.54mm -> 0.1in");
     }
 
     #[test]
-    fn absent_precip_reads_as_zero() {
+    fn absent_precip_remains_unknown() {
         // A day/hour with precip fields omitted maps to 0 precip and an
         // ABSENT probability (None, same rule as the other forecast
         // sources): a missing chance is a provider gap, not a confident
@@ -643,9 +692,9 @@ mod tests {
         }))
         .unwrap();
         let s = build_snapshot(&resp, "UTC", 1000);
-        assert_eq!(s.daily[0].precip_sum_in, 0.0);
+        assert_eq!(s.daily[0].precip_sum_in, None);
         assert_eq!(s.daily[0].precip_probability_max, None);
-        assert_eq!(s.hourly[0].precip_in, 0.0);
+        assert_eq!(s.hourly[0].precip_in, None);
         assert_eq!(s.hourly[0].precip_probability, None);
     }
 
@@ -726,5 +775,26 @@ mod tests {
             (rate - 1.0).abs() < 1e-6,
             "current wins: 25.4 mm/h -> 1.0 in/hr"
         );
+    }
+    #[test]
+    fn rain_amounts_require_finite_nonnegative_evidence() {
+        let mut resp: WkResponse = serde_json::from_value(json!({
+            "forecastDaily": { "days": [{}] }, "forecastHourly": { "hours": [{}] }
+        }))
+        .unwrap();
+        for value in [
+            None,
+            Some(-1.0),
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+            Some(0.0),
+        ] {
+            resp.forecast_daily.as_mut().unwrap().days[0].precipitation_amount = value;
+            resp.forecast_hourly.as_mut().unwrap().hours[0].precipitation_amount = value;
+            let snapshot = build_snapshot(&resp, "UTC", 1000);
+            let expected = if value == Some(0.0) { Some(0.0) } else { None };
+            assert_eq!(snapshot.daily[0].precip_sum_in, expected);
+            assert_eq!(snapshot.hourly[0].precip_in, expected);
+        }
     }
 }

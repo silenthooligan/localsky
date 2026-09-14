@@ -37,7 +37,8 @@ use std::time::{Duration, Instant};
 
 use crate::config::FileConfigStore;
 use crate::forecast::model_catalog::DEFAULT_MODEL;
-use crate::forecast::refresher::configured_open_meteo_model;
+use crate::forecast::open_meteo::configured_open_meteo_model;
+use crate::net;
 use crate::ports::config_store::ConfigStore;
 
 /// Grid points per axis: 8x8 = 64 upstream locations, comfortably inside
@@ -73,14 +74,10 @@ pub struct PrecipState {
 
 impl PrecipState {
     pub fn new(cfg_store: Option<Arc<FileConfigStore>>) -> Self {
-        // Same HTTP discipline as windgrid: bounded timeout, identifying
-        // user agent. 15s because the batched 64-point call is heavier
-        // than the single-point forecast.
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .user_agent("localsky/precip")
-            .build()
-            .unwrap_or_default();
+        // Same HTTP discipline as windgrid: bounded timeout, the derived
+        // per-install User-Agent (net::client). 15s because the batched
+        // 64-point call is heavier than the single-point forecast.
+        let client = net::client(Duration::from_secs(15));
         Self {
             client,
             cfg_store,

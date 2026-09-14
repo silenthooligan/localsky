@@ -13,13 +13,32 @@ use tracing::info;
 
 use crate::config::schema::*;
 
+/// Whether the process environment describes a legacy v0.1 deployment:
+/// a location, a Home Assistant, a Tempest hub, an MQTT broker, an LLM
+/// endpoint or a push keypair. The boot path synthesizes a config from it
+/// exactly once, when no config file exists yet.
+pub fn legacy_env_present() -> bool {
+    [
+        "WEATHER_APP_LAT",
+        "HA_URL",
+        "TEMPEST_BIND_ADDR",
+        "TEMPEST_HUB_SERIAL",
+        "MQTT_HOST",
+        "LLM_BASE_URL",
+        "VAPID_PUBLIC_KEY",
+    ]
+    .iter()
+    .any(|k| env::var(k).map(|v| !v.trim().is_empty()).unwrap_or(false))
+}
+
 /// Build a Config from process environment variables. The returned config
-/// reflects "what v0.1 would have done" given the same env. The caller is
-/// expected to persist this synthesized Config to /data/localsky.toml on
-/// first boot so subsequent boots use the file (and the env vars become
-/// no-ops). Never panics; missing optional bits silently no-op.
-pub fn synthesize() -> Config {
+/// reflects "what v0.1 would have done" given the same env. The boot path
+/// persists it to /data/localsky.toml the one time it runs, so every later
+/// boot reads the file and the environment describes nothing. Never
+/// panics; missing optional bits silently no-op.
+pub fn synthesize() -> (Config, crate::config::ledger::Ledger) {
     let mut cfg = Config::default();
+    let mut ledger = crate::config::ledger::Ledger::default();
     let mut log_lines: Vec<String> = Vec::new();
 
     // ----- Deployment / location -----
@@ -106,8 +125,8 @@ pub fn synthesize() -> Config {
             // the same fix in wizard.rs finalize_sources): without this the boot
             // seeding pass would resurrect an authority the user removed before
             // any restart recorded the id.
-            if !cfg.seeded_source_ids.contains(&entry.id) {
-                cfg.seeded_source_ids.push(entry.id.clone());
+            if !ledger.seeded_source_ids.contains(&entry.id) {
+                ledger.seeded_source_ids.push(entry.id.clone());
             }
             cfg.sources.push(entry);
         }
@@ -248,7 +267,7 @@ pub fn synthesize() -> Config {
         }
     }
 
-    cfg
+    (cfg, ledger)
 }
 
 /// Decide whether to synthesize the passive Tempest UDP listener from the
@@ -423,7 +442,7 @@ mod tests {
         // freshness window from the region helper: Open-Meteo always ranks 50,
         // and its ~1800s refresh cadence widens max_age to ~2100 so a per-field
         // pin survives a full refresh cycle (the wind-pin freshness mismatch).
-        let cfg = synthesize();
+        let (cfg, _ledger) = synthesize();
         let om = cfg
             .sources
             .iter()
@@ -447,7 +466,7 @@ mod tests {
         // synthesized config (regardless of ambient env) carries it. And because
         // this process sets no TEMPEST_* in the test env, synthesize() must not
         // produce a tempest_lan here either.
-        let cfg = synthesize();
+        let (cfg, _ledger) = synthesize();
         assert!(
             cfg.sources.iter().any(|s| s.id == "open_meteo"),
             "env_compat must always synthesize a cloud-first open_meteo source"
@@ -467,7 +486,7 @@ mod tests {
         // race-free by region::region_keyless_authority_entries unit tests (this
         // test must not mutate the shared process env to set a location). NWS /
         // Met.no must not appear at 0,0.
-        let cfg = synthesize();
+        let (cfg, _ledger) = synthesize();
         assert!(
             cfg.sources.iter().any(|s| s.id == "open_meteo"),
             "the always-on Open-Meteo backstop is present"

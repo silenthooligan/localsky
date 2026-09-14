@@ -49,6 +49,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use crate::config::schema::RachioConfig;
+use crate::controllers::zone_map::ZoneMap;
 use crate::ports::irrigation_controller::{
     ControllerCaps, ControllerError, ControllerResult, ControllerStatus, IrrigationController,
     RunHandle, RunRecord, ZoneRuntimeStatus,
@@ -173,9 +174,10 @@ pub struct Rachio {
     id: String,
     config: RachioConfig,
     client: Client,
-    /// Reverse map (zone uuid -> slug) computed from config at construction
-    /// for fast lookup during status(), Rachio returns zones by uuid.
-    uuid_to_slug: HashMap<String, String>,
+    /// Zone slug <-> Rachio zone uuid, from `config.zone_uuid_map`.
+    /// Dispatch looks up the uuid for a slug; status() walks the other
+    /// way because Rachio returns zones by uuid.
+    zones: ZoneMap<String>,
     /// Last successful status snapshot. Serves three jobs: the throttled
     /// answer inside the poll window, the stale fallback when the API is
     /// flaky (reachable=false), and the carry-forward source when running
@@ -216,21 +218,23 @@ fn carry_forward_expired(
 }
 
 impl Rachio {
+    /// Construction cannot fail today (`net::client` falls back to reqwest
+    /// defaults rather than erroring); the `Result` stays because the
+    /// wizard and runtime builders match on it.
     pub fn new(id: impl Into<String>, config: RachioConfig) -> Result<Self, ControllerError> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .map_err(|e| ControllerError::Init(format!("reqwest client: {e}")))?;
-        let uuid_to_slug = config
-            .zone_uuid_map
-            .iter()
-            .map(|(slug, uuid)| (uuid.clone(), slug.clone()))
-            .collect();
+        let client = crate::net::client(Duration::from_secs(15));
+        let zones = ZoneMap::new(
+            config
+                .zone_uuid_map
+                .iter()
+                .map(|(slug, uuid)| (slug.clone(), uuid.clone()))
+                .collect::<HashMap<_, _>>(),
+        );
         Ok(Self {
             id: id.into(),
             config,
             client,
-            uuid_to_slug,
+            zones,
             last_status: Arc::new(Mutex::new(None)),
             last_attempt: Arc::new(Mutex::new(None)),
             rate_limit_remaining: std::sync::Mutex::new(None),
@@ -268,14 +272,6 @@ impl Rachio {
             .unwrap_or(DEFAULT_POLL_INTERVAL_S)
             .max(MIN_POLL_INTERVAL_S);
         Duration::from_secs(s as u64)
-    }
-
-    fn uuid_for(&self, slug: &str) -> Result<String, ControllerError> {
-        self.config
-            .zone_uuid_map
-            .get(slug)
-            .cloned()
-            .ok_or_else(|| ControllerError::ZoneUnknown(slug.to_string()))
     }
 
     fn note_rate_limit(&self, resp: &reqwest::Response) {
@@ -439,8 +435,8 @@ impl Rachio {
                 Some(u) => u.to_string(),
                 None => continue,
             };
-            let slug = match self.uuid_to_slug.get(&uuid) {
-                Some(s) => s.clone(),
+            let slug = match self.zones.slug_for(&uuid) {
+                Some(s) => s.to_string(),
                 None => continue, // zone not mapped, ignore
             };
             let last_run_epoch = z
@@ -508,6 +504,7 @@ impl IrrigationController for Rachio {
             water_level: false,
             // The public API's only stop is device-wide stop_water.
             per_zone_stop: false,
+            duration_quantum_s: 1,
         }
     }
 
@@ -516,7 +513,7 @@ impl IrrigationController for Rachio {
     }
 
     fn mapped_zone_slugs(&self) -> Vec<String> {
-        self.config.zone_uuid_map.keys().cloned().collect()
+        self.zones.slugs()
     }
 
     /// Rachio's status is throttled to the poll interval (120s default,
@@ -527,7 +524,7 @@ impl IrrigationController for Rachio {
     }
 
     async fn run_zone(&self, slug: &str, duration_s: u32) -> ControllerResult<RunHandle> {
-        let zone_uuid = self.uuid_for(slug)?;
+        let zone_uuid = self.zones.station_for(slug)?;
         // Rachio API caps a single zone start at 3 hours (10800s).
         let clamped = duration_s.clamp(1, 10_800);
         if clamped != duration_s {
@@ -577,7 +574,7 @@ impl IrrigationController for Rachio {
         );
         // Validate slug is mapped, fail fast on typos rather than
         // surprise-stop the whole controller for an unknown zone.
-        self.uuid_for(slug)?;
+        self.zones.station_for(slug)?;
         self.put_json("/device/stop_water", json!({ "id": self.config.device_id }))
             .await?;
         // Reopen the throttle window so the next status() polls live and
@@ -592,6 +589,16 @@ impl IrrigationController for Rachio {
             .await?;
         *self.last_attempt.lock().await = None;
         Ok(())
+    }
+
+    /// Past the throttle, for the two device-stop decisions that must not
+    /// act on a snapshot. Reopening the window is what the adapter already
+    /// does after every command (`last_attempt = None`), so this reuses
+    /// the mechanism rather than adding one. The daily request budget is
+    /// unaffected in practice: both callers take one reading per pass.
+    async fn status_fresh(&self) -> ControllerResult<ControllerStatus> {
+        *self.last_attempt.lock().await = None;
+        self.status().await
     }
 
     async fn status(&self) -> ControllerResult<ControllerStatus> {
@@ -687,6 +694,7 @@ impl IrrigationController for Rachio {
             self.zone_states_from(&device, &schedule, previous.as_ref(), carry_expired);
 
         let status = ControllerStatus {
+            observed_epoch: Some(crate::timefmt::now_epoch()),
             reachable: true,
             master_enabled: device
                 .get("status")
@@ -956,11 +964,11 @@ mod tests {
     // ---- construction / mapping ----
 
     #[test]
-    fn uuid_for_known_and_unknown_slug() {
+    fn zone_map_known_and_unknown_slug() {
         let r = Rachio::new("rachio", cfg()).unwrap();
-        assert_eq!(r.uuid_for("front").unwrap(), UUID_FRONT);
+        assert_eq!(r.zones.station_for("front").unwrap(), UUID_FRONT);
         assert!(matches!(
-            r.uuid_for("side"),
+            r.zones.station_for("side"),
             Err(ControllerError::ZoneUnknown(_))
         ));
     }
@@ -968,8 +976,10 @@ mod tests {
     #[test]
     fn reverse_map_populated() {
         let r = Rachio::new("rachio", cfg()).unwrap();
-        assert_eq!(r.uuid_to_slug.get(UUID_FRONT), Some(&"front".to_string()));
-        assert_eq!(r.uuid_to_slug.get(UUID_BACK), Some(&"back".to_string()));
+        assert_eq!(r.zones.slug_for(&UUID_FRONT.to_string()), Some("front"));
+        assert_eq!(r.zones.slug_for(&UUID_BACK.to_string()), Some("back"));
+        // The unknown-zone 400 body lists the bound slugs, sorted.
+        assert_eq!(r.mapped_zone_slugs(), vec!["back", "front"]);
     }
 
     #[test]

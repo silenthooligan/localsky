@@ -25,6 +25,8 @@ pub enum RunsError {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRow {
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub id: i64,
     pub zone_slug: String,
     pub start_epoch: i64,
@@ -39,10 +41,18 @@ pub struct RunRow {
     pub applied_mm: Option<f64>,
     pub cycle_index: Option<u32>,
     pub cycle_count: Option<u32>,
+    /// Why the row ended the way it did when that is not a skip: "ended
+    /// by restart", "stopped by the reaper at its deadline". None on an
+    /// ordinary completed run.
+    pub note: Option<String>,
+    /// Metered volume across the run, when the controller has a flow
+    /// meter. None without one.
+    pub volume_gal: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
 pub struct NewRun {
+    pub session_id: Option<String>,
     pub zone_slug: String,
     pub start_epoch: i64,
     pub source: String, // "scheduler" | "manual" | "ha_external" | "controller_external"
@@ -61,8 +71,22 @@ pub struct RunsStore {
 }
 
 impl RunsStore {
+    pub fn daily(&self) -> super::daily_irrigation::DailyIrrigationStore {
+        super::daily_irrigation::DailyIrrigationStore::new(self.conn.clone())
+    }
+
     pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
         Self { conn }
+    }
+
+    pub fn commands(&self) -> super::watering_commands::WateringCommands {
+        super::watering_commands::WateringCommands::new(self.conn.clone())
+    }
+
+    /// Decision evidence shares the run history database, so dispatch and replay
+    /// always address the same durable local instance.
+    pub fn soil_decisions(&self) -> super::soil_decisions::SoilDecisionsStore {
+        super::soil_decisions::SoilDecisionsStore::new(self.conn.clone())
     }
 
     /// Mark a run as intended (queued by the scheduler but not yet
@@ -90,6 +114,50 @@ impl RunsStore {
     }
 
     /// Mark a run as already completed (used by backfill).
+    /// A run that ended before its time, recorded with what it actually
+    /// applied and a note saying why: the boot pass converting an armed
+    /// deadline it found, or the reaper closing a valve at the deadline.
+    /// Status `aborted`, skip_reason None, so the water counts.
+    pub async fn insert_aborted(
+        &self,
+        n: NewRun,
+        end_epoch: i64,
+        note: &str,
+    ) -> Result<i64, RunsError> {
+        let c = self.conn.clone();
+        let note = note.to_string();
+        let duration = (end_epoch - n.start_epoch).max(0);
+        let id = tokio::task::spawn_blocking(move || -> rusqlite::Result<i64> {
+            let conn = c.blocking_lock();
+            conn.execute(
+                "INSERT OR IGNORE INTO runs
+                    (zone_slug, start_epoch, end_epoch, duration_s, source,
+                     controller_id, status, skip_reason, et0_mm, etc_mm,
+                     applied_mm, cycle_index, cycle_count, note, session_id)
+                 VALUES (?, ?, ?, ?, ?, ?, 'aborted', NULL, ?, ?, NULL, ?, ?, ?, ?)",
+                params![
+                    n.zone_slug,
+                    n.start_epoch,
+                    end_epoch,
+                    duration,
+                    n.source,
+                    n.controller_id,
+                    n.et0_mm,
+                    n.etc_mm,
+                    n.cycle_index,
+                    n.cycle_count,
+                    note,
+                    n.session_id,
+                ],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
+        .await
+        .map_err(|e| RunsError::Sqlite(format!("join: {e}")))?
+        .map_err(|e| RunsError::Sqlite(e.to_string()))?;
+        Ok(id)
+    }
+
     pub async fn insert_completed(
         &self,
         n: NewRun,
@@ -108,8 +176,8 @@ impl RunsStore {
                 "INSERT OR IGNORE INTO runs
                     (zone_slug, start_epoch, end_epoch, duration_s, source,
                      controller_id, status, skip_reason, et0_mm, etc_mm,
-                     applied_mm, cycle_index, cycle_count)
-                 VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?)",
+                     applied_mm, cycle_index, cycle_count, session_id)
+                 VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     zone,
                     n.start_epoch,
@@ -122,7 +190,8 @@ impl RunsStore {
                     n.etc_mm,
                     applied_mm,
                     n.cycle_index,
-                    n.cycle_count
+                    n.cycle_count,
+                    n.session_id,
                 ],
             )?;
             Ok(conn.last_insert_rowid())
@@ -146,8 +215,8 @@ impl RunsStore {
                 "INSERT OR IGNORE INTO runs
                     (zone_slug, start_epoch, end_epoch, duration_s, source,
                      controller_id, status, skip_reason, et0_mm, etc_mm,
-                     applied_mm, cycle_index, cycle_count)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+                     applied_mm, cycle_index, cycle_count, session_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
                 params![
                     n.zone_slug,
                     n.start_epoch,
@@ -161,6 +230,7 @@ impl RunsStore {
                     n.etc_mm,
                     n.cycle_index,
                     n.cycle_count,
+                    n.session_id,
                 ],
             )?;
             Ok(conn.last_insert_rowid())
@@ -202,6 +272,34 @@ impl RunsStore {
             .await
     }
 
+    /// End a dispatcher's prewritten segment when boot confirms a stop.
+    /// Updating its own interval avoids leaving its planned tail credited
+    /// alongside a second, shorter restart row. Completed observer rows are
+    /// measurements and are never rewritten here.
+    pub async fn abort_dispatched_segment_at_restart(
+        &self,
+        id: i64,
+        now_epoch: i64,
+    ) -> Result<bool, RunsError> {
+        let c = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<bool> {
+            let conn = c.blocking_lock();
+            let changed = conn.execute(
+                "UPDATE runs SET status = 'aborted', end_epoch = ?2,
+                    duration_s = ?2 - start_epoch, applied_mm = NULL,
+                    note = 'ended by restart'
+                 WHERE id = ?1 AND status = 'completed'
+                   AND (source = 'manual' OR source LIKE 'manual:%' OR source = 'smart_morning')
+                   AND start_epoch <= ?2 AND end_epoch > ?2",
+                params![id, now_epoch],
+            )?;
+            Ok(changed > 0)
+        })
+        .await
+        .map_err(|e| RunsError::Sqlite(format!("join: {e}")))?
+        .map_err(|e| RunsError::Sqlite(e.to_string()))
+    }
+
     async fn update_status(
         &self,
         id: i64,
@@ -239,28 +337,6 @@ impl RunsStore {
     /// end_epoch = now, and tag skip_reason so the Gantt and history
     /// surface the cause.
     ///
-    /// Returns the number of rows reconciled.
-    pub async fn reconcile_in_flight(&self, now_epoch: i64) -> Result<usize, RunsError> {
-        let c = self.conn.clone();
-        tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
-            let mut conn = c.blocking_lock();
-            let tx = conn.transaction()?;
-            let n = tx.execute(
-                "UPDATE runs
-                 SET status = 'aborted',
-                     end_epoch = COALESCE(end_epoch, ?1),
-                     skip_reason = COALESCE(skip_reason, 'container_restart')
-                 WHERE status IN ('running', 'intended')",
-                params![now_epoch],
-            )?;
-            tx.commit()?;
-            Ok(n)
-        })
-        .await
-        .map_err(|e| RunsError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| RunsError::Sqlite(e.to_string()))
-    }
-
     /// All currently-in-flight runs (status = 'running' or 'intended').
     /// The scheduler queries this on boot to reconcile with the
     /// controllers; entries older than the controller's grace window are
@@ -272,7 +348,7 @@ impl RunsStore {
             let mut stmt = conn.prepare(
                 "SELECT id, zone_slug, start_epoch, end_epoch, duration_s, source,
                         controller_id, status, skip_reason, et0_mm, etc_mm,
-                        applied_mm, cycle_index, cycle_count
+                        applied_mm, cycle_index, cycle_count, note, volume_gal, session_id
                  FROM runs WHERE status IN ('running', 'intended')
                  ORDER BY start_epoch ASC",
             )?;
@@ -286,8 +362,8 @@ impl RunsStore {
         .map_err(|e| RunsError::Sqlite(e.to_string()))
     }
 
-    /// Truncate any OPEN manual run row for `zone_slug` at `now_epoch`.
-    /// A manual dispatch pre-writes its row as completed for the full
+    /// Truncate any OPEN prewritten LocalSky run row for `zone_slug` at `now_epoch`.
+    /// Manual and smart-morning dispatch pre-write their rows as completed for the full
     /// planned duration (the controller owns the shutoff timer), so an
     /// early Stop must shrink the row to the real span; otherwise the
     /// balance and every history surface credit water that never fell.
@@ -303,10 +379,17 @@ impl RunsStore {
         tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
             let conn = c.blocking_lock();
             conn.execute(
+                "UPDATE watering_commands SET end_epoch=?2
+                WHERE state='confirmed' AND zone_slug=?1 AND start_epoch<=?2 AND end_epoch>?2",
+                params![zone, now_epoch],
+            )?;
+            conn.execute(
                 "UPDATE runs
-                 SET end_epoch = ?2, duration_s = ?2 - start_epoch
+                 SET end_epoch = ?2, duration_s = ?2 - start_epoch,
+                     note = CASE WHEN note IS NULL OR note = '' THEN 'Stopped early by LocalSky'
+                         ELSE note || '; Stopped early by LocalSky' END
                  WHERE zone_slug = ?1 AND status = 'completed'
-                   AND (source = 'manual' OR source LIKE 'manual:%')
+                   AND (source = 'manual' OR source LIKE 'manual:%' OR source = 'smart_morning')
                    AND start_epoch <= ?2 AND end_epoch > ?2",
                 params![zone, now_epoch],
             )
@@ -318,7 +401,7 @@ impl RunsStore {
 
     /// [`Self::truncate_active`] across every zone OF ONE CONTROLLER: the
     /// device-wide-stop path (a per_zone_stop=false controller's zone stop
-    /// halts every zone on that device, so every open manual row on it must
+    /// halts every zone on that device, so every open prewritten row on it must
     /// shrink to the real span; other controllers' runs continue and keep
     /// their planned credit).
     pub async fn truncate_active_for_controller(
@@ -331,10 +414,17 @@ impl RunsStore {
         tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
             let conn = c.blocking_lock();
             conn.execute(
+                "UPDATE watering_commands SET end_epoch=?2
+                WHERE state='confirmed' AND controller_id=?1 AND start_epoch<=?2 AND end_epoch>?2",
+                params![ctrl, now_epoch],
+            )?;
+            conn.execute(
                 "UPDATE runs
-                 SET end_epoch = ?2, duration_s = ?2 - start_epoch
+                 SET end_epoch = ?2, duration_s = ?2 - start_epoch,
+                     note = CASE WHEN note IS NULL OR note = '' THEN 'Stopped early by LocalSky'
+                         ELSE note || '; Stopped early by LocalSky' END
                  WHERE controller_id = ?1 AND status = 'completed'
-                   AND (source = 'manual' OR source LIKE 'manual:%')
+                   AND (source = 'manual' OR source LIKE 'manual:%' OR source = 'smart_morning')
                    AND start_epoch <= ?2 AND end_epoch > ?2",
                 params![ctrl, now_epoch],
             )
@@ -350,10 +440,17 @@ impl RunsStore {
         tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
             let conn = c.blocking_lock();
             conn.execute(
+                "UPDATE watering_commands SET end_epoch=?1
+                WHERE state='confirmed' AND start_epoch<=?1 AND end_epoch>?1",
+                params![now_epoch],
+            )?;
+            conn.execute(
                 "UPDATE runs
-                 SET end_epoch = ?1, duration_s = ?1 - start_epoch
+                 SET end_epoch = ?1, duration_s = ?1 - start_epoch,
+                     note = CASE WHEN note IS NULL OR note = '' THEN 'Stopped early by LocalSky'
+                         ELSE note || '; Stopped early by LocalSky' END
                  WHERE status = 'completed'
-                   AND (source = 'manual' OR source LIKE 'manual:%')
+                   AND (source = 'manual' OR source LIKE 'manual:%' OR source = 'smart_morning')
                    AND start_epoch <= ?1 AND end_epoch > ?1",
                 params![now_epoch],
             )
@@ -364,6 +461,76 @@ impl RunsStore {
     }
 
     /// All runs in [from_epoch, to_epoch). Used by the Gantt history.
+    /// A run the OBSERVER saw rather than one LocalSky dispatched: the
+    /// refresher watched a zone go from running to not, and this is the
+    /// row for it. Deduped by the table's own key, so a restart that
+    /// re-observes the same edge writes nothing.
+    ///
+    /// A dispatched run has a row from the moment it is commanded (that
+    /// is `insert_intended` through `mark_completed`); this one appears
+    /// whole, after the fact, which is why the status is decided here
+    /// from whether a reason came with it.
+    pub async fn insert_observed(
+        &self,
+        n: NewRun,
+        duration_s: i64,
+        applied_mm: Option<f64>,
+        volume_gal: Option<f64>,
+    ) -> Result<(), RunsError> {
+        let c = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
+            let conn = c.blocking_lock();
+            conn.execute(
+                "INSERT OR IGNORE INTO runs
+                    (zone_slug, start_epoch, end_epoch, duration_s,
+                     source, controller_id, status, skip_reason,
+                     applied_mm, volume_gal, cycle_index, cycle_count, session_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6,
+                         CASE WHEN ?7 IS NULL THEN 'completed' ELSE 'aborted' END,
+                         ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    n.zone_slug,
+                    n.start_epoch,
+                    n.start_epoch + duration_s,
+                    duration_s,
+                    n.source,
+                    n.controller_id,
+                    n.skip_reason,
+                    applied_mm,
+                    volume_gal,
+                    n.cycle_index,
+                    n.cycle_count,
+                    n.session_id,
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| RunsError::Sqlite(format!("join: {e}")))?
+        .map_err(|e| RunsError::Sqlite(e.to_string()))
+    }
+
+    /// Drop runs that started before `cutoff_epoch`. Only called when
+    /// `[persistence] runs_retention_days` is set; the default keeps
+    /// everything, which is what makes a multi-year trend possible.
+    pub async fn prune_older_than(&self, cutoff_epoch: i64) -> Result<usize, RunsError> {
+        let c = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
+            let conn = c.blocking_lock();
+            conn.execute(
+                "DELETE FROM watering_commands WHERE end_epoch < ?",
+                [cutoff_epoch],
+            )?;
+            conn.execute(
+                "DELETE FROM runs WHERE start_epoch < ?",
+                params![cutoff_epoch],
+            )
+        })
+        .await
+        .map_err(|e| RunsError::Sqlite(format!("join: {e}")))?
+        .map_err(|e| RunsError::Sqlite(e.to_string()))
+    }
+
     pub async fn window(&self, from_epoch: i64, to_epoch: i64) -> Result<Vec<RunRow>, RunsError> {
         let c = self.conn.clone();
         tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<RunRow>> {
@@ -371,7 +538,7 @@ impl RunsStore {
             let mut stmt = conn.prepare(
                 "SELECT id, zone_slug, start_epoch, end_epoch, duration_s, source,
                         controller_id, status, skip_reason, et0_mm, etc_mm,
-                        applied_mm, cycle_index, cycle_count
+                        applied_mm, cycle_index, cycle_count, note, volume_gal, session_id
                  FROM runs WHERE start_epoch >= ? AND start_epoch < ?
                  ORDER BY start_epoch ASC",
             )?;
@@ -388,6 +555,7 @@ impl RunsStore {
 
 fn row_to_run(r: &rusqlite::Row<'_>) -> rusqlite::Result<RunRow> {
     Ok(RunRow {
+        session_id: r.get(16)?,
         id: r.get(0)?,
         zone_slug: r.get(1)?,
         start_epoch: r.get(2)?,
@@ -402,6 +570,8 @@ fn row_to_run(r: &rusqlite::Row<'_>) -> rusqlite::Result<RunRow> {
         applied_mm: r.get(11)?,
         cycle_index: r.get::<_, Option<i64>>(12)?.map(|v| v as u32),
         cycle_count: r.get::<_, Option<i64>>(13)?.map(|v| v as u32),
+        note: r.get(14)?,
+        volume_gal: r.get(15)?,
     })
 }
 
@@ -418,6 +588,7 @@ mod tests {
 
     fn new_run(zone: &str, start: i64) -> NewRun {
         NewRun {
+            session_id: None,
             zone_slug: zone.into(),
             start_epoch: start,
             source: "scheduler".into(),
@@ -587,6 +758,54 @@ mod tests {
             Some(3600),
             "the other controller's run keeps its planned credit"
         );
+    }
+
+    #[tokio::test]
+    async fn early_stops_truncate_smart_morning_rows_and_name_the_interruption() {
+        for scope in ["zone", "controller", "all"] {
+            let store = fresh_store().await;
+            for (zone, controller) in [("front", "main"), ("back", "main"), ("beds", "other")] {
+                store
+                    .insert_completed(
+                        NewRun {
+                            source: "smart_morning".into(),
+                            controller_id: controller.into(),
+                            ..new_run(zone, 1000)
+                        },
+                        1600,
+                        600,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+            }
+            let count = match scope {
+                "zone" => store.truncate_active("front", 1100).await.unwrap(),
+                "controller" => store
+                    .truncate_active_for_controller("main", 1100)
+                    .await
+                    .unwrap(),
+                _ => store.truncate_active_all(1100).await.unwrap(),
+            };
+            assert_eq!(
+                count,
+                match scope {
+                    "zone" => 1,
+                    "controller" => 2,
+                    _ => 3,
+                }
+            );
+            for row in store.window(0, 2000).await.unwrap() {
+                let stopped = row.zone_slug == "front"
+                    || scope == "all"
+                    || (scope == "controller" && row.controller_id == "main");
+                assert_eq!(row.duration_s, Some(if stopped { 100 } else { 600 }));
+                assert_eq!(
+                    row.note.as_deref(),
+                    stopped.then_some("Stopped early by LocalSky")
+                );
+            }
+        }
     }
 
     #[tokio::test]

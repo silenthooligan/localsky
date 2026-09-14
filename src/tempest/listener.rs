@@ -1,76 +1,30 @@
-// Tokio task that binds UDP 50222 (Tempest hub broadcast port), parses
-// every incoming packet, and feeds the shared store. Runs forever in
-// the background; failures are logged and retried with backoff.
+// What the LAN listener is doing, for the health endpoint and the UI.
+//
+// The socket itself is a weather source now (`sources::tempest_udp`),
+// like every other reading LocalSky takes. This is the state it reports
+// while it runs, and it stays here because /api/v1/health and the setup
+// wizard have always read it here.
+//
+// Why it is worth reporting at all: a Tempest station is read over the
+// network, and only one program per machine can read it. That is an
+// ordinary thing to run into and an awful thing to diagnose, because the
+// symptom is an empty station panel.
 
-use crate::tempest::packets::{ObsSt, RapidWindOb, StrikeEvent, TempestPacket};
-use crate::tempest::state::TempestStore;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::net::UdpSocket;
+use arc_swap::ArcSwap;
+use std::sync::OnceLock;
 
-pub fn spawn_listener(store: Arc<TempestStore>) {
-    tokio::spawn(async move {
-        loop {
-            match listen(store.clone()).await {
-                Ok(()) => {
-                    tracing::warn!("UDP listener returned cleanly; respawning");
-                }
-                Err(e) => {
-                    tracing::error!("UDP listener error: {e:?}; retrying in 5s");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                }
-            }
-        }
-    });
+pub use crate::tempest::status::ListenerStatus;
+
+fn status_cell() -> &'static ArcSwap<ListenerStatus> {
+    static CELL: OnceLock<ArcSwap<ListenerStatus>> = OnceLock::new();
+    CELL.get_or_init(|| ArcSwap::from_pointee(ListenerStatus::NotConfigured))
 }
 
-async fn listen(store: Arc<TempestStore>) -> std::io::Result<()> {
-    let sock = UdpSocket::bind("0.0.0.0:50222").await?;
-    sock.set_broadcast(true)?;
-    tracing::info!("listening for Tempest UDP on {}", sock.local_addr()?);
-
-    let mut buf = vec![0u8; 4096];
-    loop {
-        let (n, _peer) = sock.recv_from(&mut buf).await?;
-        let slice = &buf[..n];
-        match serde_json::from_slice::<TempestPacket>(slice) {
-            Ok(pkt) => apply(&store, pkt),
-            Err(e) => {
-                if let Ok(text) = std::str::from_utf8(slice) {
-                    tracing::debug!("unparseable packet ({} bytes): {}, {}", n, e, text);
-                }
-            }
-        }
-    }
+/// The listener's current state, for the health endpoint and the UI.
+pub fn listener_status() -> ListenerStatus {
+    (**status_cell().load()).clone()
 }
 
-fn apply(store: &TempestStore, pkt: TempestPacket) {
-    match pkt {
-        TempestPacket::ObsSt {
-            serial_number,
-            hub_sn,
-            obs,
-            ..
-        } => {
-            for row in &obs {
-                if let Some(parsed) = ObsSt::from_array(row) {
-                    store.apply_obs(&serial_number, &hub_sn, &parsed);
-                }
-            }
-        }
-        TempestPacket::RapidWind { ob, .. } => {
-            if let Some(p) = RapidWindOb::from_array(&ob) {
-                store.apply_rapid_wind(&p);
-            }
-        }
-        TempestPacket::EvtStrike { evt, .. } => {
-            if let Some(p) = StrikeEvent::from_array(&evt) {
-                store.apply_strike(&p);
-            }
-        }
-        TempestPacket::DeviceStatus { voltage, .. } => {
-            store.apply_battery(voltage);
-        }
-        _ => {}
-    }
+pub fn set_status(s: ListenerStatus) {
+    status_cell().store(std::sync::Arc::new(s));
 }

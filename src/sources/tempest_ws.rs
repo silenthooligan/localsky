@@ -28,16 +28,18 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashSet;
-use tokio::time::{interval, MissedTickBehavior};
-use tracing::{debug, info, warn};
+use tracing::debug;
 
 use crate::config::schema::TempestWsConfig;
 use crate::ports::weather_source::{
-    ShutdownSignal, SourceBus, SourceCaps, SourceEvent, WeatherField, WeatherSource,
+    ShutdownSignal, SourceBus, SourceCaps, WeatherField, WeatherSource,
 };
+use crate::sources::poll::{run_polling, Poll};
+use crate::units::{c_to_f, hpa_to_inhg, km_to_mi, mm_to_in, ms_to_mph};
 
 const API_BASE: &str = "https://swd.weatherflow.com/swd/rest";
 const POLL_INTERVAL: Duration = Duration::from_secs(60);
+const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct TempestWs {
     id: String,
@@ -87,14 +89,10 @@ struct Observation {
 
 impl TempestWs {
     pub fn new(id: impl Into<String>, config: TempestWsConfig) -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .expect("reqwest client construction");
         Self {
             id: id.into(),
             config,
-            client,
+            client: crate::net::client(HTTP_TIMEOUT),
         }
     }
 
@@ -113,22 +111,21 @@ impl TempestWs {
             .json()
             .await?)
     }
-}
 
-fn c_to_f(c: f64) -> f64 {
-    c * 9.0 / 5.0 + 32.0
-}
-fn mps_to_mph(v: f64) -> f64 {
-    v * 2.236936
-}
-fn hpa_to_inhg(p: f64) -> f64 {
-    p * 0.02953
-}
-fn mm_to_in(mm: f64) -> f64 {
-    mm * 0.03937
-}
-fn km_to_mi(km: f64) -> f64 {
-    km * 0.621371
+    /// One poll: the latest observation on the station, or nothing when
+    /// the station answered with no observations (a legitimate, reachable
+    /// poll). The loop owns the reachability verdict and the warn on Err.
+    async fn poll_once(&self) -> anyhow::Result<Poll> {
+        let resp = self.fetch().await?;
+        Ok(match resp.obs.first() {
+            Some(latest) => Poll::observation(
+                &self.id,
+                extract_fields(latest),
+                chrono::Utc::now().timestamp(),
+            ),
+            None => Poll::none(),
+        })
+    }
 }
 
 fn extract_fields(o: &Observation) -> Vec<(WeatherField, f64)> {
@@ -146,10 +143,10 @@ fn extract_fields(o: &Observation) -> Vec<(WeatherField, f64)> {
         out.push((WeatherField::PressureInHg, hpa_to_inhg(v)));
     }
     if let Some(v) = o.wind_avg {
-        out.push((WeatherField::WindMph, mps_to_mph(v)));
+        out.push((WeatherField::WindMph, ms_to_mph(v)));
     }
     if let Some(v) = o.wind_gust {
-        out.push((WeatherField::WindGustMph, mps_to_mph(v)));
+        out.push((WeatherField::WindGustMph, ms_to_mph(v)));
     }
     if let Some(v) = o.wind_direction {
         out.push((WeatherField::WindBearingDeg, v));
@@ -232,59 +229,19 @@ impl WeatherSource for TempestWs {
         }
     }
 
-    async fn run(
-        self: Arc<Self>,
-        bus: SourceBus,
-        mut shutdown: ShutdownSignal,
-    ) -> anyhow::Result<()> {
-        info!(source_id = %self.id, station = self.config.station_id, "TempestWs source started");
-        let mut tick = interval(POLL_INTERVAL);
-        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut last_reachable: Option<bool> = None;
-        loop {
-            tokio::select! {
-                _ = tick.tick() => {
-                    match self.fetch().await {
-                        Ok(resp) => {
-                            if last_reachable != Some(true) {
-                                let _ = bus.send(SourceEvent::Reachability {
-                                    source_id: self.id.clone(),
-                                    reachable: true,
-                                });
-                                last_reachable = Some(true);
-                            }
-                            if let Some(latest) = resp.obs.first() {
-                                let fields = extract_fields(latest);
-                                if !fields.is_empty() {
-                                    debug!(source_id = %self.id, fields_n = fields.len(), "TempestWs updated");
-                                    let _ = bus.send(SourceEvent::Observation {
-                                        source_id: self.id.clone(),
-                                        fields,
-                                        at_epoch: chrono::Utc::now().timestamp(),
-                                    });
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!(source_id = %self.id, error = %e, "TempestWs fetch failed");
-                            if last_reachable != Some(false) {
-                                let _ = bus.send(SourceEvent::Reachability {
-                                    source_id: self.id.clone(),
-                                    reachable: false,
-                                });
-                                last_reachable = Some(false);
-                            }
-                        }
-                    }
-                }
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        info!(source_id = %self.id, "TempestWs shutdown");
-                        return Ok(());
-                    }
-                }
-            }
-        }
+    async fn run(self: Arc<Self>, bus: SourceBus, shutdown: ShutdownSignal) -> anyhow::Result<()> {
+        debug!(source_id = %self.id, station = self.config.station_id, "TempestWs station");
+        let id = self.id.clone();
+        run_polling(
+            self,
+            &id,
+            "TempestWs",
+            POLL_INTERVAL,
+            bus,
+            shutdown,
+            |s: Arc<Self>| async move { s.poll_once().await },
+        )
+        .await
     }
 }
 

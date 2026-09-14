@@ -42,7 +42,7 @@ St. Augustine on sandy loam with default 50% MAD: RAW = 19.5 * 0.50 = 9.75 mm. T
 
 Determines whether cycle-and-soak is needed. The three slope bands per row reflect that water runs off faster on a hillside than on a level patch. The cycle-and-soak splitter divides total runtime when the sprinkler's precipitation rate exceeds infiltration.
 
-Example: spray head (15 mm/hr precip) on clay flat (5 mm/hr infiltration). Each minute of runtime delivers 15/60 = 0.25 mm but the soil can only absorb 5/60 = 0.083 mm. Cycling 1 minute on, 4 minutes "soak" wouldn't actually work because evaporation losses kick in. LocalSky's default minimum cycle is 3 minutes; soak gap is 30 minutes; the splitter computes the maximum continuous on-time at ~`(infiltration/precip) * 60` minutes.
+Example: MP rotator (14 mm/hr precip) on clay flat (5 mm/hr infiltration). Each minute of runtime delivers 14/60 = 0.23 mm but the soil can only absorb 5/60 = 0.083 mm. Cycling 1 minute on, 4 minutes "soak" wouldn't actually work because evaporation losses kick in. The splitter computes the maximum continuous on-time at ~`(infiltration/precip) * 60` minutes, never shorter than 3 minutes. Each soak gap is derived rather than fixed: the depth left standing when the head shuts off, divided by the infiltration rate, floored at 5, 10, or 15 minutes by texture and at your own `engine.soak_minutes` (default 5). See [cycle-and-soak](irrigation-engine.md#cycle-and-soak) for a worked example.
 
 ## Picking the right texture for your zone
 

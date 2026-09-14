@@ -5,6 +5,7 @@ expression: info
 {
   "service": "localsky",
   "service_version": "0.0.0-test",
+  "build_revision": "test-revision",
   "api_version": "0.0.0-test",
   "api_prefix": "/api/v1",
   "license": "Apache-2.0",
@@ -14,5 +15,6 @@ expression: info
   "auth_required": false,
   "uuid": "00000000-0000-0000-0000-000000000000",
   "has_irrigation": false,
-  "nerd_mode_default": false
+  "nerd_mode_default": false,
+  "location_configured": true
 }

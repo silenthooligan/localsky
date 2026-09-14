@@ -30,7 +30,7 @@
 //! engine's baked string verbatim, never fabricated.
 
 use crate::components::units_fmt::{f_to_c, in_to_mm, mph_to_kph, temp_unit, wind_unit, UnitPrefs};
-use crate::ha::snapshot::{DecisionTrace, RuleEval, SkipCheck, ZoneVerdict};
+use crate::model::{DecisionTrace, RuleEval, SkipCheck, ZoneVerdict};
 
 // ── unit-aware operand formatters ───────────────────────────────────────────
 // Each reproduces the engine's IMPERIAL token verbatim (same precision, spacing,
@@ -111,6 +111,12 @@ fn rate(in_per_hr: f64, p: UnitPrefs) -> String {
     }
 }
 
+/// Unknown rain operands must keep the engine's availability explanation.
+/// A genuine reported zero is still a value and can be converted normally.
+fn known_rain(value: Option<f64>) -> Option<f64> {
+    value.filter(|v| v.is_finite() && *v >= 0.0)
+}
+
 // ── SkipCheck.reason ─────────────────────────────────────────────────────────
 
 /// Render `SkipCheck.reason` unit-aware from `s.reason_code` + `s`'s operand
@@ -122,16 +128,23 @@ fn rate(in_per_hr: f64, p: UnitPrefs) -> String {
 pub fn render_skip_reason(s: &SkipCheck, p: UnitPrefs) -> String {
     match s.reason_code.as_str() {
         // "Currently raining ({:.2} in/hr)"
-        "rain_now" => format!(
-            "Currently raining ({})",
-            rate(s.rain_intensity_now_in_hr, p)
+        "rain_now" => known_rain(s.rain_intensity_now_in_hr).map_or_else(
+            || s.reason.clone(),
+            |value| format!("Currently raining ({})", rate(value, p)),
         ),
         // "Freeze risk now ({:.0}°F < {:.0}°F)"
-        "freeze_now" => format!(
-            "Freeze risk now ({} < {})",
-            temp(s.temp_now_f, p),
-            temp(s.min_temp_f, p)
-        ),
+        "freeze_now" => match (s.run_window, s.window_min_temp_f) {
+            (crate::engine::dispatch_window::WindowKind::PostSunrise, Some(t)) => format!(
+                "Freeze risk during the run ({} < {})",
+                temp(t, p),
+                temp(s.min_temp_f, p)
+            ),
+            _ => format!(
+                "Freeze risk now ({} < {})",
+                temp(s.temp_now_f, p),
+                temp(s.min_temp_f, p)
+            ),
+        },
         // "Overnight freeze ({:.0}°F low next 24h < {:.0}°F)"
         "overnight_freeze" => format!(
             "Overnight freeze ({} low next 24h < {})",
@@ -139,39 +152,62 @@ pub fn render_skip_reason(s: &SkipCheck, p: UnitPrefs) -> String {
             temp(s.min_temp_f, p)
         ),
         // "Soil frost ({:.1}°F < {:.0}°F threshold)"
-        "soil_frost" => format!(
-            "Soil frost ({} < {} threshold)",
-            soil_temp(s.soil_temp_yard_min_f.unwrap_or(0.0), p),
-            temp(s.frost_skip_soil_f, p)
-        ),
+        "soil_frost" => s
+            .soil_temp_yard_min_f
+            .filter(|v| v.is_finite())
+            .map_or_else(
+                || s.reason.clone(),
+                |value| {
+                    format!(
+                        "Soil frost ({} < {} threshold)",
+                        soil_temp(value, p),
+                        temp(s.frost_skip_soil_f, p)
+                    )
+                },
+            ),
         // "Wind too high now ({:.1} mph > {:.0} mph)"
         "wind_now" => format!(
             "Wind too high now ({} > {})",
             wind1(s.wind_now_mph, p),
             wind0(s.max_wind_mph, p)
         ),
-        // "Already wet ({:.2}\" today)"
-        "already_wet" => format!("Already wet ({} today)", depth(s.rain_today_in, p)),
+        // "Already wet ({:.2}\" measured today)"
+        "already_wet" => {
+            format!("Already wet ({} measured today)", depth(s.rain_today_in, p))
+        }
+        // "Rain forecast today ({:.2}\" expected, not measured)"
+        "rain_today_forecast" => known_rain(s.rain_today_forecast_in).map_or_else(
+            || s.reason.clone(),
+            |value| {
+                format!(
+                    "Rain forecast today ({} expected, not measured)",
+                    depth(value, p)
+                )
+            },
+        ),
         // "Rain expected within 4h ({:.2}\" forecast)"
-        "rain_next_4h" => format!(
-            "Rain expected within 4h ({} forecast)",
-            depth(s.rain_next_4h_in, p)
+        "rain_next_4h" => known_rain(s.rain_next_4h_in).map_or_else(
+            || s.reason.clone(),
+            |value| format!("Rain expected within 4h ({} forecast)", depth(value, p)),
         ),
         // "Tomorrow rain ({:.2}\" × {}% confidence)" when a probability was
         // reported; "Tomorrow rain ({:.2}\" forecast)" when the provider had
         // none (the engine weighted the amount at full value and made no
         // confidence claim). Mirrors engine tomorrow_rain_reason exactly.
-        "tomorrow_rain" => match s.rain_tomorrow_prob_pct {
-            Some(prob) => format!(
-                "Tomorrow rain ({} \u{d7} {prob}% confidence)",
-                depth(s.forecast_in, p)
-            ),
-            None => format!("Tomorrow rain ({} forecast)", depth(s.forecast_in, p)),
-        },
+        "tomorrow_rain" => known_rain(s.forecast_in).map_or_else(
+            || s.reason.clone(),
+            |value| match s.rain_tomorrow_prob_pct {
+                Some(prob) => format!(
+                    "Tomorrow rain ({} \u{d7} {prob}% confidence)",
+                    depth(value, p)
+                ),
+                None => format!("Tomorrow rain ({} forecast)", depth(value, p)),
+            },
+        ),
         // "Heavy rain in next 3 days ({:.2}\" weighted)"
-        "rain_3day" => format!(
-            "Heavy rain in next 3 days ({} weighted)",
-            depth(s.rain_3day_weighted_in, p)
+        "rain_3day" => known_rain(s.rain_3day_weighted_in).map_or_else(
+            || s.reason.clone(),
+            |value| format!("Heavy rain in next 3 days ({} weighted)", depth(value, p)),
         ),
         // "Heat advisory: running planned + 15% (peak {:.0}°F)"
         "heat_advisory" => format!(
@@ -237,7 +273,13 @@ pub fn render_trace_reason(trace: &DecisionTrace, p: UnitPrefs) -> String {
         ("wind_now", "wind_mph") => {
             format!("Wind too high now ({} > {})", wind1(v, p), wind0(t, p))
         }
-        ("already_wet", "rain_in") => format!("Already wet ({} today)", depth(v, p)),
+        ("already_wet", "rain_in") => {
+            format!("Already wet ({} measured today)", depth(v, p))
+        }
+        ("rain_today_forecast", "rain_in") => format!(
+            "Rain forecast today ({} expected, not measured)",
+            depth(v, p)
+        ),
         ("rain_next_4h", "rain_in") => {
             format!("Rain expected within 4h ({} forecast)", depth(v, p))
         }
@@ -273,6 +315,9 @@ pub fn render_rule_detail(r: &RuleEval, p: UnitPrefs) -> String {
             format!("{} vs {} threshold", rate(v, p), rate_bare(t, p))
         }
         // "{:.0}°F vs {:.0}°F min"
+        ("freeze_now", "temp_f") if r.detail.contains("during the run") => {
+            format!("{} during the run vs {} min", temp(v, p), temp(t, p))
+        }
         ("freeze_now", "temp_f") => format!("{} vs {} min", temp(v, p), temp(t, p)),
         // "24h low {:.0}°F vs {:.0}°F min"
         ("overnight_freeze", "temp_f") => {
@@ -282,8 +327,14 @@ pub fn render_rule_detail(r: &RuleEval, p: UnitPrefs) -> String {
         ("soil_frost", "soil_temp_f") => format!("soil {} vs {}", soil_temp(v, p), temp(t, p)),
         // "{:.1} mph vs {:.0} mph max"
         ("wind_now", "wind_mph") => format!("{} vs {} max", wind1(v, p), wind0(t, p)),
-        // "{:.2}\" today vs {:.2}\" floor"
-        ("already_wet", "rain_in") => format!("{} today vs {} floor", depth(v, p), depth(t, p)),
+        // "{:.2}\" measured today vs {:.2}\" floor"
+        ("already_wet", "rain_in") => {
+            format!("{} measured today vs {} floor", depth(v, p), depth(t, p))
+        }
+        // "{:.2}\" expected today vs {:.2}\" floor"
+        ("rain_today_forecast", "rain_in") => {
+            format!("{} expected today vs {} floor", depth(v, p), depth(t, p))
+        }
         // "{:.2}\" next 4h vs {:.2}\" skip"
         ("rain_next_4h", "rain_in") => format!("{} next 4h vs {} skip", depth(v, p), depth(t, p)),
         // "{:.2}\" weighted vs {:.2}\""
@@ -494,6 +545,7 @@ mod tests {
         pressure_metric: false,
         distance_metric: false,
         area_metric: false,
+        clock_12h: false,
     };
     const METRIC: UnitPrefs = UnitPrefs {
         temp_c: true,
@@ -502,28 +554,34 @@ mod tests {
         pressure_metric: true,
         distance_metric: true,
         area_metric: true,
+        clock_12h: false,
     };
 
     // Mirror skip_rules::tests::base() so the renderer test fires the real engine
     // over the full reason battery without reaching into that crate-private fn.
     fn base() -> Inputs {
         Inputs {
-            utc_offset_seconds: 0,
+            rain_today_forecast_in: Some(0.0),
+            calendar: crate::engine::calendar::Calendar::utc(),
             temp_now_f: 70.0,
             wind_now_mph: 3.0,
             rain_today_in: 0.0,
-            rain_intensity_now_in_hr: 0.0,
+            rain_intensity_now_in_hr: Some(0.0),
             // No live rain in the fixture (rate 0), so the rain_now gate never
             // fires; the nature is the honest Model default.
-            rain_nature: crate::ha::snapshot::RainNature::default(),
+            rain_nature: crate::model::RainNature::default(),
             humidity_now_pct: 55.0,
-            forecast_in: 0.0,
+            forecast_in: Some(0.0),
             rain_tomorrow_prob_pct: None,
-            rain_3day_weighted_in: 0.0,
-            rain_7day_weighted_in: 0.0,
-            rain_next_4h_in: 0.0,
+            rain_3day_weighted_in: Some(0.0),
+            rain_7day_weighted_in: Some(0.0),
+            rain_next_4h_in: Some(0.0),
             rain_observed_recent_in: 0.0,
             wind_max_today_mph: 6.0,
+            wind_window_max_mph: None,
+            watered_days: Vec::new(),
+            run_window: Default::default(),
+            window_min_temp_f: None,
             temp_min_24h_f: Some(60.0),
             temp_max_3day_f: 80.0,
             heat_index_max_3day_f: 0.0,
@@ -537,10 +595,14 @@ mod tests {
             frost_skip_soil_f: 35.0,
             live_readings: LiveReadings::Station,
             forecast_stale: false,
+            restart_required: false,
             is_paused: false,
             is_dry_run: false,
             pause_until_epoch: 0,
-            now_epoch: 1_700_000_000,
+            when: crate::engine::clock::DecisionTime::at(
+                crate::engine::calendar::Calendar::utc(),
+                1_700_000_000,
+            ),
             override_tomorrow: String::new(),
             is_tomorrow: false,
             global_override: "auto".to_string(),
@@ -558,6 +620,10 @@ mod tests {
                 pct: b,
                 saturation_pct: 70.0,
                 target_min_pct: 30.0,
+                probe_configured: false,
+                governed_by_soil_model: false,
+                planning_forecast_unavailable: false,
+                sprinkler_type: Default::default(),
             },
             ZoneSoil {
                 slug: "front_yard".into(),
@@ -565,6 +631,10 @@ mod tests {
                 pct: f,
                 saturation_pct: 70.0,
                 target_min_pct: 30.0,
+                probe_configured: false,
+                governed_by_soil_model: false,
+                planning_forecast_unavailable: false,
+                sprinkler_type: Default::default(),
             },
             ZoneSoil {
                 slug: "side_yard".into(),
@@ -572,6 +642,10 @@ mod tests {
                 pct: s,
                 saturation_pct: 70.0,
                 target_min_pct: 30.0,
+                probe_configured: false,
+                governed_by_soil_model: false,
+                planning_forecast_unavailable: false,
+                sprinkler_type: Default::default(),
             },
             ZoneSoil {
                 slug: "back_yard_shrubs".into(),
@@ -579,8 +653,37 @@ mod tests {
                 pct: sh,
                 saturation_pct: 85.0,
                 target_min_pct: 25.0,
+                probe_configured: false,
+                governed_by_soil_model: false,
+                planning_forecast_unavailable: false,
+                sprinkler_type: Default::default(),
             },
         ]
+    }
+
+    fn missing_rain_inputs() -> Vec<(&'static str, Inputs)> {
+        let cases: [(&str, fn(&mut Inputs)); 6] = [
+            ("rain_now", |i| i.rain_intensity_now_in_hr = None),
+            ("rain_today_forecast", |i| i.rain_today_forecast_in = None),
+            ("rain_next_4h", |i| i.rain_next_4h_in = None),
+            ("tomorrow_rain", |i| i.forecast_in = None),
+            ("rain_3day", |i| i.rain_3day_weighted_in = None),
+            ("planning_forecast", |i| {
+                i.soil_zones = vec![ZoneSoil {
+                    slug: "fixture_zone".into(),
+                    planning_forecast_unavailable: true,
+                    ..Default::default()
+                }]
+            }),
+        ];
+        cases
+            .into_iter()
+            .map(|(code, clear)| {
+                let mut input = base();
+                clear(&mut input);
+                (code, input)
+            })
+            .collect()
     }
 
     /// The full reason battery (mirrors skip_rules::tests::parity_scenarios),
@@ -593,7 +696,7 @@ mod tests {
             f(&mut i);
             out.push((code, i));
         };
-        push("rain_now", |i| i.rain_intensity_now_in_hr = 0.05);
+        push("rain_now", |i| i.rain_intensity_now_in_hr = Some(0.05));
         push("freeze_now", |i| i.temp_now_f = 30.0);
         push("overnight_freeze", |i| {
             i.temp_now_f = 50.0;
@@ -606,21 +709,24 @@ mod tests {
         push("wind_now", |i| i.wind_now_mph = 20.0);
         push("wind_forecast", |i| i.wind_max_today_mph = 30.0);
         push("already_wet", |i| i.rain_today_in = 0.10);
+        push("rain_today_forecast", |i| {
+            i.rain_today_forecast_in = Some(0.40)
+        });
         push("observed_rain", |i| i.rain_observed_recent_in = 1.5);
         push("soil_saturation", |i| {
             i.soil_zones = soil4(Some(80.0), Some(80.0), Some(80.0), Some(90.0));
         });
-        push("rain_next_4h", |i| i.rain_next_4h_in = 0.20);
+        push("rain_next_4h", |i| i.rain_next_4h_in = Some(0.20));
         push("tomorrow_rain", |i| {
-            i.forecast_in = 0.40;
+            i.forecast_in = Some(0.40);
             i.rain_tomorrow_prob_pct = Some(90);
         });
-        push("rain_3day", |i| i.rain_3day_weighted_in = 1.0);
+        push("rain_3day", |i| i.rain_3day_weighted_in = Some(1.0));
         push("heat_advisory", |i| {
             i.temp_max_3day_f = 98.0;
             i.humidity_now_pct = 70.0;
             i.days_since_significant_rain = 3;
-            i.rain_3day_weighted_in = 0.0;
+            i.rain_3day_weighted_in = Some(0.0);
         });
         push("dry_run", |i| i.is_dry_run = true);
         push("paused", |i| i.is_paused = true);
@@ -634,15 +740,19 @@ mod tests {
             i.rain_today_in = 0.5;
         });
         push("soil_floor", |i| {
-            i.rain_next_4h_in = 0.50;
+            i.rain_next_4h_in = Some(0.50);
             i.soil_zones = soil4(Some(20.0), Some(45.0), Some(45.0), Some(45.0));
         });
         // pause_until (timed): not in parity_scenarios; add it so the renderer's
         // fallback path is exercised for the date-bearing reason.
         push("pause_until", |i| {
-            i.now_epoch = 1_700_000_000;
-            i.pause_until_epoch = i.now_epoch + 3600;
+            i.when = crate::engine::clock::DecisionTime::at(
+                crate::engine::calendar::Calendar::utc(),
+                1_700_000_000,
+            );
+            i.pause_until_epoch = i.now_epoch() + 3600;
         });
+        out.extend(missing_rain_inputs());
         out
     }
 
@@ -711,6 +821,8 @@ mod tests {
             "wind_now",
             "wind_forecast",
             "already_wet",
+            "rain_today_forecast",
+            "planning_forecast",
             "observed_rain",
             "soil_saturation",
             "rain_next_4h",
@@ -728,6 +840,52 @@ mod tests {
         }
     }
 
+    #[test]
+    fn missing_rain_keeps_actual_engine_hold_explanations_in_both_units() {
+        let params = SkipRuleParams::default();
+        for (code, input) in missing_rain_inputs() {
+            let skip = evaluate_with(&input, &params);
+            let trace = decide_traced(&input, &params);
+            assert_eq!(skip.reason_code, code);
+            assert_eq!(trace.reason_code, code);
+            assert!(skip.reason.contains("unavailable"), "{}", skip.reason);
+            for prefs in [IMPERIAL, METRIC] {
+                assert_eq!(render_skip_reason(&skip, prefs), skip.reason);
+                assert_eq!(render_trace_reason(&trace, prefs), trace.reason);
+                let rule = trace.rules.iter().find(|r| r.id == code).unwrap();
+                assert_eq!(rule.value, None);
+                assert_eq!(render_rule_detail(rule, prefs), rule.detail);
+                assert_eq!(render_rule_margin(rule, prefs), rule.margin_label);
+            }
+        }
+    }
+
+    #[test]
+    fn zero_rain_is_convertible_while_absent_operands_keep_the_original_reason() {
+        let mut skip = SkipCheck {
+            reason_code: "rain_today_forecast".into(),
+            rain_today_forecast_in: Some(0.0),
+            reason: "Today's rain forecast unavailable; watering held".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            render_skip_reason(&skip, IMPERIAL),
+            "Rain forecast today (0.00\" expected, not measured)"
+        );
+        assert_eq!(
+            render_skip_reason(&skip, METRIC),
+            "Rain forecast today (0.0 mm expected, not measured)"
+        );
+        for missing in [None, Some(f64::NAN), Some(-1.0)] {
+            skip.rain_today_forecast_in = missing;
+            assert_eq!(render_skip_reason(&skip, METRIC), skip.reason);
+        }
+        skip.reason_code = "soil_frost".into();
+        skip.reason = "Soil temperature unavailable".into();
+        skip.soil_temp_yard_min_f = None;
+        assert_eq!(render_skip_reason(&skip, METRIC), skip.reason);
+    }
+
     /// Per-zone soil reasons (percent) are byte-identical in both unit systems
     /// (percent is unit-invariant); the renderer reproduces them verbatim.
     #[test]
@@ -741,7 +899,7 @@ mod tests {
             assert_eq!(render_zone_reason(&z, METRIC), z.reason);
         }
         let mut j = base();
-        j.rain_next_4h_in = 0.50;
+        j.rain_next_4h_in = Some(0.50);
         j.soil_zones = soil4(Some(20.0), Some(45.0), Some(45.0), Some(45.0));
         for z in crate::engine::skip_rules::decide_per_zone(&j, &p, &[]) {
             assert_eq!(render_zone_reason(&z, IMPERIAL), z.reason);
@@ -813,7 +971,7 @@ mod tests {
         // rain_now: 0.05 in/hr -> 1.3 mm/hr.
         let p = SkipRuleParams::default();
         let mut i = base();
-        i.rain_intensity_now_in_hr = 0.05;
+        i.rain_intensity_now_in_hr = Some(0.05);
         let s = evaluate_with(&i, &p);
         let out = render_skip_reason(&s, METRIC);
         assert!(out.contains("mm/hr"), "metric rate missing mm/hr: {out}");

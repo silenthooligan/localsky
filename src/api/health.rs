@@ -5,7 +5,6 @@
 // restart policy.
 
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{extract::State, response::Json};
@@ -14,37 +13,24 @@ use serde::Serialize;
 use crate::config::schema::SourceKind;
 use crate::config::FileConfigStore;
 use crate::forecast::ForecastStore;
-use crate::ha::IrrigationStore;
 use crate::persistence::SensorHistoryStore;
 use crate::ports::config_store::ConfigStore;
+use crate::refresher::IrrigationStore;
 use crate::tempest::state::TempestStore;
 
-static STARTED_AT: OnceLock<Instant> = OnceLock::new();
-
-fn started_at() -> Instant {
-    *STARTED_AT.get_or_init(Instant::now)
-}
-
-/// Hard-offline window. A source is only `offline` (a genuine fetch fault that
-/// degrades the instance) when it has had NO Reachability AND NO Observation for
-/// this long. A reachable-but-quiet rain authority (a dry / no-coverage MRMS
-/// that fetches both grids fine every few minutes and correctly declines to
-/// fabricate a dry 0) is `watching`, never `offline`. 1800s (30 min) is long
-/// enough that a couple of missed polls on a slow-cadence cloud never trips a
-/// false fault, while a real connectivity outage still surfaces within the
-/// half-hour. Matches the spec's "no Reachability for some long window like
-/// 30+ min" definition of a genuine fault.
+/// Compatibility freshness window for adapters with no explicit reachability
+/// verdict. Once an adapter reports reachability, both edges are authoritative:
+/// a quiet successful source stays watching, and a reported failure is offline.
 const HARD_OFFLINE_WINDOW_S: i64 = 1800;
 
 /// Shared per-source last-REACHABLE map, the reachability twin of
 /// `sources::SourceLastSeen`. Defined in the `sources` layer (next to
 /// `SourceLastSeen`) so the bus recorder can record into it without `sources`
 /// depending on `api`; re-exported here for ergonomics. The adapters publish a
-/// `SourceEvent::Reachability` on every successful fetch (e.g. noaa_mrms.rs,
-/// nws.rs); the bus recorder stamps the receive epoch on a
-/// `Reachability { reachable: true }` event so the honest-status taxonomy can
+/// `SourceEvent::Reachability` when connectivity changes; the recorder retains
+/// that verdict and the last-success epoch so the honest-status taxonomy can
 /// tell a reachable-but-quiet source (a dry rain authority emitting no
-/// Observation) apart from a genuinely unreachable one. main.rs threads one
+/// Observation) apart from a genuinely unreachable one. the boot threads one
 /// handle into both `HealthState.source_reachable` and the runtime so
 /// /api/config reads the same map. When the handle is absent (`None`), the
 /// taxonomy falls back to the Observation last-seen as the reachability proxy,
@@ -67,10 +53,8 @@ pub use crate::sources::SourceReachability;
 pub enum SourceStatus {
     /// Owns a live field per the snapshot `field_sources` right now.
     Active,
-    /// Last fetch was reachable (a Reachability event), it emits no Observation
-    /// this cycle (dry / no rain / no coverage), and it is NOT past the
-    /// hard-offline window. A reachable-but-quiet rain authority is `watching`,
-    /// never `offline`.
+    /// Last explicit connectivity verdict was reachable, but it owns no field.
+    /// A reachable-but-quiet rain authority is `watching`, never `offline`.
     Watching,
     /// Enabled + reachable + owns no field, because a higher-priority enabled
     /// source currently owns the field(s) it could provide.
@@ -78,8 +62,8 @@ pub enum SourceStatus {
     /// It was the owner, has gone stale past its per-field freshness window, and
     /// another source has taken the field (the chain handled it).
     FallingThrough,
-    /// No Reachability AND no Observation past the hard-offline window: a genuine
-    /// fault. The ONLY state that degrades the instance.
+    /// Explicit connection failure, or no fresh evidence from a legacy adapter
+    /// that has never reported reachability. The only degrading source state.
     Offline,
 }
 
@@ -126,10 +110,11 @@ pub struct SourceStatusInputs {
     /// This source was the owner and has now gone stale past its per-field
     /// freshness window while another source took over. Drives `FallingThrough`.
     pub was_owner_now_fell_through: bool,
-    /// Epoch the source was last REACHABLE (a Reachability event), or None.
-    /// Judged against the fixed `HARD_OFFLINE_WINDOW_S` (30 min): a Reachability
-    /// fires on EVERY successful fetch (every few minutes), so a long silence on
-    /// THIS channel is a genuine fetch fault.
+    /// Latest explicit adapter verdict. Unlike the last-success epoch this
+    /// persists across quiet periods and carries failures as well as success.
+    pub reachable: Option<bool>,
+    /// Epoch the source was last reachable, retained for compatibility when
+    /// the current verdict is unavailable. Quiet periods do not expire a verdict.
     pub last_reachable_epoch: Option<i64>,
     /// Epoch of the source's last Observation, or None. The fallback liveness
     /// proxy when the reachability handle is un-wired or an adapter emits data
@@ -155,8 +140,9 @@ pub struct SourceStatusInputs {
 /// the row UI and the health rollup are congruent.
 ///
 /// Decision order:
+///   0. disabled or explicit connection failure -> `Offline`.
 ///   1. owns a field            -> `Active`.
-///   2. reachable recently      -> `FallingThrough` if it just lost a field it
+///   2. reachable               -> `FallingThrough` if it just lost a field it
 ///                                 owned, else `Standby` ONLY if a strictly
 ///                                 HIGHER-priority source owns a field it could
 ///                                 provide (genuinely outranked), else `Watching`
@@ -179,17 +165,17 @@ pub struct SourceStatusInputs {
 /// /api/health degraded rollup only counts an `offline` source that is ALSO
 /// enabled, so an off source never degrades the instance.
 pub fn compute_source_status(i: SourceStatusInputs) -> SourceStatus {
-    if !i.enabled {
+    if !i.enabled || i.reachable == Some(false) {
         return SourceStatus::Offline;
     }
     if i.owns_field {
         return SourceStatus::Active;
     }
     // Reachable per a Reachability event within the hard-offline window.
-    let reachable_recently = i
-        .last_reachable_epoch
-        .map(|e| i.now - e <= HARD_OFFLINE_WINDOW_S)
-        .unwrap_or(false);
+    let reachable_recently = i.reachable == Some(true)
+        || i.last_reachable_epoch
+            .map(|e| i.now - e <= HARD_OFFLINE_WINDOW_S)
+            .unwrap_or(false);
     // An Observation within the kind-aware `obs_alive_window_s` also proves the
     // source is alive: it is the reachability proxy for an un-wired build (no
     // reachability handle) or an adapter that emits data but no explicit
@@ -302,6 +288,8 @@ pub fn source_ownership_facts(
 
 #[derive(Clone)]
 pub struct HealthState {
+    /// When the process came up, for the uptime figure.
+    pub started_at: Instant,
     pub config_store: Option<Arc<FileConfigStore>>,
     /// When set, /api/health enumerates sources from the loaded config
     /// and reports per-source freshness (seconds since last observation).
@@ -325,18 +313,52 @@ pub struct HealthState {
     /// reachable-but-quiet rain authority reads `watching`, never `offline`.
     /// `None` on an un-wired build, in which case the taxonomy falls back to the
     /// Observation last-seen as the reachability proxy. SEAM (Foundation):
-    /// main.rs constructs one `SourceReachability`, threads it into the bus
+    /// the boot constructs one `SourceReachability`, threads it into the bus
     /// recorder (record on `Reachability { reachable: true }`) and into this
     /// field + the runtime handles so /api/config can read the same map.
     pub source_reachable: Option<SourceReachability>,
+    /// The shutoff-deadline ledger, for the one state worth a red banner:
+    /// a valve past its deadline that nothing has confirmed closed.
+    pub active_runs: Option<crate::persistence::ActiveRunsStore>,
+}
+
+/// A valve past its shutoff deadline with no confirmed close.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct UnclosedValve {
+    pub zone_slug: String,
+    pub controller_id: String,
+    pub deadline_epoch: i64,
+    pub overdue_s: i64,
+}
+
+/// The ledger rows past their deadline, as the health surface shows them.
+pub fn unclosed_valves(rows: &[crate::persistence::ActiveRun], now: i64) -> Vec<UnclosedValve> {
+    rows.iter()
+        .filter(|r| r.off_deadline_epoch < now)
+        .map(|r| UnclosedValve {
+            zone_slug: r.zone_slug.clone(),
+            controller_id: r.controller_id.clone(),
+            deadline_epoch: r.off_deadline_epoch,
+            overdue_s: now - r.off_deadline_epoch,
+        })
+        .collect()
 }
 
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
     pub status: &'static str,
     pub config_present: bool,
+    /// A real place is configured. False on a fresh install and on a
+    /// config still at (0, 0); no forecast source is polled until it is
+    /// true, and the sources below say so in their `note`.
+    pub location_configured: bool,
     pub version: &'static str,
     pub schema_version: Option<u32>,
+    /// Valves past their shutoff deadline that LocalSky could not confirm
+    /// closed. Empty is the normal state; anything here means water may
+    /// be leaving the property with nothing stopping it, and the reaper
+    /// is retrying every tick.
+    pub valves_unclosed: Vec<UnclosedValve>,
     pub uptime_s: u64,
     pub subsystems: SubsystemReport,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -348,7 +370,7 @@ pub struct HealthResponse {
     /// status degraded so the UI health banner surfaces the dead
     /// hardware. Same anonymous-caller trimming as sources/controllers.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub soil_probe_faults: Vec<crate::ha::snapshot::SoilProbeFault>,
+    pub soil_probe_faults: Vec<crate::model::SoilProbeFault>,
     /// The Home Assistant relationship, both directions. None for
     /// anonymous callers on auth-required instances (same trimming as
     /// sources/controllers).
@@ -382,6 +404,14 @@ pub struct HaIntegration {
     /// ha_passthrough sources: (id, mapped-field count). A zero count
     /// means the source feeds nothing.
     pub passthrough_sources: Vec<(String, usize)>,
+    /// What the Tempest LAN listener is doing, including whether its port
+    /// is held by another program on this host.
+    ///
+    /// The port is the one piece of a LocalSky install that another
+    /// program can take, and until this existed the only evidence was a
+    /// log line. An operator running Home Assistant on the same machine
+    /// saw an empty station and no reason for it.
+    pub tempest_listener: crate::tempest::status::ListenerStatus,
     /// Controllers actuated through HA service calls.
     pub service_call_controllers: Vec<String>,
     /// Outbound: MQTT discovery publishing enabled.
@@ -416,7 +446,14 @@ pub struct SourceFreshness {
     /// calm. Congruent with the `status` field on each
     /// /api/config/source_catalog cloud entry (same `compute_source_status`).
     pub status: &'static str,
+    /// Why a source is idle when that is LocalSky's doing rather than the
+    /// source's: today only `UNLOCATED_NOTE`. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<&'static str>,
 }
+
+/// The note on every location-bound source while no location is set.
+pub const UNLOCATED_NOTE: &str = "not polled: no location is configured yet";
 
 #[derive(Debug, Serialize)]
 pub struct ControllerSummary {
@@ -426,10 +463,30 @@ pub struct ControllerSummary {
     pub enabled: bool,
 }
 
+/// `?strict=1`: answer 503 unless the status is `ok`, so a monitor that
+/// only looks at the status code (a Docker healthcheck, an uptime pinger)
+/// alerts on `degraded` and not just on dead. Without it the answer is
+/// always 200 and the body says what is wrong.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct HealthQuery {
+    #[serde(default)]
+    pub strict: Option<u8>,
+}
+
+/// The status code a health answer carries.
+pub fn status_code(status: &str, strict: bool) -> axum::http::StatusCode {
+    if strict && status != "ok" {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        axum::http::StatusCode::OK
+    }
+}
+
 pub async fn health(
     State(state): State<HealthState>,
+    axum::extract::Query(q): axum::extract::Query<HealthQuery>,
     req: axum::http::Request<axum::body::Body>,
-) -> Json<HealthResponse> {
+) -> (axum::http::StatusCode, Json<HealthResponse>) {
     // Anonymous callers on an auth-required instance get liveness only:
     // status/version/uptime, no per-source detail (Docker healthchecks
     // and uptime monitors keep working without leaking topology).
@@ -446,17 +503,27 @@ pub async fn health(
         );
         !required || identified
     };
-    let uptime_s = started_at().elapsed().as_secs();
+    let report = health_report(state, full_detail).await;
+    (
+        status_code(report.status, q.strict == Some(1)),
+        Json(report),
+    )
+}
+
+/// The health answer itself, shared by the handler and the diagnostics
+/// bundle. `full_detail` false trims topology for an anonymous caller.
+pub async fn health_report(state: HealthState, full_detail: bool) -> HealthResponse {
+    let uptime_s = state.started_at.elapsed().as_secs();
     let mut config_present = false;
+    let mut location_configured = false;
     let mut schema_version = None;
     let mut config_status = "missing";
     let mut sources_freshness: Vec<SourceFreshness> = Vec::new();
     let mut controller_summaries: Vec<ControllerSummary> = Vec::new();
-    // Source ids that are a passive live-station (TempestUdp) listener on a
-    // cloud-only install (never produced a packet, no station present): listed
-    // for visibility but excluded from the offline-degradation check below.
-    let mut passive_station_ids: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    // Source ids LocalSky is not polling by its own choice rather than by
+    // any fault of theirs (a located source on an install with no location
+    // yet): listed for visibility but excluded from the degradation check.
+    let mut not_polled_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Config-entry id -> friendly display name, built from the loaded config so
     // the conditions-provenance build below can turn the raw provenance label
     // ("open_meteo") into a person-facing name ("Open-Meteo") at THIS
@@ -473,14 +540,14 @@ pub async fn health(
                 Ok(cfg) => {
                     schema_version = Some(cfg.schema_version);
                     config_status = "ok";
+                    location_configured = cfg.deployment.location.is_set();
 
                     // Per-source freshness comes from data the source
-                    // actually produced: TempestUdp from the UDP
-                    // listener's store, OpenMeteo from the forecast
-                    // refresher's store (the two legacy v0.1 paths), and
-                    // every bus-publishing kind from the recorder's
-                    // last-seen map plus its sensor_history rows
-                    // (history survives restarts; the map is this boot).
+                    // actually produced: the recorder's last-seen map for
+                    // this boot, plus its sensor_history rows, which
+                    // survive restarts. Every kind reports the same way
+                    // now that the LAN station and the forecast refresher
+                    // publish on the bus like everything else.
                     let source_ids: Vec<String> =
                         cfg.sources.iter().map(|s| s.id.clone()).collect();
                     let last_seen = if let Some(hist) = &state.sensor_history {
@@ -490,37 +557,6 @@ pub async fn health(
                     } else {
                         std::collections::HashMap::new()
                     };
-                    let tempest_last = state
-                        .tempest_store
-                        .as_ref()
-                        .map(|s| s.snapshot().last_packet_epoch)
-                        .filter(|e| *e > 0);
-                    // Whether a live LOCAL station is actually present for this
-                    // deployment, the SAME predicate the in-page verdict-strip
-                    // pill uses (crate::tempest::state::station_present). A
-                    // TempestUdp source that has never produced a packet on a
-                    // no-station (cloud-only) install must NOT count as
-                    // offline/degrading: with nothing transmitting on the passive
-                    // listener it would otherwise drive a phantom "tempest_lan
-                    // offline / degraded" banner ~60s after first load. Once a
-                    // station HAS reported, a subsequent silence is real staleness
-                    // and still degrades (handled by the normal status below).
-                    let station_present = state
-                        .tempest_store
-                        .as_ref()
-                        .map(|s| {
-                            let snap = s.snapshot();
-                            crate::tempest::state::station_present(
-                                snap.last_packet_epoch,
-                                &snap.station_serial,
-                            )
-                        })
-                        .unwrap_or(false);
-                    let forecast_last = state
-                        .forecast_store
-                        .as_ref()
-                        .map(|s| s.snapshot().last_refresh_epoch)
-                        .filter(|e| *e > 0);
                     let now = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .map(|d| d.as_secs() as i64)
@@ -595,36 +631,26 @@ pub async fn health(
                     // `standby` ONLY when a strictly HIGHER-priority source owns a
                     // field it could provide; otherwise it is `watching`.
                     let source_priorities = crate::runtime::source_priority_map(&cfg);
-                    // Record any TempestUdp listener that has no station present
-                    // (cloud-only install): listed for visibility but excluded
-                    // from the offline-degradation check below.
                     for entry in &cfg.sources {
-                        if matches!(entry.source, SourceKind::TempestUdp(_)) && !station_present {
-                            passive_station_ids.insert(entry.id.clone());
-                        }
                         // Record this entry's friendly display name, keyed by its
                         // id, for the conditions provenance build below. The
                         // resolver maps the kind tag to a brand/pretty name; the
                         // raw id stays the merge key everywhere else.
                         source_friendly.insert(
                             entry.id.clone(),
-                            crate::components::sources_form::friendly_source_name(
-                                source_kind_label(&entry.source),
-                            ),
+                            crate::config::kind_labels::friendly_source_name(source_kind_label(
+                                &entry.source,
+                            )),
                         );
-                        let last_seen_epoch = match &entry.source {
-                            SourceKind::TempestUdp(_) => tempest_last,
-                            SourceKind::OpenMeteo(_) => forecast_last,
-                            _ => {
-                                let bus = state
-                                    .source_last_seen
-                                    .as_ref()
-                                    .and_then(|m| m.get(&entry.id));
-                                let hist = last_seen.get(&entry.id).copied();
-                                match (bus, hist) {
-                                    (Some(a), Some(b)) => Some(a.max(b)),
-                                    (a, b) => a.or(b),
-                                }
+                        let last_seen_epoch = {
+                            let bus = state
+                                .source_last_seen
+                                .as_ref()
+                                .and_then(|m| m.get(&entry.id));
+                            let hist = last_seen.get(&entry.id).copied();
+                            match (bus, hist) {
+                                (Some(a), Some(b)) => Some(a.max(b)),
+                                (a, b) => a.or(b),
                             }
                         };
                         // Diagnostics, kept on the wire: how long since the last
@@ -714,15 +740,26 @@ pub async fn health(
                             other_owns_a_field_it_could_provide,
                             outranked_by_higher_priority_owner,
                             was_owner_now_fell_through,
+                            reachable: state
+                                .source_reachable
+                                .as_ref()
+                                .and_then(|m| m.reachable(&entry.id)),
                             last_reachable_epoch,
                             last_obs_epoch: last_seen_epoch,
                             obs_alive_window_s,
                             now,
                         })
                         .as_str();
+                        // Not polled by LocalSky's choice, not the source's
+                        // fault: it cannot be offline, and it says why.
+                        let unlocated = !location_configured && entry.source.needs_location();
+                        if unlocated {
+                            not_polled_ids.insert(entry.id.clone());
+                        }
                         sources_freshness.push(SourceFreshness {
                             id: entry.id.clone(),
                             kind: source_kind_label(&entry.source),
+                            note: unlocated.then_some(UNLOCATED_NOTE),
                             // Effective, not entry-level: a parked
                             // blitzortung entry (inner opt-in off) is
                             // intentionally silent and must not trip
@@ -758,6 +795,12 @@ pub async fn health(
             .as_ref()
             .map(|s| s.snapshot().ha_reachable)
             .unwrap_or(false);
+        // ssr-only: the browser reads this off the response, it does
+        // not compute it.
+        #[cfg(feature = "ssr")]
+        let tempest_listener = crate::tempest::listener::listener_status();
+        #[cfg(not(feature = "ssr"))]
+        let tempest_listener = crate::tempest::status::ListenerStatus::NotConfigured;
         let mut passthrough_sources = Vec::new();
         let mut service_call_controllers = Vec::new();
         let mut mqtt_discovery = false;
@@ -801,6 +844,7 @@ pub async fn health(
                 "home_assistant"
             },
             passthrough_sources,
+            tempest_listener,
             service_call_controllers,
             mqtt_discovery,
             hacs_last_seen_epoch: crate::api::manifest::LAST_MANIFEST_FETCH_EPOCH
@@ -825,21 +869,25 @@ pub async fn health(
         .unwrap_or_default();
 
     let status = match (config_present, config_status) {
+        // A config with no place in it forecasts nothing: degraded, with
+        // location_configured=false and the per-source notes saying why.
+        (true, "ok") if !location_configured => "degraded",
         (true, "ok") => {
             // ONLY a genuinely-unreachable source (taxonomy `offline`) degrades
             // the instance. The calm states `watching` / `standby` /
             // `falling_through` are the fall-through chain working, NOT a fault,
             // so a dry / no-coverage rain authority that fetches fine and simply
             // emits no Observation reads `watching` here and never reds the
-            // instance. The same passive-station exemption still applies: a
-            // TempestUdp listener on a cloud-only install (no station ever
-            // present) is `offline` only because nothing transmits on its passive
-            // socket, so it is excluded from the degrade check (the in-page
-            // verdict-strip pill uses the identical station-presence gate).
+            // instance. A source LocalSky is not polling by its own choice
+            // (no location configured yet) is excluded too: that is not the
+            // source's fault and it says so in its note. A LAN station that
+            // is bound and simply quiet publishes reachability when it binds,
+            // so it reads `watching`; one that cannot bind at all is a real
+            // fault and still degrades.
             let any_offline = sources_freshness.iter().any(|s| {
                 s.enabled
                     && s.status == SourceStatus::Offline.as_str()
-                    && !passive_station_ids.contains(&s.id)
+                    && !not_polled_ids.contains(&s.id)
             });
             if any_offline || !soil_probe_faults.is_empty() {
                 "degraded"
@@ -880,11 +928,20 @@ pub async fn health(
         ha = None;
     }
 
-    Json(HealthResponse {
+    let valves_unclosed = match state.active_runs.as_ref() {
+        Some(ar) => match ar.armed().await {
+            Ok(rows) => unclosed_valves(&rows, chrono::Utc::now().timestamp()),
+            Err(_) => Vec::new(),
+        },
+        None => Vec::new(),
+    };
+    HealthResponse {
         status,
         config_present,
+        location_configured,
         version: env!("CARGO_PKG_VERSION"),
         schema_version,
+        valves_unclosed,
         uptime_s,
         subsystems: SubsystemReport {
             config_store: config_status,
@@ -895,7 +952,7 @@ pub async fn health(
         soil_probe_faults,
         ha,
         conditions,
-    })
+    }
 }
 
 use crate::config::kind_labels::source_kind_label;
@@ -962,6 +1019,7 @@ mod tests {
             other_owns_a_field_it_could_provide: false,
             outranked_by_higher_priority_owner: false,
             was_owner_now_fell_through: false,
+            reachable: None,
             last_reachable_epoch: None,
             last_obs_epoch: None,
             // Obs fallback uses the same tight window as reachability in the base
@@ -996,6 +1054,35 @@ mod tests {
             ..base_inputs()
         };
         assert_eq!(compute_source_status(i), SourceStatus::Active);
+    }
+
+    #[test]
+    fn explicit_failure_wins_over_retained_ownership_and_recent_data() {
+        let i = SourceStatusInputs {
+            owns_field: true,
+            reachable: Some(false),
+            last_reachable_epoch: Some(9_999),
+            last_obs_epoch: Some(9_999),
+            ..base_inputs()
+        };
+        assert_eq!(compute_source_status(i), SourceStatus::Offline);
+    }
+
+    #[test]
+    fn quiet_source_keeps_its_explicit_reachable_verdict_until_failure() {
+        let i = SourceStatusInputs {
+            reachable: Some(true),
+            last_reachable_epoch: Some(1),
+            ..base_inputs()
+        };
+        assert_eq!(compute_source_status(i), SourceStatus::Watching);
+        assert_eq!(
+            compute_source_status(SourceStatusInputs {
+                reachable: Some(false),
+                ..i
+            }),
+            SourceStatus::Offline
+        );
     }
 
     #[test]
@@ -1157,11 +1244,12 @@ mod tests {
 
     #[test]
     fn tempest_owned_field_matched_by_writer_label_is_active() {
-        // The regression: a fresh Tempest stamps its WRITER LABEL ("Tempest") into
-        // field_provenance for temp/wind. The status must match on THAT label, not
-        // a friendly display name ("Tempest UDP (LAN)") which never equals it. With
-        // the writer-label match the Tempest owns a field -> active.
-        let writer = crate::tempest::state::TEMPEST_LABEL; // "Tempest"
+        // The regression: a fresh Tempest stamps its WRITER LABEL (its config
+        // id) into field_provenance for temp/wind. The status must match on
+        // THAT label, not a friendly display name ("Tempest UDP (LAN)") which
+        // never equals it. With the writer-label match the station owns a
+        // field -> active.
+        let writer = "tempest";
         let owners = owner_set(&[writer]);
         let field_owners = field_owners(&[("air_temp_f", writer), ("wind_mph", writer)]);
         let providable = providable(&["air_temp_f", "wind_mph"]);
@@ -1344,5 +1432,55 @@ mod tests {
             health_status, catalog_status,
             "both surfaces are congruent (watching) for the MRMS-quiet case"
         );
+    }
+}
+
+#[cfg(test)]
+mod strict_tests {
+    use super::*;
+
+    /// A config with no place in it reads degraded. Plain health keeps the
+    /// 200 a liveness probe expects; `?strict=1` turns it into a 503 a
+    /// status-code monitor can alert on.
+    #[tokio::test]
+    async fn strict_health_answers_503_on_a_degraded_fixture() {
+        let dir =
+            std::env::temp_dir().join(format!("localsky-health-strict-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("localsky.toml");
+        std::fs::write(
+            &path,
+            "schema_version = 2\n[deployment.location]\nlat = 0.0\nlon = 0.0\n",
+        )
+        .unwrap();
+        let state = HealthState {
+            started_at: Instant::now(),
+            config_store: Some(Arc::new(FileConfigStore::new(&path))),
+            sensor_history: None,
+            tempest_store: None,
+            forecast_store: None,
+            irrigation_store: None,
+            source_last_seen: None,
+            source_reachable: None,
+            active_runs: None,
+        };
+        let report = health_report(state.clone(), true).await;
+        assert_eq!(report.status, "degraded");
+        assert!(!report.location_configured);
+        assert_eq!(
+            status_code(report.status, false),
+            axum::http::StatusCode::OK
+        );
+        assert_eq!(
+            status_code(report.status, true),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(status_code("ok", true), axum::http::StatusCode::OK);
+        assert_eq!(
+            status_code("wizard", true),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
