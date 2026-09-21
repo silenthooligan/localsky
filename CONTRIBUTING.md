@@ -64,6 +64,10 @@ Edit `src/engine/species_catalog.rs` or `src/engine/soil_catalog.rs`. New entrie
 
 ## Pull requests
 
+See [release automation](.github/RELEASING.md) for native image checks,
+verified build tools and release recovery. Workflow changes can be tested
+through the full release pipeline with publication disabled.
+
 - Open against `main`.
 - Title in conventional-commits style: `feat(scope): summary`, `fix(scope): summary`, `docs:`, `test:`, `refactor:`, etc.
 - Include a test plan when relevant.

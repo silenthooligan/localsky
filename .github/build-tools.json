@@ -1,0 +1,38 @@
+{
+  "cargo_leptos": "0.3.9",
+  "tools": [
+    {
+      "name": "wasm-bindgen",
+      "repository": "wasm-bindgen/wasm-bindgen",
+      "tag": "0.2.126",
+      "version": "0.2.126",
+      "binary": "wasm-bindgen",
+      "archives": {
+        "x86_64": {"asset_id": 456882695, "name": "wasm-bindgen-0.2.126-x86_64-unknown-linux-musl.tar.gz", "directory": "wasm-bindgen-0.2.126-x86_64-unknown-linux-musl", "sha256": "064948d58e2d6c0a745216477a639ba696216d6309aaa902939d1b865b1d869d"},
+        "aarch64": {"asset_id": 456882701, "name": "wasm-bindgen-0.2.126-aarch64-unknown-linux-gnu.tar.gz", "directory": "wasm-bindgen-0.2.126-aarch64-unknown-linux-gnu", "sha256": "96864b3992ad45536deb59fc62edc5b845376b7d8b4ac670a6bdab4ab8d2c657"}
+      }
+    },
+    {
+      "name": "binaryen",
+      "repository": "WebAssembly/binaryen",
+      "tag": "version_123",
+      "version": "123",
+      "binary": "bin/wasm-opt",
+      "archives": {
+        "x86_64": {"asset_id": 240710285, "name": "binaryen-version_123-x86_64-linux.tar.gz", "directory": "binaryen-version_123", "sha256": "e959f2170af4c20c552e9de3a0253704d6a9d2766e8fdb88e4d6ac4bae9388fe"},
+        "aarch64": {"asset_id": 240708754, "name": "binaryen-version_123-aarch64-linux.tar.gz", "directory": "binaryen-version_123", "sha256": "4b6bd61ba6cd3b18c993b4657d93426c782f9b91b74be0d38018cd8be1319376"}
+      }
+    },
+    {
+      "name": "dart-sass",
+      "repository": "sass/dart-sass",
+      "tag": "1.99.0",
+      "version": "1.99.0",
+      "binary": "sass",
+      "archives": {
+        "x86_64": {"asset_id": 387414406, "name": "dart-sass-1.99.0-linux-x64.tar.gz", "directory": "dart-sass", "sha256": "f0a32ab99bc0a1eb62ea7140a056a1bca82d534390b7c3dba4f2016eb0077753"},
+        "aarch64": {"asset_id": 387414403, "name": "dart-sass-1.99.0-linux-arm64.tar.gz", "directory": "dart-sass", "sha256": "685765a2f3dc86de1f50351c44935c138beffa923104fc2ec30273ac1416f4df"}
+      }
+    }
+  ]
+}
