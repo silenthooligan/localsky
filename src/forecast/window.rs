@@ -22,7 +22,29 @@ pub struct ForecastWindow {
     pub precip_sum_in: Option<f64>,
     pub temp_max_f: Option<f64>,
     pub temp_min_f: Option<f64>,
-    pub hourly: Vec<HourlyEntry>,
+    pub hourly: Vec<WindowHour>,
+}
+
+/// Only fields whose presence is preserved by every forecast adapter.
+/// Legacy advisory entries use zero placeholders for unsupported series;
+/// those are not observations and must not escape through this new API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowHour {
+    pub time_epoch: i64,
+    pub temp_f: Option<f64>,
+    pub precip_in: Option<f64>,
+    pub precip_probability: Option<u32>,
+}
+
+impl From<&HourlyEntry> for WindowHour {
+    fn from(hour: &HourlyEntry) -> Self {
+        Self {
+            time_epoch: hour.time_epoch,
+            temp_f: hour.temp_f.filter(|v| v.is_finite()),
+            precip_in: hour.precip_in.filter(|v| v.is_finite() && *v >= 0.0),
+            precip_probability: hour.precip_probability.filter(|v| *v <= 100),
+        }
+    }
 }
 
 pub fn validate_range(from: i64, to: i64, max_seconds: i64) -> Result<(), &'static str> {
@@ -48,7 +70,7 @@ pub fn query(
         .hourly
         .iter()
         .filter(|h| h.time_epoch >= from && h.time_epoch <= to)
-        .cloned()
+        .map(WindowHour::from)
         .collect();
     hourly.sort_by_key(|h| h.time_epoch);
     hourly.dedup_by_key(|h| h.time_epoch);
@@ -159,6 +181,26 @@ mod tests {
         for (from, to) in [(4, 3), (0, 172801), (i64::MIN, i64::MAX)] {
             assert!(query(&forecast(), "merged", None, from, to, 7200).is_err());
         }
+    }
+
+    #[test]
+    fn hourly_response_preserves_unknowns_without_legacy_advisory_placeholders() {
+        let mut f = forecast();
+        f.hourly[0].temp_f = None;
+        f.hourly[0].precip_in = Some(0.0);
+        f.hourly[0].precip_probability = Some(0);
+        let result = query(&f, "nbm", None, 3600, 3600, 7200).unwrap();
+        assert_eq!(
+            serde_json::to_value(&result.hourly[0]).unwrap(),
+            serde_json::json!({
+                "time_epoch": 3600,
+                "temp_f": null,
+                "precip_in": 0.0,
+                "precip_probability": 0,
+            })
+        );
+        assert_eq!(result.temp_max_f, None);
+        assert_eq!(result.precip_sum_in, Some(0.0));
     }
 }
 

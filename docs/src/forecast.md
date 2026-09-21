@@ -56,7 +56,11 @@ Each timestamp is the **start** of its hour. For the two hours starting at
 13:00 and 14:00, pass those two timestamps.
 
 Responses include rain probability, maximum hourly rain, total rain and
-temperature extremes, plus the underlying rows, forecast age and coverage.
+temperature summaries. Hourly rows contain the timestamp, temperature, rain
+amount and probability, with null for unavailable readings. Extended advisory
+series are outside the window response.
+
+Forecast age and coverage accompany the readings.
 Values remain in inches and Fahrenheit regardless of display settings.
 A summary is `null` if its requested hours or measurements are missing;
 reported zero still means zero. Check the age and the fields you need before

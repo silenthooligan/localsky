@@ -866,6 +866,9 @@ The response includes `track`, `model` (null for the merged forecast),
 `complete`, coverage counts (`precipitation_hours`, `probability_hours`,
 `temperature_hours`), `hourly`, and the summary fields `pop_max_pct`,
 `precip_max_in`, `precip_sum_in`, `temp_max_f`, `temp_min_f`.
+Each `hourly` row contains `time_epoch`, `temp_f`, `precip_in` and
+`precip_probability`; the three readings are nullable. Advisory soil, snow
+and other extended fields are outside this window contract.
 Each summary is null if its values or hourly coverage are incomplete. Reported
 zero stays zero. A known track with no rows returns 200 and `hours: 0`;
 an unknown track returns 404, and reversed or oversized ranges return 400.

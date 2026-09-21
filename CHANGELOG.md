@@ -25,6 +25,8 @@ remain supported. Back up your data before upgrading.
 
 ### Fixed
 
+- Updated rustls to 0.23.45 for RUSTSEC-2026-0285 (TLS handshake encryption
+  boundaries), with its required TLS dependencies.
 - Live watering decisions and future plans establish actual soil-model coverage
   before applying rain rules. Missing or stale planning rain holds affected
   zones; selecting a soil model cannot silently waive missing forecast evidence.
