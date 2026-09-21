@@ -1,73 +1,80 @@
 name: release
 
-# Every v* tag becomes a GitHub Release automatically. The body is the
-# matching CHANGELOG.md section (the mirror squashes commits, so
-# generated notes carry no detail), prefixed with the image pull
-# instructions. Betas are full releases marked Latest; only alpha and
-# rc tags publish as prereleases. Publish flow stays: tag, push, done.
-
+# One run owns validation, source checks, both native images and publication.
+# Rerun failed jobs to resume this exact tag. Never move a published version tag.
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      verify_only:
+        description: Run the entire pipeline without publishing images or a release
+        type: boolean
+        default: false
 
 permissions:
-  contents: write
-  actions: read
+  contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  # Serialize promotions across versions so an older run cannot overwrite Latest.
+  group: release-publish
   cancel-in-progress: false
 
 jobs:
-  release:
+  validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 5
+    outputs:
+      published: ${{ steps.validate.outputs.published }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - name: Wait for source checks and both image architectures
+      - name: Validate immutable version and publication state
+        id: validate
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_SHA: ${{ github.sha }}
-          RELEASE_REPO: ${{ github.repository }}
-        run: python3 .github/scripts/wait-release-gates.py
-      - name: create release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+          VERIFY_ONLY: ${{ inputs.verify_only || false }}
         run: |
-          VERSION="${TAG#v}"
-          cat > /tmp/body.md <<BODY
-          ## Run it
+          args=()
+          if [ "$VERIFY_ONLY" = true ]; then args+=(--verify-only); fi
+          python3 .github/scripts/release.py validate "${args[@]}"
 
-          \`\`\`bash
-          docker run -d -p 8090:8090 -v localsky-data:/data ghcr.io/${{ github.repository }}:${VERSION}
-          \`\`\`
+  checks:
+    needs: validate
+    if: needs.validate.outputs.published != 'true'
+    uses: ./.github/workflows/ci.yml
 
-          Multi-arch image (amd64 + arm64). Quick start: https://localsky.io/docs/getting-started
+  images:
+    needs: [validate, checks]
+    if: needs.validate.outputs.published != 'true'
+    uses: ./.github/workflows/docker.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      publish: ${{ !inputs.verify_only }}
+    secrets: inherit
 
-          BODY
-          # Pull this version's section out of CHANGELOG.md: from its
-          # heading to the next "## [" heading. Empty when the section
-          # is missing; the release still publishes with the header.
-          awk -v ver="$VERSION" '
-            $0 ~ "^## \\[" ver "\\]" { found=1; next }
-            found && /^## \[/ { exit }
-            found { print }
-          ' CHANGELOG.md >> /tmp/body.md
-          PREV=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)
-          if [ -n "$PREV" ]; then
-            printf '\n**Full Changelog**: https://github.com/%s/compare/%s...%s\n' \
-              "${{ github.repository }}" "$PREV" "$TAG" >> /tmp/body.md
-          fi
-          # Alpha/rc tags are prereleases; betas and stable are the
-          # latest release (beta in the version string says enough).
-          case "$TAG" in
-            *-alpha*|*-rc*) FLAGS="--prerelease";;
-            *) FLAGS="--latest";;
-          esac
-          gh release create "$TAG" \
-            --title "$TAG" \
-            --notes-file /tmp/body.md \
-            $FLAGS
+  publish:
+    needs: [validate, checks, images]
+    if: >-
+      always() && needs.validate.result == 'success' &&
+      (needs.validate.outputs.published == 'true' ||
+       (needs.checks.result == 'success' && needs.images.result == 'success'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Publish once, preserving existing releases on retries
+        if: '!inputs.verify_only'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/release.py publish
+      - name: Record successful rehearsal
+        if: inputs.verify_only
+        run: echo 'Source checks, both native images, startup and scans passed. No images or release were published.' >> "$GITHUB_STEP_SUMMARY"

@@ -1,6 +1,13 @@
 /target
 /dist
 /node_modules
+/.ci-tools/
+/.ci-Dockerfile
+/build-tools-proof.json
+/runtime-proof.json
+/release-images.json
+/release-notes.md
+__pycache__/
 **/*.rs.bk
 .DS_Store
 .vscode/
