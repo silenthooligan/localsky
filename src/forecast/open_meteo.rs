@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
 
-const REFRESH_INTERVAL: Duration = Duration::from_secs(30 * 60);
+pub(crate) const REFRESH_INTERVAL: Duration = Duration::from_secs(30 * 60);
 /// Poll cadence while UNLOCATED. An unlocated tick makes zero network
 /// calls (it only re-reads the local config file), so a short sleep costs
 /// nothing upstream and bounds the wizard-saves-location -> first-forecast
@@ -257,7 +257,7 @@ pub fn configured_open_meteo_model(cfg: &Config) -> String {
 
 /// Exponential backoff with jitter, capped at BACKOFF_MAX. base = 30s,
 /// doubling each consecutive failure (60s, 120s, 240s, ...).
-fn backoff(n: u32) -> Duration {
+pub(crate) fn backoff(n: u32) -> Duration {
     let base = 30u64;
     let mult = 1u64.checked_shl(n.min(16)).unwrap_or(u64::MAX);
     let secs = base.saturating_mul(mult).min(BACKOFF_MAX.as_secs());
@@ -353,7 +353,7 @@ fn forecast_url(base: &str, lat: f64, lon: f64, model: &str, past_days: u32) -> 
 /// A response served by a mirror is labeled "Open-Meteo (mirror)" so the
 /// UI provenance stays honest about where the data came from. Only the
 /// LAST host's error surfaces (by then every host has failed).
-async fn refresh_once(
+pub(crate) async fn refresh_once(
     client: &Client,
     lat: f64,
     lon: f64,
@@ -487,8 +487,11 @@ async fn fetch_forecast_raw(shared: &Client, tier: &str, base: &str, url: &str) 
 
 #[derive(Deserialize)]
 struct Raw {
+    #[serde(default)]
     timezone: String,
+    #[serde(default)]
     daily: RawDaily,
+    #[serde(default)]
     hourly: RawHourly,
     /// LIVE current-conditions block (`current=`). Absent on older cached
     /// responses or if Open-Meteo ever drops the parameter, so it is optional:
@@ -579,7 +582,7 @@ struct RawCurrentUnits {
     precipitation: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 struct RawDaily {
     // timeformat=unixtime: true epochs (local-day-start instants), so no
     // client-side timezone math and no DST edge cases.
@@ -637,7 +640,7 @@ struct RawDaily {
     cape_max: Vec<Option<f64>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 struct RawHourly {
     time: Vec<i64>,
     weather_code: Vec<u32>,
@@ -1063,6 +1066,50 @@ impl Raw {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn nbm_real_response_preserves_missing_evidence_and_normalizes_rain_hours() {
+        let raw: Raw =
+            serde_json::from_str(include_str!("../../tests/fixtures/forecast/nbm-conus.json"))
+                .unwrap();
+        assert!(raw
+            .hourly
+            .soil_moisture_3_to_9cm
+            .iter()
+            .all(Option::is_none));
+        assert!(raw.hourly.soil_temperature_6cm.iter().all(Option::is_none));
+        let expected_rain = raw.hourly.precipitation[1];
+        let snapshot = raw.into_snapshot();
+        assert_eq!(snapshot.hourly.len(), 48);
+        assert_eq!(snapshot.hourly[0].precip_in, expected_rain);
+        assert!(snapshot.hourly[..47]
+            .iter()
+            .all(|h| h.precip_in.is_some() && h.precip_probability.is_some()));
+        assert_eq!(snapshot.hourly[47].precip_in, None);
+        assert!(snapshot
+            .hourly
+            .iter()
+            .any(|h| h.reference_et0_mm().is_none()));
+        assert_eq!(
+            snapshot.soil_temp_6cm_mean_f(snapshot.hourly[0].time_epoch),
+            None
+        );
+        // NBM supplies some ET0/VPD even though its soil series are absent.
+        assert!(snapshot.has_extended_series());
+    }
+
+    #[test]
+    fn nbm_outside_domain_never_produces_a_dry_forecast() {
+        // The live upstream response contains lowercase nan, which is not
+        // JSON. Decode failure is a soft failure in the endpoint ladder.
+        assert!(serde_json::from_str::<Raw>(include_str!(
+            "../../tests/fixtures/forecast/nbm-outside.txt"
+        ))
+        .is_err());
+        // A valid no-data response is also empty and rejected by the ladder.
+        let raw: Raw = serde_json::from_str(r#"{"timezone":"Europe/Berlin"}"#).unwrap();
+        let snapshot = raw.into_snapshot();
+        assert!(snapshot.hourly.is_empty() && snapshot.daily.is_empty());
+    }
     #[test]
     fn default_model_url_is_stable_and_includes_current_block() {
         // The exact URL the best_match refresher fetches. The `current=` block

@@ -69,6 +69,15 @@ impl OpenSprinklerDirect {
             .unwrap_or_else(|| format!("station_{station}"))
     }
 
+    /// Does the board itself say this station is closed right now?
+    ///
+    /// Require a closed output AND an empty program queue. Missing or
+    /// inconsistent telemetry must leave the shutoff deadline armed.
+    async fn station_is_idle(&self, station: u32) -> ControllerResult<bool> {
+        let r: JcResponse = self.get_json("/jc", &[]).await?;
+        Ok(r.station_running(station) == Some(false))
+    }
+
     async fn get_json<T: for<'de> Deserialize<'de>>(
         &self,
         path: &str,
@@ -165,9 +174,12 @@ struct JcResponse {
     /// Rain sensor tripped (0/1). Field name varies; OS may use "rs".
     #[serde(default)]
     rs: u8,
-    /// Per-station status: array of [run_state, ...] entries.
+    /// Program queue: [pid, remaining seconds, start epoch, optional group].
     #[serde(default)]
     ps: Vec<Vec<i64>>,
+    /// Actual station output bits, eight stations per byte, least bit first.
+    #[serde(default)]
+    sbits: Vec<u8>,
     /// Firmware version string.
     #[serde(default)]
     fwv: Option<u32>,
@@ -183,6 +195,25 @@ struct JcResponse {
     /// Same pulse rate, integer-divided part (fpr1).
     #[serde(default)]
     fpr1: Option<u64>,
+}
+
+impl JcResponse {
+    /// `/jc` distinguishes output state (`sbits`) from queued programs (`ps`).
+    /// A queued station is not watering yet, but cannot be safely retired by
+    /// the reaper either. Keep that state unknown until it runs or is cleared.
+    /// Firmware 2.1.9+ supplies both fields; missing data is never idle.
+    fn station_running(&self, station: u32) -> Option<bool> {
+        let index = station.checked_sub(1)? as usize;
+        let ps = self.ps.get(index)?;
+        let bits = self.sbits.get(index / 8)?;
+        if bits & (1 << (index % 8)) != 0 {
+            return Some(true);
+        }
+        match ps.as_slice() {
+            [0, 0, 0, ..] => Some(false),
+            _ => None,
+        }
+    }
 }
 
 /// Subset of the controller options endpoint (/jo). `sn1t` is the SENSOR TYPE
@@ -277,22 +308,56 @@ impl IrrigationController for OpenSprinklerDirect {
     async fn stop_zone(&self, slug: &str) -> ControllerResult<()> {
         let sid = self.zones.station_for(slug)?;
         let zero_indexed = sid.saturating_sub(1);
-        let r: CmResponse = self
+        let sent: ControllerResult<CmResponse> = self
             .get_json(
                 "/cm",
                 &[("sid", zero_indexed.to_string()), ("en", "0".to_string())],
             )
-            .await?;
-        // get_json already rejects non-1 result envelopes; this guards
-        // the (unexpected) case of a 200 body with no result at all so
-        // a stop is never silently assumed to have worked.
-        if r.result != 1 {
-            return Err(ControllerError::Remote(format!(
+            .await;
+        match sent {
+            // get_json already rejects non-1 result envelopes; the r.result
+            // arm below guards the (unexpected) case of a 200 body with no
+            // result at all so a stop is never silently assumed to have
+            // worked.
+            Ok(r) if r.result == 1 => Ok(()),
+            Ok(r) => Err(ControllerError::Remote(format!(
                 "OS rejected station stop: result={}",
                 r.result
-            )));
+            ))),
+            Err(err) => {
+                // A stop that lost the race with the station's OWN timer is
+                // not a failure: the valve is shut, which is what was asked
+                // for. OpenSprinkler answers `result=17` ("out of range")
+                // when told to stop a station that is not running -- the
+                // same envelope a genuinely malformed request gets, and it
+                // does so whether or not `t` is supplied, so the reply
+                // alone cannot tell the two apart.
+                //
+                // Left unhandled this is not a harmless log line. The reaper
+                // treats an unconfirmed stop as the one state worth never
+                // giving up on, so it keeps the active_runs row and retries
+                // every tick, forever, against a valve that closed normally
+                // hours earlier: ~13k failed calls in a single day on the
+                // affected controller, four rows stuck armed.
+                //
+                // Ask the board instead of assuming. Only a complete /jc
+                // report of a closed output with no queued program converts
+                // the error into success. Anything else -- unreachable, malformed, a
+                // station the board does not report, or genuinely still
+                // running -- propagates, and the reaper's backstop holds.
+                match self.station_is_idle(sid).await {
+                    Ok(true) => {
+                        tracing::debug!(
+                            zone = %slug, station = sid, error = %err,
+                            "opensprinkler: stop rejected but station confirmed idle; \
+                             treating the valve as closed"
+                        );
+                        Ok(())
+                    }
+                    _ => Err(err),
+                }
+            }
         }
-        Ok(())
     }
 
     async fn stop_all(&self) -> ControllerResult<()> {
@@ -308,23 +373,25 @@ impl IrrigationController for OpenSprinklerDirect {
 
     async fn status(&self) -> ControllerResult<ControllerStatus> {
         let r: JcResponse = self.get_json("/jc", &[]).await?;
-        // Map per-station program state into ZoneRuntimeStatus. ps[i] =
-        // [pid, rem, sst] where rem > 0 means actively running.
+        // Program time alone does not prove a valve is open: it can be queued.
+        // Use the same output/queue evidence that confirms an idle stop.
         let mut zone_states = Vec::new();
         for (i, ps) in r.ps.iter().enumerate() {
             let station = (i + 1) as u32;
             let slug = self.slug_for_station(station);
-            let remaining = ps.get(1).copied().unwrap_or(0);
+            let running = r.station_running(station);
             zone_states.push(ZoneRuntimeStatus {
                 slug,
-                running: remaining > 0,
-                remaining_s: if remaining > 0 {
-                    Some(remaining as u32)
+                running: running == Some(true),
+                remaining_s: if running == Some(true) {
+                    ps.get(1)
+                        .and_then(|v| u32::try_from(*v).ok())
+                        .filter(|v| *v > 0)
                 } else {
                     None
                 },
                 last_run_epoch: None,
-                running_known: true,
+                running_known: running.is_some(),
             });
         }
         // Flow: OS reports click rate in clicks/minute; convert to GPM
@@ -491,6 +558,74 @@ mod tests {
         assert!(matches!(err, ControllerError::ZoneUnknown(_)));
         assert!(c.mapped_zone_slugs().is_empty());
         assert_eq!(c.slug_for_station(1), "station_1");
+    }
+
+    /// 2026-09-20: every zone's deadline stop answered `result=17` and the
+    /// reaper, which will not give up on an unconfirmed stop, retried ~13k
+    /// times in one day against valves that had closed normally hours
+    /// earlier. OpenSprinkler returns 17 for "stop a station that is not
+    /// running" -- verified against the live board, with and without `t` --
+    /// which is the same envelope a malformed request gets. The adapter now
+    /// asks /jc rather than guessing, and only a POSITIVE idle reading
+    /// converts that error into success.
+    #[test]
+    fn an_idle_stop_requires_closed_output_and_empty_queue() {
+        let r: JcResponse = serde_json::from_value(serde_json::json!({
+            "ps": [[0, 0, 0], [0, 0, 0, 0]], "sbits": [0]
+        }))
+        .unwrap();
+        assert_eq!(r.station_running(1), Some(false));
+        assert_eq!(r.station_running(2), Some(false));
+        assert_eq!(r.station_running(0), None);
+        assert_eq!(r.station_running(3), None);
+    }
+
+    #[test]
+    fn output_bits_win_over_an_empty_or_incomplete_timer() {
+        let mut r: JcResponse = serde_json::from_value(serde_json::json!({
+            "ps": [[0, 0, 0], []], "sbits": [3]
+        }))
+        .unwrap();
+        assert_eq!(r.station_running(1), Some(true));
+        assert_eq!(r.station_running(2), Some(true));
+        r.ps = vec![vec![0, 0, 0]; 9];
+        r.sbits = vec![128, 1];
+        assert_eq!(r.station_running(7), Some(false));
+        assert_eq!(r.station_running(8), Some(true));
+        assert_eq!(r.station_running(9), Some(true));
+    }
+
+    #[test]
+    fn queued_or_malformed_stations_never_confirm_an_idle_stop() {
+        for ps in [
+            vec![],
+            vec![0],
+            vec![0, 0],
+            vec![0, -1, 0],
+            vec![-1, 0, 0],
+            vec![0, 0, -1],
+            vec![99, 1200, 1_789_900_000],
+            vec![99, 0, 0],
+        ] {
+            let r: JcResponse = serde_json::from_value(serde_json::json!({
+                "ps": [ps], "sbits": [0]
+            }))
+            .unwrap();
+            assert_eq!(r.station_running(1), None, "row: {ps:?}");
+        }
+    }
+
+    #[test]
+    fn missing_station_bits_or_rows_are_unknown() {
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"ps": [[0, 0, 0]]}),
+            serde_json::json!({"sbits": [0]}),
+            serde_json::json!({"ps": [[0, 0, 0]], "sbits": []}),
+        ] {
+            let r: JcResponse = serde_json::from_value(body).unwrap();
+            assert_eq!(r.station_running(1), None);
+        }
     }
 
     #[test]

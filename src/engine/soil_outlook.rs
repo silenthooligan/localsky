@@ -25,7 +25,7 @@ pub fn apply(
     {
         return;
     }
-    if plan.initial_uncertainty_mm > 0.1 {
+    if plan.initial_uncertainty_mm > super::soil_schedule::RESOLVED_UNCERTAINTY_MM {
         let uncertainty = plan.initial_uncertainty_mm;
         let lower = plan.depletion_mm;
         let mut wet = plan.clone();
@@ -54,12 +54,44 @@ pub fn apply(
         .find(|(_, d)| d.can_water)
         .map(|(i, _)| i)
         .unwrap_or(days.len());
+    // A missing day before the next legal morning can change both whether
+    // water is needed and the bridge volume. It is not a forecast of no rain.
+    // Beyond that opportunity, missing days earn no speculative rain credit.
+    if days
+        .iter()
+        .take(opportunity)
+        .any(|day| day.rain_mm.is_none())
+    {
+        let reason = "Rain coverage is incomplete before the next legal watering morning; automatic watering is held".to_string();
+        plan.planned_seconds = 0;
+        plan.deferred_kind = Some(super::soil_schedule::SoilDeferKind::ForecastUnavailable);
+        plan.deferred_reason = Some(reason.clone());
+        plan.planning_reason = Some(reason);
+        plan.hold_is_forecast_rain = false;
+        return;
+    }
     let peak = peak_after(plan, params, days, opportunity, 0.0);
     if peak <= plan.raw_mm + 1e-9 {
         plan.due = false;
         plan.planned_seconds = 0;
         plan.deferred_reason = None;
         plan.deferred_kind = None;
+        // Was the forecast rain what held this zone, or did it simply need
+        // nothing? Replay the same horizon with the rain taken out: if
+        // demand alone would have crossed the trigger, this hold IS the
+        // soil model counting forecast rain against the deficit -- exactly
+        // what the inert forward-rain gates defer to. Recorded, not acted
+        // on; see SoilZonePlan::hold_is_forecast_rain.
+        let dry: Vec<OutlookDay> = days
+            .iter()
+            .map(|d| OutlookDay {
+                demand_mm: d.demand_mm,
+                rain_mm: d.rain_mm.map(|_| 0.0),
+                can_water: d.can_water,
+            })
+            .collect();
+        plan.hold_is_forecast_rain =
+            peak_after(plan, params, &dry, opportunity, 0.0) > plan.raw_mm + 1e-9;
         plan.planning_reason = Some(format!(
             "No watering needed: root-zone depletion is {:.1} mm; projected demand and rain keep it below the {:.1} mm trigger until the next legal morning",
             plan.depletion_mm, plan.raw_mm,
@@ -212,6 +244,80 @@ mod tests {
             can_water,
         }
     }
+    /// A hold that only exists BECAUSE rain is coming is the soil model
+    /// doing the very thing the inert forward-rain gates defer to. It has
+    /// to be distinguishable afterwards from a zone that simply needed
+    /// nothing, or `soil_morning_decisions` records both as "not due" --
+    /// which is why the 2026-09-20 morning could not explain itself.
+    #[test]
+    fn a_hold_that_depends_on_forecast_rain_says_so() {
+        // Depletion 5.0 against a 10.0 trigger, 3 mm/day of demand, and
+        // tomorrow is NOT a legal morning -- so the decision has to protect
+        // two days, and day 1's demand would take it to 11.0. Day 0's rain
+        // is credited after day 0's own demand (the module is deliberately
+        // conservative about arrival time) but lands before day 1, which is
+        // what keeps the peak under the trigger.
+        let mut p = plan(5.0);
+        apply(
+            &mut p,
+            &params(),
+            &[
+                day(3.0, 12.0, true),
+                day(3.0, 0.0, false),
+                day(3.0, 0.0, true),
+            ],
+            0.0,
+        );
+        assert!(!p.due, "rain keeps it under the trigger");
+        assert_eq!(p.planned_seconds, 0);
+        assert!(
+            p.hold_is_forecast_rain,
+            "demand alone would have crossed the trigger; the rain is what held it"
+        );
+        // It must NOT reach for the defer machinery: deferred_kind feeds
+        // consecutive_defers and MAX_CONSECUTIVE_DEFERS, and this flag is
+        // observational.
+        assert_eq!(p.deferred_kind, None);
+        assert_eq!(p.deferred_reason, None);
+    }
+
+    /// The opposite case: a zone comfortably under its trigger needs no
+    /// rain to stay there, so the hold is an ordinary not-due morning.
+    #[test]
+    fn a_hold_that_needs_no_rain_is_not_a_rain_hold() {
+        let mut p = plan(0.5);
+        apply(
+            &mut p,
+            &params(),
+            &[
+                day(1.0, 6.0, true),
+                day(1.0, 0.0, true),
+                day(1.0, 0.0, true),
+            ],
+            0.0,
+        );
+        assert!(!p.due);
+        assert!(
+            !p.hold_is_forecast_rain,
+            "demand alone never crosses the trigger; rain was not what held it"
+        );
+    }
+
+    /// A zone that waters is not a hold at all, whatever the forecast.
+    #[test]
+    fn a_watering_morning_is_never_flagged_as_a_rain_hold() {
+        let mut p = plan(12.0);
+        apply(
+            &mut p,
+            &params(),
+            &[day(4.0, 0.0, true), day(4.0, 0.0, true)],
+            0.0,
+        );
+        assert!(p.due);
+        assert!(p.planned_seconds > 0);
+        assert!(!p.hold_is_forecast_rain);
+    }
+
     #[test]
     fn recent_storm_and_rain_ahead_do_not_request_water() {
         let mut p = plan(0.0);
@@ -336,5 +442,41 @@ mod tests {
             0.0,
         );
         assert!(p.planned_seconds > 0);
+    }
+    #[test]
+    fn missing_rain_before_a_restricted_next_opportunity_holds_the_plan() {
+        let mut plan = plan(12.0);
+        let days = vec![
+            day(2.0, 0.0, true),
+            OutlookDay {
+                demand_mm: 2.0,
+                rain_mm: None,
+                can_water: false,
+            },
+            day(2.0, 0.0, true),
+        ];
+        apply(&mut plan, &params(), &days, 0.0);
+        assert_eq!(plan.planned_seconds, 0);
+        assert_eq!(
+            plan.deferred_kind,
+            Some(super::super::soil_schedule::SoilDeferKind::ForecastUnavailable)
+        );
+    }
+
+    #[test]
+    fn missing_rain_after_the_next_opportunity_does_not_block_a_known_need() {
+        let mut plan = plan(12.0);
+        let days = vec![
+            day(2.0, 0.0, true),
+            day(2.0, 0.0, true),
+            OutlookDay {
+                demand_mm: 2.0,
+                rain_mm: None,
+                can_water: true,
+            },
+        ];
+        apply(&mut plan, &params(), &days, 0.0);
+        assert!(plan.planned_seconds > 0);
+        assert!(plan.deferred_kind.is_none());
     }
 }

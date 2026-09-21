@@ -75,6 +75,22 @@ pub const RECON_WINDOW_DAYS: i64 = 14;
 /// resolved days land in the ledger.
 pub const MIN_EVIDENCE_DAYS: u32 = 3;
 
+/// The width of the initial-state interval, in mm, at or below which the
+/// two anchored replays are treated as CONVERGED and the resulting
+/// depletion is a figure the engine stands behind.
+///
+/// `plan_zone_with_coverage` replays the evidence window twice, anchored
+/// at field capacity and at TAW; they meet only when a saturating rain or
+/// run clamps both at the same bound. Until they do, the deficit is an
+/// interval, not a number. This one line governs every consumer of that
+/// distinction: whether the bucket is published at all
+/// (`assembly::apply_soil_schedule`), whether the plan is evidence-starved
+/// (`SoilZonePlan::evidence_starved`), and whether `soil_outlook` forks
+/// into wet/dry bounds. They were three separate `0.1` literals and could
+/// drift apart; a zone whose deficit is too uncertain to DISPLAY must not
+/// be confident enough to veto a fired rain gate.
+pub const RESOLVED_UNCERTAINTY_MM: f64 = 0.1;
+
 /// Mornings running that defer-by-deficit may hold one zone before it
 /// waters anyway.
 ///
@@ -636,6 +652,18 @@ pub struct SoilZonePlan {
     /// ETc mean with zero credits.
     #[serde(default)]
     pub fallback_days: u32,
+    /// The outlook's "no watering needed" hold was DECIDED by forecast
+    /// rain rather than by the zone simply needing nothing: with the
+    /// horizon's rain removed, projected demand would still have crossed
+    /// the trigger before the next legal morning.
+    ///
+    /// Observational only -- it is deliberately NOT `deferred_kind`,
+    /// because that field feeds `defer_by_deficit` and the
+    /// `MAX_CONSECUTIVE_DEFERS` bound, and this must not move a decision.
+    /// It exists so a rain-driven hold is distinguishable afterwards from
+    /// an ordinary not-due morning.
+    #[serde(default)]
+    pub hold_is_forecast_rain: bool,
     /// Remaining dependence on unknown initial depletion, mm. Two replays
     /// start at field capacity and wilting point; only convergence supports
     /// a single reconstructed deficit in any climate or root depth.
@@ -652,7 +680,8 @@ impl SoilZonePlan {
     /// (the 0.7.22 absent-not-zero contract) and lets the weekly
     /// allocator size a governed zone until enough rungs resolve.
     pub fn evidence_starved(&self) -> bool {
-        self.evidence_days < MIN_EVIDENCE_DAYS || self.initial_uncertainty_mm > 0.1
+        self.evidence_days < MIN_EVIDENCE_DAYS
+            || self.initial_uncertainty_mm > RESOLVED_UNCERTAINTY_MM
     }
 }
 
@@ -1446,6 +1475,7 @@ mod tests {
                 initial_uncertainty_mm: p.taw_mm(),
                 consecutive_defers: 0,
                 defer_bound_reached: false,
+                hold_is_forecast_rain: false,
             }
         );
         assert!(plan.evidence_starved());
@@ -2106,6 +2136,7 @@ mod tests {
             initial_uncertainty_mm: 0.0,
             consecutive_defers: 2,
             defer_bound_reached: false,
+            hold_is_forecast_rain: true,
         };
         let json = serde_json::to_string(&full).unwrap();
         let back: SoilZonePlan = serde_json::from_str(&json).unwrap();

@@ -70,7 +70,19 @@ pub fn from_snapshot(snapshot: &IrrigationSnapshot) -> Vec<ZoneMorningDecision> 
             let runnable = verdict
                 .is_some_and(|verdict| matches!(verdict.verdict.as_str(), "run" | "run_extended"));
             let (outcome, reason_code) = if !budget.soil_due {
-                (MorningOutcome::NotDue, "soil_not_due".into())
+                // The OUTCOME stays NotDue: it is what `consecutive_defers`
+                // reads (soil_schedule.rs), and this must not move a
+                // decision. Only the recorded reason_code narrows, so a
+                // morning held because rain is coming is afterwards
+                // distinguishable from one that simply needed nothing.
+                // Until this existed both wrote "soil_not_due", which is
+                // why the 2026-09-20 record could not explain itself.
+                let code = if budget.soil_hold_is_forecast_rain {
+                    "soil_forecast_rain"
+                } else {
+                    "soil_not_due"
+                };
+                (MorningOutcome::NotDue, code.into())
             } else if runnable
                 && !zone
                     .smart_suppressed
@@ -129,6 +141,34 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    /// A morning the outlook held BECAUSE rain is coming, and one where
+    /// the zone simply needed nothing, both used to record "soil_not_due".
+    /// The reason_code now separates them -- and the OUTCOME must not
+    /// move, because that is what `consecutive_defers` reads.
+    #[test]
+    fn a_rain_driven_hold_is_recorded_without_moving_the_outcome() {
+        let mut snapshot = deferred();
+        {
+            let b = &mut snapshot.water_budgets[0];
+            b.soil_due = false;
+            b.soil_deferred_kind = None;
+            b.soil_hold_is_forecast_rain = true;
+        }
+        let d = &from_snapshot(&snapshot)[0];
+        assert_eq!(
+            d.outcome,
+            MorningOutcome::NotDue,
+            "the outcome drives consecutive_defers and must be unchanged"
+        );
+        assert_eq!(d.reason_code, "soil_forecast_rain");
+
+        // Same hold, rain not decisive: the ordinary not-due morning.
+        snapshot.water_budgets[0].soil_hold_is_forecast_rain = false;
+        let d = &from_snapshot(&snapshot)[0];
+        assert_eq!(d.outcome, MorningOutcome::NotDue);
+        assert_eq!(d.reason_code, "soil_not_due");
     }
 
     #[test]

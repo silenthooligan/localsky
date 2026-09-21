@@ -2678,6 +2678,19 @@ mod snapshot_assembly_tests {
         );
     }
 
+    fn apply_plans_without_rewriting_decisions(snap: &mut IrrigationSnapshot, slugs: &[String]) {
+        let plans = slugs
+            .iter()
+            .map(|slug| {
+                (
+                    slug.clone(),
+                    crate::engine::soil_schedule::SoilZonePlan::default(),
+                )
+            })
+            .collect();
+        crate::assembly::apply_soil_plans(snap, &WateringPolicy::default(), None, None, 0, plans);
+    }
+
     /// Assembly summarizes completed zone decisions; it cannot manufacture
     /// permission to water by rewriting a skip after safety and user rules.
     #[test]
@@ -2711,7 +2724,7 @@ mod snapshot_assembly_tests {
         );
         snap.skip_check.reason = "Rain expected tomorrow".into();
         snap.skip_check.reason_code = "tomorrow_rain".into();
-        crate::assembly::apply_soil_gate_inertness(&mut snap, &["front".to_string()]);
+        apply_plans_without_rewriting_decisions(&mut snap, &["front".to_string()]);
         assert_eq!(snap.zone_verdicts[0].verdict, "skip");
         assert_eq!(snap.zone_verdicts[0].source, "global");
         assert_eq!(snap.zones[0].verdict.as_ref().unwrap().verdict, "skip");
@@ -2725,7 +2738,7 @@ mod snapshot_assembly_tests {
         let fv = verdict("front", "run", "soil_model", "tomorrow_rain");
         snap.zones[0].verdict = Some(fv.clone());
         snap.zone_verdicts[0] = fv;
-        crate::assembly::apply_soil_gate_inertness(&mut snap, &["front".to_string()]);
+        apply_plans_without_rewriting_decisions(&mut snap, &["front".to_string()]);
         assert!(snap.skip_check.will_skip);
         assert_eq!(snap.skip_check.verdict, "skip");
         // A non-inert gate is untouched even for governed zones.
@@ -2735,7 +2748,7 @@ mod snapshot_assembly_tests {
         snap.zone_verdicts = vec![wv];
         snap.skip_check
             .decide("skip", String::new(), "wind_now".into());
-        crate::assembly::apply_soil_gate_inertness(&mut snap, &["front".to_string()]);
+        apply_plans_without_rewriting_decisions(&mut snap, &["front".to_string()]);
         assert_eq!(snap.zone_verdicts[0].verdict, "skip");
         assert!(snap.skip_check.will_skip, "safety gates never demote");
         // Heat advisory: run_extended downgrades to run for a governed
@@ -2749,7 +2762,7 @@ mod snapshot_assembly_tests {
             .revise_verdict("run_extended", snap.skip_check.reason.clone());
         snap.skip_check.reason = "Heat advisory".into();
         snap.skip_check.reason_code = "heat_advisory".into();
-        crate::assembly::apply_soil_gate_inertness(&mut snap, &["front".to_string()]);
+        apply_plans_without_rewriting_decisions(&mut snap, &["front".to_string()]);
         assert_eq!(snap.zone_verdicts[0].verdict, "run");
         assert_eq!(snap.skip_check.verdict, "run_extended");
         // A condition-rule extension is not the heat gate: untouched.
@@ -2757,96 +2770,38 @@ mod snapshot_assembly_tests {
         let mut snap = IrrigationSnapshot::default();
         snap.zones = vec![zone("front", &cv)];
         snap.zone_verdicts = vec![cv];
-        crate::assembly::apply_soil_gate_inertness(&mut snap, &["front".to_string()]);
+        apply_plans_without_rewriting_decisions(&mut snap, &["front".to_string()]);
         assert_eq!(snap.zone_verdicts[0].verdict, "run_extended");
     }
 
-    /// The seven-day strip narrates the same decision as the demoted
-    /// aggregate. All-soil install: inert-gate cells (today AND the
-    /// forward cells) demote to runs sourced soil_model, a heat
-    /// extension cell downgrades to a plain run, and a safety-gate cell
-    /// is untouched. Mixed install: the skip stands for the weekly
-    /// zones with the weekly-only annotation the aggregate carries.
+    /// A soil configuration is not evidence about a future day. Admission
+    /// must leave forecast-only strip holds intact; the full projected engine
+    /// replaces them only after constructing that day's actual water balance.
     #[test]
-    fn verdict_strip_cells_follow_the_gate_inertness() {
-        let cell = |off: u32, v: &str, code: &str| crate::model::DayVerdict {
-            day_offset: off,
-            verdict: v.into(),
-            reason: "Rain expected".into(),
-            reason_code: code.into(),
-            ..Default::default()
-        };
-        let zone = |slug: &str| crate::model::ZoneState {
-            slug: slug.into(),
-            ..Default::default()
-        };
-        let strip = || {
-            vec![
-                cell(0, "skip", "tomorrow_rain"),
-                cell(1, "skip", "rain_3day"),
-                cell(2, "skip", "wind_now"),
-                cell(3, "run_extended", "heat_advisory"),
-                cell(4, "run", "run"),
-            ]
-        };
-        // All-soil: the completed engine answer already permits watering.
-        let mut snap = IrrigationSnapshot::default();
-        snap.zones = vec![zone("front")];
-        snap.seven_day_verdicts = strip();
-        snap.skip_check
-            .decide("run", "Soil zones can water".into(), "run".into());
-        snap.zone_verdicts = vec![crate::model::ZoneVerdict {
-            zone_slug: "front".into(),
-            zone_name: "Front".into(),
-            verdict: "run".into(),
-            reason: "Soil model already accounts for forecast rain".into(),
-            source: "soil_model".into(),
-            reason_code: "tomorrow_rain".into(),
-            multiplier: 1.0,
-            value: None,
-            threshold: None,
-        }];
-        crate::assembly::apply_soil_gate_inertness(&mut snap, &["front".to_string()]);
-        assert!(!snap.skip_check.will_skip);
-        let cells = &snap.seven_day_verdicts;
-        assert_eq!(
-            cells[0].verdict, snap.skip_check.verdict,
-            "the [0] cell agrees with the demoted skip_check"
-        );
-        assert_eq!(cells[0].reason_code, "soil_model");
-        assert!(
-            cells[0].reason.starts_with("Waters anyway:"),
-            "{}",
-            cells[0].reason
-        );
-        assert_eq!(cells[1].verdict, "run", "forward inert cells demote too");
-        assert_eq!(cells[2].verdict, "skip", "safety gates never demote");
-        assert_eq!(cells[2].reason_code, "wind_now");
-        assert_eq!(cells[3].verdict, "run", "heat extension downgrades");
-        assert_eq!(cells[4].verdict, "run");
-        assert_eq!(cells[4].reason, "Rain expected", "plain runs untouched");
-        // Mixed: the skip stands, annotated for the weekly zones.
-        let mut snap = IrrigationSnapshot::default();
-        snap.zones = vec![zone("front"), zone("back")];
-        snap.seven_day_verdicts = strip();
-        crate::assembly::apply_soil_gate_inertness(&mut snap, &["front".to_string()]);
-        let cells = &snap.seven_day_verdicts;
-        assert_eq!(cells[0].verdict, "skip");
-        assert!(
-            cells[0].reason.ends_with(crate::model::MIXED_SKIP_NOTE),
-            "{}",
-            cells[0].reason
-        );
-        assert_eq!(
-            cells[3].verdict, "run_extended",
-            "mixed keeps the extension"
-        );
-        // No governed zones: nothing moves at all.
-        let mut snap = IrrigationSnapshot::default();
-        snap.zones = vec![zone("front")];
-        snap.seven_day_verdicts = strip();
-        crate::assembly::apply_soil_gate_inertness(&mut snap, &[]);
-        assert_eq!(snap.seven_day_verdicts, strip());
+    fn admission_cannot_grant_future_permission_from_soil_configuration() {
+        for slugs in [
+            vec!["front".to_string()],
+            vec!["front".to_string(), "back".to_string()],
+        ] {
+            let mut snap = IrrigationSnapshot::default();
+            snap.zones = slugs
+                .iter()
+                .map(|slug| crate::model::ZoneState {
+                    slug: slug.clone(),
+                    ..Default::default()
+                })
+                .collect();
+            snap.seven_day_verdicts = vec![crate::model::DayVerdict {
+                day_offset: 1,
+                verdict: "skip".into(),
+                reason_code: "tomorrow_rain".into(),
+                rain_evidence_incomplete: true,
+                ..Default::default()
+            }];
+            let before = snap.seven_day_verdicts.clone();
+            apply_plans_without_rewriting_decisions(&mut snap, &slugs);
+            assert_eq!(snap.seven_day_verdicts, before);
+        }
     }
 
     /// The sticky overrides decide on BOTH deployment paths. On the Home

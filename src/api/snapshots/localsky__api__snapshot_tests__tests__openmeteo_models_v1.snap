@@ -22,6 +22,12 @@ expression: "crate::forecast::model_catalog::models()"
     "region": "global (GFS + HRRR US nest)"
   },
   {
+    "id": "ncep_nbm_conus",
+    "label": "NOAA NBM (CONUS)",
+    "agency": "NOAA US",
+    "region": "Contiguous US only (empty response outside domain)"
+  },
+  {
     "id": "meteofrance_seamless",
     "label": "Meteo-France ARPEGE/AROME",
     "agency": "Meteo-France",

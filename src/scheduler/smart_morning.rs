@@ -296,20 +296,18 @@ pub fn spawn(
             // dispatch-failure rows are ignored so recovery can still
             // water a morning that applied nothing).
             if !bootstrapped {
-                bootstrapped = true;
-                let already_handled_today = match runs.as_ref() {
-                    Some(rs) => {
-                        handled_smart_morning_today(
-                            rs,
-                            today,
-                            &snap.zones,
-                            target_start.timestamp(),
-                            Utc::now().timestamp(),
-                        )
-                        .await
-                    }
-                    None => false,
+                let Some(already_handled_today) = bootstrap_smart_morning_today(
+                    runs.as_ref(),
+                    &snap,
+                    today,
+                    target_start.timestamp(),
+                    now_utc.timestamp(),
+                )
+                .await
+                else {
+                    continue;
                 };
+                bootstrapped = true;
                 if already_handled_today {
                     info!("smart morning: runs table already has smart_morning rows for today; not re-dispatching");
                     last_fired.insert(today, true);
@@ -1752,6 +1750,27 @@ fn restart_duration_hold(row: &crate::persistence::runs::RunRow) -> bool {
         })
 }
 
+/// The initial empty/stale snapshot cannot settle the one-time boot check.
+/// Otherwise a later populated plan bypasses completed-run/recovery evidence
+/// and writes a false missed-window entry (or attempts catch-up again).
+async fn bootstrap_smart_morning_today(
+    runs: Option<&RunsStore>,
+    snap: &crate::model::IrrigationSnapshot,
+    today: NaiveDate,
+    window_start_epoch: i64,
+    now_epoch: i64,
+) -> Option<bool> {
+    if !snapshot_is_fresh(snap.last_refresh_epoch, now_epoch) || snap.zones.is_empty() {
+        return None;
+    }
+    Some(match runs {
+        Some(rs) => {
+            handled_smart_morning_today(rs, today, &snap.zones, window_start_epoch, now_epoch).await
+        }
+        None => false,
+    })
+}
+
 async fn handled_smart_morning_today(
     runs: &RunsStore,
     today: NaiveDate,
@@ -3064,6 +3083,46 @@ mod tests {
             .await
             .unwrap();
         assert!(handled_smart_morning_today(&store, today, &[], 0, t0 + 7200).await);
+    }
+
+    #[tokio::test]
+    async fn cold_boot_waits_for_zone_evidence_before_settling_the_morning() {
+        let store = fresh_store().await;
+        let (today, t0) = today_and_epoch(3600);
+        let now = t0 + 7200;
+        store
+            .insert_skipped(
+                row("back_yard", "restart", now),
+                crate::controllers::reaper::RESTART_UNKNOWN_DURATION_REASON.into(),
+            )
+            .await
+            .unwrap();
+        let mut snap = snap_with(vec![]);
+        snap.last_refresh_epoch = now;
+        assert_eq!(
+            bootstrap_smart_morning_today(Some(&store), &snap, today, t0, now).await,
+            None,
+            "empty boot state must not consume reconciliation"
+        );
+        snap.zones = vec![zone_secs("back_yard", 3600, None)];
+        snap.last_refresh_epoch = 0;
+        assert_eq!(
+            bootstrap_smart_morning_today(Some(&store), &snap, today, t0, now).await,
+            None,
+            "a stale cached plan cannot settle today's morning"
+        );
+        snap.last_refresh_epoch = now;
+        assert_eq!(
+            bootstrap_smart_morning_today(Some(&store), &snap, today, t0, now).await,
+            Some(true),
+            "the populated plan must honor the persisted restart hold"
+        );
+        snap.zones.push(zone_secs("unwatered", 600, None));
+        assert_eq!(
+            bootstrap_smart_morning_today(Some(&store), &snap, today, t0, now).await,
+            Some(false),
+            "an unfinished zone still needs normal catch-up evaluation"
+        );
     }
 
     // ----- Interleave-era executor coverage: live-clock wait arithmetic with

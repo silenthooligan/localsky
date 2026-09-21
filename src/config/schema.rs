@@ -99,6 +99,9 @@ pub struct Config {
     /// so a pin never blanks the forecast.
     #[serde(default)]
     pub forecast_provider: Option<String>,
+    /// Extra model forecasts for API consumers. They never enter irrigation arbitration.
+    #[serde(default)]
+    pub forecast_tracks: Vec<ForecastTrack>,
     #[serde(default)]
     pub controllers: Vec<ControllerEntry>,
     #[serde(default)]
@@ -151,6 +154,7 @@ impl Default for Config {
             field_source_overrides: BTreeMap::new(),
             field_source_chains: BTreeMap::new(),
             forecast_provider: None,
+            forecast_tracks: Vec::new(),
             controllers: Vec::new(),
             zones: BTreeMap::new(),
             llm: None,
@@ -165,6 +169,88 @@ impl Default for Config {
             persistence: PersistenceConfig::default(),
             ui: UiConfig::default(),
         }
+    }
+}
+
+/// A declared forecast model, refreshed independently of the merged forecast.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "ssr", derive(JsonSchema))]
+pub struct ForecastTrack {
+    pub id: String,
+    pub model: String,
+}
+
+impl ForecastTrack {
+    pub fn validate_all(tracks: &[Self]) -> Result<(), String> {
+        if tracks.len() > 4 {
+            return Err("forecast_tracks: at most four extra models are supported".into());
+        }
+        let mut seen = std::collections::HashSet::new();
+        for (index, track) in tracks.iter().enumerate() {
+            if track.id.is_empty()
+                || track.id.len() > 40
+                || !track.id.starts_with(|c: char| c.is_ascii_lowercase())
+                || !track
+                    .id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+                || track.id == "merged"
+            {
+                return Err(format!("forecast_tracks[{index}].id: use a lowercase slug, starting with a letter; 'merged' is reserved"));
+            }
+            if !seen.insert(&track.id) {
+                return Err(format!(
+                    "forecast_tracks[{index}].id: duplicate '{}'",
+                    track.id
+                ));
+            }
+            if crate::forecast::model_catalog::model_by_id(&track.model).is_none() {
+                return Err(format!(
+                    "forecast_tracks[{index}].model: unknown model '{}'",
+                    track.model
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod forecast_track_tests {
+    use super::*;
+    #[test]
+    fn declared_models_round_trip_and_invalid_entries_name_their_field() {
+        let track = ForecastTrack {
+            id: "nbm".into(),
+            model: "ncep_nbm_conus".into(),
+        };
+        let config = Config {
+            forecast_tracks: vec![track.clone()],
+            ..Default::default()
+        };
+        let restored: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(restored.forecast_tracks, vec![track.clone()]);
+        assert!(ForecastTrack::validate_all(&restored.forecast_tracks).is_ok());
+        for id in ["", "merged", "Not-a-slug", "../escape", "1model"] {
+            let invalid = ForecastTrack {
+                id: id.into(),
+                ..track.clone()
+            };
+            assert!(ForecastTrack::validate_all(&[invalid])
+                .unwrap_err()
+                .contains("[0].id"));
+        }
+        assert!(ForecastTrack::validate_all(&[track.clone(), track.clone()])
+            .unwrap_err()
+            .contains("[1].id"));
+        assert!(ForecastTrack::validate_all(&vec![track.clone(); 5]).is_err());
+        let invalid = ForecastTrack {
+            model: "unknown_model".into(),
+            ..track
+        };
+        assert!(ForecastTrack::validate_all(&[invalid])
+            .unwrap_err()
+            .contains("[0].model"));
     }
 }
 

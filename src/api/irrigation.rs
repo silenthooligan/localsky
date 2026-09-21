@@ -621,8 +621,9 @@ async fn simulate(
                 // An earlier heat/override rung may have shaped a run, but
                 // the script now decides the hold. The trace has one winner.
                 for rule in &mut hypothetical.rules {
-                    if rule.outcome == "fired" {
-                        rule.outcome = "passed".into();
+                    if rule.outcome == "fired" && rule.overridden_by.is_none() {
+                        rule.overridden_by = Some(us.id.clone());
+                        rule.overridden_detail = Some(us.reason.clone());
                         rule.detail.push_str("; watering held by test script");
                     }
                 }
@@ -638,6 +639,8 @@ async fn simulate(
                     value: None,
                     threshold: None,
                     unit_kind: None,
+                    overridden_by: None,
+                    overridden_detail: None,
                 });
             }
         }
@@ -2024,15 +2027,39 @@ mod tests {
                     if holds { "skip" } else { "run_extended" },
                     "{script:?}"
                 );
+                // One WINNER, not one fired row: a gate the script set aside
+                // keeps outcome "fired" and carries `overridden_by`, so the
+                // trace still records that it tripped.
                 assert_eq!(
                     result
                         .hypothetical
                         .rules
                         .iter()
-                        .filter(|r| r.outcome == "fired")
+                        .filter(|r| r.decided())
                         .count(),
                     1
                 );
+                if holds {
+                    // Whatever set a gate aside is the decision that won the
+                    // trace, so it matches the trace's own reason_code.
+                    let winner = result.hypothetical.reason_code.clone();
+                    assert!(
+                        result
+                            .hypothetical
+                            .rules
+                            .iter()
+                            .filter(|r| r.overridden())
+                            .all(|r| r.overridden_by.as_deref() == Some(winner.as_str())),
+                        "a set-aside gate must name the script that did it; got {:?}",
+                        result
+                            .hypothetical
+                            .rules
+                            .iter()
+                            .filter(|r| r.overridden())
+                            .map(|r| (r.id.clone(), r.overridden_by.clone()))
+                            .collect::<Vec<_>>()
+                    );
+                }
                 assert_eq!(
                     result.hypothetical.reason_code,
                     if holds { "test" } else { "heat_advisory" }

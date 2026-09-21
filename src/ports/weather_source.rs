@@ -224,6 +224,14 @@ pub struct SourceCaps {
 
 #[derive(Debug, Clone)]
 pub enum SourceEvent {
+    /// A declared model's result, consumed only by the track bridge. It cannot
+    /// become the merged forecast or a current observation. Generation rejects
+    /// late replies from removed/reconfigured tracks.
+    ForecastTrack {
+        track_id: String,
+        generation: u64,
+        result: Result<crate::forecast::snapshot::ForecastSnapshot, String>,
+    },
     /// Live observation update. The engine fans this into MergedSnapshot.
     Observation {
         source_id: String,

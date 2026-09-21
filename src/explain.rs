@@ -138,7 +138,7 @@ pub fn explain_decision_with_zones(
             "Every check is expected to pass, so the next run goes as scheduled.".to_string()
         }
     } else {
-        match trace.rules.iter().find(|r| r.outcome == "fired") {
+        match trace.rules.iter().find(|r| r.decided()) {
             Some(r) => why_for_fired(r),
             None => "Every check passes and at least one zone needs water, so the \
                  next run goes as scheduled."
@@ -192,7 +192,7 @@ fn outcome_for_today(trace: &DecisionTrace) -> String {
         "run_extended" => "Watered longer this morning",
         _ => "Watered this morning",
     };
-    let fired = trace.rules.iter().find(|r| r.outcome == "fired");
+    let fired = trace.rules.iter().find(|r| r.decided());
     match fired {
         Some(r) => {
             let name = if r.label.is_empty() {

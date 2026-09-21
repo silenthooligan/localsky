@@ -312,6 +312,28 @@
 .rule-row__badge--fired { color: var(--accent-row); background: color-mix(in oklab, var(--accent-row) 18%, transparent); }
 .rule-row__badge--passed { color: var(--accent-good); background: color-mix(in oklab, var(--accent-good) 14%, transparent); }
 .rule-row__badge--skipped { color: var(--text-faint); background: var(--surface-soft); }
+.rule-row__badge--overridden { color: var(--accent-warn); background: color-mix(in oklab, var(--accent-warn) 16%, transparent); }
+
+// An overridden gate DID trip; it just did not decide. Read it as a live
+// signal (warn accent, left rule) rather than the muted treatment given to
+// gates that never ran, and never as a pass.
+.rule-row.is-overridden {
+  border-left-color: var(--accent-warn);
+  border-left-width: 4px;
+  background: color-mix(in oklab, var(--accent-warn) 6%, var(--elev-1));
+}
+.rule-row.is-overridden::before { color: var(--accent-warn); }
+.rule-row__overridden {
+  display: inline-block;
+  margin-top: 2px;
+  width: fit-content;
+  font-size: var(--text-meta);
+  line-height: 1.3;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill, 999px);
+  color: var(--accent-warn);
+  background: color-mix(in oklab, var(--accent-warn) 12%, transparent);
+}
 
 @media (max-width: 600px) {
   .rule-row { flex-wrap: wrap; }

@@ -281,6 +281,8 @@ pub fn auto_default_controller(cfg: &mut Config) {
 /// variants, required fields) is already handled by serde; this catches
 /// structural things serde can't.
 pub fn validate(cfg: &Config) -> Result<(), LoadError> {
+    super::schema::ForecastTrack::validate_all(&cfg.forecast_tracks)
+        .map_err(LoadError::Validation)?;
     if cfg.schema_version > CURRENT_SCHEMA_VERSION {
         return Err(LoadError::SchemaTooNew {
             found: cfg.schema_version,

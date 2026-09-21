@@ -1006,6 +1006,20 @@ pub struct WaterBudget {
     /// and the soil panel says so. Additive (0.8.0); omitted when zero.
     #[serde(default, skip_serializing_if = "u32_is_zero")]
     pub soil_fallback_days: u32,
+    /// This "no watering needed" hold was DECIDED by forecast rain:
+    /// replaying the same horizon with the rain removed would have
+    /// crossed the stress trigger before the next legal morning.
+    ///
+    /// Purely observational. It does NOT feed the defer counter --
+    /// `MorningOutcome` still records `NotDue`, so
+    /// `consecutive_defers` behaves exactly as before; only the recorded
+    /// `reason_code` changes. Without it a rain-driven hold and a zone
+    /// that simply needed nothing are indistinguishable in
+    /// `soil_morning_decisions`, which is the signal that would have
+    /// made the 2026-09-20 morning legible. Additive; omitted when
+    /// false, so pinned wire snapshots stay byte-identical.
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub soil_hold_is_forecast_rain: bool,
 }
 
 fn default_wind_forecast_slack_wire() -> f64 {
@@ -1022,6 +1036,10 @@ fn default_already_wet_in_wire() -> f64 {
 
 fn default_rain_next_4h_skip_in_wire() -> f64 {
     crate::config::schema::SkipRuleParams::default().rain_next_4h_skip_in
+}
+
+fn bool_is_false(v: &bool) -> bool {
+    !*v
 }
 
 fn u32_is_zero(v: &u32) -> bool {
@@ -1532,6 +1550,43 @@ pub struct RuleEval {
     pub threshold: Option<f64>,
     #[serde(default)]
     pub unit_kind: Option<String>,
+    /// This rule FIRED on its own operands and a later, better-scoped
+    /// resolution set it aside. Names what overrode it (e.g. "soil_model",
+    /// "script"). Absent = this row was never overridden.
+    ///
+    /// `outcome` STAYS "fired" when this is set. The ladder used to rewrite
+    /// the outcome to "passed" instead, which erased the only record that a
+    /// gate had tripped: a morning whose rain gate fired and was demoted
+    /// persisted with zero "fired" rows, and `render_margin_label`
+    /// recomputes from `outcome`, so the UI went on to state the gate had
+    /// HEADROOM when it was past its line. Consumers that ask "did this
+    /// decide?" must test `outcome == "fired" && overridden_by.is_none()`.
+    #[serde(default)]
+    pub overridden_by: Option<String>,
+    /// The overriding decision's own reason, for the row's detail line.
+    /// Absent whenever `overridden_by` is.
+    #[serde(default)]
+    pub overridden_detail: Option<String>,
+}
+
+impl RuleEval {
+    /// This row is the one that DECIDED the trace: it fired on its own
+    /// operands and nothing later set it aside.
+    ///
+    /// Every consumer that picks "the deciding rule" must use this rather
+    /// than testing `outcome == "fired"`, or an overridden gate will be
+    /// mistaken for the winner. Before `overridden_by` existed the ladder
+    /// rewrote such rows to "passed", so a bare outcome test happened to
+    /// work; it no longer does, and the rewrite was itself the bug.
+    pub fn decided(&self) -> bool {
+        self.outcome == "fired" && self.overridden_by.is_none()
+    }
+
+    /// This row fired on its own operands and was then set aside. The gate
+    /// DID trip; surfaces that report what tripped should count it.
+    pub fn overridden(&self) -> bool {
+        self.outcome == "fired" && self.overridden_by.is_some()
+    }
 }
 
 /// Full structured trace of a morning skip decision.

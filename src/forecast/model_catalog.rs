@@ -60,6 +60,12 @@ pub fn models() -> &'static [ForecastModel] {
             region: "global (GFS + HRRR US nest)",
         },
         ForecastModel {
+            id: "ncep_nbm_conus",
+            label: "NOAA NBM (CONUS)",
+            agency: "NOAA US",
+            region: "Contiguous US only (empty response outside domain)",
+        },
+        ForecastModel {
             id: "meteofrance_seamless",
             label: "Meteo-France ARPEGE/AROME",
             agency: "Meteo-France",

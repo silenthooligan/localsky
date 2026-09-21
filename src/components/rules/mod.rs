@@ -251,32 +251,45 @@ fn TraceView(trace: DecisionTrace, prefs: Signal<UnitPrefs>) -> impl IntoView {
 
 #[component]
 fn RuleRow(r: RuleEval, prefs: Signal<UnitPrefs>) -> impl IntoView {
-    let (badge_label, badge_class, accent) = match r.outcome.as_str() {
-        "fired" => {
-            let v = r.verdict.clone().unwrap_or_default();
-            (
-                verdict_label(&v).to_string(),
-                "rule-row__badge rule-row__badge--fired",
-                verdict_token(&v),
-            )
+    // An overridden row keeps outcome "fired" -- the gate really did trip --
+    // so it must be matched BEFORE the plain "fired" arm, or it renders as
+    // the deciding rule it is not.
+    let (badge_label, badge_class, accent) = if r.overridden() {
+        (
+            "OVERRIDDEN".to_string(),
+            "rule-row__badge rule-row__badge--overridden",
+            "var(--accent-warn)",
+        )
+    } else {
+        match r.outcome.as_str() {
+            "fired" => {
+                let v = r.verdict.clone().unwrap_or_default();
+                (
+                    verdict_label(&v).to_string(),
+                    "rule-row__badge rule-row__badge--fired",
+                    verdict_token(&v),
+                )
+            }
+            "passed" => (
+                "PASS".to_string(),
+                "rule-row__badge rule-row__badge--passed",
+                "var(--accent-good)",
+            ),
+            "skipped" => (
+                "N/A".to_string(),
+                "rule-row__badge rule-row__badge--skipped",
+                "var(--text-faint)",
+            ),
+            _ => (
+                "-".to_string(),
+                "rule-row__badge rule-row__badge--skipped",
+                "var(--text-faint)",
+            ),
         }
-        "passed" => (
-            "PASS".to_string(),
-            "rule-row__badge rule-row__badge--passed",
-            "var(--accent-good)",
-        ),
-        "skipped" => (
-            "N/A".to_string(),
-            "rule-row__badge rule-row__badge--skipped",
-            "var(--text-faint)",
-        ),
-        _ => (
-            "-".to_string(),
-            "rule-row__badge rule-row__badge--skipped",
-            "var(--text-faint)",
-        ),
     };
-    let row_class = if r.outcome == "fired" {
+    let row_class = if r.overridden() {
+        "rule-row is-overridden"
+    } else if r.outcome == "fired" {
         "rule-row is-fired"
     } else if r.outcome == "not_reached" {
         "rule-row is-muted"
@@ -291,6 +304,13 @@ fn RuleRow(r: RuleEval, prefs: Signal<UnitPrefs>) -> impl IntoView {
     let has_margin = r.margin_label.is_some() || (r.value.is_some() && r.threshold.is_some());
     let r_detail = r.clone();
     let r_margin = r.clone();
+    // Name what set this gate aside, so the row explains itself without the
+    // reader having to compare value against threshold by hand.
+    let overridden_note = r.overridden_detail.clone().or_else(|| {
+        r.overridden_by
+            .clone()
+            .map(|by| format!("set aside by {by}"))
+    });
     view! {
         <li class=row_class style=format!("--accent-row:{accent}")>
             <span class="rule-row__cat" data-cat=cat_attr>{r.category}</span>
@@ -302,6 +322,11 @@ fn RuleRow(r: RuleEval, prefs: Signal<UnitPrefs>) -> impl IntoView {
                 {has_margin.then(|| view! {
                     <span class="rule-row__margin" aria-label="margin" title="how close this gate was to flipping">
                         {move || render_rule_margin(&r_margin, prefs.get()).unwrap_or_default()}
+                    </span>
+                })}
+                {overridden_note.map(|note| view! {
+                    <span class="rule-row__overridden" aria-label="overridden">
+                        {"This gate tripped and was set aside: "}{note}
                     </span>
                 })}
             </div>

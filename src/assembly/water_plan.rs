@@ -175,7 +175,10 @@ pub(super) fn project(
                         zone.governed_by_soil_model = policy.resolve_scheduling_model(&zone.slug)
                             == crate::config::schema::SchedulingModel::Soil;
                         zone.planning_forecast_unavailable =
-                            fc.scenario_rain_in(start, now, policy.calendar).is_none();
+                            crate::forecast::snapshot::forecast_is_stale(
+                                fc.last_refresh_epoch,
+                                now,
+                            ) || fc.scenario_rain_in(start, now, policy.calendar).is_none();
                         zone
                     })
                     .collect();
@@ -196,13 +199,6 @@ pub(super) fn project(
                     None,
                 );
                 let cap = restrictions.max_minutes_cap.map(|m| m * 60);
-                apply_engine(
-                    &mut snap,
-                    &trial,
-                    scripts,
-                    &policy.condition_rules,
-                    &policy.skip_rules,
-                );
                 snap.water_budgets = compute_water_budgets_for_horizon(
                     &fc,
                     &policy.zone_runtime,
@@ -214,7 +210,7 @@ pub(super) fn project(
                     epoch,
                     Some(now),
                 );
-                apply_soil_schedule(
+                let soil_plans = prepare_soil_schedule(
                     &mut snap,
                     policy,
                     Some(&evidence),
@@ -223,6 +219,22 @@ pub(super) fn project(
                     crate::engine::Tick::at(policy.calendar, epoch),
                     epoch,
                     Some(now),
+                );
+                set_soil_governance(&mut trial, &soil_plans);
+                apply_engine(
+                    &mut snap,
+                    &trial,
+                    scripts,
+                    &policy.condition_rules,
+                    &policy.skip_rules,
+                );
+                apply_soil_plans(
+                    &mut snap,
+                    policy,
+                    cap,
+                    crate::engine::Tick::at(policy.calendar, epoch),
+                    epoch,
+                    soil_plans,
                 );
                 apply_budget_plan(
                     &mut snap,

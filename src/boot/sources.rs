@@ -72,8 +72,18 @@ pub async fn start(storage: &Storage, config: &BootConfig, stores: &Stores) -> S
     // is not dropped (broadcast delivers only to live receivers, but
     // buffers from the moment of subscribe()).
     let forecast_rx = bus.subscribe();
+    if let Some(conn) = storage.history_conn.clone() {
+        crate::forecast::archive::spawn(
+            stores.forecast.clone(),
+            crate::persistence::forecast_archive::ForecastArchiveStore::new(conn),
+        );
+    }
     let snapshot_rx = bus.subscribe();
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    stores
+        .forecast
+        .tracks
+        .configure(&config.cfg.clone().unwrap_or_default());
 
     if !storage.demo_mode {
         if let Some(cfg) = config.cfg.as_ref() {
@@ -113,6 +123,11 @@ pub async fn start(storage: &Storage, config: &BootConfig, stores: &Stores) -> S
             config.forecast_priority.clone(),
         );
         spawn_open_meteo(config, &bus);
+        crate::forecast::tracks::spawn(
+            bus.clone(),
+            stores.forecast.tracks.clone(),
+            config.store.clone(),
+        );
     }
 
     Sources {

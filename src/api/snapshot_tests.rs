@@ -74,6 +74,32 @@ mod tests {
         assert_json_snapshot!("irrigation_v1", IrrigationSnapshot::default());
     }
 
+    /// A nonempty trace must preserve both a tripped gate and its override.
+    /// Default irrigation snapshots contain no rules and cannot catch this.
+    #[test]
+    fn overridden_rule_wire_contract_and_legacy_readback() {
+        let rule = crate::model::RuleEval {
+            id: "rain_3day".into(),
+            outcome: "fired".into(),
+            overridden_by: Some("soil_model".into()),
+            overridden_detail: Some("Water is needed before the next legal morning".into()),
+            ..Default::default()
+        };
+        let mut wire = serde_json::to_value(&rule).unwrap();
+        assert_eq!(wire["outcome"], "fired");
+        assert_eq!(wire["overridden_by"], "soil_model");
+        assert_eq!(wire["overridden_detail"], rule.overridden_detail.unwrap());
+        let restored: crate::model::RuleEval = serde_json::from_value(wire.clone()).unwrap();
+        assert!(restored.overridden());
+        assert!(!restored.decided());
+        // Older persisted traces have no annotations and still deserialize.
+        wire.as_object_mut().unwrap().remove("overridden_by");
+        wire.as_object_mut().unwrap().remove("overridden_detail");
+        let legacy: crate::model::RuleEval = serde_json::from_value(wire).unwrap();
+        assert!(legacy.decided());
+        assert!(!legacy.overridden());
+    }
+
     /// The per-zone shape inside `zones[]`, which `irrigation_v1` cannot
     /// reach: `IrrigationSnapshot::default()` carries an empty `zones`, so
     /// the wire gate locked nothing about a zone until this test. Entry one
@@ -180,6 +206,7 @@ mod tests {
                 // stays byte-identical to the pre-0.8.0 shape.
                 soil_evidence_days: 0,
                 soil_fallback_days: 0,
+                soil_hold_is_forecast_rain: false,
             },
             // Entry three pins the soil-GOVERNED hold shapes the entry
             // above cannot reach: the "soil" model tag, a populated
@@ -409,6 +436,7 @@ mod tests {
             SourceFreshness, SubsystemReport,
         };
         let health = HealthResponse {
+            forecast_tracks: Vec::new(),
             status: "ok",
             config_present: true,
             location_configured: true,

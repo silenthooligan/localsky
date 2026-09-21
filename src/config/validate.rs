@@ -62,6 +62,9 @@ impl ValidationReport {
 
 pub fn validate(cfg: &Config) -> ValidationReport {
     let mut r = ValidationReport::default();
+    if let Err(detail) = super::schema::ForecastTrack::validate_all(&cfg.forecast_tracks) {
+        r.error("forecast_tracks_invalid", detail);
+    }
 
     // Location.
     let loc = &cfg.deployment.location;

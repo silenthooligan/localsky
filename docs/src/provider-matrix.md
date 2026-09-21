@@ -36,6 +36,13 @@ fill the gaps.** A station measures your yard; a cloud service estimates it. Whe
 both are present, LocalSky takes the station for the fields it has and reaches
 for the cloud only where the station is silent.
 
+**NOAA NBM (CONUS)** is available through Open-Meteo in the model picker,
+including [extra forecast tracks](forecast.md#forecast-tracks). It provides
+forecast rain probability and amount, with partial extended weather fields.
+It is not a source of measured rain or near-real-time measured wind. Outside
+its coverage, LocalSky reports unavailable data and retains any last good
+forecast at its original age.
+
 ## Legend
 
 | Word | Meaning |

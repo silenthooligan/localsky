@@ -303,6 +303,10 @@ pub fn apply_zone_rules(rules: &[ConditionRule], ctx: &ConditionCtx) -> Conditio
             value: None,
             threshold: None,
             unit_kind: None,
+            // Override provenance is stamped later, if a better-scoped
+            // resolution sets this row aside; producers never pre-set it.
+            overridden_by: None,
+            overridden_detail: None,
         });
         if fired {
             match &rule.action {

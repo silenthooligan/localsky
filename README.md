@@ -35,16 +35,18 @@ LocalSky is two products in one Docker container.
 
 Home Assistant is supported as a peer, never required. Everything runs on your own hardware. Internet requests depend on the integrations you enable: forecasts, map and radar layers, cloud controllers, notifications, or a remote advisor. LocalSky requires no cloud account or telemetry service. You can choose Open-Meteo, NWS (US), MET Norway, OpenWeather, or Pirate Weather, or blend several sources with per-field provenance.
 
-## New in 0.9.0
+## New in 0.9.1
 
-- A compact Today/Tomorrow watering summary, with the full water plan one click away.
-- Rain, delivered watering, ET and soil drainage carried across days when planning.
-- Daily history with recorded skips and reasons, plus grouped watering sessions.
-- HA WeatherFlow input with report-age checks and native minute-rain accumulation.
-- Measured/model weather provenance, NWS observation fixes and interrupted-restore recovery.
+- Named forecast models in Settings, including NOAA NBM for CONUS.
+- Cached rain and temperature windows for automations, with age and coverage.
+- An hourly forecast archive that preserves what was known before a run.
+- Consistent rain-coverage holds across live watering and future plans.
+- Confirmed controller shutoffs and clearer rain-held morning records.
 
-Upgrading with Home Assistant? Update the LocalSky integration to **0.9.0** too.
-The server now uses API contract 2.1.0. Back up your data before upgrading.
+Update the Home Assistant integration and HAOS app to **0.9.1** alongside the
+server. API contract **2.3.0** adds `localsky.get_forecast_window` support;
+existing API major 2 clients remain compatible. Back up your data before
+upgrading. See [the changelog](CHANGELOG.md) for details and earlier releases.
 
 ## Why LocalSky
 

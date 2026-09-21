@@ -4,6 +4,53 @@ All notable changes to LocalSky are documented here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-09-21
+
+Update the Home Assistant integration and HAOS app to 0.9.1 alongside the
+server. The API contract is 2.3.0; existing `/api/v1` URLs and API major 2
+remain supported. Back up your data before upgrading.
+
+### Added
+
+- Extra forecast models in Settings, including NOAA NBM for CONUS. Each keeps
+  a named, cached forecast for automations without changing watering or current
+  weather sources. Settings shows model coverage and refresh status.
+- Forecast window queries for a named model or the main forecast, with rain and
+  temperature summaries, original data age and explicit coverage. Missing hours
+  stay unknown instead of producing misleading zero-rain totals.
+- An hourly forecast archive with JSON/CSV export and lead-hour filtering.
+  Forecast issuances are retained for 400 days so reviews can use the forecast
+  available before a run, rather than a later update.
+- The Home Assistant `localsky.get_forecast_window` response action.
+
+### Fixed
+
+- Live watering decisions and future plans establish actual soil-model coverage
+  before applying rain rules. Missing or stale planning rain holds affected
+  zones; selecting a soil model cannot silently waive missing forecast evidence.
+  Held zones no longer take morning capacity away from eligible zones.
+- A skip gate that fires and is then set aside by a better-scoped decision is
+  recorded as overridden rather than rewritten to a pass. Decision traces keep
+  the gate that tripped, Rule Lab marks it, and its margin reads "past the
+  line" instead of reporting headroom for a gate that was over its threshold.
+- OpenSprinkler stops are confirmed against the controller's own station state.
+  A stop that lost the race with the station's timer is no longer mistaken for
+  a failure, so the deadline backstop stops retrying against valves that have
+  already closed. A stop that cannot be confirmed still retries.
+- Morning records distinguish a zone held because rain is forecast from one
+  that simply needed no water.
+- OpenSprinkler shutoff confirmation requires closed station output bits and
+  an empty program queue. Missing, truncated or inconsistent status cannot
+  retire the safety deadline; queued time is not credited as running water.
+- Startup waits for a fresh, populated irrigation snapshot before reconciling
+  the morning, so an empty startup plan cannot bypass recorded recovery holds
+  and later report a completed morning as a missed window.
+- Run history retains the controller identity observed at the start of a run.
+  Losing that identity on a later poll no longer breaks command attribution
+  and splits the run into an unrelated Home Assistant session.
+- Extra-model settings fit narrow phones. Long restart notices wrap and scroll
+  within a bounded area so the settings form remains usable.
+
 ## [0.9.0] - 2026-09-13
 
 Update the LocalSky Home Assistant integration to 0.9.0 with this release.

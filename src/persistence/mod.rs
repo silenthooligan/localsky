@@ -17,6 +17,7 @@
 pub mod active_runs;
 pub mod config_snapshots;
 pub mod daily_irrigation;
+pub mod forecast_archive;
 pub mod forecast_observations;
 pub mod history_db;
 pub mod irrigation_control;

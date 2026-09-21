@@ -21,6 +21,7 @@ struct PersistedForecast {
 }
 
 pub struct ForecastStore {
+    pub tracks: Arc<super::tracks::TrackStore>,
     current: ArcSwap<ForecastSnapshot>,
     tx: watch::Sender<Arc<ForecastSnapshot>>,
     rx: watch::Receiver<Arc<ForecastSnapshot>>,
@@ -41,6 +42,7 @@ impl ForecastStore {
         let initial = Arc::new(ForecastSnapshot::default());
         let (tx, rx) = watch::channel(initial.clone());
         Self {
+            tracks: Arc::new(super::tracks::TrackStore::new(None)),
             current: ArcSwap::from(initial),
             tx,
             rx,
@@ -53,6 +55,9 @@ impl ForecastStore {
     /// immediately (publishing to subscribers) so the UI and engine start
     /// from the last known forecast instead of empty.
     pub fn with_persistence(mut self, path: PathBuf) -> Self {
+        self.tracks = Arc::new(super::tracks::TrackStore::new(Some(
+            path.with_file_name("forecast-tracks.json"),
+        )));
         match std::fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice::<PersistedForecast>(&bytes) {
                 Ok(cache) if cache.schema_version != CACHE_SCHEMA_VERSION => {

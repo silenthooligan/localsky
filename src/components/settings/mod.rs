@@ -20,6 +20,7 @@ pub mod cloud_weather;
 pub mod data_sources;
 pub mod devices;
 pub mod engine;
+pub mod forecast_tracks;
 pub mod help;
 pub mod home;
 pub mod home_assistant;

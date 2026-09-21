@@ -55,6 +55,35 @@ After pairing, the integration card exposes three options (**Configure** on the 
 | Poll interval (fallback when SSE is off) | 30 s | 5 to 600 s |
 | Default run duration for valve/switch open | 600 s | 60 to 7200 s |
 
+## Forecast window action
+
+Integration **0.9.1** adds `localsky.get_forecast_window`, requiring LocalSky
+API **2.3.0** (server 0.9.1). It reads the server's stored forecast and returns
+the response to your automation:
+
+```yaml
+- action: localsky.get_forecast_window
+  data:
+    track: merged
+    start: "{{ today_at('13:00').isoformat() }}"
+    end: "{{ today_at('14:00').isoformat() }}"
+  response_variable: afternoon
+- condition: template
+  value_template: >-
+    {{ afternoon.age_s is not none and afternoon.age_s < 21600
+       and afternoon.precip_sum_in is not none }}
+```
+
+Use a track name from **Settings > Devices > Extra forecast models** to read
+that model instead. Specify `entry_id` when more than one LocalSky instance is
+loaded. Datetimes without an offset use Home Assistant's timezone.
+
+The two timestamps above select the hours starting at 13:00 and 14:00.
+Results include the original `age_s`, per-variable coverage and nullable
+summaries. Inches and Fahrenheit are API units. An outage does not renew an
+old forecast's age; your automation decides how old is acceptable. This action
+does not create extra weather entities or change watering.
+
 ## Authentication
 
 If your LocalSky instance has an owner account (see [authentication.md](authentication.md)), the `/api/v1/info` probe reports `auth_required` and the config flow adds a token step.

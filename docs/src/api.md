@@ -1,6 +1,6 @@
 # API reference
 
-LocalSky exposes a REST + SSE API mounted at **`/api/v1/`** (canonical) and **`/api/`** (legacy alias). New clients should target `/api/v1/*`. These historical route names are independent of the response contract version reported by `/api/v1/info`: the local 0.9.0 candidate uses **API 2.1.0** at the existing URLs. A few newer endpoint families (`/api/v1/backup`, `/api/v1/updates`, `/api/v1/diagnostics`) exist only under `/api/v1`.
+LocalSky exposes a REST + SSE API mounted at **`/api/v1/`** (canonical) and **`/api/`** (legacy alias). New clients should target `/api/v1/*`. These historical route names are independent of the response contract version reported by `/api/v1/info`: the unreleased patch candidate uses **API 2.3.0** at the existing URLs (published 0.9.0 uses 2.1.0). A few newer endpoint families (`/api/v1/backup`, `/api/v1/updates`, `/api/v1/diagnostics`) exist only under `/api/v1`.
 
 **On this page**
 
@@ -52,7 +52,15 @@ These compatibility fields were deprecated during API 1 and remain in API 2.0.0.
 
 ### Migration notes
 
-**2.1.0** (local 0.9.0 completion candidate). History run records add nullable
+**2.2.0** (unreleased patch candidate). Decision-trace rule entries add nullable
+`overridden_by` and `overridden_detail`. A rule that crossed its threshold
+keeps `outcome: "fired"` when a later scoped decision overrides it. To find
+the deciding rule, require `outcome == "fired"` and no `overridden_by` value;
+use the trace's final verdict for the overall decision. Older stored traces
+lack these annotations and cannot recover erased override history. Route
+URLs and API major 2 are unchanged.
+
+**2.1.0** (released with 0.9.0). History run records add nullable
 `session_id`. One watering job retains its identity across cycle/soak segments,
 observer reconciliation, and morning catch-up after restart. Legacy records
 remain null; proximity in time does not prove they belong to the same job.
@@ -836,3 +844,50 @@ expires, the engine can use available current-hour forecast fields and marks
 A populated current response supplies `current_weather` as an object; an empty
 object means no accepted reports. `null` or an absent field means the producer
 has not supplied this evidence (including older response versions).
+
+
+### Forecast windows and extra models (API 2.3.0)
+
+`GET /api/v1/forecast/tracks` lists configured extra model forecasts, their
+original fetch time, age, serving tier and refresh errors. An extra model never
+drives irrigation or replaces current observations. Configure up to four
+`forecast_tracks` entries, each with a unique lowercase `id` and a catalog
+`model`. `merged` is reserved for the selected dashboard forecast. Changes
+apply within 15 seconds; removing a model also removes its cached forecast.
+
+`GET /api/v1/forecast/window?track=merged&from=1789909200&to=1789912800`
+selects hourly rows inclusively by UTC epoch, with a maximum 48-hour range.
+Omit `track` to use `merged`, or supply a configured id such as `nbm`.
+Rows use LocalSky's normalized hour-start timestamps: rain at T covers
+[T, T+1 hour). Open-Meteo's preceding-hour amounts are shifted during ingestion.
+
+The response includes `track`, `model` (null for the merged forecast),
+`provider_label`, `fetched_at`, `age_s`, `from`, `to`, `hours`, `expected_hours`,
+`complete`, coverage counts (`precipitation_hours`, `probability_hours`,
+`temperature_hours`), `hourly`, and the summary fields `pop_max_pct`,
+`precip_max_in`, `precip_sum_in`, `temp_max_f`, `temp_min_f`.
+Each summary is null if its values or hourly coverage are incomplete. Reported
+zero stays zero. A known track with no rows returns 200 and `hours: 0`;
+an unknown track returns 404, and reversed or oversized ranges return 400.
+Last-good forecasts remain available during outages with their original age.
+`health.forecast_tracks` exposes advisory status to authenticated operators;
+an old extra model does not fail the irrigation health check.
+
+
+`GET /api/v1/forecast/archive?track=merged&from=1789862400&to=1789948800&lead_h=6`
+returns `{ "rows": [...], "next_cursor": null }`. Each row has `track`,
+`provider`, `model`, `target_epoch`, `lead_h`, `pop_pct`, `precip_in` and
+`fetched_at`. Amount and probability may be null. Each successful issuance is
+preserved; fetching a newer forecast never rewrites an earlier prediction.
+Lead zero includes the current partial hour. `lead_h` is optional (0..47).
+The range is inclusive by target hour and capped at 400 days. Rows are ordered
+by target hour, then fetch time. The default page holds 1,000 rows; `limit`
+accepts 1..5,000. Pass a returned `next_cursor` as `cursor` with the same query
+to continue. Removed models retain their historical rows until retention expires.
+
+With `Accept: text/csv`, the endpoint returns the same page as CSV, with missing
+numbers left blank and continuation in `X-Next-Cursor`. The archive retains
+400 days and records only forecasts actually received after this feature is
+installed. It is never substituted for observed rainfall. Every half-hour
+refresh can add up to 48 rows per model (about 0.9 million rows per model over
+400 days); storage depends on configured model count and refresh cadence.

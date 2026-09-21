@@ -157,9 +157,6 @@ mod engine_params_tests {
                     ..Default::default()
                 },
             ];
-            if kind == "soil_model" {
-                crate::assembly::apply_soil_gate_inertness(&mut snapshot, &["front".into()]);
-            }
             Finalize {
                 watered: vec![],
                 forecast: Arc::new(ForecastSnapshot::default()),
@@ -180,6 +177,9 @@ mod engine_params_tests {
                 snapshot.decision_trace.as_ref().unwrap().reason_code,
                 "owner_hold"
             );
+            // One WINNER. The heat rung the script overrode keeps outcome
+            // "fired" plus `overridden_by`; it is no longer rewritten to
+            // "passed", which used to erase the fact that it tripped.
             assert_eq!(
                 snapshot
                     .decision_trace
@@ -187,9 +187,37 @@ mod engine_params_tests {
                     .unwrap()
                     .rules
                     .iter()
-                    .filter(|r| r.outcome == "fired")
+                    .filter(|r| r.decided())
                     .count(),
                 1
+            );
+            // Whatever set a gate aside is, by construction, the decision that
+            // went on to win the trace.
+            let reason_code = snapshot
+                .decision_trace
+                .as_ref()
+                .unwrap()
+                .reason_code
+                .clone();
+            assert!(
+                snapshot
+                    .decision_trace
+                    .as_ref()
+                    .unwrap()
+                    .rules
+                    .iter()
+                    .filter(|r| r.overridden())
+                    .all(|r| r.overridden_by.as_deref() == Some(reason_code.as_str())),
+                "a set-aside gate must name what set it aside; got {:?}",
+                snapshot
+                    .decision_trace
+                    .as_ref()
+                    .unwrap()
+                    .rules
+                    .iter()
+                    .filter(|r| r.overridden())
+                    .map(|r| (r.id.clone(), r.overridden_by.clone()))
+                    .collect::<Vec<_>>()
             );
             assert_eq!(
                 snapshot
@@ -289,8 +317,7 @@ mod engine_params_tests {
             zone("front", Some(80.0), true),
             zone("back", Some(85.0), true),
         ];
-        let mut snapshot = snapshot_for(&inputs, &CompiledScripts::default());
-        crate::assembly::apply_soil_gate_inertness(&mut snapshot, &["front".into(), "back".into()]);
+        let snapshot = snapshot_for(&inputs, &CompiledScripts::default());
         assert!(snapshot.skip_check.will_skip);
         assert_eq!(snapshot.skip_check.reason_code, "soil_saturation");
         assert!(snapshot

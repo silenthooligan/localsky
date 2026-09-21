@@ -960,7 +960,8 @@ pub fn assemble(input: AssemblyInput<'_>) -> IrrigationSnapshot {
     // Tell the engine which zones the soil model governs, so IT applies
     // the forward-rain inertness rule rather than the refresher rewriting
     // verdicts afterwards.
-    let planning_forecast_unavailable = fc.planning_precip_weighted_in(24, tick_epoch).is_none();
+    let planning_forecast_unavailable = forecast_is_stale(fc.last_refresh_epoch, now_epoch)
+        || fc.planning_precip_weighted_in(24, tick_epoch).is_none();
     for z in soil_zones_resolved.iter_mut() {
         z.governed_by_soil_model = matches!(
             watering_policy.resolve_scheduling_model(&z.slug),
@@ -1021,7 +1022,7 @@ pub fn assemble(input: AssemblyInput<'_>) -> IrrigationSnapshot {
     snap.today_window = tick
         .zip(today_window)
         .map(|(t, w)| crate::engine::dispatch_window::PlannedWindow::of(t.day(), w));
-    let inputs = Inputs {
+    let mut inputs = Inputs {
         restart_required: snap.restart_required,
         // The deployment's calendar, resolved here where the configured
         // timezone is known. Watering restrictions are a legal question
@@ -1113,6 +1114,33 @@ pub fn assemble(input: AssemblyInput<'_>) -> IrrigationSnapshot {
         watering_restrictions: watering_policy.restrictions.clone(),
         address_parity: watering_policy.address_parity,
     };
+    snap.water_budgets = compute_water_budgets(
+        &fc,
+        zone_runtime,
+        watering_policy.defer_threshold_in(),
+        restriction_cap_seconds,
+        &budget_zones_for_active(zones, &watering_policy.budget_zones),
+        balance,
+        watering_policy.calendar,
+        tick_epoch,
+    );
+    // The soil-model pass: shadow-compute the bucket for every zone with
+    // agronomy config (bucket_mm's producer, plus the water_budgets soil
+    // block), and swap `today_seconds` for the zones the soil model
+    // governs, BEFORE apply_budget_plan so the shared downstream
+    // (seasonal dial, Override zeroing, force floor, verdict multiplier)
+    // applies to both producers identically on both deployment paths.
+    let soil_plans = prepare_soil_schedule(
+        &mut snap,
+        watering_policy,
+        balance,
+        &fc,
+        restriction_cap_seconds,
+        tick,
+        now_epoch,
+        None,
+    );
+    set_soil_governance(&mut inputs, &soil_plans);
     apply_engine(
         &mut snap,
         &inputs,
@@ -1143,31 +1171,13 @@ pub fn assemble(input: AssemblyInput<'_>) -> IrrigationSnapshot {
         // The published eto_today_mm stays None in that case.
         et0_today_mm.unwrap_or(ENGINE_ET0_FALLBACK_MM),
     );
-    snap.water_budgets = compute_water_budgets(
-        &fc,
-        zone_runtime,
-        watering_policy.defer_threshold_in(),
-        restriction_cap_seconds,
-        &budget_zones_for_active(zones, &watering_policy.budget_zones),
-        balance,
-        watering_policy.calendar,
-        tick_epoch,
-    );
-    // The soil-model pass: shadow-compute the bucket for every zone with
-    // agronomy config (bucket_mm's producer, plus the water_budgets soil
-    // block), and swap `today_seconds` for the zones the soil model
-    // governs, BEFORE apply_budget_plan so the shared downstream
-    // (seasonal dial, Override zeroing, force floor, verdict multiplier)
-    // applies to both producers identically on both deployment paths.
-    apply_soil_schedule(
+    apply_soil_plans(
         &mut snap,
         watering_policy,
-        balance,
-        &fc,
         restriction_cap_seconds,
         tick,
         now_epoch,
-        None,
+        soil_plans,
     );
     // ONE dispatch pipe on BOTH paths: the allocator's rows (weekly, or
     // soil-swapped above) become planned seconds here. The Home
@@ -1303,7 +1313,7 @@ pub(crate) fn apply_budget_plan(
 /// verdict multiplier, dispatch) then applies to both producers
 /// identically, one truth for display and dispatch.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn apply_soil_schedule(
+pub(crate) fn prepare_soil_schedule(
     snap: &mut IrrigationSnapshot,
     watering_policy: &WateringPolicy,
     balance: Option<&BalanceTick>,
@@ -1312,7 +1322,7 @@ pub(crate) fn apply_soil_schedule(
     tick: Option<crate::engine::Tick>,
     now_epoch: i64,
     forecast_as_of: Option<i64>,
-) {
+) -> Vec<(String, crate::engine::soil_schedule::SoilZonePlan)> {
     use crate::config::schema::SchedulingModel;
     use crate::engine::soil_schedule::{
         plan_zone_with_coverage, resolve_et0_days, DeferHistory, ZoneDayEvidence, ZoneSoilParams,
@@ -1517,7 +1527,9 @@ pub(crate) fn apply_soil_schedule(
         // The bucket's producer, ending the 0.7.22 "nothing computes
         // one" era: depletion published under the field's documented
         // sign (negative = needs water).
-        let bucket = (plan.initial_uncertainty_mm <= 0.1).then_some(-plan.depletion_mm);
+        let bucket = (plan.initial_uncertainty_mm
+            <= crate::engine::soil_schedule::RESOLVED_UNCERTAINTY_MM)
+            .then_some(-plan.depletion_mm);
         snap.zones[zi].bucket_mm = bucket;
         if let Some(m) = snap.zones[zi].math.as_mut() {
             m.bucket_mm = bucket;
@@ -1544,6 +1556,7 @@ pub(crate) fn apply_soil_schedule(
             // qualifier keys on; it drops on its own as coverage lands.
             b.soil_evidence_days = plan.evidence_days;
             b.soil_fallback_days = plan.fallback_days;
+            b.soil_hold_is_forecast_rain = plan.hold_is_forecast_rain;
         }
         if model == SchedulingModel::Soil {
             // The math panel's capture efficiency reads the value the
@@ -1557,6 +1570,29 @@ pub(crate) fn apply_soil_schedule(
         }
     }
 
+    governed
+}
+
+/// Establish actual planning authority before evaluating any forecast waiver.
+fn set_soil_governance(
+    inputs: &mut Inputs,
+    plans: &[(String, crate::engine::soil_schedule::SoilZonePlan)],
+) {
+    for zone in &mut inputs.soil_zones {
+        zone.governed_by_soil_model = plans.iter().any(|(slug, _)| slug == &zone.slug);
+    }
+}
+
+/// Fit established soil plans into the morning only after the engine has
+/// decided permission for every zone, including weekly fallback zones.
+pub(crate) fn apply_soil_plans(
+    snap: &mut IrrigationSnapshot,
+    watering_policy: &WateringPolicy,
+    restriction_cap_seconds: Option<u32>,
+    tick: Option<crate::engine::Tick>,
+    now_epoch: i64,
+    governed: Vec<(String, crate::engine::soil_schedule::SoilZonePlan)>,
+) {
     // ---- The soil model GOVERNS its zones ----
     //
     // Swap each governed row's today figures for the soil plan's, then
@@ -1595,7 +1631,17 @@ pub(crate) fn apply_soil_schedule(
             slug,
             today_weekday,
         );
-        if plan.due && plan.deferred_reason.is_none() && today_seconds > 0 && !override_active {
+        let permitted = snap
+            .zone_verdicts
+            .iter()
+            .find(|zone| &zone.zone_slug == slug)
+            .is_some_and(|zone| matches!(zone.verdict.as_str(), "run" | "run_extended"));
+        if plan.due
+            && plan.deferred_reason.is_none()
+            && today_seconds > 0
+            && !override_active
+            && permitted
+        {
             candidates.push(crate::engine::soil_schedule::AdmissionCandidate {
                 slug: slug.clone(),
                 depletion_mm: plan.depletion_mm,
@@ -1604,21 +1650,6 @@ pub(crate) fn apply_soil_schedule(
             });
         }
     }
-
-    // Forward-rain gates and the heat-advisory extension are INERT for
-    // soil-governed zones: defer-by-deficit already prices forecast rain
-    // against the deficit, and measured ET0 already carries heat, so
-    // those gates would count the same signal twice. Every safety gate
-    // (wind, freeze, pause, dry-run, restrictions, rain-now, already-wet,
-    // the observed-rain backstop, soil saturation) still binds. The
-    // rewrite runs BEFORE admission so the fixed base below is priced
-    // against the verdicts dispatch will actually enforce: on a
-    // forecast-rain morning the weekly siblings' allocator seconds must
-    // not occupy window the skip ladder has already emptied.
-    apply_soil_gate_inertness(
-        snap,
-        &governed.iter().map(|(s, _)| s.clone()).collect::<Vec<_>>(),
-    );
 
     // ---- Morning-window admission ----
     //
@@ -1770,58 +1801,6 @@ pub(crate) fn apply_soil_schedule(
                         Some(crate::engine::soil_schedule::SoilDeferKind::Window);
                 }
             }
-        }
-    }
-}
-
-use crate::engine::skip_rules::SOIL_MODEL_INERT_GATES;
-
-/// Annotate soil-model applicability in the weather projection. The completed
-/// live engine answer is preserved and copied to today's tile by Finalize.
-pub(crate) fn apply_soil_gate_inertness(snap: &mut IrrigationSnapshot, governed_slugs: &[String]) {
-    if governed_slugs.is_empty() {
-        return;
-    }
-    let governed: std::collections::HashSet<&str> =
-        governed_slugs.iter().map(|s| s.as_str()).collect();
-    // Future cells have no live probe evidence. Annotate only the weather
-    // gates the soil model owns; Finalize replaces today's projection with
-    // the actual result, which also includes safety, overrides and scripts.
-    let all_governed = !snap.zones.is_empty()
-        && snap
-            .zones
-            .iter()
-            .all(|z| governed.contains(z.slug.as_str()));
-    for cell in snap.seven_day_verdicts.iter_mut() {
-        if cell.verdict == "skip"
-            && !cell.rain_evidence_incomplete
-            && SOIL_MODEL_INERT_GATES.contains(&cell.reason_code.as_str())
-        {
-            if all_governed {
-                cell.reason = format!(
-                    "Waters anyway: soil zones already count this forecast rain against \
-                     their deficit. ({})",
-                    cell.reason
-                );
-                cell.verdict = "run".into();
-                cell.reason_code = "soil_model".into();
-            } else {
-                cell.reason = format!("{}. {}", cell.reason, crate::model::MIXED_SKIP_NOTE);
-                // The same fact as data, so no surface has to find the
-                // note inside the sentence to know this hold is partial.
-                cell.mixed_hold = true;
-            }
-        } else if all_governed
-            && cell.verdict == "run_extended"
-            && cell.reason_code == "heat_advisory"
-        {
-            cell.reason = format!(
-                "Runs normally: measured water use already charges hot days into the \
-                 soil deficit. ({})",
-                cell.reason
-            );
-            cell.verdict = "run".into();
-            cell.reason_code = "soil_model".into();
         }
     }
 }

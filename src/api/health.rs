@@ -346,6 +346,9 @@ pub fn unclosed_valves(rows: &[crate::persistence::ActiveRun], now: i64) -> Vec<
 
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
+    /// Extra model diagnostics are advisory; these feeds cannot gate irrigation.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub forecast_tracks: Vec<crate::forecast::tracks::TrackStatus>,
     pub status: &'static str,
     pub config_present: bool,
     /// A real place is configured. False on a fresh install and on a
@@ -936,6 +939,15 @@ pub async fn health_report(state: HealthState, full_detail: bool) -> HealthRespo
         None => Vec::new(),
     };
     HealthResponse {
+        forecast_tracks: if full_detail {
+            state
+                .forecast_store
+                .as_ref()
+                .map(|s| s.tracks.status(chrono::Utc::now().timestamp()))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        },
         status,
         config_present,
         location_configured,

@@ -371,7 +371,10 @@ use serde::{Deserialize, Serialize};
 /// Endpoint URLs remain in the /api/v1 route family; this version describes
 /// their response contract, as documented above.
 /// 2.1.0: nullable session_id on History run records, preserving job identity.
-pub const API_VERSION: &str = "2.1.0";
+/// 2.2.0: decision-trace rules add nullable overridden_by/overridden_detail.
+/// A fired rule can be superseded; the trace verdict remains authoritative.
+/// 2.3.0: declared forecast models, inclusive window queries and hourly archive.
+pub const API_VERSION: &str = "2.3.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {

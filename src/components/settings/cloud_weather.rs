@@ -1437,6 +1437,7 @@ pub fn CloudWeatherServices(
             // matrix) plus this ADD list. The capability matrix above carries
             // provider x reading; the full per-provider detail lives in the guide.
             {discovery_list}
+            {(!write_draft).then(|| view! { <super::forecast_tracks::ForecastTracks/> })}
 
             // The read-only backup chain is now OFF in the Devices hub
             // (`show_chain=false`): the Advanced per-field picker is the ONE home

@@ -471,3 +471,34 @@ html[data-readonly="true"] body::before {
 }
 
 .settings-form-error { color: var(--accent-danger); line-height: 1.5; }
+.forecast-tracks {
+  margin-top: 1.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border);
+}
+.forecast-tracks__heading { display: flex; align-items: center; gap: .5rem; }
+.forecast-tracks__heading h3 { margin: 0; font-size: var(--text-body); }
+.forecast-tracks__intro, .forecast-tracks__coverage {
+  color: var(--text-dim); font-size: var(--text-caption); margin: .5rem 0 1rem;
+}
+.forecast-tracks__list { list-style: none; padding: 0; margin: 0 0 1rem; }
+.forecast-tracks__row {
+  display: flex; align-items: center; flex-wrap: wrap; gap: .75rem;
+  padding: .75rem 0; border-bottom: 1px solid var(--border);
+}
+.forecast-tracks__identity { display: grid; gap: .25rem; flex: 1 1 10rem; overflow-wrap: anywhere; }
+.forecast-tracks__identity span, .forecast-tracks__status { color: var(--text-dim); font-size: var(--text-caption); }
+.forecast-tracks__status { flex: 1 1 9rem; }
+.forecast-tracks__form { display: flex; align-items: end; gap: .75rem; flex-wrap: wrap; }
+.forecast-tracks__form .ui-form-field { flex: 1 1 12rem; min-width: 0; }
+.forecast-tracks__form .ui-input { width: 100%; max-width: 100%; }
+
+@include phone {
+  // Auto margins otherwise size these column-flex children to the model
+  // row's intrinsic width, letting the whole Devices page exceed the phone.
+  .page:has(.forecast-tracks), .settings-page:has(.forecast-tracks) {
+    width: 100%;
+    min-width: 0;
+  }
+  .cloud-weather:has(.forecast-tracks) { min-width: 0; max-width: 100%; }
+}

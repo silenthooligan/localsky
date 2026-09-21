@@ -773,8 +773,9 @@ pub fn evaluate_decisions(
             answer.trace.reason = hold.reason.clone();
             answer.trace.reason_code = hold.id.clone();
             for rule in &mut answer.trace.rules {
-                if rule.outcome == "fired" {
-                    rule.outcome = "passed".into();
+                if rule.outcome == "fired" && rule.overridden_by.is_none() {
+                    rule.overridden_by = Some(hold.id.clone());
+                    rule.overridden_detail = Some(hold.reason.clone());
                     rule.detail.push_str("; watering held by user script");
                 }
             }
@@ -842,8 +843,9 @@ pub fn evaluate_decisions(
             || answer.trace.reason != answer.skip_check.reason
         {
             for rule in &mut answer.trace.rules {
-                if rule.outcome == "fired" {
-                    rule.outcome = "passed".into();
+                if rule.outcome == "fired" && rule.overridden_by.is_none() {
+                    rule.overridden_by = Some(answer.skip_check.reason_code.clone());
+                    rule.overridden_detail = Some(answer.skip_check.reason.clone());
                     rule.detail.push_str("; applicability resolved per zone");
                 }
             }
@@ -1018,7 +1020,12 @@ pub fn decide_per_zone(
             let original = decide_ladder(&own, p, &disabled);
             let mut applicable = disabled.clone();
             if z.governed_by_soil_model {
-                applicable.extend(SOIL_MODEL_INERT_GATES.iter().copied());
+                applicable.extend(
+                    SOIL_MODEL_INERT_GATES
+                        .iter()
+                        .copied()
+                        .filter(|gate| soil_forecast_accounted(&own, gate)),
+                );
                 applicable.insert("heat_advisory");
             }
             let (verdict, reason, code) = decide_ladder(&own, p, &applicable);
@@ -1519,6 +1526,20 @@ fn wind_forecast_reason(scope: WindScope, peak: f64, max: f64, slack: f64) -> St
 // Missing forecast amounts are an unavailable hold in the SAME rain rung.
 // The existing per-zone soil/force scopes can therefore waive that rung
 // deliberately; an absent forecast never turns into a new global safety gate.
+fn soil_forecast_accounted(i: &Inputs, gate: &str) -> bool {
+    if i.forecast_stale || planning_forecast_unavailable(i) {
+        return false;
+    }
+    let amount = match gate {
+        "rain_today_forecast" => i.rain_today_forecast_in,
+        "rain_next_4h" => i.rain_next_4h_in,
+        "tomorrow_rain" => i.forecast_in,
+        "rain_3day" => i.rain_3day_weighted_in,
+        _ => None,
+    };
+    amount.is_some_and(|value| value.is_finite() && value >= 0.0)
+}
+
 fn forecast_rain_fires(amount: Option<f64>, threshold: f64, stale: bool) -> bool {
     amount.is_none_or(|amount| !stale && amount >= threshold)
 }
@@ -1866,6 +1887,10 @@ fn gate(
             value: None,
             threshold: None,
             unit_kind: None,
+            // Override provenance is stamped later, if a better-scoped
+            // resolution sets this row aside; producers never pre-set it.
+            overridden_by: None,
+            overridden_detail: None,
         });
         return;
     }
@@ -1884,6 +1909,10 @@ fn gate(
             value: None,
             threshold: None,
             unit_kind: None,
+            // Override provenance is stamped later, if a better-scoped
+            // resolution sets this row aside; producers never pre-set it.
+            overridden_by: None,
+            overridden_detail: None,
         });
         return;
     }
@@ -1902,6 +1931,10 @@ fn gate(
             value: None,
             threshold: None,
             unit_kind: None,
+            // Override provenance is stamped later, if a better-scoped
+            // resolution sets this row aside; producers never pre-set it.
+            overridden_by: None,
+            overridden_detail: None,
         });
         return;
     }
@@ -1919,6 +1952,10 @@ fn gate(
         value: None,
         threshold: None,
         unit_kind: None,
+        // Override provenance is stamped later, if a better-scoped
+        // resolution sets this row aside; producers never pre-set it.
+        overridden_by: None,
+        overridden_detail: None,
     });
     if cond {
         *decided = Some((verdict.into(), reason));
@@ -2947,7 +2984,7 @@ pub fn decide_traced(i: &Inputs, p: &SkipRuleParams) -> DecisionTrace {
     // decide_with_code's code so the two ladders can never disagree.
     let reason_code = rules
         .iter()
-        .find(|r| r.outcome == "fired")
+        .find(|r| r.decided())
         .map(|r| r.id.clone())
         .unwrap_or_else(|| "run".to_string());
     DecisionTrace {
@@ -3482,7 +3519,7 @@ mod tests {
     }
 
     #[test]
-    fn soil_model_can_ignore_missing_daily_rain_when_its_own_plan_has_evidence() {
+    fn soil_configuration_cannot_waive_missing_forecast_rain() {
         let mut input = base();
         input.forecast_in = None;
         input.rain_3day_weighted_in = None;
@@ -3498,7 +3535,7 @@ mod tests {
             },
         ];
         let zones = decide_per_zone(&input, &SkipRuleParams::default(), &[]);
-        assert_eq!(zv(&zones, "soil").verdict, "run");
+        assert_eq!(zv(&zones, "soil").reason_code, "tomorrow_rain");
         assert_eq!(zv(&zones, "weekly").reason_code, "tomorrow_rain");
         input.forecast_stale = true;
         input.forecast_in = Some(2.0);
@@ -6672,5 +6709,45 @@ mod tests {
         let recovered: SkipCheck = serde_json::from_value(legacy).unwrap();
         assert!(recovered.soil_probe_configured.is_empty());
         assert!(recovered.soil_probe_holds.is_empty());
+    }
+    #[test]
+    fn soil_model_cannot_claim_to_have_counted_missing_forecast_rain() {
+        for gate in SOIL_MODEL_INERT_GATES {
+            let mut input = base();
+            for zone in &mut input.soil_zones {
+                zone.governed_by_soil_model = true;
+                zone.probe_configured = false;
+                zone.pct = None;
+            }
+            match *gate {
+                "rain_today_forecast" => input.rain_today_forecast_in = None,
+                "rain_next_4h" => input.rain_next_4h_in = None,
+                "tomorrow_rain" => input.forecast_in = None,
+                "rain_3day" => input.rain_3day_weighted_in = None,
+                _ => unreachable!(),
+            }
+            let answer = evaluate_decisions(
+                &input,
+                &SkipRuleParams::default(),
+                &[],
+                &CompiledScripts::compile(&[]),
+            );
+            assert!(
+                answer
+                    .zones
+                    .iter()
+                    .all(|zone| zone.verdict == "skip" && zone.reason_code == *gate),
+                "{gate}: {:?}",
+                answer.zones
+            );
+            let trace = answer
+                .trace
+                .rules
+                .iter()
+                .find(|rule| rule.id == *gate)
+                .unwrap();
+            assert_eq!(trace.outcome, "fired", "{gate}");
+            assert!(trace.overridden_by.is_none(), "{gate}");
+        }
     }
 }

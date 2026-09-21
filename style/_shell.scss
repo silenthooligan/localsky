@@ -224,6 +224,23 @@ a { color: var(--accent); }
   z-index: var(--z-base);
   box-shadow: var(--shadow-1);
 }
+@include phone {
+  // A pending setup can have several reasons. Keep the notice available
+  // without covering the form or squeezing its text beside the actions.
+  .health-banner--sticky {
+    top: calc(4.25rem + env(safe-area-inset-top));
+    flex-wrap: wrap;
+    align-items: flex-start;
+    max-height: 35dvh;
+    overflow-y: auto;
+  }
+  .health-banner--sticky .health-banner__text { flex-basis: calc(100% - 2rem); }
+  // Native focus and scroll-into-view must leave room for both sticky bars.
+  html:has(.health-banner--sticky) {
+    scroll-padding-top: calc(4.25rem + env(safe-area-inset-top) + 35dvh + 1rem);
+    scroll-padding-bottom: calc(5rem + env(safe-area-inset-bottom));
+  }
+}
 .health-banner__link { flex: none; color: var(--accent-text); font-weight: 600; text-decoration: none; }
 .health-banner__link:hover { text-decoration: underline; }
 .health-banner__dismiss { display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; flex: none; @include surface($background: (none), $border: (none), $radius: (var(--radius-sm)), $shadow: null);  color: var(--text-faint);  cursor: pointer; }

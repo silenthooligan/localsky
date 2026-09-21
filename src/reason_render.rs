@@ -247,7 +247,7 @@ pub fn render_skip_reason(s: &SkipCheck, p: UnitPrefs) -> String {
 /// Under IMPERIAL the handled codes are byte-identical to `trace.reason` (pinned
 /// by `imperial_identity_trace`).
 pub fn render_trace_reason(trace: &DecisionTrace, p: UnitPrefs) -> String {
-    let Some(r) = trace.rules.iter().find(|r| r.outcome == "fired") else {
+    let Some(r) = trace.rules.iter().find(|r| r.decided()) else {
         return trace.reason.clone();
     };
     let (Some(v), Some(t), Some(kind)) = (r.value, r.threshold, r.unit_kind.as_deref()) else {
@@ -422,7 +422,15 @@ pub fn render_rule_margin(r: &RuleEval, p: UnitPrefs) -> Option<String> {
         _ => return r.margin_label.clone(),
     };
 
-    let fired = r.outcome == "fired";
+    // Overridden FIRST: such a row keeps `outcome == "fired"` but did not
+    // decide, and `over_line` is false on it (annotate_margins computes
+    // `over_line = !fired && fires_raw`, and `fired` was true when the row
+    // was built). Testing `fired` before `overridden` would be harmless, but
+    // testing `over_line` alone reaches the final arm and renders HEADROOM
+    // for a gate that is past its line -- the inversion that hid the
+    // 2026-09-20 rain_3day override from the UI while the persisted
+    // margin_label said "past the line".
+    let fired = r.decided();
     // Mirror annotate_margins: a passed gate whose OWN raw threshold is met was
     // overridden (the baked label already says so). We can't recompute fires_raw
     // without the gate's exact operator, and `over_line` carries that
@@ -432,7 +440,7 @@ pub fn render_rule_margin(r: &RuleEval, p: UnitPrefs) -> Option<String> {
     // outcome.)
     let label = if fired {
         format!("skipped, {dist_str}{unit_tok} past the line")
-    } else if r.over_line {
+    } else if r.overridden() || r.over_line {
         format!("{dist_str}{unit_tok} past the line, but overridden")
     } else {
         format!("{dist_str}{unit_tok} of headroom before this skips")
@@ -464,6 +472,115 @@ pub fn render_zone_reason(z: &ZoneVerdict, _p: UnitPrefs) -> String {
 
 #[cfg(all(test, feature = "ssr"))]
 mod tests {
+
+    /// 2026-09-20: `rain_3day` fired at 0.38727" against its 0.375" line and
+    /// the soil model set it aside. The ladder rewrote the row's outcome to
+    /// "passed", and because `annotate_margins` computes
+    /// `over_line = !fired && fires_raw` the row ALSO carried
+    /// `over_line: false` -- so this renderer fell through to the last arm
+    /// and told the operator the gate had HEADROOM while it sat past its
+    /// line. The persisted `margin_label` said "past the line" at the same
+    /// time: the database and the UI stated opposites.
+    #[test]
+    fn an_overridden_gate_never_renders_as_headroom() {
+        let overridden = RuleEval {
+            id: "rain_3day".into(),
+            label: "Rain in the next 3 days".into(),
+            category: "weather".into(),
+            detail: "0.39\" weighted vs 0.38\"".into(),
+            outcome: "fired".into(),
+            over_line: false,
+            verdict: Some("skip".into()),
+            margin_label: Some("skipped, 0.01\" past the line".into()),
+            value: Some(0.38726666666666665),
+            threshold: Some(0.375),
+            unit_kind: Some("rain_in".into()),
+            overridden_by: Some("soil_model".into()),
+            overridden_detail: Some("soil zones count this rain themselves".into()),
+        };
+        assert!(overridden.overridden(), "fired + overridden_by = set aside");
+        assert!(!overridden.decided(), "a set-aside row did not decide");
+
+        let out = render_rule_margin(&overridden, UnitPrefs::default()).unwrap();
+        assert!(
+            !out.contains("headroom"),
+            "a gate past its line must never claim headroom: {out}"
+        );
+        assert!(out.contains("past the line"), "{out}");
+        assert!(out.contains("overridden"), "{out}");
+    }
+
+    /// The same row without the override IS the decision, and reads as the
+    /// skip it caused.
+    #[test]
+    fn a_deciding_gate_reads_as_skipped_past_the_line() {
+        let decided = RuleEval {
+            id: "rain_3day".into(),
+            label: "Rain in the next 3 days".into(),
+            category: "weather".into(),
+            detail: "0.39\" weighted vs 0.38\"".into(),
+            outcome: "fired".into(),
+            over_line: false,
+            verdict: Some("skip".into()),
+            margin_label: None,
+            value: Some(0.38726666666666665),
+            threshold: Some(0.375),
+            unit_kind: Some("rain_in".into()),
+            overridden_by: None,
+            overridden_detail: None,
+        };
+        assert!(decided.decided());
+        let out = render_rule_margin(&decided, UnitPrefs::default()).unwrap();
+        assert!(out.contains("skipped"), "{out}");
+        assert!(out.contains("past the line"), "{out}");
+        assert!(!out.contains("headroom"), "{out}");
+    }
+
+    /// A trace whose only fired row was set aside has no winner among the
+    /// rules, so reason rendering must fall back to the trace's own
+    /// sentence rather than narrating the gate that lost.
+    #[test]
+    fn render_trace_reason_ignores_a_set_aside_gate() {
+        let trace = DecisionTrace {
+            verdict: "run".into(),
+            reason: "All zones can water after their own safety checks.".into(),
+            reason_code: "run".into(),
+            rules: vec![RuleEval {
+                id: "rain_3day".into(),
+                label: "Rain in the next 3 days".into(),
+                category: "weather".into(),
+                detail: "0.39\" weighted vs 0.38\"".into(),
+                outcome: "fired".into(),
+                over_line: false,
+                verdict: Some("skip".into()),
+                margin_label: None,
+                value: Some(0.387),
+                threshold: Some(0.375),
+                unit_kind: Some("rain_in".into()),
+                overridden_by: Some("soil_model".into()),
+                overridden_detail: None,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            render_trace_reason(&trace, UnitPrefs::default()),
+            "All zones can water after their own safety checks."
+        );
+    }
+
+    /// Traces persisted before `overridden_by` existed must still load.
+    #[test]
+    fn a_pre_override_trace_row_deserializes() {
+        let old = r#"{"id":"rain_3day","label":"Rain","category":"weather",
+            "detail":"0.39 vs 0.38","outcome":"passed","over_line":false,
+            "verdict":null,"margin_label":null,"value":0.387,"threshold":0.375,
+            "unit_kind":"rain_in"}"#;
+        let r: RuleEval = serde_json::from_str(old).unwrap();
+        assert_eq!(r.overridden_by, None);
+        assert_eq!(r.overridden_detail, None);
+        assert!(!r.overridden());
+        assert!(!r.decided());
+    }
 
     /// A metric viewer sees metric in every reason that HAS a unit in it.
     /// These two used to fall through to the engine's baked sentence,

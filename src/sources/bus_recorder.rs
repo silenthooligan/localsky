@@ -221,7 +221,7 @@ pub fn spawn(
                 // Which hardware is talking is not a reading, and carries
                 // no time of its own; the observations that come with it
                 // are what prove the source is alive.
-                Ok(SourceEvent::Identity { .. }) => {}
+                Ok(SourceEvent::Identity { .. } | SourceEvent::ForecastTrack { .. }) => {}
                 Ok(SourceEvent::Reachability {
                     source_id,
                     reachable,

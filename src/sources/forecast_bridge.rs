@@ -27,7 +27,7 @@ use crate::ports::weather_source::SourceEvent;
 /// How long the current forecast owner is trusted before a lower-priority
 /// source may take over. Forecast refreshes run ~30 min, so 90 min tolerates a
 /// couple of missed refreshes before failing over to a backup provider.
-const FORECAST_OWNER_STALE_SECS: i64 = 90 * 60;
+pub(crate) const FORECAST_OWNER_STALE_SECS: i64 = 90 * 60;
 
 /// How old the extended-series donor snapshot (the freshest emit carrying
 /// ET0/VPD/model-soil, i.e. Open-Meteo) may be and still get grafted onto

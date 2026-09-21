@@ -23,6 +23,8 @@ use tokio::sync::Mutex;
 struct RunLatch {
     /// Epoch of the poll that first saw the zone running.
     start_epoch: i64,
+    /// Preserve the reporting controller if a later poll loses its identity.
+    controller_id: Option<String>,
     /// Metered volume integrated across the run so far, gallons, when
     /// the controller has a flow meter. None without one.
     volume_gal: Option<f64>,
@@ -174,6 +176,7 @@ impl IngestState {
                     zone.slug.clone(),
                     RunLatch {
                         start_epoch: now,
+                        controller_id: zone.controller_id.clone().filter(|c| !c.is_empty()),
                         volume_gal: None,
                         dry_run: simulated_running.contains(&zone.slug),
                         last_known_running_epoch: now,
@@ -202,6 +205,7 @@ impl IngestState {
                 // End of a run, emit the row.
                 let latch = self.seen_running.remove(&zone.slug).unwrap_or(RunLatch {
                     start_epoch: now,
+                    controller_id: None,
                     volume_gal: None,
                     dry_run: false,
                     last_known_running_epoch: now,
@@ -232,13 +236,12 @@ impl IngestState {
                     } else {
                         "ha_refresher".to_string()
                     },
-                    // The controller that reported it, written now rather
-                    // than derived later from a config that may have
-                    // changed. The historical placeholder stands for the
-                    // rows nothing can attribute.
-                    controller_id: zone
+                    // Use the identity that observed the run start. An
+                    // outage on the falling edge must not turn a native
+                    // run into an unrelated HA session.
+                    controller_id: latch
                         .controller_id
-                        .clone()
+                        .or_else(|| zone.controller_id.clone())
                         .filter(|c| !c.is_empty())
                         .unwrap_or_else(|| "ha_service_call".to_string()),
                     planned_duration_s: duration.max(0) as u32,
@@ -373,6 +376,44 @@ mod tests {
         assert_eq!(ingest.observe(&db, &snap(1_030, false), &none).await, 1);
         // Idle again: nothing further.
         assert_eq!(ingest.observe(&db, &snap(1_040, false), &none).await, 0);
+    }
+
+    #[tokio::test]
+    async fn lost_controller_identity_keeps_the_original_command_session() {
+        let db = mem();
+        let store = RunsStore::new(db.clone());
+        let command = NewRun {
+            session_id: Some("smart:day:front".into()),
+            zone_slug: "front".into(),
+            start_epoch: 100,
+            source: "smart_morning".into(),
+            controller_id: "native".into(),
+            planned_duration_s: 600,
+            skip_reason: None,
+            et0_mm: None,
+            etc_mm: None,
+            cycle_index: None,
+            cycle_count: None,
+        };
+        let id = store.commands().request(command).await.unwrap();
+        store.commands().finish(id, Some((100, 600))).await.unwrap();
+        let mut ingest = IngestState::new();
+        let none = std::collections::HashSet::new();
+        let mut start = snap(110, true);
+        start.zones[0].controller_id = Some("native".into());
+        ingest.observe(&db, &start, &none).await;
+        start.last_refresh_epoch = 160;
+        ingest.observe(&db, &start, &none).await;
+        // A failed controller read closes the verified observation span.
+        // No identity on this tick is not evidence of a different controller.
+        ingest
+            .observe(&db, &snap_known(170, false, false), &none)
+            .await;
+        let rows = store.window(0, 1000).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].controller_id, "native");
+        assert_eq!(rows[0].session_id.as_deref(), Some("smart:day:front"));
+        assert_eq!(rows[0].duration_s, Some(50));
     }
 
     // The post-outage inflation scenario: a verified run (known ticks at
