@@ -83,6 +83,20 @@ def image_refs(directory, repository, sha):
 def promote(directory):
     tag, _ = validate()
     repo = os.environ['GITHUB_REPOSITORY']
+    # A partial rerun can reuse validate's earlier output after an operator has
+    # completed recovery. Check again at the write boundary; never retag those
+    # published images with a newly rebuilt candidate.
+    existing = api(f'repos/{repo}/releases/tags/{tag}', missing_ok=True)
+    if existing:
+        if existing['draft'] or existing['prerelease'] != (version_key(tag)[3] in (0, 2)):
+            raise ValueError(f'Existing release {tag} has unexpected draft/prerelease state')
+        proof = {'source': os.environ['GITHUB_SHA'], 'tag': tag,
+                 'already_published': True, 'url': existing['html_url']}
+        Path('release-images.json').write_text(json.dumps(proof, indent=2), encoding='utf-8')
+        print(f'Preserving already-published images for {tag}', flush=True)
+        return
+    if os.environ.get('DOCKERHUB_TOKEN') and not os.environ.get('DOCKERHUB_USERNAME'):
+        raise ValueError('Docker Hub mirror has a token but no DOCKERHUB_USERNAME; no images promoted')
     refs = image_refs(directory, repo, os.environ['GITHUB_SHA'])
     latest = api(f'repos/{repo}/releases/latest', missing_ok=True)
     tags = promotion_tags(tag, latest['tag_name'] if latest else None)

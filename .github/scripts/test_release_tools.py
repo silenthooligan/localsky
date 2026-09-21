@@ -141,6 +141,24 @@ class Publication(unittest.TestCase):
             release.publish()
             run.assert_not_called()
 
+    def test_partial_rerun_after_manual_recovery_does_not_retag_images(self):
+        existing = {'draft': False, 'prerelease': False, 'html_url': 'https://github.com/test/app/releases/tag/v0.9.2'}
+        with patch.dict(os.environ, {'GITHUB_REPOSITORY': 'test/app', 'GITHUB_SHA': 'a' * 40}), \
+             patch.object(release, 'validate', return_value=('v0.9.2', 'notes')), \
+             patch.object(release, 'api', return_value=existing), \
+             patch.object(release.Path, 'write_text') as write, patch.object(release.subprocess, 'run') as run:
+            release.promote(Path('absent-digests'))
+            run.assert_not_called()
+            self.assertTrue(json.loads(write.call_args.args[0])['already_published'])
+
+    def test_incomplete_mirror_credentials_fail_before_any_registry_write(self):
+        with patch.dict(os.environ, {'GITHUB_REPOSITORY': 'test/app', 'DOCKERHUB_TOKEN': 'test', 'DOCKERHUB_USERNAME': ''}), \
+             patch.object(release, 'validate', return_value=('v0.9.2', 'notes')), \
+             patch.object(release, 'api', return_value=None), patch.object(release.subprocess, 'run') as run:
+            with self.assertRaisesRegex(ValueError, 'no DOCKERHUB_USERNAME'):
+                release.promote(Path('absent-digests'))
+            run.assert_not_called()
+
     def test_draft_is_not_silently_accepted_as_published(self):
         with patch.dict(os.environ, {'GITHUB_REPOSITORY': 'test/app'}), \
              patch.object(release, 'validate', return_value=('v0.9.2', 'notes')), \
