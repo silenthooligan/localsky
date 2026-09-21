@@ -53,7 +53,7 @@ pub enum InviteState {
 #[derive(Debug, Error)]
 pub enum TuningDismissalsError {
     #[error("sqlite: {0}")]
-    Sqlite(String),
+    Sqlite(#[source] Box<crate::failure::Failure>),
 }
 
 /// One stored dismissal row.
@@ -131,8 +131,18 @@ impl TuningDismissalsStore {
             Ok(())
         })
         .await
-        .map_err(|e| TuningDismissalsError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| TuningDismissalsError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            TuningDismissalsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "tuning_dismissals.dismiss",
+            )))
+        })?
+        .map_err(|e| {
+            TuningDismissalsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "tuning_dismissals.dismiss",
+            )))
+        })
     }
 
     /// Remove every dismissal for (zone, field). Returns how many rows
@@ -153,8 +163,18 @@ impl TuningDismissalsStore {
             )
         })
         .await
-        .map_err(|e| TuningDismissalsError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| TuningDismissalsError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            TuningDismissalsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "tuning_dismissals.undismiss",
+            )))
+        })?
+        .map_err(|e| {
+            TuningDismissalsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "tuning_dismissals.undismiss",
+            )))
+        })
     }
 
     /// Where the soil-model opt-in offer stands at `now`. Reads the one
@@ -196,8 +216,18 @@ impl TuningDismissalsStore {
             Ok(InviteState::Open)
         })
         .await
-        .map_err(|e| TuningDismissalsError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| TuningDismissalsError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            TuningDismissalsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "tuning_dismissals.soil_invite_state",
+            )))
+        })?
+        .map_err(|e| {
+            TuningDismissalsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "tuning_dismissals.soil_invite_state",
+            )))
+        })
     }
 
     /// Record the answer to the soil-model offer and report where the
@@ -256,8 +286,18 @@ impl TuningDismissalsStore {
             Ok(rows)
         })
         .await
-        .map_err(|e| TuningDismissalsError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| TuningDismissalsError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            TuningDismissalsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "tuning_dismissals.active",
+            )))
+        })?
+        .map_err(|e| {
+            TuningDismissalsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "tuning_dismissals.active",
+            )))
+        })
     }
 }
 

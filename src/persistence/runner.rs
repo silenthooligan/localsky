@@ -141,7 +141,11 @@ pub enum MigrationError {
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("migration {version} failed: {detail}")]
-    Failed { version: String, detail: String },
+    Failed {
+        version: String,
+        #[source]
+        detail: Box<crate::failure::Failure>,
+    },
 }
 
 /// Compile-time-ish guarantee that MIGRATIONS is monotonically ordered
@@ -206,7 +210,10 @@ fn apply(tx: &Transaction, m: &Migration) -> Result<(), MigrationError> {
     tx.execute_batch(m.sql)
         .map_err(|e| MigrationError::Failed {
             version: m.version.to_string(),
-            detail: e.to_string(),
+            detail: Box::new(
+                crate::diagnostics::from_sqlite(&e, "database apply migration")
+                    .with_resource(m.version),
+            ),
         })?;
     tx.execute(
         "INSERT OR REPLACE INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",

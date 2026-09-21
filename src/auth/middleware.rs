@@ -1699,8 +1699,11 @@ mod tests {
 
         // Transient error -> keep last good (None), never silently drop auth.
         assert!(
-            AuthRuntime::policy_for_load_result(Err(ConfigStoreError::Io("flaky".into())))
-                .is_none(),
+            AuthRuntime::policy_for_load_result(Err(ConfigStoreError::io(
+                &std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                "test config load"
+            )))
+            .is_none(),
             "transient read error must keep the last good policy"
         );
 

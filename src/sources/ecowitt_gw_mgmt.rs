@@ -21,7 +21,7 @@
 //! reject, capped body): `host` is operator-configured, so it is treated like
 //! every other operator-supplied fetch target in the codebase.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -73,26 +73,47 @@ async fn resolve_soil_channel(
     channel: u32,
 ) -> Result<Option<(serde_json::Value, bool)>> {
     let want = format!("Soil moisture CH{channel}");
+    let mut failures = Vec::new();
     for page in 1..=MAX_PAGES {
         let url = format!("http://{host}/get_sensors_info?page={page}");
         let (client, safe_url) = crate::net::safe_fetch::build_safe_client(&url, MGMT_TIMEOUT)
             .await
-            .map_err(|e| anyhow::anyhow!("gateway unreachable ({host}): {e}"))?;
+            .map_err(|e| {
+                crate::net::source_failure::from_safe(&e, "Ecowitt initialize management request")
+            })?;
         let resp = client
             .get(safe_url)
             .basic_auth(user, Some(pass))
             .send()
             .await
-            .with_context(|| format!("GET get_sensors_info p{page} ({host})"))?
+            .map_err(|e| {
+                crate::net::source_failure::from_reqwest(&e, "Ecowitt GET sensor inventory")
+                    .with_item(page as usize)
+            })?
             .error_for_status()
-            .with_context(|| format!("get_sensors_info p{page} non-2xx ({host})"))?;
+            .map_err(|e| {
+                crate::net::source_failure::from_reqwest(&e, "Ecowitt sensor inventory status")
+                    .with_item(page as usize)
+            })?;
         let bytes = crate::net::safe_fetch::read_body_capped(resp)
             .await
-            .map_err(|e| anyhow::anyhow!("read get_sensors_info p{page}: {e}"))?;
+            .map_err(|e| {
+                crate::net::source_failure::from_safe(&e, "Ecowitt read sensor inventory")
+                    .with_item(page as usize)
+            })?;
         let sensors: Vec<RawSensor> = match serde_json::from_slice(&bytes) {
             Ok(v) => v,
             // A page we cannot parse: skip it, keep walking (never abort on one).
-            Err(_) => continue,
+            Err(error) => {
+                let failure = crate::net::source_failure::from_json(
+                    &error,
+                    "Ecowitt decode sensor inventory",
+                )
+                .with_item(page as usize);
+                tracing::warn!(error = %failure, "Ecowitt sensor inventory page failed");
+                failures.push(failure);
+                continue;
+            }
         };
         if sensors.is_empty() {
             break; // walked past the last populated page
@@ -104,6 +125,11 @@ async fn resolve_soil_channel(
             let ty = s.type_code.clone().unwrap_or(serde_json::Value::Null);
             return Ok(Some((ty, is_registered(s.idst.as_ref()))));
         }
+    }
+    if !failures.is_empty() {
+        return Err(
+            crate::failure::Failure::batch("Ecowitt resolve soil channel", failures, true).into(),
+        );
     }
     Ok(None)
 }
@@ -128,7 +154,9 @@ pub async fn unregister_soil_channel(
     let url = format!("http://{host}/set_sensors_info");
     let (client, safe_url) = crate::net::safe_fetch::build_safe_client(&url, MGMT_TIMEOUT)
         .await
-        .map_err(|e| anyhow::anyhow!("gateway unreachable ({host}): {e}"))?;
+        .map_err(|e| {
+            crate::net::source_failure::from_safe(&e, "Ecowitt initialize management request")
+        })?;
     let body = serde_json::json!({ "type": type_code, "id": DISABLE_ID });
     client
         .post(safe_url)
@@ -136,9 +164,13 @@ pub async fn unregister_soil_channel(
         .json(&body)
         .send()
         .await
-        .with_context(|| format!("POST set_sensors_info ({host})"))?
+        .map_err(|e| {
+            crate::net::source_failure::from_reqwest(&e, "Ecowitt unregister soil channel")
+        })?
         .error_for_status()
-        .with_context(|| format!("set_sensors_info non-2xx ({host})"))?;
+        .map_err(|e| {
+            crate::net::source_failure::from_reqwest(&e, "Ecowitt unregister soil channel")
+        })?;
     Ok(UnregisterOutcome::Unregistered)
 }
 

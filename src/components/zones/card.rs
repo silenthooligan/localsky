@@ -270,7 +270,7 @@ pub fn ZoneCard(
     /// card list is rebuilt on every streamed snapshot and a callback
     /// created here would be disposed with its own request still in
     /// flight (see `on_stop`).
-    stop_done: Callback<Result<Option<String>, String>>,
+    stop_done: Callback<Result<Option<String>, crate::components::request_error::RequestError>>,
 ) -> impl IntoView {
     // A zone the budget zeroed is "on hold" with a reason, never idle.
     // Held only when nothing else already explains the zero: a skip verdict

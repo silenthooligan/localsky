@@ -84,13 +84,13 @@ impl ForecastStore {
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    tracing::warn!(path = %path.display(), error = %e,
+                    tracing::warn!(path = %path.display(), error = %crate::diagnostics::from_error(&e, "forecast cache load"),
                         "persisted forecast legacy or unreadable; awaiting fresh provider evidence");
                 }
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e,
+                tracing::warn!(path = %path.display(), error = %crate::diagnostics::from_error(&e, "forecast cache load"),
                     "persisted forecast unreadable; starting empty");
             }
         }
@@ -142,7 +142,7 @@ impl ForecastStore {
                 std::fs::rename(&tmp, path)
             };
             if let Err(e) = write() {
-                tracing::debug!(path = %path.display(), error = %e,
+                tracing::debug!(path = %path.display(), error = %crate::diagnostics::from_error(&e, "forecast cache write"),
                     "forecast persistence write failed (non-fatal)");
             }
         }

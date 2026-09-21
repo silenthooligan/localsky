@@ -57,6 +57,8 @@ impl ReachabilityLatch {
 /// What one poll produced.
 #[derive(Debug, Default)]
 pub struct Poll {
+    /// A partial poll can be reachable while retaining failed item evidence.
+    pub failure: Option<crate::failure::Failure>,
     /// Events to publish, in order. Empty is a legitimate poll (the
     /// upstream answered, nothing new).
     pub events: Vec<SourceEvent>,
@@ -93,6 +95,20 @@ impl Poll {
         self.reachable = Some(false);
         self
     }
+
+    pub fn with_failure(mut self, failure: crate::failure::Failure) -> Self {
+        self.failure = Some(failure);
+        self
+    }
+}
+
+/// Streaming adapters use the same bus-owned diagnostic state as polling ones.
+pub fn report_diagnostic(bus: &SourceBus, id: &str, failure: Option<crate::failure::Failure>) {
+    let _ = bus.send(SourceEvent::Diagnostic {
+        source_id: id.to_owned(),
+        failure: failure.map(Box::new),
+        at_epoch: chrono::Utc::now().timestamp(),
+    });
 }
 
 /// Run `fetch` every `every`, publishing what it returns, until shutdown.
@@ -127,6 +143,11 @@ where
             _ = tick.tick() => {
                 match crate::metrics::observe_fetch(source_id, fetch(source.clone())).await {
                     Ok(poll) => {
+                        let _ = bus.send(SourceEvent::Diagnostic {
+                            source_id: source_id.to_string(),
+                            failure: poll.failure.clone().map(Box::new),
+                            at_epoch: chrono::Utc::now().timestamp(),
+                        });
                         let reachable = poll.reachable.unwrap_or(true);
                         latch.report(&bus, source_id, reachable);
                         let n = poll.events.len();
@@ -138,7 +159,14 @@ where
                         }
                     }
                     Err(e) => {
-                        warn!(source_id = %source_id, error = %e, "{label} fetch failed");
+                        let failure = crate::net::source_failure::from_anyhow(&e, "source poll");
+                        warn!(source_id = %source_id, error_code = failure.code.as_str(),
+                            operation = failure.operation, http_status = ?failure.http_status,
+                            error = %failure, "{label} fetch failed");
+                        let _ = bus.send(SourceEvent::Diagnostic {
+                            source_id: source_id.to_string(), failure: Some(Box::new(failure)),
+                            at_epoch: chrono::Utc::now().timestamp(),
+                        });
                         latch.report(&bus, source_id, false);
                     }
                 }
@@ -207,15 +235,78 @@ mod tests {
         let _ = task.await;
         let mut edges = Vec::new();
         let mut observations = 0;
+        let mut failures = Vec::new();
         while let Ok(ev) = rx.try_recv() {
             match ev {
                 SourceEvent::Reachability { reachable, .. } => edges.push(reachable),
                 SourceEvent::Observation { .. } => observations += 1,
+                SourceEvent::Diagnostic { failure, .. } => failures.push(failure.map(|f| f.code)),
                 _ => {}
             }
         }
         assert_eq!(edges, vec![true, false, true]);
         assert_eq!(observations, 2);
+        use crate::ports::source_error::SourceErrorCode;
+        assert_eq!(
+            failures,
+            vec![
+                None,
+                Some(SourceErrorCode::DiagnosticMissing),
+                Some(SourceErrorCode::DiagnosticMissing),
+                None
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn partial_failure_stays_visible_until_full_recovery_without_refreshing_data() {
+        use crate::failure::{Failure, FailureCode};
+        let (bus, mut rx) = tokio::sync::broadcast::channel(32);
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(run_polling(
+            Arc::new(Flaky {
+                calls: AtomicUsize::new(0),
+            }),
+            "partial",
+            "Partial",
+            Duration::from_secs(10),
+            bus,
+            stop_rx,
+            |s: Arc<Flaky>| async move {
+                let poll = Poll::observation("partial", vec![(WeatherField::AirTempF, 70.0)], 123);
+                if s.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Ok(poll.with_failure(Failure::batch(
+                        "query batch",
+                        vec![Failure::http(503, Some("HTML"), "query").with_item(2)],
+                        true,
+                    )))
+                } else {
+                    Ok(poll)
+                }
+            },
+        ));
+        tokio::time::sleep(Duration::from_secs(11)).await;
+        let _ = stop_tx.send(true);
+        task.await.unwrap().unwrap();
+        let mut diagnostics = Vec::new();
+        let mut edges = Vec::new();
+        let mut ages = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                SourceEvent::Diagnostic { failure, .. } => diagnostics.push(failure),
+                SourceEvent::Reachability { reachable, .. } => edges.push(reachable),
+                SourceEvent::Observation { at_epoch, .. } => ages.push(at_epoch),
+                _ => {}
+            }
+        }
+        assert_eq!(edges, [true]);
+        assert_eq!(ages, [123, 123]);
+        assert_eq!(diagnostics.len(), 2);
+        let partial = diagnostics[0].as_ref().unwrap();
+        assert_eq!(partial.code, FailureCode::BatchPartial);
+        assert_eq!(partial.causes[0].item_index, Some(2));
+        assert_eq!(partial.causes[0].http_status, Some(503));
+        assert!(diagnostics[1].is_none());
     }
 
     /// A poll that answers but says the station is gone reports offline
@@ -236,9 +327,12 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(1)).await;
         let _ = stop_tx.send(true);
         let _ = task.await;
-        match rx.try_recv() {
-            Ok(SourceEvent::Reachability { reachable, .. }) => assert!(!reachable),
-            other => panic!("{other:?}"),
+        let mut offline = false;
+        while let Ok(event) = rx.try_recv() {
+            if let SourceEvent::Reachability { reachable, .. } = event {
+                offline = !reachable;
+            }
         }
+        assert!(offline);
     }
 }

@@ -214,4 +214,7 @@ pub struct TrackStatus {
     pub tier: String,
     pub degraded: bool,
     pub last_error: Option<String>,
+    /// Serialized shared failure record; retained as owned JSON in the browser.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<serde_json::Value>,
 }

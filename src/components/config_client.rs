@@ -66,10 +66,9 @@ pub fn outcome_from_body(body: &serde_json::Value) -> SaveOutcome {
 #[cfg(feature = "hydrate")]
 pub async fn get_config() -> Result<serde_json::Value, String> {
     use gloo_net::http::Request;
-    let resp = Request::get("/api/config")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let resp = Request::get("/api/config").send().await.map_err(|_| {
+        crate::components::request_error::RequestError::network("configuration request").to_string()
+    })?;
     if !resp.ok() {
         let body = resp.text().await.unwrap_or_default();
         return Err(crate::components::settings_ui::load_error_message(
@@ -86,15 +85,17 @@ pub async fn get_config() -> Result<serde_json::Value, String> {
 #[cfg(feature = "hydrate")]
 pub async fn put_config(cfg: &serde_json::Value) -> Result<SaveOutcome, String> {
     use gloo_net::http::Request;
-    let req = Request::put("/api/config")
-        .json(cfg)
-        .map_err(|e| e.to_string())?;
+    let req = Request::put("/api/config").json(cfg).map_err(|_| {
+        crate::components::request_error::RequestError::network("configuration request").to_string()
+    })?;
     finish_save(req).await
 }
 
 #[cfg(feature = "hydrate")]
 async fn finish_save(req: gloo_net::http::Request) -> Result<SaveOutcome, String> {
-    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let resp = req.send().await.map_err(|_| {
+        crate::components::request_error::RequestError::network("configuration request").to_string()
+    })?;
     if !resp.ok() {
         let body = resp.text().await.unwrap_or_default();
         return Err(crate::components::settings_ui::save_error_message(

@@ -35,12 +35,15 @@ use crate::model::IrrigationSnapshot;
 #[derive(Debug, Error)]
 pub enum MqttPublishError {
     #[error("mqtt client error: {0}")]
-    Client(String),
+    Client(#[source] Box<crate::failure::Failure>),
 }
 
 impl From<ClientError> for MqttPublishError {
     fn from(e: ClientError) -> Self {
-        Self::Client(e.to_string())
+        Self::Client(Box::new(crate::diagnostics::from_error(
+            &e,
+            "HA MQTT publish queue",
+        )))
     }
 }
 
@@ -239,8 +242,12 @@ impl HaMqttPublisher {
             "discovery payload points at an availability topic nothing publishes"
         );
         let topic = self.config_topic(component, object_id);
-        let payload = serde_json::to_string(entity)
-            .map_err(|e| MqttPublishError::Client(format!("serialize: {e}")))?;
+        let payload = serde_json::to_string(entity).map_err(|e| {
+            MqttPublishError::Client(Box::new(crate::diagnostics::from_error(
+                &e,
+                "HA MQTT discovery serialization",
+            )))
+        })?;
         self.client
             .publish(topic, QoS::AtLeastOnce, true, payload)
             .await?;
@@ -652,7 +659,8 @@ pub fn spawn(
                             }
                             Ok(_) => {} // PingResp, PubAck, outgoing, etc.
                             Err(e) => {
-                                warn!(error = %e, "ha mqtt publisher: eventloop error; reconnecting in 5s");
+                                let failure = crate::net::stream_failure::mqtt(&e, "HA MQTT publisher connection");
+                                warn!(%failure, "ha mqtt publisher: eventloop error; reconnecting in 5s");
                                 tokio::time::sleep(Duration::from_secs(5)).await;
                                 break; // drop this connection; outer loop reconnects
                             }

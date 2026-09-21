@@ -16,9 +16,9 @@ use crate::engine::forecast_bias::Observation as BiasObservation;
 #[derive(Debug, Error)]
 pub enum ForecastObservationsError {
     #[error("sqlite: {0}")]
-    Sqlite(String),
+    Sqlite(#[source] Box<crate::failure::Failure>),
     #[error("bad date string: {0}")]
-    Date(String),
+    Date(#[source] Box<crate::failure::Failure>),
 }
 
 #[derive(Debug, Clone)]
@@ -84,8 +84,18 @@ impl ForecastObservationsStore {
             Ok(())
         })
         .await
-        .map_err(|e| ForecastObservationsError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| ForecastObservationsError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            ForecastObservationsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "forecast_observations.upsert",
+            )))
+        })?
+        .map_err(|e| {
+            ForecastObservationsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "forecast_observations.upsert",
+            )))
+        })
     }
 
     /// Record a day's reference ET0 (mm) under the same day-MAX rule as
@@ -135,8 +145,18 @@ impl ForecastObservationsStore {
             Ok(())
         })
         .await
-        .map_err(|e| ForecastObservationsError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| ForecastObservationsError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            ForecastObservationsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "forecast_observations.upsert_et0",
+            )))
+        })?
+        .map_err(|e| {
+            ForecastObservationsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "forecast_observations.upsert_et0",
+            )))
+        })
     }
 
     /// Per-day reference ET0 rows over the trailing `window_days` local
@@ -178,12 +198,26 @@ impl ForecastObservationsStore {
                 Ok(mapped)
             })
             .await
-            .map_err(|e| ForecastObservationsError::Sqlite(format!("join: {e}")))?
-            .map_err(|e| ForecastObservationsError::Sqlite(e.to_string()))?;
+            .map_err(|e| {
+                ForecastObservationsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                    &e,
+                    "forecast_observations.et0_window_days",
+                )))
+            })?
+            .map_err(|e| {
+                ForecastObservationsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                    &e,
+                    "forecast_observations.et0_window_days",
+                )))
+            })?;
         let mut out = Vec::with_capacity(rows.len());
         for (date_str, et0_mm, source) in rows {
-            let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
-                .map_err(|e| ForecastObservationsError::Date(format!("{date_str}: {e}")))?;
+            let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").map_err(|e| {
+                ForecastObservationsError::Date(Box::new(
+                    crate::diagnostics::from_error(&e, "forecast observations parse stored date")
+                        .with_field("date_local"),
+                ))
+            })?;
             out.push(Et0LedgerDay {
                 date,
                 et0_mm,
@@ -223,13 +257,27 @@ impl ForecastObservationsStore {
                 }
             })
             .await
-            .map_err(|e| ForecastObservationsError::Sqlite(format!("join: {e}")))?
-            .map_err(|e| ForecastObservationsError::Sqlite(e.to_string()))?;
+            .map_err(|e| {
+                ForecastObservationsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                    &e,
+                    "forecast_observations.days_since_observed_rain",
+                )))
+            })?
+            .map_err(|e| {
+                ForecastObservationsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                    &e,
+                    "forecast_observations.days_since_observed_rain",
+                )))
+            })?;
         let Some(date_str) = last_wet else {
             return Ok(None);
         };
-        let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
-            .map_err(|e| ForecastObservationsError::Date(format!("{date_str}: {e}")))?;
+        let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").map_err(|e| {
+            ForecastObservationsError::Date(Box::new(
+                crate::diagnostics::from_error(&e, "forecast observations parse stored date")
+                    .with_field("date_local"),
+            ))
+        })?;
         // Clamp at zero: a (clock-skewed) future-dated row reads as "wet
         // today" rather than going negative. Configured-timezone date, same
         // frame the ingest writer stamps rows with; anchoring on the
@@ -274,13 +322,27 @@ impl ForecastObservationsStore {
                 Ok(mapped)
             })
             .await
-            .map_err(|e| ForecastObservationsError::Sqlite(format!("join: {e}")))?
-            .map_err(|e| ForecastObservationsError::Sqlite(e.to_string()))?;
+            .map_err(|e| {
+                ForecastObservationsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                    &e,
+                    "forecast_observations.recent",
+                )))
+            })?
+            .map_err(|e| {
+                ForecastObservationsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                    &e,
+                    "forecast_observations.recent",
+                )))
+            })?;
 
         let mut out = Vec::with_capacity(rows.len());
         for (date_str, predicted_in, observed_in) in rows {
-            let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
-                .map_err(|e| ForecastObservationsError::Date(format!("{date_str}: {e}")))?;
+            let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").map_err(|e| {
+                ForecastObservationsError::Date(Box::new(
+                    crate::diagnostics::from_error(&e, "forecast observations parse stored date")
+                        .with_field("date_local"),
+                ))
+            })?;
             out.push(BiasObservation::new(date, predicted_in, observed_in));
         }
         Ok(out)
@@ -327,12 +389,26 @@ impl ForecastObservationsStore {
                 Ok(mapped)
             })
             .await
-            .map_err(|e| ForecastObservationsError::Sqlite(format!("join: {e}")))?
-            .map_err(|e| ForecastObservationsError::Sqlite(e.to_string()))?;
+            .map_err(|e| {
+                ForecastObservationsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                    &e,
+                    "forecast_observations.range",
+                )))
+            })?
+            .map_err(|e| {
+                ForecastObservationsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                    &e,
+                    "forecast_observations.range",
+                )))
+            })?;
         let mut out = Vec::with_capacity(rows.len());
         for (date_str, predicted_in, observed_in) in rows {
-            let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
-                .map_err(|e| ForecastObservationsError::Date(format!("{date_str}: {e}")))?;
+            let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").map_err(|e| {
+                ForecastObservationsError::Date(Box::new(
+                    crate::diagnostics::from_error(&e, "forecast observations parse stored date")
+                        .with_field("date_local"),
+                ))
+            })?;
             out.push(BiasObservation::new(date, predicted_in, observed_in));
         }
         Ok(out)
@@ -369,8 +445,18 @@ impl ForecastObservationsStore {
             )
         })
         .await
-        .map_err(|e| ForecastObservationsError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| ForecastObservationsError::Sqlite(e.to_string()))?;
+        .map_err(|e| {
+            ForecastObservationsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "forecast_observations.observed_rain_last_n_days",
+            )))
+        })?
+        .map_err(|e| {
+            ForecastObservationsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "forecast_observations.observed_rain_last_n_days",
+            )))
+        })?;
         Ok(total)
     }
 
@@ -416,12 +502,26 @@ impl ForecastObservationsStore {
                 Ok(mapped)
             })
             .await
-            .map_err(|e| ForecastObservationsError::Sqlite(format!("join: {e}")))?
-            .map_err(|e| ForecastObservationsError::Sqlite(e.to_string()))?;
+            .map_err(|e| {
+                ForecastObservationsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                    &e,
+                    "forecast_observations.observed_rain_window_days",
+                )))
+            })?
+            .map_err(|e| {
+                ForecastObservationsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                    &e,
+                    "forecast_observations.observed_rain_window_days",
+                )))
+            })?;
         let mut out = Vec::with_capacity(rows.len());
         for (date_str, observed_in, source) in rows {
-            let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
-                .map_err(|e| ForecastObservationsError::Date(format!("{date_str}: {e}")))?;
+            let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").map_err(|e| {
+                ForecastObservationsError::Date(Box::new(
+                    crate::diagnostics::from_error(&e, "forecast observations parse stored date")
+                        .with_field("date_local"),
+                ))
+            })?;
             out.push(ObservedRainDay {
                 date,
                 observed_in,
@@ -469,8 +569,18 @@ impl ForecastObservationsStore {
                 Ok(mapped)
             })
             .await
-            .map_err(|e| ForecastObservationsError::Sqlite(format!("join: {e}")))?
-            .map_err(|e| ForecastObservationsError::Sqlite(e.to_string()))?;
+            .map_err(|e| {
+                ForecastObservationsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                    &e,
+                    "forecast_observations.observed_rain_window_by_source",
+                )))
+            })?
+            .map_err(|e| {
+                ForecastObservationsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                    &e,
+                    "forecast_observations.observed_rain_window_by_source",
+                )))
+            })?;
         let mut out = ObservedRainWindow::default();
         for (source, sum_in, days) in rows {
             let days = days.max(0) as u32;

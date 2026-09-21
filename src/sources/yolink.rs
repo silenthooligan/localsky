@@ -31,6 +31,9 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use tracing::{debug, warn};
 
+use crate::failure::Failure;
+use crate::net::source_failure::from_anyhow;
+
 use crate::config::schema::{YolinkConfig, YolinkFieldMap};
 use crate::ports::weather_source::{
     ShutdownSignal, SourceBus, SourceCaps, SourceEvent, WeatherField, WeatherSource,
@@ -74,15 +77,27 @@ struct TokenResponse {
 /// exactly this error as "log in again and retry once"; every other
 /// failure (timeout, 5xx, bad JSON) is an outage and is not retried.
 #[derive(Debug)]
-struct TokenRejected;
+struct TokenRejected(crate::failure::Failure);
 
 impl std::fmt::Display for TokenRejected {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "yolink api {}", StatusCode::UNAUTHORIZED)
+        self.0.fmt(f)
     }
 }
-
-impl std::error::Error for TokenRejected {}
+impl std::error::Error for TokenRejected {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+impl TokenRejected {
+    fn new(status: u16) -> Self {
+        Self(crate::failure::Failure::http(
+            status,
+            None,
+            "yolink authenticated request",
+        ))
+    }
+}
 
 fn token_rejected(e: &anyhow::Error) -> bool {
     e.downcast_ref::<TokenRejected>().is_some()
@@ -148,10 +163,15 @@ impl Yolink {
             .await?;
         let status = resp.status();
         if status == StatusCode::UNAUTHORIZED {
-            return Err(TokenRejected.into());
+            return Err(TokenRejected::new(401).into());
         }
         if !status.is_success() {
-            return Err(anyhow::anyhow!("yolink api {status}"));
+            return Err(Failure::http(
+                status.as_u16(),
+                Some(crate::net::source_failure::response_format(&resp)),
+                "YoLink API request",
+            )
+            .into());
         }
         Ok(crate::net::safe_fetch::read_json_capped(resp).await?)
     }
@@ -191,14 +211,17 @@ impl Yolink {
         let mut fields: Vec<(WeatherField, f64)> = Vec::new();
         let mut soil: Vec<(String, f64)> = Vec::new();
         let mut any_ok = false;
-        let mut last_err: Option<anyhow::Error> = None;
-        for m in &self.mapping {
+        let mut failures = Vec::new();
+        for (index, m) in self.mapping.iter().enumerate() {
             let method = format!("{}.getState", m.device_type);
             let resp = match self.api_call(&method, &m.device_id).await {
                 Ok(resp) => resp,
                 Err(e) => {
-                    debug!(source_id = %self.id, device_id = m.device_id, error = %e, "yolink getState failed");
-                    last_err = Some(e);
+                    let failure = from_anyhow(&e, "YoLink getState")
+                        .with_item(index)
+                        .with_resource(&m.device_id);
+                    debug!(source_id = %self.id, error = %failure, "yolink getState failed");
+                    failures.push(failure);
                     continue;
                 }
             };
@@ -220,17 +243,15 @@ impl Yolink {
                 fields.push((f, v));
             }
         }
-        if !any_ok {
-            let last = last_err
-                .map(|e| format!("{e:#}"))
-                .unwrap_or_else(|| "no error recorded".to_string());
-            return Err(anyhow::anyhow!(
-                "no mapped device answered ({} tried); last error: {last}",
-                self.mapping.len()
-            ));
-        }
         let now = chrono::Utc::now().timestamp();
         let mut poll = Poll::none();
+        if !failures.is_empty() {
+            let failure = Failure::batch("YoLink device batch", failures, any_ok);
+            if !any_ok {
+                return Err(failure.into());
+            }
+            poll = poll.with_failure(failure);
+        }
         for (key, value) in soil {
             poll = poll.with(SourceEvent::KeyedReading {
                 source_id: self.id.clone(),
@@ -383,6 +404,17 @@ impl WeatherSource for Yolink {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reauth_marker_preserves_http_evidence_through_context() {
+        let error =
+            anyhow::Error::new(super::TokenRejected::new(401)).context("credential-must-not-leak");
+        assert!(super::token_rejected(&error));
+        let failure = crate::net::source_failure::from_anyhow(&error, "poll");
+        assert_eq!(failure.code, crate::failure::FailureCode::HttpUnauthorized);
+        assert_eq!(failure.http_status, Some(401));
+        assert!(!failure.to_string().contains("credential-must-not-leak"));
+    }
+
     use super::*;
     use serde_json::json;
 
@@ -490,10 +522,12 @@ mod tests {
     /// outage-shaped error must not trigger a re-authentication.
     #[test]
     fn only_a_401_counts_as_a_rejected_token() {
-        assert!(token_rejected(&anyhow::Error::from(TokenRejected)));
+        assert!(token_rejected(&anyhow::Error::from(TokenRejected::new(
+            401
+        ))));
         assert!(!token_rejected(&anyhow::anyhow!(
             "yolink api 503 Service Unavailable"
         )));
-        assert_eq!(TokenRejected.to_string(), "yolink api 401 Unauthorized");
+        assert!(TokenRejected::new(401).to_string().contains("LS_HTTP_401"));
     }
 }

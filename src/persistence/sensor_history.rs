@@ -23,7 +23,7 @@ const PRUNE_INTERVAL_S: i64 = 3600;
 #[derive(Debug, Error)]
 pub enum SensorHistoryError {
     #[error("sqlite: {0}")]
-    Sqlite(String),
+    Sqlite(#[source] Box<crate::failure::Failure>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,8 +73,18 @@ impl SensorHistoryStore {
             Ok(())
         })
         .await
-        .map_err(|e| SensorHistoryError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| SensorHistoryError::Sqlite(e.to_string()))?;
+        .map_err(|e| {
+            SensorHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "sensor_history.insert",
+            )))
+        })?
+        .map_err(|e| {
+            SensorHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "sensor_history.insert",
+            )))
+        })?;
         self.maybe_prune().await;
         Ok(())
     }
@@ -100,8 +110,18 @@ impl SensorHistoryStore {
             Ok(inserted)
         })
         .await
-        .map_err(|e| SensorHistoryError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| SensorHistoryError::Sqlite(e.to_string()))?;
+        .map_err(|e| {
+            SensorHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "sensor_history.insert_many",
+            )))
+        })?
+        .map_err(|e| {
+            SensorHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "sensor_history.insert_many",
+            )))
+        })?;
         self.maybe_prune().await;
         Ok(inserted)
     }
@@ -117,8 +137,18 @@ impl SensorHistoryStore {
             )
         })
         .await
-        .map_err(|e| SensorHistoryError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| SensorHistoryError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            SensorHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "sensor_history.prune_older_than",
+            )))
+        })?
+        .map_err(|e| {
+            SensorHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "sensor_history.prune_older_than",
+            )))
+        })
     }
 
     /// Retention pruning, piggybacked on writes: at most one pass per
@@ -180,8 +210,18 @@ impl SensorHistoryStore {
             Ok(rows)
         })
         .await
-        .map_err(|e| SensorHistoryError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| SensorHistoryError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            SensorHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "sensor_history.series",
+            )))
+        })?
+        .map_err(|e| {
+            SensorHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "sensor_history.series",
+            )))
+        })
     }
 
     /// SOURCE-SCOPED windowed series for one channel, ascending by epoch.
@@ -222,8 +262,18 @@ impl SensorHistoryStore {
             Ok(rows)
         })
         .await
-        .map_err(|e| SensorHistoryError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| SensorHistoryError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            SensorHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "sensor_history.series_for_channel",
+            )))
+        })?
+        .map_err(|e| {
+            SensorHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "sensor_history.series_for_channel",
+            )))
+        })
     }
 
     /// Most-recent observation epoch per source_id. Used by /api/health
@@ -256,8 +306,18 @@ impl SensorHistoryStore {
             },
         )
         .await
-        .map_err(|e| SensorHistoryError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| SensorHistoryError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            SensorHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "sensor_history.last_seen_per_source",
+            )))
+        })?
+        .map_err(|e| {
+            SensorHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "sensor_history.last_seen_per_source",
+            )))
+        })
     }
 
     /// The last value for a key from a specific source. Used by the
@@ -291,8 +351,18 @@ impl SensorHistoryStore {
             }
         })
         .await
-        .map_err(|e| SensorHistoryError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| SensorHistoryError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            SensorHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "sensor_history.last_value",
+            )))
+        })?
+        .map_err(|e| {
+            SensorHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "sensor_history.last_value",
+            )))
+        })
     }
 
     /// The most recent reading for a channel with value strictly above
@@ -329,8 +399,18 @@ impl SensorHistoryStore {
             }
         })
         .await
-        .map_err(|e| SensorHistoryError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| SensorHistoryError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            SensorHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "sensor_history.last_value_above",
+            )))
+        })?
+        .map_err(|e| {
+            SensorHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "sensor_history.last_value_above",
+            )))
+        })
     }
 
     /// Latest reading for every (source_id, key) whose key looks like a
@@ -372,8 +452,18 @@ impl SensorHistoryStore {
             Ok(rows)
         })
         .await
-        .map_err(|e| SensorHistoryError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| SensorHistoryError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            SensorHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "sensor_history.soil_channels",
+            )))
+        })?
+        .map_err(|e| {
+            SensorHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "sensor_history.soil_channels",
+            )))
+        })
     }
 
     /// Delete every reading for one (source_id, key) channel. Powers probe
@@ -396,8 +486,18 @@ impl SensorHistoryStore {
             )
         })
         .await
-        .map_err(|e| SensorHistoryError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| SensorHistoryError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            SensorHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "sensor_history.delete_channel",
+            )))
+        })?
+        .map_err(|e| {
+            SensorHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "sensor_history.delete_channel",
+            )))
+        })
     }
 
     /// Latest value for every distinct key a source has reported, newest
@@ -435,8 +535,18 @@ impl SensorHistoryStore {
             Ok(rows)
         })
         .await
-        .map_err(|e| SensorHistoryError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| SensorHistoryError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            SensorHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "sensor_history.latest_for_source",
+            )))
+        })?
+        .map_err(|e| {
+            SensorHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "sensor_history.latest_for_source",
+            )))
+        })
     }
 }
 

@@ -53,7 +53,12 @@ impl OllamaProvider {
         // reach a local provider). Same anti-SSRF hardening otherwise.
         crate::net::build_llm_probe_client(url, DEFAULT_TIMEOUT)
             .await
-            .map_err(|e| LlmError::Transport(e.to_string()))
+            .map_err(|e| {
+                LlmError::transport(crate::net::source_failure::from_safe(
+                    &e,
+                    "Ollama initialize request",
+                ))
+            })
     }
 }
 
@@ -138,45 +143,62 @@ impl LlmProvider for OllamaProvider {
         if let Some(t) = opts.timeout_s {
             req = req.timeout(Duration::from_secs(t as u64));
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| LlmError::Transport(crate::net::reqwest_error_category(&e).to_string()))?;
+        let resp = req.send().await.map_err(|e| {
+            LlmError::transport(crate::net::source_failure::from_reqwest(&e, "Ollama chat"))
+        })?;
         let status = resp.status();
         if !status.is_success() {
             // Status only: don't reflect the upstream body (SSRF exfil
             // channel when the URL was steered to an unintended target).
-            return Err(LlmError::Remote(format!("HTTP {status}")));
+            return Err(LlmError::http(
+                status.as_u16(),
+                Some(crate::net::source_failure::response_format(&resp)),
+                "Ollama chat",
+            ));
         }
-        let parsed: ChatResponse = resp
-            .json()
-            .await
-            .map_err(|e| LlmError::Parse(crate::net::reqwest_error_category(&e).to_string()))?;
-        parsed
-            .message
-            .and_then(|m| m.content)
-            .ok_or_else(|| LlmError::Remote("empty message content".into()))
+        let parsed: ChatResponse = resp.json().await.map_err(|e| {
+            LlmError::parse(crate::net::source_failure::from_reqwest(&e, "Ollama chat"))
+        })?;
+        parsed.message.and_then(|m| m.content).ok_or_else(|| {
+            LlmError::remote(
+                crate::failure::Failure::new(
+                    crate::failure::FailureCode::MissingField,
+                    "Ollama chat response",
+                )
+                .with_field("message.content"),
+            )
+        })
     }
 
     async fn health(&self) -> Result<HealthReport, LlmError> {
         let endpoint = self.url("/api/tags");
         let (client, safe_url) = self.safe_client(&endpoint).await?;
-        let resp =
-            client.get(safe_url).send().await.map_err(|e| {
-                LlmError::Transport(crate::net::reqwest_error_category(&e).to_string())
-            })?;
+        let resp = client.get(safe_url).send().await.map_err(|e| {
+            LlmError::transport(crate::net::source_failure::from_reqwest(
+                &e,
+                "Ollama health",
+            ))
+        })?;
         if !resp.status().is_success() {
+            let failure = crate::failure::Failure::http(
+                resp.status().as_u16(),
+                Some(crate::net::source_failure::response_format(&resp)),
+                "Ollama health",
+            );
             return Ok(HealthReport {
                 reachable: false,
                 model_loaded: None,
                 provider_version: None,
-                last_error: Some(format!("HTTP {}", resp.status())),
+                last_error: Some(failure.to_string()),
+                diagnostic: Some(crate::failure::FailureRecord::now(failure)),
             });
         }
-        let tags: TagsResponse = resp
-            .json()
-            .await
-            .map_err(|e| LlmError::Parse(crate::net::reqwest_error_category(&e).to_string()))?;
+        let tags: TagsResponse = resp.json().await.map_err(|e| {
+            LlmError::parse(crate::net::source_failure::from_reqwest(
+                &e,
+                "Ollama health",
+            ))
+        })?;
         let loaded = tags
             .models
             .iter()
@@ -187,6 +209,7 @@ impl LlmProvider for OllamaProvider {
             model_loaded: loaded,
             provider_version: None,
             last_error: None,
+            diagnostic: None,
         })
     }
 }

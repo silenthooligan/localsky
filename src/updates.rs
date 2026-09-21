@@ -29,6 +29,9 @@ pub struct UpdateStatus {
     pub release_url: Option<String>,
     pub checked_at_epoch: Option<i64>,
     pub check_enabled: bool,
+    pub attempted_at_epoch: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<crate::failure::FailureRecord>,
 }
 
 /// The cached comparison, shared by the checker task and the handler.
@@ -66,32 +69,85 @@ fn newer(latest: &str, current: &str) -> bool {
     }
 }
 
-async fn check_once(cache: &RwLock<UpdateStatus>, client: &reqwest::Client) {
-    let resp = client
-        .get(RELEASES_URL)
+async fn fetch_manifest(
+    client: &reqwest::Client,
+    url: &str,
+) -> anyhow::Result<(String, Option<String>)> {
+    use crate::failure::{Failure, FailureCode as Code};
+    let response = client
+        .get(url)
         .header("User-Agent", USER_AGENT)
         .header("Accept", "application/json")
         .send()
-        .await;
-    let Ok(resp) = resp else { return };
-    let Ok(v) = resp.json::<serde_json::Value>().await else {
-        return;
-    };
-    let tag = v
-        .get("tag_name")
-        .and_then(|t| t.as_str())
-        .map(str::to_string);
-    let url = v
-        .get("html_url")
-        .and_then(|u| u.as_str())
-        .map(str::to_string);
-    let mut c = cache.write().await;
-    c.checked_at_epoch = Some(chrono::Utc::now().timestamp());
-    if let Some(tag) = tag {
-        c.update_available = newer(&tag, &c.current);
-        c.latest = Some(tag);
-        c.release_url = url;
+        .await
+        .map_err(|e| crate::net::source_failure::from_reqwest(&e, "updates fetch manifest"))?;
+    if !response.status().is_success() {
+        return Err(Failure::http(
+            response.status().as_u16(),
+            Some(crate::net::source_failure::response_format(&response)),
+            "updates fetch manifest",
+        )
+        .into());
     }
+    let value: serde_json::Value = crate::net::safe_fetch::read_json_capped(response)
+        .await
+        .map_err(|e| crate::net::source_failure::from_safe(&e, "updates decode manifest"))?;
+    let tag = value
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            Failure::new(Code::UpdateManifest, "updates validate manifest").with_field("tag_name")
+        })?;
+    semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag)).map_err(|_| {
+        Failure::new(Code::UpdateManifest, "updates validate version").with_field("tag_name")
+    })?;
+    let release_url = value.get("html_url").and_then(|v| v.as_str());
+    if let Some(url) = release_url {
+        let parsed = reqwest::Url::parse(url).map_err(|_| {
+            Failure::new(Code::UpdateManifest, "updates validate release link")
+                .with_field("html_url")
+        })?;
+        if parsed.scheme() != "https"
+            || parsed.host_str().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+        {
+            return Err(
+                Failure::new(Code::UpdateManifest, "updates validate release link")
+                    .with_field("html_url")
+                    .into(),
+            );
+        }
+    }
+    Ok((tag.to_owned(), release_url.map(str::to_owned)))
+}
+
+async fn check_at(cache: &RwLock<UpdateStatus>, client: &reqwest::Client, url: &str) {
+    let result = fetch_manifest(client, url).await;
+    let now = chrono::Utc::now().timestamp();
+    let mut status = cache.write().await;
+    status.attempted_at_epoch = Some(now);
+    match result {
+        Ok((tag, url)) => {
+            status.update_available = newer(&tag, &status.current);
+            status.latest = Some(tag);
+            status.release_url = url;
+            status.checked_at_epoch = Some(now);
+            status.diagnostic = None;
+        }
+        Err(error) => {
+            let failure = crate::diagnostics::from_anyhow(&error, "updates check");
+            tracing::warn!(error_code = failure.code.as_str(), error = %failure, "update check failed");
+            status.diagnostic = Some(crate::failure::FailureRecord {
+                at_epoch: now,
+                failure,
+            });
+        }
+    }
+}
+
+async fn check_once(cache: &RwLock<UpdateStatus>, client: &reqwest::Client) {
+    check_at(cache, client, RELEASES_URL).await;
 }
 
 /// Spawn the daily checker (only call when [updates].check_enabled).
@@ -127,6 +183,52 @@ pub async fn updates_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_check_keeps_last_success_and_clears_diagnostic_only_after_recovery() {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let updates = Updates::new();
+        {
+            let mut status = updates.cache.write().await;
+            status.latest = Some("v0.9.1".into());
+            status.checked_at_epoch = Some(100);
+        }
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(502).set_body_string("secret proxy response"))
+            .mount(&server)
+            .await;
+        let client = crate::net::client(std::time::Duration::from_secs(2));
+        check_at(&updates.cache, &client, &server.uri()).await;
+        let failed = updates.status().await;
+        assert_eq!(failed.checked_at_epoch, Some(100));
+        assert_eq!(failed.latest.as_deref(), Some("v0.9.1"));
+        assert_eq!(failed.diagnostic.unwrap().failure.http_status, Some(502));
+        server.reset().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"tag_name":"invalid-secret-version"})),
+            )
+            .mount(&server)
+            .await;
+        check_at(&updates.cache, &client, &server.uri()).await;
+        let failed = updates.status().await;
+        assert_eq!(
+            failed.diagnostic.as_ref().unwrap().failure.code,
+            crate::failure::FailureCode::UpdateManifest
+        );
+        assert_eq!(failed.checked_at_epoch, Some(100));
+        assert!(!serde_json::to_string(&failed).unwrap().contains("secret"));
+        server.reset().await;
+        Mock::given(method("GET")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"tag_name":"v0.9.2","html_url":"https://github.com/silenthooligan/localsky/releases/tag/v0.9.2"})))
+            .mount(&server).await;
+        check_at(&updates.cache, &client, &server.uri()).await;
+        let healthy = updates.status().await;
+        assert_eq!(healthy.latest.as_deref(), Some("v0.9.2"));
+        assert!(healthy.diagnostic.is_none());
+        assert_eq!(healthy.checked_at_epoch, healthy.attempted_at_epoch);
+    }
 
     #[test]
     fn version_comparison() {

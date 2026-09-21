@@ -83,9 +83,12 @@ use async_trait::async_trait;
 use reqwest::Client;
 use tracing::{debug, info, warn};
 
+use crate::failure::{Failure, FailureCode as Code};
+use crate::net::source_failure::{from_anyhow, from_grib};
+
 use crate::config::schema::{Location, NoaaMrmsConfig};
 use crate::ports::weather_source::{
-    ShutdownSignal, SourceBus, SourceCaps, SourceEvent, WeatherField, WeatherSource,
+    ShutdownSignal, SourceBus, SourceCaps, WeatherField, WeatherSource,
 };
 use crate::sources::poll::{run_polling, Poll};
 
@@ -271,18 +274,28 @@ impl NoaaMrms {
     /// used for log context.
     async fn fetch_gz_with_retry(&self, url: &str, product: &str) -> anyhow::Result<Vec<u8>> {
         let mut attempt = 0u32;
+        let mut failures = Vec::new();
         loop {
             match self.fetch_grib_once(url).await {
-                Ok(gz) => return Ok(gz),
+                Ok(gz) => {
+                    if attempt > 0 {
+                        info!(source_id = %self.id, product = %product, attempts = attempt + 1, recovered = true, "MRMS fetch recovered");
+                    }
+                    return Ok(gz);
+                }
                 Err(e) => {
+                    let failure = from_anyhow(&e, "MRMS download product")
+                        .with_item(attempt as usize)
+                        .with_resource(product);
+                    failures.push(failure.clone());
                     if attempt >= FETCH_MAX_RETRIES {
-                        return Err(e);
+                        return Err(Failure::attempts("MRMS download retries", failures).into());
                     }
                     warn!(
                         source_id = %self.id,
                         product = %product,
                         attempt = attempt + 1,
-                        error = %e,
+                        error = %failure,
                         "MRMS GRIB fetch transient failure; retrying after backoff"
                     );
                     tokio::time::sleep(FETCH_RETRY_BACKOFF).await;
@@ -317,24 +330,20 @@ impl NoaaMrms {
     /// short lag, the lagged hourly accumulation a wide one).
     ///
     /// Returns `None` (emit nothing) on a no-coverage / missing cell (skip,
-    /// never a false 0), on any decode problem (logged), or on a grid whose
+    /// never a false 0) or on a grid whose
     /// valid time is older than that product's staleness window (logged), so the
     /// caller never emits a fabricated or stale-looking reading. On a real
-    /// reading it returns the fields plus the valid epoch to stamp.
+    /// reading it returns the fields plus the valid epoch to stamp. Decode errors
+    /// remain typed diagnostics rather than becoming empty successful reads.
     fn fields_from_grib(
         &self,
         product: &str,
         grib: &[u8],
         now_epoch: i64,
-    ) -> Option<DecodedObservation> {
+    ) -> anyhow::Result<Option<DecodedObservation>> {
         let kind = classify_product(product);
-        let cell = match decode_point_value(grib, self.location.lat, self.location.lon) {
-            Ok(c) => c,
-            Err(e) => {
-                warn!(source_id = %self.id, product = %product, error = %e, "MRMS GRIB decode failed");
-                return None;
-            }
-        };
+        let cell = decode_point_value(grib, self.location.lat, self.location.lon)
+            .map_err(|e| from_anyhow(&e, "MRMS decode product").with_resource(product))?;
 
         // Reject a stuck publish: the `.latest` symlink can keep serving the same
         // grid for hours, so we trust the GRIB's OWN valid time, not Utc::now().
@@ -351,7 +360,7 @@ impl NoaaMrms {
                 age_secs = age,
                 "MRMS grid is stale (valid time older than this product's staleness window); skipped"
             );
-            return None;
+            return Ok(None);
         }
 
         let Some(mm_or_mmhr) = cell.value else {
@@ -360,16 +369,16 @@ impl NoaaMrms {
                 product = %product,
                 "MRMS cell is no-coverage / missing this cycle; skipped (not emitted as 0)"
             );
-            return None;
+            return Ok(None);
         };
         let fields = rain_fields(kind, mm_or_mmhr);
         if fields.is_empty() {
-            return None;
+            return Ok(None);
         }
-        Some(DecodedObservation {
+        Ok(Some(DecodedObservation {
             fields,
             valid_epoch: cell.valid_epoch,
-        })
+        }))
     }
 }
 
@@ -393,7 +402,9 @@ struct DecodedCell {
 fn gunzip(gz: &[u8]) -> anyhow::Result<Vec<u8>> {
     let mut decoder = flate2::read::GzDecoder::new(gz);
     let mut out = Vec::new();
-    decoder.read_to_end(&mut out)?;
+    decoder
+        .read_to_end(&mut out)
+        .map_err(|e| Failure::from_io(Code::Compression, "MRMS decompress gzip", &e))?;
     Ok(out)
 }
 
@@ -450,15 +461,13 @@ fn rain_fields(kind: RainKind, value: f64) -> Vec<(WeatherField, f64)> {
 fn decode_point_value(grib: &[u8], lat: f64, lon: f64) -> anyhow::Result<DecodedCell> {
     let message = gribberish::message::read_messages(grib)
         .next()
-        .ok_or_else(|| anyhow::anyhow!("no GRIB message found in MRMS payload"))?;
+        .ok_or_else(|| Failure::new(Code::GribMessage, "MRMS read GRIB message"))?;
 
     let valid_epoch = message_valid_epoch(&message);
 
     let geom = grid_geometry(&message)?;
     let Some(idx) = nearest_cell_index(&geom, lat, lon) else {
-        return Err(anyhow::anyhow!(
-            "point ({lat}, {lon}) is outside the MRMS grid bounds"
-        ));
+        return Err(Failure::new(Code::GribOutside, "MRMS locate deployment cell").into());
     };
 
     // `data()` is the full decoded field in GRIB scan order (row-major
@@ -468,10 +477,10 @@ fn decode_point_value(grib: &[u8], lat: f64, lon: f64) -> anyhow::Result<Decoded
     // `png` feature would surface as an Err (every cycle decoded nothing).
     let data = message
         .data()
-        .map_err(|e| anyhow::anyhow!("MRMS GRIB data decode failed: {e}"))?;
+        .map_err(|e| from_grib(&e, "MRMS decode cell data"))?;
     let value = *data
         .get(idx)
-        .ok_or_else(|| anyhow::anyhow!("MRMS cell index {idx} out of decoded data range"))?;
+        .ok_or_else(|| Failure::new(Code::GribGrid, "MRMS index decoded cell").with_item(idx))?;
 
     let value = if !value.is_finite() || value < MRMS_MIN_VALID {
         None
@@ -505,14 +514,16 @@ fn message_valid_epoch(message: &gribberish::message::Message<'_>) -> i64 {
 fn grid_geometry(message: &gribberish::message::Message<'_>) -> anyhow::Result<GridGeometry> {
     let (ny, nx) = message
         .grid_dimensions()
-        .map_err(|e| anyhow::anyhow!("MRMS grid dimensions read failed: {e}"))?;
+        .map_err(|e| from_grib(&e, "MRMS decode grid dimensions"))?;
     let projector = message
         .latlng_projector()
-        .map_err(|e| anyhow::anyhow!("MRMS grid projector read failed: {e}"))?;
+        .map_err(|e| from_grib(&e, "MRMS decode grid projector"))?;
     if !projector.is_regular_latlng_grid() {
-        return Err(anyhow::anyhow!(
-            "MRMS message is not a regular lat/lon grid"
-        ));
+        return Err(Failure::new(
+            Code::GribGrid,
+            "MRMS validate regular latitude/longitude grid",
+        )
+        .into());
     }
     // `latlng_start`/`latlng_end` give the first and last coordinate of each
     // axis; the per-cell step is the span divided by (count - 1).
@@ -710,58 +721,51 @@ impl NoaaMrms {
     /// cell that is no-coverage / missing / stale still counts as reachable
     /// (the server answered; there was simply nothing to emit this cycle).
     /// `Err` is the fetch itself failing after the bounded retries.
-    async fn poll_product(
-        &self,
-        product: &str,
-        now_epoch: i64,
-    ) -> anyhow::Result<Option<SourceEvent>> {
+    async fn poll_product(&self, product: &str, now_epoch: i64) -> anyhow::Result<Poll> {
         let grib = self.fetch_grib(product).await?;
-        Ok(self.fields_from_grib(product, &grib, now_epoch).map(|obs| {
-            debug!(
-                source_id = %self.id,
-                product = %product,
-                fields_n = obs.fields.len(),
-                valid_epoch = obs.valid_epoch,
-                "MRMS cell decoded; emitting rain observation"
-            );
-            SourceEvent::Observation {
-                source_id: self.id.clone(),
-                fields: obs.fields,
-                at_epoch: obs.valid_epoch,
-            }
-        }))
+        match self.fields_from_grib(product, &grib, now_epoch) {
+            Ok(Some(obs)) => Ok(Poll::observation(&self.id, obs.fields, obs.valid_epoch)),
+            Ok(None) => Ok(Poll::none()),
+            // The server answered, so preserve reachability while surfacing the
+            // decode failure. No observation or freshness is fabricated.
+            Err(error) => Ok(Poll::none().with_failure(from_anyhow(&error, "MRMS decode product"))),
+        }
     }
 
-    /// Fold the two per-product results into the cycle's verdict. The source
-    /// is reachable when EITHER product fetched (a single product's transient
-    /// gap never marks the whole source unreachable): a partial failure is
-    /// logged per product here and the cycle stays Ok, carrying whatever the
-    /// other product decoded. Only BOTH failing is the cycle's error, which the
-    /// poll loop logs once and reports as the offline edge.
+    /// A product transport failure does not discard the other product's data.
+    /// Decode failures also remain visible when the server is reachable.
     fn cycle_poll(
         &self,
-        rate: anyhow::Result<Option<SourceEvent>>,
-        accum: anyhow::Result<Option<SourceEvent>>,
+        rate: anyhow::Result<Poll>,
+        accum: anyhow::Result<Poll>,
     ) -> anyhow::Result<Poll> {
-        if let (Err(rate_err), Err(accum_err)) = (&rate, &accum) {
-            anyhow::bail!(
-                "{} ({rate_err:#}); {} ({accum_err:#})",
-                self.rate_product(),
-                self.accum_product()
-            );
-        }
+        let any_reachable = rate.is_ok() || accum.is_ok();
+        let mut failures = Vec::new();
         let mut poll = Poll::none();
+        let mut successful_products = 0;
         for (product, result) in [(self.rate_product(), rate), (self.accum_product(), accum)] {
             match result {
-                Ok(Some(event)) => poll = poll.with(event),
-                Ok(None) => {}
-                Err(e) => warn!(
-                    source_id = %self.id,
-                    product = %product,
-                    error = %e,
-                    "MRMS GRIB fetch failed; the other product answered, source stays reachable"
-                ),
+                Ok(product_poll) => {
+                    if let Some(failure) = product_poll.failure {
+                        failures.push(failure.with_resource(product));
+                    } else {
+                        successful_products += 1;
+                    }
+                    for event in product_poll.events {
+                        poll = poll.with(event);
+                    }
+                }
+                Err(error) => {
+                    failures.push(from_anyhow(&error, "MRMS fetch product").with_resource(product))
+                }
             }
+        }
+        if !failures.is_empty() {
+            let failure = Failure::batch("MRMS product batch", failures, successful_products > 0);
+            if !any_reachable {
+                return Err(failure.into());
+            }
+            poll = poll.with_failure(failure);
         }
         Ok(poll)
     }
@@ -770,6 +774,7 @@ impl NoaaMrms {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ports::weather_source::SourceEvent;
 
     /// CONUS-shaped synthetic geometry: a coarse stand-in for the real MRMS
     /// grid (north -> south scan, 0..360 longitudes) so the cell arithmetic is
@@ -785,6 +790,39 @@ mod tests {
             dlat: -1.0,       // scans north -> south, like MRMS
             dlon: 1.0,        // scans west -> east
         }
+    }
+
+    #[test]
+    fn bad_grib_is_visible_even_when_other_product_succeeds() {
+        let src = test_source();
+        let failure = match src.fields_from_grib(src.rate_product(), b"not a GRIB payload", 123) {
+            Err(error) => from_anyhow(&error, "MRMS decode product"),
+            Ok(_) => panic!("invalid GRIB must report a decode failure"),
+        };
+        assert_eq!(failure.code, Code::GribMessage);
+        let poll = src
+            .cycle_poll(
+                Ok(Poll::none().with_failure(failure)),
+                Ok(Poll::none().with(observation(99))),
+            )
+            .unwrap();
+        assert_eq!(poll.events.len(), 1);
+        assert_ne!(poll.reachable, Some(false));
+        let failure = poll.failure.unwrap();
+        assert_eq!(failure.code, Code::BatchPartial);
+        assert_eq!(
+            failure.causes[0].resource_id.as_deref(),
+            Some(src.rate_product())
+        );
+    }
+
+    #[test]
+    fn corrupt_gzip_retains_the_decoder_stage() {
+        let error = gunzip(b"not gzip").unwrap_err();
+        let failure = from_anyhow(&error, "poll");
+        assert_eq!(failure.code, Code::Compression);
+        assert_eq!(failure.operation, "MRMS decompress gzip");
+        assert!(failure.io_kind.is_some());
     }
 
     #[test]
@@ -1130,6 +1168,7 @@ mod tests {
         let now = FIXTURE_VALID_EPOCH + 60;
         let obs = src
             .fields_from_grib(src.accum_product(), &grib, now)
+            .unwrap()
             .expect("a fresh wet grid emits an observation");
         // Stamped with the GRIB valid time, NOT `now`.
         assert_eq!(obs.valid_epoch, FIXTURE_VALID_EPOCH);
@@ -1176,6 +1215,7 @@ mod tests {
         let now = FIXTURE_VALID_EPOCH + ACCUM_MAX_STALENESS.as_secs() as i64 + 600;
         assert!(
             src.fields_from_grib(src.accum_product(), &grib, now)
+                .unwrap()
                 .is_none(),
             "a grid older than the accumulation staleness window is dropped"
         );
@@ -1185,6 +1225,7 @@ mod tests {
         let lagged_now = FIXTURE_VALID_EPOCH + 90 * 60;
         assert!(
             src.fields_from_grib(src.accum_product(), &grib, lagged_now)
+                .unwrap()
                 .is_some(),
             "a 90 min lagged hourly accumulation is still inside its 3 hr window"
         );
@@ -1211,6 +1252,7 @@ mod tests {
         let now_90m = FIXTURE_VALID_EPOCH + 90 * 60;
         assert!(
             src.fields_from_grib(src.rate_product(), &grib, now_90m)
+                .unwrap()
                 .is_none(),
             "a 90 min old grid is past the 45 min rate window"
         );
@@ -1218,6 +1260,7 @@ mod tests {
         let now_30m = FIXTURE_VALID_EPOCH + 30 * 60;
         let obs = src
             .fields_from_grib(src.rate_product(), &grib, now_30m)
+            .unwrap()
             .expect("a 30 min old grid is inside the 45 min rate window");
         // Read as a RATE it emits ONLY RainIntensityInHr (no accumulation total),
         // converting the cell mm value through the mm/hr -> in/hr seam.
@@ -1259,6 +1302,7 @@ mod tests {
         let now = RATE_FIXTURE_VALID_EPOCH + 60;
         let obs = src
             .fields_from_grib(src.rate_product(), &grib, now)
+            .unwrap()
             .expect("a fresh PrecipRate grid emits an observation");
         // Stamped with the GRIB valid time, NOT `now`.
         assert_eq!(obs.valid_epoch, RATE_FIXTURE_VALID_EPOCH);
@@ -1335,18 +1379,18 @@ mod tests {
         let poll = src
             .cycle_poll(
                 Err(anyhow::anyhow!("dropped body")),
-                Ok(Some(observation(1))),
+                Ok(Poll::none().with(observation(1))),
             )
             .expect("one product answering keeps the source reachable");
         assert_eq!(poll.events.len(), 1);
         assert_eq!(poll.reachable, None, "the loop's Ok verdict stands");
         // Both answered, one with nothing to emit (no-coverage / stale cell).
         let poll = src
-            .cycle_poll(Ok(Some(observation(1))), Ok(None))
+            .cycle_poll(Ok(Poll::none().with(observation(1))), Ok(Poll::none()))
             .expect("a quiet product is still a successful fetch");
         assert_eq!(poll.events.len(), 1);
         // Both answered, nothing to emit: an empty Ok poll, still reachable.
-        let poll = src.cycle_poll(Ok(None), Ok(None)).unwrap();
+        let poll = src.cycle_poll(Ok(Poll::none()), Ok(Poll::none())).unwrap();
         assert!(poll.events.is_empty());
         assert_eq!(poll.reachable, None);
     }
@@ -1356,18 +1400,18 @@ mod tests {
         let src = test_source();
         let err = src
             .cycle_poll(
-                Err(anyhow::anyhow!("rate down")),
-                Err(anyhow::anyhow!("accum down")),
+                Err(Failure::http(503, None, "MRMS rate fetch").into()),
+                Err(Failure::http(429, None, "MRMS accumulation fetch").into()),
             )
             .expect_err("both products failing is the cycle's error");
         // The one warn the loop logs names both products and both causes.
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("PrecipRate") && msg.contains("rate down"),
+            msg.contains("PrecipRate") && msg.contains("HTTP 503"),
             "{msg}"
         );
         assert!(
-            msg.contains("MultiSensor_QPE_01H_Pass2") && msg.contains("accum down"),
+            msg.contains("MultiSensor_QPE_01H_Pass2") && msg.contains("HTTP 429"),
             "{msg}"
         );
     }
@@ -1376,7 +1420,10 @@ mod tests {
     fn cycle_events_keep_rate_then_accumulation_order() {
         let src = test_source();
         let poll = src
-            .cycle_poll(Ok(Some(observation(10))), Ok(Some(observation(20))))
+            .cycle_poll(
+                Ok(Poll::none().with(observation(10))),
+                Ok(Poll::none().with(observation(20))),
+            )
             .unwrap();
         let stamps: Vec<i64> = poll
             .events
@@ -1515,11 +1562,13 @@ mod tests {
             .fetch_gz_with_retry(&url, "PrecipRate")
             .await
             .expect_err("exhausting the retry budget surfaces an error");
-        // It is the transient body/transport error, not a fabricated success.
-        let msg = format!("{err:#}");
-        assert!(
-            !msg.is_empty(),
-            "the final failure carries the underlying fetch error"
-        );
+        let failure = from_anyhow(&err, "poll");
+        assert_eq!(failure.code, Code::RetryExhausted);
+        assert_eq!(failure.causes.len(), FETCH_MAX_RETRIES as usize + 1);
+        for (index, cause) in failure.causes.iter().enumerate() {
+            assert_eq!(cause.item_index, Some(index));
+            assert_ne!(cause.code, Code::DiagnosticMissing);
+            assert!(!cause.to_string().contains(&url));
+        }
     }
 }

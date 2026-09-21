@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 #[derive(Debug, Error)]
 pub enum ActiveRunsError {
     #[error("sqlite: {0}")]
-    Sqlite(String),
+    Sqlite(#[source] Box<crate::failure::Failure>),
 }
 
 /// One commanded-ON zone and the wall-clock epoch by which it must be closed.
@@ -72,8 +72,18 @@ impl ActiveRunsStore {
             Ok(())
         })
         .await
-        .map_err(|e| ActiveRunsError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| ActiveRunsError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            ActiveRunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "active_runs.arm",
+            )))
+        })?
+        .map_err(|e| {
+            ActiveRunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "active_runs.arm",
+            )))
+        })
     }
 
     /// Disarm a zone: explicit Stop, or a successful reap.
@@ -89,8 +99,18 @@ impl ActiveRunsStore {
             Ok(())
         })
         .await
-        .map_err(|e| ActiveRunsError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| ActiveRunsError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            ActiveRunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "active_runs.disarm",
+            )))
+        })?
+        .map_err(|e| {
+            ActiveRunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "active_runs.disarm",
+            )))
+        })
     }
 
     /// Every armed run whose deadline has passed; the reaper enforces these.
@@ -119,8 +139,18 @@ impl ActiveRunsStore {
             Ok(rows)
         })
         .await
-        .map_err(|e| ActiveRunsError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| ActiveRunsError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            ActiveRunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "active_runs.armed",
+            )))
+        })?
+        .map_err(|e| {
+            ActiveRunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "active_runs.armed",
+            )))
+        })
     }
 
     pub async fn due(&self, now_epoch: i64) -> Result<Vec<ActiveRun>, ActiveRunsError> {
@@ -145,8 +175,18 @@ impl ActiveRunsStore {
             Ok(rows)
         })
         .await
-        .map_err(|e| ActiveRunsError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| ActiveRunsError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            ActiveRunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "active_runs.due",
+            )))
+        })?
+        .map_err(|e| {
+            ActiveRunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "active_runs.due",
+            )))
+        })
     }
 
     /// Clear every armed row belonging to any of the given controller ids.
@@ -172,8 +212,18 @@ impl ActiveRunsStore {
             Ok(n)
         })
         .await
-        .map_err(|e| ActiveRunsError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| ActiveRunsError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            ActiveRunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "active_runs.clear_for_controllers",
+            )))
+        })?
+        .map_err(|e| {
+            ActiveRunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "active_runs.clear_for_controllers",
+            )))
+        })
     }
 
     /// Clear the whole ledger. Called at boot AFTER reconcile_stop_all has
@@ -187,8 +237,18 @@ impl ActiveRunsStore {
             Ok(n)
         })
         .await
-        .map_err(|e| ActiveRunsError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| ActiveRunsError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            ActiveRunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "active_runs.clear_all",
+            )))
+        })?
+        .map_err(|e| {
+            ActiveRunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "active_runs.clear_all",
+            )))
+        })
     }
 }
 
@@ -200,6 +260,20 @@ mod tests {
         let mut c = Connection::open_in_memory().unwrap();
         crate::persistence::run_migrations(&mut c).unwrap();
         ActiveRunsStore::new(Arc::new(Mutex::new(c)))
+    }
+
+    #[tokio::test]
+    async fn failed_arm_retains_database_code_and_operation() {
+        let connection = Connection::open_in_memory().unwrap();
+        let store = ActiveRunsStore::new(Arc::new(Mutex::new(connection)));
+        let error = store
+            .arm("test_zone".into(), "test_controller".into(), 100, 130)
+            .await
+            .unwrap_err();
+        let failure = crate::diagnostics::from_error(&error, "dispatch");
+        assert_eq!(failure.code, crate::failure::FailureCode::Sqlite);
+        assert_eq!(failure.sqlite_code, Some(1));
+        assert_eq!(failure.operation, "active_runs.arm");
     }
 
     #[tokio::test]

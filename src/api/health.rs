@@ -434,6 +434,10 @@ pub struct SubsystemReport {
 
 #[derive(Debug, Serialize)]
 pub struct SourceFreshness {
+    /// Latest poll failure this boot; cleared by a successful poll. Only on
+    /// privileged health/diagnostics, like the rest of source topology.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<crate::sources::bus_recorder::SourceFailureRecord>,
     pub id: String,
     pub kind: &'static str,
     pub enabled: bool,
@@ -760,6 +764,14 @@ pub async fn health_report(state: HealthState, full_detail: bool) -> HealthRespo
                             not_polled_ids.insert(entry.id.clone());
                         }
                         sources_freshness.push(SourceFreshness {
+                            error: if source_effectively_enabled(entry) && !unlocated {
+                                state
+                                    .source_reachable
+                                    .as_ref()
+                                    .and_then(|map| map.failure(&entry.id))
+                            } else {
+                                None
+                            },
                             id: entry.id.clone(),
                             kind: source_kind_label(&entry.source),
                             note: unlocated.then_some(UNLOCATED_NOTE),

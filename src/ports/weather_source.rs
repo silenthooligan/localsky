@@ -230,7 +230,7 @@ pub enum SourceEvent {
     ForecastTrack {
         track_id: String,
         generation: u64,
-        result: Result<crate::forecast::snapshot::ForecastSnapshot, String>,
+        result: Result<crate::forecast::snapshot::ForecastSnapshot, Box<crate::failure::Failure>>,
     },
     /// Live observation update. The engine fans this into MergedSnapshot.
     Observation {
@@ -266,6 +266,13 @@ pub enum SourceEvent {
     },
     /// Reachability change. The engine surfaces this in per-source status badges.
     Reachability { source_id: String, reachable: bool },
+    /// Current poll failure, or a successful poll clearing it. Measurement
+    /// freshness is independent; this event never refreshes observations.
+    Diagnostic {
+        source_id: String,
+        failure: Option<Box<super::source_error::SourceFailure>>,
+        at_epoch: i64,
+    },
     /// Lightning strikes a detection network reported: the station's own
     /// detector one at a time, the community network in batches. The
     /// live store keeps the last hour in a ring for the dashboard and the

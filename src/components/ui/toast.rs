@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use leptos::prelude::*;
 
-use crate::components::ui::Icon;
+use crate::components::ui::{DiagnosticDetails, Icon};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ToastKind {
@@ -55,6 +55,7 @@ pub struct ToastItem {
     pub id: u64,
     pub kind: ToastKind,
     pub message: String,
+    pub diagnostic: Option<serde_json::Value>,
 }
 
 /// Copy handle to the toast stack. Stored in context.
@@ -79,13 +80,23 @@ impl ToastHub {
     }
 
     pub fn push(&self, kind: ToastKind, message: impl Into<String>) {
+        self.push_details(kind, message.into(), None);
+    }
+
+    fn push_details(
+        &self,
+        kind: ToastKind,
+        message: String,
+        diagnostic: Option<serde_json::Value>,
+    ) {
         let id = self.next_id.get_untracked();
         self.next_id.set(id + 1);
         self.items.update(|v| {
             v.push(ToastItem {
                 id,
                 kind,
-                message: message.into(),
+                message,
+                diagnostic,
             })
         });
         // Auto-dismiss ROUTINE toasts only. An error toast carries the
@@ -116,6 +127,10 @@ impl ToastHub {
     }
     pub fn error(&self, m: impl Into<String>) {
         self.push(ToastKind::Error, m);
+    }
+
+    pub fn error_details(&self, message: impl Into<String>, diagnostic: Option<serde_json::Value>) {
+        self.push_details(ToastKind::Error, message.into(), diagnostic);
     }
 
     pub fn dismiss(&self, id: u64) {
@@ -175,7 +190,7 @@ fn toast_view(t: ToastItem, hub: ToastHub) -> impl IntoView {
     view! {
         <div class=format!("ui-toast {}", t.kind.class())>
             <span class="ui-toast__icon"><Icon name=t.kind.icon() size=16/></span>
-            <span class="ui-toast__msg">{t.message}</span>
+            <div class="ui-toast__msg">{t.message}{t.diagnostic.map(|record| view! { <DiagnosticDetails record/> })}</div>
             <button
                 type="button"
                 class="ui-toast__close"

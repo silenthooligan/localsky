@@ -3,6 +3,7 @@
 // acknowledgements tucked behind a disclosure. Pulls /api/v1/health
 // and /api/v1/updates after hydration.
 
+use crate::components::ui::DiagnosticDetails;
 use leptos::prelude::*;
 
 use crate::components::ui::Icon;
@@ -61,7 +62,14 @@ pub fn AboutPage() -> impl IntoView {
                         let u = updates.get()?;
                         let available = u.get("update_available").and_then(|v| v.as_bool()).unwrap_or(false);
                         let enabled = u.get("check_enabled").and_then(|v| v.as_bool()).unwrap_or(false);
-                        Some(if available {
+                        let failed = u.get("diagnostic").filter(|value| !value.is_null()).cloned();
+                        let checked = u.get("checked_at_epoch").and_then(|value| value.as_i64()).is_some();
+                        Some(if let Some(record) = failed {
+                            view! {
+                                <span class="ha-chip ha-chip--warn">"Update check failed"</span>
+                                <DiagnosticDetails record=record/>
+                            }.into_any()
+                        } else if available {
                             let latest = u.get("latest").and_then(|v| v.as_str()).unwrap_or("?").to_string();
                             let url = u.get("release_url").and_then(|v| v.as_str()).unwrap_or(REPO_URL).to_string();
                             view! {
@@ -70,13 +78,15 @@ pub fn AboutPage() -> impl IntoView {
                                     {format!("{latest} available")}
                                 </a>
                             }.into_any()
-                        } else if enabled {
+                        } else if enabled && checked {
                             view! {
                                 <span class="ha-chip">
                                     <span class="ha-chip__dot" aria-hidden="true"></span>
                                     "Up to date"
                                 </span>
                             }.into_any()
+                        } else if enabled {
+                            view! { <span class="ha-chip">"Waiting for update check"</span> }.into_any()
                         } else {
                             ().into_any()
                         })

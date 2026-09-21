@@ -198,28 +198,33 @@ pub fn ZoneDetailView(
     // only thing the user ever saw was the deadline warning. Every signal
     // touch uses try_* because this runs from a detached continuation and
     // wasm-release is panic=abort.
-    let action_done = Callback::new(move |result: Result<Option<serde_json::Value>, String>| {
-        match result {
-            Ok(body) => {
-                let v = body.unwrap_or(serde_json::Value::Null);
-                let _ = confirm_within_s.try_set(
-                    v.get("confirm_within_s")
-                        .and_then(|n| n.as_u64())
-                        .map(|n| n as u32),
-                );
-                let _ = via_controller.try_set(v.get("dispatched").is_some());
-                // A controller with no per-zone stop reports the real scope
-                // (the whole device stopped); relay it verbatim.
-                if let Some(note) = v.get("note").and_then(|n| n.as_str()) {
-                    toast.info(note.to_string());
+    let action_done = Callback::new(
+        move |result: Result<
+            Option<serde_json::Value>,
+            crate::components::request_error::RequestError,
+        >| {
+            match result {
+                Ok(body) => {
+                    let v = body.unwrap_or(serde_json::Value::Null);
+                    let _ = confirm_within_s.try_set(
+                        v.get("confirm_within_s")
+                            .and_then(|n| n.as_u64())
+                            .map(|n| n as u32),
+                    );
+                    let _ = via_controller.try_set(v.get("dispatched").is_some());
+                    // A controller with no per-zone stop reports the real scope
+                    // (the whole device stopped); relay it verbatim.
+                    if let Some(note) = v.get("note").and_then(|n| n.as_str()) {
+                        toast.info(note.to_string());
+                    }
+                }
+                Err(e) => {
+                    let _ = pending.try_set(None);
+                    e.show(toast, "Zone command failed");
                 }
             }
-            Err(e) => {
-                let _ = pending.try_set(None);
-                toast.error(format!("Zone command failed: {e}"));
-            }
-        }
-    });
+        },
+    );
 
     #[cfg(feature = "hydrate")]
     {

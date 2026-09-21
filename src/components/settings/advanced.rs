@@ -1,6 +1,7 @@
 // SettingsAdvanced. Nerd mode toggle + kiosk mode toggle + source
 // freshness + rollback snapshot list + demo mode display.
 
+use crate::components::ui::DiagnosticDetails;
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::IntoAny;
 
@@ -365,6 +366,7 @@ fn format_epoch(epoch: i64) -> String {
 #[derive(Clone, Default)]
 struct SourceStatusRow {
     label: String,
+    diagnostic: Option<serde_json::Value>,
     last_epoch: i64,
     /// Server-computed freshness: "fresh" | "stale" | "offline". Empty before
     /// the first health fetch lands (the loading state).
@@ -442,6 +444,7 @@ fn SourceStatusRowView(row: SourceStatusRow) -> impl IntoView {
             <span class="source-status-label">{label}</span>
             <span class=status_class>{status_text}</span>
             <span class="source-status-age">{age_text}</span>
+            {row.diagnostic.map(|record| view! { <DiagnosticDetails record=record/> })}
         </li>
     }
 }
@@ -727,6 +730,7 @@ async fn fetch_source_status() -> Option<Vec<SourceStatusRow>> {
             };
             SourceStatusRow {
                 label,
+                diagnostic: s.get("error").filter(|value| !value.is_null()).cloned(),
                 last_epoch: s
                     .get("last_seen_epoch")
                     .and_then(Value::as_i64)

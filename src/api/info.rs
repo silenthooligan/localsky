@@ -374,7 +374,8 @@ use serde::{Deserialize, Serialize};
 /// 2.2.0: decision-trace rules add nullable overridden_by/overridden_detail.
 /// A fired rule can be superseded; the trace verdict remains authoritative.
 /// 2.3.0: declared forecast models, inclusive window queries and hourly archive.
-pub const API_VERSION: &str = "2.3.0";
+/// 2.4.0: optional structured source failures in privileged health/diagnostics.
+pub const API_VERSION: &str = "2.4.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {

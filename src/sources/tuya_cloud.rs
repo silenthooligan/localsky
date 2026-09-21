@@ -46,6 +46,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 
+use crate::failure::{Failure, FailureCode as Code};
+use crate::net::source_failure::from_anyhow;
+
 use crate::config::schema::{TuyaCloudConfig, TuyaFieldMap};
 use crate::ports::weather_source::{
     ShutdownSignal, SourceBus, SourceCaps, SourceEvent, WeatherField, WeatherSource,
@@ -74,15 +77,27 @@ pub struct TuyaCloud {
 /// Tuya answered 401 to a signed request: the access_token is bad, not the
 /// upstream. `with_reauth` reads this as "log in again and retry once".
 #[derive(Debug)]
-struct TokenRejected;
+struct TokenRejected(crate::failure::Failure);
 
 impl std::fmt::Display for TokenRejected {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("tuya rejected the access_token (401)")
+        self.0.fmt(f)
     }
 }
-
-impl std::error::Error for TokenRejected {}
+impl std::error::Error for TokenRejected {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+impl TokenRejected {
+    fn new(status: u16) -> Self {
+        Self(crate::failure::Failure::http(
+            status,
+            None,
+            "tuya_cloud authenticated request",
+        ))
+    }
+}
 
 fn token_rejected(e: &anyhow::Error) -> bool {
     e.downcast_ref::<TokenRejected>().is_some()
@@ -107,7 +122,7 @@ struct TokenResponse {
     #[serde(default)]
     success: bool,
     #[serde(default)]
-    msg: Option<String>,
+    code: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -124,7 +139,7 @@ struct StatusResponse {
     #[serde(default)]
     success: bool,
     #[serde(default)]
-    msg: Option<String>,
+    code: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -196,14 +211,13 @@ impl TuyaCloud {
             .json()
             .await?;
         if !resp.success {
-            return Err(anyhow::anyhow!(
-                "tuya token request failed: {}",
-                resp.msg.unwrap_or_else(|| "<no message>".into())
-            ));
+            return Err(Failure::new(Code::ProviderRejected, "Tuya acquire token")
+                .with_provider_code(resp.code.as_ref().and_then(Value::as_i64))
+                .into());
         }
-        let r = resp
-            .result
-            .ok_or_else(|| anyhow::anyhow!("tuya token response missing 'result'"))?;
+        let r = resp.result.ok_or_else(|| {
+            Failure::new(Code::MissingField, "Tuya acquire token").with_field("result")
+        })?;
         self.token_expires_at_ms.store(
             chrono::Utc::now().timestamp_millis() + r.expire_time * 1000,
             Ordering::Relaxed,
@@ -256,15 +270,14 @@ impl TuyaCloud {
             .send()
             .await?;
         if resp.status() == StatusCode::UNAUTHORIZED {
-            return Err(TokenRejected.into());
+            return Err(TokenRejected::new(401).into());
         }
         let http = resp.error_for_status()?;
         let body: StatusResponse = crate::net::safe_fetch::read_json_capped(http).await?;
         if !body.success {
-            return Err(anyhow::anyhow!(
-                "tuya status response failed: {}",
-                body.msg.unwrap_or_else(|| "<no message>".into())
-            ));
+            return Err(Failure::new(Code::ProviderRejected, "Tuya device status")
+                .with_provider_code(body.code.as_ref().and_then(Value::as_i64))
+                .into());
         }
         Ok(body.result)
     }
@@ -286,13 +299,14 @@ impl TuyaCloud {
         let mut poll = Poll::none();
         let mut fields = Vec::new();
         let mut any_ok = false;
-        let mut last_err = None;
+        let mut failures = Vec::new();
         for (device_id, mappings) in &by_device {
             let items = match self.fetch_device_status(device_id).await {
                 Ok(items) => items,
                 Err(e) => {
-                    debug!(source_id = %self.id, device_id, error = %e, "tuya device status failed");
-                    last_err = Some(e);
+                    let failure = from_anyhow(&e, "Tuya device status").with_resource(device_id);
+                    debug!(source_id = %self.id, error = %failure, "tuya device status failed");
+                    failures.push(failure);
                     continue;
                 }
             };
@@ -322,12 +336,12 @@ impl TuyaCloud {
                 }
             }
         }
-        if !any_ok {
-            let e = last_err.unwrap_or_else(|| anyhow::anyhow!("no tuya device answered"));
-            return Err(e.context(format!(
-                "none of {} tuya device(s) answered",
-                by_device.len()
-            )));
+        if !failures.is_empty() {
+            let failure = Failure::batch("Tuya device batch", failures, any_ok);
+            if !any_ok {
+                return Err(failure.into());
+            }
+            poll = poll.with_failure(failure);
         }
         if !fields.is_empty() {
             poll = poll.with(SourceEvent::Observation {
@@ -437,6 +451,17 @@ impl WeatherSource for TuyaCloud {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reauth_marker_preserves_http_evidence_through_context() {
+        let error =
+            anyhow::Error::new(super::TokenRejected::new(401)).context("credential-must-not-leak");
+        assert!(super::token_rejected(&error));
+        let failure = crate::net::source_failure::from_anyhow(&error, "poll");
+        assert_eq!(failure.code, crate::failure::FailureCode::HttpUnauthorized);
+        assert_eq!(failure.http_status, Some(401));
+        assert!(!failure.to_string().contains("credential-must-not-leak"));
+    }
+
     use super::*;
 
     fn cfg() -> TuyaCloudConfig {
@@ -515,9 +540,11 @@ mod tests {
     /// again on every transport error.
     #[test]
     fn only_the_401_marker_counts_as_a_rejected_token() {
-        assert!(token_rejected(&anyhow::Error::from(TokenRejected)));
+        assert!(token_rejected(&anyhow::Error::from(TokenRejected::new(
+            401
+        ))));
         assert!(token_rejected(
-            &anyhow::Error::from(TokenRejected).context("status fetch")
+            &anyhow::Error::from(TokenRejected::new(401)).context("status fetch")
         ));
         assert!(!token_rejected(&anyhow::anyhow!("request timed out")));
     }

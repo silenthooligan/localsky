@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 #[derive(Debug, Error)]
 pub enum TuningReportStateError {
     #[error("sqlite: {0}")]
-    Sqlite(String),
+    Sqlite(#[source] Box<crate::failure::Failure>),
 }
 
 #[derive(Debug, Clone)]
@@ -75,8 +75,18 @@ impl TuningReportStateStore {
             Ok(())
         })
         .await
-        .map_err(|e| TuningReportStateError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| TuningReportStateError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            TuningReportStateError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "tuning_report.set_last_notified_epoch",
+            )))
+        })?
+        .map_err(|e| {
+            TuningReportStateError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "tuning_report.set_last_notified_epoch",
+            )))
+        })
     }
 }
 

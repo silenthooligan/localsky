@@ -40,6 +40,7 @@ pub mod backup;
 pub mod config;
 pub mod devices;
 pub mod diagnostics;
+pub mod error_boundary;
 pub mod forecast;
 pub mod health;
 pub mod info;

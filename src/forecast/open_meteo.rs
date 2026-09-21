@@ -106,6 +106,7 @@ pub fn spawn_forecast_refresher(
             .await
             {
                 Ok((snap, current)) => {
+                    crate::sources::poll::report_diagnostic(&bus, &source_id, None);
                     let at = snap.last_refresh_epoch;
                     last_good = Some(snap.clone());
                     let _ = bus.send(SourceEvent::Forecast {
@@ -140,6 +141,13 @@ pub fn spawn_forecast_refresher(
                     REFRESH_INTERVAL
                 }
                 Err(e) => {
+                    let failure =
+                        crate::diagnostics::from_anyhow(&e, "Open-Meteo forecast refresh");
+                    crate::sources::poll::report_diagnostic(
+                        &bus,
+                        &source_id,
+                        Some(failure.clone()),
+                    );
                     consecutive_failures = consecutive_failures.saturating_add(1);
                     // Re-emit the last good forecast flagged unreachable so the UI
                     // shows the stale forecast + a degraded badge (the bridge
@@ -160,14 +168,14 @@ pub fn spawn_forecast_refresher(
                     });
                     if !degraded {
                         tracing::warn!(
-                            error = %format!("{e:#}"),
+                            error = %failure,
                             "forecast source unreachable; entering degraded mode"
                         );
                         degraded = true;
                     } else {
                         tracing::debug!(
                             consecutive_failures,
-                            error = %format!("{e:#}"),
+                            error = %failure,
                             "forecast still unreachable"
                         );
                     }
@@ -361,7 +369,7 @@ pub(crate) async fn refresh_once(
     custom_endpoint: Option<&str>,
     past_days: u32,
 ) -> Result<(ForecastSnapshot, Option<(Vec<(WeatherField, f64)>, i64)>)> {
-    let mut last_err: Option<anyhow::Error> = None;
+    let mut failures = Vec::new();
     // A configured self-hosted instance leads the ladder; the hosted service
     // and its mirrors stay behind it as automatic fallback, so a down
     // self-hosted box degrades to hosted instead of a dead forecast. Normalize
@@ -374,11 +382,8 @@ pub(crate) async fn refresh_once(
         .filter(|e| !e.is_empty());
     let custom = match custom {
         Some(e) if e.starts_with("http://") || e.starts_with("https://") => Some(e),
-        Some(bad) => {
-            tracing::warn!(
-                endpoint = %bad,
-                "self-hosted open-meteo endpoint is not an http(s) URL; ignoring it"
-            );
+        Some(_) => {
+            tracing::warn!("self-hosted open-meteo endpoint is not an http(s) URL; ignoring it");
             None
         }
         None => None,
@@ -406,15 +411,24 @@ pub(crate) async fn refresh_once(
                 // fall through to the next rung so a working provider still wins.
                 if snap.daily.is_empty() && snap.hourly.is_empty() {
                     if i + 1 < bases.len() {
-                        tracing::debug!(host, "endpoint returned an empty forecast; trying next");
+                        tracing::debug!(tier, "endpoint returned an empty forecast; trying next");
                     }
-                    last_err = Some(anyhow::anyhow!("empty forecast from {host}"));
+                    failures.push(
+                        crate::failure::Failure::new(
+                            crate::failure::FailureCode::MissingField,
+                            "Open-Meteo forecast response",
+                        )
+                        .with_field("daily/hourly")
+                        .with_item(i)
+                        .with_resource(tier),
+                    );
                     continue;
                 }
                 if i > 0 {
                     tracing::info!(
-                        host,
                         tier,
+                        recovered = true,
+                        attempts = i + 1,
                         "earlier forecast endpoint down; fallback answered"
                     );
                 }
@@ -430,14 +444,15 @@ pub(crate) async fn refresh_once(
                 return Ok((snap, current));
             }
             Err(e) => {
-                if i + 1 < bases.len() {
-                    tracing::debug!(host, error = %format!("{e:#}"), "endpoint failed; trying next");
-                }
-                last_err = Some(e);
+                let failure = crate::diagnostics::from_anyhow(&e, "Open-Meteo fetch forecast")
+                    .with_item(i)
+                    .with_resource(tier);
+                tracing::debug!(error = %failure, "forecast endpoint failed");
+                failures.push(failure);
             }
         }
     }
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no forecast hosts configured")))
+    Err(crate::failure::Failure::attempts("Open-Meteo forecast endpoint fallback", failures).into())
 }
 
 /// Fetch + decode one forecast endpoint into `Raw`. The self-hosted rung is an
@@ -455,7 +470,10 @@ async fn fetch_forecast_raw(shared: &Client, tier: &str, base: &str, url: &str) 
             crate::net::safe_fetch::build_safe_client(base, Duration::from_secs(10))
                 .await
                 .map_err(|e| {
-                    anyhow::anyhow!("self-hosted open-meteo endpoint rejected ({base}): {e}")
+                    crate::net::source_failure::from_safe(
+                        &e,
+                        "Open-Meteo initialize self-hosted request",
+                    )
                 })?;
         // `url` shares `base`'s host, so the resolve() pin built for `base`
         // applies to this request; the query path is our own, not attacker data.
@@ -468,7 +486,10 @@ async fn fetch_forecast_raw(shared: &Client, tier: &str, base: &str, url: &str) 
             .with_context(|| format!("self-hosted open-meteo non-2xx ({base})"))?;
         crate::net::safe_fetch::read_json_capped::<Raw>(resp)
             .await
-            .map_err(|e| anyhow::anyhow!("decode self-hosted open-meteo ({base}): {e}"))
+            .map_err(|e| {
+                crate::net::source_failure::from_safe(&e, "Open-Meteo decode self-hosted response")
+                    .into()
+            })
     } else {
         shared
             .get(url)

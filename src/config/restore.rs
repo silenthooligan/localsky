@@ -74,7 +74,10 @@ impl HotRestore {
         let expected = paths(config, db)?;
         let path = hot_marker_path(&expected[0]);
         if exists(&path)? || exists(&marker_path(&expected[2]))? {
-            return Err(recovery_error(&path, "an earlier restore is pending"));
+            return Err(recovery_error(
+                &path,
+                invariant("an earlier restore is pending"),
+            ));
         }
         let transaction = format!("{:032x}", rand::random::<u128>());
         let journal = HotJournal {
@@ -109,7 +112,7 @@ impl HotRestore {
         if self.journal.phase != Phase::Activated {
             return Err(recovery_error(
                 &self.path,
-                "config pair was not fully installed",
+                invariant("config pair was not fully installed"),
             ));
         }
         ActivatedRestore { marker: self.path }.complete()
@@ -126,11 +129,15 @@ fn save_hot_marker(path: &Path, journal: &HotJournal) -> io::Result<()> {
 
 fn recover_hot(expected: &[PathBuf; 3], path: &Path) -> io::Result<ActivatedRestore> {
     regular(path)?;
-    let mut journal: HotJournal = serde_json::from_slice(&std::fs::read(path)?).map_err(|_| {
-        io::Error::other("legacy or unreadable hot restore has no recovery journal")
-    })?;
+    let mut journal: HotJournal =
+        serde_json::from_slice(&std::fs::read(path)?).map_err(|error| {
+            io::Error::other(crate::diagnostics::from_error(
+                &error,
+                "hot restore journal parse",
+            ))
+        })?;
     if journal.version != 2 || !valid_transaction(&journal.transaction) {
-        return Err(io::Error::other("unsupported hot restore journal"));
+        return Err(invariant("unsupported hot restore journal"));
     }
     journal
         .files
@@ -142,7 +149,7 @@ fn recover_hot(expected: &[PathBuf; 3], path: &Path) -> io::Result<ActivatedRest
             save_hot_marker(path, &journal)?;
         }
         Phase::Activated => {}
-        _ => return Err(io::Error::other("unsupported hot restore phase")),
+        _ => return Err(invariant("unsupported hot restore phase")),
     }
     journal.files.verify_installed_presence()?;
     super::loader::load_from_path(&expected[0]).map_err(io::Error::other)?;
@@ -166,7 +173,7 @@ fn paths(config: &Path, db: &Path) -> io::Result<[PathBuf; 3]> {
     let ledger = super::ledger::Ledger::path_for(&config);
     let db = std::path::absolute(db)?;
     if config == db || ledger == db {
-        return Err(io::Error::other(
+        return Err(invariant(
             "restore config, ledger and database paths must be distinct",
         ));
     }
@@ -183,10 +190,7 @@ fn exists(path: &Path) -> io::Result<bool> {
 
 fn regular(path: &Path) -> io::Result<()> {
     if !std::fs::symlink_metadata(path)?.is_file() {
-        return Err(io::Error::other(format!(
-            "not a regular restore file: {}",
-            path.display()
-        )));
+        return Err(invariant("not a regular restore file"));
     }
     Ok(())
 }
@@ -252,7 +256,7 @@ fn validate_marker(marker: &Marker, expected: &[PathBuf; 3]) -> io::Result<()> {
         || marker.parts[2].sha256.is_none()
         || (marker.parts[1].sha256.is_some() && marker.parts[0].sha256.is_none())
     {
-        return Err(io::Error::other(
+        return Err(invariant(
             "restore marker has unsupported or mismatched paths/parts",
         ));
     }
@@ -264,16 +268,10 @@ fn verify_stages(marker: &Marker) -> io::Result<()> {
         let stage = staged_path(&part.live);
         match &part.sha256 {
             Some(expected) if digest(&stage)? != *expected => {
-                return Err(io::Error::other(format!(
-                    "restore digest mismatch: {}",
-                    stage.display()
-                )));
+                return Err(invariant("restore digest mismatch"));
             }
             None if exists(&stage)? => {
-                return Err(io::Error::other(format!(
-                    "unexpected restore stage: {}",
-                    stage.display()
-                )));
+                return Err(invariant("unexpected restore stage"));
             }
             _ => {}
         }
@@ -296,18 +294,24 @@ impl Publication {
         transaction: String,
     ) -> io::Result<Self> {
         if !valid_transaction(&transaction) {
-            return Err(io::Error::other("invalid restore transaction"));
+            return Err(invariant("invalid restore transaction"));
         }
         let expected = paths(config, db)?;
         let path = marker_path(&expected[2]);
         if exists(&hot_marker_path(&expected[0]))? {
-            return Err(recovery_error(&path, "a configuration restore is pending"));
+            return Err(recovery_error(
+                &path,
+                invariant("a configuration restore is pending"),
+            ));
         }
         let previous = read_marker(&path)?;
         if let Some(previous) = &previous {
             validate_marker(previous, &expected)?;
             if previous.phase != Phase::Ready {
-                return Err(recovery_error(&path, "an earlier restore is incomplete"));
+                return Err(recovery_error(
+                    &path,
+                    invariant("an earlier restore is incomplete"),
+                ));
             }
             verify_stages(previous)?;
         }
@@ -355,11 +359,19 @@ impl Publication {
     }
 }
 
-fn recovery_error(marker: &Path, detail: impl std::fmt::Display) -> io::Error {
-    io::Error::other(format!(
-        "LocalSky startup refused: {detail}. Restore state: {}. Keep this marker, all .restore stages and .pre-restore recovery files; recover a complete verified bundle before restarting. No controllers or schedulers were started.",
-        marker.display()
-    ))
+fn invariant(reason: &'static str) -> io::Error {
+    let mut failure = crate::failure::Failure::new(
+        crate::failure::FailureCode::RestoreSchema,
+        "restore transaction validation",
+    );
+    failure.error_kind = Some(reason);
+    io::Error::other(failure)
+}
+
+fn recovery_error(marker: &Path, detail: io::Error) -> io::Error {
+    let failure = crate::diagnostics::from_error(&detail, "restore activation");
+    tracing::error!(%failure, marker = %marker.display(), "startup refused; preserve restore stages and recovery files");
+    io::Error::other(failure)
 }
 
 /// Kept until the restored database opens and the config loads successfully.
@@ -385,7 +397,10 @@ pub fn activate_at_boot(config: &Path, db: &Path) -> io::Result<Option<Activated
     let hot_marker = hot_marker_path(&expected[0]);
     if exists(&hot_marker)? {
         if exists(&marker_path(&expected[2]))? {
-            return Err(recovery_error(&hot_marker, "conflicting restore journals"));
+            return Err(recovery_error(
+                &hot_marker,
+                invariant("conflicting restore journals"),
+            ));
         }
         return recover_hot(&expected, &hot_marker)
             .map(Some)
@@ -401,7 +416,7 @@ fn resume_publication(path: &Path, marker: &mut Marker) -> io::Result<()> {
         .files
         .as_ref()
         .filter(|_| marker.version == 2)
-        .ok_or_else(|| io::Error::other("legacy Publishing restore has no recovery journal"))?;
+        .ok_or_else(|| invariant("legacy Publishing restore has no recovery journal"))?;
     files.validate(&targets, &marker.transaction)?;
     files.install()?;
     verify_stages(marker)?;
@@ -449,7 +464,7 @@ fn preflight_schema(marker: &Marker, staged: bool) -> io::Result<()> {
     regular(&db)?;
     crate::persistence::restore_probe::probe_localsky_db(
         db.to_str()
-            .ok_or_else(|| io::Error::other("database path is not UTF-8"))?,
+            .ok_or_else(|| invariant("database path is not UTF-8"))?,
     )
     .map_err(io::Error::other)?;
     Ok(())
@@ -461,9 +476,7 @@ fn remove_consumed_stages(marker: &Marker) -> io::Result<()> {
     for part in &marker.parts {
         let stage = staged_path(&part.live);
         if exists(&stage)? && Some(digest(&stage)?) != part.sha256 {
-            return Err(io::Error::other(
-                "unexpected restore stage during completion",
-            ));
+            return Err(invariant("unexpected restore stage during completion"));
         }
     }
     for part in &marker.parts {
@@ -481,10 +494,7 @@ fn activate(expected: &[PathBuf; 3], path: &Path) -> io::Result<Option<Activated
         for live in expected {
             let stage = staged_path(live);
             if exists(&stage)? {
-                return Err(io::Error::other(format!(
-                    "unmarked legacy restore stage: {}",
-                    stage.display()
-                )));
+                return Err(invariant("unmarked legacy restore stage"));
             }
         }
         return Ok(None);
@@ -519,7 +529,7 @@ fn activate(expected: &[PathBuf; 3], path: &Path) -> io::Result<Option<Activated
             .files
             .as_ref()
             .filter(|_| marker.version == 2)
-            .ok_or_else(|| io::Error::other("legacy Applying restore has no recovery journal"))?;
+            .ok_or_else(|| invariant("legacy Applying restore has no recovery journal"))?;
         files.validate(&activation_targets(&marker), &marker.transaction)?;
         files.install()?;
         remove_consumed_stages(&marker)?;
@@ -529,12 +539,12 @@ fn activate(expected: &[PathBuf; 3], path: &Path) -> io::Result<Option<Activated
         save_marker(path, &marker)?;
     }
     if marker.phase != Phase::Activated || marker.version != 2 {
-        return Err(io::Error::other("unsupported restore recovery phase"));
+        return Err(invariant("unsupported restore recovery phase"));
     }
     let files = marker
         .files
         .as_ref()
-        .ok_or_else(|| io::Error::other("missing activation journal"))?;
+        .ok_or_else(|| invariant("missing activation journal"))?;
     files.validate(&activation_targets(&marker), &marker.transaction)?;
     for part in &marker.parts {
         if part.sha256.is_some() {

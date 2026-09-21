@@ -98,6 +98,7 @@ pub struct Nws {
     /// hour), we fall through to the next-nearest instead of going silent.
     station_cache: Arc<Mutex<Option<Vec<String>>>>,
     last_forecast_epoch: AtomicI64,
+    forecast_diagnostic: Mutex<Option<crate::failure::Failure>>,
 }
 
 #[derive(Debug, Clone)]
@@ -304,6 +305,7 @@ impl Nws {
             grid_cache: Arc::new(Mutex::new(None)),
             station_cache: Arc::new(Mutex::new(None)),
             last_forecast_epoch: AtomicI64::new(0),
+            forecast_diagnostic: Mutex::new(None),
         }
     }
 
@@ -464,6 +466,7 @@ impl Nws {
         let now = chrono::Utc::now().timestamp();
         let mut poll = Poll::none().unreachable();
         let mut reports = Vec::new();
+        let mut failures = Vec::new();
         for (rank, station, response) in responses {
             match response {
                 Ok(obs) => {
@@ -472,11 +475,22 @@ impl Nws {
                     reports.push((rank, obs.properties));
                 }
                 Err(error) => {
-                    warn!(source_id = %self.id, %station, %error, "NWS observation fetch failed")
+                    let failure = crate::diagnostics::from_anyhow(&error, "NWS latest observation")
+                        .with_resource(&station)
+                        .with_item(rank);
+                    warn!(source_id = %self.id, error = %failure, "NWS observation fetch failed");
+                    failures.push(failure);
                 }
             }
         }
         poll.events = merge_current_observations(&self.id, &reports, now);
+        if !failures.is_empty() {
+            poll.failure = Some(crate::failure::Failure::batch(
+                "NWS observation stations",
+                failures,
+                !reports.is_empty(),
+            ));
+        }
         poll
     }
 
@@ -486,10 +500,12 @@ impl Nws {
         let mut poll = match self.resolve_stations().await {
             Ok(stations) if !stations.is_empty() => self.fetch_current_fields(&stations).await,
             Ok(_) => Poll::none(),
-            Err(error) => {
-                warn!(source_id = %self.id, %error, "NWS station lookup failed");
-                Poll::none().unreachable()
-            }
+            Err(error) => Poll::none()
+                .unreachable()
+                .with_failure(crate::diagnostics::from_anyhow(
+                    &error,
+                    "NWS resolve observation stations",
+                )),
         };
         let now = chrono::Utc::now().timestamp();
         if forecast_due(self.last_forecast_epoch.load(Ordering::Relaxed), now) {
@@ -505,30 +521,56 @@ impl Nws {
                     });
                 }
                 Err(error) => {
-                    warn!(source_id = %self.id, error = %format!("{error:#}"), "NWS forecast fetch failed; retaining current observations")
+                    *self.forecast_diagnostic.lock().await =
+                        Some(crate::diagnostics::from_anyhow(&error, "NWS forecast"));
                 }
             }
+        }
+        if let Some(forecast_failure) = self.forecast_diagnostic.lock().await.clone() {
+            poll.failure = Some(match poll.failure.take() {
+                Some(observation_failure) => crate::failure::Failure::batch(
+                    "NWS poll",
+                    vec![observation_failure, forecast_failure],
+                    !poll.events.is_empty(),
+                ),
+                None => forecast_failure,
+            });
         }
         poll
     }
 
     async fn poll_forecast(&self) -> anyhow::Result<ForecastSnapshot> {
-        let grid = self.resolve_grid().await?;
-        let forecast = self.fetch_forecast(&grid).await?;
+        let grid = self
+            .resolve_grid()
+            .await
+            .map_err(|e| crate::diagnostics::from_anyhow(&e, "NWS resolve forecast grid"))?;
+        let forecast = self
+            .fetch_forecast(&grid)
+            .await
+            .map_err(|e| crate::diagnostics::from_anyhow(&e, "NWS fetch daily forecast"))?;
+        let mut failures = Vec::new();
         let hourly = match self.fetch_hourly(&grid).await {
             Ok(value) => Some(value),
             Err(error) => {
-                warn!(source_id = %self.id, %error, "NWS hourly fetch failed");
+                failures.push(crate::diagnostics::from_anyhow(
+                    &error,
+                    "NWS fetch hourly forecast",
+                ));
                 None
             }
         };
         let qpf = match self.fetch_raw_grid(&grid).await {
             Ok(value) => Some(value),
             Err(error) => {
-                warn!(source_id = %self.id, %error, "NWS QPF fetch failed");
+                failures.push(crate::diagnostics::from_anyhow(
+                    &error,
+                    "NWS fetch quantitative precipitation",
+                ));
                 None
             }
         };
+        *self.forecast_diagnostic.lock().await = (!failures.is_empty())
+            .then(|| crate::failure::Failure::batch("NWS forecast products", failures, true));
         Ok(self.build_snapshot(
             &forecast,
             hourly.as_ref(),
@@ -1220,6 +1262,54 @@ mod tests {
         assert_eq!(*at_epoch, now - 300);
         assert!((fields[0].1 - 5.7489).abs() < 0.001);
         assert_eq!(source.last_forecast_epoch.load(Ordering::Relaxed), 0);
+        let failure = poll.failure.unwrap();
+        assert_eq!(failure.http_status, Some(503));
+        assert_eq!(failure.operation, "NWS fetch daily forecast");
+    }
+
+    #[tokio::test]
+    async fn partial_forecast_error_is_retained_between_forecast_refreshes() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/gridpoints/TEST/1,1/forecast"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"properties":{"periods":[]}})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut source = Nws::new(
+            "weather",
+            serde_json::from_str("{}").unwrap(),
+            Location::default(),
+        );
+        source.api_base = server.uri();
+        *source.station_cache.lock().await = Some(vec![]);
+        *source.grid_cache.lock().await = Some(GridPoint {
+            grid_id: "TEST".into(),
+            grid_x: 1,
+            grid_y: 1,
+        });
+        let first = source.poll_once().await;
+        assert!(first.failure.is_some());
+        assert_eq!(first.events.len(), 1);
+        let second = source.poll_once().await;
+        assert!(
+            second.events.is_empty(),
+            "cached forecast must not be freshly republished"
+        );
+        let failure = second.failure.unwrap();
+        assert_eq!(failure.code, crate::failure::FailureCode::BatchPartial);
+        assert_eq!(failure.causes.len(), 2);
+        assert!(failure
+            .causes
+            .iter()
+            .all(|cause| cause.http_status == Some(404)));
     }
 
     #[test]

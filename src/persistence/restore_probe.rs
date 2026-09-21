@@ -3,6 +3,38 @@
 
 use rusqlite::Connection;
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RestoreProbeError {
+    #[error("LS_RESTORE_SCHEMA: {0}")]
+    Schema(String),
+    #[error("{0}")]
+    Cause(#[source] Box<crate::failure::Failure>),
+}
+impl From<String> for RestoreProbeError {
+    fn from(value: String) -> Self {
+        Self::Schema(value)
+    }
+}
+impl From<&str> for RestoreProbeError {
+    fn from(value: &str) -> Self {
+        Self::Schema(value.into())
+    }
+}
+impl RestoreProbeError {
+    pub fn diagnostic(&self) -> crate::failure::Failure {
+        match self {
+            Self::Schema(_) => crate::failure::Failure::new(
+                crate::failure::FailureCode::RestoreSchema,
+                "restore database schema proof",
+            ),
+            Self::Cause(failure) => (**failure).clone(),
+        }
+    }
+}
+fn cause(error: &(dyn std::error::Error + 'static), operation: &'static str) -> RestoreProbeError {
+    RestoreProbeError::Cause(Box::new(crate::diagnostics::from_error(error, operation)))
+}
+
 static PROBE_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Scratch files are unique per proof and never candidates for a later restore.
@@ -16,24 +48,27 @@ impl Drop for ProbeFileGuard {
 
 /// Required schema materialized by the migrations, compared structurally so
 /// whitespace in historic CREATE statements does not reject a usable backup.
-fn require_migration_schema(conn: &Connection, expected: &Connection) -> Result<(), String> {
+fn require_migration_schema(
+    conn: &Connection,
+    expected: &Connection,
+) -> Result<(), RestoreProbeError> {
     type ColumnShape = (String, String, i64, Option<String>, i64, i64);
     type IndexShape = (String, i64, String, i64);
     type IndexField = (Option<String>, i64, Option<String>, i64);
     let tables: Vec<String> = expected.prepare(
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
     ).and_then(|mut stmt| stmt.query_map([], |row| row.get(0))?.collect())
-        .map_err(|e| format!("reference schema: {e}"))?;
+        .map_err(|e| cause(&e, "reference schema"))?;
     for table in tables {
         let columns = |db: &Connection| -> rusqlite::Result<Vec<ColumnShape>> {
             db.prepare("SELECT name, upper(type), \"notnull\", dflt_value, pk, hidden FROM pragma_table_xinfo(?1) ORDER BY name")?
                 .query_map([&table], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)))?
                 .collect()
         };
-        let actual = columns(conn).map_err(|e| format!("db table {table}: {e}"))?;
-        for column in columns(expected).map_err(|e| format!("reference table {table}: {e}"))? {
+        let actual = columns(conn).map_err(|e| cause(&e, "db table"))?;
+        for column in columns(expected).map_err(|e| cause(&e, "reference table"))? {
             if !actual.contains(&column) {
-                return Err(format!("db schema does not match its migration history: {table}.{} is missing or incompatible", column.0));
+                return Err(format!("db schema does not match its migration history: {table}.{} is missing or incompatible", column.0).into());
             }
         }
         let indexes = |db: &Connection| -> rusqlite::Result<Vec<IndexShape>> {
@@ -45,10 +80,10 @@ fn require_migration_schema(conn: &Connection, expected: &Connection) -> Result<
             })?
             .collect()
         };
-        let actual = indexes(conn).map_err(|e| format!("db indexes for {table}: {e}"))?;
-        for index in indexes(expected).map_err(|e| format!("reference indexes for {table}: {e}"))? {
+        let actual = indexes(conn).map_err(|e| cause(&e, "db indexes for"))?;
+        for index in indexes(expected).map_err(|e| cause(&e, "reference indexes for"))? {
             if !actual.contains(&index) {
-                return Err(format!("db schema does not match its migration history: index {} is missing or incompatible", index.0));
+                return Err(format!("db schema does not match its migration history: index {} is missing or incompatible", index.0).into());
             }
             let fields = |db: &Connection| -> rusqlite::Result<Vec<IndexField>> {
                 db.prepare(
@@ -59,10 +94,10 @@ fn require_migration_schema(conn: &Connection, expected: &Connection) -> Result<
                 })?
                 .collect()
             };
-            if fields(conn).map_err(|e| format!("db index {}: {e}", index.0))?
-                != fields(expected).map_err(|e| format!("reference index {}: {e}", index.0))?
+            if fields(conn).map_err(|e| cause(&e, "db index"))?
+                != fields(expected).map_err(|e| cause(&e, "reference index"))?
             {
-                return Err(format!("db schema does not match its migration history: index {} has incompatible columns", index.0));
+                return Err(format!("db schema does not match its migration history: index {} has incompatible columns", index.0).into());
             }
         }
     }
@@ -72,11 +107,12 @@ fn require_migration_schema(conn: &Connection, expected: &Connection) -> Result<
 /// Validate the ledger as a contiguous prefix of migrations this binary knows.
 /// The one legacy marker is produced by runner::backfill_legacy and is not a
 /// numbered schema migration. Unknown future versions are never silently skipped.
-fn supported_migration_prefix(conn: &Connection) -> Result<usize, String> {
-    let reference = Connection::open_in_memory().map_err(|e| e.to_string())?;
+fn supported_migration_prefix(conn: &Connection) -> Result<usize, RestoreProbeError> {
+    let reference =
+        Connection::open_in_memory().map_err(|e| cause(&e, "restore reference database"))?;
     reference
         .execute_batch(crate::persistence::MIGRATIONS[0].sql)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| cause(&e, "restore reference database"))?;
     require_migration_schema(conn, &reference)?;
     let rows: Vec<(String, String, i64)> = conn
         .prepare("SELECT version, name, applied_at FROM schema_migrations ORDER BY version")
@@ -84,7 +120,7 @@ fn supported_migration_prefix(conn: &Connection) -> Result<usize, String> {
             stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
                 .collect()
         })
-        .map_err(|e| format!("db migration ledger is malformed: {e}"))?;
+        .map_err(|e| cause(&e, "db migration ledger is malformed"))?;
     let mut prefix = 0;
     for (version, name, applied_at) in rows {
         if applied_at < 0 {
@@ -100,17 +136,15 @@ fn supported_migration_prefix(conn: &Connection) -> Result<usize, String> {
                 .ok_or_else(|| "reference legacy push migration is missing".to_string())?;
             reference
                 .execute_batch(push.sql)
-                .map_err(|e| format!("reference legacy push schema: {e}"))?;
+                .map_err(|e| cause(&e, "reference legacy push schema"))?;
             require_migration_schema(conn, &reference)?;
             continue;
         }
         let Some(migration) = crate::persistence::MIGRATIONS.get(prefix) else {
-            return Err(format!(
-                "db migration {version} is unsupported by this LocalSky"
-            ));
+            return Err(format!("db migration {version} is unsupported by this LocalSky").into());
         };
         if version != migration.version || name != migration.name {
-            return Err(format!("db migration history is unsupported or inconsistent at {version}; expected {} ({})", migration.version, migration.name));
+            return Err(format!("db migration history is unsupported or inconsistent at {version}; expected {} ({})", migration.version, migration.name).into());
         }
         prefix += 1;
     }
@@ -124,34 +158,35 @@ fn supported_migration_prefix(conn: &Connection) -> Result<usize, String> {
 /// original bytes stay read-only; pending migrations run on a disposable copy.
 /// Claimed migration rows alone are insufficient: the corresponding tables,
 /// columns and indexes must already exist before the normal runner is invoked.
-pub(crate) fn probe_localsky_db(path: &str) -> Result<(), String> {
+pub(crate) fn probe_localsky_db(path: &str) -> Result<(), RestoreProbeError> {
     let conn = Connection::open_with_flags(
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
-    .map_err(|e| format!("db is not readable as a SQLite database: {e}"))?;
+    .map_err(|e| cause(&e, "db is not readable as a SQLite database"))?;
     let has_ledger: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schema_migrations'",
             [],
             |row| row.get(0),
         )
-        .map_err(|e| format!("db is not readable as a SQLite database: {e}"))?;
+        .map_err(|e| cause(&e, "db is not readable as a SQLite database"))?;
     if has_ledger == 0 {
         return Err("db is a SQLite file but not a LocalSky database (it has no schema_migrations table); upload the irrigation.db from a LocalSky backup bundle".into());
     }
     let integrity: String = conn
         .query_row("PRAGMA quick_check", [], |row| row.get(0))
-        .map_err(|e| format!("db integrity check failed: {e}"))?;
+        .map_err(|e| cause(&e, "db integrity check failed"))?;
     if integrity != "ok" {
-        return Err(format!("db integrity check failed: {integrity}"));
+        return Err(format!("db integrity check failed: {integrity}").into());
     }
     let prefix = supported_migration_prefix(&conn)?;
-    let mut expected = Connection::open_in_memory().map_err(|e| e.to_string())?;
+    let mut expected =
+        Connection::open_in_memory().map_err(|e| cause(&e, "restore reference database"))?;
     for migration in crate::persistence::MIGRATIONS.iter().take(prefix) {
         expected
             .execute_batch(migration.sql)
-            .map_err(|e| format!("reference migration {}: {e}", migration.version))?;
+            .map_err(|e| cause(&e, "reference migration"))?;
     }
     require_migration_schema(&conn, &expected)?;
     drop(conn);
@@ -165,16 +200,16 @@ pub(crate) fn probe_localsky_db(path: &str) -> Result<(), String> {
     let _wal = ProbeFileGuard(format!("{proof_path}-wal"));
     let _shm = ProbeFileGuard(format!("{proof_path}-shm"));
     let _journal = ProbeFileGuard(format!("{proof_path}-journal"));
-    std::fs::copy(path, &proof_path).map_err(|e| format!("db migration probe copy: {e}"))?;
+    std::fs::copy(path, &proof_path).map_err(|e| cause(&e, "db migration probe copy"))?;
     let mut proof =
-        Connection::open(&proof_path).map_err(|e| format!("db migration probe open: {e}"))?;
+        Connection::open(&proof_path).map_err(|e| cause(&e, "db migration probe open"))?;
     crate::persistence::run_migrations(&mut proof)
-        .map_err(|e| format!("db cannot migrate to this LocalSky: {e}"))?;
+        .map_err(|e| cause(&e, "db cannot migrate to this LocalSky"))?;
     // The reference has no ledger rows, so build the final canonical schema in
     // a new connection using the very same runner boot uses.
-    expected = Connection::open_in_memory().map_err(|e| e.to_string())?;
+    expected = Connection::open_in_memory().map_err(|e| cause(&e, "restore reference database"))?;
     crate::persistence::run_migrations(&mut expected)
-        .map_err(|e| format!("reference migrations: {e}"))?;
+        .map_err(|e| cause(&e, "reference migrations"))?;
     require_migration_schema(&proof, &expected)?;
     Ok(())
 }

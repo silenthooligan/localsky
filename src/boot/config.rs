@@ -126,7 +126,7 @@ async fn load_or_synthesize(store: &FileConfigStore, path: &str) -> Option<Confi
                 }
                 Err(e) => {
                     tracing::error!(
-                        error = %e,
+                        error = %e.diagnostic(),
                         "could not write the config synthesized from the environment; \
                          booting unconfigured"
                     );
@@ -144,7 +144,7 @@ async fn load_or_synthesize(store: &FileConfigStore, path: &str) -> Option<Confi
             // wizard-empty instead, with rollback and backup-restore still
             // reachable.
             tracing::error!(
-                error = %e,
+                error = %e.diagnostic(),
                 config_path = %path,
                 "FAILED to load an existing localsky config; booting UNCONFIGURED \
                  (no zones, no controllers, no scheduled watering). This is NOT a \
@@ -225,7 +225,7 @@ async fn seed_region_authorities(
         };
         if let Err(e) = persisted {
             tracing::warn!(
-                error = %e,
+                error = %e.diagnostic(),
                 "failed to persist region authority seeding; sources still \
                  active this boot, will retry next boot"
             );

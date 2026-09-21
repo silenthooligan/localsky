@@ -87,8 +87,13 @@ fn build_jwt(config: &WeatherKitConfig, now: i64) -> anyhow::Result<String> {
         b64url(&serde_json::to_vec(&header)?),
         b64url(&serde_json::to_vec(&payload)?),
     );
-    let key = SigningKey::from_pkcs8_pem(config.private_key_pem.trim())
-        .map_err(|e| anyhow::anyhow!("invalid WeatherKit private key (PKCS#8 PEM): {e}"))?;
+    let key = SigningKey::from_pkcs8_pem(config.private_key_pem.trim()).map_err(|_| {
+        crate::failure::Failure::new(
+            crate::failure::FailureCode::SigningKey,
+            "WeatherKit JWT signing",
+        )
+        .with_field("private_key_pem")
+    })?;
     let sig: Signature = key.sign(signing_input.as_bytes());
     let sig_bytes = sig.to_bytes();
     Ok(format!("{signing_input}.{}", b64url(sig_bytes.as_ref())))

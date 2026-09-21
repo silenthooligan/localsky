@@ -29,11 +29,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::{stream::FuturesUnordered, StreamExt};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
 use tracing::{debug, info, warn};
 
 use crate::config::schema::HaPassthroughConfig;
+use crate::net::source_failure::{from_anyhow, from_reqwest, from_safe, response_format};
+use crate::ports::source_error::{SourceErrorCode as Code, SourceFailure};
 use crate::ports::weather_source::{
     ShutdownSignal, SourceBus, SourceCaps, SourceEvent, WeatherField, WeatherSource,
 };
@@ -43,6 +46,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(30);
 /// Per-request budget for the HA REST poll. Matches the previous persistent
 /// client's timeout; each fetch now builds an SSRF-hardened client.
 const HA_TIMEOUT: Duration = Duration::from_secs(8);
+const ENTITY_FETCH_CONCURRENCY: usize = 4;
 
 pub struct HaPassthrough {
     id: String,
@@ -122,22 +126,162 @@ impl HaPassthrough {
     }
 
     async fn fetch_states(&self) -> anyhow::Result<Vec<StateEntry>> {
+        // Bound the complete poll, including DNS and any mapped-entity fallback.
+        // A broken bulk endpoint must not turn one eight-second request into
+        // an unbounded sequence of eight-second requests.
+        poll_with_deadline(self.fetch_states_inner()).await
+    }
+
+    async fn fetch_states_inner(&self) -> anyhow::Result<Vec<StateEntry>> {
         let url = format!("{}/api/states", self.config.base_url.trim_end_matches('/'));
         // SSRF-hardened client built per poll. The HA base_url is
         // config-supplied and this poller is always-on, so route outbound
         // through net::safe_fetch (defense in depth): forbidden-target filter,
         // resolved-IP pin (anti DNS-rebinding), no redirects. RFC1918/ULA stays
         // allowed (HA lives on the LAN), so legitimate polling is unaffected.
-        let (client, safe_url) =
-            crate::net::safe_fetch::build_safe_client(&url, HA_TIMEOUT).await?;
-        let resp = client
-            .get(safe_url)
+        let (client, safe_url) = crate::net::safe_fetch::build_safe_client(&url, HA_TIMEOUT)
+            .await
+            .map_err(|error| from_safe(&error, "HA resolve/build client"))?;
+        self.fetch_states_with_client(&client, safe_url).await
+    }
+
+    async fn get_states_response(
+        &self,
+        client: &reqwest::Client,
+        url: reqwest::Url,
+        operation: &'static str,
+    ) -> anyhow::Result<reqwest::Response> {
+        client
+            .get(url)
             .bearer_auth(&self.config.bearer_token)
+            .header(reqwest::header::ACCEPT, "application/json")
             .send()
-            .await?
-            .error_for_status()?;
-        let arr: Vec<Value> = crate::net::safe_fetch::read_json_capped(resp).await?;
+            .await
+            .map_err(|error| from_reqwest(&error, operation).into())
+    }
+
+    async fn fetch_states_with_client(
+        &self,
+        client: &reqwest::Client,
+        url: reqwest::Url,
+    ) -> anyhow::Result<Vec<StateEntry>> {
+        let resp = self
+            .get_states_response(client, url.clone(), "HA GET /api/states")
+            .await?;
+        if resp.status() == reqwest::StatusCode::INTERNAL_SERVER_ERROR {
+            // HA serializes every visible entity for its bulk response. One
+            // unrelated integration's invalid attribute can make it return 500
+            // while our configured sensors still have valid individual states.
+            // Only that status triggers fallback; auth/redirect failures must
+            // remain failures. Never follow another host or copy error bodies.
+            let bulk_error = ha_response_error(&resp, "HA GET /api/states");
+            drop(resp);
+            warn!(source_id = %self.id, error_code = bulk_error.code.as_str(),
+                error = %bulk_error, "HA bulk read failed; attempting mapped entity recovery within the same poll deadline");
+            let states = self.fetch_mapped_states(client, &url).await.map_err(|e| {
+                let mut failure = SourceFailure::new(Code::HaFallback, "HA poll recovery");
+                failure.causes = vec![bulk_error.clone(), from_anyhow(&e, "HA mapped entity read")];
+                failure
+            })?;
+            warn!(source_id = %self.id, recovered_entities = states.len(),
+                error_code = bulk_error.code.as_str(), error = %bulk_error, recovered = true,
+                "HA bulk states returned HTTP 500; recovered through mapped entity endpoints. Check HA/proxy logs for the bulk error");
+            return Ok(states);
+        }
+        if !resp.status().is_success() {
+            return Err(ha_response_error(&resp, "HA GET /api/states").into());
+        }
+        let format = response_format(&resp);
+        let arr: Vec<Value> = crate::net::safe_fetch::read_json_capped(resp)
+            .await
+            .map_err(|error| {
+                let mut failure = from_safe(&error, "HA decode /api/states");
+                failure.response_format = Some(format);
+                failure
+            })?;
         Ok(arr.into_iter().filter_map(StateEntry::from_value).collect())
+    }
+
+    async fn fetch_mapped_states(
+        &self,
+        client: &reqwest::Client,
+        bulk_url: &reqwest::Url,
+    ) -> anyhow::Result<Vec<StateEntry>> {
+        let entities: std::collections::BTreeSet<&str> = self
+            .mapping
+            .iter()
+            .map(|(_, entity)| entity.as_str())
+            .chain(
+                self.config
+                    .soil_zone_map
+                    .iter()
+                    .filter(|(_, zone)| !zone.trim().is_empty())
+                    .map(|(entity, _)| entity.as_str()),
+            )
+            .collect();
+        if entities.is_empty() {
+            return Err(
+                SourceFailure::new(Code::HaNoMappings, "HA mapped entity selection").into(),
+            );
+        }
+        let mut remaining = entities.into_iter();
+        let mut pending = FuturesUnordered::new();
+        for entity in remaining.by_ref().take(ENTITY_FETCH_CONCURRENCY) {
+            pending.push(self.fetch_mapped_state(client, bulk_url, entity));
+        }
+        let mut states = Vec::new();
+        while let Some(result) = pending.next().await {
+            if let Some(state) = result? {
+                states.push(state);
+            }
+            if let Some(entity) = remaining.next() {
+                pending.push(self.fetch_mapped_state(client, bulk_url, entity));
+            }
+        }
+        // Complete the whole read before emitting observations. A failing
+        // required mapped endpoint cannot make a partial poll look successful.
+        Ok(states)
+    }
+
+    async fn fetch_mapped_state(
+        &self,
+        client: &reqwest::Client,
+        bulk_url: &reqwest::Url,
+        entity: &str,
+    ) -> anyhow::Result<Option<StateEntry>> {
+        let mut url = bulk_url.clone();
+        url.path_segments_mut()
+            .map_err(|_| SourceFailure::new(Code::InvalidUrl, "HA mapped entity URL"))?
+            .push(entity);
+        let resp = self
+            .get_states_response(client, url, "HA GET /api/states/{entity_id}")
+            .await
+            .map_err(|error| from_anyhow(&error, "HA mapped entity read").with_entity(entity))?;
+        // A missing entity is also absent from a successful bulk read.
+        // Preserve that absence; never substitute zero or refresh age.
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(ha_response_error(&resp, "HA GET /api/states/{entity_id}")
+                .with_entity(entity)
+                .into());
+        }
+        let format = response_format(&resp);
+        let value: Value = crate::net::safe_fetch::read_json_capped(resp)
+            .await
+            .map_err(|error| {
+                let mut failure = from_safe(&error, "HA decode mapped entity").with_entity(entity);
+                failure.response_format = Some(format);
+                failure
+            })?;
+        let state = StateEntry::from_value(value)
+            .filter(|state| state.entity_id == entity)
+            .ok_or_else(|| {
+                SourceFailure::new(Code::HaEntityState, "HA validate mapped entity")
+                    .with_entity(entity)
+            })?;
+        Ok(Some(state))
     }
 
     /// Transport reachability and measurement freshness are separate facts.
@@ -201,6 +345,26 @@ impl HaPassthrough {
         }
         poll
     }
+}
+
+async fn poll_with_deadline<T>(
+    poll: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    tokio::time::timeout(HA_TIMEOUT, poll).await.map_err(|_| {
+        let mut failure = SourceFailure::new(Code::Timeout, "HA complete state poll");
+        failure.timeout_ms = Some(HA_TIMEOUT.as_millis() as u64);
+        failure
+    })?
+}
+
+/// Fixed diagnostic categories, never upstream bodies, redirect locations,
+/// bearer tokens or configured URLs. A 500 does not identify which hop failed.
+fn ha_response_error(resp: &reqwest::Response, operation: &'static str) -> SourceFailure {
+    SourceFailure::http(
+        resp.status().as_u16(),
+        Some(response_format(resp)),
+        operation,
+    )
 }
 
 fn build_mapping(
@@ -309,6 +473,10 @@ impl WeatherSource for HaPassthrough {
         .await
     }
 }
+
+#[cfg(test)]
+#[path = "ha_passthrough_http_tests.rs"]
+mod http_tests;
 
 #[cfg(test)]
 mod tests {

@@ -30,6 +30,8 @@ struct Entry {
     generation: u64,
     #[serde(skip)]
     last_error: Option<String>,
+    #[serde(skip)]
+    diagnostic: Option<crate::failure::FailureRecord>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -51,8 +53,26 @@ impl TrackStore {
     pub fn new(path: Option<PathBuf>) -> Self {
         let mut entries: BTreeMap<String, Entry> = path
             .as_ref()
-            .and_then(|p| std::fs::read(p).ok())
-            .and_then(|bytes| serde_json::from_slice::<Cache>(&bytes).ok())
+            .and_then(|p| {
+                std::fs::read(p)
+                    .inspect_err(|error| {
+                        if error.kind() != std::io::ErrorKind::NotFound {
+                            let failure =
+                                crate::diagnostics::from_error(error, "forecast track cache load");
+                            tracing::warn!(%failure, "forecast track cache could not be read");
+                        }
+                    })
+                    .ok()
+            })
+            .and_then(|bytes| {
+                serde_json::from_slice::<Cache>(&bytes)
+                    .inspect_err(|error| {
+                        let failure =
+                            crate::diagnostics::from_error(error, "forecast track cache decode");
+                        tracing::warn!(%failure, "forecast track cache could not be decoded");
+                    })
+                    .ok()
+            })
             .filter(|cache| cache.version == 1)
             .map(|cache| cache.entries)
             .unwrap_or_default();
@@ -109,6 +129,7 @@ impl TrackStore {
                         snapshot: None,
                         generation: 0,
                         last_error: None,
+                        diagnostic: None,
                     },
                 );
                 changed = true;
@@ -119,6 +140,13 @@ impl TrackStore {
                 if !located {
                     entry.last_error =
                         Some("Set the installation location to fetch this model".into());
+                    entry.diagnostic = Some(crate::failure::FailureRecord::now(
+                        crate::failure::Failure::new(
+                            crate::failure::FailureCode::ConfigField,
+                            "forecast track location",
+                        )
+                        .with_field("deployment.location"),
+                    ));
                 }
                 changed = true;
             }
@@ -145,11 +173,17 @@ impl TrackStore {
         .map_err(std::io::Error::other)
         .and_then(|bytes| crate::config::store::write_atomic_durable(path, &bytes));
         if let Err(error) = result {
-            tracing::warn!(%error, "forecast track cache could not be saved");
+            let failure = crate::diagnostics::from_error(&error, "forecast track cache save");
+            tracing::warn!(%failure, "forecast track cache could not be saved");
         }
     }
 
-    fn accept(&self, id: &str, generation: u64, result: Result<ForecastSnapshot, String>) {
+    fn accept(
+        &self,
+        id: &str,
+        generation: u64,
+        result: Result<ForecastSnapshot, Box<crate::failure::Failure>>,
+    ) {
         let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
         let Some(entry) = entries.get_mut(id).filter(|e| e.generation == generation) else {
             return;
@@ -158,12 +192,19 @@ impl TrackStore {
             Ok(snapshot) if !snapshot.hourly.is_empty() => {
                 entry.snapshot = Some(snapshot);
                 entry.last_error = None;
+                entry.diagnostic = None;
                 self.persist(&entries);
             }
-            _ => {
-                // Never publish upstream URLs or credentials in diagnostics.
-                entry.last_error =
-                    Some("Forecast refresh failed; retaining the last available forecast".into());
+            result => {
+                let failure = result.err().map(|failure| *failure).unwrap_or_else(|| {
+                    crate::failure::Failure::new(
+                        crate::failure::FailureCode::MissingField,
+                        "forecast track response",
+                    )
+                    .with_field("hourly")
+                });
+                entry.last_error = Some(format!("{}: {}", failure.code.as_str(), failure.message));
+                entry.diagnostic = Some(crate::failure::FailureRecord::now(failure));
                 if let Some(snapshot) = &mut entry.snapshot {
                     snapshot.source_reachable = false;
                 }
@@ -227,6 +268,10 @@ impl TrackStore {
                         age > crate::sources::forecast_bridge::FORECAST_OWNER_STALE_SECS
                     }) || snapshot.is_none_or(|s| !s.source_reachable),
                     last_error: entry.last_error.clone(),
+                    diagnostic: entry
+                        .diagnostic
+                        .as_ref()
+                        .and_then(|record| serde_json::to_value(record).ok()),
                 }
             })
             .collect()
@@ -317,7 +362,12 @@ fn spawn_worker(
             )
             .await
             .map(|(snapshot, _current)| snapshot)
-            .map_err(|_| "Forecast refresh failed".to_string());
+            .map_err(|e| {
+                Box::new(crate::diagnostics::from_anyhow(
+                    &e,
+                    "forecast track refresh",
+                ))
+            });
             let wait = if result.is_ok() {
                 failures = 0;
                 super::open_meteo::REFRESH_INTERVAL
@@ -378,7 +428,15 @@ mod tests {
         store.configure(&config());
         let generation = store.requests()[0].1;
         store.accept("nbm", generation, Ok(snapshot()));
-        store.accept("nbm", generation, Err("private upstream detail".into()));
+        store.accept(
+            "nbm",
+            generation,
+            Err(Box::new(crate::failure::Failure::http(
+                503,
+                None,
+                "forecast track fetch",
+            ))),
+        );
         assert_eq!(store.status(7000)[0].age_s, Some(6000));
         assert!(!store.status(7000)[0]
             .last_error

@@ -241,13 +241,15 @@ pub(crate) fn provide_override_actions() -> impl IntoView {
     let force_target = RwSignal::new(None::<String>);
     let force_open = RwSignal::new(false);
     let toast = crate::components::ui::use_toast();
-    let done = Callback::new(move |result: Result<(), String>| {
-        saving.set(false);
-        if let Err(e) = result {
-            choice.set(None);
-            toast.error(format!("Couldn't set override: {e}"));
-        }
-    });
+    let done = Callback::new(
+        move |result: Result<(), crate::components::request_error::RequestError>| {
+            saving.set(false);
+            if let Err(e) = result {
+                choice.set(None);
+                e.show(toast, "Couldn't set override");
+            }
+        },
+    );
     let request = Callback::new(move |(zone, mode): (Option<String>, String)| {
         if saving.get_untracked() {
             return;
@@ -415,13 +417,17 @@ pub fn OverrideControl(
 /// reflects the change). Must be called from component scope, where the
 /// ToastHub context resolves; the returned Callback is then safe to run
 /// from the detached async task inside `post_action_then`.
-pub(crate) fn toast_on_err(prefix: &'static str) -> Callback<Result<(), String>> {
+pub(crate) fn toast_on_err(
+    prefix: &'static str,
+) -> Callback<Result<(), crate::components::request_error::RequestError>> {
     let toast = crate::components::ui::use_toast();
-    Callback::new(move |result: Result<(), String>| {
-        if let Err(e) = result {
-            toast.error(format!("{prefix} ({e})"));
-        }
-    })
+    Callback::new(
+        move |result: Result<(), crate::components::request_error::RequestError>| {
+            if let Err(e) = result {
+                e.show(toast, prefix);
+            }
+        },
+    )
 }
 
 /// POST the action and read the outcome. On a non-2xx the response BODY is
@@ -433,7 +439,9 @@ pub(crate) fn toast_on_err(prefix: &'static str) -> Callback<Result<(), String>>
 /// indistinguishable "HTTP 502" with nothing for the user to report.
 /// `load_error_message` is the same body reader the settings pages use.
 #[cfg(feature = "hydrate")]
-async fn post_action(body: serde_json::Value) -> Result<Option<serde_json::Value>, String> {
+async fn post_action(
+    body: serde_json::Value,
+) -> Result<Option<serde_json::Value>, crate::components::request_error::RequestError> {
     let payload = body.to_string();
     let req = gloo_net::http::Request::post("/api/irrigation/action")
         .header("Content-Type", "application/json")
@@ -444,13 +452,17 @@ async fn post_action(body: serde_json::Value) -> Result<Option<serde_json::Value
             Ok(resp) => {
                 let status = resp.status();
                 let text = resp.text().await.unwrap_or_default();
-                Err(crate::components::settings_ui::load_error_message(
+                Err(crate::components::request_error::RequestError::response(
                     status, &text,
                 ))
             }
-            Err(e) => Err(e.to_string()),
+            Err(_) => Err(crate::components::request_error::RequestError::network(
+                "POST irrigation action",
+            )),
         },
-        Err(e) => Err(e.to_string()),
+        Err(_) => Err(crate::components::request_error::RequestError::network(
+            "POST irrigation action",
+        )),
     }
 }
 
@@ -469,7 +481,10 @@ async fn post_action(body: serde_json::Value) -> Result<Option<serde_json::Value
 /// request (that is what restores the message); this is the backstop that
 /// keeps the failure mode a silent no-op rather than a dead page.
 #[cfg(feature = "hydrate")]
-pub(crate) fn post_action_then(body: serde_json::Value, done: Callback<Result<(), String>>) {
+pub(crate) fn post_action_then(
+    body: serde_json::Value,
+    done: Callback<Result<(), crate::components::request_error::RequestError>>,
+) {
     leptos::task::spawn_local(async move {
         let _ = done.try_run(post_action(body).await.map(|_| ()));
     });
@@ -482,7 +497,7 @@ pub(crate) fn post_action_then(body: serde_json::Value, done: Callback<Result<()
 #[cfg(feature = "hydrate")]
 pub(crate) fn post_action_note_then(
     body: serde_json::Value,
-    done: Callback<Result<Option<String>, String>>,
+    done: Callback<Result<Option<String>, crate::components::request_error::RequestError>>,
 ) {
     leptos::task::spawn_local(async move {
         let _ =
@@ -499,7 +514,9 @@ pub(crate) fn post_action_note_then(
 #[cfg(feature = "hydrate")]
 pub(crate) fn post_action_body_then(
     body: serde_json::Value,
-    done: Callback<Result<Option<serde_json::Value>, String>>,
+    done: Callback<
+        Result<Option<serde_json::Value>, crate::components::request_error::RequestError>,
+    >,
 ) {
     leptos::task::spawn_local(async move {
         let _ = done.try_run(post_action(body).await);
@@ -508,13 +525,17 @@ pub(crate) fn post_action_body_then(
 
 #[cfg(not(feature = "hydrate"))]
 #[allow(dead_code)]
-pub(crate) fn post_action_then(_body: serde_json::Value, _done: Callback<Result<(), String>>) {}
+pub(crate) fn post_action_then(
+    _body: serde_json::Value,
+    _done: Callback<Result<(), crate::components::request_error::RequestError>>,
+) {
+}
 
 #[cfg(not(feature = "hydrate"))]
 #[allow(dead_code)]
 pub(crate) fn post_action_note_then(
     _body: serde_json::Value,
-    _done: Callback<Result<Option<String>, String>>,
+    _done: Callback<Result<Option<String>, crate::components::request_error::RequestError>>,
 ) {
 }
 
@@ -522,7 +543,9 @@ pub(crate) fn post_action_note_then(
 #[allow(dead_code)]
 pub(crate) fn post_action_body_then(
     _body: serde_json::Value,
-    _done: Callback<Result<Option<serde_json::Value>, String>>,
+    _done: Callback<
+        Result<Option<serde_json::Value>, crate::components::request_error::RequestError>,
+    >,
 ) {
 }
 

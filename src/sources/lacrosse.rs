@@ -33,6 +33,8 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use tokio::sync::Mutex;
 
+use crate::failure::{Failure, FailureCode as Code};
+
 use crate::config::schema::LacrosseConfig;
 use crate::ports::weather_source::{
     ShutdownSignal, SourceBus, SourceCaps, WeatherField, WeatherSource,
@@ -146,12 +148,16 @@ impl Lacrosse {
         let locs = body
             .get("items")
             .and_then(|a| a.as_array())
-            .ok_or_else(|| anyhow::anyhow!("lacrosse locations response missing items[]"))?;
+            .ok_or_else(|| {
+                Failure::new(Code::MissingField, "LaCrosse locations").with_field("items[]")
+            })?;
         for loc in locs {
             let loc_id = loc
                 .get("id")
                 .and_then(|x| x.as_str())
-                .ok_or_else(|| anyhow::anyhow!("lacrosse location missing id"))?
+                .ok_or_else(|| {
+                    Failure::new(Code::MissingField, "LaCrosse locations").with_field("items[].id")
+                })?
                 .to_string();
             if let Some(devs) = loc.get("devices").and_then(|a| a.as_array()) {
                 for dev in devs {
@@ -175,9 +181,7 @@ impl Lacrosse {
                 }
             }
         }
-        Err(anyhow::anyhow!(
-            "lacrosse: no devices found under this account"
-        ))
+        Err(Failure::new(Code::DeviceMissing, "LaCrosse resolve device").into())
     }
 
     async fn fetch_feed(&self) -> anyhow::Result<Value> {

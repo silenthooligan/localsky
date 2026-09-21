@@ -52,9 +52,13 @@ impl HaServiceCall {
 
     async fn call_service(&self, service_dotted: &str, data: Value) -> Result<(), ControllerError> {
         let (domain, service) = service_dotted.split_once('.').ok_or_else(|| {
-            ControllerError::Remote(format!(
-                "service '{service_dotted}' must be 'domain.action'"
-            ))
+            ControllerError::init(
+                crate::failure::Failure::new(
+                    crate::failure::FailureCode::ConfigField,
+                    "HA controller parse service",
+                )
+                .with_field("domain.action"),
+            )
         })?;
         let url = format!(
             "{}/api/services/{}/{}",
@@ -69,7 +73,12 @@ impl HaServiceCall {
         // lives on the LAN). A blocked target never made the call -> Init-class.
         let (client, safe_url) = crate::net::safe_fetch::build_safe_client(&url, HA_TIMEOUT)
             .await
-            .map_err(|e| ControllerError::Init(e.to_string()))?;
+            .map_err(|e| {
+                ControllerError::init(crate::net::source_failure::from_safe(
+                    &e,
+                    "HA controller initialize request",
+                ))
+            })?;
         let resp = client
             .post(safe_url)
             .bearer_auth(&self.config.bearer_token)
@@ -77,17 +86,28 @@ impl HaServiceCall {
             .send()
             .await
             .map_err(|e| {
-                ControllerError::Transport(crate::net::reqwest_error_category(&e).to_string())
+                ControllerError::transport(crate::net::source_failure::from_reqwest(
+                    &e,
+                    "HA controller request",
+                ))
             })?;
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(ControllerError::AuthFailed);
+            return Err(ControllerError::http(
+                status.as_u16(),
+                None,
+                "HA controller authentication",
+            ));
         }
         if !status.is_success() {
             // Status only: do NOT reflect the upstream body. The base_url is
             // operator-supplied, so echoing the target's response would leak it
             // (SSRF exfil channel), matching the other adapters' body-trim.
-            return Err(ControllerError::Remote(format!("HTTP {status}")));
+            return Err(ControllerError::http(
+                status.as_u16(),
+                None,
+                "HA controller response",
+            ));
         }
         Ok(())
     }

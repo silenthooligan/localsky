@@ -2,7 +2,29 @@
 
 All notable changes to LocalSky are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.2] - 2026-09-21
+
+Update the Home Assistant integration and HAOS app to 0.9.2 alongside the
+server. API 2.4.0 is additive; existing `/api/v1` URLs and API major 2 remain
+supported. Back up your data before upgrading.
+
+### Fixed
+
+- HA passthrough falls back to individual mapped weather and soil entities
+  when `/api/states` returns HTTP 500. Reads share one deadline, preserve
+  measurement age, and publish no partial data if recovery fails. This handles
+  a reproduced HA bulk-state serialization failure; it does not assume every
+  HA 500 has that cause.
+- Operational errors retain stable codes, operation, timestamps and available
+  HTTP, TLS, parsing, OS, SQLite and provider evidence across weather sources,
+  forecasts, irrigation controllers, storage, recovery, notifications and LLMs.
+  Failed retries retain their causes; partial source failures remain visible
+  without discarding valid measurements.
+- API failures include request IDs for log correlation. Source health, forecast
+  tracks, updates and irrigation action errors expose copyable technical details.
+  Credentials and raw upstream response bodies are excluded from diagnostics.
+- MQTT source health waits for subscription acknowledgement and reports broker
+  denials. Update-check failures no longer appear as an up-to-date result.
 
 ## [0.9.1] - 2026-09-21
 

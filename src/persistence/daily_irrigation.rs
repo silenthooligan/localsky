@@ -16,8 +16,16 @@ impl DailyIrrigationStore {
     }
 
     /// The scheduled decision survives forecast changes and process restarts.
-    pub async fn record(&self, decision: DailyDecision) -> Result<(), String> {
-        let json = serde_json::to_string(&decision).map_err(|e| e.to_string())?;
+    pub async fn record(
+        &self,
+        decision: DailyDecision,
+    ) -> Result<(), Box<crate::failure::Failure>> {
+        let json = serde_json::to_string(&decision).map_err(|e| {
+            Box::new(crate::diagnostics::from_error(
+                &e,
+                "daily_irrigation.record",
+            ))
+        })?;
         let connection = self.0.clone();
         tokio::task::spawn_blocking(move || {
             connection
@@ -31,35 +39,49 @@ impl DailyIrrigationStore {
                     params![decision.date_local, decision.epoch, json, decision.kind],
                 )
                 .map(|_| ())
-                .map_err(|e| e.to_string())
+                .map_err(|e| {
+                    Box::new(crate::diagnostics::from_error(
+                        &e,
+                        "daily_irrigation.record",
+                    ))
+                })
         })
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| {
+            Box::new(crate::diagnostics::from_error(
+                &e,
+                "daily_irrigation.record",
+            ))
+        })?
     }
 
-    pub async fn window(&self, from: i64, to: i64) -> Result<Vec<DailyDecision>, String> {
+    pub async fn window(
+        &self,
+        from: i64,
+        to: i64,
+    ) -> Result<Vec<DailyDecision>, Box<crate::failure::Failure>> {
         let connection = self.0.clone();
         tokio::task::spawn_blocking(move || {
             let connection = connection.blocking_lock();
             let mut query = connection.prepare(
                 "SELECT decision_json FROM daily_irrigation WHERE epoch >= ?1 AND epoch < ?2 ORDER BY epoch DESC"
-            ).map_err(|e| e.to_string())?;
+            ).map_err(|e| Box::new(crate::diagnostics::from_error(&e, "daily_irrigation.window")))?;
             let rows = query.query_map(params![from, to], |row| row.get::<_, String>(0))
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| Box::new(crate::diagnostics::from_error(&e, "daily_irrigation.window")))?;
             let mut result: Vec<DailyDecision> = rows.map(|row| {
-                serde_json::from_str(&row.map_err(|e| e.to_string())?).map_err(|e| e.to_string())
-            }).collect::<Result<_, String>>()?;
+                serde_json::from_str(&row.map_err(|e| Box::new(crate::diagnostics::from_error(&e, "daily_irrigation.window")))?).map_err(|e| Box::new(crate::diagnostics::from_error(&e, "daily_irrigation.window")))
+            }).collect::<Result<_, Box<crate::failure::Failure>>>()?;
             let recorded: std::collections::HashSet<_> = result.iter().map(|d| d.date_local.clone()).collect();
             let mut legacy = std::collections::BTreeMap::<String, DailyDecision>::new();
             let mut query = connection.prepare(
                 "SELECT date_local, epoch, zone_slug, outcome, reason_code FROM soil_morning_decisions WHERE epoch >= ?1 AND epoch < ?2 ORDER BY epoch"
-            ).map_err(|e| e.to_string())?;
+            ).map_err(|e| Box::new(crate::diagnostics::from_error(&e, "daily_irrigation.window")))?;
             let rows = query.query_map(params![from, to], |row| Ok((
                 row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?, row.get::<_, String>(4)?,
-            ))).map_err(|e| e.to_string())?;
+            ))).map_err(|e| Box::new(crate::diagnostics::from_error(&e, "daily_irrigation.window")))?;
             for row in rows {
-                let (date, epoch, zone, outcome, code) = row.map_err(|e| e.to_string())?;
+                let (date, epoch, zone, outcome, code) = row.map_err(|e| Box::new(crate::diagnostics::from_error(&e, "daily_irrigation.window")))?;
                 if recorded.contains(&date) { continue; }
                 let day = legacy.entry(date.clone()).or_insert_with(|| DailyDecision {
                     date_local: date, epoch, kind: "scheduled_legacy".into(), zones: Vec::new(),
@@ -76,7 +98,7 @@ impl DailyIrrigationStore {
             }
             result.extend(legacy.into_values());
             Ok(result)
-        }).await.map_err(|e| e.to_string())?
+        }).await.map_err(|e| Box::new(crate::diagnostics::from_error(&e, "daily_irrigation.window")))?
     }
 }
 

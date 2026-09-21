@@ -1,6 +1,7 @@
 // IrrigationController port. Every controller adapter (OpenSprinkler direct,
 // HA service call, ESPHome native, Rachio cloud, DryRun) implements this.
 
+use crate::failure::{Failure, FailureCode};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -14,14 +15,14 @@ pub enum ControllerError {
     Offline,
     #[error("zone unknown: {0}")]
     ZoneUnknown(String),
-    #[error("rate limited")]
-    RateLimited,
-    #[error("auth failed")]
-    AuthFailed,
+    #[error("{0}")]
+    RateLimited(#[source] Box<Failure>),
+    #[error("{0}")]
+    AuthFailed(#[source] Box<Failure>),
     #[error("controller returned error: {0}")]
-    Remote(String),
+    Remote(#[source] Box<Failure>),
     #[error("transport error: {0}")]
-    Transport(String),
+    Transport(#[source] Box<Failure>),
     /// Adapter construction failed before any network call (typically
     /// the HTTP client builder rejected the config, e.g. TLS root
     /// loading failure). Distinct from Transport so operators can tell
@@ -30,11 +31,52 @@ pub enum ControllerError {
     /// composition logs and skips the controller rather than panicking
     /// the whole container.
     #[error("init failed: {0}")]
-    Init(String),
+    Init(#[source] Box<Failure>),
     /// The adapter doesn't support this operation (e.g. zone discovery on
     /// a fire-and-forget MQTT controller).
     #[error("unsupported: {0}")]
     Unsupported(String),
+}
+
+impl ControllerError {
+    pub fn transport(failure: Failure) -> Self {
+        Self::Transport(Box::new(failure))
+    }
+    pub fn remote(failure: Failure) -> Self {
+        Self::Remote(Box::new(failure))
+    }
+    pub fn init(failure: Failure) -> Self {
+        Self::Init(Box::new(failure))
+    }
+    pub fn auth(failure: Failure) -> Self {
+        Self::AuthFailed(Box::new(failure))
+    }
+    pub fn http(status: u16, format: Option<&'static str>, operation: &'static str) -> Self {
+        let failure = Box::new(Failure::http(status, format, operation));
+        match status {
+            401 | 403 => Self::AuthFailed(failure),
+            429 => Self::RateLimited(failure),
+            _ => Self::Remote(failure),
+        }
+    }
+
+    pub fn diagnostic(&self) -> Failure {
+        match self {
+            Self::Remote(f)
+            | Self::Transport(f)
+            | Self::Init(f)
+            | Self::AuthFailed(f)
+            | Self::RateLimited(f) => (**f).clone(),
+            Self::Held(_) => Failure::new(FailureCode::WateringHeld, "irrigation dispatch"),
+            Self::Offline => Failure::new(FailureCode::ControllerOffline, "controller status"),
+            Self::ZoneUnknown(zone) => {
+                Failure::new(FailureCode::ZoneMapping, "controller zone lookup").with_resource(zone)
+            }
+            Self::Unsupported(_) => {
+                Failure::new(FailureCode::UnsupportedOperation, "controller operation")
+            }
+        }
+    }
 }
 
 pub type ControllerResult<T> = Result<T, ControllerError>;

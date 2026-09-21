@@ -26,14 +26,17 @@ pub fn ZonesPage(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     // HERE, at page scope, and handed down as a prop, it outlives every
     // rebuild. Same defect as the zone detail pane's, one file over.
     let card_toast = crate::components::ui::use_toast();
-    let card_stop_done =
-        Callback::new(move |result: Result<Option<String>, String>| match result {
-            // A controller with no per-zone stop reports the real scope (the
-            // whole device stopped); relay it instead of implying one zone did.
-            Ok(Some(note)) => card_toast.info(note),
-            Ok(None) => {}
-            Err(e) => card_toast.error(format!("Stop failed: {e}")),
-        });
+    let card_stop_done = Callback::new(
+        move |result: Result<Option<String>, crate::components::request_error::RequestError>| {
+            match result {
+                // A controller with no per-zone stop reports the real scope (the
+                // whole device stopped); relay it instead of implying one zone did.
+                Ok(Some(note)) => card_toast.info(note),
+                Ok(None) => {}
+                Err(e) => e.show(card_toast, "Stop failed"),
+            }
+        },
+    );
     // The page CONSUMES the app-level tuning report (provided by App()
     // via provide_tuning_summary): the Suggestions KPI, the per-card
     // attention pills, and the recommendation-aware auto-select below all

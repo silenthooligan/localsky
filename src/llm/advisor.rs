@@ -22,13 +22,12 @@ const OFFLINE_TTL_SECS: i64 = 60;
 /// Tag-like discriminator for the advisor's response. Returned to the
 /// dashboard so a thin badge can render "advisor offline" without
 /// tearing down the explanation tile every time the provider hiccups.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone)]
 pub enum AdvisorError {
     /// LLM_ADVISOR_DISABLED=1 in the container env. Permanent until restart.
     Disabled,
     /// The configured LLM provider or its upstream is unreachable.
-    Offline,
+    Offline(Box<crate::failure::FailureRecord>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -129,7 +128,9 @@ impl AdvisorState {
                 tracing::warn!("advisor explain failed: {e}");
                 let err = match e {
                     ClientError::Disabled => Err(AdvisorError::Disabled),
-                    _ => Err(AdvisorError::Offline),
+                    _ => Err(AdvisorError::Offline(Box::new(
+                        crate::failure::FailureRecord::now(e.diagnostic()),
+                    ))),
                 };
                 self.inner
                     .explanations
@@ -172,11 +173,12 @@ impl AdvisorState {
                         Ok(a)
                     }
                     Err(e) => {
-                        tracing::warn!(
-                            "advisor anomalies parse failed: {e} body={}",
-                            truncate(trimmed, 160)
-                        );
-                        let err = Err(AdvisorError::Offline);
+                        let failure =
+                            crate::diagnostics::from_error(&e, "LLM advisor anomalies decode");
+                        tracing::warn!(%failure, "advisor anomalies parse failed");
+                        let err = Err(AdvisorError::Offline(Box::new(
+                            crate::failure::FailureRecord::now(failure),
+                        )));
                         self.inner.anomalies.put(key, err.clone(), OFFLINE_TTL_SECS);
                         err
                     }
@@ -186,7 +188,9 @@ impl AdvisorState {
                 tracing::warn!("advisor anomalies failed: {e}");
                 let err = match e {
                     ClientError::Disabled => Err(AdvisorError::Disabled),
-                    _ => Err(AdvisorError::Offline),
+                    _ => Err(AdvisorError::Offline(Box::new(
+                        crate::failure::FailureRecord::now(e.diagnostic()),
+                    ))),
                 };
                 self.inner.anomalies.put(key, err.clone(), OFFLINE_TTL_SECS);
                 err
@@ -415,6 +419,7 @@ fn strip_json_fence(s: &str) -> &str {
 /// "°F"), and `&s[..max]` on a non-boundary index panics inside the axum
 /// handler task, 500ing the advisor request. Log-trimming only, so losing a
 /// few bytes to the boundary walk is fine.
+#[cfg(test)]
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();

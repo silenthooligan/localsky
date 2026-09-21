@@ -231,14 +231,19 @@ fn supervise(
             match outcome {
                 // Clean return: the source stopped itself (shutdown).
                 Ok(Ok(())) => break,
-                Ok(Err(e)) => tracing::warn!(
-                    source = %id, error = %e,
-                    "weather source task errored; restarting after backoff"
-                ),
-                Err(_) => tracing::error!(
-                    source = %id,
-                    "weather source task PANICKED; restarting after backoff"
-                ),
+                Ok(Err(e)) => {
+                    let failure = crate::diagnostics::from_anyhow(&e, "weather source worker");
+                    tracing::warn!(source = %id, %failure, "weather source task errored; restarting after backoff");
+                    crate::sources::poll::report_diagnostic(&bus, &id, Some(failure));
+                }
+                Err(_) => {
+                    let failure = crate::failure::Failure::new(
+                        crate::failure::FailureCode::TaskPanic,
+                        "weather source worker",
+                    );
+                    tracing::error!(source = %id, %failure, "weather source task panicked; restarting after backoff");
+                    crate::sources::poll::report_diagnostic(&bus, &id, Some(failure));
+                }
             }
             if started.elapsed() >= std::time::Duration::from_secs(120) {
                 backoff = base;

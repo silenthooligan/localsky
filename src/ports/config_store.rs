@@ -15,11 +15,32 @@ pub enum ConfigStoreError {
     #[error("validation failed: {0}")]
     Validation(String),
     #[error("io error: {0}")]
-    Io(String),
+    Io(#[source] Box<crate::failure::Failure>),
     #[error("schema migration failed: {0}")]
     Migration(String),
+    #[error("{0}")]
+    Parse(#[source] Box<crate::failure::Failure>),
     #[error("rollback target not found: {0}")]
     RollbackTargetMissing(u32),
+}
+
+impl ConfigStoreError {
+    pub fn io(error: &(dyn std::error::Error + 'static), operation: &'static str) -> Self {
+        Self::Io(Box::new(crate::diagnostics::from_error(error, operation)))
+    }
+    pub fn diagnostic(&self) -> crate::failure::Failure {
+        use crate::failure::{Failure, FailureCode as Code};
+        match self {
+            Self::Io(failure) | Self::Parse(failure) => (**failure).clone(),
+            Self::NotFound => Failure::new(Code::ConfigMissing, "config load"),
+            Self::Validation(_) => Failure::new(Code::ConfigField, "config validation"),
+            Self::Migration(_) => Failure::new(Code::ConfigSchema, "config schema migration"),
+            Self::RollbackTargetMissing(version) => {
+                Failure::new(Code::SnapshotMissing, "config rollback")
+                    .with_resource(&version.to_string())
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -449,6 +449,14 @@ mod tests {
                 persistence: "ok",
             },
             sources: vec![SourceFreshness {
+                error: Some(crate::sources::bus_recorder::SourceFailureRecord {
+                    at_epoch: 0,
+                    failure: crate::ports::source_error::SourceFailure::http(
+                        503,
+                        Some("JSON"),
+                        "source poll",
+                    ),
+                }),
                 id: "open_meteo".into(),
                 kind: "open_meteo",
                 enabled: true,

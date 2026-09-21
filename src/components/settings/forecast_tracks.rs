@@ -1,5 +1,5 @@
 //! Extra models share the app's config client and form primitives.
-use crate::components::ui::{Button, FormField, Icon, ToastHub};
+use crate::components::ui::{Button, DiagnosticDetails, FormField, Icon, ToastHub};
 use crate::config::ForecastTrack;
 use crate::forecast::window::TrackStatus;
 use leptos::prelude::*;
@@ -126,6 +126,7 @@ pub fn ForecastTracks() -> impl IntoView {
                 <For each=move || tracks.get() key=|track| track.id.clone() children=move |track| {
                     let id = track.id.clone();
                     let status_id = track.id.clone();
+                    let diagnostic_id = track.id.clone();
                     let label = crate::forecast::model_catalog::model_by_id(&track.model).map(|m| m.label.to_string()).unwrap_or(track.model);
                     let remove = Callback::new(move |_| {
                         save.run(tracks.get_untracked().into_iter().filter(|track| track.id != id).collect());
@@ -143,6 +144,7 @@ pub fn ForecastTracks() -> impl IntoView {
                                     None => "Waiting for its first forecast".into(),
                                 }
                             })}</span>
+                            {move || statuses.with(|rows| rows.iter().find(|row| row.id == diagnostic_id).and_then(|row| row.diagnostic.clone())).map(|record| view! { <DiagnosticDetails record/> })}
                             <Button variant="ghost" size="sm" disabled=Signal::derive(move || saving.get()) on_click=remove>"Remove"</Button>
                         </li>
                     }

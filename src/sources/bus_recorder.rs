@@ -61,7 +61,10 @@ impl SourceLastSeen {
 #[derive(Clone, Default)]
 pub struct SourceReachability {
     inner: Arc<RwLock<HashMap<String, ReachabilityState>>>,
+    diagnostics: Arc<RwLock<HashMap<String, (i64, Option<SourceFailureRecord>)>>>,
 }
+
+pub use crate::failure::FailureRecord as SourceFailureRecord;
 
 #[derive(Clone, Copy)]
 struct ReachabilityState {
@@ -71,6 +74,32 @@ struct ReachabilityState {
 }
 
 impl SourceReachability {
+    pub fn report_failure(
+        &self,
+        source_id: &str,
+        failure: Option<crate::ports::source_error::SourceFailure>,
+        at_epoch: i64,
+    ) {
+        if let Ok(mut map) = self.diagnostics.write() {
+            if map.get(source_id).is_some_and(|(at, _)| *at > at_epoch) {
+                return;
+            }
+            map.insert(
+                source_id.to_owned(),
+                (
+                    at_epoch,
+                    failure.map(|failure| SourceFailureRecord { at_epoch, failure }),
+                ),
+            );
+        }
+    }
+
+    pub fn failure(&self, source_id: &str) -> Option<SourceFailureRecord> {
+        self.diagnostics
+            .read()
+            .ok()
+            .and_then(|map| map.get(source_id).and_then(|(_, record)| record.clone()))
+    }
     /// Stamp `source_id` reachable as of `epoch` (monotonic: never regresses).
     pub fn record(&self, source_id: &str, epoch: i64) {
         self.report(source_id, true, epoch);
@@ -233,6 +262,13 @@ pub fn spawn(
                     source_reachable.report(&source_id, reachable, now);
                     debug!(source = %source_id, reachable, "source reachability changed");
                 }
+                Ok(SourceEvent::Diagnostic {
+                    source_id,
+                    failure,
+                    at_epoch,
+                }) => {
+                    source_reachable.report_failure(&source_id, failure.map(|f| *f), at_epoch);
+                }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(skipped = n, "bus recorder lagged; observations skipped");
                 }
@@ -252,6 +288,64 @@ mod tests {
     use crate::sources::mqtt_subscribe::parse_weather_field;
     use rusqlite::Connection;
     use tokio::sync::Mutex;
+
+    #[tokio::test]
+    async fn diagnostic_bus_records_changes_and_recovery_without_refreshing_weather() {
+        use crate::ports::source_error::SourceFailure;
+        let (bus, _rx) = broadcast::channel(16);
+        let seen = SourceLastSeen::default();
+        let reach = SourceReachability::default();
+        spawn(bus.clone(), None, seen.clone(), reach.clone());
+        bus.send(SourceEvent::Diagnostic {
+            source_id: "ha".into(),
+            failure: Some(Box::new(SourceFailure::http(
+                500,
+                Some("plain text"),
+                "HA GET /api/states",
+            ))),
+            at_epoch: 100,
+        })
+        .unwrap();
+        // An observation after the diagnostic proves the recorder processed
+        // that diagnostic too, without relying on task scheduling sleeps.
+        bus.send(SourceEvent::Observation {
+            source_id: "barrier".into(),
+            fields: vec![],
+            at_epoch: 1,
+        })
+        .unwrap();
+        while seen.get("barrier") != Some(1) {
+            tokio::task::yield_now().await;
+        }
+        let record = reach.failure("ha").unwrap();
+        assert_eq!(record.failure.http_status, Some(500));
+        assert_eq!(record.at_epoch, 100);
+        assert_eq!(seen.get("ha"), None);
+        assert_eq!(reach.get("ha"), None);
+        reach.report_failure("ha", Some(SourceFailure::http(401, None, "poll")), 101);
+        assert_eq!(reach.failure("ha").unwrap().failure.http_status, Some(401));
+        bus.send(SourceEvent::Diagnostic {
+            source_id: "ha".into(),
+            failure: None,
+            at_epoch: 102,
+        })
+        .unwrap();
+        bus.send(SourceEvent::Observation {
+            source_id: "barrier".into(),
+            fields: vec![],
+            at_epoch: 2,
+        })
+        .unwrap();
+        while seen.get("barrier") != Some(2) {
+            tokio::task::yield_now().await;
+        }
+        assert!(reach.failure("ha").is_none());
+        reach.report_failure("ha", Some(SourceFailure::http(500, None, "poll")), 100);
+        assert!(
+            reach.failure("ha").is_none(),
+            "old events cannot revive a cleared failure"
+        );
+    }
 
     #[test]
     fn field_keys_round_trip_through_parser() {

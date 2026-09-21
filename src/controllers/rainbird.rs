@@ -81,6 +81,29 @@ enum Attempt {
     Failed(ControllerError),
 }
 
+impl crate::sources::auth::ReauthError for Attempt {
+    fn diagnostic(&self) -> crate::failure::Failure {
+        match self {
+            Self::TokenRejected => {
+                crate::failure::Failure::http(401, None, "Rain Bird authenticated request")
+            }
+            Self::Failed(error) => error.diagnostic(),
+        }
+    }
+    fn after_rejection(self, previous: Self) -> Self {
+        let convert = |attempt: Self| match attempt {
+            Self::TokenRejected => {
+                ControllerError::http(401, None, "Rain Bird authenticated request")
+            }
+            Self::Failed(error) => error,
+        };
+        Self::Failed(crate::sources::auth::ReauthError::after_rejection(
+            convert(self),
+            convert(previous),
+        ))
+    }
+}
+
 impl From<ControllerError> for Attempt {
     fn from(e: ControllerError) -> Self {
         Attempt::Failed(e)
@@ -117,7 +140,12 @@ impl Rainbird {
     async fn safe_client(&self, url: &str) -> Result<(Client, reqwest::Url), ControllerError> {
         crate::net::safe_fetch::build_safe_client(url, RB_TIMEOUT)
             .await
-            .map_err(|e| ControllerError::Init(e.to_string()))
+            .map_err(|e| {
+                ControllerError::init(crate::net::source_failure::from_safe(
+                    &e,
+                    "Rain Bird initialize request",
+                ))
+            })
     }
 
     /// Exchange email + password for a fresh access_token. Caching is the
@@ -137,21 +165,34 @@ impl Rainbird {
             .send()
             .await
             .map_err(|e| {
-                ControllerError::Transport(format!(
-                    "rainbird login: {}",
-                    crate::net::reqwest_error_category(&e)
+                ControllerError::transport(crate::net::source_failure::from_reqwest(
+                    &e,
+                    "Rain Bird authenticate",
                 ))
             })?;
         let status = resp.status();
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-            return Err(ControllerError::AuthFailed);
+            return Err(ControllerError::http(
+                status.as_u16(),
+                None,
+                "Rain Bird authentication",
+            ));
         }
         if !status.is_success() {
-            return Err(ControllerError::Remote(format!("rainbird login {status}")));
+            return Err(ControllerError::http(
+                status.as_u16(),
+                None,
+                "Rain Bird response",
+            ));
         }
         let lr: LoginResponse = crate::net::safe_fetch::read_json_capped(resp)
             .await
-            .map_err(|e| ControllerError::Transport(format!("rainbird login decode: {e}")))?;
+            .map_err(|e| {
+                ControllerError::transport(crate::net::source_failure::from_safe(
+                    &e,
+                    "Rain Bird decode login",
+                ))
+            })?;
         Ok(lr.access_token)
     }
 
@@ -172,9 +213,9 @@ impl Rainbird {
             req = req.json(b);
         }
         let resp = req.send().await.map_err(|e| {
-            ControllerError::Transport(format!(
-                "rainbird {method}: {}",
-                crate::net::reqwest_error_category(&e)
+            ControllerError::transport(crate::net::source_failure::from_reqwest(
+                &e,
+                "Rain Bird request",
             ))
         })?;
         let status = resp.status();
@@ -182,20 +223,32 @@ impl Rainbird {
             return Err(Attempt::TokenRejected);
         }
         if status == StatusCode::TOO_MANY_REQUESTS {
-            return Err(Attempt::Failed(ControllerError::RateLimited));
+            return Err(Attempt::Failed(ControllerError::http(
+                429,
+                None,
+                "Rain Bird request",
+            )));
         }
         if status == StatusCode::FORBIDDEN {
-            return Err(Attempt::Failed(ControllerError::AuthFailed));
+            return Err(Attempt::Failed(ControllerError::http(
+                status.as_u16(),
+                None,
+                "Rain Bird authorization",
+            )));
         }
         if !status.is_success() {
-            return Err(Attempt::Failed(ControllerError::Remote(format!(
-                "rainbird {status}"
-            ))));
+            return Err(Attempt::Failed(ControllerError::http(
+                status.as_u16(),
+                None,
+                "Rain Bird response",
+            )));
         }
         crate::net::safe_fetch::read_json_capped(resp)
             .await
             .map_err(|e| {
-                Attempt::Failed(ControllerError::Transport(format!("rainbird decode: {e}")))
+                Attempt::Failed(ControllerError::transport(
+                    crate::net::source_failure::from_safe(&e, "Rain Bird decode response"),
+                ))
             })
     }
 
@@ -215,7 +268,9 @@ impl Rainbird {
         )
         .await
         .map_err(|e| match e {
-            Attempt::TokenRejected => ControllerError::AuthFailed,
+            Attempt::TokenRejected => {
+                ControllerError::http(401, None, "Rain Bird reauthenticated request")
+            }
             Attempt::Failed(e) => e,
         })
     }

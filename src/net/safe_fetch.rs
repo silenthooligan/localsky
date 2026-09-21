@@ -48,8 +48,8 @@ pub const MAX_RESPONSE_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 /// Why a safe-fetch client could not be built for a user-supplied target,
 /// or a response body could not be safely read from it.
-/// Deliberately coarse: a caller surfaces a category, never the raw
-/// upstream response, so this is not an information-leak oracle.
+/// Preserve the underlying type; Display emits only the stable diagnostic
+/// and safe evidence, never the raw upstream response or target URL.
 #[derive(Debug)]
 pub enum SafeFetchError {
     /// URL did not parse, or carried no host.
@@ -58,36 +58,35 @@ pub enum SafeFetchError {
     UnsupportedScheme,
     /// DNS resolution returned no addresses (host unknown / no records).
     DnsFailed,
+    DnsLookup(std::io::Error),
     /// Every resolved address is a forbidden target (loopback,
     /// link-local/metadata, unspecified, or multicast).
     BlockedTarget,
     /// reqwest client construction failed (TLS root load, etc.).
-    ClientBuild(String),
+    ClientBuild(reqwest::Error),
     /// Response body exceeded [`MAX_RESPONSE_BODY_BYTES`]; read aborted.
     BodyTooLarge,
-    /// Body could not be read or decoded. Carries the COARSE category from
-    /// `net::reqwest_error_category`, never raw reqwest text (whose Display
-    /// embeds the target URL).
-    BodyRead(&'static str),
+    /// Typed body-transfer failure, rendered without the request URL.
+    BodyRead(reqwest::Error),
+    Json(serde_json::Error),
 }
 
 impl std::fmt::Display for SafeFetchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SafeFetchError::InvalidUrl => write!(f, "invalid url"),
-            SafeFetchError::UnsupportedScheme => write!(f, "unsupported scheme (http/https only)"),
-            SafeFetchError::DnsFailed => write!(f, "host did not resolve"),
-            SafeFetchError::BlockedTarget => {
-                write!(f, "target address is not a permitted device endpoint")
-            }
-            SafeFetchError::ClientBuild(e) => write!(f, "client build failed: {e}"),
-            SafeFetchError::BodyTooLarge => write!(f, "response body exceeded the size cap"),
-            SafeFetchError::BodyRead(c) => write!(f, "body read failed: {c}"),
-        }
+        super::source_failure::from_safe(self, "safe_fetch").fmt(f)
     }
 }
 
-impl std::error::Error for SafeFetchError {}
+impl std::error::Error for SafeFetchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::DnsLookup(error) => Some(error),
+            Self::ClientBuild(error) | Self::BodyRead(error) => Some(error),
+            Self::Json(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 /// True for addresses that are NEVER a legitimate user device and are the
 /// classic SSRF pivots: loopback, link-local (incl. the cloud metadata
@@ -149,7 +148,7 @@ pub async fn build_safe_client(
     // Resolve once. A bare-IP host resolves to itself; a name hits DNS.
     let candidates: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
         .await
-        .map_err(|_| SafeFetchError::DnsFailed)?
+        .map_err(SafeFetchError::DnsLookup)?
         .collect();
     if candidates.is_empty() {
         return Err(SafeFetchError::DnsFailed);
@@ -170,7 +169,7 @@ pub async fn build_safe_client(
         // to exactly what we checked, never a re-resolved (rebinding) one.
         .resolve(&host, chosen)
         .build()
-        .map_err(|e| SafeFetchError::ClientBuild(e.to_string()))?;
+        .map_err(SafeFetchError::ClientBuild)?;
 
     Ok((client, url))
 }
@@ -199,11 +198,7 @@ async fn read_body_capped_limit(
         }
     }
     let mut buf: Vec<u8> = Vec::new();
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| SafeFetchError::BodyRead(crate::net::reqwest_error_category(&e)))?
-    {
+    while let Some(chunk) = resp.chunk().await.map_err(SafeFetchError::BodyRead)? {
         if buf.len() + chunk.len() > cap {
             return Err(SafeFetchError::BodyTooLarge);
         }
@@ -213,15 +208,13 @@ async fn read_body_capped_limit(
 }
 
 /// [`read_body_capped`] + JSON parse, the shape nearly every safe-fetch
-/// call site wants. A parse failure maps to the same coarse bucket
-/// reqwest's own decode errors use, so callers keep surfacing a category,
-/// never upstream bytes.
+/// call site wants. Preserve JSON failure category/position without exposing
+/// upstream values in the safe diagnostic.
 pub async fn read_json_capped<T: serde::de::DeserializeOwned>(
     resp: reqwest::Response,
 ) -> Result<T, SafeFetchError> {
     let body = read_body_capped(resp).await?;
-    serde_json::from_slice(&body)
-        .map_err(|_| SafeFetchError::BodyRead("response could not be decoded"))
+    serde_json::from_slice(&body).map_err(SafeFetchError::Json)
 }
 
 #[cfg(test)]

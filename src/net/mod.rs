@@ -5,6 +5,8 @@
 // following, and an http/https scheme restriction.
 
 pub mod safe_fetch;
+pub mod source_failure;
+pub mod stream_failure;
 
 /// The one way an adapter, a controller or a service builds its outbound
 /// HTTP client: this timeout, this User-Agent (the derived per-install
@@ -46,31 +48,11 @@ pub fn client_opts(
         })
 }
 
-/// Classify a `reqwest::Error` into a COARSE category string, never the raw
-/// upstream message. The raw `reqwest::Error` Display embeds the target URL
-/// and OS/TLS error text; reflecting it to an API caller (the wizard probe /
-/// controller-test handlers do) turns an operator-supplied-host fetch into an
-/// SSRF/exfil oracle and leaks the internal target. This maps the error to one
-/// of a handful of stable buckets so callers (adapters' `Transport`/`Init`
-/// wrappers, probe handlers) carry a category an operator can act on without
-/// exposing the upstream's own bytes. Consistent with the Wave-1 body-trim
-/// (status-only on bad HTTP status; this covers the connection-level errors).
-pub fn reqwest_error_category(e: &reqwest::Error) -> &'static str {
-    if e.is_timeout() {
-        "request timed out"
-    } else if e.is_connect() {
-        "could not connect to host"
-    } else if e.is_redirect() {
-        "redirect not followed"
-    } else if e.is_decode() {
-        "response could not be decoded"
-    } else if e.is_body() {
-        "request/response body error"
-    } else if e.is_request() {
-        "request could not be sent"
-    } else {
-        "network error"
-    }
+/// Safe typed transport evidence. Existing controller/probe/LLM wrappers
+/// retain Display compatibility, but now include stable codes and status/OS
+/// details. No configured URL, body or arbitrary upstream text is reflected.
+pub fn reqwest_error_category(e: &reqwest::Error) -> crate::ports::source_error::SourceFailure {
+    source_failure::from_reqwest(e, "HTTP request")
 }
 
 /// True when `ip` is loopback in ANY representation: IPv4 127/8, IPv6 ::1, or
@@ -130,7 +112,7 @@ pub async fn build_llm_probe_client(
     // Resolve once. A bare-IP host resolves to itself; a name hits DNS.
     let candidates: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
         .await
-        .map_err(|_| SafeFetchError::DnsFailed)?
+        .map_err(SafeFetchError::DnsLookup)?
         .collect();
     if candidates.is_empty() {
         return Err(SafeFetchError::DnsFailed);
@@ -153,7 +135,7 @@ pub async fn build_llm_probe_client(
         // exactly what we checked, never a re-resolved (rebinding) one.
         .resolve(&host, chosen)
         .build()
-        .map_err(|e| SafeFetchError::ClientBuild(e.to_string()))?;
+        .map_err(SafeFetchError::ClientBuild)?;
 
     Ok((client, url))
 }
@@ -337,7 +319,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reqwest_error_category_is_coarse_and_leaks_no_target() {
+    async fn reqwest_error_category_is_typed_and_leaks_no_target() {
         // A timeout to an unroutable address yields a real reqwest::Error; the
         // category must be one of the fixed buckets and must NOT echo the
         // target host/URL or raw OS text (the leak the trim closes).
@@ -352,17 +334,12 @@ mod tests {
             .await
             .expect_err("unroutable target must error");
         let cat = super::reqwest_error_category(&err);
-        // It is one of the stable buckets.
-        const BUCKETS: &[&str] = &[
-            "request timed out",
-            "could not connect to host",
-            "redirect not followed",
-            "response could not be decoded",
-            "request/response body error",
-            "request could not be sent",
-            "network error",
-        ];
-        assert!(BUCKETS.contains(&cat), "unexpected category: {cat}");
+        use crate::ports::source_error::SourceErrorCode;
+        assert!(matches!(
+            cat.code,
+            SourceErrorCode::Timeout | SourceErrorCode::Connection | SourceErrorCode::Request
+        ));
+        let cat = cat.to_string();
         // The target host never appears in the category text.
         assert!(
             !cat.contains(secret_host),

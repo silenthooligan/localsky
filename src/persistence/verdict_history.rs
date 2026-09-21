@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 #[derive(Debug, Error)]
 pub enum VerdictHistoryError {
     #[error("sqlite: {0}")]
-    Sqlite(String),
+    Sqlite(#[source] Box<crate::failure::Failure>),
     #[error("inputs serialize: {0}")]
     Serialize(String),
 }
@@ -193,8 +193,8 @@ impl VerdictHistoryStore {
             Ok(())
         })
         .await
-        .map_err(|e| VerdictHistoryError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| VerdictHistoryError::Sqlite(e.to_string()))
+        .map_err(|e| VerdictHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(&e, "verdict_history.insert"))))?
+        .map_err(|e| VerdictHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(&e, "verdict_history.insert"))))
     }
 
     /// A verdict CHANGE, with the trace that explains it. The day is the
@@ -225,8 +225,18 @@ impl VerdictHistoryStore {
             Ok(())
         })
         .await
-        .map_err(|e| VerdictHistoryError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| VerdictHistoryError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            VerdictHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "verdict_history.insert_transition",
+            )))
+        })?
+        .map_err(|e| {
+            VerdictHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "verdict_history.insert_transition",
+            )))
+        })
     }
 
     /// Drop verdict rows older than `cutoff_epoch`, on the same retention
@@ -241,8 +251,18 @@ impl VerdictHistoryStore {
             )
         })
         .await
-        .map_err(|e| VerdictHistoryError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| VerdictHistoryError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            VerdictHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "verdict_history.prune_older_than",
+            )))
+        })?
+        .map_err(|e| {
+            VerdictHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "verdict_history.prune_older_than",
+            )))
+        })
     }
 
     pub async fn window(
@@ -275,8 +295,18 @@ impl VerdictHistoryStore {
             Ok(rows)
         })
         .await
-        .map_err(|e| VerdictHistoryError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| VerdictHistoryError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            VerdictHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "verdict_history.window",
+            )))
+        })?
+        .map_err(|e| {
+            VerdictHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "verdict_history.window",
+            )))
+        })
     }
 
     /// The forecast-accuracy scoreboard. One row per LOCAL calendar day,
@@ -466,8 +496,18 @@ impl VerdictHistoryStore {
             })
         })
         .await
-        .map_err(|e| VerdictHistoryError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| VerdictHistoryError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            VerdictHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "verdict_history.accuracy_window",
+            )))
+        })?
+        .map_err(|e| {
+            VerdictHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "verdict_history.accuracy_window",
+            )))
+        })
     }
 
     /// All verdicts for a specific local date. Useful for the daily
@@ -500,8 +540,18 @@ impl VerdictHistoryStore {
             Ok(rows)
         })
         .await
-        .map_err(|e| VerdictHistoryError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| VerdictHistoryError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            VerdictHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "verdict_history.for_date",
+            )))
+        })?
+        .map_err(|e| {
+            VerdictHistoryError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "verdict_history.for_date",
+            )))
+        })
     }
 }
 

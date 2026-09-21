@@ -257,13 +257,23 @@ async fn get_draft(State(s): State<WizardApiState>) -> impl IntoResponse {
         Ok(Ok(d)) => d,
         Ok(Err(WizardError::NotPresent)) => WizardDraft::default(),
         Ok(Err(e)) => return wizard_err(e).into_response(),
-        Err(e) => return wizard_err(WizardError::Io(format!("join: {e}"))).into_response(),
+        Err(e) => {
+            return wizard_err(WizardError::Io(Box::new(crate::diagnostics::from_error(
+                &e,
+                "wizard.get_draft",
+            ))))
+            .into_response()
+        }
     };
     // Serialize, redact only the nested config block, return.
     let mut v = match serde_json::to_value(&draft) {
         Ok(v) => v,
         Err(e) => {
-            return wizard_err(WizardError::Io(format!("serialize draft: {e}"))).into_response()
+            return wizard_err(WizardError::Io(Box::new(crate::diagnostics::from_error(
+                &e,
+                "wizard.get_draft",
+            ))))
+            .into_response()
         }
     };
     if let Some(cfg) = v.get_mut("config") {
@@ -361,7 +371,11 @@ async fn put_draft(
     match res {
         Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
         Ok(Err(e)) => wizard_err(e).into_response(),
-        Err(e) => wizard_err(WizardError::Io(format!("join: {e}"))).into_response(),
+        Err(e) => wizard_err(WizardError::Io(Box::new(crate::diagnostics::from_error(
+            &e,
+            "wizard.put_draft",
+        ))))
+        .into_response(),
     }
 }
 
@@ -371,7 +385,11 @@ async fn delete_draft(State(s): State<WizardApiState>) -> impl IntoResponse {
     match res {
         Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
         Ok(Err(e)) => wizard_err(e).into_response(),
-        Err(e) => wizard_err(WizardError::Io(format!("join: {e}"))).into_response(),
+        Err(e) => wizard_err(WizardError::Io(Box::new(crate::diagnostics::from_error(
+            &e,
+            "wizard.delete_draft",
+        ))))
+        .into_response(),
     }
 }
 
@@ -381,7 +399,13 @@ async fn post_apply(State(s): State<WizardApiState>) -> impl IntoResponse {
     let mut draft = match load_res {
         Ok(Ok(d)) => d,
         Ok(Err(e)) => return wizard_err(e).into_response(),
-        Err(e) => return wizard_err(WizardError::Io(format!("join: {e}"))).into_response(),
+        Err(e) => {
+            return wizard_err(WizardError::Io(Box::new(crate::diagnostics::from_error(
+                &e,
+                "wizard.post_apply",
+            ))))
+            .into_response()
+        }
     };
     // Fill the defaults the wizard promises for skipped steps (sources,
     // timezone, units), auto-mark the sole controller default, and provision
@@ -802,24 +826,11 @@ async fn test_rachio_controller(id: &str, rc: &crate::config::schema::RachioConf
     }
 }
 
-/// Map a `ControllerError` to a caller-safe detail string. Auth/zone/rate
-/// failures are our own labels and safe verbatim; the Transport/Init/Remote
-/// variants may carry upstream/transport text (the adapters now feed them a
-/// trimmed category, but be defensive here too), so collapse them to a fixed
-/// category rather than reflecting whatever string they hold.
+/// Controller diagnostics contain safe typed evidence; retain it in setup.
 fn controller_error_detail(e: &crate::ports::irrigation_controller::ControllerError) -> String {
-    use crate::ports::irrigation_controller::ControllerError as CE;
     match e {
-        CE::Held(reason) => reason.clone(),
-        CE::Offline => "controller offline".into(),
-        CE::ZoneUnknown(z) => format!("zone unknown: {z}"),
-        CE::RateLimited => "rate limited".into(),
-        CE::AuthFailed => "authentication failed".into(),
-        CE::Unsupported(_) => "operation not supported by this controller".into(),
-        // These can carry upstream/transport text; do not reflect it.
-        CE::Remote(_) => "controller returned an error".into(),
-        CE::Transport(_) => "could not reach the controller".into(),
-        CE::Init(_) => "controller client could not be initialized".into(),
+        crate::ports::irrigation_controller::ControllerError::Held(reason) => reason.clone(),
+        _ => e.diagnostic().to_string(),
     }
 }
 
@@ -871,20 +882,9 @@ async fn post_test_llm(
     }
 }
 
-/// Caller-safe detail for an `LlmError`. Mirrors `controller_error_detail`:
-/// the Remote/Transport/Parse/ModelUnavailable variants may carry upstream
-/// text, so collapse them to a fixed category rather than reflecting it.
+/// The typed provider envelope is safe to expose in setup.
 fn llm_error_detail(e: &crate::ports::llm_provider::LlmError) -> String {
-    use crate::ports::llm_provider::LlmError as LE;
-    match e {
-        LE::Offline => "provider offline".into(),
-        LE::AuthFailed => "authentication failed".into(),
-        LE::ModelUnavailable(_) => "model unavailable".into(),
-        LE::RateLimited => "rate limited".into(),
-        LE::Remote(_) => "provider returned an error".into(),
-        LE::Transport(_) => "could not reach the provider".into(),
-        LE::Parse(_) => "provider response could not be parsed".into(),
-    }
+    e.diagnostic().to_string()
 }
 
 async fn post_scan_zones(
@@ -1194,7 +1194,11 @@ async fn post_seed_current(State(s): State<WizardApiState>) -> impl IntoResponse
     match tokio::task::spawn_blocking(move || store.save(&draft)).await {
         Ok(Ok(())) => Json(serde_json::json!({ "ok": true })).into_response(),
         Ok(Err(e)) => wizard_err(e).into_response(),
-        Err(e) => wizard_err(WizardError::Io(format!("join: {e}"))).into_response(),
+        Err(e) => wizard_err(WizardError::Io(Box::new(crate::diagnostics::from_error(
+            &e,
+            "wizard.post_seed_current",
+        ))))
+        .into_response(),
     }
 }
 

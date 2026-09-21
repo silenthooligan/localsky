@@ -23,6 +23,9 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use tracing::{debug, info, warn};
 
+use crate::failure::{Failure, FailureCode as Code};
+use crate::net::source_failure::from_anyhow;
+
 use crate::config::schema::PrometheusConfig;
 use crate::ports::weather_source::{
     ShutdownSignal, SourceBus, SourceCaps, SourceEvent, WeatherField, WeatherSource,
@@ -43,7 +46,7 @@ pub struct Prometheus {
 #[derive(Debug, Deserialize)]
 struct PromResp {
     status: String,
-    data: PromData,
+    data: Option<PromData>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,9 +64,9 @@ fn scalar_from_response(resp: &PromResp) -> Option<f64> {
     if resp.status != "success" {
         return None;
     }
-    let raw = match resp.data.result_type.as_str() {
-        "vector" => resp
-            .data
+    let data = resp.data.as_ref()?;
+    let raw = match data.result_type.as_str() {
+        "vector" => data
             .result
             .as_array()
             .and_then(|a| a.first())
@@ -71,8 +74,7 @@ fn scalar_from_response(resp: &PromResp) -> Option<f64> {
             .and_then(|v| v.as_array())
             .and_then(|v| v.get(1))
             .and_then(|v| v.as_str()),
-        "scalar" => resp
-            .data
+        "scalar" => data
             .result
             .as_array()
             .and_then(|v| v.get(1))
@@ -94,7 +96,8 @@ impl Prometheus {
     /// is encoded into the URL (so build_safe_client pins the resolved host).
     async fn query(&self, promql: &str) -> anyhow::Result<f64> {
         let base = format!("{}/api/v1/query", self.config.url.trim_end_matches('/'));
-        let mut url = reqwest::Url::parse(&base)?;
+        let mut url = reqwest::Url::parse(&base)
+            .map_err(|_| Failure::new(Code::InvalidUrl, "Prometheus query URL"))?;
         url.query_pairs_mut().append_pair("query", promql);
         let (client, safe_url) =
             crate::net::safe_fetch::build_safe_client(url.as_str(), PROM_TIMEOUT).await?;
@@ -104,8 +107,11 @@ impl Prometheus {
         }
         let http = req.send().await?.error_for_status()?;
         let resp: PromResp = crate::net::safe_fetch::read_json_capped(http).await?;
+        if resp.status != "success" {
+            return Err(Failure::new(Code::QueryRejected, "Prometheus query").into());
+        }
         scalar_from_response(&resp)
-            .ok_or_else(|| anyhow::anyhow!("query returned no scalar sample: {promql}"))
+            .ok_or_else(|| Failure::new(Code::QueryEmpty, "Prometheus query result").into())
     }
 }
 
@@ -180,8 +186,8 @@ impl WeatherSource for Prometheus {
                 let mut poll = Poll::none();
                 let mut fields: Vec<(WeatherField, f64)> = Vec::new();
                 let mut ok_n = 0usize;
-                let mut err_n = 0usize;
-                for q in &s.config.queries {
+                let mut failures = Vec::new();
+                for (index, q) in s.config.queries.iter().enumerate() {
                     match s.query(&q.query).await {
                         Ok(raw) => {
                             ok_n += 1;
@@ -205,18 +211,23 @@ impl WeatherSource for Prometheus {
                             }
                         }
                         Err(e) => {
-                            err_n += 1;
+                            let failure = from_anyhow(&e, "Prometheus query").with_item(index);
                             warn!(
                                 source_id = %s.id,
-                                query = q.query,
-                                error = %e,
+                                query_index = index,
+                                error = %failure,
                                 "Prometheus query failed"
                             );
+                            failures.push(failure);
                         }
                     }
                 }
-                if ok_n == 0 && err_n > 0 {
-                    anyhow::bail!("all {err_n} queries failed");
+                if !failures.is_empty() {
+                    let failure = Failure::batch("Prometheus query batch", failures, ok_n > 0);
+                    if ok_n == 0 {
+                        return Err(failure.into());
+                    }
+                    poll = poll.with_failure(failure);
                 }
                 if !fields.is_empty() {
                     poll = poll.with(SourceEvent::Observation {
@@ -234,6 +245,16 @@ impl WeatherSource for Prometheus {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rejected_query_without_data_keeps_provider_status() {
+        let response: super::PromResp = serde_json::from_str(
+            r#"{"status":"error","errorType":"bad_data","error":"secret query"}"#,
+        )
+        .unwrap();
+        assert_eq!(response.status, "error");
+        assert!(super::scalar_from_response(&response).is_none());
+    }
+
     use super::*;
     use serde_json::json;
 

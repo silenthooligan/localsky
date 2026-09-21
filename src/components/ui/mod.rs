@@ -24,6 +24,7 @@
 
 pub mod button;
 pub mod confirm_sheet;
+pub mod diagnostic_details;
 pub mod empty_state;
 pub mod field_labels;
 pub mod form_field;
@@ -62,3 +63,5 @@ pub use stat_tile::StatTile;
 pub use stepper::Stepper;
 pub use toast::{use_toast, ToastHub, ToastKind, ToastViewport};
 pub use toggle::Toggle;
+
+pub use diagnostic_details::DiagnosticDetails;

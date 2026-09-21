@@ -5,6 +5,16 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+fn invalid_query(field: &'static str, reason: &'static str) -> crate::failure::Failure {
+    let mut failure = crate::failure::Failure::new(
+        crate::failure::FailureCode::ApiRejected,
+        "forecast archive query",
+    )
+    .with_field(field);
+    failure.error_kind = Some(reason);
+    failure
+}
+
 pub const RETENTION_DAYS: i64 = 400;
 pub const MAX_PAGE_SIZE: usize = 5000;
 
@@ -106,14 +116,14 @@ impl ForecastArchiveStore {
 
     pub async fn query(&self, query: ArchiveQuery) -> anyhow::Result<ArchivePage> {
         crate::forecast::window::validate_range(query.from, query.to, RETENTION_DAYS * 86400)
-            .map_err(anyhow::Error::msg)?;
+            .map_err(|reason| invalid_query("from/to", reason))?;
         anyhow::ensure!(
             query.limit > 0 && query.limit <= MAX_PAGE_SIZE,
-            "invalid archive page size"
+            invalid_query("limit", "invalid archive page size")
         );
         anyhow::ensure!(
             query.lead_h.is_none_or(|lead| lead < 48),
-            "lead_h must be between 0 and 47"
+            invalid_query("lead_h", "lead_h must be between 0 and 47")
         );
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || -> rusqlite::Result<ArchivePage> {

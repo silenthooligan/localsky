@@ -41,3 +41,5 @@ pub mod weather_hero;
 pub mod welcome_card;
 pub mod wind;
 pub mod zones;
+
+pub(crate) mod request_error;

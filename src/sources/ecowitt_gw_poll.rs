@@ -451,6 +451,9 @@ impl crate::ports::weather_source::WeatherSource for EcowittGwPoll {
                 match crate::metrics::observe_fetch(&id, fetch_with_retry(&url)).await {
                     Ok(body) => {
                         failed_cycles = 0;
+                        if let Some(bus) = &bus {
+                            crate::sources::poll::report_diagnostic(bus, &id, None);
+                        }
                         if report(&mut latch, bus.as_ref(), &id, true) {
                             info!(source_id = %id, "ecowitt_gw_poll reachable");
                         }
@@ -461,14 +464,37 @@ impl crate::ports::weather_source::WeatherSource for EcowittGwPoll {
                         // matches a calibrated source-of-truth, replacing the
                         // gateway's own % from livedata.
                         if !config.soil_calibration.is_empty() {
-                            if let Ok(soilad) = fetch(&soilad_url).await {
-                                let cal =
-                                    parse_soilad(&soilad, &id, epoch, &config.soil_calibration);
-                                apply_calibrated_readings(&mut readings, cal);
+                            match fetch(&soilad_url).await {
+                                Ok(soilad) => {
+                                    let cal =
+                                        parse_soilad(&soilad, &id, epoch, &config.soil_calibration);
+                                    apply_calibrated_readings(&mut readings, cal);
+                                }
+                                Err(error) => {
+                                    let failure = crate::diagnostics::from_anyhow(
+                                        &error,
+                                        "Ecowitt gateway soil calibration",
+                                    );
+                                    warn!(source_id = %id, %failure, "calibration read failed; retaining reported moisture");
+                                    if let Some(bus) = &bus {
+                                        crate::sources::poll::report_diagnostic(
+                                            bus,
+                                            &id,
+                                            Some(failure),
+                                        );
+                                    }
+                                }
                             }
                         }
                         if readings.is_empty() {
-                            debug!(source_id = %id, "ecowitt_gw_poll: no parseable readings");
+                            let failure = crate::failure::Failure::new(
+                                crate::failure::FailureCode::MissingField,
+                                "Ecowitt gateway livedata",
+                            )
+                            .with_field("readings");
+                            if let Some(bus) = &bus {
+                                crate::sources::poll::report_diagnostic(bus, &id, Some(failure));
+                            }
                             continue;
                         }
                         // Publish the outdoor weather subset onto the merge bus so
@@ -505,6 +531,10 @@ impl crate::ports::weather_source::WeatherSource for EcowittGwPoll {
                         debug!(source_id = %id, readings = readings.len(), "ecowitt_gw_poll published");
                     }
                     Err(e) => {
+                        let e = crate::diagnostics::from_anyhow(&e, "Ecowitt gateway poll");
+                        if let Some(bus) = &bus {
+                            crate::sources::poll::report_diagnostic(bus, &id, Some(e.clone()));
+                        }
                         failed_cycles = failed_cycles.saturating_add(1);
                         if failed_cycles == 1 {
                             // One failed cycle (after the retry): quiet. The next
@@ -544,9 +574,23 @@ fn report(
 async fn fetch_with_retry(url: &str) -> anyhow::Result<Value> {
     match fetch(url).await {
         Ok(body) => Ok(body),
-        Err(_) => {
+        Err(first) => {
+            let first = crate::diagnostics::from_anyhow(&first, "Ecowitt gateway livedata");
             tokio::time::sleep(Duration::from_secs(2)).await;
-            fetch(url).await
+            match fetch(url).await {
+                Ok(body) => {
+                    tracing::debug!(%first, recovered = true, "Ecowitt gateway retry recovered");
+                    Ok(body)
+                }
+                Err(error) => Err(crate::failure::Failure::attempts(
+                    "Ecowitt gateway retry",
+                    vec![
+                        first,
+                        crate::diagnostics::from_anyhow(&error, "Ecowitt gateway livedata"),
+                    ],
+                )
+                .into()),
+            }
         }
     }
 }

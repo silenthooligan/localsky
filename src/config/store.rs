@@ -80,8 +80,8 @@ impl FileConfigStore {
         let path = self.ledger_path.clone();
         tokio::task::spawn_blocking(move || ledger.save(&path))
             .await
-            .map_err(|e| ConfigStoreError::Io(format!("join error: {e}")))?
-            .map_err(|e| ConfigStoreError::Io(format!("ledger write: {e}")))?;
+            .map_err(|e| ConfigStoreError::io(&e, "config.ledger join error"))?
+            .map_err(|e| ConfigStoreError::io(&e, "config.ledger ledger write"))?;
         Ok(out)
     }
 
@@ -178,8 +178,8 @@ impl FileConfigStore {
             Ok(())
         })
         .await
-        .map_err(|e| ConfigStoreError::Io(format!("join error: {e}")))?
-        .map_err(|e| ConfigStoreError::Io(format!("stage: {e}")))
+        .map_err(|e| ConfigStoreError::io(&e, "config.stage_restore join error"))?
+        .map_err(|e| ConfigStoreError::io(&e, "config.stage_restore stage"))
     }
 
     /// Publish a fully validated database-bearing restore under the file writer
@@ -244,8 +244,8 @@ impl FileConfigStore {
         db_path: &str,
     ) -> Result<super::restore::HotRestore, ConfigStoreError> {
         loader::validate(cfg).map_err(map_load_err)?;
-        let config_text =
-            toml::to_string_pretty(cfg).map_err(|e| ConfigStoreError::Io(e.to_string()))?;
+        let config_text = toml::to_string_pretty(cfg)
+            .map_err(|e| ConfigStoreError::io(&e, "config.restore_config_pair"))?;
         let config_path = self.path.clone();
         let ledger_path = self.ledger_path.clone();
         let database_path = PathBuf::from(db_path);
@@ -280,8 +280,8 @@ impl FileConfigStore {
             Ok(restore)
         })
         .await
-        .map_err(|e| ConfigStoreError::Io(format!("join error: {e}")))?
-        .map_err(|e| ConfigStoreError::Io(format!("config restore: {e}")))
+        .map_err(|e| ConfigStoreError::io(&e, "config.restore_config_pair join error"))?
+        .map_err(|e| ConfigStoreError::io(&e, "config.restore_config_pair config restore"))
     }
 
     /// Once the blocking stage writer starts, cancellation of its awaiting
@@ -297,8 +297,8 @@ impl FileConfigStore {
             stage()
         })
         .await
-        .map_err(|e| ConfigStoreError::Io(format!("join error: {e}")))?
-        .map_err(|e| ConfigStoreError::Io(format!("restore staging: {e}")))
+        .map_err(|e| ConfigStoreError::io(&e, "config.run_restore_stage join error"))?
+        .map_err(|e| ConfigStoreError::io(&e, "config.run_restore_stage restore staging"))
     }
 
     /// Take the config read-modify-write guard. Hold the returned guard
@@ -347,8 +347,8 @@ impl FileConfigStore {
             write_atomic_durable(&path, body.as_bytes())
         })
         .await
-        .map_err(|e| ConfigStoreError::Io(format!("join error: {e}")))?
-        .map_err(|e| ConfigStoreError::Io(format!("write: {e}")))
+        .map_err(|e| ConfigStoreError::io(&e, "config.save_raw_toml join error"))?
+        .map_err(|e| ConfigStoreError::io(&e, "config.save_raw_toml write"))
     }
 }
 
@@ -454,8 +454,11 @@ fn prune_snapshots_blocking(dir: &Path) -> std::io::Result<()> {
 fn map_load_err(e: LoadError) -> ConfigStoreError {
     match e {
         LoadError::NotFound(_) => ConfigStoreError::NotFound,
-        LoadError::Io(_, ioe) => ConfigStoreError::Io(ioe.to_string()),
-        LoadError::Parse(e) => ConfigStoreError::Validation(format!("toml parse: {e}")),
+        LoadError::Io(_, ioe) => ConfigStoreError::io(&ioe, "config read file"),
+        LoadError::Parse(e) => ConfigStoreError::Parse(Box::new(crate::diagnostics::from_error(
+            &e,
+            "config parse TOML",
+        ))),
         LoadError::UnsetEnvVar(v) => {
             ConfigStoreError::Validation(format!("env var ${{{v}}} unset"))
         }
@@ -479,7 +482,7 @@ impl ConfigStore for FileConfigStore {
             loader::load_from_path(&path)
         })
         .await
-        .map_err(|e| ConfigStoreError::Io(format!("join error: {e}")))?
+        .map_err(|e| ConfigStoreError::io(&e, "config.load join error"))?
         .map_err(map_load_err)
     }
 
@@ -489,7 +492,7 @@ impl ConfigStore for FileConfigStore {
         loader::validate(cfg).map_err(map_load_err)?;
 
         let toml_str = toml::to_string_pretty(cfg)
-            .map_err(|e| ConfigStoreError::Io(format!("toml serialize: {e}")))?;
+            .map_err(|e| ConfigStoreError::io(&e, "config.save toml serialize"))?;
 
         // Queue behind any concurrent writer (see save_lock).
         let _guard = self.save_lock.lock().await;
@@ -501,8 +504,8 @@ impl ConfigStore for FileConfigStore {
             write_atomic_durable(&path, toml_str.as_bytes())
         })
         .await
-        .map_err(|e| ConfigStoreError::Io(format!("join error: {e}")))?
-        .map_err(|e| ConfigStoreError::Io(format!("write: {e}")))?;
+        .map_err(|e| ConfigStoreError::io(&e, "config.save join error"))?
+        .map_err(|e| ConfigStoreError::io(&e, "config.save write"))?;
 
         Ok(ConfigVersion {
             version: 0,
@@ -537,7 +540,7 @@ impl ConfigStore for FileConfigStore {
                 .collect()
         })
         .await
-        .map_err(|e| ConfigStoreError::Io(format!("join error: {e}")))
+        .map_err(|e| ConfigStoreError::io(&e, "config.list_snapshots join error"))
     }
 
     async fn rollback(&self, version: u32) -> Result<Config, ConfigStoreError> {
@@ -552,17 +555,17 @@ impl ConfigStore for FileConfigStore {
             // corrupt snapshot must never replace a working config.
             let cfg = loader::load_from_path(&snap_path).map_err(map_load_err)?;
             let bytes = std::fs::read(&snap_path)
-                .map_err(|e| ConfigStoreError::Io(format!("read snapshot: {e}")))?;
+                .map_err(|e| ConfigStoreError::io(&e, "config.rollback read snapshot"))?;
             // Snapshot the current config first so a rollback is itself
             // rollback-able.
             snapshot_current_blocking(&path)
-                .map_err(|e| ConfigStoreError::Io(format!("snapshot current: {e}")))?;
+                .map_err(|e| ConfigStoreError::io(&e, "config.rollback snapshot current"))?;
             write_atomic_durable(&path, &bytes)
-                .map_err(|e| ConfigStoreError::Io(format!("write: {e}")))?;
+                .map_err(|e| ConfigStoreError::io(&e, "config.rollback write"))?;
             Ok(cfg)
         })
         .await
-        .map_err(|e| ConfigStoreError::Io(format!("join error: {e}")))?
+        .map_err(|e| ConfigStoreError::io(&e, "config.rollback join error"))?
     }
 }
 
@@ -575,6 +578,29 @@ struct SchemaVersionOnly {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bad_toml_exposes_offset_without_configuration_secrets() {
+        let error = toml::from_str::<toml::Value>("token = [private-secret").unwrap_err();
+        let mapped = map_load_err(LoadError::Parse(error));
+        assert!(matches!(&mapped, ConfigStoreError::Parse(_)));
+        let failure = mapped.diagnostic();
+        assert_eq!(failure.code, crate::failure::FailureCode::TomlParse);
+        assert!(failure.byte_offset.is_some());
+        assert!(!mapped.to_string().contains("private-secret"));
+    }
+
+    #[test]
+    fn read_permission_failure_preserves_os_evidence() {
+        let mapped = map_load_err(LoadError::Io(
+            "private-config-path".into(),
+            std::io::Error::from_raw_os_error(13),
+        ));
+        let failure = mapped.diagnostic();
+        assert_eq!(failure.os_code, Some(13));
+        assert_eq!(failure.operation, "config read file");
+        assert!(!mapped.to_string().contains("private-config-path"));
+    }
 
     #[tokio::test]
     async fn future_schema_load_refuses_without_rewriting_config_or_ledger() {

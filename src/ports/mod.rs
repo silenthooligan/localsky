@@ -9,6 +9,7 @@ pub mod config_store;
 pub mod irrigation_controller;
 pub mod llm_provider;
 pub mod notification_sink;
+pub mod source_error;
 pub mod weather_source;
 
 pub use config_store::*;

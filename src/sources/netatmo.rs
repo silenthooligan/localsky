@@ -87,15 +87,27 @@ struct TokenResponse {
 /// revoked. `with_reauth` re-exchanges the refresh token once on this
 /// error and on nothing else (an outage is not a bad token).
 #[derive(Debug)]
-struct TokenRejected(StatusCode);
+struct TokenRejected(crate::failure::Failure);
 
 impl std::fmt::Display for TokenRejected {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Netatmo rejected the access token ({})", self.0)
+        self.0.fmt(f)
     }
 }
-
-impl std::error::Error for TokenRejected {}
+impl std::error::Error for TokenRejected {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+impl TokenRejected {
+    fn new(status: u16) -> Self {
+        Self(crate::failure::Failure::http(
+            status,
+            None,
+            "netatmo authenticated request",
+        ))
+    }
+}
 
 fn token_rejected(e: &anyhow::Error) -> bool {
     e.downcast_ref::<TokenRejected>().is_some()
@@ -211,7 +223,7 @@ impl Netatmo {
             .await?;
         let status = resp.status();
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-            return Err(TokenRejected(status).into());
+            return Err(TokenRejected::new(status.as_u16()).into());
         }
         let v: Value = resp.error_for_status()?.json().await?;
         Ok(v)
@@ -459,6 +471,17 @@ impl WeatherSource for Netatmo {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reauth_marker_preserves_http_evidence_through_context() {
+        let error =
+            anyhow::Error::new(super::TokenRejected::new(401)).context("credential-must-not-leak");
+        assert!(super::token_rejected(&error));
+        let failure = crate::net::source_failure::from_anyhow(&error, "poll");
+        assert_eq!(failure.code, crate::failure::FailureCode::HttpUnauthorized);
+        assert_eq!(failure.http_status, Some(401));
+        assert!(!failure.to_string().contains("credential-must-not-leak"));
+    }
+
     use super::*;
     use serde_json::json;
 
@@ -546,9 +569,9 @@ mod tests {
     #[test]
     fn only_a_rejected_token_triggers_reauth() {
         // 401 and 403 both mean "exchange the refresh token and retry".
-        let unauthorized: anyhow::Error = TokenRejected(StatusCode::UNAUTHORIZED).into();
+        let unauthorized: anyhow::Error = TokenRejected::new(401).into();
         assert!(token_rejected(&unauthorized));
-        let forbidden: anyhow::Error = TokenRejected(StatusCode::FORBIDDEN).into();
+        let forbidden: anyhow::Error = TokenRejected::new(403).into();
         assert!(token_rejected(&forbidden));
         // An outage (or any other error) is not a bad token: the refresh
         // token must not be burned on it.

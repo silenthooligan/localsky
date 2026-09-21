@@ -234,14 +234,16 @@ impl MqttCommand {
     /// the reaper retries every tick until the command can land.
     async fn deliverable(&self) -> ControllerResult<()> {
         if !*self.connected.lock().await {
-            return Err(ControllerError::Transport(
-                "mqtt broker disconnected; command not delivered".into(),
-            ));
+            return Err(ControllerError::transport(crate::failure::Failure::new(
+                crate::failure::FailureCode::MqttDisconnected,
+                "MQTT command delivery",
+            )));
         }
         if *self.shared.available.lock().await == Some(false) {
-            return Err(ControllerError::Transport(
-                "device reports offline on its availability topic; command not delivered".into(),
-            ));
+            return Err(ControllerError::transport(crate::failure::Failure::new(
+                crate::failure::FailureCode::MqttDeviceOffline,
+                "MQTT command delivery",
+            )));
         }
         Ok(())
     }
@@ -262,7 +264,12 @@ impl MqttCommand {
         self.client
             .publish(&cmd.topic, QoS::AtLeastOnce, retain, payload.to_vec())
             .await
-            .map_err(|e| ControllerError::Transport(format!("mqtt publish failed: {e}")))?;
+            .map_err(|e| {
+                ControllerError::transport(crate::diagnostics::from_error(
+                    &e,
+                    "MQTT publish zone command",
+                ))
+            })?;
         debug!(
             controller = %self.id,
             zone = slug,
@@ -283,19 +290,44 @@ async fn drive_eventloop(
     shared: Arc<SharedState>,
 ) {
     info!(controller = %id, "mqtt controller event loop started");
+    let mut pending = 0usize;
+    let mut subscribe_failed = false;
     loop {
         match eventloop.poll().await {
             Ok(Event::Incoming(Packet::ConnAck(_))) => {
-                *connected.lock().await = true;
-                info!(controller = %id, "mqtt controller connected");
+                let topics = sub_meta.topics();
+                pending = 0;
+                subscribe_failed = false;
+                *connected.lock().await = topics.is_empty();
+                info!(controller = %id, "mqtt controller connected; awaiting readback subscriptions");
                 // (Re)subscribe to every readback topic on each connect so
                 // subscriptions survive a reconnect. Retained state topics
                 // deliver the current value immediately.
-                for topic in sub_meta.topics() {
-                    if let Err(e) = client.subscribe(&topic, QoS::AtLeastOnce).await {
-                        warn!(controller = %id, topic = %topic, error = %e, "mqtt subscribe failed");
+                if !topics.is_empty() {
+                    let filters = topics
+                        .into_iter()
+                        .map(|topic| rumqttc::SubscribeFilter::new(topic, QoS::AtLeastOnce));
+                    match client.try_subscribe_many(filters) {
+                        Ok(()) => pending = 1,
+                        Err(error) => {
+                            subscribe_failed = true;
+                            let failure = crate::diagnostics::from_error(
+                                &error,
+                                "MQTT controller readback subscription",
+                            );
+                            warn!(controller = %id, %failure, "mqtt subscribe failed");
+                        }
                     }
                 }
+            }
+            Ok(Event::Incoming(Packet::SubAck(ack))) => {
+                pending = pending.saturating_sub(1);
+                if let Some(failure) = crate::net::stream_failure::mqtt_subscription(&ack) {
+                    subscribe_failed = true;
+                    clear_stale_telemetry(&shared).await;
+                    warn!(controller = %id, %failure, "MQTT controller readback subscription denied");
+                }
+                *connected.lock().await = pending == 0 && !subscribe_failed;
             }
             Ok(Event::Incoming(Packet::Publish(p))) => {
                 let payload = String::from_utf8_lossy(&p.payload);
@@ -330,7 +362,7 @@ async fn drive_eventloop(
             Err(e) => {
                 *connected.lock().await = false;
                 clear_stale_telemetry(&shared).await;
-                warn!(controller = %id, error = %e, "mqtt controller eventloop error; rumqttc will reconnect");
+                warn!(controller = %id, error = %crate::net::stream_failure::mqtt(&e, "MQTT controller connection"), "mqtt controller eventloop error; rumqttc will reconnect");
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         }
@@ -421,7 +453,7 @@ impl IrrigationController for MqttCommand {
                             controller = %controller_id,
                             zone = %zone,
                             topic = %topic,
-                            error = %e,
+                            error = %crate::diagnostics::from_error(&e, "MQTT shutoff timer off publish"),
                             "mqtt shutoff timer: off publish failed; zone may still be running"
                         ),
                     }
@@ -607,7 +639,7 @@ mod tests {
         let zone = c.config.zone_command_map.keys().next().unwrap().clone();
         let err = c.stop_zone(&zone).await.unwrap_err();
         assert!(
-            matches!(err, ControllerError::Transport(ref m) if m.contains("disconnected")),
+            matches!(err, ControllerError::Transport(ref m) if m.code == crate::failure::FailureCode::MqttDisconnected),
             "{err:?}"
         );
         let err = c.stop_all().await.unwrap_err();
@@ -626,7 +658,7 @@ mod tests {
         *c.shared.available.lock().await = Some(false);
         let err = c.stop_zone(&zone).await.unwrap_err();
         assert!(
-            matches!(err, ControllerError::Transport(ref m) if m.contains("offline")),
+            matches!(err, ControllerError::Transport(ref m) if m.code == crate::failure::FailureCode::MqttDeviceOffline),
             "{err:?}"
         );
         *c.shared.available.lock().await = Some(true);

@@ -52,7 +52,7 @@ pub enum TuningError {
     #[error("tuning report requires the history database")]
     NotConfigured,
     #[error("store: {0}")]
-    Store(String),
+    Store(#[source] Box<crate::failure::Failure>),
 }
 
 /// Generate the tuning report over the last `days` (clamped to the
@@ -68,7 +68,11 @@ pub async fn generate_report(
         // A fresh install with no config yet has no zones; the report is
         // honestly empty rather than an error.
         Err(ConfigStoreError::NotFound) => Config::default(),
-        Err(e) => return Err(TuningError::Store(e.to_string())),
+        Err(e) => {
+            return Err(TuningError::Store(Box::new(
+                crate::diagnostics::from_error(&e, "tuning report"),
+            )))
+        }
     };
     generate_report_with(handles, &cfg, days).await
 }
@@ -89,18 +93,22 @@ pub async fn generate_report_with(
     let sensor_store = SensorHistoryStore::new(handles.history_conn.clone());
     let obs_store = ForecastObservationsStore::new(handles.history_conn.clone());
 
-    let run_rows = runs_store
-        .window(from_epoch, now + 1)
-        .await
-        .map_err(|e| TuningError::Store(e.to_string()))?;
+    let run_rows = runs_store.window(from_epoch, now + 1).await.map_err(|e| {
+        TuningError::Store(Box::new(crate::diagnostics::from_error(
+            &e,
+            "tuning report",
+        )))
+    })?;
 
     // Rain-day map over the report window (for dry stretches + backout
     // event hygiene) and the wider scorecard window.
     let obs_from = today - chrono::Duration::days(tuning::SCORECARD_WINDOW_DAYS as i64 + 3);
-    let obs_rows = obs_store
-        .range(obs_from, today)
-        .await
-        .map_err(|e| TuningError::Store(e.to_string()))?;
+    let obs_rows = obs_store.range(obs_from, today).await.map_err(|e| {
+        TuningError::Store(Box::new(crate::diagnostics::from_error(
+            &e,
+            "tuning report",
+        )))
+    })?;
     let obs_by_date: BTreeMap<NaiveDate, (f64, f64)> = obs_rows
         .iter()
         .map(|o| (o.date, (o.predicted_in, o.observed_in)))
@@ -380,7 +388,12 @@ pub async fn generate_report_with(
                         PROBE_SERIES_LIMIT,
                     )
                     .await
-                    .map_err(|e| TuningError::Store(e.to_string()))?;
+                    .map_err(|e| {
+                        TuningError::Store(Box::new(crate::diagnostics::from_error(
+                            &e,
+                            "tuning report",
+                        )))
+                    })?;
                 // Same validity gate as apply_soil_quality: dead-probe zeros
                 // and out-of-band values never enter the math.
                 let readings: Vec<(i64, f64)> = readings_raw

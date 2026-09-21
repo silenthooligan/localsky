@@ -342,7 +342,10 @@ mod tests {
         async fn stop_all(&self) -> ControllerResult<()> {
             self.stop_all_calls.fetch_add(1, Ordering::SeqCst);
             if self.fail {
-                Err(ControllerError::Transport("unreachable at boot".into()))
+                Err(ControllerError::transport(crate::failure::Failure::new(
+                    crate::failure::FailureCode::Connection,
+                    "simulated controller connection",
+                )))
             } else {
                 Ok(())
             }

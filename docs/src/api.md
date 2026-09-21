@@ -1,6 +1,6 @@
 # API reference
 
-LocalSky exposes a REST + SSE API mounted at **`/api/v1/`** (canonical) and **`/api/`** (legacy alias). New clients should target `/api/v1/*`. These historical route names are independent of the response contract version reported by `/api/v1/info`: the unreleased patch candidate uses **API 2.3.0** at the existing URLs (published 0.9.0 uses 2.1.0). A few newer endpoint families (`/api/v1/backup`, `/api/v1/updates`, `/api/v1/diagnostics`) exist only under `/api/v1`.
+LocalSky exposes a REST + SSE API mounted at **`/api/v1/`** (canonical) and **`/api/`** (legacy alias). New clients should target `/api/v1/*`. These historical route names are independent of the response contract version reported by `/api/v1/info`: LocalSky 0.9.2 uses **API 2.4.0** at the existing URLs. A few newer endpoint families (`/api/v1/backup`, `/api/v1/updates`, `/api/v1/diagnostics`) exist only under `/api/v1`.
 
 **On this page**
 
@@ -51,6 +51,31 @@ These compatibility fields were deprecated during API 1 and remain in API 2.0.0.
 | `POST /wizard/test_source` | endpoint | structural validation only; nothing in the UI calls it | absent |
 
 ### Migration notes
+
+**2.4.0** (LocalSky 0.9.2). Privileged `/health` and the health section of
+`/diagnostics` add optional `sources[].error`: `{at_epoch, failure}`. `failure`
+contains a stable `code`, `operation`, `message`, `next_step`, and available
+evidence (`http_status`, `response_format`, `entity_id`, `io_kind`, `os_code`,
+`tls_reason`, `line`, `column`, `timeout_ms`, `limit_bytes`). `causes` retains separate failed
+attempts, including HA bulk and individual-entity recovery. Fields without
+evidence are omitted. No token, configured URL, response body or redirect
+location is included. A successful poll clears the current error without
+changing measurement freshness. These records are in memory for this boot;
+the existing diagnostic log tail retains recent failures after recovery.
+Streaming sources use the same bus record; partial forecast failures remain
+visible between forecast refreshes.
+Anonymous liveness responses continue to omit source details.
+
+Codes identify client-observed failures, not hidden server exceptions.
+`LS_SOURCE_DIAGNOSTIC_MISSING` explicitly identifies an adapter instrumentation
+defect; it must not be interpreted as a diagnosis of the remote source.
+API failures also carry `request: {id, method, route}` and the matching
+`X-LocalSky-Request-Id` response header. Existing statuses and error fields are
+preserved. Controller, storage, backup/restore, advisor and update failures add
+optional diagnostic records; forecast tracks add an optional `diagnostic`.
+Available evidence now includes SQLite extended codes, provider codes, field,
+resource and item identity. `omitted_causes` reports bounded cause truncation.
+See [operational error codes](source-errors.md) for the diagnostic contract.
 
 **2.2.0** (unreleased patch candidate). Decision-trace rule entries add nullable
 `overridden_by` and `overridden_detail`. A rule that crossed its threshold

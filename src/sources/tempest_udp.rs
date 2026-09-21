@@ -120,6 +120,7 @@ impl TempestUdp {
             reachable: true,
         });
 
+        crate::sources::poll::report_diagnostic(bus, &self.id, None);
         let mut buf = vec![0u8; 4096];
         loop {
             let (n, _peer) = sock.recv_from(&mut buf).await?;
@@ -127,9 +128,9 @@ impl TempestUdp {
             match serde_json::from_slice::<TempestPacket>(slice) {
                 Ok(pkt) => self.publish(pkt, cfg, bus).await,
                 Err(e) => {
-                    if let Ok(text) = std::str::from_utf8(slice) {
-                        tracing::debug!("unparseable packet ({} bytes): {}, {}", n, e, text);
-                    }
+                    let failure =
+                        crate::net::source_failure::from_json(&e, "Tempest decode UDP packet");
+                    tracing::debug!(source_id = %self.id, bytes = n, error = %failure, "unparseable Tempest packet");
                 }
             }
         }
@@ -456,7 +457,9 @@ impl WeatherSource for TempestUdp {
                         // problem from a broken socket and it has a
                         // different fix, so it gets its own state and its
                         // own words rather than a generic error.
-                        let detail = e.to_string();
+                        let failure = crate::failure::Failure::from_io(crate::failure::FailureCode::UdpIo, "Tempest UDP listener", &e);
+                        let detail = failure.to_string();
+                        crate::sources::poll::report_diagnostic(&bus, &self.id, Some(failure));
                         if e.kind() == std::io::ErrorKind::AddrInUse {
                             tracing::error!(
                                 bind_addr = %cfg.bind_addr,

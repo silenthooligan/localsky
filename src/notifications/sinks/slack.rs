@@ -33,19 +33,26 @@ impl NotificationSink for Slack {
     async fn emit(&self, event: &NotificationEvent) -> Result<(), NotificationError> {
         let (title, body) = fanout_headline(event);
         let payload = serde_json::json!({ "text": format!("*{title}*\n{body}") });
-        let resp = self
-            .client
-            .post(&self.cfg.webhook_url)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| NotificationError::Transport(e.to_string()))?;
+        let resp =
+            self.client
+                .post(&self.cfg.webhook_url)
+                .json(&payload)
+                .send()
+                .await
+                .map_err(|e| {
+                    NotificationError::Transport(Box::new(
+                        crate::net::source_failure::from_reqwest(&e, "Slack notification delivery"),
+                    ))
+                })?;
         if resp.status().is_success() {
             Ok(())
         } else {
-            Err(NotificationError::Transport(format!(
-                "Slack answered {}",
-                resp.status()
+            Err(NotificationError::Transport(Box::new(
+                crate::failure::Failure::http(
+                    resp.status().as_u16(),
+                    Some(crate::net::source_failure::response_format(&resp)),
+                    "Slack notification delivery",
+                ),
             )))
         }
     }

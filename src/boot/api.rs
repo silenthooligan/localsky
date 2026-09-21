@@ -172,8 +172,7 @@ pub fn build(
         dispatch,
         inventory,
         tuning: control.tuning.clone(),
-    })
-    .layer(axum::middleware::from_fn(json_error_envelope));
+    });
 
     let updates = crate::updates::Updates::new();
     if cfg.map(|c| c.updates.check_enabled).unwrap_or(false) {
@@ -379,6 +378,10 @@ pub fn build(
         app
     };
 
+    let app = app.layer(axum::middleware::from_fn(
+        crate::api::error_boundary::envelope,
+    ));
+
     // gzip/brotli. The hydrate wasm ships ~2.8 MB (brotli) instead of
     // ~24.5 MB, the single highest cold-load win on every RPi and
     // HA-OS-ingress deploy. DefaultPredicate skips text/event-stream (the
@@ -408,43 +411,6 @@ async fn metrics_handler() -> impl axum::response::IntoResponse {
         )],
         crate::metrics::render(),
     )
-}
-
-/// ONE error shape on the API surface: axum's built-in extractor
-/// rejections (a typoed ?days=abc query, malformed JSON, a wrong
-/// Content-Type) reply text/plain, while every handler-authored error is
-/// the JSON {"error": ...} envelope integrators are told to parse. This
-/// rewrites any text/plain ERROR response into the envelope so a client's
-/// resp.json() error handler never throws on the transport layer's own
-/// rejections. Only error statuses with a text/plain body are touched;
-/// rejection bodies are tiny, the 64KB read cap is pure defense.
-async fn json_error_envelope(
-    req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    use axum::response::IntoResponse;
-    let res = next.run(req).await;
-    let status = res.status();
-    if !(status.is_client_error() || status.is_server_error()) {
-        return res;
-    }
-    let is_plain = res
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(|ct| ct.starts_with("text/plain"))
-        .unwrap_or(false);
-    if !is_plain {
-        return res;
-    }
-    let (parts, body) = res.into_parts();
-    let bytes = axum::body::to_bytes(body, 64 * 1024)
-        .await
-        .unwrap_or_default();
-    let msg = String::from_utf8_lossy(&bytes).trim().to_string();
-    let mut out = axum::response::Json(serde_json::json!({ "error": msg })).into_response();
-    *out.status_mut() = parts.status;
-    out
 }
 
 /// Cache policy, path-aware. CONTENT-HASHED /pkg assets (the

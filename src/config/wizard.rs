@@ -110,11 +110,11 @@ impl Default for WizardDraft {
 #[derive(Debug, Error)]
 pub enum WizardError {
     #[error("io error: {0}")]
-    Io(String),
+    Io(#[source] Box<crate::failure::Failure>),
     #[error("draft serialize: {0}")]
-    Serialize(String),
+    Serialize(#[source] Box<crate::failure::Failure>),
     #[error("draft parse: {0}")]
-    Parse(String),
+    Parse(#[source] Box<crate::failure::Failure>),
     #[error("draft not present")]
     NotPresent,
     #[error("license must be accepted before apply")]
@@ -144,22 +144,37 @@ impl WizardStore {
     pub fn load(&self) -> Result<WizardDraft, WizardError> {
         let raw = std::fs::read_to_string(&self.path).map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => WizardError::NotPresent,
-            _ => WizardError::Io(e.to_string()),
+            _ => WizardError::Io(Box::new(crate::diagnostics::from_error(&e, "wizard.load"))),
         })?;
-        serde_json::from_str(&raw).map_err(|e| WizardError::Parse(e.to_string()))
+        serde_json::from_str(&raw).map_err(|e| {
+            WizardError::Parse(Box::new(crate::diagnostics::from_error(
+                &e,
+                "wizard parse draft",
+            )))
+        })
     }
 
     pub fn save(&self, draft: &WizardDraft) -> Result<(), WizardError> {
         let mut d = draft.clone();
         d.last_updated_epoch = chrono::Utc::now().timestamp();
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| WizardError::Io(e.to_string()))?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                WizardError::Io(Box::new(crate::diagnostics::from_error(&e, "wizard.save")))
+            })?;
         }
-        let json =
-            serde_json::to_string_pretty(&d).map_err(|e| WizardError::Serialize(e.to_string()))?;
+        let json = serde_json::to_string_pretty(&d).map_err(|e| {
+            WizardError::Serialize(Box::new(crate::diagnostics::from_error(
+                &e,
+                "wizard serialize draft",
+            )))
+        })?;
         let tmp = self.path.with_extension("draft.tmp");
-        std::fs::write(&tmp, json).map_err(|e| WizardError::Io(e.to_string()))?;
-        std::fs::rename(&tmp, &self.path).map_err(|e| WizardError::Io(e.to_string()))?;
+        std::fs::write(&tmp, json).map_err(|e| {
+            WizardError::Io(Box::new(crate::diagnostics::from_error(&e, "wizard.save")))
+        })?;
+        std::fs::rename(&tmp, &self.path).map_err(|e| {
+            WizardError::Io(Box::new(crate::diagnostics::from_error(&e, "wizard.save")))
+        })?;
         Ok(())
     }
 
@@ -167,7 +182,10 @@ impl WizardStore {
         match std::fs::remove_file(&self.path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(WizardError::Io(e.to_string())),
+            Err(e) => Err(WizardError::Io(Box::new(crate::diagnostics::from_error(
+                &e,
+                "wizard.clear",
+            )))),
         }
     }
 

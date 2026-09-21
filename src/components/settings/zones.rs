@@ -3075,13 +3075,15 @@ fn ZoneCard(
         // (what the engine/snapshot uses), while config keys are hyphenated --
         // normalize so "front-yard" dispatches as "front_yard".
         let s = slug_for_test.replace('-', "_");
-        let done = Callback::new(move |res: Result<(), String>| {
-            testing.set(false);
-            match res {
-                Ok(()) => test_msg.set("Running 30s -- check the valve.".to_string()),
-                Err(e) => test_msg.set(format!("Couldn't start: {e}")),
-            }
-        });
+        let done = Callback::new(
+            move |res: Result<(), crate::components::request_error::RequestError>| {
+                testing.set(false);
+                match res {
+                    Ok(()) => test_msg.set("Running 30s -- check the valve.".to_string()),
+                    Err(e) => test_msg.set(format!("Couldn't start: {e}")),
+                }
+            },
+        );
         crate::components::irrigation::controls::post_action_then(
             serde_json::json!({ "kind": "run", "zone": s, "seconds": 30 }),
             done,

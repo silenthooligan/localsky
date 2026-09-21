@@ -16,6 +16,17 @@ expression: health
   },
   "sources": [
     {
+      "error": {
+        "at_epoch": 0,
+        "failure": {
+          "code": "LS_HTTP_SERVER",
+          "operation": "source poll",
+          "message": "upstream returned a server error",
+          "next_step": "Check source and proxy logs at this timestamp; compare direct and proxied API responses. HTTP status alone does not identify the server exception.",
+          "http_status": 503,
+          "response_format": "JSON"
+        }
+      },
       "id": "open_meteo",
       "kind": "open_meteo",
       "enabled": true,

@@ -16,10 +16,15 @@ async fn main() -> anyhow::Result<()> {
     use localsky::boot;
 
     let logging = boot::logging::init();
-    let storage = boot::storage::open()?;
-    let config = boot::config::load(&storage).await?;
+    let storage = boot::storage::open()
+        .map_err(|e| localsky::diagnostics::from_anyhow(&e, "startup storage and recovery"))?;
+    let config = boot::config::load(&storage)
+        .await
+        .map_err(|e| localsky::diagnostics::from_anyhow(&e, "startup configuration"))?;
     if let Some(restore) = &storage.restore {
-        restore.complete()?;
+        restore
+            .complete()
+            .map_err(|e| localsky::diagnostics::from_error(&e, "startup recovery completion"))?;
         tracing::info!("verified restore activated; database and configuration loaded");
     }
     let stores = boot::stores::build(&storage, &config).await;

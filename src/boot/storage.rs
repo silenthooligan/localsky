@@ -64,9 +64,8 @@ pub fn open() -> anyhow::Result<Storage> {
             return Err(e).context("restored history could not open; startup refused, restore marker and recovery files retained");
         }
         Err(e) => {
-            tracing::warn!(
-                "history db open failed at {history_path:?}: {e:#}; running without persistence"
-            );
+            let failure = crate::diagnostics::from_anyhow(&e, "startup history database");
+            tracing::warn!(%failure, "history database unavailable; running without persistence");
             None
         }
     };

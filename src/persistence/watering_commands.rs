@@ -53,8 +53,18 @@ impl WateringCommands {
             Ok(conn.last_insert_rowid())
         })
         .await
-        .map_err(|e| RunsError::Sqlite(e.to_string()))?
-        .map_err(|e: rusqlite::Error| RunsError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "watering_commands.request",
+            )))
+        })?
+        .map_err(|e: rusqlite::Error| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "watering_commands.request",
+            )))
+        })
     }
 
     pub async fn finish(&self, id: i64, confirmed: Option<(i64, u32)>) -> Result<(), RunsError> {
@@ -76,8 +86,18 @@ impl WateringCommands {
             Ok(())
         })
         .await
-        .map_err(|e| RunsError::Sqlite(e.to_string()))?
-        .map_err(|e: rusqlite::Error| RunsError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "watering_commands.finish",
+            )))
+        })?
+        .map_err(|e: rusqlite::Error| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "watering_commands.finish",
+            )))
+        })
     }
 
     /// Attribute only a fully contained observation with exactly one matching
@@ -122,8 +142,18 @@ impl WateringCommands {
             })
         })
         .await
-        .map_err(|e| RunsError::Sqlite(e.to_string()))?
-        .map_err(|e: rusqlite::Error| RunsError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "watering_commands.attribution",
+            )))
+        })?
+        .map_err(|e: rusqlite::Error| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "watering_commands.attribution",
+            )))
+        })
     }
 }
 

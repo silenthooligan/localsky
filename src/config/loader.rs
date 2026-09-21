@@ -14,7 +14,7 @@ pub enum LoadError {
     #[error("config file not found: {0}")]
     NotFound(String),
     #[error("io error reading {0}: {1}")]
-    Io(String, std::io::Error),
+    Io(String, #[source] std::io::Error),
     #[error("toml parse error: {0}")]
     Parse(#[from] toml::de::Error),
     #[error("env var ${{{0}}} referenced in config but unset")]

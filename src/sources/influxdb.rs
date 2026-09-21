@@ -21,6 +21,9 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use tracing::{debug, info, warn};
 
+use crate::failure::{Failure, FailureCode as Code};
+use crate::net::source_failure::from_anyhow;
+
 use crate::config::schema::InfluxDbConfig;
 use crate::ports::weather_source::{
     ShutdownSignal, SourceBus, SourceCaps, SourceEvent, WeatherField, WeatherSource,
@@ -41,10 +44,14 @@ pub struct InfluxDb {
 #[derive(Debug, Deserialize)]
 struct InfluxResp {
     #[serde(default)]
+    error: Option<serde_json::Value>,
+    #[serde(default)]
     results: Vec<InfluxResult>,
 }
 #[derive(Debug, Deserialize)]
 struct InfluxResult {
+    #[serde(default)]
+    error: Option<serde_json::Value>,
     #[serde(default)]
     series: Vec<InfluxSeries>,
 }
@@ -92,7 +99,8 @@ impl InfluxDb {
 
     async fn query(&self, influxql: &str) -> anyhow::Result<f64> {
         let base = format!("{}/query", self.config.url.trim_end_matches('/'));
-        let mut url = reqwest::Url::parse(&base)?;
+        let mut url = reqwest::Url::parse(&base)
+            .map_err(|_| Failure::new(Code::InvalidUrl, "InfluxDB query URL"))?;
         {
             let mut q = url.query_pairs_mut();
             q.append_pair("db", &self.config.database);
@@ -111,7 +119,11 @@ impl InfluxDb {
         }
         let http = req.send().await?.error_for_status()?;
         let resp: InfluxResp = crate::net::safe_fetch::read_json_capped(http).await?;
-        latest_value(&resp).ok_or_else(|| anyhow::anyhow!("query returned no value: {influxql}"))
+        if resp.error.is_some() || resp.results.iter().any(|result| result.error.is_some()) {
+            return Err(Failure::new(Code::QueryRejected, "InfluxDB query").into());
+        }
+        latest_value(&resp)
+            .ok_or_else(|| Failure::new(Code::QueryEmpty, "InfluxDB query result").into())
     }
 
     /// One poll: run every configured query and map each answer to a global
@@ -126,8 +138,8 @@ impl InfluxDb {
         let mut poll = Poll::none();
         let mut fields: Vec<(WeatherField, f64)> = Vec::new();
         let mut any_ok = false;
-        let mut failed = 0usize;
-        for q in &self.config.queries {
+        let mut failures = Vec::new();
+        for (index, q) in self.config.queries.iter().enumerate() {
             match self.query(&q.query).await {
                 Ok(raw) => {
                     any_ok = true;
@@ -151,18 +163,23 @@ impl InfluxDb {
                     }
                 }
                 Err(e) => {
-                    failed += 1;
+                    let failure = from_anyhow(&e, "InfluxDB query").with_item(index);
                     warn!(
                         source_id = %self.id,
-                        query = q.query,
-                        error = %e,
+                        query_index = index,
+                        error = %failure,
                         "InfluxDb query failed"
                     );
+                    failures.push(failure);
                 }
             }
         }
-        if failed > 0 && !any_ok {
-            anyhow::bail!("all {failed} queries failed");
+        if !failures.is_empty() {
+            let failure = Failure::batch("InfluxDB query batch", failures, any_ok);
+            if !any_ok {
+                return Err(failure.into());
+            }
+            poll = poll.with_failure(failure);
         }
         // Zone readings ride ahead of the global Observation, as they always
         // did; the loop publishes them in this order.

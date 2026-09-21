@@ -127,48 +127,89 @@ impl HttpGeneric {
         let url = format!("{}{}", self.base(), path);
         let (client, safe_url) = crate::net::safe_fetch::build_safe_client(&url, HTTP_TIMEOUT)
             .await
-            .map_err(|e| ControllerError::Init(e.to_string()))?;
+            .map_err(|e| {
+                ControllerError::init(crate::net::source_failure::from_safe(
+                    &e,
+                    "HTTP controller initialize request",
+                ))
+            })?;
         let mut req = client.get(safe_url);
         if let Some(token) = &self.config.bearer_token {
             req = req.bearer_auth(token);
         }
         let resp = req.send().await.map_err(|e| {
-            ControllerError::Transport(crate::net::reqwest_error_category(&e).to_string())
+            ControllerError::transport(crate::net::source_failure::from_reqwest(
+                &e,
+                "HTTP controller request",
+            ))
         })?;
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(ControllerError::AuthFailed);
+            return Err(ControllerError::http(
+                status.as_u16(),
+                None,
+                "HTTP controller authentication",
+            ));
         }
         if !status.is_success() {
             // Status only: never reflect the upstream body (operator-supplied
             // base_url -> SSRF exfil channel otherwise), matching sibling adapters.
-            return Err(ControllerError::Remote(format!("HTTP {status}")));
+            return Err(ControllerError::http(
+                status.as_u16(),
+                None,
+                "HTTP controller response",
+            ));
         }
         let body = crate::net::safe_fetch::read_body_capped(resp)
             .await
-            .map_err(|e| ControllerError::Transport(e.to_string()))?;
-        serde_json::from_slice(&body)
-            .map_err(|_| ControllerError::Remote("unexpected response shape".into()))
+            .map_err(|e| {
+                ControllerError::transport(crate::net::source_failure::from_safe(
+                    &e,
+                    "HTTP controller read response",
+                ))
+            })?;
+        serde_json::from_slice(&body).map_err(|e| {
+            ControllerError::remote(crate::net::source_failure::from_json(
+                &e,
+                "HTTP controller decode response",
+            ))
+        })
     }
 
     async fn post(&self, path: &str, body: serde_json::Value) -> Result<(), ControllerError> {
         let url = format!("{}{}", self.base(), path);
         let (client, safe_url) = crate::net::safe_fetch::build_safe_client(&url, HTTP_TIMEOUT)
             .await
-            .map_err(|e| ControllerError::Init(e.to_string()))?;
+            .map_err(|e| {
+                ControllerError::init(crate::net::source_failure::from_safe(
+                    &e,
+                    "HTTP controller initialize request",
+                ))
+            })?;
         let mut req = client.post(safe_url).json(&body);
         if let Some(token) = &self.config.bearer_token {
             req = req.bearer_auth(token);
         }
         let resp = req.send().await.map_err(|e| {
-            ControllerError::Transport(crate::net::reqwest_error_category(&e).to_string())
+            ControllerError::transport(crate::net::source_failure::from_reqwest(
+                &e,
+                "HTTP controller request",
+            ))
         })?;
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(ControllerError::AuthFailed);
+            return Err(ControllerError::http(
+                status.as_u16(),
+                None,
+                "HTTP controller authentication",
+            ));
         }
         if !status.is_success() {
-            return Err(ControllerError::Remote(format!("HTTP {status}")));
+            return Err(ControllerError::http(
+                status.as_u16(),
+                None,
+                "HTTP controller response",
+            ));
         }
         Ok(())
     }

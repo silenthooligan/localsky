@@ -27,8 +27,11 @@ pub mod agronomy;
 pub mod app;
 pub mod base;
 pub mod components;
+#[cfg(feature = "ssr")]
+pub mod diagnostics;
 pub mod docs;
 pub mod explain;
+pub mod failure;
 pub mod forecast;
 pub mod gates_catalog;
 pub mod history;

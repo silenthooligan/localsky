@@ -55,7 +55,12 @@ impl OpenaiCompatProvider {
         // reach a local provider). Same anti-SSRF hardening otherwise.
         crate::net::build_llm_probe_client(url, DEFAULT_TIMEOUT)
             .await
-            .map_err(|e| LlmError::Transport(e.to_string()))
+            .map_err(|e| {
+                LlmError::transport(crate::net::source_failure::from_safe(
+                    &e,
+                    "OpenAI-compatible provider initialize request",
+                ))
+            })
     }
 }
 
@@ -138,32 +143,56 @@ impl LlmProvider for OpenaiCompatProvider {
         if let Some(t) = opts.timeout_s {
             req = req.timeout(Duration::from_secs(t as u64));
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| LlmError::Transport(crate::net::reqwest_error_category(&e).to_string()))?;
+        let resp = req.send().await.map_err(|e| {
+            LlmError::transport(crate::net::source_failure::from_reqwest(
+                &e,
+                "OpenAI-compatible provider chat",
+            ))
+        })?;
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(LlmError::AuthFailed);
+            return Err(LlmError::http(
+                status.as_u16(),
+                Some(crate::net::source_failure::response_format(&resp)),
+                "OpenAI-compatible provider chat",
+            ));
         }
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(LlmError::RateLimited);
+            return Err(LlmError::http(
+                429,
+                Some(crate::net::source_failure::response_format(&resp)),
+                "OpenAI-compatible provider chat",
+            ));
         }
         if !status.is_success() {
             // Status only: don't reflect the upstream body (SSRF exfil
             // channel when the URL was steered to an unintended target).
-            return Err(LlmError::Remote(format!("HTTP {status}")));
+            return Err(LlmError::http(
+                status.as_u16(),
+                Some(crate::net::source_failure::response_format(&resp)),
+                "OpenAI-compatible provider chat",
+            ));
         }
-        let parsed: ChatResponse = resp
-            .json()
-            .await
-            .map_err(|e| LlmError::Parse(crate::net::reqwest_error_category(&e).to_string()))?;
+        let parsed: ChatResponse = resp.json().await.map_err(|e| {
+            LlmError::parse(crate::net::source_failure::from_reqwest(
+                &e,
+                "OpenAI-compatible provider chat",
+            ))
+        })?;
         parsed
             .choices
             .into_iter()
             .next()
             .and_then(|c| c.message.and_then(|m| m.content))
-            .ok_or_else(|| LlmError::Remote("empty choices/content".into()))
+            .ok_or_else(|| {
+                LlmError::remote(
+                    crate::failure::Failure::new(
+                        crate::failure::FailureCode::MissingField,
+                        "OpenAI-compatible provider chat response",
+                    )
+                    .with_field("message.content"),
+                )
+            })
     }
 
     async fn health(&self) -> Result<HealthReport, LlmError> {
@@ -174,20 +203,26 @@ impl LlmProvider for OpenaiCompatProvider {
         if let Some(key) = &self.api_key {
             req = req.bearer_auth(key);
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| LlmError::Transport(crate::net::reqwest_error_category(&e).to_string()))?;
+        let resp = req.send().await.map_err(|e| {
+            LlmError::transport(crate::net::source_failure::from_reqwest(
+                &e,
+                "OpenAI-compatible provider health",
+            ))
+        })?;
         let reachable = resp.status().is_success();
+        let diagnostic = (!reachable).then(|| {
+            crate::failure::FailureRecord::now(crate::failure::Failure::http(
+                resp.status().as_u16(),
+                Some(crate::net::source_failure::response_format(&resp)),
+                "OpenAI-compatible provider health",
+            ))
+        });
         Ok(HealthReport {
             reachable,
-            model_loaded: Some(self.model.clone()),
+            model_loaded: reachable.then(|| self.model.clone()),
             provider_version: None,
-            last_error: if reachable {
-                None
-            } else {
-                Some(format!("HTTP {}", resp.status()))
-            },
+            last_error: diagnostic.as_ref().map(|d| d.failure.to_string()),
+            diagnostic,
         })
     }
 }
@@ -195,6 +230,32 @@ impl LlmProvider for OpenaiCompatProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn provider_http_failure_keeps_status_and_does_not_expose_credentials() {
+        use wiremock::{matchers::any, Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(403).set_body_string("secret echoed credential"))
+            .mount(&server)
+            .await;
+        let provider = OpenaiCompatProvider::new(
+            "test",
+            server.uri(),
+            "model",
+            Some("secret request credential".into()),
+        );
+        let error = provider
+            .chat("system", "user", ChatOpts::default())
+            .await
+            .unwrap_err();
+        assert_eq!(error.diagnostic().http_status, Some(403));
+        assert!(!error.to_string().contains("secret"));
+        let health = provider.health().await.unwrap();
+        assert!(!health.reachable);
+        assert!(health.model_loaded.is_none());
+        assert_eq!(health.diagnostic.unwrap().failure.http_status, Some(403));
+    }
 
     #[test]
     fn url_trim_handles_trailing_slash() {

@@ -4,33 +4,29 @@
 // as `ClientError` so the advisor layer can degrade gracefully:
 // never panics, never blocks irrigation.
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ClientError {
+    #[error("LLM disabled by configuration")]
     Disabled,
-    Unreachable(String),
-    BadStatus(String),
-    Decode(String),
-    Empty,
+    #[error("{0}")]
+    Failed(#[source] Box<crate::failure::Failure>),
 }
-
-impl std::fmt::Display for ClientError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl ClientError {
+    pub fn diagnostic(&self) -> crate::failure::Failure {
         match self {
-            Self::Disabled => write!(f, "LLM disabled by env var"),
-            Self::Unreachable(s) => write!(f, "LLM upstream unreachable: {s}"),
-            Self::BadStatus(s) => write!(f, "LLM returned non-2xx: {s}"),
-            Self::Decode(s) => write!(f, "LLM response decode failed: {s}"),
-            Self::Empty => write!(f, "LLM returned empty content"),
+            Self::Failed(failure) => (**failure).clone(),
+            Self::Disabled => crate::failure::Failure::new(
+                crate::failure::FailureCode::ProviderOffline,
+                "LLM advisor disabled",
+            ),
         }
     }
 }
-
-impl std::error::Error for ClientError {}
 
 /// Minimal OpenAI-compatible request body. We only need messages +
 /// max_tokens + temperature; the rest of the OpenAI spec stays at the
@@ -187,75 +183,83 @@ impl LlmClient {
         if let Some(key) = &self.api_key {
             req = req.bearer_auth(key);
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| ClientError::Unreachable(e.to_string()))?;
+        let resp = req.send().await.map_err(|e| {
+            ClientError::Failed(Box::new(crate::diagnostics::from_error(
+                &e,
+                "LLM advisor chat request",
+            )))
+        })?;
         let status = resp.status();
         if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            return Err(ClientError::BadStatus(format!(
-                "{}, {}",
-                status,
-                truncate(&text, 240)
+            return Err(ClientError::Failed(Box::new(
+                crate::failure::Failure::http(
+                    status.as_u16(),
+                    Some(crate::net::source_failure::response_format(&resp)),
+                    "LLM advisor chat response",
+                ),
             )));
         }
-        let parsed: ChatResponse = resp
-            .json()
-            .await
-            .map_err(|e| ClientError::Decode(e.to_string()))?;
+        let parsed: ChatResponse = resp.json().await.map_err(|e| {
+            ClientError::Failed(Box::new(crate::diagnostics::from_error(
+                &e,
+                "LLM advisor chat decode",
+            )))
+        })?;
         let content = parsed
             .choices
             .into_iter()
             .next()
-            .ok_or(ClientError::Empty)?
+            .ok_or(ClientError::Failed(Box::new(
+                crate::failure::Failure::new(
+                    crate::failure::FailureCode::MissingField,
+                    "LLM advisor chat response",
+                )
+                .with_field("choices.message.content"),
+            )))?
             .message
             .content
             .trim()
             .to_string();
         if content.is_empty() {
-            return Err(ClientError::Empty);
+            return Err(ClientError::Failed(Box::new(
+                crate::failure::Failure::new(
+                    crate::failure::FailureCode::MissingField,
+                    "LLM advisor chat response",
+                )
+                .with_field("choices.message.content"),
+            )));
         }
         Ok(content)
     }
 }
 
-/// Byte-budgeted truncation that never splits a UTF-8 codepoint: when `max`
-/// lands mid-character, walk back to the nearest char boundary before slicing.
-/// The upstream error body this trims is arbitrary bytes-of-text (a proxy page,
-/// a JSON error with curly quotes), and `&s[..max]` on a non-boundary index
-/// panics inside the request task. Log-trimming only, so losing a few bytes to
-/// the boundary walk is fine. Mirrors `llm::advisor::truncate`.
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let mut cut = max;
-    while cut > 0 && !s.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    format!("{}…", &s[..cut])
-}
-
-/// Convenience: log a warning + map to anyhow for callers that prefer
-/// the unified anyhow error type. Used by advisor.rs.
+/// Retain the typed client error through callers using anyhow.
 pub fn map_err(e: ClientError) -> anyhow::Error {
-    anyhow!("llm client: {e}")
+    e.into()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::truncate;
-
-    #[test]
-    fn truncate_never_splits_a_multibyte_codepoint() {
-        // A degree sign straddling the byte budget must not panic the slice:
-        // "88°F and rising" cut at byte 3 lands mid-"°" and walks back.
-        let s = "88°F and rising";
-        assert_eq!(truncate(s, 3), "88…");
-        // On-boundary cut keeps the full prefix; short input is untouched.
-        assert_eq!(truncate(s, 4), "88°…");
-        assert_eq!(truncate(s, s.len()), s);
-        assert_eq!(truncate("abcdef", 3), "abc…");
+    #[tokio::test]
+    async fn advisor_rejection_preserves_status_without_response_secret() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(429).set_body_string("private upstream token"),
+            )
+            .mount(&server)
+            .await;
+        let client = super::LlmClient {
+            http: reqwest::Client::new(),
+            base_url: server.uri(),
+            model: "test".into(),
+            api_key: Some("private credential".into()),
+            disabled: false,
+        };
+        let error = client.chat("system", "user", None, None).await.unwrap_err();
+        let failure = error.diagnostic();
+        assert_eq!(failure.http_status, Some(429));
+        assert_eq!(failure.operation, "LLM advisor chat response");
+        assert!(!error.to_string().contains("private"));
     }
 }

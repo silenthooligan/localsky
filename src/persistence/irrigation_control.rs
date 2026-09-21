@@ -18,7 +18,7 @@ use tokio::sync::Mutex;
 #[derive(Debug, Error)]
 pub enum IrrigationControlError {
     #[error("sqlite: {0}")]
-    Sqlite(String),
+    Sqlite(#[source] Box<crate::failure::Failure>),
 }
 
 /// Resolve the stored one-day override against today's local date.
@@ -183,8 +183,12 @@ impl IrrigationControlStore {
                 is_paused,
                 is_dry_run,
             }),
-            Ok(Err(e)) => Err(IrrigationControlError::Sqlite(e.to_string())),
-            Err(e) => Err(IrrigationControlError::Sqlite(format!("join: {e}"))),
+            Ok(Err(e)) => Err(IrrigationControlError::Sqlite(Box::new(
+                crate::diagnostics::from_error(&e, "irrigation_control.try_get_on"),
+            ))),
+            Err(e) => Err(IrrigationControlError::Sqlite(Box::new(
+                crate::diagnostics::from_error(&e, "irrigation_control.try_get_on"),
+            ))),
         }
     }
 
@@ -205,8 +209,18 @@ impl IrrigationControlStore {
             Ok(())
         })
         .await
-        .map_err(|e| IrrigationControlError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| IrrigationControlError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            IrrigationControlError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "irrigation_control.set_pause_until",
+            )))
+        })?
+        .map_err(|e| {
+            IrrigationControlError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "irrigation_control.set_pause_until",
+            )))
+        })
     }
 
     /// Set the one-day override for tomorrow. Caller validates the mode is
@@ -241,8 +255,18 @@ impl IrrigationControlStore {
             Ok(())
         })
         .await
-        .map_err(|e| IrrigationControlError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| IrrigationControlError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            IrrigationControlError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "irrigation_control.set_override_tomorrow_on",
+            )))
+        })?
+        .map_err(|e| {
+            IrrigationControlError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "irrigation_control.set_override_tomorrow_on",
+            )))
+        })
     }
 
     /// Set the indefinite vacation pause (M0017). The native home of
@@ -275,8 +299,18 @@ impl IrrigationControlStore {
             Ok(())
         })
         .await
-        .map_err(|e| IrrigationControlError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| IrrigationControlError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            IrrigationControlError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "irrigation_control.set_flag",
+            )))
+        })?
+        .map_err(|e| {
+            IrrigationControlError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "irrigation_control.set_flag",
+            )))
+        })
     }
 
     /// Force everything written above onto stable storage.
@@ -292,37 +326,49 @@ impl IrrigationControlStore {
     /// pass, between the control writes and the config marker.
     pub async fn flush_durable(&self) -> Result<(), IrrigationControlError> {
         let c = self.conn.clone();
-        tokio::task::spawn_blocking(move || -> Result<(), String> {
+        tokio::task::spawn_blocking(move || -> Result<(), Box<crate::failure::Failure>> {
             let conn = c.blocking_lock();
+            let classify = |error: rusqlite::Error, operation| {
+                Box::new(crate::diagnostics::from_sqlite(&error, operation))
+            };
             let mode: String = conn
                 .query_row("PRAGMA journal_mode", [], |r| r.get(0))
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| classify(e, "irrigation control read journal mode"))?;
             if !mode.eq_ignore_ascii_case("wal") {
-                // A rollback-journal or in-memory database has no WAL to
-                // checkpoint, and its commits are already as durable as they
-                // are going to get.
                 return Ok(());
             }
-            // FULL rather than TRUNCATE: TRUNCATE fails SQLITE_BUSY while any
-            // other handle holds a read lock on the WAL, and the second
-            // history handle is exactly that. FULL still syncs the WAL and the
-            // database file, and waits out a reader through the connection's
-            // busy timeout.
-            conn.pragma_update(None, "synchronous", "FULL").ok();
-            let busy = conn.query_row("PRAGMA wal_checkpoint(FULL)", [], |r| r.get::<_, i64>(0));
-            conn.pragma_update(None, "synchronous", "NORMAL").ok();
-            match busy {
-                // Column 0 is the busy flag: non-zero means the checkpoint
-                // could not finish, so the pages are not known to be on disk
-                // and the caller must NOT write its marker yet.
-                Ok(0) => Ok(()),
-                Ok(_) => Err("wal checkpoint did not complete".to_string()),
-                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(()),
-                Err(e) => Err(e.to_string()),
+            conn.pragma_update(None, "synchronous", "FULL")
+                .map_err(|e| classify(e, "irrigation control enable durable checkpoint"))?;
+            let checkpoint =
+                match conn.query_row("PRAGMA wal_checkpoint(FULL)", [], |r| r.get::<_, i64>(0)) {
+                    Ok(0) | Err(rusqlite::Error::QueryReturnedNoRows) => Ok(()),
+                    Ok(_) => Err(Box::new(crate::failure::Failure::new(
+                        crate::failure::FailureCode::CheckpointBusy,
+                        "irrigation control flush checkpoint",
+                    ))),
+                    Err(e) => Err(classify(e, "irrigation control flush checkpoint")),
+                };
+            // Restore the connection policy even when the checkpoint failed.
+            let restore = conn
+                .pragma_update(None, "synchronous", "NORMAL")
+                .map_err(|e| classify(e, "irrigation control restore sync policy"));
+            match (checkpoint, restore) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Err(first), Err(second)) => Err(Box::new(crate::failure::Failure::batch(
+                    "irrigation control durable flush",
+                    vec![*first, *second],
+                    false,
+                ))),
+                (Err(error), _) | (_, Err(error)) => Err(error),
             }
         })
         .await
-        .map_err(|e| IrrigationControlError::Sqlite(format!("join: {e}")))?
+        .map_err(|e| {
+            IrrigationControlError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "irrigation_control.flush_durable",
+            )))
+        })?
         .map_err(IrrigationControlError::Sqlite)
     }
 
@@ -342,8 +388,18 @@ impl IrrigationControlStore {
             Ok(())
         })
         .await
-        .map_err(|e| IrrigationControlError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| IrrigationControlError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            IrrigationControlError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "irrigation_control.set_global_override",
+            )))
+        })?
+        .map_err(|e| {
+            IrrigationControlError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "irrigation_control.set_global_override",
+            )))
+        })
     }
 
     /// All per-zone sticky overrides as slug -> mode. Zones absent here are
@@ -406,8 +462,18 @@ impl IrrigationControlStore {
             Ok(())
         })
         .await
-        .map_err(|e| IrrigationControlError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| IrrigationControlError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            IrrigationControlError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "irrigation_control.set_zone_override",
+            )))
+        })?
+        .map_err(|e| {
+            IrrigationControlError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "irrigation_control.set_zone_override",
+            )))
+        })
     }
 }
 
@@ -499,7 +565,7 @@ mod tests {
             .await
             .expect_err("a checkpoint that could not finish must not report success");
         assert!(
-            format!("{err}").contains("wal checkpoint did not complete"),
+            format!("{err}").contains("LS_STORAGE_CHECKPOINT_BUSY"),
             "a busy checkpoint has to surface as an error, got {err}"
         );
 

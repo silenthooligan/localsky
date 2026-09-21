@@ -308,10 +308,14 @@ impl Rachio {
         self.note_rate_limit(resp);
         let status = resp.status();
         if status.as_u16() == 401 || status.as_u16() == 403 {
-            return Err(ControllerError::AuthFailed);
+            return Err(ControllerError::http(
+                status.as_u16(),
+                None,
+                "Rachio authentication",
+            ));
         }
         if status.as_u16() == 429 {
-            return Err(ControllerError::RateLimited);
+            return Err(ControllerError::http(429, None, "Rachio request"));
         }
         Ok(())
     }
@@ -330,13 +334,19 @@ impl Rachio {
             .send()
             .await
             .map_err(|e| {
-                ControllerError::Transport(crate::net::reqwest_error_category(&e).to_string())
+                ControllerError::transport(crate::net::source_failure::from_reqwest(
+                    &e,
+                    "Rachio request",
+                ))
             })?;
         self.check_response(&resp)?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ControllerError::Remote(format!("HTTP {status}: {body}")));
+            return Err(ControllerError::http(
+                status.as_u16(),
+                None,
+                "Rachio response",
+            ));
         }
         Ok(resp)
     }
@@ -344,7 +354,13 @@ impl Rachio {
     async fn get_json(&self, path: &str) -> Result<Value, ControllerError> {
         match self.get_json_opt(path).await? {
             Some(v) => Ok(v),
-            None => Err(ControllerError::Remote("empty response body".into())),
+            None => Err(ControllerError::remote(
+                crate::failure::Failure::new(
+                    crate::failure::FailureCode::MissingField,
+                    "Rachio decode response",
+                )
+                .with_field("body"),
+            )),
         }
     }
 
@@ -360,24 +376,35 @@ impl Rachio {
             .send()
             .await
             .map_err(|e| {
-                ControllerError::Transport(crate::net::reqwest_error_category(&e).to_string())
+                ControllerError::transport(crate::net::source_failure::from_reqwest(
+                    &e,
+                    "Rachio request",
+                ))
             })?;
         self.check_response(&resp)?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ControllerError::Remote(format!("HTTP {status}: {body}")));
+            return Err(ControllerError::http(
+                status.as_u16(),
+                None,
+                "Rachio response",
+            ));
         }
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| ControllerError::Remote(format!("read body: {e}")))?;
+        let text = resp.text().await.map_err(|e| {
+            ControllerError::transport(crate::net::source_failure::from_reqwest(
+                &e,
+                "Rachio read response",
+            ))
+        })?;
         if text.trim().is_empty() {
             return Ok(None);
         }
-        serde_json::from_str(&text)
-            .map(Some)
-            .map_err(|e| ControllerError::Remote(format!("invalid json: {e}")))
+        serde_json::from_str(&text).map(Some).map_err(|e| {
+            ControllerError::remote(crate::net::source_failure::from_json(
+                &e,
+                "Rachio decode JSON",
+            ))
+        })
     }
 
     /// Resolve the account's device from just the api_token:
@@ -386,8 +413,11 @@ impl Rachio {
     /// result, it is never written into config silently.
     pub async fn resolve_device_id(&self) -> Result<RachioDeviceSummary, ControllerError> {
         let info = self.get_json("/person/info").await?;
-        let person: RachioPersonInfo = serde_json::from_value(info)
-            .map_err(|_| ControllerError::Remote("person/info response had no id".into()))?;
+        let person: RachioPersonInfo = serde_json::from_value(info).map_err(|e| {
+            ControllerError::remote(
+                crate::net::source_failure::from_json(&e, "Rachio resolve person").with_field("id"),
+            )
+        })?;
         let full = self.get_json(&format!("/person/{}", person.id)).await?;
         let devices = full
             .get("devices")
@@ -395,12 +425,20 @@ impl Rachio {
             .cloned()
             .unwrap_or_default();
         let Some(first) = devices.first() else {
-            return Err(ControllerError::Remote("no devices on this account".into()));
+            return Err(ControllerError::remote(crate::failure::Failure::new(
+                crate::failure::FailureCode::DeviceMissing,
+                "Rachio resolve device",
+            )));
         };
-        let device_id = first
-            .get("id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ControllerError::Remote("device entry had no id".into()))?;
+        let device_id = first.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
+            ControllerError::remote(
+                crate::failure::Failure::new(
+                    crate::failure::FailureCode::MissingField,
+                    "Rachio resolve device",
+                )
+                .with_field("devices[].id"),
+            )
+        })?;
         Ok(RachioDeviceSummary {
             device_id: device_id.to_string(),
             name: first
@@ -849,6 +887,26 @@ mod tests {
     /// untestable. Mount the FULL path behind a base that carries its own
     /// segment, the shape production actually uses.
     #[tokio::test]
+    async fn upstream_failure_preserves_status_without_reflecting_secret_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/zone/start"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("private upstream credential"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let controller = Rachio::new("rachio", cfg_at(&server.uri())).unwrap();
+        let error = controller.run_zone("front", 60).await.unwrap_err();
+        let failure = error.diagnostic();
+        assert_eq!(failure.http_status, Some(503));
+        assert_eq!(failure.code, crate::failure::FailureCode::HttpServer);
+        assert!(!error.to_string().contains("private upstream credential"));
+        assert!(!serde_json::to_string(&failure)
+            .unwrap()
+            .contains(&server.uri()));
+    }
+
+    #[tokio::test]
     async fn requests_join_onto_a_base_that_carries_a_path_segment() {
         let server = MockServer::start().await;
         let base = format!("{}/1/public", server.uri());
@@ -1072,7 +1130,7 @@ mod tests {
         let r = Rachio::new("rachio", cfg_at(&server.uri())).unwrap();
         assert!(matches!(
             r.run_zone("front", 300).await,
-            Err(ControllerError::RateLimited)
+            Err(ControllerError::RateLimited(_))
         ));
         assert_eq!(r.last_rate_limit_remaining().as_deref(), Some("0"));
     }
@@ -1103,7 +1161,7 @@ mod tests {
         assert_eq!(r.last_rate_limit_remaining().as_deref(), Some("540"));
         assert!(matches!(
             r.run_zone("front", 300).await,
-            Err(ControllerError::RateLimited)
+            Err(ControllerError::RateLimited(_))
         ));
         assert_eq!(
             r.last_rate_limit_remaining(),
@@ -1123,7 +1181,7 @@ mod tests {
         let r = Rachio::new("rachio", cfg_at(&server.uri())).unwrap();
         assert!(matches!(
             r.discover_zones().await,
-            Err(ControllerError::AuthFailed)
+            Err(ControllerError::AuthFailed(_))
         ));
     }
 

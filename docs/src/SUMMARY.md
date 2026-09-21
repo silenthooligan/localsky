@@ -62,6 +62,7 @@
 # Help
 
 - [Troubleshooting](troubleshooting.md)
+- [Source error codes](source-errors.md)
 - [FAQ](faq.md)
 
 # Reference

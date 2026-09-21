@@ -18,7 +18,7 @@ use tokio::sync::Mutex;
 #[derive(Debug, Error)]
 pub enum RunsError {
     #[error("sqlite: {0}")]
-    Sqlite(String),
+    Sqlite(#[source] Box<crate::failure::Failure>),
     #[error("not found: id={0}")]
     NotFound(i64),
 }
@@ -153,8 +153,18 @@ impl RunsStore {
             Ok(conn.last_insert_rowid())
         })
         .await
-        .map_err(|e| RunsError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| RunsError::Sqlite(e.to_string()))?;
+        .map_err(|e| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "runs.insert_aborted",
+            )))
+        })?
+        .map_err(|e| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "runs.insert_aborted",
+            )))
+        })?;
         Ok(id)
     }
 
@@ -197,8 +207,18 @@ impl RunsStore {
             Ok(conn.last_insert_rowid())
         })
         .await
-        .map_err(|e| RunsError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| RunsError::Sqlite(e.to_string()))?;
+        .map_err(|e| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "runs.insert_completed",
+            )))
+        })?
+        .map_err(|e| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "runs.insert_completed",
+            )))
+        })?;
         Ok(id)
     }
 
@@ -236,8 +256,18 @@ impl RunsStore {
             Ok(conn.last_insert_rowid())
         })
         .await
-        .map_err(|e| RunsError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| RunsError::Sqlite(e.to_string()))?;
+        .map_err(|e| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "runs.insert_with_status",
+            )))
+        })?
+        .map_err(|e| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "runs.insert_with_status",
+            )))
+        })?;
         Ok(id)
     }
 
@@ -296,8 +326,18 @@ impl RunsStore {
             Ok(changed > 0)
         })
         .await
-        .map_err(|e| RunsError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| RunsError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "runs.abort_dispatched_segment_at_restart",
+            )))
+        })?
+        .map_err(|e| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "runs.abort_dispatched_segment_at_restart",
+            )))
+        })
     }
 
     async fn update_status(
@@ -322,8 +362,18 @@ impl RunsStore {
             )
         })
         .await
-        .map_err(|e| RunsError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| RunsError::Sqlite(e.to_string()))?;
+        .map_err(|e| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "runs.update_status",
+            )))
+        })?
+        .map_err(|e| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "runs.update_status",
+            )))
+        })?;
         if changed == 0 {
             return Err(RunsError::NotFound(id));
         }
@@ -358,8 +408,18 @@ impl RunsStore {
             Ok(rows)
         })
         .await
-        .map_err(|e| RunsError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| RunsError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "runs.in_flight",
+            )))
+        })?
+        .map_err(|e| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "runs.in_flight",
+            )))
+        })
     }
 
     /// Truncate any OPEN prewritten LocalSky run row for `zone_slug` at `now_epoch`.
@@ -395,8 +455,18 @@ impl RunsStore {
             )
         })
         .await
-        .map_err(|e| RunsError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| RunsError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "runs.truncate_active",
+            )))
+        })?
+        .map_err(|e| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "runs.truncate_active",
+            )))
+        })
     }
 
     /// [`Self::truncate_active`] across every zone OF ONE CONTROLLER: the
@@ -430,8 +500,18 @@ impl RunsStore {
             )
         })
         .await
-        .map_err(|e| RunsError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| RunsError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "runs.truncate_active_for_controller",
+            )))
+        })?
+        .map_err(|e| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "runs.truncate_active_for_controller",
+            )))
+        })
     }
 
     /// [`Self::truncate_active`] across every zone (the StopAll path).
@@ -456,8 +536,18 @@ impl RunsStore {
             )
         })
         .await
-        .map_err(|e| RunsError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| RunsError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "runs.truncate_active_all",
+            )))
+        })?
+        .map_err(|e| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "runs.truncate_active_all",
+            )))
+        })
     }
 
     /// All runs in [from_epoch, to_epoch). Used by the Gantt history.
@@ -506,8 +596,18 @@ impl RunsStore {
             Ok(())
         })
         .await
-        .map_err(|e| RunsError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| RunsError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "runs.insert_observed",
+            )))
+        })?
+        .map_err(|e| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "runs.insert_observed",
+            )))
+        })
     }
 
     /// Drop runs that started before `cutoff_epoch`. Only called when
@@ -527,8 +627,18 @@ impl RunsStore {
             )
         })
         .await
-        .map_err(|e| RunsError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| RunsError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "runs.prune_older_than",
+            )))
+        })?
+        .map_err(|e| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(
+                &e,
+                "runs.prune_older_than",
+            )))
+        })
     }
 
     pub async fn window(&self, from_epoch: i64, to_epoch: i64) -> Result<Vec<RunRow>, RunsError> {
@@ -548,8 +658,10 @@ impl RunsStore {
             Ok(rows)
         })
         .await
-        .map_err(|e| RunsError::Sqlite(format!("join: {e}")))?
-        .map_err(|e| RunsError::Sqlite(e.to_string()))
+        .map_err(|e| {
+            RunsError::Sqlite(Box::new(crate::diagnostics::from_error(&e, "runs.window")))
+        })?
+        .map_err(|e| RunsError::Sqlite(Box::new(crate::diagnostics::from_error(&e, "runs.window"))))
     }
 }
 

@@ -20,3 +20,14 @@
 .u-touch-row { display: flex; gap: var(--space-2); align-items: center; min-height: 44px; }
 .u-touch-row-top { display: flex; gap: var(--space-2); align-items: flex-start; min-height: 44px; }
 .u-wrap-row { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+
+// Diagnostic detail stays collapsed until requested; long codes never widen a card.
+.diagnostic-details {
+  min-width: 0;
+  max-width: 100%;
+  grid-column: 1 / -1;
+  font-size: 0.8125rem;
+  text-align: left;
+  summary { cursor: pointer; padding-block: 0.4rem; overflow-wrap: anywhere; }
+  pre { max-height: 20rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 0.75rem; }
+}

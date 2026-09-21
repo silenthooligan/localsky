@@ -27,13 +27,17 @@ pub fn RunningBanner(snap: ReadSignal<IrrigationSnapshot>) -> impl IntoView {
     // resolve from.
     let toast = crate::components::ui::use_toast();
     let stop_done = super::controls::toast_on_err("Stop failed; zone may still be running");
-    let note_done = Callback::new(move |result: Result<Option<String>, String>| match result {
-        // A controller with no per-zone stop reports the real scope (the
-        // whole device stopped); relay it.
-        Ok(Some(note)) => toast.info(note),
-        Ok(None) => {}
-        Err(e) => stop_done.run(Err(e)),
-    });
+    let note_done = Callback::new(
+        move |result: Result<Option<String>, crate::components::request_error::RequestError>| {
+            match result {
+                // A controller with no per-zone stop reports the real scope (the
+                // whole device stopped); relay it.
+                Ok(Some(note)) => toast.info(note),
+                Ok(None) => {}
+                Err(e) => stop_done.run(Err(e)),
+            }
+        },
+    );
     move || {
         let s = snap.get();
         let running: Vec<_> = s

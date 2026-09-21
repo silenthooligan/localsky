@@ -61,7 +61,7 @@ fn create_copy(candidate: &Candidate, to: &Path) -> io::Result<String> {
         if digest(to)? == expected {
             return Ok(expected);
         }
-        return Err(io::Error::other(
+        return Err(super::invariant(
             "restore recovery copy already exists with different bytes",
         ));
     }
@@ -88,7 +88,7 @@ fn create_copy(candidate: &Candidate, to: &Path) -> io::Result<String> {
     }
     output.sync_all()?;
     if digest(&temporary)? != expected {
-        return Err(io::Error::other(
+        return Err(super::invariant(
             "restore source changed while being preserved",
         ));
     }
@@ -115,7 +115,7 @@ fn interruption_point() -> io::Result<()> {
     match CRASH_AFTER.get() {
         Some(0) => {
             CRASH_AFTER.set(None);
-            Err(io::Error::other("simulated process interruption"))
+            Err(super::invariant("simulated process interruption"))
         }
         Some(n) => {
             CRASH_AFTER.set(Some(n - 1));
@@ -141,19 +141,19 @@ impl FileSet {
                     &before_path(&target, transaction),
                 )?;
                 if before.as_ref() != Some(&copied) {
-                    return Err(io::Error::other(
+                    return Err(super::invariant(
                         "restore target changed during preparation",
                     ));
                 }
             } else if exists(&before_path(&target, transaction))? {
-                return Err(io::Error::other("unexpected prior restore recovery file"));
+                return Err(super::invariant("unexpected prior restore recovery file"));
             }
             let after = candidate
                 .as_ref()
                 .map(|c| create_copy(c, &after_path(&target, transaction)))
                 .transpose()?;
             if candidate.is_none() && exists(&after_path(&target, transaction))? {
-                return Err(io::Error::other("unexpected restore payload file"));
+                return Err(super::invariant("unexpected restore payload file"));
             }
             entries.push(Entry {
                 target,
@@ -176,7 +176,7 @@ impl FileSet {
                 .zip(targets)
                 .any(|(e, p)| &e.target != p)
         {
-            return Err(io::Error::other(
+            return Err(super::invariant(
                 "restore journal has mismatched paths or transaction",
             ));
         }
@@ -199,14 +199,11 @@ impl FileSet {
             if hash_if_present(&before_path(&entry.target, &self.transaction))? != entry.before
                 || hash_if_present(&after_path(&entry.target, &self.transaction))? != entry.after
             {
-                return Err(io::Error::other("restore recovery copy digest mismatch"));
+                return Err(super::invariant("restore recovery copy digest mismatch"));
             }
             let actual = hash_if_present(&entry.target)?;
             if actual != entry.before && actual != entry.after {
-                return Err(io::Error::other(format!(
-                    "unexpected bytes at restore target: {}",
-                    entry.target.display()
-                )));
+                return Err(super::invariant("unexpected bytes at restore target"));
             }
         }
         Ok(())

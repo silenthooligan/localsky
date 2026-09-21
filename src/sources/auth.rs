@@ -48,6 +48,53 @@ impl TokenCache {
     }
 }
 
+/// Retain both attempts without changing controller error routing (401/429).
+pub trait ReauthError: Sized {
+    fn diagnostic(&self) -> crate::failure::Failure;
+    fn after_rejection(self, rejected: Self) -> Self;
+}
+
+impl ReauthError for anyhow::Error {
+    fn diagnostic(&self) -> crate::failure::Failure {
+        crate::diagnostics::from_anyhow(self, "token authenticated request")
+    }
+    fn after_rejection(self, rejected: Self) -> Self {
+        crate::failure::Failure::attempts(
+            "token renewal and retry",
+            vec![rejected.diagnostic(), self.diagnostic()],
+        )
+        .into()
+    }
+}
+
+impl ReauthError for crate::ports::irrigation_controller::ControllerError {
+    fn diagnostic(&self) -> crate::failure::Failure {
+        self.diagnostic()
+    }
+    fn after_rejection(mut self, rejected: Self) -> Self {
+        use crate::ports::irrigation_controller::ControllerError::*;
+        match &mut self {
+            Remote(f) | Transport(f) | Init(f) | AuthFailed(f) | RateLimited(f) => {
+                f.causes.insert(0, rejected.diagnostic())
+            }
+            _ => {
+                tracing::warn!(failure = %rejected.diagnostic(), "authentication rejected before controller retry")
+            }
+        }
+        self
+    }
+}
+
+#[cfg(test)]
+impl ReauthError for &'static str {
+    fn diagnostic(&self) -> crate::failure::Failure {
+        crate::failure::Failure::http(401, None, "test token")
+    }
+    fn after_rejection(self, _: Self) -> Self {
+        self
+    }
+}
+
 /// Run `call` with the cached token; when it reports the token was
 /// rejected, invalidate, re-authenticate and run it once more. `rejected`
 /// decides which errors mean "the token is bad" (a 401, usually) rather
@@ -59,6 +106,7 @@ pub async fn with_reauth<T, E, Auth, AuthFut, Call, CallFut>(
     mut call: Call,
 ) -> Result<T, E>
 where
+    E: ReauthError,
     Auth: Fn() -> AuthFut,
     AuthFut: Future<Output = Result<String, E>>,
     Call: FnMut(String) -> CallFut,
@@ -68,8 +116,18 @@ where
     match call(token).await {
         Err(e) if rejected(&e) => {
             cache.invalidate().await;
-            let token = cache.get_or_fetch(&auth).await?;
-            call(token).await
+            tracing::warn!(failure = %e.diagnostic(), "token rejected; renewing once");
+            let result = match cache.get_or_fetch(&auth).await {
+                Ok(token) => call(token).await,
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(value) => {
+                    tracing::info!(recovered = true, "token renewal recovered the request");
+                    Ok(value)
+                }
+                Err(error) => Err(error.after_rejection(e)),
+            }
         }
         other => other,
     }
@@ -143,5 +201,26 @@ mod tests {
         assert_eq!(out, Err("timeout"));
         assert_eq!(logins.load(Ordering::SeqCst), 0, "no re-login on an outage");
         assert_eq!(cache.peek().await.as_deref(), Some("good"));
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    #[tokio::test]
+    async fn failed_renewal_retains_original_rejection_and_new_cause() {
+        let cache = TokenCache::new();
+        cache.set("expired".into()).await;
+        let result: anyhow::Result<()> = with_reauth(
+            &cache,
+            || async { Err(crate::failure::Failure::http(503, None, "login").into()) },
+            |_| true,
+            |_| async { Err(crate::failure::Failure::http(401, None, "device read").into()) },
+        )
+        .await;
+        let failure = crate::diagnostics::from_anyhow(&result.unwrap_err(), "poll");
+        assert_eq!(failure.causes.len(), 2);
+        assert_eq!(failure.causes[0].http_status, Some(401));
+        assert_eq!(failure.causes[1].http_status, Some(503));
     }
 }

@@ -283,8 +283,9 @@ impl<'a> Dispatcher<'a> {
                 Ok(id) => Some(id),
                 Err(e) => {
                     return RunOutcome::Failed {
-                        error: ControllerError::Init(format!(
-                            "cannot journal watering command: {e}"
+                        error: ControllerError::init(crate::diagnostics::from_error(
+                            &e,
+                            "irrigation journal command",
                         )),
                         deadline_armed: false,
                     }

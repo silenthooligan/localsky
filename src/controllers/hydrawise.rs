@@ -113,25 +113,33 @@ impl Hydrawise {
             // would leak the account key into the /irrigation/action JSON error
             // body and the warn logs. (Same guard rainbird/http_generic use.)
             .map_err(|e| {
-                ControllerError::Transport(format!(
-                    "hydrawise GET failed: {}",
-                    crate::net::reqwest_error_category(&e)
+                ControllerError::transport(crate::net::source_failure::from_reqwest(
+                    &e,
+                    "Hydrawise request",
                 ))
             })?;
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(ControllerError::AuthFailed);
+            return Err(ControllerError::http(
+                status.as_u16(),
+                None,
+                "Hydrawise authentication",
+            ));
         }
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(ControllerError::RateLimited);
+            return Err(ControllerError::http(429, None, "Hydrawise request"));
         }
         if !status.is_success() {
-            return Err(ControllerError::Remote(format!("hydrawise {status}")));
+            return Err(ControllerError::http(
+                status.as_u16(),
+                None,
+                "Hydrawise response",
+            ));
         }
         let v: Value = resp.json().await.map_err(|e| {
-            ControllerError::Transport(format!(
-                "hydrawise decode failed: {}",
-                crate::net::reqwest_error_category(&e)
+            ControllerError::transport(crate::net::source_failure::from_reqwest(
+                &e,
+                "Hydrawise decode response",
             ))
         })?;
         // Hydrawise returns 200 OK with {"message":"error blah"} for
@@ -143,7 +151,13 @@ impl Hydrawise {
                 && v.get("relays").is_none()
                 && msg.to_lowercase().contains("error")
             {
-                return Err(ControllerError::Remote(msg.to_string()));
+                return Err(ControllerError::remote(
+                    crate::failure::Failure::new(
+                        crate::failure::FailureCode::ProviderRejected,
+                        "Hydrawise application response",
+                    )
+                    .with_field("message"),
+                ));
             }
         }
         Ok(v)
@@ -228,8 +242,13 @@ impl IrrigationController for Hydrawise {
         );
         match self.get_json(url).await {
             Ok(v) => {
-                let resp: StatusScheduleResponse = serde_json::from_value(v.clone())
-                    .map_err(|e| ControllerError::Remote(format!("statusschedule decode: {e}")))?;
+                let resp: StatusScheduleResponse =
+                    serde_json::from_value(v.clone()).map_err(|e| {
+                        ControllerError::remote(crate::net::source_failure::from_json(
+                            &e,
+                            "Hydrawise decode statusschedule",
+                        ))
+                    })?;
                 let zone_states: Vec<ZoneRuntimeStatus> = resp
                     .relays
                     .iter()

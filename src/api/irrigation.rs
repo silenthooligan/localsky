@@ -255,7 +255,7 @@ async fn soil_invite(State(st): State<SoilInviteApiState>) -> impl IntoResponse 
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
+            Json(operation_error(&e, "irrigation.soil_invite")),
         ),
     }
 }
@@ -304,7 +304,7 @@ async fn soil_invite_dismiss(
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
+            Json(operation_error(&e, "irrigation.soil_invite_dismiss")),
         ),
     }
 }
@@ -386,7 +386,7 @@ async fn tuning_dismiss(
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
+            Json(operation_error(&e, "irrigation.tuning_dismiss")),
         ),
     }
 }
@@ -409,7 +409,7 @@ async fn tuning_undismiss(
         Ok(removed) => (StatusCode::OK, Json(json!({ "removed": removed }))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
+            Json(operation_error(&e, "irrigation.tuning_undismiss")),
         ),
     }
 }
@@ -438,7 +438,7 @@ async fn tuning_report(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
+            Json(operation_error(&e, "irrigation.tuning_report")),
         ),
     }
 }
@@ -473,6 +473,8 @@ struct AdvisorEnvelope<T: Serialize> {
     /// tile can render the right "advisor offline" copy.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostic: Option<Box<crate::failure::FailureRecord>>,
 }
 
 impl<T: Serialize> AdvisorEnvelope<T> {
@@ -481,17 +483,19 @@ impl<T: Serialize> AdvisorEnvelope<T> {
             status: "ok",
             data: Some(data),
             error: None,
+            diagnostic: None,
         }
     }
     fn from_err(e: AdvisorError) -> Self {
-        let (status, error) = match e {
-            AdvisorError::Disabled => ("disabled", "disabled"),
-            AdvisorError::Offline => ("offline", "offline"),
+        let (status, error, diagnostic) = match e {
+            AdvisorError::Disabled => ("disabled", "disabled", None),
+            AdvisorError::Offline(record) => ("offline", "offline", Some(record)),
         };
         Self {
             status,
             data: None,
             error: Some(error),
+            diagnostic,
         }
     }
 }
@@ -881,7 +885,7 @@ async fn control_toggle_action(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
+            Json(operation_error(&e, "irrigation.control_toggle_action")),
         ),
     }
 }
@@ -988,6 +992,24 @@ fn route_via_registry(source: SnapshotSource, has_default_controller: bool) -> b
     source == SnapshotSource::Native || has_default_controller
 }
 
+/// Safe error payload shared by history, control and tuning boundaries.
+fn operation_error(error: &(dyn std::error::Error + 'static), operation: &'static str) -> Value {
+    let failure = crate::diagnostics::from_error(error, operation);
+    tracing::error!(%failure, operation, "irrigation API operation failed");
+    json!({ "error": failure.message, "diagnostic": crate::failure::FailureRecord::now(failure) })
+}
+
+fn controller_context(
+    mut response: (StatusCode, Json<Value>),
+    controller: &str,
+    zone: &str,
+) -> (StatusCode, Json<Value>) {
+    response.1 .0["controller_id"] = json!(controller);
+    response.1 .0["zone"] = json!(zone);
+    tracing::warn!(controller, zone, diagnostic = %response.1.0["diagnostic"], "controller action failed");
+    response
+}
+
 /// Map a ControllerError to an HTTP response for the action endpoint.
 ///
 /// Every failure except an unknown zone and an unsupported operation used
@@ -1019,8 +1041,8 @@ fn controller_error_response(
         ControllerError::Held(_) => StatusCode::SERVICE_UNAVAILABLE,
         ControllerError::ZoneUnknown(_) => StatusCode::BAD_REQUEST,
         ControllerError::Unsupported(_) => StatusCode::NOT_IMPLEMENTED,
-        ControllerError::AuthFailed => StatusCode::FAILED_DEPENDENCY,
-        ControllerError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+        ControllerError::AuthFailed(_) => StatusCode::FAILED_DEPENDENCY,
+        ControllerError::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
         ControllerError::Offline
         | ControllerError::Remote(_)
         | ControllerError::Transport(_)
@@ -1033,8 +1055,8 @@ fn controller_error_response(
         ControllerError::Held(_) => "watering_held",
         ControllerError::ZoneUnknown(_) => "zone_unknown",
         ControllerError::Unsupported(_) => "controller_unsupported",
-        ControllerError::AuthFailed => "controller_auth_failed",
-        ControllerError::RateLimited => "controller_rate_limited",
+        ControllerError::AuthFailed(_) => "controller_auth_failed",
+        ControllerError::RateLimited(_) => "controller_rate_limited",
         ControllerError::Offline
         | ControllerError::Remote(_)
         | ControllerError::Transport(_)
@@ -1049,7 +1071,9 @@ fn controller_error_response(
         }
         other => other.to_string(),
     };
-    let mut body = json!({ "error": message, "code": code });
+    let mut body = json!({ "error": message, "code": code,
+        "diagnostic": { "at_epoch": chrono::Utc::now().timestamp(), "failure": e.diagnostic() }
+    });
     match &e {
         ControllerError::ZoneUnknown(zone) => {
             // Nothing on this controller is wired to this zone. The one
@@ -1083,7 +1107,7 @@ fn controller_error_response(
             body["mapped_zones"] = json!(mapped_zone_slugs);
             body["hint"] = json!(hint);
         }
-        ControllerError::RateLimited => {
+        ControllerError::RateLimited(_) => {
             let hint = match rate_limit_remaining.as_deref() {
                 Some(n) => format!(
                     "The controller's cloud last reported {n} API requests left for today. \
@@ -1096,7 +1120,7 @@ fn controller_error_response(
             body["rate_limit_remaining"] = json!(rate_limit_remaining);
             body["hint"] = json!(hint);
         }
-        ControllerError::AuthFailed => {
+        ControllerError::AuthFailed(_) => {
             body["hint"] = json!(
                 "The controller rejected the credential. This is the controller's own \
                  credential, not your LocalSky login. Re-enter it under Settings, then \
@@ -1188,10 +1212,14 @@ async fn registry_zone_action(
                         "cap_s": usage.cap_s,
                     })),
                 ),
-                RunOutcome::Failed { error, .. } => controller_error_response(
-                    error,
-                    controller.rate_limit_remaining(),
-                    controller.mapped_zone_slugs(),
+                RunOutcome::Failed { error, .. } => controller_context(
+                    controller_error_response(
+                        error,
+                        controller.rate_limit_remaining(),
+                        controller.mapped_zone_slugs(),
+                    ),
+                    controller.id(),
+                    &zone,
                 ),
             }
         }
@@ -1227,10 +1255,14 @@ async fn registry_zone_action(
                     }
                     (StatusCode::OK, Json(body))
                 }
-                Err(e) => controller_error_response(
-                    e,
-                    controller.rate_limit_remaining(),
-                    controller.mapped_zone_slugs(),
+                Err(e) => controller_context(
+                    controller_error_response(
+                        e,
+                        controller.rate_limit_remaining(),
+                        controller.mapped_zone_slugs(),
+                    ),
+                    controller.id(),
+                    &zone,
                 ),
             }
         }
@@ -1456,16 +1488,26 @@ async fn history_window(
         let rows = RunsStore::new(conn.clone())
             .window(from, now)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| {
+                Box::new(crate::diagnostics::from_error(
+                    &e,
+                    "irrigation history window",
+                ))
+            })?;
         let daily = crate::persistence::daily_irrigation::DailyIrrigationStore::new(conn.clone())
             .window(from, now)
             .await?;
         let decisions = crate::persistence::VerdictHistoryStore::new(conn)
             .window(from, now)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| {
+                Box::new(crate::diagnostics::from_error(
+                    &e,
+                    "irrigation history window",
+                ))
+            })?;
         let daily = crate::persistence::daily_irrigation::with_legacy_decisions(daily, decisions);
-        Ok::<_, String>((rows, daily))
+        Ok::<_, Box<crate::failure::Failure>>((rows, daily))
     }
     .await;
     match result {
@@ -1483,7 +1525,9 @@ async fn history_window(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
+            Json(
+                json!({ "error": e.message, "diagnostic": crate::failure::FailureRecord::now(*e) }),
+            ),
         ),
     }
 }
@@ -1512,7 +1556,7 @@ async fn decisions_window(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
+            Json(operation_error(&e, "irrigation.decisions_window")),
         ),
     }
 }
@@ -1535,7 +1579,7 @@ async fn accuracy(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
+            Json(operation_error(&e, "irrigation.accuracy")),
         ),
     }
 }
@@ -1621,7 +1665,7 @@ async fn export(
             Err(e) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": e.to_string() })),
+                    Json(operation_error(&e, "irrigation.export")),
                 )
                     .into_response();
             }
@@ -1635,7 +1679,7 @@ async fn export(
             Err(e) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": e.to_string() })),
+                    Json(operation_error(&e, "irrigation.export")),
                 )
                     .into_response();
             }
@@ -1727,19 +1771,32 @@ mod tests {
         // this deploy's own auth outcome, and the Home Assistant integration
         // reacts to one by invalidating its LocalSky token and starting a
         // reauth loop over a token that was never at fault.
-        let (s, Json(body)) =
-            controller_error_response(ControllerError::AuthFailed, None, no_zones());
+        let (s, Json(body)) = controller_error_response(
+            ControllerError::http(401, None, "test controller authentication"),
+            None,
+            no_zones(),
+        );
         assert_eq!(s, StatusCode::FAILED_DEPENDENCY);
         assert_ne!(s, StatusCode::UNAUTHORIZED);
         assert_eq!(body["code"], json!("controller_auth_failed"));
-        let (s, _) = controller_error_response(ControllerError::RateLimited, None, no_zones());
+        let (s, _) = controller_error_response(
+            ControllerError::http(429, None, "test controller request"),
+            None,
+            no_zones(),
+        );
         assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
         // 502 stays for the failures that really are upstream or transport.
         for e in [
             ControllerError::Offline,
-            ControllerError::Remote("HTTP 500: boom".into()),
-            ControllerError::Transport("connect".into()),
-            ControllerError::Init("tls roots".into()),
+            ControllerError::http(500, Some("HTML"), "test controller request"),
+            ControllerError::transport(crate::failure::Failure::new(
+                crate::failure::FailureCode::Connection,
+                "test controller connection",
+            )),
+            ControllerError::init(crate::failure::Failure::new(
+                crate::failure::FailureCode::ClientBuild,
+                "test controller initialization",
+            )),
         ] {
             let (s, Json(body)) = controller_error_response(e, None, no_zones());
             assert_eq!(s, StatusCode::BAD_GATEWAY);
@@ -1761,8 +1818,14 @@ mod tests {
                 ControllerError::Unsupported("op".into()),
                 "controller_unsupported",
             ),
-            (ControllerError::AuthFailed, "controller_auth_failed"),
-            (ControllerError::RateLimited, "controller_rate_limited"),
+            (
+                ControllerError::http(401, None, "test controller authentication"),
+                "controller_auth_failed",
+            ),
+            (
+                ControllerError::http(429, None, "test controller request"),
+                "controller_rate_limited",
+            ),
             (ControllerError::Offline, "controller_unreachable"),
         ] {
             let (_, Json(body)) = controller_error_response(e, None, no_zones());
@@ -1839,6 +1902,24 @@ mod tests {
         assert!(hint.contains("Controller station"), "{hint}");
     }
 
+    #[test]
+    fn upstream_auth_keeps_local_auth_valid_and_exposes_original_status() {
+        let (status, Json(body)) = controller_error_response(
+            ControllerError::http(403, Some("HTML"), "controller status"),
+            None,
+            no_zones(),
+        );
+        assert_eq!(status, StatusCode::FAILED_DEPENDENCY);
+        assert_eq!(body["code"], "controller_auth_failed");
+        assert_eq!(body["diagnostic"]["failure"]["code"], "LS_HTTP_403");
+        assert_eq!(body["diagnostic"]["failure"]["http_status"], 403);
+        assert_eq!(
+            body["diagnostic"]["failure"]["operation"],
+            "controller status"
+        );
+        assert!(body["diagnostic"]["at_epoch"].as_i64().is_some());
+    }
+
     /// The server's error body and the client's reader are two ends of one
     /// contract, and the break was on the client end: it printed the bare
     /// status and discarded the body. Lock them together so whatever
@@ -1847,22 +1928,25 @@ mod tests {
     #[test]
     fn the_client_reader_surfaces_the_controller_reason_from_the_error_body() {
         use crate::components::settings_ui::load_error_message;
-        // A cloud controller's Remote error carries the vendor's own status
-        // and body. That text is the whole point of reading the body.
+        // Typed upstream evidence reaches the UI without reflecting raw
+        // vendor bodies, which may contain credentials or proxy login pages.
         let (status, Json(body)) = controller_error_response(
-            ControllerError::Remote("HTTP 400: zone id not recognized".into()),
+            ControllerError::http(400, None, "test controller zone start"),
             None,
             no_zones(),
         );
         let msg = load_error_message(status.as_u16(), &body.to_string());
         assert!(
-            msg.contains("zone id not recognized"),
-            "the vendor's reason must survive to the user: {msg}"
+            msg.contains("LS_HTTP_REJECTED") && msg.contains("HTTP 400"),
+            "the observed failure must survive to the user: {msg}"
         );
         assert!(msg.contains("502"), "the status stays visible: {msg}");
 
-        let (status, Json(body)) =
-            controller_error_response(ControllerError::RateLimited, Some("0".into()), no_zones());
+        let (status, Json(body)) = controller_error_response(
+            ControllerError::http(429, None, "test controller request"),
+            Some("0".into()),
+            no_zones(),
+        );
         let msg = load_error_message(status.as_u16(), &body.to_string());
         assert!(msg.contains("rate limited"), "{msg}");
         assert!(
@@ -1877,8 +1961,11 @@ mod tests {
 
     #[test]
     fn rate_limited_body_carries_the_remaining_allowance_when_known() {
-        let (s, Json(body)) =
-            controller_error_response(ControllerError::RateLimited, Some("0".into()), no_zones());
+        let (s, Json(body)) = controller_error_response(
+            ControllerError::http(429, None, "test controller request"),
+            Some("0".into()),
+            no_zones(),
+        );
         assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(body["rate_limit_remaining"], json!("0"));
         let hint = body["hint"].as_str().unwrap();
@@ -1891,8 +1978,11 @@ mod tests {
             "the hint must not assert a live allowance: {hint}"
         );
         // Unknown stays null, never a zero that reads as "exhausted".
-        let (_, Json(body)) =
-            controller_error_response(ControllerError::RateLimited, None, no_zones());
+        let (_, Json(body)) = controller_error_response(
+            ControllerError::http(429, None, "test controller request"),
+            None,
+            no_zones(),
+        );
         assert!(
             body["rate_limit_remaining"].is_null(),
             "an unknown allowance must be null, not a sentinel"

@@ -402,6 +402,35 @@ fn parse_error_body(status: u16, body: &str) -> Option<ParsedErrorBody> {
             return Some(ParsedErrorBody::ValidationRules(msg));
         }
     }
+    if let Some(diagnostic) = v.get("diagnostic").filter(|d| d.is_object()) {
+        let failure = &diagnostic["failure"];
+        let code = failure["code"].as_str().unwrap_or("LS_API_SERVER");
+        let operation = failure["operation"].as_str().unwrap_or("LocalSky request");
+        let detail = v
+            .get("hint")
+            .or_else(|| v.get("detail"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(&err);
+        let lead = failure["message"].as_str().unwrap_or(&err);
+        let detail = if detail == err || detail == lead {
+            lead.to_owned()
+        } else {
+            format!("{lead}. {detail}")
+        };
+        let request = v
+            .pointer("/request/id")
+            .and_then(|v| v.as_str())
+            .map(|id| format!(" · request {id}"))
+            .unwrap_or_default();
+        let cause = failure
+            .get("http_status")
+            .and_then(|v| v.as_u64())
+            .map(|status| format!(" · source HTTP {status}"))
+            .unwrap_or_default();
+        return Some(ParsedErrorBody::Coded(format!(
+            "{detail} (HTTP {status} · {code} · {operation}{cause}{request})"
+        )));
+    }
     if let Some(hint) = v.get("hint").and_then(|h| h.as_str()) {
         return Some(ParsedErrorBody::Coded(format!(
             "{err} (HTTP {status}). {hint}"

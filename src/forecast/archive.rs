@@ -30,7 +30,7 @@ pub fn spawn(store: Arc<ForecastStore>, archive: ForecastArchiveStore) {
                         recorded.insert(id, identity);
                     }
                     Err(error) => {
-                        tracing::warn!(%error, track = %id, "forecast archive write failed; will retry")
+                        tracing::warn!(error = %crate::diagnostics::from_anyhow(&error, "forecast archive write"), track = %id, "forecast archive write failed; will retry")
                     }
                 }
             }
@@ -39,7 +39,7 @@ pub fn spawn(store: Arc<ForecastStore>, archive: ForecastArchiveStore) {
                 match archive.prune_older_than(now - RETENTION_DAYS * 86400).await {
                     Ok(_) => prune_at = now + 86400,
                     Err(error) => {
-                        tracing::warn!(%error, "forecast archive retention failed; will retry")
+                        tracing::warn!(error = %crate::diagnostics::from_anyhow(&error, "forecast archive retention"), "forecast archive retention failed; will retry")
                     }
                 }
             }

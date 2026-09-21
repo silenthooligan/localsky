@@ -514,6 +514,7 @@ impl Heartbeat {
     fn beat(&mut self, bus: &SourceBus, id: &str) {
         if self.last.is_none_or(|t| t.elapsed() >= HEARTBEAT) {
             self.last = Some(tokio::time::Instant::now());
+            crate::sources::poll::report_diagnostic(bus, id, None);
             let _ = bus.send(SourceEvent::Reachability {
                 source_id: id.to_string(),
                 reachable: true,
@@ -550,6 +551,8 @@ async fn run_websocket(
             .await
             .unwrap_err(); // the stream loop only returns by failing
         beat.disconnected(bus, id);
+        let failure = crate::diagnostics::from_anyhow(&err, "Blitzortung stream");
+        crate::sources::poll::report_diagnostic(bus, id, Some(failure.clone()));
         if frames > 0 {
             // The connection was healthy before it died; reconnect fast.
             backoff = BACKOFF_MIN;
@@ -558,10 +561,10 @@ async fn run_websocket(
         // Degrade quietly (volunteer-run network, outages are normal):
         // warn once on the streaming -> down transition, debug after.
         if was_streaming {
-            warn!(source_id = %id, host = %url, error = %format!("{err:#}"),
+            warn!(source_id = %id, host = %url, error = %failure,
                   "blitzortung connection lost; rotating host with backoff");
         } else {
-            debug!(source_id = %id, host = %url, error = %format!("{err:#}"),
+            debug!(source_id = %id, host = %url, error = %failure,
                    "blitzortung still unreachable");
         }
         was_streaming = false;
@@ -600,15 +603,17 @@ async fn run_mqtt(
                 .await
                 .unwrap_err(); // the stream loop only returns by failing
         beat.disconnected(bus, id);
+        let failure = crate::diagnostics::from_anyhow(&err, "Blitzortung stream");
+        crate::sources::poll::report_diagnostic(bus, id, Some(failure.clone()));
         if frames > 0 {
             backoff = BACKOFF_MIN;
             was_streaming = true;
         }
         if was_streaming {
-            warn!(source_id = %id, host = %mqtt.host, error = %format!("{err:#}"),
+            warn!(source_id = %id, host = %mqtt.host, error = %failure,
                   "blitzortung mqtt connection lost; backing off");
         } else {
-            debug!(source_id = %id, host = %mqtt.host, error = %format!("{err:#}"),
+            debug!(source_id = %id, host = %mqtt.host, error = %failure,
                    "blitzortung mqtt still unreachable");
         }
         was_streaming = false;
@@ -643,14 +648,20 @@ async fn connect_and_stream(
         let msg = match tokio::time::timeout(FRAME_SILENCE, ws.next()).await {
             Err(_) => {
                 flush(bus, id, &mut pending);
-                anyhow::bail!(
-                    "no frames for {}s (global feed never goes quiet; treating as dead)",
-                    FRAME_SILENCE.as_secs()
+                let mut failure = crate::failure::Failure::new(
+                    crate::failure::FailureCode::Timeout,
+                    "Blitzortung wait for stream frame",
                 );
+                failure.timeout_ms = Some(FRAME_SILENCE.as_millis() as u64);
+                return Err(failure.into());
             }
             Ok(None) => {
                 flush(bus, id, &mut pending);
-                anyhow::bail!("stream closed by server");
+                return Err(crate::failure::Failure::new(
+                    crate::failure::FailureCode::StreamClosed,
+                    "Blitzortung receive frame",
+                )
+                .into());
             }
             Ok(Some(Err(e))) => {
                 flush(bus, id, &mut pending);
@@ -734,10 +745,12 @@ async fn connect_and_stream_mqtt(
         let event = match tokio::time::timeout(FRAME_SILENCE, eventloop.poll()).await {
             Err(_) => {
                 flush(bus, id, &mut pending);
-                anyhow::bail!(
-                    "no frames for {}s (global feed never goes quiet; treating as dead)",
-                    FRAME_SILENCE.as_secs()
+                let mut failure = crate::failure::Failure::new(
+                    crate::failure::FailureCode::Timeout,
+                    "Blitzortung wait for stream frame",
                 );
+                failure.timeout_ms = Some(FRAME_SILENCE.as_millis() as u64);
+                return Err(failure.into());
             }
             Ok(Err(e)) => {
                 flush(bus, id, &mut pending);
@@ -808,18 +821,23 @@ mod tests {
         beat.disconnected(&bus, "lightning");
         // A reconnect inside the one-minute throttle must clear the failure.
         beat.beat(&bus, "lightning");
-        for expected in [true, false, true] {
-            match rx.try_recv().unwrap() {
+        let mut states = Vec::new();
+        let mut recoveries = 0;
+        while let Ok(event) = rx.try_recv() {
+            match event {
                 SourceEvent::Reachability {
                     source_id,
                     reachable,
                 } => {
                     assert_eq!(source_id, "lightning");
-                    assert_eq!(reachable, expected);
+                    states.push(reachable);
                 }
-                other => panic!("expected reachability, got {other:?}"),
+                SourceEvent::Diagnostic { failure: None, .. } => recoveries += 1,
+                other => panic!("unexpected event: {other:?}"),
             }
         }
+        assert_eq!(states, [true, false, true]);
+        assert_eq!(recoveries, 2);
     }
 
     /// LZW compressor mirroring decode_frame (and the JS client's

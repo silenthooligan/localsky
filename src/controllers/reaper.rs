@@ -568,7 +568,10 @@ mod tests {
         }
         async fn stop_zone(&self, slug: &str) -> ControllerResult<()> {
             if self.fail.load(Ordering::SeqCst) {
-                return Err(ControllerError::Transport("unreachable".into()));
+                return Err(ControllerError::transport(crate::failure::Failure::new(
+                    crate::failure::FailureCode::Connection,
+                    "simulated controller connection",
+                )));
             }
             self.stopped.lock().unwrap().push(slug.to_string());
             Ok(())
@@ -576,7 +579,10 @@ mod tests {
         async fn stop_all(&self) -> ControllerResult<()> {
             self.stop_alls.fetch_add(1, Ordering::SeqCst);
             if self.fail.load(Ordering::SeqCst) {
-                return Err(ControllerError::Transport("unreachable".into()));
+                return Err(ControllerError::transport(crate::failure::Failure::new(
+                    crate::failure::FailureCode::Connection,
+                    "simulated controller connection",
+                )));
             }
             Ok(())
         }
@@ -1240,7 +1246,10 @@ mod tests {
         }
         async fn status(&self) -> ControllerResult<ControllerStatus> {
             if self.status_fails.load(Ordering::SeqCst) {
-                return Err(ControllerError::Transport("unreachable".into()));
+                return Err(ControllerError::transport(crate::failure::Failure::new(
+                    crate::failure::FailureCode::Connection,
+                    "simulated controller connection",
+                )));
             }
             Ok(ControllerStatus {
                 observed_epoch: None,

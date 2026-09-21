@@ -923,8 +923,11 @@ async fn get_raw_toml(
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiError {
+                diagnostic: Some(crate::failure::FailureRecord::now(
+                    crate::diagnostics::from_error(&e, "config raw read"),
+                )),
                 error: "raw_read_failed".into(),
-                detail: Some(e.to_string()),
+                detail: Some(crate::diagnostics::from_error(&e, "config raw read").to_string()),
             }),
         )
             .into_response(),
@@ -1028,6 +1031,7 @@ async fn put_raw_toml(
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(ApiError {
+                    diagnostic: None,
                     error: "toml_parse_error".into(),
                     detail: Some(e.to_string()),
                 }),
@@ -1041,8 +1045,11 @@ async fn put_raw_toml(
     let mut candidate_json = match serde_json::to_value(&parsed) {
         Ok(v) => v,
         Err(e) => {
-            return store_err(ConfigStoreError::Io(format!("serialize candidate: {e}")))
-                .into_response();
+            return store_err(ConfigStoreError::io(
+                &e,
+                "config.put_raw_toml serialize candidate",
+            ))
+            .into_response();
         }
     };
     let original = match store.load().await {
@@ -1065,6 +1072,7 @@ async fn put_raw_toml(
         return (
             StatusCode::BAD_REQUEST,
             Json(ApiError {
+                diagnostic: None,
                 error: "unmatched_redacted_secret".into(),
                 detail: Some(format!(
                     "redacted placeholder(s) with no stored value at: {}. If you renamed a \
@@ -1086,6 +1094,7 @@ async fn put_raw_toml(
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(ApiError {
+                    diagnostic: None,
                     error: "config_decode_error".into(),
                     detail: Some(e.to_string()),
                 }),
@@ -1112,6 +1121,7 @@ async fn put_raw_toml(
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(ApiError {
+                    diagnostic: None,
                     error: "zone_key_renamed".into(),
                     detail: Some(detail),
                 }),
@@ -1124,6 +1134,7 @@ async fn put_raw_toml(
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(ApiError {
+                diagnostic: None,
                 error: "config_validation_error".into(),
                 detail: Some(format!("{e}")),
             }),
@@ -1182,18 +1193,23 @@ async fn put_raw_toml(
 struct ApiError {
     error: String,
     detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostic: Option<crate::failure::FailureRecord>,
 }
 
 fn store_err(e: ConfigStoreError) -> (StatusCode, Json<ApiError>) {
     let code = match &e {
         ConfigStoreError::NotFound => StatusCode::NOT_FOUND,
-        ConfigStoreError::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        ConfigStoreError::Validation(_) | ConfigStoreError::Parse(_) => {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
         ConfigStoreError::RollbackTargetMissing(_) => StatusCode::NOT_FOUND,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (
         code,
         Json(ApiError {
+            diagnostic: Some(crate::failure::FailureRecord::now(e.diagnostic())),
             error: "config_store_error".into(),
             detail: Some(e.to_string()),
         }),
@@ -1213,7 +1229,7 @@ async fn get_config(
             let mut v = match serde_json::to_value(&cfg) {
                 Ok(v) => v,
                 Err(e) => {
-                    return store_err(ConfigStoreError::Io(format!("serialize: {e}")))
+                    return store_err(ConfigStoreError::io(&e, "config.get_config serialize"))
                         .into_response();
                 }
             };
@@ -1232,8 +1248,11 @@ async fn get_config(
             let cfg = crate::config::Config::default();
             match serde_json::to_value(&cfg) {
                 Ok(v) => Json(v).into_response(),
-                Err(e) => store_err(ConfigStoreError::Io(format!("serialize default: {e}")))
-                    .into_response(),
+                Err(e) => store_err(ConfigStoreError::io(
+                    &e,
+                    "config.get_config serialize default",
+                ))
+                .into_response(),
             }
         }
         Err(e) => store_err(e).into_response(),
@@ -1616,8 +1635,11 @@ async fn put_config(
         Ok(cfg) => match serde_json::to_value(&cfg) {
             Ok(v) => v,
             Err(e) => {
-                return store_err(ConfigStoreError::Io(format!("serialize current: {e}")))
-                    .into_response();
+                return store_err(ConfigStoreError::io(
+                    &e,
+                    "config.put_config serialize current",
+                ))
+                .into_response();
             }
         },
         Err(ConfigStoreError::NotFound) => serde_json::Value::Null,
@@ -1646,6 +1668,7 @@ async fn put_config(
         return (
             StatusCode::BAD_REQUEST,
             Json(ApiError {
+                diagnostic: None,
                 error: "unmatched_redacted_secret".into(),
                 detail: Some(format!(
                     "redacted placeholder(s) with no stored value at: {}; supply the real secret",
@@ -1661,6 +1684,7 @@ async fn put_config(
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(ApiError {
+                    diagnostic: None,
                     error: "config_decode_error".into(),
                     detail: Some(e.to_string()),
                 }),
@@ -1693,6 +1717,7 @@ async fn put_config(
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(ApiError {
+                    diagnostic: None,
                     error: "zone_key_renamed".into(),
                     detail: Some(detail),
                 }),
@@ -2216,6 +2241,7 @@ async fn post_rollback(
         return (
             StatusCode::BAD_REQUEST,
             Json(ApiError {
+                diagnostic: None,
                 error: "rollback_target_missing".into(),
                 detail: Some("send {\"ts\": <snapshot ts>} or ?to=<ts>".into()),
             }),

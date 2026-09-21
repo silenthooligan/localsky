@@ -680,3 +680,30 @@ test("Wind distinguishes measured average from estimated fallback and keeps deta
   await expect(page.locator(".wind-bar-live")).toHaveCount(0);
   expect(unexpected).toEqual([]);
 });
+
+for (const width of [1280, 390]) {
+  test(`failed irrigation action keeps copyable server evidence at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    await fixture(page);
+    await page.route("**/api/irrigation/action", route => route.fulfill({ status: 502, json: {
+      error: "Controller request failed", request: { id: "fixture-request-092", method: "POST", route: "/api/irrigation/action" },
+      diagnostic: { at_epoch: 1790000000, failure: { code: "LS_HTTP_SERVER", operation: "controller request", http_status: 503,
+        message: "upstream returned a server error", next_step: "Check controller logs at this timestamp." } },
+    } }));
+    await open(page, "/zones/fixture_zone");
+    await page.getByRole("button", { name: "Run now", exact: true }).click();
+    const toast = page.locator(".ui-toast--error").filter({ hasText: "Zone command failed" });
+    await expect(toast).toBeVisible();
+    const details = toast.locator("details.diagnostic-details");
+    await expect(details).not.toHaveAttribute("open", "");
+    await details.locator("summary").click();
+    await expect(details.locator("pre")).toContainText("fixture-request-092");
+    await expect(details.locator("pre")).toContainText('"http_status": 503');
+    await details.getByRole("button", { name: "Copy details", exact: true }).click();
+    await expect(details.getByRole("button")).toHaveText(/Copied|Select and copy below/);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBeTruthy();
+    expect(errors).toEqual([]);
+  });
+}

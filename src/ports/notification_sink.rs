@@ -13,9 +13,9 @@ pub enum NotificationError {
     #[error("sink offline")]
     Offline,
     #[error("transport error: {0}")]
-    Transport(String),
+    Transport(#[source] Box<crate::failure::Failure>),
     #[error("permanent: {0}")]
-    Permanent(String),
+    Permanent(#[source] Box<crate::failure::Failure>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

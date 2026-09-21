@@ -11,7 +11,7 @@ use crate::engine::soil_decisions::{MorningOutcome, PastMorning, ZoneMorningDeci
 
 #[derive(Debug, thiserror::Error)]
 #[error("soil morning decisions: {0}")]
-pub struct SoilDecisionsError(String);
+pub struct SoilDecisionsError(#[source] Box<crate::failure::Failure>);
 
 #[derive(Clone)]
 pub struct SoilDecisionsStore {
@@ -45,8 +45,8 @@ impl SoilDecisionsStore {
                 )?;
             }
             transaction.commit()
-        }).await.map_err(|error| SoilDecisionsError(error.to_string()))?
-            .map_err(|error| SoilDecisionsError(error.to_string()))
+        }).await.map_err(|error| SoilDecisionsError(Box::new(crate::diagnostics::from_error(&error, "soil_decisions.record_morning"))))?
+            .map_err(|error| SoilDecisionsError(Box::new(crate::diagnostics::from_error(&error, "soil_decisions.record_morning"))))
     }
 
     /// Only completed local dates are returned. Today's partial soil replay can
@@ -94,8 +94,18 @@ impl SoilDecisionsStore {
             },
         )
         .await
-        .map_err(|error| SoilDecisionsError(error.to_string()))?
-        .map_err(|error| SoilDecisionsError(error.to_string()))
+        .map_err(|error| {
+            SoilDecisionsError(Box::new(crate::diagnostics::from_error(
+                &error,
+                "soil_decisions.completed_window",
+            )))
+        })?
+        .map_err(|error| {
+            SoilDecisionsError(Box::new(crate::diagnostics::from_error(
+                &error,
+                "soil_decisions.completed_window",
+            )))
+        })
     }
 }
 

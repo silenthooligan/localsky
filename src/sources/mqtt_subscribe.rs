@@ -112,6 +112,8 @@ impl WeatherSource for MqttSubscribe {
         }
         let (client, mut eventloop) = AsyncClient::new(opts, 32);
         let mut reachability = crate::sources::poll::ReachabilityLatch::new();
+        let mut pending_subscriptions = 0usize;
+        let mut subscription_failed = false;
 
         // Subscriptions are issued on every ConnAck (initial connect AND
         // each automatic reconnect). rumqttc reconnects with a clean
@@ -135,16 +137,13 @@ impl WeatherSource for MqttSubscribe {
                         }
                         Ok(Event::Incoming(Packet::ConnAck(_))) => {
                             let mut ok = 0usize;
-                            for sub in &self.config.subscriptions {
-                                match client.subscribe(&sub.topic, QoS::AtMostOnce).await {
-                                    Ok(()) => ok += 1,
-                                    Err(e) => warn!(
-                                        source = self.id,
-                                        topic = sub.topic,
-                                        error = %e,
-                                        "mqtt subscribe failed"
-                                    ),
-                                }
+                            let mut failures = Vec::new();
+                            // One queued packet avoids waiting for capacity while this
+                            // same task owns the event loop that drains the queue.
+                            let filters = self.config.subscriptions.iter().map(|sub| rumqttc::SubscribeFilter::new(sub.topic.clone(), QoS::AtMostOnce));
+                            match client.try_subscribe_many(filters) {
+                                Ok(()) => ok = self.config.subscriptions.len(),
+                                Err(error) => failures.push(crate::diagnostics::from_error(&error, "MQTT subscribe packet")),
                             }
                             info!(
                                 source = self.id,
@@ -152,12 +151,29 @@ impl WeatherSource for MqttSubscribe {
                                 total = self.config.subscriptions.len(),
                                 "mqtt source connected; subscriptions issued"
                             );
-                            reachability.report(&bus, &self.id, ok == self.config.subscriptions.len());
+                            pending_subscriptions = usize::from(ok > 0);
+                            subscription_failed = !failures.is_empty();
+                            reachability.report(&bus, &self.id, false);
+                            crate::sources::poll::report_diagnostic(&bus, &self.id, (!failures.is_empty()).then(|| crate::failure::Failure::batch("MQTT subscriptions", failures, ok > 0)));
                         }
-                        Ok(_) => {} // PingResp, SubAck, etc.
+                        Ok(Event::Incoming(Packet::SubAck(ack))) => {
+                            pending_subscriptions = pending_subscriptions.saturating_sub(1);
+                            if let Some(failure) = crate::net::stream_failure::mqtt_subscription(&ack) {
+                                subscription_failed = true;
+                                warn!(source = self.id, %failure, "MQTT broker rejected subscription");
+                                crate::sources::poll::report_diagnostic(&bus, &self.id, Some(failure));
+                            }
+                            if pending_subscriptions == 0 && !subscription_failed {
+                                reachability.report(&bus, &self.id, true);
+                                crate::sources::poll::report_diagnostic(&bus, &self.id, None);
+                            }
+                        }
+                        Ok(_) => {} // PingResp, outgoing packets, etc.
                         Err(e) => {
                             reachability.report(&bus, &self.id, false);
-                            warn!(source = self.id, error = %e, "mqtt eventloop error; reconnecting");
+                            let failure = crate::net::stream_failure::mqtt(&e, "MQTT source connection");
+                            warn!(source = self.id, error = %failure, "mqtt eventloop error; reconnecting");
+                            crate::sources::poll::report_diagnostic(&bus, &self.id, Some(failure));
                             tokio::time::sleep(Duration::from_secs(2)).await;
                         }
                     }

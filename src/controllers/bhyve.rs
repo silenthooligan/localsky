@@ -70,6 +70,27 @@ enum CallError {
     Other(ControllerError),
 }
 
+impl crate::sources::auth::ReauthError for CallError {
+    fn diagnostic(&self) -> crate::failure::Failure {
+        match self {
+            Self::TokenRejected => {
+                crate::failure::Failure::http(401, None, "B-hyve authenticated request")
+            }
+            Self::Other(error) => error.diagnostic(),
+        }
+    }
+    fn after_rejection(self, previous: Self) -> Self {
+        let convert = |attempt: Self| match attempt {
+            Self::TokenRejected => ControllerError::http(401, None, "B-hyve authenticated request"),
+            Self::Other(error) => error,
+        };
+        Self::Other(crate::sources::auth::ReauthError::after_rejection(
+            convert(self),
+            convert(previous),
+        ))
+    }
+}
+
 impl Bhyve {
     /// Infallible today (`net::client` falls back to reqwest's defaults
     /// rather than failing); the `Result` stays for the registry's
@@ -104,22 +125,30 @@ impl Bhyve {
             .send()
             .await
             .map_err(|e| {
-                ControllerError::Transport(format!(
-                    "bhyve POST /session: {}",
-                    crate::net::reqwest_error_category(&e)
+                ControllerError::transport(crate::net::source_failure::from_reqwest(
+                    &e,
+                    "B-hyve authenticate",
                 ))
             })?;
         let status = resp.status();
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-            return Err(ControllerError::AuthFailed);
+            return Err(ControllerError::http(
+                status.as_u16(),
+                None,
+                "B-hyve authentication",
+            ));
         }
         if !status.is_success() {
-            return Err(ControllerError::Remote(format!("bhyve session {status}")));
+            return Err(ControllerError::http(
+                status.as_u16(),
+                None,
+                "B-hyve response",
+            ));
         }
         let sr: SessionResponse = resp.json().await.map_err(|e| {
-            ControllerError::Transport(format!(
-                "bhyve session decode: {}",
-                crate::net::reqwest_error_category(&e)
+            ControllerError::transport(crate::net::source_failure::from_reqwest(
+                &e,
+                "B-hyve decode response",
             ))
         })?;
         Ok(sr.orbit_session_token)
@@ -143,31 +172,39 @@ impl Bhyve {
             req = req.json(b);
         }
         let resp = req.send().await.map_err(|e| {
-            CallError::Other(ControllerError::Transport(format!(
-                "bhyve {method} {url}: {}",
-                crate::net::reqwest_error_category(&e)
-            )))
+            CallError::Other(ControllerError::transport(
+                crate::net::source_failure::from_reqwest(&e, "B-hyve request"),
+            ))
         })?;
         let status = resp.status();
         if status == StatusCode::UNAUTHORIZED {
             return Err(CallError::TokenRejected);
         }
         if status == StatusCode::TOO_MANY_REQUESTS {
-            return Err(CallError::Other(ControllerError::RateLimited));
+            return Err(CallError::Other(ControllerError::http(
+                429,
+                None,
+                "B-hyve request",
+            )));
         }
         if status == StatusCode::FORBIDDEN {
-            return Err(CallError::Other(ControllerError::AuthFailed));
+            return Err(CallError::Other(ControllerError::http(
+                status.as_u16(),
+                None,
+                "B-hyve authorization",
+            )));
         }
         if !status.is_success() {
-            return Err(CallError::Other(ControllerError::Remote(format!(
-                "bhyve {status}"
-            ))));
+            return Err(CallError::Other(ControllerError::http(
+                status.as_u16(),
+                None,
+                "B-hyve response",
+            )));
         }
         resp.json().await.map_err(|e| {
-            CallError::Other(ControllerError::Transport(format!(
-                "bhyve decode: {}",
-                crate::net::reqwest_error_category(&e)
-            )))
+            CallError::Other(ControllerError::transport(
+                crate::net::source_failure::from_reqwest(&e, "B-hyve decode response"),
+            ))
         })
     }
 
@@ -188,7 +225,9 @@ impl Bhyve {
         .await
         .map_err(|e| match e {
             // Rejected again on a fresh session: the account is refused.
-            CallError::TokenRejected => ControllerError::AuthFailed,
+            CallError::TokenRejected => {
+                ControllerError::http(401, None, "B-hyve reauthenticated request")
+            }
             CallError::Other(e) => e,
         })
     }

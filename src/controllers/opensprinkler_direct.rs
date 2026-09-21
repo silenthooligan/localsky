@@ -104,21 +104,42 @@ impl OpenSprinklerDirect {
         // never made the call) rather than a Transport one.
         let (client, safe_url) = crate::net::safe_fetch::build_safe_client(&url, OS_TIMEOUT)
             .await
-            .map_err(|e| ControllerError::Init(e.to_string()))?;
+            .map_err(|e| {
+                ControllerError::init(crate::net::source_failure::from_safe(
+                    &e,
+                    "OpenSprinkler initialize request",
+                ))
+            })?;
         let resp = client.get(safe_url).send().await.map_err(|e| {
-            ControllerError::Transport(crate::net::reqwest_error_category(&e).to_string())
+            ControllerError::transport(crate::net::source_failure::from_reqwest(
+                &e,
+                "OpenSprinkler request",
+            ))
         })?;
         let status = resp.status();
         let body = crate::net::safe_fetch::read_body_capped(resp)
             .await
-            .map_err(|e| ControllerError::Transport(e.to_string()))?;
+            .map_err(|e| {
+                ControllerError::transport(crate::net::source_failure::from_safe(
+                    &e,
+                    "OpenSprinkler read response",
+                ))
+            })?;
         if !status.is_success() {
             // Do NOT reflect the raw upstream body: against a forced SSRF
             // target it would leak that target's response. Status only.
-            return Err(ControllerError::Remote(format!("HTTP {status}")));
+            return Err(ControllerError::http(
+                status.as_u16(),
+                None,
+                "OpenSprinkler response",
+            ));
         }
-        let value: serde_json::Value = serde_json::from_slice(&body)
-            .map_err(|_| ControllerError::Remote("response was not valid JSON".into()))?;
+        let value: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
+            ControllerError::remote(crate::net::source_failure::from_json(
+                &e,
+                "OpenSprinkler decode JSON",
+            ))
+        })?;
         // OS replies HTTP 200 even on errors and signals them via a
         // {"result":N} envelope (firmware always uses 200 + result
         // codes). Without this check a wrong password "passes" the /jc
@@ -128,8 +149,12 @@ impl OpenSprinklerDirect {
         check_result_envelope(&value)?;
         // Typed-shape mismatch: report the kind of failure, not the raw
         // body (would leak a forced-SSRF target's response).
-        serde_json::from_value(value)
-            .map_err(|_| ControllerError::Remote("unexpected response shape".into()))
+        serde_json::from_value(value).map_err(|e| {
+            ControllerError::remote(crate::net::source_failure::from_json(
+                &e,
+                "OpenSprinkler decode response",
+            ))
+        })
     }
 }
 
@@ -143,23 +168,16 @@ fn check_result_envelope(v: &serde_json::Value) -> Result<(), ControllerError> {
     let Some(code) = v.get("result").and_then(|r| r.as_i64()) else {
         return Ok(());
     };
+    let failure = crate::failure::Failure::new(
+        crate::failure::FailureCode::ProviderRejected,
+        "OpenSprinkler result envelope",
+    )
+    .with_field("result")
+    .with_provider_code(Some(code));
     match code {
         1 => Ok(()),
-        2 => Err(ControllerError::AuthFailed),
-        other => {
-            let label = match other {
-                3 => "mismatch",
-                16 => "data missing",
-                17 => "out of range",
-                18 => "data format error",
-                32 => "page not found",
-                48 => "not permitted",
-                _ => "unknown error",
-            };
-            Err(ControllerError::Remote(format!(
-                "OpenSprinkler error result={other} ({label})"
-            )))
-        }
+        2 => Err(ControllerError::auth(failure)),
+        _ => Err(ControllerError::remote(failure)),
     }
 }
 
@@ -291,10 +309,14 @@ impl IrrigationController for OpenSprinklerDirect {
             )
             .await?;
         if r.result != 1 {
-            return Err(ControllerError::Remote(format!(
-                "OS rejected manual start: result={}",
-                r.result
-            )));
+            return Err(ControllerError::remote(
+                crate::failure::Failure::new(
+                    crate::failure::FailureCode::ProviderRejected,
+                    "OpenSprinkler manual start",
+                )
+                .with_field("result")
+                .with_provider_code(Some(i64::from(r.result))),
+            ));
         }
         Ok(RunHandle {
             controller_id: self.id.clone(),
@@ -320,10 +342,14 @@ impl IrrigationController for OpenSprinklerDirect {
             // result at all so a stop is never silently assumed to have
             // worked.
             Ok(r) if r.result == 1 => Ok(()),
-            Ok(r) => Err(ControllerError::Remote(format!(
-                "OS rejected station stop: result={}",
-                r.result
-            ))),
+            Ok(r) => Err(ControllerError::remote(
+                crate::failure::Failure::new(
+                    crate::failure::FailureCode::ProviderRejected,
+                    "OpenSprinkler station stop",
+                )
+                .with_field("result")
+                .with_provider_code(Some(i64::from(r.result))),
+            )),
             Err(err) => {
                 // A stop that lost the race with the station's OWN timer is
                 // not a failure: the valve is shut, which is what was asked
@@ -363,10 +389,14 @@ impl IrrigationController for OpenSprinklerDirect {
     async fn stop_all(&self) -> ControllerResult<()> {
         let r: CmResponse = self.get_json("/cv", &[("rsn", "1".to_string())]).await?;
         if r.result != 1 {
-            return Err(ControllerError::Remote(format!(
-                "OS rejected stop-all: result={}",
-                r.result
-            )));
+            return Err(ControllerError::remote(
+                crate::failure::Failure::new(
+                    crate::failure::FailureCode::ProviderRejected,
+                    "OpenSprinkler stop-all",
+                )
+                .with_field("result")
+                .with_provider_code(Some(i64::from(r.result))),
+            ));
         }
         Ok(())
     }
@@ -642,7 +672,7 @@ mod tests {
         // Wrong password: OS replies HTTP 200 with {"result":2}. This
         // must NOT pass the wizard's controller test.
         let err = check_result_envelope(&serde_json::json!({"result": 2})).unwrap_err();
-        assert!(matches!(err, ControllerError::AuthFailed));
+        assert!(matches!(err, ControllerError::AuthFailed(_)));
     }
 
     #[test]
@@ -651,7 +681,7 @@ mod tests {
             let err = check_result_envelope(&serde_json::json!({"result": code})).unwrap_err();
             match err {
                 ControllerError::Remote(msg) => {
-                    assert!(msg.contains(&format!("result={code}")), "msg: {msg}")
+                    assert_eq!(msg.provider_code, Some(code))
                 }
                 other => panic!("expected Remote, got {other:?}"),
             }

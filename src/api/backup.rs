@@ -209,6 +209,16 @@ fn err(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, Json(serde_json::json!({ "error": msg.into() }))).into_response()
 }
 
+fn operation_err(
+    status: StatusCode,
+    error: &(dyn std::error::Error + 'static),
+    operation: &'static str,
+) -> Response {
+    let failure = crate::diagnostics::from_error(error, operation);
+    tracing::error!(%failure, operation, "backup or restore operation failed");
+    (status, Json(serde_json::json!({ "error": failure.to_string(), "diagnostic": crate::failure::FailureRecord::now(failure) }))).into_response()
+}
+
 /// Delete-on-drop guard for the on-disk temp files backing a backup
 /// download. The bundle's guard rides inside the response body stream, so
 /// the temp file is removed when the download completes AND when the client
@@ -254,18 +264,21 @@ async fn get_backup(State(s): State<BackupApiState>) -> Response {
     let db_copy: Option<String> = if let Some(db) = &s.db {
         let db = db.clone();
         let tmp_clone = db_tmp.clone();
-        let res = tokio::task::spawn_blocking(move || -> Result<(), String> {
-            let conn = db.blocking_lock();
-            let _ = std::fs::remove_file(&tmp_clone);
-            conn.execute("VACUUM INTO ?1", rusqlite::params![tmp_clone])
-                .map_err(|e| e.to_string())
-                .map(|_| ())
-        })
-        .await;
+        let res =
+            tokio::task::spawn_blocking(move || -> Result<(), Box<crate::failure::Failure>> {
+                let conn = db.blocking_lock();
+                let _ = std::fs::remove_file(&tmp_clone);
+                conn.execute("VACUUM INTO ?1", rusqlite::params![tmp_clone])
+                    .map_err(|e| {
+                        Box::new(crate::diagnostics::from_error(&e, "backup bundle creation"))
+                    })
+                    .map(|_| ())
+            })
+            .await;
         match res {
             Ok(Ok(())) => Some(db_tmp.clone()),
-            Ok(Err(e)) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("db copy: {e}")),
-            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")),
+            Ok(Err(e)) => return operation_err(StatusCode::INTERNAL_SERVER_ERROR, &e, "db copy"),
+            Err(e) => return operation_err(StatusCode::INTERNAL_SERVER_ERROR, &e, "join"),
         }
     } else {
         None
@@ -320,23 +333,28 @@ async fn get_backup(State(s): State<BackupApiState>) -> Response {
     let build = {
         let bundle_tmp = bundle_tmp.clone();
         let db_copy = db_copy.clone();
-        tokio::task::spawn_blocking(move || -> Result<(), String> {
-            let out = std::fs::File::create(&bundle_tmp).map_err(|e| e.to_string())?;
+        tokio::task::spawn_blocking(move || -> Result<(), Box<crate::failure::Failure>> {
+            let out = std::fs::File::create(&bundle_tmp).map_err(|e| {
+                Box::new(crate::diagnostics::from_error(&e, "backup bundle creation"))
+            })?;
             let gz = flate2::write::GzEncoder::new(out, flate2::Compression::default());
             let mut tar = tar::Builder::new(gz);
-            let mut add = |name: &str, bytes: &[u8]| -> Result<(), String> {
+            let mut add = |name: &str, bytes: &[u8]| -> Result<(), Box<crate::failure::Failure>> {
                 let mut h = tar::Header::new_gnu();
                 h.set_size(bytes.len() as u64);
                 h.set_mode(0o600);
                 h.set_mtime(chrono::Utc::now().timestamp() as u64);
                 h.set_cksum();
-                tar.append_data(&mut h, name, bytes)
-                    .map_err(|e| e.to_string())
+                tar.append_data(&mut h, name, bytes).map_err(|e| {
+                    Box::new(crate::diagnostics::from_error(&e, "backup bundle creation"))
+                })
             };
             add(
                 "manifest.json",
                 serde_json::to_vec_pretty(&manifest)
-                    .map_err(|e| e.to_string())?
+                    .map_err(|e| {
+                        Box::new(crate::diagnostics::from_error(&e, "backup bundle creation"))
+                    })?
                     .as_slice(),
             )?;
             if let Some(cfg) = &config_toml {
@@ -346,26 +364,45 @@ async fn get_backup(State(s): State<BackupApiState>) -> Response {
                 add("localsky.ledger.toml", l)?;
             }
             if let Some(path) = &db_copy {
-                let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
-                let len = f.metadata().map_err(|e| e.to_string())?.len();
+                let mut f = std::fs::File::open(path).map_err(|e| {
+                    Box::new(crate::diagnostics::from_error(&e, "backup bundle creation"))
+                })?;
+                let len = f
+                    .metadata()
+                    .map_err(|e| {
+                        Box::new(crate::diagnostics::from_error(&e, "backup bundle creation"))
+                    })?
+                    .len();
                 let mut h = tar::Header::new_gnu();
                 h.set_size(len);
                 h.set_mode(0o600);
                 h.set_mtime(chrono::Utc::now().timestamp() as u64);
                 h.set_cksum();
                 tar.append_data(&mut h, "irrigation.db", &mut f)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| {
+                        Box::new(crate::diagnostics::from_error(&e, "backup bundle creation"))
+                    })?;
             }
-            let gz = tar.into_inner().map_err(|e| e.to_string())?;
-            gz.finish().map_err(|e| e.to_string())?;
+            let gz = tar.into_inner().map_err(|e| {
+                Box::new(crate::diagnostics::from_error(&e, "backup bundle creation"))
+            })?;
+            gz.finish().map_err(|e| {
+                Box::new(crate::diagnostics::from_error(&e, "backup bundle creation"))
+            })?;
             Ok(())
         })
         .await
     };
     match build {
         Ok(Ok(())) => {}
-        Ok(Err(e)) => return err(StatusCode::INTERNAL_SERVER_ERROR, e),
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")),
+        Ok(Err(e)) => {
+            return operation_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &e,
+                "backup bundle creation",
+            )
+        }
+        Err(e) => return operation_err(StatusCode::INTERNAL_SERVER_ERROR, &e, "join"),
     }
     // The VACUUM copy's bytes are inside the bundle now; free the disk before
     // a potentially slow download.
@@ -379,21 +416,11 @@ async fn get_backup(State(s): State<BackupApiState>) -> Response {
     // is dropped mid-download.
     let file = match tokio::fs::File::open(&bundle_tmp).await {
         Ok(f) => f,
-        Err(e) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("bundle open: {e}"),
-            )
-        }
+        Err(e) => return operation_err(StatusCode::INTERNAL_SERVER_ERROR, &e, "bundle open"),
     };
     let len = match file.metadata().await {
         Ok(m) => m.len(),
-        Err(e) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("bundle stat: {e}"),
-            )
-        }
+        Err(e) => return operation_err(StatusCode::INTERNAL_SERVER_ERROR, &e, "bundle stat"),
     };
     let stream =
         futures::stream::try_unfold((file, bundle_guard), |(mut file, guard)| async move {
@@ -451,7 +478,7 @@ async fn post_restore(State(s): State<BackupApiState>, mut multipart: Multipart)
         let field = match multipart.next_field().await {
             Ok(Some(field)) => field,
             Ok(None) => break,
-            Err(e) => return err(StatusCode::BAD_REQUEST, format!("upload read: {e}")),
+            Err(e) => return operation_err(StatusCode::BAD_REQUEST, &e, "upload read"),
         };
         let name = field.name().unwrap_or("").to_string();
         let Ok(data) = field.bytes().await else {
@@ -496,12 +523,7 @@ async fn post_restore(State(s): State<BackupApiState>, mut multipart: Multipart)
     let config = if let Some(text) = config_text {
         let cfg: crate::config::schema::Config = match toml::from_str(text) {
             Ok(cfg) => cfg,
-            Err(e) => {
-                return err(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    format!("config parse: {e}"),
-                )
-            }
+            Err(e) => return operation_err(StatusCode::UNPROCESSABLE_ENTITY, &e, "config parse"),
         };
         if cfg.schema_version > crate::config::schema::CURRENT_SCHEMA_VERSION {
             return err(
@@ -533,7 +555,9 @@ async fn post_restore(State(s): State<BackupApiState>, mut multipart: Multipart)
     let ledger = if let Some(text) = ledger_text {
         let ledger = match toml::from_str::<crate::config::ledger::Ledger>(text) {
             Ok(ledger) => ledger,
-            Err(_) => return err(StatusCode::UNPROCESSABLE_ENTITY, "ledger does not parse"),
+            Err(e) => {
+                return operation_err(StatusCode::UNPROCESSABLE_ENTITY, &e, "restore ledger parse")
+            }
         };
         if config.is_none() {
             return err(
@@ -557,16 +581,17 @@ async fn post_restore(State(s): State<BackupApiState>, mut multipart: Multipart)
         );
         let guard = TempFileGuard(probe.clone());
         if let Err(e) = tokio::fs::write(&probe, bytes).await {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("db probe write: {e}"),
-            );
+            return operation_err(StatusCode::INTERNAL_SERVER_ERROR, &e, "db probe write");
         }
         let verdict = tokio::task::spawn_blocking(move || probe_localsky_db(&probe)).await;
         match verdict {
             Ok(Ok(())) => Some(guard),
-            Ok(Err(msg)) => return err(StatusCode::UNPROCESSABLE_ENTITY, msg),
-            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("db probe: {e}")),
+            Ok(Err(error)) => {
+                let mut response = serde_json::json!({ "error": error.to_string(), "diagnostic": crate::failure::FailureRecord::now(error.diagnostic()) });
+                response["code"] = serde_json::json!("restore_database_invalid");
+                return (StatusCode::UNPROCESSABLE_ENTITY, Json(response)).into_response();
+            }
+            Err(e) => return operation_err(StatusCode::INTERNAL_SERVER_ERROR, &e, "db probe"),
         }
     } else {
         None
@@ -588,10 +613,7 @@ async fn post_restore(State(s): State<BackupApiState>, mut multipart: Multipart)
     // only detaches this task; it cannot cancel an already-started file write.
     match tokio::spawn(commit_restore(s, accepted)).await {
         Ok(response) => response,
-        Err(e) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("restore transaction: {e}"),
-        ),
+        Err(e) => operation_err(StatusCode::INTERNAL_SERVER_ERROR, &e, "restore transaction"),
     }
 }
 
@@ -652,10 +674,7 @@ async fn commit_restore(s: BackupApiState, accepted: AcceptedRestore) -> Respons
                     "A restore staging write failed. Check recovery files and restart LocalSky before starting new watering.".to_string(),
                 ]);
             }
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("restore stage: {e}"),
-            );
+            return operation_err(StatusCode::INTERNAL_SERVER_ERROR, &e, "restore stage");
         }
         restart_reasons.push(if staged_config {
             "A restored configuration and History database are staged. Restart LocalSky to apply the backup."
@@ -676,10 +695,7 @@ async fn commit_restore(s: BackupApiState, accepted: AcceptedRestore) -> Respons
             Ok(restore) => restore,
             Err(e) => {
                 hold_failed_config_restore(&s).await;
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("config restore: {e}"),
-                );
+                return operation_err(StatusCode::INTERNAL_SERVER_ERROR, &e, "config restore");
             }
         };
         applied_config = true;
@@ -690,11 +706,20 @@ async fn commit_restore(s: BackupApiState, accepted: AcceptedRestore) -> Respons
         }
         match tokio::task::spawn_blocking(move || hot_restore.complete()).await {
             Ok(Ok(())) => {}
-            result => {
+            Ok(Err(error)) => {
                 hold_failed_config_restore(&s).await;
-                return err(
+                return operation_err(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("config restore completion: {result:?}"),
+                    &error,
+                    "config restore completion",
+                );
+            }
+            Err(error) => {
+                hold_failed_config_restore(&s).await;
+                return operation_err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &error,
+                    "config restore worker",
                 );
             }
         }
@@ -1152,7 +1177,9 @@ mod tests {
         conn.execute_batch("CREATE TABLE notes(id INTEGER PRIMARY KEY, body TEXT);")
             .unwrap();
         drop(conn);
-        let msg = probe_localsky_db(alien.to_str().unwrap()).unwrap_err();
+        let msg = probe_localsky_db(alien.to_str().unwrap())
+            .unwrap_err()
+            .to_string();
         assert!(msg.contains("not a LocalSky database"), "{msg}");
 
         // Magic-prefixed garbage fails too (the magic alone proves nothing).
@@ -1296,7 +1323,9 @@ mod tests {
             .unwrap();
         }
         drop(conn);
-        let err = probe_localsky_db(path.to_str().unwrap()).unwrap_err();
+        let err = probe_localsky_db(path.to_str().unwrap())
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("does not match its migration history"),
             "{err}"
