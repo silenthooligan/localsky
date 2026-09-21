@@ -7,11 +7,13 @@ Pushing a version tag starts one `release` workflow:
 3. Build amd64 and arm64 images on native runners. Start each image with no
    network and temporary data, check health/pages/assets, then scan that exact
    image with Trivy.
-4. Push the verified images, combine their recorded digests and promote GHCR
+4. Combine the verified image digests and promote GHCR
    and the configured Docker Hub mirror.
 5. Publish the GitHub release. This job depends on all previous jobs succeeding.
 
 PRs run the same native image builds, startup checks and scans without publishing.
+Release candidates are pushed by digest with BuildKit provenance; version and
+Latest tags are created only after both architectures pass their checks.
 No polling script waits for unrelated workflow runs. The release run contains
 the checks and artifacts that authorized its publication.
 
