@@ -82,7 +82,7 @@ docker create --name "$PW" --network "$NET" --ipc=host -w /e2e \
     && npm ci --no-audit --no-fund >/dev/null \
     && npx playwright test fresh-install.spec.ts --reporter=list --retries=0 --forbid-only \
     && npx playwright test axe.spec.ts editor-drawer.spec.ts intent-safety.spec.ts forecast-tracks.spec.ts rachio-scan.spec.ts zone-bind.spec.ts --reporter=list --retries=0 --forbid-only \
-    && BASE_URL="$DEMO_BASE_URL" npx playwright test smoke.spec.ts radar.spec.ts --reporter=list --retries=0 --forbid-only --update-snapshots=none' >/dev/null
+    && BASE_URL="$DEMO_BASE_URL" npx playwright test smoke.spec.ts radar.spec.ts demo.spec.ts --reporter=list --retries=0 --forbid-only --update-snapshots=none' >/dev/null
 for f in package.json package-lock.json playwright.config.ts "$E2E_DIR"/*.spec.ts; do
   case "$f" in /*) src="$f" ;; *) src="$E2E_DIR/$f" ;; esac
   docker cp "$src" "$PW:/e2e/$(basename "$src")"

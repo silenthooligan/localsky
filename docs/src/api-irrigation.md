@@ -52,7 +52,7 @@ Daily entries contain `date_local`, `epoch`, `kind`, and `zones`. Zone entries p
 
 Daily planning evidence and actual run records have different meanings. A generic historical decision does not prove that a scheduled valve dispatch was skipped.
 
-**GET /decisions?days=30** returns verdict transitions. Its range clamps to 1–365 days. A transition is not the daily watering journal.
+**GET /decisions?days=30** returns verdict transitions. Its range clamps to 1 to 365 days. A transition is not the daily watering journal.
 
 ## Export and review
 
@@ -64,7 +64,7 @@ Daily planning evidence and actual run records have different meanings. A generi
 | `GET /explanation` | Optional advisor explanation |
 | `GET /anomalies` | Optional advisory checks |
 
-Export ranges clamp to 1–3,650 days. Accuracy uses 1–365 days and does not score incomplete current days. Tuning uses 7–30 days.
+Export ranges clamp to 1 to 3,650 days. Accuracy uses 1 to 365 days and does not score incomplete current days. Tuning uses 7 to 30 days.
 
 History-dependent routes require persistent storage. An unavailable or failed history read must not be treated as an empty successful report.
 
@@ -93,7 +93,7 @@ Use the LocalSky zone slug, not a guessed controller name. For example:
 
 Explicit run durations have a defensive ceiling of 7,200 seconds and remain subject to the applicable dispatch policy. A Force choice does not bypass every protection. See [rules and thresholds](skip-rules.md).
 
-Threshold writes accept `max_wind_mph` (0–50), `min_temp_f` (20–70), and `rain_skip_in` (0–10). Controls are stored in LocalSky; retired HA helpers are not the control store.
+Threshold writes accept `max_wind_mph` (0 to 50), `min_temp_f` (20 to 70), and `rain_skip_in` (0 to 10). Controls are stored in LocalSky; retired HA helpers are not the control store.
 
 Successful dispatch responses include `ok`, the dispatch target, and, where available, `confirm_within_s`. Check subsequent reported state. If a request times out, inspect state before retrying a run.
 

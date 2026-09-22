@@ -1,6 +1,8 @@
 @use "mixins" as *;
 
 // radar and its Leaflet overrides
+.radar-map .radar-basemap { filter: var(--radar-basemap-filter); }
+.radar-map.leaflet-container { background: var(--bg-deep); }
 //
 // Split out of main.scss, which had grown to 11,330 lines.
 // Load order is the cascade: see the @use list in main.scss.
@@ -1700,6 +1702,9 @@
 .setup-shell__header { margin-bottom: 1.5rem; }
 .setup-shell__title { margin: 0 0 0.4rem; color: var(--text); font-size: 1.8rem; }
 .setup-shell__subtitle { color: var(--text-dim); line-height: 1.55; max-width: 60ch; }
+.setup-demo-intro { display: none; }
+[data-demo="true"] .setup-demo-intro { display: block; }
+[data-demo="true"] .setup-live-intro { display: none; }
 
 // Wizard species gallery: a responsive grid of cards, each with an
 // optional photo + name + Kc range + root depth + MAD + short note.

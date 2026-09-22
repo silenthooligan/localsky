@@ -1,6 +1,6 @@
 # LocalSky guide
 
-Service 0.9.2; API 2.4.0.
+Service 0.9.3; API 2.4.0.
 
 
 ---
@@ -10,7 +10,7 @@ Source: https://localsky.io/docs/introduction.html
 # LocalSky
 
 <div class="ls-doc-hero">
-<p class="ls-eyebrow">THE LOCALSKY GUIDE · v0.9.2</p>
+<p class="ls-eyebrow">THE LOCALSKY GUIDE · v0.9.3</p>
 <p class="ls-doc-tagline">Understand your weather.<br>Water for your yard.</p>
 <p>LocalSky brings weather, soil conditions, and irrigation into one app on your own hardware. See what happened today, what is planned next, and why.</p>
 <a class="ls-doc-primary" href="getting-started.html">Install LocalSky →</a>
@@ -1575,7 +1575,7 @@ The progressive plan carries earlier projected rain, demand, and watering into l
 
 ## Weather demand
 
-Reference evapotranspiration, **ETâ‚€**, estimates atmospheric demand. LocalSky uses FAO-56 Penman–Monteith calculations where inputs support them, with the implemented alternatives for reduced data. Crop coefficients adapt reference demand to the configured plants and season.
+Reference evapotranspiration, **ETâ‚€**, estimates atmospheric demand. LocalSky uses FAO-56 Penman-Monteith calculations where inputs support them, with the implemented alternatives for reduced data. Crop coefficients adapt reference demand to the configured plants and season.
 
 FAO-56 defines the reference method and the root-zone water-balance framework. LocalSky's scheduling rules, limits, and defaults are its implementation of those methods; the application itself is not a peer-reviewed field trial. [FAO reference ET](https://www.fao.org/4/x0490e/x0490e06.htm), [FAO soil water balance](https://www.fao.org/4/x0490e/x0490e0e.htm).
 
@@ -1660,7 +1660,7 @@ Source: https://localsky.io/docs/skip-rules.html
 
 LocalSky checks each zone through the same decision ladder every morning and whenever conditions change. **First matching applicable gate wins.** Active owner holds, watering restrictions, unavailable weather or configured probes, and enabled freeze, frost, and wind protections remain binding when Force is selected. Rain, reliable soil readings, and structured condition recommendations can be bypassed by an explicitly confirmed Force choice. Script holds remain binding.
 
-Source: `src/engine/skip_rules.rs`.
+The catalog contains 25 built-in rules. Source: `src/engine/skip_rules.rs`.
 
 ## Ladder
 
@@ -2620,7 +2620,7 @@ Back up, update the server, then update the Home Assistant companion if you use 
 
 Download a bundle from **Settings > Advanced > Backup and restore**. Keep it outside the LocalSky host. Copy zone photos and the Web Push private key separately if you need them; the bundle excludes both.
 
-Record your current image tag and deployment settings. For predictable upgrades, pin a released image such as `ghcr.io/silenthooligan/localsky:v0.9.2`.
+Record your current image tag and deployment settings. For predictable upgrades, pin a released image such as `ghcr.io/silenthooligan/localsky:v0.9.3`.
 
 ## Docker Compose
 
@@ -3583,7 +3583,7 @@ Daily entries contain `date_local`, `epoch`, `kind`, and `zones`. Zone entries p
 
 Daily planning evidence and actual run records have different meanings. A generic historical decision does not prove that a scheduled valve dispatch was skipped.
 
-**GET /decisions?days=30** returns verdict transitions. Its range clamps to 1–365 days. A transition is not the daily watering journal.
+**GET /decisions?days=30** returns verdict transitions. Its range clamps to 1 to 365 days. A transition is not the daily watering journal.
 
 ## Export and review
 
@@ -3595,7 +3595,7 @@ Daily planning evidence and actual run records have different meanings. A generi
 | `GET /explanation` | Optional advisor explanation |
 | `GET /anomalies` | Optional advisory checks |
 
-Export ranges clamp to 1–3,650 days. Accuracy uses 1–365 days and does not score incomplete current days. Tuning uses 7–30 days.
+Export ranges clamp to 1 to 3,650 days. Accuracy uses 1 to 365 days and does not score incomplete current days. Tuning uses 7 to 30 days.
 
 History-dependent routes require persistent storage. An unavailable or failed history read must not be treated as an empty successful report.
 
@@ -3624,7 +3624,7 @@ Use the LocalSky zone slug, not a guessed controller name. For example:
 
 Explicit run durations have a defensive ceiling of 7,200 seconds and remain subject to the applicable dispatch policy. A Force choice does not bypass every protection. See [rules and thresholds](skip-rules.md).
 
-Threshold writes accept `max_wind_mph` (0–50), `min_temp_f` (20–70), and `rain_skip_in` (0–10). Controls are stored in LocalSky; retired HA helpers are not the control store.
+Threshold writes accept `max_wind_mph` (0 to 50), `min_temp_f` (20 to 70), and `rain_skip_in` (0 to 10). Controls are stored in LocalSky; retired HA helpers are not the control store.
 
 Successful dispatch responses include `ok`, the dispatch target, and, where available, `confirm_within_s`. Check subsequent reported state. If a request times out, inspect state before retrying a run.
 

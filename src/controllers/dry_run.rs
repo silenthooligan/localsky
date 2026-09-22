@@ -24,6 +24,11 @@ pub struct DryRunController {
     id: String,
     config: DryRunConfig,
     runs: Option<RunsStore>,
+    /// Zones bound to this controller. `status()` reports every one of them
+    /// (idle unless pretend-running) so the refresher sees a known state for
+    /// each; a zone missing from the report reads as unknown, which left the
+    /// demo stuck on "Checking valves" for every idle zone.
+    zones: Vec<String>,
     /// Lightweight in-memory state so `status()` reflects pretend runs.
     pretend_running: Arc<Mutex<HashSet<String>>>,
 }
@@ -34,8 +39,17 @@ impl DryRunController {
             id: id.into(),
             config,
             runs,
+            zones: Vec::new(),
             pretend_running: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    /// Bind the zone slugs this controller reports on.
+    pub fn with_zones(mut self, zones: impl IntoIterator<Item = String>) -> Self {
+        self.zones = zones.into_iter().collect();
+        self.zones.sort();
+        self.zones.dedup();
+        self
     }
 }
 
@@ -135,6 +149,8 @@ impl IrrigationController for DryRunController {
 
     async fn status(&self) -> ControllerResult<ControllerStatus> {
         let running = self.pretend_running.lock().await.clone();
+        let mut slugs: Vec<String> = self.zones.clone();
+        slugs.extend(running.iter().filter(|s| !self.zones.contains(s)).cloned());
         Ok(ControllerStatus {
             observed_epoch: None,
             reachable: true,
@@ -143,11 +159,11 @@ impl IrrigationController for DryRunController {
             water_level_pct: None,
             rain_sensor_tripped: Some(false),
             current_program: None,
-            zone_states: running
+            zone_states: slugs
                 .into_iter()
                 .map(|slug| ZoneRuntimeStatus {
+                    running: running.contains(&slug),
                     slug,
-                    running: true,
                     remaining_s: None,
                     last_run_epoch: None,
                     running_known: true,
@@ -240,6 +256,40 @@ mod tests {
         c.stop_all().await.unwrap();
         let s = c.status().await.unwrap();
         assert!(s.zone_states.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bound_idle_zones_report_known_not_running() {
+        let c = ctrl().with_zones(["back_yard".to_string(), "front_yard".to_string()]);
+        let s = c.status().await.unwrap();
+        assert_eq!(s.zone_states.len(), 2);
+        assert!(s.zone_states.iter().all(|z| z.running_known && !z.running));
+    }
+
+    #[tokio::test]
+    async fn bound_zone_reports_running_while_pretending() {
+        let c = ctrl().with_zones(["back_yard".to_string(), "front_yard".to_string()]);
+        c.run_zone("back_yard", 600).await.unwrap();
+        let s = c.status().await.unwrap();
+        let by = |slug: &str| s.zone_states.iter().find(|z| z.slug == slug).unwrap();
+        assert!(by("back_yard").running);
+        assert!(!by("front_yard").running && by("front_yard").running_known);
+    }
+
+    #[tokio::test]
+    async fn simulate_runs_still_reports_bound_zones() {
+        let c = DryRunController::new(
+            "demo",
+            DryRunConfig {
+                simulate_runs: true,
+            },
+            None,
+        )
+        .with_zones(["side_yard".to_string()]);
+        c.run_zone("side_yard", 60).await.unwrap();
+        let s = c.status().await.unwrap();
+        assert_eq!(s.zone_states.len(), 1);
+        assert!(s.zone_states[0].running_known && !s.zone_states[0].running);
     }
 
     #[tokio::test]

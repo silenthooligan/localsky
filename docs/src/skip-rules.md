@@ -2,7 +2,7 @@
 
 LocalSky checks each zone through the same decision ladder every morning and whenever conditions change. **First matching applicable gate wins.** Active owner holds, watering restrictions, unavailable weather or configured probes, and enabled freeze, frost, and wind protections remain binding when Force is selected. Rain, reliable soil readings, and structured condition recommendations can be bypassed by an explicitly confirmed Force choice. Script holds remain binding.
 
-Source: `src/engine/skip_rules.rs`.
+The catalog contains {{LOCALSKY_SKIP_RULES}} built-in rules. Source: `src/engine/skip_rules.rs`.
 
 ## Ladder
 

@@ -103,9 +103,12 @@ pub fn SetupShell() -> impl IntoView {
         <div class="setup-shell">
             <header class="setup-shell__header">
                 <h1 class="setup-shell__title">"Set up LocalSky"</h1>
-                <p class="setup-shell__subtitle">
+                <p class="setup-shell__subtitle setup-live-intro">
                     "About five minutes. Leave any time; your progress is saved "
                     "on this device until you apply it at the end."
+                </p>
+                <p class="setup-shell__subtitle setup-demo-intro" role="status">
+                    "This demo is read-only. You can explore setup, but changes aren't saved and device probes are disabled."
                 </p>
                 <ProgressStrip current=current_step/>
             </header>

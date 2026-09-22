@@ -1,0 +1,251 @@
+name: recover 0.9.2 images
+
+# The regular ARM64 build hit repeated 504s on GitHub release-download URLs.
+# Fetch the same checksummed tool assets through the asset API. The checked-out
+# application and immutable release tag remain unchanged; the build-only
+# Dockerfile addition installs those tools before cargo-leptos needs them.
+on:
+  push:
+    branches: ['release/0.9.2-image-recovery']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  packages: write
+
+concurrency:
+  group: recover-092-images
+  cancel-in-progress: false
+
+jobs:
+  arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 3582031134d4b392b5ca4896b1010b7442aa7794
+      - name: Verify immutable application source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(git rev-parse HEAD)" = 3582031134d4b392b5ca4896b1010b7442aa7794
+          test "$(git rev-parse HEAD^{tree})" = df07573b63ec1eccb64c0c76fb62833cecafb556
+          test "$(gh api repos/silenthooligan/localsky/releases/latest --jq .tag_name)" = v0.9.1
+          git diff --exit-code
+      - name: Fetch and verify the original build tools through GitHub's asset API
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess, tarfile
+          root = pathlib.Path('.ci-tools')
+          root.mkdir()
+          assets = [
+            ('wasm-bindgen/wasm-bindgen', 456882701, '96864b3992ad45536deb59fc62edc5b845376b7d8b4ac670a6bdab4ab8d2c657', 'wasm-bindgen-0.2.126-aarch64-unknown-linux-gnu', 'wasm-bindgen'),
+            ('WebAssembly/binaryen', 240708754, '4b6bd61ba6cd3b18c993b4657d93426c782f9b91b74be0d38018cd8be1319376', 'binaryen-version_123', 'binaryen'),
+            ('sass/dart-sass', 387414403, '685765a2f3dc86de1f50351c44935c138beffa923104fc2ec30273ac1416f4df', 'dart-sass', 'dart-sass'),
+          ]
+          proof = []
+          for repo, asset_id, expected, directory, name in assets:
+              archive = pathlib.Path('/tmp') / (name + '.tar.gz')
+              fetched = subprocess.run(['curl', '-fsSL', '--retry', '3', '--retry-all-errors',
+                  '--retry-delay', '3', '--connect-timeout', '20', '--max-time', '180',
+                  '-H', 'Accept: application/octet-stream',
+                  '-H', 'Authorization: Bearer ' + os.environ['GH_TOKEN'],
+                  '-o', str(archive), f'https://api.github.com/repos/{repo}/releases/assets/{asset_id}'])
+              if fetched.returncode:
+                  raise SystemExit(f'Asset download failed: repository={repo} asset_id={asset_id} curl_exit={fetched.returncode}')
+              actual = hashlib.sha256(archive.read_bytes()).hexdigest()
+              assert actual == expected, (name, 'checksum mismatch', actual)
+              with tarfile.open(archive) as bundle:
+                  bundle.extractall(root, filter='data')
+              if directory != name:
+                  (root / directory).rename(root / name)
+              proof.append({'repository': repo, 'asset_id': asset_id, 'sha256': actual})
+          for binary, version in [('wasm-bindgen/wasm-bindgen', '0.2.126'),
+                                  ('binaryen/bin/wasm-opt', '123'), ('dart-sass/sass', '1.99.0')]:
+              output = subprocess.check_output([str(root / binary), '--version'], text=True)
+              assert version in output, output
+              print(output.strip())
+          pathlib.Path('/tmp/tool-assets.json').write_text(json.dumps(proof, indent=2))
+          original = pathlib.Path('Dockerfile').read_text()
+          marker = 'ENV LEPTOS_SASS_VERSION=1.99.0\n'
+          assert original.count(marker) == 1
+          addition = ('COPY .ci-tools /opt/localsky-build-tools\n'
+                      'ENV PATH="/opt/localsky-build-tools/wasm-bindgen:/opt/localsky-build-tools/binaryen/bin:/opt/localsky-build-tools/dart-sass:${PATH}"\n')
+          pathlib.Path('/tmp/Dockerfile.092-recovery').write_text(original.replace(marker, marker + addition))
+          PY
+          git diff --exit-code
+          diff -u Dockerfile /tmp/Dockerfile.092-recovery > /tmp/build-tools.diff || test "$?" = 1
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build the immutable release using the verified tools
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: .
+          file: /tmp/Dockerfile.092-recovery
+          platforms: linux/arm64
+          build-args: GIT_SHA=3582031134d4b392b5ca4896b1010b7442aa7794
+          outputs: type=image,name=ghcr.io/silenthooligan/localsky,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=arm64
+          cache-to: type=gha,scope=arm64,mode=max
+      - name: Native ARM64 runtime smoke
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re, subprocess, time
+          image = 'ghcr.io/silenthooligan/localsky@' + os.environ['IMAGE_DIGEST']
+          cid = subprocess.check_output(['docker', 'run', '-d', '--network', 'none',
+              '--tmpfs', '/data', '--tmpfs', '/keys', '-e', 'LOCALSKY_DEMO=1',
+              '-e', 'LOCALSKY_SMART_DRY_RUN=1', image], text=True).strip()
+          assert re.fullmatch(r'[a-f0-9]{64}', cid)
+          def get(path):
+              return subprocess.check_output(['docker', 'exec', cid, 'curl', '-fsS',
+                  '--max-time', '5', 'http://127.0.0.1:8090' + path], stderr=subprocess.DEVNULL)
+          try:
+              for _ in range(45):
+                  try:
+                      info = json.loads(get('/api/v1/info'))
+                      health = json.loads(get('/api/v1/health?strict=1'))
+                      if health['status'] == 'ok':
+                          break
+                  except subprocess.CalledProcessError:
+                      pass
+                  time.sleep(2)
+              else:
+                  raise AssertionError('Native ARM64 runtime did not become healthy')
+              assert info['service_version'] == '0.9.2' and info['api_version'] == '2.4.0'
+              assert info['build_revision'] == '3582031134d4b392b5ca4896b1010b7442aa7794'
+              assert info['demo'] and info['dry_run'] and not health['valves_unclosed']
+              snapshot = json.loads(get('/api/v1/irrigation/snapshot'))
+              assert all(not zone['running'] for zone in snapshot['zones'])
+              routes = ['/', '/irrigation', '/irrigation/decisions', '/zones', '/history', '/docs/']
+              pages = {path: get(path).decode() for path in routes}
+              assert all('<html' in body.lower() for body in pages.values())
+              assets = set(re.findall(r'[/]pkg/[^"\s<>]+\.(?:js|wasm|css)', pages['/']))
+              assert len(assets) >= 3 and all(len(get(path)) > 100 for path in assets)
+              status = subprocess.check_output(['docker', 'exec', cid, 'cat', '/proc/1/status'], text=True)
+              assert re.search(r'^Uid:\s+(\d+)', status, re.M).group(1) == '10001'
+              proof = {'result': 'pass', 'architecture': 'arm64', 'digest': os.environ['IMAGE_DIGEST'],
+                  'source': info['build_revision'], 'health': health['status'], 'routes': routes,
+                  'assets': sorted(assets), 'uid': 10001, 'network': 'none', 'valve_actions': 0}
+              pathlib.Path('/tmp/runtime-arm64.json').write_text(json.dumps(proof, indent=2))
+              print(json.dumps(proof))
+          finally:
+              subprocess.run(['docker', 'rm', '-f', cid], check=True)
+          PY
+      - name: Export digest and source proof
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          git diff --exit-code
+          test "$(git rev-parse HEAD)" = 3582031134d4b392b5ca4896b1010b7442aa7794
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${IMAGE_DIGEST#sha256:}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: recovered-arm64-digest
+          path: /tmp/digests/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: verified-build-tools
+          path: |
+            /tmp/tool-assets.json
+            /tmp/build-tools.diff
+            /tmp/Dockerfile.092-recovery
+            /tmp/runtime-arm64.json
+
+  merge:
+    needs: arm64
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Confirm the original source and successful amd64 build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(gh api repos/silenthooligan/localsky/releases/latest --jq .tag_name)" = v0.9.1
+          gh api repos/silenthooligan/localsky/actions/runs/35614521910 > /tmp/original-run.json
+          gh api repos/silenthooligan/localsky/actions/runs/35614521910/jobs > /tmp/original-jobs.json
+          python3 - <<'PY'
+          import json
+          assert json.load(open('/tmp/original-run.json'))['head_sha'] == '3582031134d4b392b5ca4896b1010b7442aa7794'
+          jobs = json.load(open('/tmp/original-jobs.json'))['jobs']
+          assert any(j['name'] == 'build (linux/amd64)' and j['conclusion'] == 'success' for j in jobs)
+          PY
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: digests-amd64
+          path: /tmp/digests/amd64
+          run-id: 35614521910
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: recovered-arm64-digest
+          path: /tmp/digests/arm64
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the two verified architectures
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, subprocess
+          refs = []
+          for architecture in ['amd64', 'arm64']:
+              files = list((pathlib.Path('/tmp/digests') / architecture).iterdir())
+              assert len(files) == 1 and re.fullmatch(r'[a-f0-9]{64}', files[0].name)
+              refs.append('ghcr.io/silenthooligan/localsky@sha256:' + files[0].name)
+          subprocess.run(['docker', 'buildx', 'imagetools', 'create',
+              '-t', 'ghcr.io/silenthooligan/localsky:0.9.2',
+              '-t', 'ghcr.io/silenthooligan/localsky:0.9',
+              '-t', 'ghcr.io/silenthooligan/localsky:latest', *refs], check=True)
+          PY
+
+  scan:
+    needs: merge
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [amd64, arm64]
+    steps:
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          TRIVY_PLATFORM: linux/${{ matrix.architecture }}
+        with:
+          image-ref: ghcr.io/silenthooligan/localsky:0.9.2
+          format: json
+          output: trivy.json
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+      - name: Verify scan architecture
+        env:
+          EXPECTED_ARCH: ${{ matrix.architecture }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          data = json.load(open('trivy.json'))
+          assert data['Metadata']['ImageConfig']['architecture'] == os.environ['EXPECTED_ARCH']
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: trivy-${{ matrix.architecture }}
+          path: trivy.json

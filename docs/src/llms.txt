@@ -1,6 +1,6 @@
 # LocalSky
 
-> Self-hosted weather and irrigation. Guide for service 0.9.2, API 2.4.0.
+> Self-hosted weather and irrigation. Guide for service 0.9.3, API 2.4.0.
 
 Use recorded history for past outcomes and water_plan for projections. Preserve nulls, units, source identity, observation age, and forecast coverage. LocalSky API tokens are not read-scoped.
 

@@ -110,15 +110,15 @@ fn public_readme() -> String {
         .expect("public README must be present in the canonical or sanitized tree")
 }
 
-/// README.public.md is read on GitHub as-is, so its numbers are literals;
-/// they must be the code's.
+/// The guide owns the rule inventory. Any count mentioned in the public
+/// README must still match the code, but the product overview need not list it.
 #[test]
-fn the_public_readme_states_the_codes_numbers() {
+fn the_rule_reference_uses_the_catalog_and_readme_counts_cannot_drift() {
     let readme = public_readme();
-    let want = format!("{}-rule", skip_rule_count());
+    let reference = std::fs::read_to_string(root().join("docs/src/skip-rules.md")).unwrap();
     assert!(
-        readme.contains(&want),
-        "README.public.md names the {want} skip ladder"
+        reference.contains("{{LOCALSKY_SKIP_RULES}}"),
+        "the rule reference derives its count from the catalog"
     );
     for (i, line) in readme.lines().enumerate() {
         // Every "N-rule" in the README is the catalog's N.

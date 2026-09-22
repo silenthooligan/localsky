@@ -1056,11 +1056,19 @@ pub fn build_controllers(
             None
         }
         let constructed: Option<Arc<dyn IrrigationController>> = match &entry.controller {
-            ControllerKind::DryRun(c) => Some(Arc::new(DryRunController::new(
-                entry.id.clone(),
-                c.clone(),
-                runs.clone(),
-            ))),
+            // Same binding rule as the device list: a zone with an empty
+            // controller_id belongs to the default controller.
+            ControllerKind::DryRun(c) => Some(Arc::new(
+                DryRunController::new(entry.id.clone(), c.clone(), runs.clone()).with_zones(
+                    cfg.zones
+                        .iter()
+                        .filter(|(_, z)| {
+                            z.controller_id == entry.id
+                                || (z.controller_id.is_empty() && entry.default)
+                        })
+                        .map(|(slug, _)| slug.replace('-', "_")),
+                ),
+            )),
             ControllerKind::OpensprinklerDirect(c) => {
                 // Build zone -> station map from cfg.zones for this
                 // controller. Station strings parsed as 1-based ints.

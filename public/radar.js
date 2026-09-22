@@ -388,11 +388,17 @@
     // account. Keep OSM attribution visible and let the browser honor its tile
     // cache headers; request only the normal interactive viewport.
     // https://operations.osmfoundation.org/policies/tiles/
+    // Theme only the geographic base. Radar colors, warnings, and markers
+    // retain their original meaning in every theme.
+    var basePane = map.createPane('radar-base');
+    basePane.classList.add('radar-basemap');
+    basePane.style.zIndex = '200';
     L.tileLayer(
       'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
       {
         attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
         referrerPolicy: 'strict-origin-when-cross-origin',
+        pane: 'radar-base',
         minZoom: 0,
         maxZoom: 19,
       }

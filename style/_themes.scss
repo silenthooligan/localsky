@@ -149,6 +149,7 @@
 // the OS prefers light. Everything light-specific lives in the two mixins
 // above so a new override needs exactly one edit.
 @mixin localsky-light {
+  --radar-basemap-filter: none;
   @include localsky-light-tokens;
   @include localsky-light-element-overrides;
 }
@@ -165,6 +166,7 @@
 // similar reasons. text-bright stays pure white; borders stay pure white.
 
 [data-theme="hc"] {
+  --radar-basemap-filter: invert(1) grayscale(1) contrast(1.25);
   --bg-deep: #000000;
   --bg-panel: #000000;
   --bg-panel-soft: #0a0a0a;

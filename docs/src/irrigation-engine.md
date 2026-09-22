@@ -40,7 +40,7 @@ The progressive plan carries earlier projected rain, demand, and watering into l
 
 ## Weather demand
 
-Reference evapotranspiration, **ETâ‚€**, estimates atmospheric demand. LocalSky uses FAO-56 Penman–Monteith calculations where inputs support them, with the implemented alternatives for reduced data. Crop coefficients adapt reference demand to the configured plants and season.
+Reference evapotranspiration, **ETâ‚€**, estimates atmospheric demand. LocalSky uses FAO-56 Penman-Monteith calculations where inputs support them, with the implemented alternatives for reduced data. Crop coefficients adapt reference demand to the configured plants and season.
 
 FAO-56 defines the reference method and the root-zone water-balance framework. LocalSky's scheduling rules, limits, and defaults are its implementation of those methods; the application itself is not a peer-reviewed field trial. [FAO reference ET](https://www.fao.org/4/x0490e/x0490e06.htm), [FAO soil water balance](https://www.fao.org/4/x0490e/x0490e0e.htm).
 

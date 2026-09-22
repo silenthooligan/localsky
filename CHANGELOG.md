@@ -2,6 +2,34 @@
 
 All notable changes to LocalSky are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.3] - 2026-09-22
+
+### Fixed
+
+- Demo history stays current on a persisted volume. Missing days receive
+  consistent sample runs and daily decisions, including rain, wind, and soil
+  skips. Existing records are preserved, and interrupted refreshes can retry
+  without duplicating history. The sample year fills the longer history views.
+- Demo setup explains that changes and device probes are disabled instead of
+  displaying a raw API failure. The server remains read-only.
+- The radar base map follows Dark, Light, Auto, and High contrast themes.
+  Weather overlays retain their original colors.
+- Dry-run controllers report every bound zone, including known-idle zones.
+  Demo zones also report their controller and known state, clearing the
+  misleading "Checking valves" message.
+- Documentation table values stay together while descriptions wrap. Wide
+  tables support keyboard scrolling without changing chapters.
+
+### Documentation and release tooling
+
+- Reorganized the product guide around installation, daily use, devices,
+  watering decisions, maintenance, and integration development. Added API
+  connector examples, a selected-read OpenAPI profile, and AI documentation
+  exports. Updated screenshots and mobile/accessibility checks.
+- Release checks now verify build-tool downloads and image provenance, support
+  bounded retries and safe recovery, and check generated connector exports.
+  Publication follows source checks, native image startup, and security scans.
+
 ## [0.9.2] - 2026-09-21
 
 Update the Home Assistant integration and HAOS app to 0.9.2 alongside the

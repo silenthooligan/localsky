@@ -26,6 +26,8 @@
 // colors past this block.
 
 :root {
+  // OSM is a light raster; this filter applies only to geographic base tiles.
+  --radar-basemap-filter: invert(1) hue-rotate(180deg) saturate(0.55) brightness(0.85);
   // ─────────────────────────────────────────────────────────────────
   // LocalSky brand palette
   // ─────────────────────────────────────────────────────────────────

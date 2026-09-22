@@ -7,6 +7,8 @@
 // we want to show; the rest stay zero/empty and the UI degrades
 // gracefully through its existing empty-state handling.
 
+mod history;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -44,7 +46,7 @@ pub fn spawn(
 ) {
     info!("demo_data: spawning synthetic data feeder (LOCALSKY_DEMO=1)");
     if let Some(conn) = history.clone() {
-        tokio::spawn(seed_history(conn));
+        tokio::spawn(history::maintain(conn));
     }
     if let Some(conn) = history {
         tokio::spawn(feed_sensor_history(conn, tempest.clone()));
@@ -805,6 +807,12 @@ fn synth_zone(slug: &str, name: &str, last_run: i64) -> ZoneState {
     // `apply_budget_plan` set the real figure.
     z.planned_run_seconds = 0;
     z.last_run_epoch = last_run;
+    // The demo's dry-run controller reports every zone it owns, so the zone
+    // reads as known-idle on that controller. `ZoneState::default()` leaves
+    // `running_known` false (the serde default only applies on deserialize),
+    // which showed every demo zone as "Checking valves" with no controller.
+    z.running_known = true;
+    z.controller_id = Some("demo_controller".into());
     z.math = Some(ZoneMath {
         bucket_mm: None,
         // The zone's own species curve at midsummer, not a slug guess.
@@ -1234,131 +1242,8 @@ fn synth_forecast() -> ForecastSnapshot {
     f
 }
 
-/// Seed ~30 days of plausible runs, skips, and decisions so the demo's
-/// History page (run log, charts, calendar, skip breakdown) tells a
-/// story instead of rendering empty states, plus the rain observations
-/// and per-zone probe curves the tuning report reads, so the public demo
-/// renders that feature populated too. Idempotent: only fires when the
-/// runs table is empty. Deterministic: every value keys off the day
-/// index (no RNG).
-async fn seed_history(conn: Arc<tokio::sync::Mutex<rusqlite::Connection>>) {
-    use crate::persistence::runs::{NewRun, RunsStore};
-    use crate::persistence::VerdictHistoryStore;
-
-    // One synthetic row, written the way the observer writes a real one.
-    // A duration of zero with a reason is the skip shape.
-    async fn seed_run(runs: &RunsStore, slug: &str, start: i64, dur: i64, reason: Option<&str>) {
-        let _ = runs
-            .insert_observed(
-                NewRun {
-                    session_id: None,
-                    zone_slug: slug.into(),
-                    start_epoch: start,
-                    source: "ha_refresher".into(),
-                    controller_id: "demo_controller".into(),
-                    planned_duration_s: dur.max(0) as u32,
-                    skip_reason: reason.map(str::to_string),
-                    et0_mm: None,
-                    etc_mm: None,
-                    cycle_index: None,
-                    cycle_count: None,
-                },
-                dur,
-                None,
-                None,
-            )
-            .await;
-    }
-
-    let runs = RunsStore::new(conn.clone());
-    let verdicts = VerdictHistoryStore::new(conn.clone());
-
-    let existing: i64 = {
-        let c = conn.lock().await;
-        c.query_row("SELECT COUNT(*) FROM runs", [], |r| r.get(0))
-            .unwrap_or(0)
-    };
-    if existing > 0 {
-        return;
-    }
-    info!("demo_data: seeding 30 days of synthetic history");
-
-    let zones: [(&str, i64); 4] = [
-        ("back_yard", 3600),
-        ("front_yard", 1800),
-        ("side_yard", 1800),
-        ("back_yard_shrubs", 1320),
-    ];
-    let now = chrono::Utc::now().timestamp();
-    let day = 86_400i64;
-    // Per-zone completed watering intervals, collected while seeding so
-    // the probe curves below can bracket the SAME events the runs table
-    // records (rises right after each run; steady drying between).
-    let mut watered: std::collections::HashMap<&str, Vec<(i64, i64)>> =
-        std::collections::HashMap::new();
-    // Deterministic pseudo-random pattern keyed by day index: roughly
-    // every other day waters, with rain and wind skip days mixed in.
-    for back in (1..=30).rev() {
-        let midnight = now - back * day - (now % day);
-        let start = midnight + 6 * 3600 + (back % 3) * 600;
-        let kind = back % 7;
-        match kind {
-            2 => {
-                let _ = verdicts
-                    .insert_transition(
-                        start,
-                        "skip".into(),
-                        "Rain expected within 4h (0.31 in forecast)".into(),
-                        String::new(),
-                    )
-                    .await;
-                for (slug, _) in zones {
-                    seed_run(&runs, slug, start, 0, Some("Rain expected within 4h")).await;
-                }
-            }
-            5 => {
-                let _ = verdicts
-                    .insert_transition(
-                        start,
-                        "skip".into(),
-                        "Wind 14 mph above 10 mph threshold".into(),
-                        String::new(),
-                    )
-                    .await;
-            }
-            0 | 3 => {
-                // Rest day: bucket still comfortable, no rows.
-            }
-            _ => {
-                let _ = verdicts
-                    .insert_transition(start, "run".into(), String::new(), String::new())
-                    .await;
-                let mut t = start;
-                for (slug, dur) in zones {
-                    // back_yard sits out the trailing week: the balance
-                    // showcase has it behind on its target (its capped
-                    // sessions could not keep up), which is exactly the
-                    // state the cap-raise recommendation describes. Its
-                    // earlier weeks still water normally so the 14-day
-                    // report window has run days to evaluate.
-                    if slug == "back_yard" && back <= 7 {
-                        continue;
-                    }
-                    let jitter = ((back * 37 + t) % 90) - 45;
-                    let d = (dur + jitter).max(300);
-                    seed_run(&runs, slug, t, d, None).await;
-                    watered.entry(slug).or_default().push((t, t + d));
-                    t += d + 300;
-                }
-            }
-        }
-    }
-    seed_tuning_signals(conn, now, &watered).await;
-}
-
-/// Seed the tuning report's raw material: daily rain observations
-/// (predicted vs observed, keyed by the same configured-tz day the
-/// decisions land on) and per-zone soil-probe curves in sensor_history.
+/// Seed per-zone soil-probe curves against the actual stored demo runs.
+/// The history maintainer writes daily rain and decision samples together.
 /// The curves are shaped so the report demos every state: back_yard is
 /// session-capped (synth_water_budgets), so the top-ranked cap check
 /// recommends raising its run limit (its probe curve still exercises the
@@ -1377,34 +1262,6 @@ async fn seed_tuning_signals(
     use chrono::Datelike;
 
     let day = 86_400i64;
-    // Daily predicted-vs-observed rain. Rain-skip days (day index % 7 ==
-    // 2) carried a 0.31" forecast; the rain actually arrived on two of
-    // them (backs 30 and 16, chosen OFF the 3-day dry gaps the drift
-    // check needs) and missed on the rest, so the forecast-skip
-    // scorecard scores 5 days with 2 confirmations.
-    let obs_store = crate::persistence::ForecastObservationsStore::new(conn.clone());
-    for back in (1..=30).rev() {
-        let midnight = now - back * day - (now % day);
-        let Some(date) = crate::timeutil::local_date(midnight + 12 * 3600) else {
-            continue;
-        };
-        let (predicted, observed) = if back % 7 == 2 {
-            let observed = match back {
-                30 => 0.35,
-                16 => 0.30,
-                _ => 0.0,
-            };
-            (0.31, observed)
-        } else {
-            (0.0, 0.0)
-        };
-        // The demo presents a live station, so its observed rows are
-        // gauge-provenance (and train the bias model like a real yard).
-        if let Err(e) = obs_store.upsert(date, predicted, observed, "gauge").await {
-            tracing::debug!("demo_data: forecast observation seed failed: {e}");
-        }
-    }
-
     // Model-side rates computed from the SAME seed the live report reads
     // (seed_config zones + synth_forecast temps), so the seeded slopes
     // stay in the intended ratio bands in any season.
@@ -1437,7 +1294,7 @@ async fn seed_tuning_signals(
     let slope_front = 0.3 * mean_daily_etc(GrassSpecies::StAugustine) / taw_front * 100.0;
 
     let store = crate::persistence::SensorHistoryStore::new(conn);
-    let win_start = now - 30 * day;
+    let win_start = now - now.rem_euclid(3600) - 30 * day;
     let empty: Vec<(i64, i64)> = Vec::new();
     let curves: [(&str, f64, f64, i64); 4] = [
         // (slug, start value, drying slope %/day, reading cadence seconds)
@@ -1605,6 +1462,9 @@ mod seed_config_tests {
             assert_eq!(s.timezone, "America/New_York");
             for z in &s.zones {
                 assert_eq!(z.override_mode, "auto", "zone {} override", z.slug);
+                // Known-idle on the demo controller, never "Checking valves".
+                assert!(z.running_known, "zone {} running_known", z.slug);
+                assert_eq!(z.controller_id.as_deref(), Some("demo_controller"));
             }
             // The forecast block is populated, not the all-zero default.
             let f = &s.forecast;

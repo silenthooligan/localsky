@@ -370,6 +370,13 @@ fn parse_error_body(status: u16, body: &str) -> Option<ParsedErrorBody> {
     if err.is_empty() {
         return None;
     }
+    // This is an expected product restriction, not an operational failure.
+    // The API keeps its full diagnostic envelope for clients and logs.
+    if status == 403 && err == "demo_read_only" {
+        return Some(ParsedErrorBody::Coded(
+            "This demo is read-only. Changes and device probes are disabled.".into(),
+        ));
+    }
     // A config_invalid 422 carries its substance in
     // validation.errors[].detail, not in error/hint/detail. Rendering
     // only the code left the operator with "config_invalid (HTTP 422)"
@@ -507,6 +514,19 @@ pub fn SettingsLoadError(
 #[cfg(test)]
 mod tests {
     use super::{load_error_message, save_error_message};
+
+    #[test]
+    fn demo_restriction_is_plain_language_but_other_failures_keep_diagnostics() {
+        let body = r#"{"error":"demo_read_only","diagnostic":{"failure":{"code":"LS_API_REJECTED","message":"LocalSky rejected the API request","operation":"PUT /api/wizard/draft"}},"request":{"id":"request-123"}}"#;
+        assert_eq!(
+            save_error_message(403, body),
+            "This demo is read-only. Changes and device probes are disabled."
+        );
+        assert_eq!(load_error_message(403, body), save_error_message(403, body));
+        let actual_failure = body.replace("demo_read_only", "forbidden");
+        let message = save_error_message(403, &actual_failure);
+        assert!(message.contains("LS_API_REJECTED") && message.contains("request-123"));
+    }
 
     #[test]
     fn save_error_surfaces_server_error_and_hint() {
