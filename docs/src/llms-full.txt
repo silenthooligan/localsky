@@ -3553,6 +3553,8 @@ A zone's `running` value must be read with `running_known`. `ledger_running` rec
 
 ## Future plan
 
+`water_plan` is omitted when no plan rows are available. Treat that as an unavailable projection, not a promise of no watering.
+
 Each `water_plan` day contains its local date, day offset, optional start/finish times, forecast rain, expected rain, probability, evidence completeness, and zones.
 
 Each zone names its planned seconds, reason code, reason, water need, model, and available depletion, trigger, capacity, and demand values.

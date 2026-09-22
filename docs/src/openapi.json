@@ -1113,8 +1113,7 @@
         "description": "Selected fields from the full irrigation snapshot. Read observation ages independently of snapshot age.",
         "required": [
           "last_refresh_epoch",
-          "zones",
-          "water_plan"
+          "zones"
         ]
       },
       "RunRecord": {
