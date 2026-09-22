@@ -1,72 +1,81 @@
 # Summary
 
-[Introduction](introduction.md)
+[Welcome to LocalSky](introduction.md)
 
-# Getting Started
+# Start
 
-- [Quick start](getting-started.md)
-- [Standalone mode (no Home Assistant)](standalone.md)
+- [Install LocalSky](getting-started.md)
+- [Install on Home Assistant OS](home-assistant-app.md)
+- [Connect Home Assistant](hacs.md)
+- [Move watering from HA](migrating-from-ha.md)
+- [Local and offline operation](standalone.md)
 
-# Home Assistant
+# Use the app
 
-- [Install as a Home Assistant App](home-assistant-app.md)
-- [Home Assistant integration](hacs.md)
-- [Migrating watering off Home Assistant](migrating-from-ha.md)
-
-# Connecting Hardware
-
-- [Devices hub](devices.md)
-- [Add your first soil sensor](first-soil-sensor.md)
-- [Weather and soil sensors](sensors.md)
-- [Soil probes and zones](soil-sensors.md)
-- [Removing and disabling devices](removing-devices.md)
-- [Irrigation controllers](controllers.md)
-- [DIY & ESP32 controllers](diy-controllers.md)
-- [Zones](zones.md)
-- [Forecast sources and merge](forecast.md)
-- [Data sources and priority](sources.md)
-- [Weather providers and what they measure](provider-matrix.md)
-- [Live radar](radar.md)
-
-# Using LocalSky
-
-- [7-day verdict strip](verdict-strip.md)
-- [Morning advisory](advisor.md)
-- [Skip rules at a glance](skip-breakdown.md)
-- [Tuning report](tuning-report.md)
-- [Why this duration? (zone math)](zone-math.md)
-- [Weekly water budget](water-budget.md)
-- [History and reporting](history.md)
+- [Your daily view](daily-use.md)
+- [Today's status and tomorrow's plan](advisor.md)
+- [The week ahead](verdict-strip.md)
+- [Runs, skips, and history](history.md)
 - [Notifications](notifications.md)
-- [AI advisor](llm.md)
 - [Display units](units.md)
-- [Theme](theme.md)
+- [Appearance](theme.md)
 
-# How the Engine Works
+# Connect your devices
 
-- [Irrigation engine](irrigation-engine.md)
-- [Skip rules in depth](skip-rules.md)
-- [Watering restrictions](restrictions.md)
+- [Device setup](devices.md)
+- [Weather and soil sensors](sensors.md)
+- [Choose reading sources](sources.md)
+- [Choose forecast sources](forecast.md)
+- [Provider capabilities](provider-matrix.md)
+- [Irrigation controllers](controllers.md)
+- [DIY controllers](diy-controllers.md)
+- [Set up zones](zones.md)
+- [Connect a soil probe](first-soil-sensor.md)
+- [Calibrate soil probes](soil-sensors.md)
+- [Disable or remove a device](removing-devices.md)
+- [Radar and maps](radar.md)
+
+# Understand watering
+
+- [How watering decisions work](irrigation-engine.md)
+- [Why watering is held](skip-breakdown.md)
+- [Rules and thresholds](skip-rules.md)
+- [Zone water needs and duration](zone-math.md)
+- [Weekly scheduling](water-budget.md)
 - [Manual schedules](schedules.md)
-- [Grass species catalog](grass-species.md)
-- [Soil texture catalog](soil-textures.md)
+- [Watering restrictions](restrictions.md)
+- [Review tuning suggestions](tuning-report.md)
+- [Plant catalog](grass-species.md)
+- [Soil catalog](soil-textures.md)
+- [Optional AI advisor](llm.md)
 
-# Administration
+# Maintain your installation
 
-- [Authentication](authentication.md)
-- [Reverse proxy and HTTPS](reverse-proxy.md)
-- [Upgrading LocalSky](upgrading.md)
+- [Accounts and API tokens](authentication.md)
+- [Remote access and HTTPS](reverse-proxy.md)
+- [Update LocalSky](upgrading.md)
 - [Backup, restore, and recovery](backup-restore.md)
-- [Advanced settings](advanced.md)
-
-# Help
-
 - [Troubleshooting](troubleshooting.md)
-- [Source error codes](source-errors.md)
-- [FAQ](faq.md)
+- [Error codes](source-errors.md)
+- [Common questions](faq.md)
 
-# Reference
+# Build with LocalSky
 
-- [Configuration reference](configuration.md)
+- [Developer guide](developers.md)
+- [Your first API request](api-quickstart.md)
+- [Live updates with SSE](api-streams.md)
+- [Connect AI tools](ai-integrations.md)
+- [API reference](api.md)
+  - [Weather and forecasts](api-weather.md)
+  - [Irrigation and history](api-irrigation.md)
+  - [Devices and data ingest](api-devices.md)
+  - [Configuration and administration](api-admin.md)
+  - [Errors and diagnostics](api-errors.md)
+  - [Versions and migrations](api-versions.md)
+
+# Configuration reference
+
+- [Controller examples](controller-reference.md)
+- [Configuration fields](configuration.md)
+- [Advanced options](advanced.md)
 - [Location and timezone](location.md)
-- [REST + SSE API](api.md)

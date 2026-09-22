@@ -1,12 +1,8 @@
-# Soil Texture Catalog
+# Soil catalog
 
-USDA soil texture classification (developed in the US but used internationally as the standard texture taxonomy; the classes apply to any soil, anywhere). LocalSky uses field capacity (FC), wilting point (WP), available water (AW = FC - WP), and infiltration rate per texture + slope. Source: [src/engine/soil_catalog.rs](../src/engine/soil_catalog.rs).
-
-Pick texture per zone in the zone editor. If unsure, use the [USDA texture triangle](https://www.nrcs.usda.gov/sites/default/files/2022-09/Soil-Texture-Triangle.pdf): rub moist soil between your fingers and match to the closest class.
+Choose the texture that represents each zone. LocalSky uses these catalog values to estimate root-zone storage and infiltration. They are model inputs, not a soil test of your property.
 
 ## Catalog
-
-Water holding per FAO-56 Table 19 (Allen et al., 1998); infiltration per USDA NRCS Part 652 Table 11-3. Every FC and WP below sits inside the range Table 19 publishes for that class, and a test in the engine keeps it that way.
 
 | Texture | FC (m³/m³) | WP (m³/m³) | AW (mm/m) | Infil flat (mm/hr) | Infil 3-5% (mm/hr) | Infil >5% (mm/hr) |
 |---|---:|---:|---:|---:|---:|---:|
@@ -18,66 +14,25 @@ Water holding per FAO-56 Table 19 (Allen et al., 1998); infiltration per USDA NR
 | Clay loam     | 0.36 | 0.20 | 160 |  8 |  6 |  4 |
 | Clay          | 0.38 | 0.24 | 140 |  5 |  4 |  3 |
 
-## How the values map into the engine
+## Water storage
 
-### Total Available Water (TAW)
-
-```
-TAW_mm = (FC - WP) * root_depth_mm
-```
-
-This is the depth of water the zone can hold between field capacity (fully wet, no gravity drainage) and the wilting point (so dry the plant gives up). St. Augustine on sandy loam at the default 150 mm root depth: TAW = (0.23 - 0.10) * 150 = 19.5 mm. Tall fescue on loam at its 250 mm default depth: TAW = (0.27 - 0.12) * 250 = 37.5 mm, nearly double the buffer.
-
-### Readily Available Water (RAW)
-
-```
-RAW_mm = TAW_mm * MAD_pct
+```text
+TAW_mm = (field_capacity - wilting_point) × root_depth_mm
+RAW_mm = TAW_mm × allowed_depletion_fraction
 ```
 
-MAD (Management Allowed Depletion) comes from the species catalog. RAW is the depletion beyond which the plant starts to stress. It is a reference threshold the tuning report uses when it estimates a watering interval; it is not the live irrigation trigger. See [the irrigation engine](irrigation-engine.md) for what decides watering today.
+TAW is the modeled water available to roots. RAW is the allowed depletion used to form the soil model's watering trigger. These quantities follow the root-zone balance described in [FAO-56](https://www.fao.org/4/x0490e/x0490e0e.htm).
 
-St. Augustine on sandy loam with default 50% MAD: RAW = 19.5 * 0.50 = 9.75 mm. That is the depletion at which St. Augustine on this soil would start to stress, which is why the tuning report flags an interval much longer than about two days here.
+For example, sandy loam with 150 mm roots has 19.5 mm of available storage. At an allowed depletion fraction of 0.5, RAW is 9.75 mm. The actual decision also depends on evidence quality, forecast rain, restrictions, and other gates.
 
-### Infiltration rate
+## Infiltration and runoff
 
-Determines whether cycle-and-soak is needed. The three slope bands per row reflect that water runs off faster on a hillside than on a level patch. The cycle-and-soak splitter divides total runtime when the sprinkler's precipitation rate exceeds infiltration.
+The infiltration value and slope help determine cycle and soak. Watering faster than soil can absorb it can cause runoff. Catalog values are starting estimates; compacted soil, slopes, surface cover, and sprinkler distribution affect the real result.
 
-Example: MP rotator (14 mm/hr precip) on clay flat (5 mm/hr infiltration). Each minute of runtime delivers 14/60 = 0.23 mm but the soil can only absorb 5/60 = 0.083 mm. Cycling 1 minute on, 4 minutes "soak" wouldn't actually work because evaporation losses kick in. The splitter computes the maximum continuous on-time at ~`(infiltration/precip) * 60` minutes, never shorter than 3 minutes. Each soak gap is derived rather than fixed: the depth left standing when the head shuts off, divided by the infiltration rate, floored at 5, 10, or 15 minutes by texture and at your own `engine.soak_minutes` (default 5). See [cycle-and-soak](irrigation-engine.md#cycle-and-soak) for a worked example.
+## Choose a texture
 
-## Picking the right texture for your zone
+Use a soil test or a local soil survey where available. A hand texture assessment can narrow the choice, but do not treat a guess as a measured property. Check the zone after watering and investigate persistent runoff or rapid drying.
 
-Without a soil test, two practical methods:
+Do not select a different texture simply to suppress a capacity warning. Set the physical inputs first, then assess whether the system can deliver the required water.
 
-### Ribbon test
-
-1. Take a handful of moist (not wet) soil. Squeeze into a ball.
-2. Squeeze the ball through your thumb and forefinger to form a ribbon.
-3. Categorize:
-   - No ribbon, falls apart: **sand** or **loamy sand**
-   - Weak ribbon (<2.5 cm before breaking): **sandy loam** or **loam**
-   - Medium ribbon (2.5-5 cm): **clay loam** or **silt loam**
-   - Strong ribbon (>5 cm): **clay**
-
-### Jar test
-
-1. Half-fill a one-litre (quart) jar with soil from the zone's root depth.
-2. Fill the rest with water + a teaspoon of dish soap.
-3. Shake hard. Set aside.
-4. After 1 minute, mark the sand layer (settles first).
-5. After 2 hours, mark the silt layer.
-6. After 24-48 hours, mark the clay layer (or what hasn't settled yet).
-7. Use the USDA triangle to classify based on relative thicknesses.
-
-## When in doubt
-
-If you genuinely don't know, **sandy loam** is the safest guess: it sits mid-triangle and the engine's math is most forgiving when off by one texture class in either direction (loamy sand or loam).
-
-## Contributing a texture
-
-The catalog is a fixed enumeration (USDA's classification is the standard; "soil 1" and "soil 2" aren't textures). New entries are not expected. If you need finer-grained soil characterization, override per zone via direct FC/WP/AW values in a future iteration's `ZoneConfig.soil_overrides` block.
-
-## Further reading
-
-- [USDA NRCS National Soil Survey Handbook](https://www.nrcs.usda.gov/resources/guides-and-instructions/national-soil-survey-handbook)
-- [FAO Irrigation and Drainage Paper No. 56, Chapter 8 (ETc - Single Crop Coefficient)](https://www.fao.org/3/x0490e/x0490e08.htm)
-- [USDA NRCS Part 652 National Irrigation Guide, Chapter 11 (Sprinkler Irrigation)](https://www.nrcs.usda.gov/sites/default/files/2022-09/Sprinkler-Irrigation.pdf)
+[Zone setup](zones.md) · [Plant catalog](grass-species.md) · [Watering logic](irrigation-engine.md)

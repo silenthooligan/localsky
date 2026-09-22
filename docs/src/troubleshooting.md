@@ -1,243 +1,74 @@
 # Troubleshooting
 
-This page is keyed by symptom. Find the thing that looks wrong, follow the steps. When in doubt, start with the first section: almost every problem shows its face in the logs or the health endpoint before it shows anywhere else.
+Start with the failing component and its error detail. A running server can still have an unavailable source, an unbound zone, or a controller that did not complete a command.
 
-## Logs and health first
+## Capture useful evidence
 
-### Read the logs
-
-```bash
-docker logs -f localsky
-```
-
-Log verbosity is controlled by the standard `RUST_LOG` environment variable (the server uses `tracing` with an env filter; if `RUST_LOG` is unset it defaults to `info`). To get engine, source, and controller detail without drowning in HTTP transport noise:
+Open **Settings > About** for the version and inspect the relevant device status. For Docker:
 
 ```bash
-docker run ... -e RUST_LOG=info,localsky=debug ...
+docker logs --since 15m localsky
+curl -i http://localhost:8090/api/v1/info
 ```
 
-Restart the container after changing it.
+Use `GET /api/v1/health` for health detail; anonymous responses are reduced. `?strict=1` returns 503 when overall status is not healthy. Supply a bearer token for privileged diagnostics.
 
-### Ask the health endpoint
+For a report, include the action, timestamp and timezone, LocalSky version, installation type, stable error code, and request ID. The diagnostics endpoint collects health, recent logs, redacted configuration, and decision context. Review the bundle for personal addresses and identifiers before sharing it.
 
-```bash
-curl -s http://localhost:8090/api/v1/health | jq
-```
+[API error reference](api-errors.md) · [Source error codes](source-errors.md)
 
-What the fields mean:
+## Home Assistant returns HTTP 500
 
-- `status` is a three-step ladder:
-  - `wizard`: no config file exists yet. Visit `/setup`.
-  - `ok`: config loaded and every enabled source is reporting.
-  - `degraded`: the config file exists but failed to load, **or** at least one enabled source is offline.
-- `sources[]`: one entry per configured source with `last_seen_epoch`, `stale_for_s`, and a `status` of `fresh`, `stale`, or `offline`. For live sources (stations, soil sensors) the windows are: fresh under 5 minutes, stale from 5 minutes to 1 hour, offline past 1 hour (or never seen). Polled forecast sources (Open-Meteo, NWS, OpenWeather, Pirate Weather, MET Norway, Netatmo) refresh on a roughly 30 minute cadence, so they get wider windows: fresh under 65 minutes, offline past 3 hours.
-- `controllers[]`: id, kind, whether it is the default, and whether it is enabled.
-- `ha`: the Home Assistant relationship in both directions: `env_configured` (HA_URL set), `reachable` (last HA poll succeeded), `snapshot_source` (`standalone` or `home_assistant`), `mqtt_discovery` (outbound MQTT publishing on), `hacs_last_seen_epoch` and `hacs_streaming` (whether the Home Assistant integration has fetched the manifest or is holding a live event stream right now).
+A 500 from HA's `/api/states` is an upstream failure, not proof that a mapped entity is missing. LocalSky 0.9.2 can fall back to reading individually mapped entities within the same request deadline.
 
-If authentication is enabled and you call `/api/v1/health` without credentials, you get a trimmed body: `status`, `config_present`, `version`, `uptime_s`, and `subsystems` only. Sources, controllers, and the `ha` block are removed so an anonymous probe cannot map your network. Docker healthchecks and uptime monitors keep working either way.
+If the mapped reading now works, the fallback recovered that input. It does not identify or repair the cause of HA's bulk-endpoint failure. Check HA's logs at the same timestamp for the exception and integration involved. Include LocalSky's operation, upstream status, error code, and request ID when reporting continued failures.
 
-### Compose healthcheck
+For a single unavailable entity, verify the exact entity ID, its current state, unit, and mapping in LocalSky. Do not map a preceding-minute rain reading as a daily total; use **Rain last minute (accumulate today)**.
 
-The image ships a built-in `HEALTHCHECK` that curls `http://127.0.0.1:8090/api/v1/info` every 30 seconds. If you move LocalSky off port 8090, override it in compose:
+## Tempest has no readings
 
-```yaml
-services:
-  localsky:
-    # ...
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "--max-time", "4", "http://127.0.0.1:8091/api/v1/info"]
-      interval: 30s
-      timeout: 5s
-      start_period: 30s
-      retries: 3
-```
+The local Tempest path listens for UDP broadcasts on port 50222. Confirm the source is enabled, the hub is on a reachable broadcast network, and Docker uses host networking where necessary.
 
-`/api/v1/info` is the cheapest liveness probe. Use `/api/v1/health?strict=1` if you want your monitor to alert on `degraded`, not just on dead: with `strict=1` the endpoint answers `503` whenever the status is not `ok` (plain `/api/v1/health` always answers `200` and says what is wrong in the body). For a bug report, `GET /api/v1/diagnostics` returns one JSON bundle with health, info, the last 300 log lines, the config with secrets redacted, and the current decision trace; it is scrubbed against your own secret values and safe to paste.
+If HA already owns the local listener on the same host, use [HA passthrough](hacs.md#use-home-assistant-weather-sensors) or move ownership deliberately. Disabling or removing LocalSky's native source releases its listener within about 15 seconds.
 
-## Install and first boot
+A cloud Tempest connection is a separate path with its own credentials and internet requirement.
 
-### Container exits immediately with a bind error
+## Ecowitt discovery finds nothing
 
-The log will end with a line like:
+Local discovery needs broadcast reachability to the gateway. Enter the gateway IP manually for a polling source if discovery cannot cross your network. For custom uploads, verify the destination host, port, protocol, and path against [sensor setup](sensors.md).
 
-```
-bind 0.0.0.0:8090: is another service holding this port?
-```
+## Watering did not run
 
-Something else on the host already owns the port. Either free it, or move LocalSky:
+Open **History > Daily log** for the recorded decision, then **Watering decisions** for current evidence. A missing historical record is not a recorded skip.
 
-```bash
-docker run ... -e LEPTOS_SITE_ADDR=0.0.0.0:8091 -p 8091:8091 ...
-```
+Check the zone's binding, pause and override state, permitted watering days, forecast coverage, soil evidence, and controller health. A configured probe that is missing or untrusted can hold its zone. Missing required forecast evidence can hold automatic watering.
 
-This bites most often with `network_mode: host`, where the container shares the host's port space directly (no `-p` remapping is possible). Pick a free port via `LEPTOS_SITE_ADDR` and remember to override the healthcheck (above).
+A request being accepted does not establish that a physical valve opened. Verify device feedback and the run outcome. See [controllers](controllers.md) and [skip reasons](skip-breakdown.md).
 
-### Wizard cannot save, or history is missing, with permission errors in the logs
+## Water ran despite rain later
 
-The app runs as the non-root user uid 10001, and the container fixes the ownership of `/data` to that user on every startup, so a normal bind mount or named volume needs no manual `chown`. If you still see permission errors (the wizard cannot save `localsky.toml`, or history is disabled with a logged SQLite open failure), the cause is almost always one of:
+Compare the recorded decision with what was known at dispatch: recent measured rain, earlier watering, soil demand, and the forecast issued before the run. Later rainfall does not by itself prove that the earlier decision ignored rain.
 
-- **`/data` is mounted read-only.** The container cannot fix ownership of, or write to, a read-only mount. Mount `/data` read-write.
-- **`/data` is a NAS / NFS share the container can't chown (Synology, QNAP).** Exports with `root_squash` or "map all users" squash the container's root, so it is not allowed to chown the volume to uid 10001. LocalSky handles this automatically: when it detects `/data` isn't writable as 10001, it runs as the volume's actual owner instead and logs `running as its owner <uid>:<gid>`. If you'd rather pin it, set `PUID`/`PGID` to the uid:gid that owns the share (find it in Synology File Station, or run `id` on the NAS):
-  ```yaml
-  environment:
-    - PUID=1026     # the share's owning uid
-    - PGID=100      # the share's owning gid
-  ```
-- **You overrode the entrypoint** (a custom `entrypoint:`, or `user:` set to a uid that can't write the volume). Prefer `PUID`/`PGID` over `user:` so the entrypoint can still fix ownership and pick a working uid.
+The forecast archive preserves received forecasts; history preserves decisions and runs. Use both to distinguish a forecast miss from stale input, missing history, an incorrect zone rate, or a planning defect. Include those timestamps in a report.
 
-As a last resort you can pre-own the host directory yourself: `sudo chown -R 10001:10001 /opt/localsky/data` (use whatever uid you set in `PUID`).
+## A valve may still be open
 
-### Low-power hardware
+Use **Stop** and verify the valve physically. If LocalSky cannot reach the controller, use the controller's own stop or shut off the water supply. Preserve the command error and controller logs for diagnosis.
 
-- Raspberry Pi 4/5: the image ships arm64, but the OS must be 64-bit. `uname -m` should report `aarch64`. 32-bit Pi OS is not supported.
-- LocalSky idles around 30 MB resident, so nothing special is needed beyond that. The SQLite database sees light write traffic (run rows, sensor samples), which is fine on an SD card, though an SSD never hurts.
+Controller timers and LocalSky's shutoff retries reduce risk, but a successful network response cannot guarantee a mechanically closed valve.
 
-## Weather sources
+## Setup cannot save
 
-### Tempest station shows no data
+Check that `/data` is persistent and writable. The container normally runs as uid 10001 and prepares the volume at startup. NAS mappings may require explicit `PUID` and `PGID` matching the share owner. Inspect the startup error before changing permissions; do not make the entire volume world-writable.
 
-The Tempest hub broadcasts UDP packets on port 50222 to your LAN's broadcast address. Docker's default bridge networking does not deliver broadcast traffic into a container, so a bridge-networked LocalSky never hears the hub even though everything looks configured. Run with host networking:
+## Port already in use
 
-```yaml
-services:
-  localsky:
-    network_mode: host
-```
+Change the host port mapping for bridge networking. With host networking, change `LEPTOS_SITE_ADDR` to a free listen port and update any healthcheck or client URL that refers to it.
 
-To confirm packets are actually arriving on the host:
+## Login or live updates fail through a proxy
 
-```bash
-sudo tcpdump -i any -c 3 udp port 50222
-```
+Check HTTPS forwarding, `trusted_proxies`, and SSE buffering. Test from a signed-out browser. Follow the matching examples in [reverse proxy setup](reverse-proxy.md).
 
-If tcpdump sees packets and LocalSky still shows nothing, check the source is enabled under Settings, then Sources, and watch `docker logs` for parse errors.
+## Restore or startup failed
 
-### Ecowitt discovery finds nothing
-
-Discovery works by sending a broadcast datagram on UDP 46000 and listening about 3 seconds for gateway replies. Two requirements:
-
-1. Host networking (same broadcast limitation as Tempest above).
-2. The gateway must be on the same subnet as the LocalSky host.
-
-If discovery still comes back empty, skip it and add the gateway manually: create an `ecowitt_gw_poll` source under Settings, then Sources, and enter the gateway's IP address. Alternatively, point the gateway's own custom upload (WSView Plus or the console UI) at LocalSky's receiver: protocol Ecowitt, path `/ingest/ecowitt`, your LocalSky host and port.
-
-### A source went stale: what happens to watering?
-
-Nothing dramatic, by design. When an enabled source crosses the offline threshold:
-
-- `/api/v1/health` flips to `degraded`.
-- A dismissable banner appears at the top of the UI naming the offline source(s), with a link to the Sensors hub. Dismissing it snoozes that exact set of sources for the session; a new failure re-raises it.
-- The engine keeps deciding from the freshest data it has. Field merging picks the highest-priority source with a recent observation (ties broken by recency), and rain totals take the max across sources so one dead gauge cannot mask real rain. Sensor-dependent extras (soil-saturation skip, for example) sit out while their probe is silent; the weather and ET math stays on.
-
-## Controllers
-
-### Controller was offline when watering should have started
-
-Runs do not queue. When the morning scheduler dispatches a zone and the controller call fails, LocalSky logs a warning (`controller dispatch failed` with `source=smart_morning`, then `smart morning: segment not dispatched` naming the segment), abandons the rest of that zone's segments, moves on to the next zone, and records the failure for that zone in History with the controller's own error text. As long as LocalSky itself keeps running there is no retry later in the day; the next attempt is tomorrow's window. Check `docker logs` around your dispatch time and fix the controller's reachability (power, IP change, password).
-
-If LocalSky **restarts** while the watering window is still open (a redeploy, an out-of-memory kill, a host reboot) it re-checks the morning at boot, and the outcome depends on how far the sequence got:
-
-- **Every zone's dispatch failed.** Every row for the morning is a dispatch failure, so the morning does not count as handled. If the grace period below has not expired and the controller is reachable again, the catch-up waters. A morning that mixes a failure with a zone the engine itself decided to skip counts as handled: the skip row is a decision about the yard, and the refused zones wait for tomorrow.
-- **Some zones watered before the failure.** Each zone is judged on its own evidence: a zone that received its planned water since the window opened is left alone, and a zone that received less is dispatched for the remainder. The morning counts as handled only once every planned zone has had its water (or a skip row says the engine decided otherwise), so a restart after a controller died partway through finishes the dry zones rather than re-running the whole sequence on top of water already on the ground.
-
-A zone the controller currently reports as running is skipped by the morning dispatcher, on the scheduled path and the catch-up path alike, so a catch-up cannot re-open a valve that is already open. A run you start by hand, from the zone page or from a manual schedule, is not gated this way: it commands the zone on whatever the controller currently reports.
-
-Different case: if **LocalSky itself** was down through the morning window, it catches up at boot. Within a 2 hour grace period after the planned finish time it dispatches a late run (if the verdict is still "run"); past that, it records a skipped row with the reason "Missed dispatch window (LocalSky offline)" so the history stays complete.
-
-### A smart-morning run is missing from History after a restart
-
-A smart-morning run is written to History when the zone stops, so a restart between a zone's start and its stop loses that record. The water reached the ground; History will not show it, and the weekly water balance will not count it, so the zone may come up for watering sooner than it needed to.
-
-Runs you start by hand and runs from a manual schedule behave differently: LocalSky writes those to History at dispatch, at their full planned length, so a restart never loses them. It does mean the opposite error. LocalSky closes every valve at boot, so a hand-started or scheduled run cut short by a restart is still credited in full, and the zone may come up for watering later than it needed to. If you need to restart LocalSky, doing it outside your watering window avoids both.
-
-### Zone is running but the dashboard disagrees (or vice versa)
-
-The dashboard's view of controller state comes from a poll loop that refreshes roughly every 10 seconds (with backoff during outages), so a few seconds of lag is normal. If the disagreement persists:
-
-- Check the `controllers` block in `/api/v1/health`: is the controller enabled, and is one marked `default`?
-- Runs started from the controller's own app or front panel show up via the status poll, but they were not planned by LocalSky and may not appear in its run history the way engine-dispatched runs do.
-
-### Verify wiring with the DryRun controller
-
-Before trusting a new setup with real valves, add a controller of kind `dry_run`. Every dispatch is logged (`dry_run: would have run zone ...`) instead of actuated, and with `simulate_runs` enabled it writes completed rows to the runs table so the dashboard and history render exactly as they would for real hardware. The wizard's zone scan against a DryRun controller returns sample zones (Front Lawn, Back Lawn, Garden Beds) so you can rehearse the full add, test, scan, import flow with zero hardware. See [Controllers](controllers.md).
-
-## Watering decisions
-
-### My zones started watering right after I upgraded to 0.7.22
-
-Expected, on a Home Assistant deployment. Until 0.7.22, run lengths there
-were sized by a Smart Irrigation entity and by nothing else, so an install
-without that HACS integration planned zero minutes on every zone and
-dispatched nothing. 0.7.22 sizes runs from LocalSky's own weekly water
-budget on every deployment, so those zones water for the first time on the
-first morning after the upgrade.
-
-If you never set a zone's weekly target, LocalSky infers one from the zone's
-species: 1.00 inches a week over two sessions for warm-season turf, scaled
-by each species' own peak crop coefficient, each held to the zone's maximum
-run time. Open **Settings**, then **Zones**, open the zone
-and set **Weekly target** and **Sessions per week**; blank shows the inferred
-default in the box. Check **Max run time** there too. The zone list marks
-every zone still running on an inferred target. To hold everything while you
-decide, set **Rain delay** on the irrigation page.
-
-### Why did my zone skip today?
-
-Every skip is recorded per zone with its reason. Open the zone's skip breakdown in the UI, or look at the run history. The full explanation of each threshold lives in [Skip thresholds explained](skip-breakdown.md), and the reporting views in [History and reporting](history.md).
-
-### A zone never waters and the card just says a number
-
-Open the zone card or the zone detail. A zone the weekly budget zeroed reads **ON HOLD** with the allocator's own sentence under it, naming which gate fired: the week is already covered by rain and prior watering, rain is forecast inside the next 24 hours, or the session spacing has not elapsed since the last run. That line is the answer; tune against it.
-
-A zone the [soil model](irrigation-engine.md#the-soil-model) governs holds with its own vocabulary: the soil bucket holds (depletion has not crossed the trigger), forecast rain refills the deficit, the morning window fits N of M zones that need water, or delivery is held to the weekly ceiling. The zone detail's Soil model block shows the deficit, the trigger, and when the zone waters next.
-
-For weekly-governed zones, two settings decide the size: **Weekly target** (`weekly_budget_in`, the gross weekly target in inches including rain) and **Sessions per week** (`sessions_per_week`), both in the zone editor under Settings, then Zones. The rain-defer threshold is `engine.session_rain_defer_in`, default 0.10 inches over the next 24 forecast hours weighted by probability; soil-governed zones defer by deficit instead.
-
-Rain counts per day, and each day is capped at what the zone's root zone can hold, so a single storm no longer covers a whole week on sandy soil: the covered line then names both figures, what fell and what counted. The cap derives from the zone's soil texture and root depth; **Rain the soil can bank per day** in the zone editor overrides it.
-
-### I added a manual schedule and smart watering stopped for good
-
-A manual schedule's mode defaults to **Override**, which stops smart watering for that zone on every day the schedule covers. The zone card and the schedule's own card in Settings both say so now, naming the days. Delete the schedule to hand the zone back to the engine. Switching it to **Floor** keeps the scheduled run as a minimum, but a Floor run is watering like any other: it counts against the weekly target and it resets the session-spacing clock, so the engine can only add on top once `floor(7 / sessions_per_week)` days have passed since the scheduled run. On a zone whose schedule fires as often as its own session cadence, such as a weekly schedule on a 1-session-a-week bed, that leaves no eligible day and the zone reads ON HOLD naming the spacing every day.
-
-A schedule's water still counts against the zone's weekly budget on the days the schedule does not cover, because it is water the zone received, and applied water always counts in full (the per-day cap above is a rain rule: irrigation is sized to what the soil takes, a storm is not). A schedule that already delivers the weekly target therefore leaves the engine nothing to add. Lower the zone's Weekly target, or delete the schedule, if you want the engine sizing the week instead.
-
-### The soil Deficit reads a dash
-
-The deficit is computed for every zone with a species and a soil texture, from the soil model's replay of measured ET, rain, and completed runs (negative = needs water), so a dash appears only where no bucket can be derived: a zone with no species or soil texture configured. Set both under Settings, then Zones, and the deficit fills on the next refresh. Before 0.8.0 the field's only producer was a Home Assistant Smart Irrigation entity and every install showed a dash rather than a 0.00 nothing measured.
-
-## Auth and reverse proxy
-
-### Locked out of the owner account
-
-Short version (full procedure in [Authentication](authentication.md)): stop the container, delete the identity rows from the SQLite database, restart, and re-run account creation:
-
-```bash
-sqlite3 /opt/localsky/data/irrigation.db \
-  "DELETE FROM auth_sessions; DELETE FROM api_tokens; DELETE FROM users;"
-```
-
-Physical access to the data volume is the trust anchor, same as Home Assistant.
-
-### Page loads but is frozen: nothing clicks, behind a proxy auth gate
-
-Classic symptom of an external auth gate (oauth2-proxy, Authelia, Caddy forward_auth) swallowing the app's compiled assets. Browsers fetch `/pkg/*` (the WASM bundle) and `/sw.js` (the service worker) without credentials, the gate answers with a 302 to its login page instead of the file, and hydration dies silently: you see server-rendered HTML, but no JavaScript behavior. Exempt `/pkg/*` and `/sw.js` from the gate. Examples in [Reverse proxy and HTTPS](reverse-proxy.md). LocalSky's own built-in auth already exempts these paths.
-
-### Home Assistant integration logs 401s
-
-The API token it was given has been revoked or replaced. The integration starts its reauthentication flow automatically on the next 401: Home Assistant raises a repair/reauth prompt. Create a fresh token in LocalSky (Settings, then Account, then Create token) and paste it into the prompt. Tokens are shown in plaintext exactly once.
-
-## Home Assistant
-
-### No LocalSky entities in HA
-
-- The integration is installed from HACS (search for LocalSky in the store); if you only installed HACS itself, the LocalSky integration is not there yet. See [Home Assistant integration](hacs.md).
-- The config flow needs a reachable LocalSky URL and, on auth-enabled instances, an API token (`lsk_...`).
-- Zeroconf discovery (the config flow finding LocalSky by itself) relies on LocalSky's mDNS announce (`_localsky._tcp`), which only reaches the LAN when LocalSky runs with host networking. With bridge networking, just enter the URL manually.
-
-### Duplicate entities
-
-You have both publishing paths on at once: MQTT discovery (LocalSky publishing to your broker) and the HACS integration (HA polling LocalSky) each create their own set of `localsky` entities. Pick one. To keep the integration, turn off MQTT publishing under Settings, then Notifications, and delete the leftover MQTT device in HA (Settings, Devices & Services, MQTT).
-
-### Entities unavailable, but LocalSky is still watering
-
-Expected, and it is the point of standalone operation: the engine and scheduler run inside LocalSky and do not depend on HA being up. Unavailable entities only mean HA cannot currently see LocalSky's state. The one exception is controllers of kind `ha_service_call`, which dispatch through HA and do need it reachable.
+Preserve the data directory and the full startup error. Repeated restarts do not repair an incomplete restore. Follow [backup and recovery](backup-restore.md#a-restore-was-interrupted); do not delete the marker to force startup.

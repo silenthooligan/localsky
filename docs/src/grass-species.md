@@ -1,14 +1,14 @@
-# Grass Species Catalog
+# Plant catalog
 
-LocalSky ships a built-in catalog of 12 grass species + ornamental categories with monthly Kc curves, root zone depths, and MAD percentages. Source: [src/engine/species_catalog.rs](../src/engine/species_catalog.rs).
+LocalSky stores seasonal crop coefficients, root depths, and allowed-depletion defaults for the plant categories below. These are the values used by the model; local growing conditions and management can require adjustment.
 
-Curves are listed January-December as Northern-Hemisphere anchors; for Southern-Hemisphere locations the engine shifts every curve six months automatically.
+Curves are listed January to December for the Northern Hemisphere. The engine shifts them six months for Southern Hemisphere locations. Use measured zone inputs where available and review the resulting demand.
 
-ETc for any zone equals `ET0 * Kc(species, day-of-year) * heat_multiplier`. Picking the right species is the single most impactful zone setting.
+The cited publications provide background on plant care and water use. The listed monthly curves are LocalSky catalog values, not a claim that each publication supplies that exact curve.
 
 ## Warm-season turfgrasses
 
-These five dominate lawns across warm and subtropical climates worldwide (southern US, Australia, South America, southern Europe, Asia). Kc values cite UF/IFAS Extension publications; the curves are climate-driven, not region-specific.
+Select the matching turf species. Confirm its suitability and management needs with guidance for your local climate.
 
 ### St. Augustinegrass
 
@@ -62,7 +62,7 @@ These five dominate lawns across warm and subtropical climates worldwide (southe
 
 ## Cool-season turfgrasses
 
-For cool-temperate and transitional climates (northern US and Canada, the UK and northern Europe, New Zealand, highland regions). Curves drawn from FAO-56 Table 12.
+For cool-temperate and transitional climates (northern US and Canada, the UK and northern Europe, New Zealand, highland regions). Catalog curves describe the application defaults.
 
 ### Kentucky Bluegrass
 
@@ -126,7 +126,7 @@ The catalog drives three things:
 
 ## Contributing a species
 
-New species PRs welcome. Open a PR against [src/engine/species_catalog.rs](../src/engine/species_catalog.rs) with:
+New species PRs welcome. Open a PR against [src/engine/species_catalog.rs](https://github.com/silenthooligan/localsky/blob/main/src/engine/species_catalog.rs) with:
 
 - 12 monthly Kc values (mid-month anchors)
 - Default root zone depth (mm)

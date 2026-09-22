@@ -1,9 +1,6 @@
-# Removing and disabling devices
+# Disable or remove a device
 
-LocalSky is meant to be the single place you manage your setup, so removing a
-sensor or a zone should not leave you hunting through a second app. This chapter
-covers what "remove" and "disable" actually do, and how far LocalSky can reach
-into the upstream device on your behalf.
+Disable a device to keep its configuration while taking it out of use. Remove it when you no longer want its configuration or bindings. Read the confirmation: removing a probe can also remove stored readings or attempt a gateway change.
 
 ## Disable vs remove
 
@@ -46,7 +43,7 @@ Soil probes are managed wherever you see them:
   button opens the full manager.
 
 The Remove action is the same everywhere. It
-always does three things safely on the LocalSky side:
+changes three things on the LocalSky side:
 
 1. Clears the probe's binding from whatever zone used it.
 2. Suppresses that zone's offline warning (a removed probe is not a fault).
@@ -60,19 +57,9 @@ gateway** in the same click, so it stops showing there too. The confirmation
 tells you exactly what will happen, and the result reports each side honestly:
 it will not claim a gateway removal that did not occur.
 
-### Why the gateway step matters
+### Gateway registration
 
-An Ecowitt gateway keeps a sensor's registration, and its last signal and
-battery reading, effectively **forever** after the sensor goes quiet. Pulling
-the battery stops the live readings but does **not** remove the sensor from the
-gateway, so it keeps appearing in the Ecowitt app as if it were still there. The
-only ways to clear it are to delete it in the gateway's own UI, or to let
-LocalSky do it for you.
-
-LocalSky uses the gateway's "disable this slot" state, which also stops the
-gateway from **auto-adding** the sensor back if it is still powered and
-broadcasting. So a removal from LocalSky is a real remove-and-stays-removed, not
-a temporary un-pair.
+Removing a probe from LocalSky does not automatically remove it from its upstream gateway. Where supported and authorized by a configured gateway login, LocalSky can disable the Ecowitt slot too. The result reports LocalSky cleanup and gateway cleanup separately. Otherwise, remove the registration in the gateway interface.
 
 ### Enabling gateway removal
 
@@ -95,8 +82,7 @@ tells you to delete the sensor in the gateway UI yourself.
 ## What each device class allows
 
 Not every device can be managed from LocalSky, because they do not all expose a
-way to remove things. LocalSky is honest about this per device rather than
-pretending:
+way to remove things. Review the supported operation for each device:
 
 | Device | Remove from LocalSky | Also remove upstream? |
 |---|---|---|

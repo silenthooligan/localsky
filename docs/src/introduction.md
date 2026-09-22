@@ -1,63 +1,42 @@
 # LocalSky
 
-<!-- The version token below is substituted from Cargo.toml at build time by
-     both doc builders (the Dockerfile before its `mdbook build docs`, and the
-     docs-publishing CI workflow before its build), so this banner follows
-     every release automatically. Do not replace it with a literal. -->
-> These docs track LocalSky v{{LOCALSKY_VERSION}}.
+<div class="ls-doc-hero">
+<p class="ls-eyebrow">THE LOCALSKY GUIDE · v{{LOCALSKY_VERSION}}</p>
+<p class="ls-doc-tagline">Understand your weather.<br>Water for your yard.</p>
+<p>LocalSky brings weather, soil conditions, and irrigation into one app on your own hardware. See what happened today, what is planned next, and why.</p>
+<a class="ls-doc-primary" href="getting-started.html">Install LocalSky →</a>
+<a class="ls-doc-secondary" href="https://demo.localsky.io">Explore the demo</a>
+</div>
 
-**Hyperlocal weather on your hardware. Smart irrigation when you want it.**
+## Find your path
 
-LocalSky is two products in one Docker container.
+<div class="ls-doc-paths">
+<a class="ls-doc-path" href="getting-started.html"><span class="ls-path-number">01</span><strong>Set up LocalSky</strong><span>Choose Docker or Home Assistant OS, connect devices, and finish your first setup.</span><span class="ls-path-link">Start here →</span></a>
+<a class="ls-doc-path" href="daily-use.html"><span class="ls-path-number">02</span><strong>Use it every day</strong><span>Read today's status, understand the next run, and find the history behind it.</span><span class="ls-path-link">Explore the app →</span></a>
+<a class="ls-doc-path" href="developers.html"><span class="ls-path-number">03</span><strong>Build an integration</strong><span>Connect dashboards, automations, and AI tools with the API and working examples.</span><span class="ls-path-link">Open the developer guide →</span></a>
+</div>
 
-A **self-hosted weather dashboard** that is cloud-first out of the box: a new install with no hardware picks up Open-Meteo automatically and shows you weather immediately, then reads your weather station over the LAN when you add one (Tempest, Ecowitt, Ambient Weather, Davis, and more). It merges Open-Meteo with regional forecast sources (NWS in the US, MET Norway, OpenWeather, Pirate Weather) using per-field priority chains, so you set the backup order for each reading yourself, and it labels every reading with an honesty tag (measured, radar, nowcast, or forecast) so you always know where a number came from. Display units are configurable, with a household default and a per-device override. The result renders in a fast installable PWA with built-in radar (RainViewer worldwide, NOAA MRMS and IEM NEXRAD in the US) and lightning. Useful on its own, even if you never irrigate anything.
+## How LocalSky fits
 
-A **smart irrigation engine** that pairs the same weather data with peer-reviewed agronomy (FAO-56 reference ET, USDA soil textures, species-aware Kc curves, a {{LOCALSKY_SKIP_RULES}}-rule skip ladder) and drives OpenSprinkler, Rachio, Rain Bird, Hydrawise, B-hyve, or any valve reachable over MQTT or Home Assistant. Optional. Off until you wire a controller.
+**LocalSky is the server and app.** It collects readings, keeps local history, plans watering, and talks to your controller. Run it with Docker or as a Home Assistant OS app. Use it for weather alone if you do not have irrigation.
 
-This site is the operator's manual. The dashboard, settings UI, and first-run wizard are designed to keep you out of YAML and out of the terminal for day-to-day use. The chapters here exist for when you want to understand exactly what the engine is doing, swap a sensor source, calibrate a zone, or wire LocalSky into the rest of your stack.
+**The Home Assistant integration is an optional companion.** It brings LocalSky's readings, valves, and actions into HA. Existing HA sensors can also supply LocalSky through a separate passthrough source.
 
-## Where to start
+**Your connections determine what needs the internet.** Local devices can communicate over your LAN. Online forecasts, radar, cloud controllers, and remote advisors need their respective services. LocalSky itself requires no vendor account or subscription.
 
-- New install: jump to **[Quick start](getting-started.md)** for the docker run and the first-run wizard walkthrough.
-- Weather-only user: the wizard's "Controllers" step can be skipped. The irrigation surfaces disappear and LocalSky runs as a pure weather product.
-- No Home Assistant: **[Standalone mode](standalone.md)** covers sensors via MQTT, Ecowitt LAN, and HTTP webhooks.
-- Existing HA user: **[Home Assistant integration](hacs.md)** covers the LocalSky integration for HA (installed through HACS). It discovers LocalSky on your network and brings live weather, every zone and its valve, forecasts, and run/stop/pause controls into HA as native entities and services.
+## Common tasks
 
-## Where things live
-
-| What you want to know | Chapter |
+| I need to… | Read |
 |---|---|
-| What weather sources LocalSky can read | [Weather and soil sensors](sensors.md) |
-| How the engine decides whether to water | [Irrigation engine](irrigation-engine.md) + [Skip rules in depth](skip-rules.md) |
-| Which grass species the catalog supports | [Grass species catalog](grass-species.md) |
-| Which soil textures the catalog supports | [Soil texture catalog](soil-textures.md) |
-| Which controllers LocalSky drives | [Irrigation controllers](controllers.md) |
-| Every config option | [Configuration reference](configuration.md) |
-| Every REST + SSE endpoint | [REST + SSE API](api.md) |
-| Upgrade from v0.1 | [Upgrading LocalSky](upgrading.md) |
-| Something broke | [Troubleshooting](troubleshooting.md) |
-| Quick answers | [FAQ](faq.md) |
+| Connect my weather station | [Weather and soil sensors](sensors.md) |
+| Keep HA's WeatherFlow integration | [Use HA weather sensors](hacs.md#use-home-assistant-weather-sensors) |
+| Set up sprinklers | [Controllers](controllers.md), then [Zones](zones.md) |
+| Understand a skipped run | [Watering decisions](irrigation-engine.md) |
+| See runs and skipped mornings | [History](history.md) |
+| Recover or move an installation | [Backup and restore](backup-restore.md) |
+| Diagnose a problem | [Troubleshooting](troubleshooting.md) |
+| Query weather or forecast data | [API quick start](api-quickstart.md) |
 
-## Two ways to run it
+This guide describes the released version above. Your installation also includes its own version-matched copy at **/docs**, available on your LAN.
 
-LocalSky is designed to work well in either configuration:
-
-- **Standalone**: a self-contained service that talks directly to your weather sensors (and optionally to your irrigation controller). Add sensors over MQTT, Ecowitt LAN POST, or HTTP webhooks.
-- **Alongside Home Assistant**: install the LocalSky integration from HACS and HA finds LocalSky on your network by itself. HA gets native entities and controls (live weather, zones, valves, forecasts, run/stop/pause); LocalSky owns irrigation scheduling and actuation. An MQTT discovery publisher is also available for setups that prefer MQTT.
-
-Both modes are first-class. Pick the one that fits your stack.
-
-Everything runs on your own hardware, and every script and stylesheet the pages use is served by LocalSky itself; nothing is fetched from a CDN. The outbound calls an install makes are these, and each is yours to make or not:
-
-- **Forecast and observation providers** you configure: Open-Meteo, NWS, Met.no and the other sources under Devices. A location with no sources fetches nothing.
-- **Radar and map tiles** when you open the radar page: the basemap comes from CARTO and the precipitation layers from the radar provider you pick (RainViewer by default). A LAN-only install can leave the radar page closed, or disable the radar providers, and makes none of these.
-- **Cloud-backed controllers** you connect (Rachio, B-hyve, Hydrawise) and **notification sinks** you enable (ntfy, Slack, Web Push).
-
-No telemetry, no analytics, no update check unless you turn it on. A LAN-only setup with a local controller and no radar makes no outbound call at all.
-
-## Project links
-
-- Source: [github.com/silenthooligan/localsky](https://github.com/silenthooligan/localsky)
-- HACS integration: [github.com/silenthooligan/localsky-ha](https://github.com/silenthooligan/localsky-ha)
-- Issues + discussions: same repos
-- License: [Apache-2.0](https://github.com/silenthooligan/localsky/blob/main/LICENSE)
+[GitHub](https://github.com/silenthooligan/localsky) · [Release notes](https://github.com/silenthooligan/localsky/releases) · [Report a problem](https://github.com/silenthooligan/localsky/issues)

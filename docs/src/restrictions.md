@@ -1,22 +1,13 @@
 # Watering restrictions
 
-Many places limit when you may water: a water authority, a council, a
-water management district, or an HOA may restrict watering to certain
-days, forbid it during the hottest hours, or cap how long each zone runs.
-LocalSky's restriction system encodes those rules and feeds them straight
-into the skip engine, so the dashboard's verdict already reflects what
-you are legally allowed to do.
-
-Restrictions live under **Settings, Watering restrictions**. Check your
-local water utility or municipality for the exact rules where you live;
-LocalSky's job is to honor them, not to know them.
+Enter permitted days, forbidden hours, and duration limits in **Settings > Watering restrictions**. LocalSky enforces the rules you configure; it does not fetch or certify the rules for your address. Verify them with the responsible authority.
 
 ## How a restriction interacts with the engine
 
 Restrictions are evaluated before the weather skip rules. When a
 restriction blocks watering right now, the engine skips and the verdict
 reason names the rule (for example, "Watering restriction (HOA summer):
-today is not an allowed watering day"), so you see the legal block rather
+today is not an allowed watering day"), so you see the restriction rather
 than a weather explanation.
 
 Multiple restrictions stack. The engine evaluates every enabled,
@@ -36,7 +27,7 @@ and the list matching the parity you set here is the one that binds. (It
 carries a third list that binds every address regardless; see [allowed
 weekdays](#allowed-weekdays).)
 
-Parity matters only for a rule that genuinely depends on it. A rule whose
+Parity matters only for a rule that depends on it. A rule whose
 odd and even lists name the same days binds on its own even at **N/A**,
 because it never depended on your house number in the first place. Only
 two things need a parity to decide: two weekday lists that differ, and a
@@ -156,7 +147,7 @@ applicable restriction, safety gate, soil condition, and owner rule before
 the zone can run. An exempt drip bed can water while a restricted lawn
 waits, but a freeze or operator hold still stops it. The zone card and
 dispatch use the same completed verdict. Set each zone's head type in the
-[zone editor](zones.md#advanced-options).
+[zone editor](zones.md#watering-settings).
 
 A duration cap is not exempted along with the schedule. The tightest cap
 across the active restrictions is worked out for the yard as a whole and

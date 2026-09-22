@@ -1,18 +1,18 @@
 # Configuration reference
 
-LocalSky's configuration is a single TOML file at `/data/localsky.toml`. The first-run wizard writes it; the settings UI edits it; every `PUT /api/v1/config` validates and then writes it atomically (write to a temp file, rename). Schema lives in [src/config/schema.rs](../src/config/schema.rs).
+Use the Settings forms for normal changes. This reference covers the TOML fields in `/data/localsky.toml`; the server also exposes its JSON Schema at `/api/v1/config/schema`.
 
-This document is the field-by-field reference. The wizard ([docs/getting-started.md](getting-started.md)) is the conversational walkthrough; this is the lookup table.
+Saves validate the candidate, retain a config snapshot, and apply supported changes. Startup-only changes report a required restart and hold new watering until it completes. Keep the server-owned `localsky.ledger.toml` beside the configuration; do not edit migration records by hand.
 
 ## Top-level structure
 
 ```toml
 schema_version = 2
+forecast_provider = "..."     # optional root-level source ID
 
 [deployment]
 [features]
 [[sources]]
-forecast_provider = "..."     # optional: pin the forecast provider (a source id)
 [field_source_overrides]      # optional: per-reading single pin (reading -> source id)
 [field_source_chains]         # optional: per-reading ordered backup chain
 [[controllers]]
@@ -30,7 +30,7 @@ forecast_provider = "..."     # optional: pin the forecast provider (a source id
 [ui]
 ```
 
-Every section except `deployment` is optional (zero-source / zero-controller configs are valid for first boots before the wizard has been completed). `schema_version` is required; a config whose `schema_version` is higher than the binary supports is refused at load (see [Upgrading LocalSky](upgrading.md#downgrading-and-rollback)).
+Every section except `deployment` is optional (zero-source / zero-controller configs are valid for first boots before the wizard has been completed). `schema_version` is required; a config whose `schema_version` is higher than the binary supports is refused at load (see [Upgrading LocalSky](upgrading.md#roll-back)).
 
 ## `[deployment]`
 
@@ -88,7 +88,7 @@ bind_addr = "0.0.0.0:50222"
 hub_serial = null  # filter to a specific Tempest hub; null = accept any
 ```
 
-Supported `kind` values: `tempest_udp`, `tempest_ws`, `open_meteo`, `ecowitt_local`, `ecowitt_gw_poll`, `davis_wll`, `nws`, `openweather`, `pirate_weather`, `met_norway`, `synoptic`, `noaa_mrms`, `ambient_weather`, `netatmo`, `yolink`, `lacrosse`, `tuya_cloud`, `ha_passthrough`, `mqtt`, `http_webhook`, `rest_poll`, `prometheus`, `influxdb`, `weatherkit`, `demo_replay`. See [src/config/schema.rs](../src/config/schema.rs) `SourceKind` enum for per-kind config fields.
+Supported `kind` values: `tempest_udp`, `tempest_ws`, `open_meteo`, `ecowitt_local`, `ecowitt_gw_poll`, `davis_wll`, `nws`, `openweather`, `pirate_weather`, `met_norway`, `synoptic`, `noaa_mrms`, `ambient_weather`, `netatmo`, `yolink`, `lacrosse`, `tuya_cloud`, `ha_passthrough`, `mqtt`, `http_webhook`, `rest_poll`, `prometheus`, `influxdb`, `weatherkit`, `demo_replay`. See [src/config/schema.rs](https://github.com/silenthooligan/localsky/blob/main/src/config/schema.rs) `SourceKind` enum for per-kind config fields.
 
 New in 0.7.0: `synoptic` (Synoptic Data / MesoWest, a dense real-station observation network keyed by a free API token, current wind/pressure/temp/humidity like NWS but from a much denser mesonet) and `noaa_mrms` (NOAA Multi-Radar Multi-Sensor, keyless US-only gauge-corrected radar rain that sees the rain on your block, refreshed about every 2 minutes). Both emit only current scalars into the merge, not forecast snapshots.
 
@@ -334,7 +334,7 @@ All values match v0.1 hardcoded constants, with two exceptions. See [skip-rules.
 
 `capture_efficiency` is read by the soil model: the replay credits rain and applied water through it and each refill divides by it, so on soil-governed zones editing it changes run length, and the zone math panel there shows the configured value. Weekly-governed sizing does not read it (the weekly target is gross), and the soil projection plus the math panel on weekly zones keep the fixed 0.70. Its other reader is the tuning report's measured-sprinkler-rate check, which divides a probe's rise by it. `et0_method` is accepted and validated but not read: the ET0 path always runs the automatic method (Penman-Monteith when the inputs are there, otherwise ASCE-simplified, otherwise Hargreaves-Samani).
 
-`interleave_cycles` waters other zones during a zone's cycle-and-soak pauses instead of idling through them, shortening the morning sequence. Default on; turn it off on installs fed by a well or low-recovery pump, where the idle soak gaps double as supply recovery time (the setup wizard's water-supply question sets this for you). One valve still runs at a time and soaks are minimums that may stretch, never shrink; details in [irrigation-engine.md](irrigation-engine.md#cycle-interleaving). `interleave_cycles` and `soak_minutes` hot-reload with the rest of the watering policy: a change applies on the next scheduler tick (the next morning's plan), no restart needed. Both, plus the seasonal water-budget dial, are editable on the Engine settings page.
+`interleave_cycles` waters other zones during a zone's cycle-and-soak pauses instead of idling through them, shortening the morning sequence. Default on; turn it off on installs fed by a well or low-recovery pump, where the idle soak gaps double as supply recovery time (the setup wizard's water-supply question sets this for you). One valve still runs at a time and soaks are minimums that may stretch, never shrink; details in [irrigation-engine.md](irrigation-engine.md#cycle-and-soak). `interleave_cycles` and `soak_minutes` hot-reload with the rest of the watering policy: a change applies on the next scheduler tick (the next morning's plan), no restart needed. Both, plus the seasonal water-budget dial, are editable on the Engine settings page.
 
 ### Watering restrictions
 
@@ -411,7 +411,7 @@ trusted_proxies = []       # CIDRs of YOUR reverse proxies; makes X-Forwarded-Fo
 
 Configs without an `[auth]` block behave exactly as before (no login). With `mode = "required"`, static assets, `/api/v1/info`, and the `/ingest/*` receivers stay public; everything else needs a session or a Bearer token.
 
-`proxy_auth_header` names the identity header an authenticating reverse proxy (for example oauth2-proxy's `X-Auth-Request-Email`) stamps on requests it has already logged in. It is honored only when the request's direct peer is inside `trusted_proxies`, and it vouches the caller as an authenticated operator on the privileged config/backup routes in both auth modes. `proxy_auth_allow` optionally restricts which header values qualify. The proxy must strip or overwrite the header on client traffic. Full walkthrough: [Authentication](authentication.md#running-behind-an-authenticating-reverse-proxy).
+`proxy_auth_header` names the identity header an authenticating reverse proxy (for example oauth2-proxy's `X-Auth-Request-Email`) stamps on requests it has already logged in. It is honored only when the request's direct peer is inside `trusted_proxies`, and it vouches the caller as an authenticated operator on the privileged config/backup routes in both auth modes. `proxy_auth_allow` optionally restricts which header values qualify. The proxy must strip or overwrite the header on client traffic. Full walkthrough: [Authentication](authentication.md#an-authenticating-proxy).
 
 ## `[network]`
 
@@ -483,7 +483,7 @@ Bad PUTs return 422 with the specific failure; on-disk file is untouched.
 
 ## Migrations
 
-There are two migration chains. Config migrations (`schema_version` in `localsky.toml`) are an ordered list applied exactly once on load and recorded in `localsky.ledger.toml` beside the config; that ledger also holds the server-owned records (seeded forecast authorities, the 0.7.22 helper migration) that no config write can touch, and it travels inside a backup bundle. On boot, the database migration runner replays any database migrations the file has not seen yet. Schema bumps live in [src/persistence/migrations/](../src/persistence/migrations/) as numbered SQL files, each applied in its own transaction and recorded in the `schema_migrations` table. The config file's own `schema_version` is currently `2`; older configs gain new fields via defaults, and a config newer than the binary is refused at load. Details: [Upgrading LocalSky](upgrading.md#what-happens-on-first-boot-after-an-upgrade).
+There are two migration chains. Config migrations (`schema_version` in `localsky.toml`) are an ordered list applied exactly once on load and recorded in `localsky.ledger.toml` beside the config; that ledger also holds the server-owned records (seeded forecast authorities, the 0.7.22 helper migration) that no config write can touch, and it travels inside a backup bundle. On boot, the database migration runner replays any database migrations the file has not seen yet. Schema bumps live in [src/persistence/migrations/](https://github.com/silenthooligan/localsky/blob/main/src/persistence/migrations/) as numbered SQL files, each applied in its own transaction and recorded in the `schema_migrations` table. The config file's own `schema_version` is currently `2`; older configs gain new fields via defaults, and a config newer than the binary is refused at load. Details: [Upgrading LocalSky](upgrading.md#config-and-database-migrations).
 
 LocalSky records a config snapshot on every save. Each successful write (a settings `PUT`, a raw-TOML save, or the wizard apply) first copies the previous on-disk `localsky.toml` to `<config_dir>/snapshots/<unix_ts>.toml`, keeping the newest 20 and pruning older ones. To list and restore them:
 

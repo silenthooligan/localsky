@@ -11,9 +11,9 @@ preferred-dark-theme = "ayu"
 git-repository-url = "https://github.com/silenthooligan/localsky"
 edit-url-template = "https://github.com/silenthooligan/localsky/edit/main/docs/src/{path}"
 site-url = "/docs/"
-additional-css = ["theme/css/custom.css"]
+additional-css = ["theme/css/custom.css", "theme/css/product.css"]
 additional-js = ["theme/js/umami.js", "theme/js/backlink.js", "theme/js/branding.js"]
-no-section-label = false
+no-section-label = true
 mathjax-support = false
 
 [output.html.search]
@@ -26,7 +26,8 @@ boost-paragraph = 1
 heading-split-level = 3
 
 [output.html.fold]
-enable = false
+enable = true
+level = 1
 
 [output.html.print]
 enable = true

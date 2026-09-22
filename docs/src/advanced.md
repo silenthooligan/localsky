@@ -1,120 +1,31 @@
 # Advanced settings
 
-The Advanced page (**Settings, Advanced**) is for debug visibility,
-rollback, and backup. Nothing here changes how the engine decides to
-water; these controls only expose what is already happening, or let you
-recover a previous state. Most of the toggles are per-device (stored in
-this browser's local storage), so turning one on here does not affect
-anyone else's view.
+Use **Settings > Advanced** for extra diagnostic detail, raw configuration, backups, and display controls.
 
 ## Nerd mode
 
-Nerd mode shows the raw inputs behind the verdict on the irrigation page.
-With it on, the forecast panel adds its forecast intelligence block,
-today's and tomorrow's reference evapotranspiration (ET0) and rain with the
-heat multiplier, the advisory soil model, and today's temperature range,
-peak wind and mean humidity, and the skip check shows its full breakdown
-rather than the summary.
-
-It is the right setting when you want to understand or audit a decision,
-or when you are tuning species and soil settings and want to watch the
-math respond. It is per-device and persisted, so you can leave it on for
-your own browser without cluttering a shared dashboard.
+Shows more of the inputs and calculations behind a decision. Use it when comparing source values, zone demand, and rule results. This is a browser preference; it does not change the engine.
 
 ## Kiosk mode
 
-Kiosk mode hides destructive controls on this device. With it on, the
-device cannot trigger any irrigation action: no running a zone, no
-stop-all, no threshold edits, no pause toggles. Status, history, and all
-the read-only views stay fully visible.
+Hides irrigation controls on this browser for a shared display. It is a presentation preference, not server authorization. Someone with an operator credential can still call the API.
 
-This is for shared and public-facing screens: a wall tablet, a family
-device, a kiosk in a lobby. It is per-device, so the screen on the wall
-can be locked down while your own browser keeps full control.
+Use [authentication](authentication.md) and network access controls for an installation that other people can reach.
 
-## Source freshness
+## Raw configuration
 
-Source freshness now lives in the unified device list under **Settings,
-Devices**. Every source you have configured appears there exactly once,
-whatever its kind: local weather stations, cloud services, the irrigation
-refresher, and the forecast source. Each entry shows its live status with
-a colored pill (fresh, stale, waiting, or offline), when it last reported,
-the sensors it provides, and an enable/disable toggle so you can take a
-source out of rotation without deleting it.
+The TOML editor exposes settings beyond the standard forms. Saves validate the configuration and retain snapshots. A change can affect watering or require a restart; read the resulting message before leaving the page.
 
-Staleness is judged against each source's own expected cadence, so a
-forecast that polls every 30 minutes and a station that reports every few
-seconds are each graded on their own clock. Use this to confirm a source
-is alive before chasing a verdict you do not understand.
+Use the [configuration reference](configuration.md) for fields and [backup guide](backup-restore.md) before recovery work.
 
-Cloud services you have not enabled yet do not clutter the configured
-list. They appear separately as "coverage you can add", so you can see at
-a glance which extra data sources are available to turn on.
+## Source and API diagnostics
 
-## Update check
+Source status is in **Settings > Devices**. Check the field's observation time as well as the connection status.
 
-An opt-in check for new LocalSky releases. Off by default. When you turn
-it on, this device asks the project's version manifest at
-`localsky.io/latest.json` for the newest release at most once per day and
-shows it below the toggle, flagging when a newer version is available with
-a link to the release notes. The page is explicit about the trade: that
-request reveals this device's IP address to the `localsky.io` server, and
-the running version travels in the request's User-Agent so the maintainer
-can see aggregate version adoption. No per-install identifier or config
-data is sent. That outbound contact is why it is opt-in. Per-device and
-persisted.
+Use `/api/v1/info` to identify the server, health for component status, and diagnostics for a report. [Error codes](source-errors.md) and [API errors](api-errors.md) explain the detail to preserve.
 
-## Demo mode
+## Release checks
 
-A read-only status line showing whether the deployment is running in demo
-mode. When active, all controller actions are recorded but never fired
-and the weather data is simulated. This is not a toggle on this page:
-demo mode is enabled with the `LOCALSKY_DEMO=1` container environment
-variable, which seeds a demo config with `features.demo_mode = true`.
-The line just tells you which mode you are in.
+The browser's release-check preference applies to this device. Server-side checks are separate and optional. Neither setting installs an update.
 
-## Configuration history and rollback
-
-Every time the configuration is saved, LocalSky snapshots the previous
-version before writing. The Configuration history panel lists the most
-recent versions (up to 20), each with its version number, when it was
-applied, and an optional note.
-
-If a change goes wrong, you can roll back to any listed version. The
-rollback is performed through the API
-(`POST /api/config/rollback?to=<version>`); the panel shows you which
-versions are available to target. The first save records version 1, so a
-brand-new install starts with an empty list.
-
-## Backup and restore
-
-A full backup in one bundle. **Download backup** produces a single
-archive holding your configuration and the entire history database (runs,
-sensor readings, and decisions). The VAPID push key and the instance
-identity are deliberately left out, so a backup is safe to copy between
-installs without cloning a deployment's identity.
-
-**Restore from bundle** uploads a backup to apply. Because a restore
-replaces both the current configuration and the history database, it asks
-you to confirm before doing anything, and the picked file alone never
-triggers it. A configuration restore applies on the next engine tick; a
-database restore takes effect at the next container restart.
-
-## Raw TOML editor
-
-A direct editor for `/data/localsky.toml`. It loads the live config as
-text, lets you edit it, and validates on save (TOML parse plus the schema
-invariants) before writing. This is the escape hatch for adding sources,
-controllers, or zones from a template you already have, bypassing the
-wizard entirely. Unlike the JSON config API, the raw file shows secrets
-in place, so treat the editor accordingly. The container loads the new
-config on its next restart.
-
-## Where to read more
-
-- [Backup, restore, and recovery](backup-restore.md): the full backup
-  workflow and what each bundle contains.
-- [Configuration reference](configuration.md): every field the raw editor
-  exposes.
-- [Upgrading LocalSky](upgrading.md): version upgrades and the update
-  check.
+[Update LocalSky](upgrading.md)

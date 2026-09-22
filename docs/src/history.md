@@ -1,41 +1,44 @@
-# History
+# Runs, skips, and history
 
-The **Run log** leads with recorded activity. Choose a range or month and
-search by zone or reason. Sessions are grouped by their start date in your
-installation's timezone; expand a session to inspect its cycles and original
-records. Manual watering and the normal automatic schedule retain their sources.
+History separates delivered watering from the decisions that scheduled or held it.
 
-**Watering insights** has a separate, clearly labeled 30-day, 90-day, or
-one-year window:
+## Run log
 
-- **Watering time** counts valve-open minutes, excluding soak waits and
-  duplicate controller observations. It is duration, not measured volume.
-- **Watering sessions** counts recorded watering events.
-- **Skipped zone mornings** and **Why scheduled zones held** use recorded
-  automatic outcomes, once per zone and local day. A later watering outcome
-  replaces an earlier hold. A changing live forecast is not a completed skip.
-- Daily trends, the calendar, and the per-zone split show where watering occurred.
-  An empty day means no watering was recorded; it does not prove a skip.
+Choose a date range or month, then search by zone or reason. **All Months** includes the available history across months.
 
-**Rain forecast review** is collapsed below the watering insights. Expand it
-to compare completed-day forecasts with gauge evidence. This feedback does not
-measure water saved. Incomplete days and unavailable observations are not scored.
+Watering sessions are grouped by their start date in your installation's timezone. Expand a session to see its cycle-and-soak segments and original records. Automatic and manual runs retain their sources.
 
-Print creates a report; Download CSV exports the stored records. History lives
-in LocalSky's own SQLite database. A failed history request is reported as
-unavailable, never as zero watering.
+A session ID identifies related records. Older records without an ID remain separate; nearby timestamps alone do not establish that they belong together.
 
-## Today's run and tomorrow's projection
+## Daily log
 
-The Irrigation page separates **Today · normal irrigation run** from
-**Tomorrow · projected**. Today's result comes from stored automatic-run rows,
-including the reasons recorded at dispatch. When those rows are absent, LocalSky
-says there is no automatic-run record rather than guessing from today's weather.
-Manual runs remain visible in the run log.
+Use the Daily log to answer **what happened to the normal run that morning?** It includes recorded automatic watering and skipped mornings, with zone reasons.
 
-Tomorrow uses tomorrow's forecast verdict. The morning check time includes its
-day and timezone. Normally LocalSky works backward from sunrise minus 15 minutes
-by the sequence's watering and soak duration. A zero-minute plan checks 15 minutes
-before sunrise; freeze forecasts can move watering to a safe post-sunrise window.
-The time can move as the plan changes. Fresh evidence and the applicable rules
-determine the final decision at the check.
+A live hold shown in the app is not automatically a historical skip. The log needs a recorded outcome. When that evidence is absent, LocalSky shows no record.
+
+## Watering insights
+
+Choose the labeled 30-day, 90-day, or one-year reporting window.
+
+| Measure | Meaning |
+|---|---|
+| Watering time | Valve-open time, excluding soak waits and duplicate observations |
+| Watering sessions | Recorded watering events |
+| Skipped zone mornings | Recorded automatic holds by zone and local day |
+| Daily and zone breakdowns | Where and when recorded watering occurred |
+
+Duration is not measured volume. Gallons require a supported, connected flow meter and valid readings. An empty day does not prove a skip or zero use.
+
+## Rain forecast review
+
+Expand **Rain forecast review** below the watering insights to compare past forecasts with observed rain. Only completed days with enough evidence are scored. Today's partial rainfall cannot establish whether a forecast was correct.
+
+This comparison measures forecast outcomes, not water saved.
+
+## Export and recovery
+
+**Download CSV** exports stored records. **Print** creates a report. History lives in LocalSky's database and is included in a LocalSky backup.
+
+A failed history request is shown as unavailable. It is not converted into an empty successful report.
+
+[Backup and restore](backup-restore.md) · [History API](api-irrigation.md)

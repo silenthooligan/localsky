@@ -1,6 +1,6 @@
 # Notifications
 
-LocalSky notifies you about the things that matter to a lawn and a water bill:
+Choose which channels should receive run, decision, and device alerts in **Settings > Notifications**. Events include:
 
 - **Zone started** and **zone stopped**, with the duration.
 - **Daily verdict** once per day, the first time the morning's decision is made (skip, run, run extended, with the reason).
@@ -13,11 +13,11 @@ Three channels deliver them: **Web Push** to a subscribed browser or the install
 
 ## ntfy and Slack
 
-ntfy wants a server (the public `https://ntfy.sh` or your own) and a topic; an access token is optional. LocalSky posts one message per event with the headline as the title. Slack wants an incoming webhook URL; LocalSky posts the headline in bold and the detail on the next line. A sink that fails is logged and never blocks the others. There is no email channel: it would need an SMTP dependency this image does not carry, so the field was removed rather than shipped dead.
+ntfy wants a server (the public `https://ntfy.sh` or your own) and a topic; an access token is optional. LocalSky posts one message per event with the headline as the title. Slack wants an incoming webhook URL; LocalSky posts the headline in bold and the detail on the next line. A sink that fails is logged and never blocks the others. Email delivery is not supported.
 
 ## Web Push
 
-Web Push is the closest thing to a real app notification without putting LocalSky in any app store. Once a phone or laptop opens the dashboard and subscribes, the OS-native notification surface fires even when the browser is closed. Notifications use a grouping tag, so a newer event for the same zone replaces the previous notification instead of stacking, and tapping one opens the relevant page (`/irrigation` or the zone's detail page).
+Subscribe each browser or installed web app that should receive notifications. Delivery depends on browser permission, platform support, and the browser's push service. Use a secure context such as HTTPS.
 
 Web Push needs a VAPID keypair so the push service can verify that notifications are signed by your LocalSky instance. The keypair is generated once and reused for the life of the deployment.
 
@@ -85,7 +85,7 @@ A configured instance returns `{ "public_key": "BNJxRy7..." }`. A `503` with `{ 
 
 ### 4. Subscribe a device
 
-Open the dashboard on each phone / laptop / tablet that should receive notifications. Go to **Settings -> Notifications -> Web Push** and tap **Subscribe this device**. The browser asks for notification permission; allow it. The dashboard registers a push endpoint with the public key, and from that moment LocalSky can wake the device.
+Open the dashboard on each phone / laptop / tablet that should receive notifications. Go to **Settings -> Notifications -> Web Push** and tap **Subscribe this device**. The browser asks for notification permission; allow it. The dashboard registers a push endpoint with the public key, and saves the subscription for delivery.
 
 To stop receiving on a device: tap **Unsubscribe** in the same panel, or clear the site data in the browser. Endpoints that a browser has revoked are pruned automatically the next time a push to them fails.
 
@@ -93,7 +93,7 @@ To stop receiving on a device: tap **Unsubscribe** in the same panel, or clear t
 
 - **The subscribe control reports push as unavailable**: the server did not load a VAPID keypair, or the history database (where subscriptions are stored) was not openable at startup. `GET /api/v1/push/vapid-key` distinguishes the two: `503` means keys, and `503` from `POST /api/v1/push/subscribe` with `"history db not configured"` means the database.
 - **iOS does not show notifications**: iOS 16.4+ supports Web Push but only for PWAs added to the home screen via Share -> Add to Home Screen. A regular Safari tab will not ring.
-- **No notifications after subscribing**: confirm the server side with `GET /api/v1/push/vapid-key`, then trigger a test by manually running a zone; the zone-start event should arrive within seconds. Check the container logs for `push: send ... failed` lines.
+- **No notifications after subscribing**: confirm the server side with `GET /api/v1/push/vapid-key`, then check delivery during a supervised run you already intend to make. Check the container logs for `push: send ... failed` lines.
 
 ## What fires when
 
@@ -103,4 +103,4 @@ To stop receiving on a device: tap **Unsubscribe** in the same panel, or clear t
 | Zone stopped | A zone's running state flips from on to off (carries the run duration in minutes) |
 | Daily verdict | The first verdict computation of each day (skip / run / run extended, with the reason text) |
 
-There is no rate-limit or quiet-hours logic yet. If a misbehaving controller flaps a zone, every subscribed device hears every flap. Track [the roadmap](https://github.com/silenthooligan/localsky/issues) for a quiet-hours policy.
+There is no general quiet-hours policy. Repeated state changes can produce repeated notifications; investigate a flapping controller rather than relying on notification grouping to hide it.

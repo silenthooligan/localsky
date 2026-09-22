@@ -1,84 +1,33 @@
-# Reverse proxy and HTTPS
+# HTTPS and reverse proxies
 
-LocalSky listens on plain HTTP (default `:8090`). On a trusted LAN with
-built-in auth enabled that is a reasonable place to stop. To reach it
-from the internet, put a TLS reverse proxy in front and let it terminate
-HTTPS.
+Use HTTPS for access beyond a trusted LAN. LocalSky listens on HTTP; a reverse proxy supplies TLS and forwards requests to it.
 
-Three things matter for any proxy:
+## Configure both sides
 
-1. Pass `X-Forwarded-Proto: https` so LocalSky marks its session cookie
-   `Secure`.
-2. **Overwrite** (never append to) `X-Forwarded-For` with the real
-   client address. LocalSky reads the first hop of that header for
-   `auth.trusted_networks` and login rate limiting, and it has no
-   trusted-proxy list, so an appended header leaves a client-forged
-   address in the position LocalSky trusts. See
-   [X-Forwarded-For and trusted networks](authentication.md#x-forwarded-for-and-trusted-networks).
-3. Server-Sent Events (`/api/v1/stream`, `/api/v1/irrigation/stream`,
-   `/api/v1/forecast/stream`, plus their legacy `/api/*` aliases) are
-   long-lived responses: disable buffering and give them a long (or no)
-   read timeout.
+1. Complete LocalSky setup and enable [authentication](authentication.md).
+2. Restrict direct access to LocalSky's port so external clients go through the proxy.
+3. Set `auth.trusted_proxies` to the proxy's actual address.
+4. Forward the client address and scheme. Disable response buffering for event streams.
 
-## What to expose
+For a proxy connecting from the same host through loopback:
 
-Built-in auth gates most of the app, but a few paths are public by
-design. For an internet-facing deployment, narrow them at the proxy:
+```toml
+[auth]
+mode = "required"
+trusted_proxies = ["127.0.0.1/32", "::1/128"]
+trusted_networks = []
+```
 
-- **Block `/ingest/*` and `/api/v1/ingest/*` from the internet.** These
-  receive sensor data from hardware that cannot authenticate (Ecowitt
-  consoles, webhook devices), so they are exempt from auth. Anyone who
-  can POST to them can feed LocalSky fabricated weather, and fabricated
-  weather steers irrigation decisions. Your weather hardware is on your
-  LAN; the internet has no business reaching these paths.
-- **Consider blocking `/setup` and `/api/v1/wizard/*` until setup is
-  done.** The setup wizard (pages and APIs) is public until the first
-  account exists, so a brand-new instance exposed before you finish the
-  wizard can be configured by whoever finds it first. Either complete
-  the wizard before exposing the instance, or block these paths at the
-  proxy until you have created the owner account (after that, LocalSky
-  locks them itself).
-- **Consider blocking `/metrics` from the internet.** The Prometheus
-  exposition endpoint is public like `/api/v1/health`: it carries only
-  aggregate operational counters (verdict mix, refresh and degraded
-  counts, controller/cloud error counts, last-fetch latency), no secrets
-  or PII. That is safe to leave open on a LAN, but if you do not want the
-  numbers public, firewall or 403 `/metrics` at the proxy (let your
-  monitoring host reach it directly).
-- **Keep `/pkg/*` and `/sw.js` reachable without credentials.** These
-  hydration assets are fetched by the browser without cookies; if a
-  proxy-side auth layer intercepts them, the app shell breaks (see the
-  warnings in each proxy section below).
-
-Everything else (dashboard pages, the API, uploaded photos) is covered
-by LocalSky's own auth when `[auth] mode = "required"`. If you run with
-auth disabled, the proxy is your only gate; in that case put proxy-side
-auth in front of everything except `/pkg/*`, `/sw.js`, and (if hardware
-posts from outside) the ingest paths.
+For a separate container or host, use its real source address instead. LocalSky accepts forwarded addresses only from a declared proxy and reads the chain from the right, stopping at the first untrusted hop.
 
 ## Caddy
 
-```caddy
-localsky.example.com {
-    reverse_proxy 127.0.0.1:8090 {
-        flush_interval -1   # stream SSE unbuffered
-    }
-}
-```
-
-Caddy sets the forwarding headers and provisions certificates
-automatically, and (since 2.5) ignores forwarded headers from untrusted
-clients, so the `X-Forwarded-For` LocalSky sees is the real client
-address. If you also gate with Caddy-side auth (forward_auth, OAuth
-plugins), exempt `/pkg/*` and `/sw.js`: hydration assets are fetched
-without credentials and a redirect there breaks the app shell.
-
-To block the ingest receivers from the internet with Caddy:
+This example assumes the proxy reaches LocalSky at `127.0.0.1:8090`:
 
 ```caddy
 localsky.example.com {
-    @ingest path /ingest/* /api/v1/ingest/*
-    respond @ingest 403
+    @private_paths path /ingest/* /api/ingest/* /api/v1/ingest/* /metrics
+    respond @private_paths 403
 
     reverse_proxy 127.0.0.1:8090 {
         flush_interval -1
@@ -86,31 +35,30 @@ localsky.example.com {
 }
 ```
 
+Point your domain to the proxy and allow it to obtain a certificate. Keep hardware ingest reachable over the LAN where needed.
+
 ## nginx
+
+Supply your certificate paths in this server block:
 
 ```nginx
 server {
     listen 443 ssl;
     server_name localsky.example.com;
-    # ssl_certificate ...; ssl_certificate_key ...;
+    ssl_certificate /etc/ssl/localsky/fullchain.pem;
+    ssl_certificate_key /etc/ssl/localsky/privkey.pem;
 
-    # Block unauthenticated receivers from the internet.
-    location ~ ^/(ingest|api/v1/ingest)/ {
+    location ~ ^/(ingest|api/ingest|api/v1/ingest)/ {
+        return 403;
+    }
+    location = /metrics {
         return 403;
     }
 
     location / {
         proxy_pass http://127.0.0.1:8090;
         proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $remote_addr;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-
-    # SSE: no buffering, no read timeout.
-    location ~ /stream$ {
-        proxy_pass http://127.0.0.1:8090;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_buffering off;
         proxy_read_timeout 24h;
@@ -118,43 +66,19 @@ server {
 }
 ```
 
-Note `X-Forwarded-For $remote_addr`, **not**
-`$proxy_add_x_forwarded_for`. The latter appends to whatever
-`X-Forwarded-For` the client sent, and LocalSky reads the first
-(client-controlled) hop, which would let an internet client spoof a
-`trusted_networks` address and bypass login. `$remote_addr` replaces
-the header with the address nginx actually saw.
+Appending the observed peer with `$proxy_add_x_forwarded_for` is compatible with LocalSky's trusted-proxy chain. If there are multiple proxy hops, configure each trusted hop deliberately.
 
-If nginx itself sits behind another proxy you control (e.g. a
-Cloudflare tunnel), use the `real_ip` module to recover the true client
-address first, and still send LocalSky a single-value header.
+## What to expose
 
-## Traefik (Docker labels)
+Hardware ingest accepts observations from devices that cannot send LocalSky credentials. Keep it private: fabricated observations can affect watering decisions. Restrict metrics if you do not want operational counters public.
 
-```yaml
-services:
-  localsky:
-    # ... your localsky service ...
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.localsky.rule=Host(`localsky.example.com`)
-      - traefik.http.routers.localsky.entrypoints=websecure
-      - traefik.http.routers.localsky.tls.certresolver=letsencrypt
-      - traefik.http.services.localsky.loadbalancer.server.port=8090
-```
+Static assets, login, and docs must load for a new browser. If you add proxy-side authentication, ensure it handles those requests and SSE without redirect loops. Verify the full app in a signed-out browser.
 
-Traefik streams responses by default and, unless you opt in to
-`forwardedHeaders.insecure` or `trustedIPs`, discards forwarded headers
-from untrusted clients and sets its own, which is what LocalSky needs.
+## Check the result
 
-If you add a Traefik auth middleware (`forwardAuth`, `basicAuth`,
-OAuth) in front of LocalSky, exempt `/pkg/*` and `/sw.js` from it (a
-higher-priority router for those path prefixes without the middleware).
-Hydration assets are fetched without credentials; gating them breaks
-the app shell exactly as it does with Caddy or nginx.
+- Sign in through HTTPS and reload the app.
+- Open Weather or Irrigation and confirm updates continue without refreshing.
+- Confirm a remote client cannot bypass authentication through port 8090.
+- Check that hardware ingest is blocked externally but still works for the local device.
 
-## Home Assistant integration through a proxy
-
-The HACS integration talks to whatever host/port you pair it with. On
-the LAN, pair it straight to `:8090` (with an API token when auth is
-required) and keep the proxy for browsers; nothing else is needed.
+A 401 on a privileged route often means a missing credential or an incorrectly declared proxy. See [authentication](authentication.md#trusted-networks-and-proxies).

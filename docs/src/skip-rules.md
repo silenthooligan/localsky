@@ -30,12 +30,12 @@ Source: `src/engine/skip_rules.rs`.
 | 13 | Rain in next 4 hours | `rain_next_4h_in >= 0.10` | 0.10 in (2.5 mm) | `rain_next_4h_skip_in` |
 | 14 | Tomorrow rain (confidence-weighted) | `forecast_in * prob/100 >= rain_skip_in` | 0.25 in (6.4 mm), weighted | `rain_skip_in` |
 | 15 | 3-day rain rollup | `rain_3day_weighted_in >= 1.5 * rain_skip_in` | 1.5x multiplier | `rain_3day_factor` |
-| 15b | Soil floor (the moat) | a soft forecast-rain skip meets a zone measured below its dry floor | per-zone `target_min_pct_soil` | per-zone soil settings |
+| 15b | Measured dry-soil exception | a soft forecast-rain skip meets a zone measured below its dry floor | per-zone `target_min_pct_soil` | per-zone soil settings |
 | 16 | Heat advisory (pre-water) | 3-day max >= 95°F (35°C) + humidity >= 60% + 2+ dry days | composite | `heat_advisory_*` |
 | 17 | Dry-run mode | `is_dry_run == true` | none | UI |
 | - | Default | (no rule matched) | none | run |
 
-Rules 4b, 4c, 4d and 4e have no off switch, for the reasons in [Disabling a gate](#disabling-a-gate) below. Rule 15b demotes a soft forecast-rain skip for a zone that is measurably dry, and it gets its own section under [Soil floor (the moat)](#soil-floor-the-moat).
+Rules 4b, 4c, 4d and 4e have no off switch, for the reasons in [Disabling a gate](#disabling-a-gate) below. Rule 15b demotes a soft forecast-rain skip for a zone that is measurably dry, and it gets its own section under [Measured dry-soil exception](#measured-dry-soil-exception).
 
 A missing or untrusted configured probe holds its own zone, even when a neighboring probe reads dry. A zone with no probe binding uses its weather and soil model normally. Manual schedule weather waivers cannot bypass this data hold.
 
@@ -69,7 +69,7 @@ The ladder returns one of three verdicts:
 
 Live precipitation intensity from the Tempest hub (or merged from any source advertising `RainIntensityInHr`). 0.01 in/hr (0.25 mm/hr) is essentially "you can see the pavement getting wet"; anything above triggers the skip.
 
-A hard "currently raining" skip only applies when the rain source is observation-grade: a local gauge, an NWS observation, or NOAA MRMS radar. A model forecast rain rate is treated as a soft skip that a measured-dry zone can demote to a run (see [Soil floor (the moat)](#soil-floor-the-moat)).
+A hard "currently raining" skip only applies when the rain source is observation-grade: a local gauge, an NWS observation, or NOAA MRMS radar. A model forecast rain rate is treated as a soft skip that a measured-dry zone can demote to a run (see [Measured dry-soil exception](#measured-dry-soil-exception)).
 
 ### Freeze + soil frost (rules 6-8)
 
@@ -101,7 +101,7 @@ Three look-ahead windows: next 4 hours (hourly forecast), tomorrow (probability-
 
 Missing rain is unknown, including when a provider's weather request succeeds but its precipitation request fails. An enabled forecast-rain gate holds on missing amount evidence and explains what is unavailable; reported zero over a fully covered interval means dry. The measured-dry soil exception below still applies to soft forecast recommendations, while the separate automatic-plan availability gate remains protected. Unknown rain also cannot justify a heat-advisory extension or a forecast deferral beyond its evidence.
 
-### Soil floor (the moat)
+### Measured dry-soil exception
 
 A soft, forecast-based rain skip (next 4 hours, tomorrow, or the 3-day rollup) may be demoted to a run when a zone is measured healthy-dry: its soil percent is below its per-zone dry floor, `target_min_pct_soil`, with a present probe reading above zero. This honors measured soil truth over an uncertain forecast. Hard skips (measured rain now, observed recent rain, freeze, wind, soil saturation) are never demotable, and observation-grade rain (a real gauge or MRMS radar) never demotes.
 
@@ -124,7 +124,7 @@ Disabled in cooler climates by raising heat_advisory_temp_f.
 
 The ladder is fixed. On top of it you can build your own rules in Rule Lab, each one a scope (every zone, or a named few), a condition tree over the weather and per-zone soil metrics, and a single action: skip the zone, mark its run extended, or scale its run by a factor. Only the scale factor moves the dispatched minutes; extend labels the verdict and leaves the run length alone.
 
-Those three actions are the whole list, on purpose. A rule can add a skip, tag a run as extended, or resize one; it can never do the opposite. There is no action that clears a freeze, a wind gate, a watering restriction, or a rain skip, and none that forces a run. A scale factor is clamped to 0.5-1.5 no matter what the config file says, and the scaled run is re-capped at [the zone's maximum run time](zones.md#advanced-options), so scaling up cannot push a run past its ceiling.
+Those three actions are the whole list, on purpose. A rule can add a skip, tag a run as extended, or resize one; it can never do the opposite. There is no action that clears a freeze, a wind gate, a watering restriction, or a rain skip, and none that forces a run. A scale factor is clamped to 0.5-1.5 no matter what the config file says, and the scaled run is re-capped at [the zone's maximum run time](zones.md#watering-settings), so scaling up cannot push a run past its ceiling.
 
 Condition rules run for every otherwise eligible ordinary zone, including a measured-dry zone that demoted a soft forecast skip, a soil-model zone that already credited forecast rain, and a zone exempt from a restriction. They can add a hold but cannot clear an existing hold. Explicit Force bypasses these structured condition recommendations; enabled safety gates and restrictions still apply. Rhai script rules remain additional holds on every runnable decision, including Force, and the completed per-zone verdict is the one dispatch reads.
 

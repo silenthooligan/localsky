@@ -1,0 +1,62 @@
+name: Documentation
+
+on:
+  push:
+    branches: [main, docs/product-guide]
+    paths: ['docs/**', '.github/scripts/*doc*', '.github/workflows/docs.yml', 'README.md']
+  pull_request:
+    paths: ['docs/**', '.github/scripts/*doc*', '.github/workflows/docs.yml', 'README.md']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guide:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check generated connector assets and example clients
+        run: |
+          node --version
+          python3 .github/scripts/build-doc-assets.py --check
+          python3 -m unittest discover -s .github/scripts -p 'test_doc_*.py' -v
+          pip install 'openapi-spec-validator==0.7.2'
+          python3 -c "import json; from openapi_spec_validator import validate; validate(json.load(open('docs/src/openapi.json')))"
+      - name: Build guide with verified mdBook
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/build-docs.py
+      - name: Check links and fragment targets
+        run: python3 .github/scripts/check-docs.py
+      - name: Install existing browser test dependencies
+        working-directory: tests/e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Check desktop and mobile guide
+        run: |
+          python3 -m http.server 8765 --bind 127.0.0.1 --directory docs/book > /tmp/localsky-docs-http.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID"' EXIT
+          for attempt in 1 2 3 4 5; do
+            curl -fsS http://127.0.0.1:8765/index.html >/dev/null && break
+            sleep 1
+          done
+          node .github/scripts/check-docs-browser.cjs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: docs-review
+          path: docs-browser-proof/
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: localsky-guide
+          path: docs/book/
+          if-no-files-found: error

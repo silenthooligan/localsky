@@ -1,0 +1,69 @@
+# LocalSky
+
+> Self-hosted weather and irrigation. Guide for service 0.9.2, API 2.4.0.
+
+Use recorded history for past outcomes and water_plan for projections. Preserve nulls, units, source identity, observation age, and forecast coverage. LocalSky API tokens are not read-scoped.
+
+## Guides
+- [Welcome to LocalSky](https://localsky.io/docs/introduction.html): Welcome to LocalSky.
+- [Install LocalSky](https://localsky.io/docs/getting-started.html): Install LocalSky.
+- [Install on Home Assistant OS](https://localsky.io/docs/home-assistant-app.html): Install on Home Assistant OS.
+- [Connect Home Assistant](https://localsky.io/docs/hacs.html): Connect Home Assistant.
+- [Move watering from HA](https://localsky.io/docs/migrating-from-ha.html): Move watering from HA.
+- [Local and offline operation](https://localsky.io/docs/standalone.html): Local and offline operation.
+- [Your daily view](https://localsky.io/docs/daily-use.html): Your daily view.
+- [Today's status and tomorrow's plan](https://localsky.io/docs/advisor.html): Today's status and tomorrow's plan.
+- [The week ahead](https://localsky.io/docs/verdict-strip.html): The week ahead.
+- [Runs, skips, and history](https://localsky.io/docs/history.html): Runs, skips, and history.
+- [Notifications](https://localsky.io/docs/notifications.html): Notifications.
+- [Display units](https://localsky.io/docs/units.html): Display units.
+- [Appearance](https://localsky.io/docs/theme.html): Appearance.
+- [Device setup](https://localsky.io/docs/devices.html): Device setup.
+- [Weather and soil sensors](https://localsky.io/docs/sensors.html): Weather and soil sensors.
+- [Choose reading sources](https://localsky.io/docs/sources.html): Choose reading sources.
+- [Choose forecast sources](https://localsky.io/docs/forecast.html): Choose forecast sources.
+- [Provider capabilities](https://localsky.io/docs/provider-matrix.html): Provider capabilities.
+- [Irrigation controllers](https://localsky.io/docs/controllers.html): Irrigation controllers.
+- [DIY controllers](https://localsky.io/docs/diy-controllers.html): DIY controllers.
+- [Set up zones](https://localsky.io/docs/zones.html): Set up zones.
+- [Connect a soil probe](https://localsky.io/docs/first-soil-sensor.html): Connect a soil probe.
+- [Calibrate soil probes](https://localsky.io/docs/soil-sensors.html): Calibrate soil probes.
+- [Disable or remove a device](https://localsky.io/docs/removing-devices.html): Disable or remove a device.
+- [Radar and maps](https://localsky.io/docs/radar.html): Radar and maps.
+- [How watering decisions work](https://localsky.io/docs/irrigation-engine.html): How watering decisions work.
+- [Why watering is held](https://localsky.io/docs/skip-breakdown.html): Why watering is held.
+- [Rules and thresholds](https://localsky.io/docs/skip-rules.html): Rules and thresholds.
+- [Zone water needs and duration](https://localsky.io/docs/zone-math.html): Zone water needs and duration.
+- [Weekly scheduling](https://localsky.io/docs/water-budget.html): Weekly scheduling.
+- [Manual schedules](https://localsky.io/docs/schedules.html): Manual schedules.
+- [Watering restrictions](https://localsky.io/docs/restrictions.html): Watering restrictions.
+- [Review tuning suggestions](https://localsky.io/docs/tuning-report.html): Review tuning suggestions.
+- [Plant catalog](https://localsky.io/docs/grass-species.html): Plant catalog.
+- [Soil catalog](https://localsky.io/docs/soil-textures.html): Soil catalog.
+- [Optional AI advisor](https://localsky.io/docs/llm.html): Optional AI advisor.
+- [Accounts and API tokens](https://localsky.io/docs/authentication.html): Accounts and API tokens.
+- [Remote access and HTTPS](https://localsky.io/docs/reverse-proxy.html): Remote access and HTTPS.
+- [Update LocalSky](https://localsky.io/docs/upgrading.html): Update LocalSky.
+- [Backup, restore, and recovery](https://localsky.io/docs/backup-restore.html): Backup, restore, and recovery.
+- [Troubleshooting](https://localsky.io/docs/troubleshooting.html): Troubleshooting.
+- [Error codes](https://localsky.io/docs/source-errors.html): Error codes.
+- [Common questions](https://localsky.io/docs/faq.html): Common questions.
+- [Developer guide](https://localsky.io/docs/developers.html): Developer guide.
+- [Your first API request](https://localsky.io/docs/api-quickstart.html): Your first API request.
+- [Live updates with SSE](https://localsky.io/docs/api-streams.html): Live updates with SSE.
+- [Connect AI tools](https://localsky.io/docs/ai-integrations.html): Connect AI tools.
+- [API reference](https://localsky.io/docs/api.html): API reference.
+- [Weather and forecasts](https://localsky.io/docs/api-weather.html): Weather and forecasts.
+- [Irrigation and history](https://localsky.io/docs/api-irrigation.html): Irrigation and history.
+- [Devices and data ingest](https://localsky.io/docs/api-devices.html): Devices and data ingest.
+- [Configuration and administration](https://localsky.io/docs/api-admin.html): Configuration and administration.
+- [Errors and diagnostics](https://localsky.io/docs/api-errors.html): Errors and diagnostics.
+- [Versions and migrations](https://localsky.io/docs/api-versions.html): Versions and migrations.
+- [Controller examples](https://localsky.io/docs/controller-reference.html): Controller examples.
+- [Configuration fields](https://localsky.io/docs/configuration.html): Configuration fields.
+- [Advanced options](https://localsky.io/docs/advanced.html): Advanced options.
+- [Location and timezone](https://localsky.io/docs/location.html): Location and timezone.
+
+## Connector files
+- [OpenAPI read profile](https://localsky.io/docs/openapi.json)
+- [Full guide text](https://localsky.io/docs/llms-full.txt)
