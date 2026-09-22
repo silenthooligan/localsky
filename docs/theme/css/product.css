@@ -13,6 +13,7 @@
 .content table td, .content table th { padding: .65rem .85rem; line-height: 1.5; }
 .content table th { text-align: left; }
 .content a:focus-visible { outline: 3px solid var(--links); outline-offset: 4px; border-radius: 3px; }
+.content [tabindex="0"]:focus-visible { outline: 2px solid var(--links); outline-offset: 2px; }
 .content main a:not(.header):not(.ls-doc-primary):not(.ls-doc-secondary):not(.ls-doc-path) { text-decoration: underline; text-underline-offset: .18em; }
 .ls-docs-tag { line-height: 1.2; }
 .light .ls-docs-tag, .light .ls-wordmark em { color: #096ea3; }
