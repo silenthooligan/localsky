@@ -52,6 +52,9 @@
 .light { --ls-card-bg: #f5f8fc; --ls-card-border: #cbd5e1; }
 .light .ls-doc-hero { background-image: radial-gradient(ellipse at top right, rgba(10,110,180,.1), transparent 65%); }
 @media (max-width: 700px) {
+  #ls-home-link, .right-buttons a[rel="edit"], .right-buttons a[href="print.html"], .ls-docs-tag { display: none; }
+  .menu-title { font-size: 1.8rem; }
+  .right-buttons { margin: 0 6px; }
   .ls-doc-paths { grid-template-columns: 1fr; }
   .ls-doc-hero { padding: 1.5rem; border-radius: 14px; }
   .content main > h1 { font-size: 2rem; }
