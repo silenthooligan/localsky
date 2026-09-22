@@ -3,9 +3,9 @@ name: Documentation
 on:
   push:
     branches: [main, docs/product-guide]
-    paths: ['docs/**', '.github/scripts/*doc*', '.github/workflows/docs.yml', 'README.md']
+    paths: ['docs/**', '.github/scripts/*doc*', '.github/workflows/docs.yml', 'README.md', 'Cargo.toml', 'src/api/info.rs']
   pull_request:
-    paths: ['docs/**', '.github/scripts/*doc*', '.github/workflows/docs.yml', 'README.md']
+    paths: ['docs/**', '.github/scripts/*doc*', '.github/workflows/docs.yml', 'README.md', 'Cargo.toml', 'src/api/info.rs']
   workflow_dispatch:
 
 permissions:
