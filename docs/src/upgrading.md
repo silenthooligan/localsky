@@ -1,139 +1,65 @@
-# Upgrading LocalSky
+# Updates and rollback
 
-LocalSky ships as a single Docker image. Upgrading means pulling a newer image and recreating the container. Everything that matters lives in `/data` (your config file and the SQLite database), so the container itself is disposable: stop it, remove it, start a new one on the same volume, and you are back where you were, on the new version.
+Back up, update the server, then update the Home Assistant companion if you use it. Read the [release notes](https://github.com/silenthooligan/localsky/releases) for the version you are installing.
 
-## Back up first
+## Before updating
 
-Before any upgrade, download a backup bundle. It takes one click (Settings -> Advanced -> Download backup) or one command:
+Download a bundle from **Settings > Advanced > Backup and restore**. Keep it outside the LocalSky host. Copy zone photos and the Web Push private key separately if you need them; the bundle excludes both.
 
-```bash
-curl -fL -o localsky-backup.tar.gz http://localhost:8090/api/v1/backup
-```
+Record your current image tag and deployment settings. For predictable upgrades, pin a released image such as `ghcr.io/silenthooligan/localsky:v{{LOCALSKY_VERSION}}`.
 
-If you enabled [authentication](authentication.md), add `-H "Authorization: Bearer lsk_..."` with an API token. See [Backup, restore, and recovery](backup-restore.md) for everything the bundle contains and how to restore it. A pre-upgrade backup is also your downgrade path, so do not skip it.
+## Docker Compose
 
-## Choosing a tag
-
-The image is published at `ghcr.io/silenthooligan/localsky`:
-
-- **Pinned version** (`ghcr.io/silenthooligan/localsky:v0.7.0`): you decide exactly when to move and what release notes apply. Recommended while LocalSky is pre-1.0.
-- **`:latest`**: always points at the newest release. Convenient, but a routine `docker compose pull` can move you across versions without you reading the release notes first.
-
-Either way, read the release notes on GitHub before upgrading. Releases that change the database or config schema say so explicitly.
-
-**0.7.0 integration lockstep.** As of 0.7.0 the Home Assistant integration ships in version lockstep with the app. The 0.7.0 integration requires the app at 0.7.0 or newer (API 1.12.0 or newer); an older app build cannot pair the new integration until the app is upgraded. Upgrade the app first, then the integration.
-
-## The upgrade
-
-With plain `docker run` (matching the install command from [Quick start](getting-started.md)):
-
-```bash
-docker pull ghcr.io/silenthooligan/localsky:latest
-docker stop localsky && docker rm localsky
-docker run -d \
-  --name localsky \
-  --restart unless-stopped \
-  -p 8090:8090 \
-  -v /opt/localsky/data:/data \
-  ghcr.io/silenthooligan/localsky:latest
-```
-
-With Docker Compose:
+Change the image tag in your Compose file, preserving the existing volume, network, ports, and environment. Then:
 
 ```bash
 docker compose pull
 docker compose up -d
+docker compose logs --tail=100 localsky
 ```
 
-Removing the container does not touch `/data`. Your config, run history, sensor history, and login accounts all survive the recreate.
+For a container created with `docker run`, recreate it with your original options and the new image. Reuse the same persistent data mount. Do not replace a host-network installation with a bridge-network example if it receives local broadcasts.
 
-Auto-updaters (Watchtower, Diun notifications, Renovate on a pinned compose file) work fine with this image. Pair them with a scheduled backup if you let them act unattended.
+## Home Assistant OS
 
-## What happens on first boot after an upgrade
+Take an HA backup, update the **LocalSky app**, and inspect its log. Open LocalSky and verify the server version. Update the optional **HACS integration** afterward.
 
-1. **Database migrations run.** LocalSky keeps a chain of numbered SQLite migrations ({{LOCALSKY_DB_MIGRATIONS}} of them as of this release) and records each applied one in a `schema_migrations` table. On boot it applies only the ones your database has not seen yet. Each migration runs inside a single transaction, so a failure rolls back cleanly rather than leaving a half-migrated database. Skipping releases is fine: the chain applies in order, however many versions you jumped.
-2. **Config migrations run, once.** `/data/localsky.toml` carries a `schema_version` field (currently `2`). Each release's config migrations are an ordered list applied exactly once; the ledger beside the config, `/data/localsky.ledger.toml`, records which have run, and the migrated document is written back so the next boot finds nothing to do. Fields added by newer releases are filled with documented defaults when missing from an older file, and unknown leftover fields are ignored, so old configs keep loading. 0.9.0's migration moves the server-owned records (which forecast authorities were seeded, which Home Assistant helpers the 0.7.22 migration recorded) out of the document and into the ledger, where no settings save, raw edit, rollback or restore can drop them.
-3. **The app comes up** at the same address with the same data, zones, and history.
+The app hosts the server. The HACS integration connects HA to that server; updating one does not update the other.
 
-No manual migration steps. If a migration fails, the error appears in `docker logs localsky` with the migration version that failed.
+## Verify the update
 
-**Ownership is handled for you.** LocalSky runs as a non-root user (uid 10001 by default) and the container fixes the ownership of `/data` to that user at startup. Upgrading from an older version that ran as root (and left root-owned files in the volume) needs no manual `chown`; the only requirement is that `/data` stays writable (not mounted read-only). If you front LocalSky with a reverse proxy, set `trusted_proxies` so it sees the real client IP (see [Authentication](authentication.md)).
+Check **Settings > About** or `GET /api/v1/info`. Confirm:
 
-**`PUID` / `PGID` are now honored** (they were previously ignored). The container drops to `PUID:PGID`, defaulting to `10001:10001`. Two things to know when upgrading:
+- Configured sources are reporting with plausible observation times.
+- Zones remain bound to the correct controller stations.
+- Today's recorded activity and the next watering plan are available.
+- HA entities reconnect, if used.
 
-- If your volume is owned by 10001 (the default), leave `PUID`/`PGID` unset or set them to `10001` so nothing re-chowns.
-- If you carried a stale `PUID=1000` from an old `.env`, the container will now run as 1000 and re-chown `/data` to 1000 on first boot. That is harmless but one-time; set it to match your volume's owner if you want to avoid the re-chown.
+A liveness check alone does not prove that sources or controllers work.
 
-**NFS exports that refuse ownership changes** (Synology / QNAP with `root_squash` or "map all users") can't be chowned to an arbitrary uid. The container detects that `/data` still isn't writable as the target uid and falls back to running as the volume's *actual* owner so writes succeed, instead of erroring. It will **not** fall back to root: if the only writable owner is root, it logs an error and refuses, since running the app as root would defeat the non-root model. Pin a concrete uid:gid with `PUID`/`PGID` (matching what your NAS maps the share to) for full control. See [Troubleshooting -> Wizard cannot save](troubleshooting.md).
+## Config and database migrations
 
-## Downgrading and rollback
+LocalSky migrates supported older data at startup. Config schema version and migration records are maintained separately in `localsky.toml` and `localsky.ledger.toml`; keep the pair together. SQLite migrations apply in order.
 
-Rolling back the image is the same recreate dance with an older tag:
+A migration failure is a reason to preserve the files and investigate the logged version and error. Do not delete the migration ledger or edit schema numbers to bypass it.
 
-```bash
-docker stop localsky && docker rm localsky
-docker run -d \
-  --name localsky \
-  --restart unless-stopped \
-  -p 8090:8090 \
-  -v /opt/localsky/data:/data \
-  ghcr.io/silenthooligan/localsky:v0.7.0
-```
+## Roll back
 
-Two things to know:
+Use the previous image **with the backup made before the upgrade**. Database migrations are not reversed by changing an image tag, and newer configuration may not load in an older server.
 
-- **Database migrations are not reversed.** An older binary simply ignores migration entries it does not know about. That often works, but if the release you are leaving changed table shapes, the older code may misread them. The supported downgrade path is to restore the backup you took before upgrading (see [restore](backup-restore.md#restoring)).
-- **A config from the future is refused.** If a newer release ever bumps `schema_version` above what the running binary supports, the loader refuses it with `refusing to load a config newer than this binary` and LocalSky boots as if unconfigured rather than guessing. Restore the pre-upgrade `localsky.toml` from your backup (or re-upgrade). As of this release `schema_version` is still `1`, so this cannot bite you yet.
+Stop watering, stop the service, preserve the current data, and restore a complete compatible set. The [recovery guide](backup-restore.md) covers validation and pending-restore markers.
 
-There is also a config rollback path that is independent of the image tag. LocalSky snapshots `localsky.toml` on every save (newest 20 kept), so you can list and restore an earlier config without touching the container:
-
-```bash
-curl http://localhost:8090/api/v1/config/snapshots
-curl -X POST -H 'Content-Type: application/json' \
-    -d '{"ts": <snapshot ts>}' \
-    http://localhost:8090/api/v1/config/rollback
-```
-
-This rolls back the *config* only, not the database or the image. For a full downgrade, restore the pre-upgrade backup bundle. See the [configuration reference](configuration.md#migrations) for details.
+For a settings mistake, config snapshots may be enough. They restore configuration only; they do not roll back the image or database.
 
 ## Update notifications
 
-LocalSky never updates itself and phones nowhere by default. Two opt-in ways to hear about new releases:
-
-**Server-side check.** Add to `/data/localsky.toml` and restart the container:
+Automatic installation is not built into LocalSky. Server-side release checks are optional:
 
 ```toml
 [updates]
-check_enabled = true   # default: false
+check_enabled = true
 ```
 
-When enabled, LocalSky polls the project version manifest at `localsky.io/latest.json` about once a day (a plain GET; the running version travels in the User-Agent, nothing per-install) and serves the result at:
+This checks the public version manifest about daily. The request includes the running version in its User-Agent. The browser's update toggle is a separate, per-device preference.
 
-```bash
-curl http://localhost:8090/api/v1/updates
-```
-
-```json
-{
-  "current": "0.7.0",
-  "latest": "v0.7.1",
-  "update_available": true,
-  "release_url": "https://github.com/silenthooligan/localsky/releases/tag/v0.7.1",
-  "checked_at_epoch": 1765432100,
-  "check_enabled": true
-}
-```
-
-The first check happens about a minute after boot; until then `latest` is null. Wire `update_available` into whatever notifies you (Home Assistant REST sensor, Uptime Kuma keyword, a cron + curl).
-
-**Per-device check.** Settings -> Advanced -> "Check for new LocalSky releases" makes your browser (not the server) fetch `localsky.io/latest.json`, at most once per 24 hours, and shows the result inline. It is stored per device and discloses that device's IP to the `localsky.io` server, which the toggle's help text says outright.
-
-## Upgrading from v0.1
-
-v0.1 installs are adopted in place; point the v0.2 container at the same `/data`:
-
-- An existing `irrigation.db` that predates the migration runner is detected on first boot. The legacy `runs` table is rebuilt into the current schema with every historical row preserved (your watering history carries forward), and existing web push subscriptions are kept as-is.
-- `/data/localsky.toml`, if the wizard already wrote one, loads and migrates on the first boot (`schema_version = 1` becomes `2`, with the records it carried moved to `localsky.ledger.toml`).
-- New v0.2 surfaces ([authentication](authentication.md), the `/api/v1/*` API prefix, backup endpoints) start in their defaults: auth stays disabled until you create an owner account, and the old bare `/api/*` paths still work for existing clients.
-
-Take a copy of `/data` before the first v0.2 boot anyway. The runs-table rebuild is one-way, and a 30-second `tar czf localsky-v01.tar.gz -C /opt/localsky data` is cheap insurance.
+[Backup and restore](backup-restore.md) · [Troubleshooting](troubleshooting.md)

@@ -1,86 +1,40 @@
-# Soil sensors
+# Calibrate soil probes
 
-Wire a moisture probe to a zone and the engine gets a measured gate: a
-saturated zone skips on its own, and a measured-dry zone can override a
-soft forecast-rain skip.
+A soil probe adds evidence about a particular zone. It can support a saturation hold or show that the zone is dry enough to reconsider a soft forecast recommendation.
 
-**Supported paths in:**
+## Bind the reading
 
-- Ecowitt soil probes (WH51 and friends) via a LAN gateway poll: native,
-  no cloud, with moisture and battery for every probe. Soil temperature
-  and conductivity come only from the newer EC probes; a WH51 reports
-  neither.
-- Any Home Assistant soil sensor entity, through an HA bridge source.
-- MQTT topics and HTTP webhooks for DIY probes.
+For an Ecowitt channel or discovered HA sensor, select the probe under **Zone → Soil moisture sensor**.
 
-**Assignment** is one step or two, depending on how the reading gets in.
+For MQTT, HTTP, and other manually mapped channels, first set **Bind to zone** in the source mapping. Wait for a reading, then select that channel in the zone editor. A source mapping and the zone's selected probe serve different purposes.
 
-- An Ecowitt gateway channel or a Home Assistant entity is ready to
-  assign as soon as the source reports. Open Settings > Zones, pick the
-  zone, and choose the probe in its **Soil moisture sensor** dropdown.
-  One picker lists both kinds, so there is no separate Home Assistant
-  list. The probe's card under Settings > Sensors or Settings > Devices
-  binds the same zone, if you are already looking at it.
-- An MQTT subscription, an HTTP webhook, or any other source whose
-  readings you map by hand needs the zone bound on the source first. In
-  the source editor, set that subscription's or mapping's **Bind to
-  zone**. That control is on MQTT soil subscriptions, on HTTP webhook
-  and REST poller field mappings, and on YoLink and Tuya device
-  mappings. Prometheus and InfluxDB take the same binding as a
-  `zone_slug` on the query in the source's JSON, and Davis WLL and the
-  Home Assistant passthrough take a `soil_zone_map` on the source
-  config. The value is then recorded as that zone's own soil channel
-  instead of as a global reading, which is the whole point of the field:
-  an unbound MQTT soil subscription publishes as humidity and is merged
-  into the general humidity reading, and a webhook or polled-API mapping
-  has no soil option at all until a zone is bound. Save, then open the
-  zone and pick that channel as its **Soil moisture sensor**. Both
-  halves are required; binding the source alone does not gate the zone.
+Verify the channel on the Sensors page before relying on it. A gateway being online does not prove a particular probe is current.
 
-A zone-bound channel appears in the zone's dropdown only after the
-source has published at least once, because that list is built from the
-readings LocalSky has recorded. One probe per zone is structural: a zone
-holds a single soil sensor. One zone per probe holds only when you bind
-from the probe's card under Settings > Sensors or Settings > Devices,
-which releases the probe from whatever zone had it. The zone editor
-writes the zone you are editing and nothing else, so picking the same
-probe there leaves the earlier zone's binding in place. The Sensors hub
-shows which zones each source feeds, and the step-by-step walkthrough is
-in
-[Add your first soil sensor](first-soil-sensor.md#binding-a-probe-to-a-zone).
+[First-probe walkthrough](first-soil-sensor.md)
 
-**How the engine uses it:**
+## Set calibration and targets
 
-- Below the zone's target band: the zone is eligible. Run length is
-  unchanged; it comes from the weekly water balance.
-- Inside the band: healthy; scheduled runs still apply unless the
-  saturation threshold says otherwise.
-- At or above saturation: the zone skips on its own, even when the day's
-  verdict is Run, and the skip reason gives the measured percent and the
-  saturation threshold it crossed.
-- A probe that goes offline is flagged as an anomaly on the irrigation
-  and zones views, but only for a zone bound to a `source:` channel (an
-  Ecowitt gateway, MQTT, a webhook, an entry in the Home Assistant
-  passthrough's `soil_zone_map`) whose last reading above zero is more
-  than 24 hours old. A zone bound to a Home Assistant entity through the
-  HA bridge is never flagged offline, because there is no local history
-  to tell a flatline from a blip.
-- A probe that reads as a wild outlier versus its neighbors is flagged
-  the same way, once three or more zones are reporting a reading and the
-  zone sits further from the yard median than the outlier threshold, 35
-  percentage points by default. On a two-probe yard nothing is judged an
-  outlier.
+Use the supported dry/wet calibration values and the zone's target band. Place the probe where it represents the root zone, away from an isolated emitter or a consistently unwatered edge.
 
-The Sensors hub and each zone's detail show the probe's live reading,
-the target band, and a 7-day no-watering projection so you can sanity
-check that the moisture curve actually behaves like your yard.
+A relative probe percentage is not automatically volumetric water content. Without suitable calibration, the app can show the reading without claiming a precise future soil-percentage curve.
 
-A probe also unlocks the [tuning report](tuning-report.md)'s two
-calibration checks: the drying-drift check (does your soil dry at the
-rate the configured texture and root depth predict?) and the
-sprinkler-rate backout (what rate do your heads actually deliver, per
-the probe's rise across waterings?). Both need LocalSky's own recorded
-probe history, so they work for a zone bound to a `source:` channel (the
-Ecowitt gateway poll, MQTT, webhooks, the Home Assistant passthrough's
-`soil_zone_map`); a zone bound to a Home Assistant entity through the HA
-bridge has no local history and reports that state honestly.
+## How readings affect watering
+
+- A sufficiently wet zone can be held independently of neighboring zones.
+- Reliable dry evidence can demote supported soft forecast-rain recommendations.
+- A configured missing or untrusted probe holds its affected zone.
+- A zone with no probe binding can use the weather and soil model.
+
+A true zero reading is not the same as missing data. Freshness and fault checks matter alongside the number.
+
+## Temperature, conductivity, and battery
+
+Available fields depend on the hardware. WH51 moisture probes do not provide soil temperature or conductivity. Those values appear only when the device supports and reports them.
+
+Check batteries and placement when readings flatline or disagree with the zone's condition. Do not change a soil texture just to silence a probe fault.
+
+## Tuning
+
+Recorded probe trends can support drying-rate and sprinkler-rate suggestions when enough valid observations exist. Suggestions need evidence and remain reviewable; a single watering event is not enough to establish a new application rate.
+
+[Zone setup](zones.md) · [Tuning report](tuning-report.md) · [Sensor sources](sensors.md)

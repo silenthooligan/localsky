@@ -1,0 +1,68 @@
+/* Product guide: readable chapters, clear next steps, no remote font dependency. */
+:root {
+  --content-max-width: 900px;
+  --ls-card-bg: var(--quote-bg);
+  --ls-card-border: var(--table-border-color);
+}
+.content main { line-height: 1.7; }
+.content main > h1 { font-size: 2.5rem; letter-spacing: -.035em; margin-bottom: 1.4rem; }
+.content main > h2 { margin-top: 2.7rem; font-size: 2rem; }
+.content main > p, .content main > ul, .content main > ol { max-width: 76ch; }
+.content main img { border-radius: 12px; }
+.content table { display: block; width: max-content; max-width: 100%; overflow-x: auto; margin: 1.5rem 0; }
+.content table td, .content table th { padding: .65rem .85rem; line-height: 1.5; }
+.content table th { text-align: left; }
+.content a:focus-visible { outline: 3px solid var(--links); outline-offset: 4px; border-radius: 3px; }
+.content [tabindex="0"]:focus-visible { outline: 2px solid var(--links); outline-offset: 2px; }
+.content main a:not(.header):not(.ls-doc-primary):not(.ls-doc-secondary):not(.ls-doc-path) { text-decoration: underline; text-underline-offset: .18em; }
+.ls-docs-tag { line-height: 1.2; }
+.light .ls-docs-tag, .light .ls-wordmark em { color: #096ea3; }
+.ayu .hljs-comment { color: #9aa7bd; }
+.light .hljs-comment { color: #566273; }
+.chapter .part-title { font-size: .82em; letter-spacing: .08em; text-transform: uppercase; margin-top: 1.7em; }
+.chapter li.chapter-item { line-height: 1.5; margin-top: .5em; }
+.ls-doc-hero {
+  position: relative; overflow: hidden; padding: 2.6rem; border-radius: 20px;
+  border: 1px solid var(--ls-card-border); background: var(--ls-card-bg);
+  background-image: radial-gradient(ellipse at top right, rgba(94,200,255,.16), transparent 65%);
+  margin-bottom: 2.5rem;
+}
+.ls-eyebrow { font-size: .8em; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+.ls-doc-tagline { font-size: clamp(2rem, 4vw, 3.25rem); font-weight: 750; letter-spacing: -.045em; line-height: 1.15; margin: 1rem 0 1.2rem; }
+.ls-doc-hero > p:not(.ls-eyebrow):not(.ls-doc-tagline) { max-width: 57ch; }
+.content a.ls-doc-primary, .content a.ls-doc-secondary {
+  display: inline-flex; align-items: center; min-height: 44px; box-sizing: border-box;
+  padding: .65rem 1rem; border-radius: 8px; font-weight: 650; text-decoration: none;
+  margin: .7rem .6rem 0 0;
+}
+.content a.ls-doc-primary { background: #5ec8ff; color: #091322; }
+.content a.ls-doc-primary:hover { background: #97ddff; }
+.content a.ls-doc-secondary { border: 1px solid var(--ls-card-border); color: var(--fg); }
+.ls-doc-paths { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; margin: 1.5rem 0 2.5rem; }
+.content a.ls-doc-path {
+  display: flex; flex-direction: column; gap: .85rem; padding: 1.4rem;
+  border: 1px solid var(--ls-card-border); border-radius: 12px;
+  background: var(--ls-card-bg); text-decoration: none; color: var(--fg);
+}
+.content a.ls-doc-path:hover { border-color: var(--links); }
+.ls-doc-path strong { font-size: 1.15em; line-height: 1.25; }
+.ls-doc-path > span:not(.ls-path-link):not(.ls-path-number) { font-size: .94em; line-height: 1.55; }
+.ls-path-number { color: var(--links); font-size: .85em; font-weight: 700; }
+.ls-path-link { color: var(--links); font-size: .88em; font-weight: 650; margin-top: auto; padding-top: .4rem; }
+.light { --ls-card-bg: #f5f8fc; --ls-card-border: #cbd5e1; }
+.light .ls-doc-hero { background-image: radial-gradient(ellipse at top right, rgba(10,110,180,.1), transparent 65%); }
+@media (max-width: 700px) {
+  #ls-home-link, .right-buttons a[rel="edit"], .right-buttons a[href="print.html"], .ls-docs-tag { display: none; }
+  .menu-title { font-size: 1.8rem; }
+  .right-buttons { margin: 0 6px; }
+  .ls-doc-paths { grid-template-columns: 1fr; }
+  .ls-doc-hero { padding: 1.5rem; border-radius: 14px; }
+  .content main > h1 { font-size: 2rem; }
+  .content table { font-size: .9em; }
+  .ls-doc-path { gap: .5rem; }
+}
+@media print {
+  .ls-doc-hero, .content a.ls-doc-path { background: white; border-color: #aaa; break-inside: avoid; }
+  .ls-doc-paths { display: block; }
+  .content table { display: table; width: 100%; font-size: .8em; }
+}

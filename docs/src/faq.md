@@ -1,66 +1,65 @@
-# FAQ
+# Questions and terms
 
-### Does my data leave my network?
+## Do I need Home Assistant?
 
-Only when you ask it to. By default LocalSky makes no calls home, and the app itself runs no analytics. The outbound traffic that can exist:
+No. LocalSky has its own web app, weather inputs, watering engine, scheduler, and controller adapters. The HA integration is an optional companion.
 
-- Forecast sources you configure (Open-Meteo, NWS, OpenWeather, Pirate Weather, MET Norway): polled requests carrying your coordinates and any API key you supplied. NWS and MET Norway also require an identifying User-Agent by their terms of service; if you leave that field empty, LocalSky sends `localsky/<version> (instance-<first 8 characters of the install id>; +https://localsky.io)`, and you can set your own contact string instead.
-- Cloud-bridged hardware you add (Tempest WebSocket, Netatmo, Ambient Weather, Tuya, YoLink sources; Rachio, Hydrawise, B-hyve controllers): those vendors' clouds, with the credentials you entered.
-- The optional update check: a plain daily GET to the project's version manifest at `localsky.io/latest.json`, off by default, opt-in via `[updates].check_enabled`. The request carries the running version in its User-Agent (so the maintainer can see which versions are in use); no per-install identifier or config data rides along.
-- Web Push notifications, if you enable them: encrypted payloads to your browser's push service.
+## Can it run completely locally?
 
-Pure-LAN setups (local station, OpenSprinkler, no forecast sources) generate zero outbound traffic.
+The server, stored data, supported LAN devices, and controller commands can stay on your network. Online forecasts, cloud hardware, radar services, remote AI providers, and most push delivery need their respective external services.
 
-### Do I need Home Assistant?
+Loss of internet does not turn missing forecast evidence into permission to water. Automatic watering can hold when required data is unavailable. Plan your connections around the behavior you need.
 
-No. LocalSky is a complete standalone product: its own engine, scheduler, controller drivers, dashboard, and notifications. HA is one optional integration path among several. See [Standalone mode](standalone.md).
+## Which Home Assistant repository do I install?
 
-### What hardware works with it?
+[localsky-apps](https://github.com/silenthooligan/localsky-apps) installs the server on Home Assistant OS. [localsky-ha](https://github.com/silenthooligan/localsky-ha) adds LocalSky entities and actions to HA. You can use the companion with a server running elsewhere in Docker.
 
-Weather: Tempest, Ecowitt gateways and soil probes, Davis WeatherLink Live, Synoptic Data (pulls your nearest real station over a free token), NOAA MRMS radar rain (US radar-derived rainfall), plus cloud and generic MQTT/webhook sources; see [Weather + soil sensors](sensors.md). When you configure more than one source, per-field priority chains let each reading (rain, wind, temperature, and so on) fall through an ordered primary-then-backup list, so the merged picture keeps updating even if one source goes quiet. Irrigation: OpenSprinkler is the canonical direct-LAN controller, with HA service-call, MQTT, cloud (Rachio, Hydrawise, B-hyve, Rain Bird), and others; see [Controllers](controllers.md).
+## Can HA keep its WeatherFlow integration?
 
-### What does "beta" mean here?
+Yes. Feed its sensors into LocalSky through HA passthrough. Use the preceding-minute rain mapping for HA's local precipitation sensor; LocalSky accumulates that into a daily total. It cannot reconstruct minutes missed while disconnected.
 
-LocalSky is in its 0.x release line (check Settings > About, or `GET /api/v1/info`, for the exact version you are running). The engine math (FAO-56) is stable, but the API wire format is not semver-locked until 1.0, and features and config fields can still change between releases. Config files carry a `schema_version` and migrate forward automatically at boot, so upgrades are safe; still, keep backups, and rehearse new controller setups with the `dry_run` controller before letting the engine drive real valves.
+## Why did it skip today?
 
-### Where is my data?
+The **Daily log** records evaluated daily outcomes and their reasons. **Watering decisions** explains the current evidence and projections. If the server was off or no decision was recorded, absence of a run is not proof of a particular skip reason.
 
-Everything lives in the `/data` volume you mounted: `localsky.toml` (configuration), `irrigation.db` (SQLite: run history, sensor samples, accounts, tokens), and a small instance-identity file. Nothing is stored in any cloud.
+## Can I use it without irrigation?
 
-### Can I move LocalSky to a different host?
+Yes. Connect weather sources and use the dashboard, forecasts, history, and API.
 
-Yes. Either copy the `/data` directory to the new host, or use the built-in bundle: `GET /api/v1/backup` downloads a tar.gz of config plus a consistent database copy, and `POST /api/v1/backup/restore` loads it on the new instance. See [Backup and restore](backup-restore.md).
+## Where is my data?
 
-### Can I run two instances?
+The installation stores configuration, its migration ledger, history, and account data in the persistent data directory. Zone photos are stored separately within the data tree by default. Keep a [backup](backup-restore.md) outside the host.
 
-You can (separate data volumes, different ports), and a second instance in demo mode is a handy sandbox. What you should not do is point two live engines at the same controller: each one runs its own scheduler, so the same zones would be dispatched twice.
+## Does LocalSky send telemetry?
 
-### Why did it skip watering today?
+The installed app has no usage or crash-reporting service. Configured providers receive their normal requests: forecasts use your location, cloud hardware uses its credentials, and an enabled remote advisor receives the context needed for its response. Update checks are optional.
 
-There is always a recorded reason per zone: rain already received, rain expected, wind, temperature, soil moisture from a probe, restriction calendars, and so on. The UI shows the exact threshold that tripped. A zone that is not skipping but still plans zero minutes reads ON HOLD on its card, with the weekly water balance's own reason beside it. See [Skip thresholds explained](skip-breakdown.md) and [History and reporting](history.md).
+The public website and documentation have their own site analytics. They are separate from your installation.
 
-### Can I enter thresholds in metric?
+## Can I run a second instance?
 
-Display units are configurable in Settings > Units. You choose the units for temperature, rainfall, wind, pressure, distance, and zone area independently, and the choice sets a household default that any individual device can override with its own preference. Every reading and every plain-language reason renders in the units you picked. The one exception is input: the skip-threshold input fields (already-wet, max wind, min temperature, rain skip, and friends) currently accept imperial values only; metric input is on the roadmap. The docs list metric equivalents next to every default so you can translate while you tune.
+Use a separate data directory and port. For testing, isolate it from real controllers. Two independent schedulers pointed at the same valves can conflict; LocalSky is not an active-active controller cluster.
 
-### Does it need internet access?
+## What does beta mean?
 
-Not for the core loop. A LAN weather station plus a LAN controller (Tempest or Ecowitt plus OpenSprinkler, say) keeps measuring, deciding, and watering with the WAN unplugged. Forecast-driven features (forecast merge, rain-hold lookahead, the 7-day verdict strip) need egress to whichever forecast providers you configured.
+LocalSky is in its 0.x release series. Behavior and API contracts can change between releases. Read release notes, back up before updating, and verify a new controller configuration under supervision.
 
-### Is there telemetry?
+## Can an AI assistant use the API?
 
-No tracking lives in the app: no usage reporting, no crash reporting, no analytics SDK, nothing sent to the maintainer beyond the optional update check above, off by default. When you enable it, the daily request to `localsky.io` carries the running version in its User-Agent (no per-install identifier), and (as with any web request) the server can see your IP; the maintainer reads those access logs only as aggregate version counts. One separate case: NWS and MET Norway require an identifying User-Agent by their terms, so requests to those two agencies carry a short per-install tag (the first 8 characters of the install id) unless you set your own contact string in the source's settings. That identity goes to the weather agency you chose, never to the maintainer. Nothing else is collected, and nothing is stored in the app.
+Yes, if your connector can reach the instance. Start with the [AI integration guide](ai-integrations.md), OpenAPI read profile, and example clients. Keep watering and configuration commands outside a read connector. API tokens themselves are not read-scoped.
 
-## Glossary
+## Terms used in the app
 
-- **ET0**: reference evapotranspiration; how much water (mm/day) a standardized grass surface would lose to evaporation plus transpiration under today's weather.
-- **ETc**: crop evapotranspiration; ET0 adjusted to your actual lawn (ETc = ET0 x Kc), how much water the lawn loses each day.
-- **Kc**: crop coefficient; a per-species, season-aware multiplier that converts ET0 into ETc.
-- **MAD**: management allowed depletion; the fraction of TAW the engine lets the soil dry out before watering is triggered.
-- **TAW**: total available water; how much water (mm) the root zone can hold between field capacity (full) and wilting point (empty).
-- **Soil bucket**: a per-zone depletion model where rain and irrigation fill and ETc drains. The soil scheduling model waters a zone when the bucket's deficit crosses its trigger and refills it; the deficit shows on every zone's tiles whichever model governs.
-- **Weekly water balance**: the scheduling model an install or a zone follows by pinning `weekly`. A gross weekly target per zone, settled against observed rain (credited per day, each day capped at what the root zone can hold), water already applied, and a probability-weighted forecast credit; the remainder is split across the sessions still expected this week. The shipped default is the soil bucket; `scheduling_model` is where you pin either one.
-- **Verdict**: the engine's daily decision for the yard: run or skip, with the reason attached.
-- **HAL**: hardware abstraction layer; the Rust trait every controller adapter implements, so the engine speaks one language to OpenSprinkler, Rachio, HA service calls, and the rest.
-- **FDR**: frequency domain reflectometry; the measuring principle behind common soil-moisture probes, whose raw readings LocalSky calibrates into a percentage.
-- **zeroconf**: zero-configuration networking (mDNS); LocalSky announces itself as `_localsky._tcp` on the LAN so clients like the Home Assistant integration can find it without you typing an IP.
+| Term | Meaning |
+|---|---|
+| ET0 | Reference evapotranspiration: modeled water loss from a reference surface. |
+| ETc | Plant water demand, adjusted from ET0 using a crop coefficient. |
+| Kc | The crop coefficient for the plant and season. |
+| TAW | Water available to roots between field capacity and wilting point. |
+| MAD / RAW | Allowed depletion fraction, and the corresponding readily available water depth. |
+| Depletion | Estimated water missing from the root zone. |
+| Soil model | Carries the water balance forward and schedules from depletion and its trigger. |
+| Weekly model | Allocates a weekly target after accounting for rain and irrigation. |
+| Water plan | A projection across coming days, updated as evidence changes. |
+| Cycle and soak | Short watering passes separated by time for infiltration. |
+| SSE | Server-Sent Events: a persistent connection for snapshot updates. |

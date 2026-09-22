@@ -1,261 +1,95 @@
-# Home Assistant integration
+# Connect Home Assistant
 
-LocalSky ships a native Home Assistant integration, distributed through HACS from [github.com/silenthooligan/localsky-ha](https://github.com/silenthooligan/localsky-ha). It turns a running LocalSky instance into a first-class HA device: every weather reading, zone valve, soil probe, verdict, and threshold slider becomes an HA entity, and run/stop/pause become HA services you can call from automations.
+The LocalSky companion integration adds your server's weather, sensors, valves, and actions to Home Assistant. It uses REST for setup and live SSE streams for updates.
 
-LocalSky stays the brain. The integration is a thin client over LocalSky's REST and SSE API; if HA goes down, watering continues unaffected.
+You need a running LocalSky server. Install it [with Docker](getting-started.md) or as a [Home Assistant OS app](home-assistant-app.md).
 
-The integration installs through HACS and works on **every** Home Assistant installation type (OS, Supervised, Container, Core). Only the *server* half differs by installation type: the [Home Assistant app](home-assistant-app.md) exists solely for OS/Supervised installs, while [Docker](getting-started.md) covers every other setup.
+## Install and pair
 
-> **Two pieces, in this order.** LocalSky is a server you run yourself (one Docker container, see the [Quick start](getting-started.md), or one click as a [Home Assistant App](home-assistant-app.md) on HAOS); this integration is only the bridge that surfaces it inside Home Assistant. Installing the integration without a running LocalSky gives you nothing to pair with. Server first, integration second.
+1. In HACS, search for **LocalSky**, install it, and restart Home Assistant.
+2. Open **Settings → Devices & services**.
+3. Add the discovered LocalSky instance, or choose **Add integration → LocalSky** and enter its address and port.
+4. If authentication is required, create an API token under **LocalSky → Settings → Account** and enter it in the pairing flow.
 
-> **Pick one path into HA, never both.** LocalSky can also publish entities through MQTT discovery (`sensor.localsky_*` via your broker). Running MQTT discovery *and* the HACS integration at the same time creates two copies of every entity. New setups should use the HACS integration; if you previously used MQTT discovery, disable LocalSky's MQTT publishing and clear the retained `homeassistant/.../config` discovery topics before adding the integration (see [Troubleshooting](#troubleshooting) below).
+[![Open LocalSky in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=silenthooligan&repository=localsky-ha&category=integration)
 
-## What you get
+The companion requires HA 2024.11 or newer and LocalSky API 1.12.0 through 2.x. Use matching server and companion releases when updating.
 
-One HA device per LocalSky instance, populated from LocalSky's live entity manifest (`GET /api/v1/sensors/manifest`). Updates arrive over Server-Sent Events by default, so zone state changes show up in HA in under a second; a 30 second poll is the fallback. Adding a zone or sensor in LocalSky surfaces in HA automatically, no reconfiguration needed.
+Discovery uses mDNS. If it cannot cross a subnet or container network, pair manually with a reachable address. LocalSky verifies the server and instance identity before adopting a discovered address change.
 
-## Requirements
+## Entities
 
-- Home Assistant **2024.11.0** or newer (enforced by HACS).
-- LocalSky app **0.7.0** or newer. The integration and app ship in lockstep from 0.7.0. The integration probes `GET /api/v1/info` during setup and refuses to pair with older instances (you will see a "service too old" error in the config flow), and it requires API version **1.12.0** or newer.
-- Network reachability from HA to LocalSky's HTTP port (default **8090**).
-
-## Install
-
-### 1. Install from HACS
-
-LocalSky is in the HACS default store:
-
-1. In Home Assistant, open **HACS**.
-2. Search for **LocalSky** and install it.
-3. Restart Home Assistant.
-
-Or in one click (opens your own Home Assistant):
-
-[![Open your Home Assistant instance and show LocalSky in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=silenthooligan&repository=localsky-ha&category=integration)
-
-### 2. Pair with your LocalSky instance
-
-LocalSky announces itself on the LAN via mDNS as `_localsky._tcp.local.`, so in most cases HA discovers it on its own: a "LocalSky" card appears under **Settings > Devices & Services > Discovered**. Click **Configure** and confirm.
-
-If discovery does not fire (separate subnets, mDNS blocked), add it manually:
-
-1. **Settings > Devices & Services > Add Integration**, search for **LocalSky**.
-2. Enter the host (for example `10.0.0.100`) and port (default `8090`).
-
-**Pair against LocalSky directly on port 8090, not through a reverse proxy.** If you front LocalSky with Caddy/nginx plus an auth gate, the gate's redirects will break the integration's API calls and the SSE stream. The proxy is for your browser; HA should talk to the instance directly on the LAN.
-
-### Options
-
-After pairing, the integration card exposes three options (**Configure** on the integration entry):
-
-| Option | Default | Range |
-|---|---|---|
-| Use SSE push updates | on | on/off |
-| Poll interval (fallback when SSE is off) | 30 s | 5 to 600 s |
-| Default run duration for valve/switch open | 600 s | 60 to 7200 s |
-
-## Forecast window action
-
-Integration **0.9.1** adds `localsky.get_forecast_window`, requiring LocalSky
-API **2.3.0** (server 0.9.1). It reads the server's stored forecast and returns
-the response to your automation:
-
-```yaml
-- action: localsky.get_forecast_window
-  data:
-    track: merged
-    start: "{{ today_at('13:00').isoformat() }}"
-    end: "{{ today_at('14:00').isoformat() }}"
-  response_variable: afternoon
-- condition: template
-  value_template: >-
-    {{ afternoon.age_s is not none and afternoon.age_s < 21600
-       and afternoon.precip_sum_in is not none }}
-```
-
-Use a track name from **Settings > Devices > Extra forecast models** to read
-that model instead. Specify `entry_id` when more than one LocalSky instance is
-loaded. Datetimes without an offset use Home Assistant's timezone.
-
-The two timestamps above select the hours starting at 13:00 and 14:00.
-Results include the original `age_s`, per-variable coverage and nullable
-summaries. Inches and Fahrenheit are API units. An outage does not renew an
-old forecast's age; your automation decides how old is acceptable. This action
-does not create extra weather entities or change watering.
-
-## Authentication
-
-If your LocalSky instance has an owner account (see [authentication.md](authentication.md)), the `/api/v1/info` probe reports `auth_required` and the config flow adds a token step.
-
-**Create the API token in LocalSky first**, before adding the integration:
-
-1. In LocalSky, open **Settings > Account**.
-2. Under API tokens, create a token with a recognizable name (for example `home-assistant`).
-3. Copy the token; LocalSky shows it once.
-4. Paste it into the config flow's token step. The integration validates it against `GET /api/v1/auth/session` before finishing.
-
-If the token is later revoked, or you enable auth on a previously open instance, the integration receives a 401 and starts HA's reauthentication flow: a repair issue appears asking for a fresh token. Create a new one in **Settings > Account** and paste it in.
-
-## Entity reference
-
-Entity inventory comes from LocalSky's manifest, so the exact set depends on your sources and zones. The tables below list what a typical install produces. Entity ids are generated by HA from the device and entity names; check **Settings > Devices & Services > LocalSky** for the exact ids on your install.
-
-### Weather
-
-One `weather.*` entity built from the live station snapshot, with a 7 day daily forecast, plus individual sensors:
-
-Sensors report in the app's configured display units (**Settings > Units**: a household default that any device can override). Home Assistant then converts sensors with supported device classes (temperature, wind speed, precipitation, pressure, distance) to your HA unit system.
-
-Entities come from the server's sensor manifest, and since 0.7.14 the manifest only advertises what your install can actually feed: wet bulb, wind lull, rain last minute, illuminance, and station battery need a station source; precipitation probability needs a source that reports it; water level needs a controller that reports one; per-zone soil sensors need a soil probe on that zone. A sensor your install cannot feed is simply not created, and a created sensor whose value is momentarily missing reads `unavailable` instead of a fabricated number.
-
-| Sensor | Unit |
+| Group | What it provides |
 |---|---|
-| Air temperature, feels like, dew point, wet bulb | °F |
-| Humidity | % |
-| Pressure | inHg |
-| Wind speed, gust, lull | mph |
-| Wind direction | ° |
-| Solar irradiance | W/m² |
-| UV index, illuminance | index, lx |
-| Rain today, rain last minute, rain intensity | in, in/hr |
-| Lightning strikes (last hour), average distance | count, mi |
-| Station battery | % |
+| Weather | Current conditions and daily forecasts |
+| Station | Available temperature, humidity, wind, rain, pressure, solar, and lightning readings |
+| Irrigation | Decision and reason, pause control, and supported threshold controls |
+| Zones | Valve controls, planned watering, and available soil readings |
 
-### Irrigation
+The server's entity manifest determines what is available. A missing measurement remains unavailable rather than becoming zero. Multiple LocalSky instances can be paired separately.
 
-| Entity | Platform | Notes |
-|---|---|---|
-| Irrigation verdict | `sensor` | today's run/skip verdict from the engine |
-| Irrigation reason | `sensor` | the human-readable "why" behind the verdict |
-| ET₀ today | `sensor` | mm |
-| Days since rain | `sensor` | days since significant rain |
-| Rain tomorrow probability | `sensor` | % |
-| Heat multiplier | `sensor` | engine's heat adjustment factor |
-| Water level | `sensor` | controller water level %; only for controllers that report one (OpenSprinkler) |
-| Max wind, Min temp, Rain skip | `number` | skip-threshold sliders. The integration builds them at 0-50 mph, 20-60 °F and 0-1 in (about 0-80 km/h, -7 to 16 °C, 0-25 mm); LocalSky accepts 0-50 mph, 20-70 °F and 0-10 in, so every slider value is accepted. They do not convert to HA's unit system; set them in imperial | 
-| HA reachable | `binary_sensor` | connectivity diagnostic |
-| Irrigation suspended | `binary_sensor` | on while a pause is active |
-| Any zone running | `binary_sensor` | on while any zone runs |
+## Watering actions
 
-### Per zone
+The integration provides `localsky.run_zone`, `stop_zone`, `stop_all`, `pause`, `resume`, `set_override`, and `set_zone_override`.
 
-| Entity | Platform | Notes |
-|---|---|---|
-| `valve.<zone>` | `valve` | the canonical control: open = run (default duration from options), close = stop |
-| `<zone> running` | `binary_sensor` | device class `running` |
-| `<zone> soil moisture` | `sensor` | live probe %; soil sensors are created only for zones with a probe |
-| `<zone> soil temperature` | `sensor` | °F, native Ecowitt probes |
-| `<zone> soil EC` | `sensor` | µS/cm, native Ecowitt probes |
-| `<zone> soil battery` | `sensor` | probe battery % |
-| `<zone> planned run` | `sensor` | seconds planned for the next run |
-| `switch.<zone> run` | `switch` | legacy shim, disabled by default; prefer the valve |
+Choose actions and their fields in **Developer tools → Actions**. Runs and overrides use LocalSky's control path. A successful request does not by itself prove the valve is open or closed; check reported zone state.
 
-`<zone> run today` is no longer produced: nothing on any install sums a
-zone's minutes since midnight, so the sensor that recorded 0 is gone. Delete
-it in Home Assistant if it lingers as unavailable.
+An override does not remove all protections. Owner holds, unavailable required data, restrictions, and applicable safety checks can still prevent watering. [Rules and thresholds](skip-rules.md).
 
-## Service reference
+## Forecast-window action
 
-Five services, registered under the `localsky` domain. All accept an optional `entry_id` to target one instance when several LocalSky deployments are paired; without it the call fans out to every entry.
-
-| Service | Fields | Limits |
-|---|---|---|
-| `localsky.run_zone` | `zone` (slug, required), `seconds` (required) | seconds clamped to 1-7200; LocalSky's server enforces the same 2 hour cap |
-| `localsky.stop_zone` | `zone` (required) | |
-| `localsky.stop_all` | | stops every running zone |
-| `localsky.pause` | `hours` (default 24) | 1-720 hours; schedules and manual runs will not fire while paused |
-| `localsky.resume` | | clears an active pause |
-
-## Example automations
-
-Get notified when the engine decides to skip, with the reason:
+`localsky.get_forecast_window` requires server API **2.3.0 or newer**. It returns a selected forecast over an interval:
 
 ```yaml
-automation:
-  - alias: "LocalSky: notify on skip"
-    triggers:
-      - trigger: state
-        entity_id: sensor.localsky_irrigation_verdict
-        to: "skip"
-    actions:
-      - action: notify.mobile_app_your_phone
-        data:
-          title: "Watering skipped today"
-          message: "{{ states('sensor.localsky_irrigation_reason') }}"
+action: localsky.get_forecast_window
+data:
+  track: merged
+  start: "{{ now().replace(minute=0, second=0, microsecond=0).isoformat() }}"
+  end: "{{ (now().replace(minute=0, second=0, microsecond=0) + timedelta(hours=2)).isoformat() }}"
+response_variable: forecast
 ```
 
-Give the dog-run zone a five minute rinse when a helper toggles:
+Both timestamps are included. This example selects three hourly rows; each row's rainfall covers the following hour. Use `entry_id` when multiple instances are loaded.
 
-```yaml
-  - alias: "LocalSky: quick rinse"
-    triggers:
-      - trigger: state
-        entity_id: input_boolean.rinse_dog_run
-        to: "on"
-    actions:
-      - action: localsky.run_zone
-        data:
-          zone: dog_run
-          seconds: 300
-```
+`merged` is LocalSky's selected forecast. A configured extra model ID queries that model instead.
 
-Pause watering for three days when vacation mode turns on, resume on return:
+Before an automation uses the result:
 
-```yaml
-  - alias: "LocalSky: vacation pause"
-    triggers:
-      - trigger: state
-        entity_id: input_boolean.vacation_mode
-        to: "on"
-    actions:
-      - action: localsky.pause
-        data:
-          hours: 72
+- Check `complete` for hourly coverage.
+- Check `age_s` against a freshness limit appropriate to the automation.
+- Check the required summary values for null. Complete timestamps do not guarantee every measurement is present.
+- Use the returned units: inches and Fahrenheit, regardless of app display settings.
 
-  - alias: "LocalSky: vacation resume"
-    triggers:
-      - trigger: state
-        entity_id: input_boolean.vacation_mode
-        to: "off"
-    actions:
-      - action: localsky.resume
-```
+[Forecast-window API](api-weather.md#forecast-windows)
 
-## Outage behavior
+## Use Home Assistant weather sensors
 
-- **LocalSky restarts or the network blips:** the SSE streams reconnect automatically with backoff (2 s growing to 30 s). In polling mode, failed polls mark the entities unavailable until the next successful fetch.
-- **HA restarts or goes down:** nothing changes on the LocalSky side. Scheduling, skip rules, and controller dispatch all run inside LocalSky; HA is a window into the system, not part of the watering path. (The one exception is the `ha_service_call` controller, which routes valve commands *through* HA; see [migrating-from-ha.md](migrating-from-ha.md) for why and how to move off it.)
+This is the reverse direction: **HA → LocalSky**.
 
-## Troubleshooting
+In **LocalSky → Settings → Devices**, add **HA passthrough**, provide the HA connection, and map the desired entities. Select HA in the source chain for those readings. The HAOS app can use its Supervisor connection.
 
-**LocalSky is not discovered.** mDNS does not cross subnets or Docker bridge networks by default. LocalSky's compose file runs with `network_mode: host` so the announcement reaches the LAN; if your HA and LocalSky sit on different subnets, skip discovery and add the integration manually with host and port.
+For an existing HA WeatherFlow setup:
 
-**Setup fails with "service too old".** The integration requires the LocalSky app 0.7.0 or newer (API 1.12.0 or newer). Upgrade the LocalSky container and retry.
+1. Disable or remove LocalSky's **Tempest UDP** source to release its listener.
+2. Map the WeatherFlow sensor entities through HA passthrough.
+3. For preceding-minute precipitation, choose **Rain last minute (accumulate today)**. Use the daily-total mapping only for an actual daily-total sensor.
+4. Keep a forecast provider enabled.
+5. Check the source, values, and original observation times in LocalSky.
 
-**Repeating 401 / reauth loop.** The stored token is no longer valid. Open LocalSky **Settings > Account**, delete the old token, create a new one, and complete the reauth prompt in HA. If you are fronting LocalSky with a proxy auth gate, re-pair against port 8090 directly; the gate's redirects can masquerade as auth failures.
+The minute-rain accumulator restores recorded totals after restart but cannot reconstruct minutes missed while offline. Polling an old HA state does not make the measurement fresh.
 
-**Duplicate entities.** You have both MQTT discovery and the HACS integration active. Choose one:
+## Connection problems
 
-- Keep the HACS integration (recommended): disable MQTT publishing in LocalSky's config, then clear the retained discovery topics on your broker, for example `mosquitto_sub -h <broker> -t 'homeassistant/#' --remove-retained --retained-only -W 5`. **That command removes every retained discovery topic on the broker, from every integration, not only LocalSky's**, which is what you want here (you are retiring the whole MQTT path) and is not what you want for a single stale sensor. The stale `sensor.localsky_*` MQTT entities disappear after an HA restart. Do this while MQTT publishing is still on if you can: LocalSky clears the retained topics it no longer publishes (the per-zone `zone_<slug>_bucket_mm` config and state topics, since 0.7.22), and it cannot clear anything once publishing is off.
+| Symptom | Check |
+|---|---|
+| Not discovered | Pair manually; confirm HA can reach the server address. |
+| Reauthentication requested | Create a replacement LocalSky API token and complete HA's reauth flow. |
+| Login page instead of API JSON | Check the proxy route and authentication arrangement. |
+| Duplicate MQTT and companion entities | Choose the publishing path you want. Remove only the affected LocalSky entities or retained topics. |
+| Bulk HA read returns 500 | In 0.9.2, LocalSky attempts individual mapped-entity reads. The HA/proxy log is needed to diagnose the original server error. |
 
-  To clear one stale sensor rather than the whole tree, publish an empty retained message to just its two topics, per zone:
+Never clear the broker's entire discovery tree to remove LocalSky duplicates; it can remove other integrations' retained discovery messages.
 
-  ```
-  mosquitto_pub -h <broker> -r -n -t 'homeassistant/sensor/<node_id>/zone_<slug>_bucket_mm/config'
-  mosquitto_pub -h <broker> -r -n -t 'homeassistant/sensor/<node_id>/zone_<slug>_bucket_mm/state'
-  ```
+If HA is unavailable, native LocalSky devices can continue independently. Sources or controllers that rely on HA remain dependent on it, and missing required readings can hold watering.
 
-  `homeassistant` is the discovery prefix unless you changed it, and `<node_id>` is your deployment name, slugified.
-- Keep MQTT discovery: remove the LocalSky integration entry under **Settings > Devices & Services**.
-
-## Catalog status
-
-The integration is in the **HACS default store** (accepted July 2026), so it installs by searching for LocalSky in HACS directly. Installs that predate the listing and were added as a custom repository keep working and keep receiving updates; there is nothing to migrate. The integration's brand icon ships inside the integration itself and appears on Home Assistant 2026.3.0 or newer.
-
-## See also
-
-- [standalone.md](standalone.md): everything LocalSky does without HA
-- [migrating-from-ha.md](migrating-from-ha.md): moving the watering brain out of HA
-- [api.md](api.md): the REST and SSE surface the integration consumes
-- [authentication.md](authentication.md): owner accounts and API tokens
+[Companion repository](https://github.com/silenthooligan/localsky-ha) · [Troubleshooting](troubleshooting.md) · [API guide](developers.md)

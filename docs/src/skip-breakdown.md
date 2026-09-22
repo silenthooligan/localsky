@@ -1,38 +1,30 @@
-# Skip rules and thresholds
+# Why watering is held
 
-The engine checks every planned run against a short list of vetoes,
-in order. First trip wins; the reason is recorded and shown.
+Open **Watering decisions** and choose the zone. Start with its short reason, then expand the evidence if you need the threshold or source behind it.
 
-| Rule | Default | What it protects |
-|---|---|---|
-| Rain in the recent window | 0.20 in (5 mm) | Don't water what the sky watered. |
-| Observed rain recently | ~0.25 in over today plus the past day | Measured rain skips on its own, independent of any soil reading. |
-| Rain expected in the next hours | forecast x probability | Don't water ahead of a storm. |
-| Wind | 10 mph (16 km/h) | Spray pattern integrity (drift loss). |
-| Freeze / low temperature | 38 F (3.3 C) | Ice on hardscape, plant shock. |
-| Soil moisture (per zone, with a probe) | zone target band | The probe outranks the model. |
-| Allowed days / restrictions | local rules | Water-authority schedules, municipal restrictions, HOA rules. |
-| Vacation pause / dry-run | manual | You said so. |
+## Common reasons
 
-Thresholds are tunable in Settings under Logic (and live-tunable from
-the Irrigation tab's threshold sliders). The History tab's "Why it
-skipped" panel aggregates which rules actually fired over the window,
-so you can see whether a threshold is doing real work or just noise.
-The [tuning report](tuning-report.md) goes one step further for the
-rain rules: its forecast-skip scorecard tells you how often the rain a
-skip was betting on actually arrived.
+| Reason | What to inspect |
+|---|---|
+| Enough water available | Recent observed rain, applied irrigation, and the zone's soil balance |
+| Rain expected | Forecast amount, probability, coverage, and whether the zone can wait |
+| Wind or cold | Selected current measurement and the relevant forecast window |
+| Soil wet | Bound probe, calibration, timestamp, and saturation threshold |
+| Required data unavailable | Source health and the affected zone's missing evidence |
+| Paused or restricted | Owner controls, allowed days, time windows, and duration caps |
+| Restart required | Saved startup-dependent changes and the restart notice |
+| Manual schedule applies | The zone's enabled Override schedule |
 
-Not every skip is final. A soft forecast-rain veto can be demoted back
-to a run when the zone is measured dry: the soil floor moat lets a
-trustworthy dry reading override rain the sky only promised but has not
-delivered. Measured rain (the observed-rain backstop above) is not soft
-and is never demoted this way.
+A reason shown now describes the current evaluation. Use the Daily log to find why a past automatic morning was held.
 
-A bad or offline soil probe cannot block or force a run on its own.
-When a probe looks untrustworthy, its value is inferred from its
-trustworthy neighbors (quarantine), so one flaky sensor never vetoes a
-zone or falsely triggers one.
+## Overrides have limits
 
-Heat advisory is the one rule that extends instead of vetoes: when the
-forecast high crosses its threshold, planned runs stretch by the
-configured multiplier.
+Force bypasses specified recommendations, not every protection. It cannot make missing required evidence valid or clear a restart hold.
+
+A reliable dry probe can affect a soft forecast-rain recommendation. An absent or untrusted configured probe does not borrow a neighbor's reading as permission to water.
+
+## If the result seems wrong
+
+Check the selected source and original observation time first. Then check zone bindings, soil, application rate, and scheduling model. Change a threshold only when its meaning and the evidence justify it.
+
+[Rules and thresholds](skip-rules.md) · [History](history.md) · [Troubleshooting](troubleshooting.md)

@@ -1,34 +1,26 @@
-# AI advisor (optional)
+# Optional AI advisor
 
-A fully optional natural-language layer over the engine's state. Point
-LocalSky at any OpenAI-compatible endpoint, a local Ollama or
-llama.cpp instance on your network, or nothing at all.
+The advisor turns LocalSky's current decision into a short explanation and can report possible inconsistencies for review. Irrigation scheduling and valve commands remain controlled by the deterministic engine.
 
-What it does when enabled:
+Configure it under **Settings → Logic → LLM advisor**, or skip it during setup.
 
-- Writes the **Advisor** note on the irrigation dashboard: a one-or-two
-  sentence plain-English read of today's verdict (what will run or
-  skip, and the concrete conditions behind it), shown under the hero
-  verdict and refreshed as conditions change (the explanation is cached
-  for about five minutes). Also available at
-  `GET /api/v1/irrigation/explanation`.
-- Cross-checks the snapshot for anomalies: inconsistencies between the
-  live station, the forecast, and the verdict (for example a rain gauge
-  reading zero while the radar says it is pouring). Served as a
-  structured list at `GET /api/v1/irrigation/anomalies`, refreshed
-  hourly.
+## Connect a provider
 
-The advisor is a read-only narration layer; there is no chat
-interface. If the provider is unreachable, the dashboard simply omits
-the advisor note and the deterministic explanation stands on its own.
+Choose a supported local Ollama or llama.cpp endpoint, or an OpenAI-compatible endpoint. Enter the reachable address, model, and any required credential, then test the connection.
 
-What it never does:
+A local endpoint keeps those requests on your network. A remote endpoint receives the context sent for the explanation. Choose the provider accordingly.
 
-- Make watering decisions. The deterministic engine decides; the
-  advisor only narrates and explains it.
-- Send your data anywhere you didn't point it. Local endpoints stay
-  local; the provider is your choice and "None" is a first-class
-  setting.
+## What you can read
 
-Configure under Settings > Logic > LLM advisor, or during setup (the
-step is skippable and defaults to off).
+- **Explanation:** a short account of the current verdict, available at `GET /api/v1/irrigation/explanation`.
+- **Anomalies:** advisory observations available at `GET /api/v1/irrigation/anomalies`.
+
+Explanations are cached for about five minutes; anomaly checks refresh less often. They are not a record of the exact evidence at a past dispatch.
+
+If the provider is unavailable, use the engine's decision reasons and technical details. The advisor is optional, and there is no built-in conversational control interface.
+
+## Connect your own AI tool
+
+For an external assistant or agent, use the documented API, OpenAPI read profile, and client examples. Treat current state, future projections, and historical records as separate evidence.
+
+[Connect AI tools](ai-integrations.md) · [Developer guide](developers.md)

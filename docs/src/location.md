@@ -1,16 +1,11 @@
-# Location
+# Location and timezone
 
-Latitude, longitude, and elevation anchor everything: sunrise and
-sunset for scheduling, solar geometry for evapotranspiration, the
-timezone (inferred offline from coordinates), forecast grid points,
-and radar centering.
+Set latitude, longitude, and elevation during setup. LocalSky uses them for sunrise, solar calculations, forecast coverage, and map placement. The timezone is inferred from coordinates.
 
-Set it once in the wizard, by address search or by coordinates.
-Elevation is auto-resolved when omitted. Changing location later
-(Settings > Hardware > Location) re-infers the timezone and re-anchors
-the forecast sources on their next poll.
+Use address search or enter coordinates directly. Check the result, especially near a timezone boundary. Enter a known elevation when the automatic lookup is unavailable or inaccurate.
 
-LocalSky is hemisphere-aware end to end: the FAO-56 solar math is
-signed-latitude correct, species curves flip seasons south of the
-equator, and polar-edge cases (no sunrise) fall back to fixed
-scheduling gracefully.
+After moving an installation, update its location in Settings and confirm the timezone, forecast coverage, and next scheduled run. Daily history and permitted watering days depend on local time.
+
+Sunrise scheduling requires a valid sunrise. At locations or dates without one, inspect the reported scheduling state and configure an appropriate supported schedule instead of assuming the usual morning window exists.
+
+[Manual schedules](schedules.md) · [Watering restrictions](restrictions.md)

@@ -1,6 +1,6 @@
 # Backup, restore, and recovery
 
-Everything LocalSky knows lives in the `/data` directory you mounted at install time. Back that up and you can rebuild a working instance on any machine in minutes.
+Keep a recoverable copy of configuration and history outside the LocalSky host. Use the built-in bundle for routine backups, and a stopped-service copy when you need the complete data directory and instance identity.
 
 ## What is in /data
 
@@ -28,20 +28,20 @@ LocalSky can produce a consistent backup bundle while running: a `.tar.gz` conta
 **From the command line:**
 
 ```bash
-curl -fL -OJ http://localhost:8090/api/v1/backup
+curl -f -OJ http://localhost:8090/api/v1/backup
 # saves localsky-backup-<version>-<timestamp>.tar.gz
 ```
 
-If [authentication](authentication.md) is enabled (`[auth] mode = "required"`), pass an API token:
+Backup endpoints are privileged. For a script, send an [API token](authentication.md):
 
 ```bash
-curl -fL -OJ -H "Authorization: Bearer lsk_yourtoken" \
+curl -f -OJ -H "Authorization: Bearer lsk_yourtoken" \
   http://localhost:8090/api/v1/backup
 ```
 
-That curl line drops straight into cron for nightly backups. Keep a few generations and store them off the machine that runs LocalSky.
+A scheduler can call this endpoint with its token stored as a secret. Retain multiple generations outside the LocalSky host.
 
-> **The bundle contains real secrets.** So that it restores onto a fresh machine without you re-typing everything, `localsky.toml` is included **full fidelity**: your Home Assistant token, MQTT and SMTP passwords, OpenSprinkler password hash, LLM API key, and any webhook URLs are all in the file. The download endpoint is privileged (only an authenticated session, an API token, or a trusted-network/loopback caller can fetch it, even when auth is set to disabled), but the resulting `.tar.gz` is a credential once it leaves the box. Store it somewhere secure and encrypted, and treat it like a password. (The on-screen config views, by contrast, redact secrets.)
+> **Backups contain credentials.** Configuration is included with its real secrets so it can be restored. Store bundles securely and do not attach them to public issue reports.
 
 Deliberately **not** in the bundle:
 
@@ -49,46 +49,21 @@ Deliberately **not** in the bundle:
 - `instance-id`. Restoring a bundle onto new hardware mints a new identity on purpose.
 - Zone photos (`/data/site/photos/`). Copy that directory yourself if the photos matter to you.
 
-## Offline alternative
+## Full data-directory copy
 
-No API needed; plain files work too.
+Stop LocalSky before copying its complete data directory. Include the database and its own journal sidecars, configuration and ledger, instance identity, and photos. Copy any Web Push key stored outside that directory separately.
 
-**While running** (WAL mode makes a SQLite-aware copy safe):
-
-```bash
-# Bind mount, as in the install docs:
-sqlite3 /opt/localsky/data/irrigation.db \
-  ".backup '/backup/localsky/irrigation-$(date +%F).db'"
-cp /opt/localsky/data/localsky.toml /backup/localsky/localsky-$(date +%F).toml
-cp /opt/localsky/data/localsky.ledger.toml /backup/localsky/localsky-$(date +%F).ledger.toml
-
-# Named volume instead? The files live under Docker's volume root:
-sqlite3 /var/lib/docker/volumes/localsky-data/_data/irrigation.db \
-  ".backup '/backup/localsky/irrigation-$(date +%F).db'"
-```
-
-**Cold copy** (simplest, brief downtime):
-
-```bash
-docker stop localsky
-tar czf localsky-backup-$(date +%F).tar.gz -C /opt/localsky data
-docker start localsky
-```
-
-A cold `tar` of the whole directory captures everything, including the wizard draft, instance id, and photos.
+A raw copy of a running SQLite database can miss committed WAL data. Use the built-in bundle for online backups instead. Keep the original directory until a restore has been tested.
 
 ## Scheduled backups (automatic)
 
-The best backup is the one you do not have to remember. LocalSky can write a bundle to a local directory on an interval and keep the newest few, off by default and enabled with one environment variable:
+LocalSky can write backup bundles on an interval. Add these settings to your existing deployment:
 
-```bash
-docker run -d \
-  --name localsky \
-  --restart unless-stopped \
-  -p 8090:8090 \
-  -v /opt/localsky/data:/data \
-  -e LOCALSKY_AUTO_BACKUP_HOURS=24 \    # interval in hours; unset or 0 disables
-  ghcr.io/silenthooligan/localsky:latest
+```yaml
+environment:
+  LOCALSKY_AUTO_BACKUP_HOURS: "24"
+  LOCALSKY_BACKUP_KEEP: "7"
+  LOCALSKY_BACKUP_DIR: /data/backups
 ```
 
 Bundles are written as `localsky-backup-<epoch>.tar.gz` in `LOCALSKY_BACKUP_DIR` (default `/data/backups`, so they live inside your mounted volume), in the exact same format as the API bundle above, so they restore through the same flow. Two more optional knobs:
@@ -96,7 +71,7 @@ Bundles are written as `localsky-backup-<epoch>.tar.gz` in `LOCALSKY_BACKUP_DIR`
 - `LOCALSKY_BACKUP_DIR`: where bundles are written (default `/data/backups`).
 - `LOCALSKY_BACKUP_KEEP`: how many newest bundles to retain; older ones are pruned (default `7`).
 
-These bundles contain **real secrets** (like every backup), and by default land inside `/data`, so keep the volume protected. For off-box durability, point `LOCALSKY_BACKUP_DIR` at a mounted path that is itself backed up, or copy the directory out on your own schedule. A scheduled backup you have never restored is still only hope: run through [Test your restore](#test-your-restore) once.
+These bundles contain **real secrets** (like every backup), and by default land inside `/data`, so keep the volume protected. For off-box durability, point `LOCALSKY_BACKUP_DIR` at a mounted path that is itself backed up, or copy the directory out on your own schedule. Verify a scheduled bundle with [Test your restore](#test-your-restore) once.
 
 ## Restoring
 
@@ -108,7 +83,7 @@ These bundles contain **real secrets** (like every backup), and by default land 
 
 ```bash
 curl -f -X POST \
-  -F bundle=@localsky-backup-0.7.1-20260703-020000.tar.gz \
+  -F bundle=@localsky-backup.tar.gz \
   http://localhost:8090/api/v1/backup/restore
 docker restart localsky
 ```
@@ -128,16 +103,9 @@ You can also restore pieces individually: `-F config=@localsky.toml` applies a c
 
 ### From plain file copies
 
-```bash
-docker stop localsky
-cp /backup/localsky/irrigation-2026-06-01.db /opt/localsky/data/irrigation.db
-rm -f /opt/localsky/data/irrigation.db-wal /opt/localsky/data/irrigation.db-shm /opt/localsky/data/irrigation.db-journal
-cp /backup/localsky/localsky-2026-06-01.toml /opt/localsky/data/localsky.toml
-cp /backup/localsky/localsky-2026-06-01.ledger.toml /opt/localsky/data/localsky.ledger.toml
-docker start localsky
-```
+Stop LocalSky and preserve the current directory first. Restore the selected config, its matching ledger, and database as one recovery set. A self-contained SQLite backup must not be combined with unrelated WAL, SHM, or rollback-journal files. A cold database copy may need its own journals.
 
-This example assumes no interrupted restore or pending stages; otherwise follow [manual recovery](#a-restore-was-interrupted) first. Keep the config and its ledger together. Remove stale `-wal`, `-shm` and `-journal` sidecars only when replacing the database with a self-contained SQLite backup; preserve the original files elsewhere first. The restore endpoint checks whether an older database can migrate to the current release before accepting it. Plain file copying bypasses that upload validation.
+Copying files bypasses upload validation. Validate the selected set in an isolated instance before reconnecting it to controllers. If pending stages or restore markers exist, follow [interrupted restore recovery](#a-restore-was-interrupted) first.
 
 ## Test your restore
 
@@ -192,51 +160,17 @@ If the log reports an incomplete restore, repeated restarts will not finish or u
 4. Only after the selected live set is complete and verified, archive the obsolete marker and pending stages outside their watched paths. Do not fabricate a `ready` marker or edit its hashes to make a partial set pass. Unmarked `.restore` files left by an older release need this same deliberate recovery.
 5. Start LocalSky and check the startup log, health, configuration, zones and history. A fresh process clears the runtime restart hold; successful loading and the expected bindings still need verification before resuming watering.
 
-### "Nothing loads at all"
+### Configuration or database will not load
 
-Edit the file from the host (bind mount: `/opt/localsky/data/localsky.toml`) or via the container:
+Preserve the full directory and startup error. If only configuration is damaged, recover a validated config snapshot with its ledger. For database corruption, restore a known-good compatible backup; keep the damaged database and journals for diagnosis.
 
-```bash
-docker exec localsky cat /data/localsky.toml > /tmp/broken.toml
-# fix /tmp/broken.toml in your editor
-docker cp /tmp/broken.toml localsky:/data/localsky.toml
-docker restart localsky
-```
+Creating a fresh database discards history and account data. It is a deliberate reset, not a routine repair. Do not remove journal files or configuration to make an unexplained startup error disappear.
 
-Worst case, move the file aside and rerun the first-run wizard; the database (and all history) is untouched by config problems.
+### Move to another host
 
-### "The database is corrupted"
+Use a stopped-service copy of the full data directory to retain instance identity and photos. A built-in bundle deliberately excludes them; a new host restored from that bundle needs HA pairing reviewed and photos copied separately.
 
-Crashes mid-write are handled automatically by WAL recovery. For real filesystem-level corruption:
-
-```bash
-docker stop localsky
-mv /opt/localsky/data/irrigation.db /opt/localsky/data/irrigation.db.bad
-rm -f /opt/localsky/data/irrigation.db-wal /opt/localsky/data/irrigation.db-shm
-docker start localsky
-```
-
-Boot creates a fresh database via the migration chain. Your config, zones, sources, and controllers are all preserved (they live in `localsky.toml`); run history starts over unless you restore a database backup instead.
-
-### "I want to move to a new machine"
-
-```bash
-# Old host
-docker stop localsky
-tar czf localsky-move.tar.gz -C /opt/localsky data
-
-# New host
-mkdir -p /opt/localsky
-tar xzf localsky-move.tar.gz -C /opt/localsky
-docker run -d \
-  --name localsky \
-  --restart unless-stopped \
-  -p 8090:8090 \
-  -v /opt/localsky/data:/data \
-  ghcr.io/silenthooligan/localsky:latest
-```
-
-A full directory copy carries everything, identity included, so Home Assistant pairings and push subscriptions follow you. If you used the API bundle instead, the new host gets a fresh identity and excludes the VAPID key by design: re-pair the HACS integration and re-enable push notifications on your devices afterward.
+Copy the Web Push signing key separately and preserve its configured path if you want existing subscriptions to remain usable. Start the new instance in isolation, verify its configuration and history, then retire the old scheduler before connecting the replacement to controllers.
 
 ## Related pages
 

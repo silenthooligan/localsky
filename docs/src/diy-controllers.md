@@ -1,9 +1,6 @@
-# DIY & ESP32 controllers
+# DIY controllers
 
-You do not need a boxed controller. If you have an ESP32 (or any board that can
-switch a relay and talk to your network), LocalSky can drive it as a
-first-class controller, same engine, same verdict, same dashboard. There are
-two supported paths; pick the one that fits how your board already works.
+Connect a relay controller through HTTP or MQTT. The board must implement reliable valve control and its own maximum-runtime shutoff. LocalSky supplies planning and commands; firmware remains responsible for responding safely when the network or server disappears.
 
 | Path | Controller kind | Board needs | You get back |
 |---|---|---|---|
@@ -72,7 +69,7 @@ and **Scan zones** imports `GET /zones`, just like OpenSprinkler.
 
 - `seconds` is a positive integer. LocalSky caps a single run at 7200s (2h)
   before sending, but your board should enforce its own max-runtime watchdog
-  too, so a lost network or server can never leave a valve open. The reference
+  too, to stop a timed run even if the network or server is lost. The reference
   sketch in `examples/http/` does this.
 - `run`, `stop`, and `stop_all` are `POST`s. LocalSky sends a JSON body
   (`{"seconds":N}` for run, `{}` for stop / stop_all); accept and ignore an

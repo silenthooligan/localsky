@@ -17,7 +17,7 @@ LocalSky is pre-1.0. The current minor release receives security patches; older 
 
 Please report security issues privately via GitHub Security Advisories:
 
-1. Open the [Security tab](../../security) on the LocalSky repository.
+1. Open the [private vulnerability report](https://github.com/silenthooligan/localsky/security/advisories/new) on the LocalSky repository.
 2. Click **Report a vulnerability**.
 3. Provide a short description of the issue and steps to reproduce.
 
@@ -47,7 +47,7 @@ Operators running LocalSky in production:
 
 - Run behind a reverse proxy with TLS termination (Caddy, nginx, Traefik)
 - Use a non-root container user
-- Mount `/data` and `/keys` read-write but everything else read-only
+- Keep `/data` writable; mount the signing-key directory read-only
 - Rotate the VAPID keypair on operator turnover
 - Use a per-deployment HA long-lived token (revoke promptly when retired)
 - Avoid exposing the LocalSky port directly to the public internet; if remote access is needed, use Tailscale or WireGuard
