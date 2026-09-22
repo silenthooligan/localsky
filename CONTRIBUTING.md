@@ -58,6 +58,8 @@ python3 -m unittest discover -s .github/scripts -p 'test_doc_*.py' -v
 
 The Documentation workflow builds the guide and checks links, accessibility, mobile layout, and API examples.
 
+Keep displayed values intact: never split an identifier, separate a number from its unit, or truncate a value to fit a column. Let descriptions wrap and rows grow. In guide tables, use inline code for identifiers and `<span class="ls-value">12 mm</span>` for a number with its unit. If intact values exceed the available width, the table should scroll within the page and remain usable with a keyboard. Check narrow screens as well as desktop.
+
 ## Device and science changes
 
 A weather adapter must report capabilities, timestamps, units, and unavailable readings accurately. A successful poll must not make an old observation appear fresh.

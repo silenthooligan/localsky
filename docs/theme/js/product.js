@@ -1,7 +1,7 @@
 // Make overflowing examples and tables reachable with a keyboard.
 (() => {
   const update = () => {
-    document.querySelectorAll('main pre code, main table').forEach(element => {
+    document.querySelectorAll('main pre code, main .table-wrapper').forEach(element => {
       if (element.scrollWidth > element.clientWidth + 1) element.setAttribute('tabindex', '0');
       else element.removeAttribute('tabindex');
     });

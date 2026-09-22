@@ -1,6 +1,6 @@
 // The v1 deprecation record, enforced.
 //
-// Every field api.md lists as deprecated carries a DEPRECATED note on
+// Every field api-versions.md lists as deprecated carries a DEPRECATED note on
 // its struct field, and the number of places in src/ that read each one
 // is pinned: a new reader of a deprecated field fails this test, which
 // is the plan's rule for this release ("no new consumer of a deprecated
@@ -90,12 +90,12 @@ fn every_deprecated_field_is_marked_in_the_source() {
 
 #[test]
 fn every_deprecated_field_is_in_the_api_docs_table() {
-    let api = std::fs::read_to_string(root().join("docs/src/api.md")).unwrap();
+    let api = std::fs::read_to_string(root().join("docs/src/api-versions.md")).unwrap();
     let table = api
         .split("### Deprecated on v1")
         .nth(1)
         .expect("the table exists");
-    let table = table.split("### Migration notes").next().unwrap();
+    let table = table.split("## Migration notes").next().unwrap();
     for (field, _) in DEPRECATED {
         assert!(
             table.contains(&format!("`{field}`")) || table.contains(&format!("[].{field}`")),
