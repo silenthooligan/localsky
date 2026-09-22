@@ -12,7 +12,7 @@ git-repository-url = "https://github.com/silenthooligan/localsky"
 edit-url-template = "https://github.com/silenthooligan/localsky/edit/main/docs/src/{path}"
 site-url = "/docs/"
 additional-css = ["theme/css/custom.css", "theme/css/product.css"]
-additional-js = ["theme/js/umami.js", "theme/js/backlink.js", "theme/js/branding.js"]
+additional-js = ["theme/js/umami.js", "theme/js/backlink.js", "theme/js/branding.js", "theme/js/legacy-links.js"]
 no-section-label = true
 mathjax-support = false
 

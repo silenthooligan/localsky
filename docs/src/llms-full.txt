@@ -1603,6 +1603,12 @@ A zone's run cap, watering restrictions, supply policy, and the available window
 
 [Duration math](zone-math.md) · [Tuning suggestions](tuning-report.md)
 
+## Cycle and soak
+
+When application rate exceeds the modeled infiltration rate, LocalSky can divide watering into cycles with soak gaps. Soil texture, slope, sprinkler rate, and configured soak settings affect the split. The schedule includes those gaps, so valve-open minutes and total elapsed time differ.
+
+A longer allowed session does not remove cycle and soak. Check actual runoff and coverage when tuning these inputs.
+
 ## Check the outcome
 
 Use **Today** and the Daily log for recorded automatic outcomes. Use the Run log for actual watering records. Later rain alone cannot establish that an earlier decision was wrong; evaluate the evidence that was available at dispatch.

@@ -20,7 +20,7 @@ body:
     id: what_happened
     attributes:
       label: What happened
-      description: One or two sentences. Skip the long preamble.
+      description: Describe the action and the result.
     validations:
       required: true
   - type: textarea
@@ -47,13 +47,13 @@ body:
     attributes:
       label: Relevant logs
       description: |
-        `GET /api/v1/diagnostics` (from the host: `curl -s http://localhost:8090/api/v1/diagnostics`) returns health, info, the last 300 log lines, your config with secrets redacted, and the current decision trace in one scrubbed bundle. Paste that, or `docker logs --since 10m localsky` if you prefer; trim secrets if any.
+        `GET /api/v1/diagnostics` (from the host: `curl -s http://localhost:8090/api/v1/diagnostics`) returns health, info, the last 300 log lines, your config with secrets redacted, and the current decision trace in one scrubbed bundle. Paste that, or `docker logs --since 10m localsky` if you prefer; include the error code, request ID, and timestamp. Review personal information and credentials before sharing.
       render: shell
   - type: input
     id: deployment
     attributes:
       label: Deployment shape
-      description: e.g. "Docker on Ubuntu 22.04, Caddy reverse proxy" or "HACS standalone".
+      description: For example, Docker on Ubuntu with Caddy, or the LocalSky app on Home Assistant OS. Mention the companion integration if used.
     validations:
       required: true
   - type: checkboxes
