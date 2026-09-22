@@ -49,6 +49,14 @@ of settings Save/Reset/Add/Delete, dialog confirm/cancel, toolbar actions.
 When in doubt: if it's a standalone "do this thing" action, it's a `<Button>`; if it's
 part of a custom control (a group, a chip rail, a slider), it stays.
 
+## Values and descriptions
+
+Keep each value together, including its unit. Do not split identifiers across
+lines, clip values, or replace them with an ellipsis. Let the description wrap
+and the row grow before taking space away from the value. When a table cannot
+fit intact values, allow horizontal scrolling within the table, including by
+keyboard. Apply this rule to the app and documentation at every screen size.
+
 ## Spacing
 
 Use the `--space-0 … --space-9` scale. No bare `px`/`rem` for spacing. Allowed bare
