@@ -16,6 +16,8 @@
 .content main a:not(.header):not(.ls-doc-primary):not(.ls-doc-secondary):not(.ls-doc-path) { text-decoration: underline; text-underline-offset: .18em; }
 .ls-docs-tag { line-height: 1.2; }
 .light .ls-docs-tag, .light .ls-wordmark em { color: #096ea3; }
+.ayu .hljs-comment { color: #9aa7bd; }
+.light .hljs-comment { color: #566273; }
 .chapter .part-title { font-size: .82em; letter-spacing: .08em; text-transform: uppercase; margin-top: 1.7em; }
 .chapter li.chapter-item { line-height: 1.5; margin-top: .5em; }
 .ls-doc-hero {
