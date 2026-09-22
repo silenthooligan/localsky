@@ -9,8 +9,17 @@
 .content main > h2 { margin-top: 2.7rem; font-size: 2rem; }
 .content main > p, .content main > ul, .content main > ol { max-width: 76ch; }
 .content main img { border-radius: 12px; }
-.content table { display: block; width: max-content; max-width: 100%; overflow-x: auto; margin: 1.5rem 0; }
-.content table td, .content table th { padding: .65rem .85rem; line-height: 1.5; }
+/* Values set the minimum column width; prose uses the remaining space.
+   mdBook's wrapper owns overflow when an intact value cannot fit the page. */
+.content .table-wrapper { max-width: 100%; overflow-x: auto; margin: 1.5rem 0; }
+.content table { display: table; width: 100%; table-layout: auto; margin: 0; }
+.content table td, .content table th {
+  padding: .65rem .85rem; line-height: 1.5; vertical-align: top;
+  white-space: normal; overflow-wrap: normal; word-break: normal;
+}
+.content table code, .content table .ls-value {
+  white-space: nowrap; overflow-wrap: normal; word-break: normal;
+}
 .content table th { text-align: left; }
 .content a:focus-visible { outline: 3px solid var(--links); outline-offset: 4px; border-radius: 3px; }
 .content [tabindex="0"]:focus-visible { outline: 2px solid var(--links); outline-offset: 2px; }
