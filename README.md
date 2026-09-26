@@ -21,6 +21,9 @@ Run it on your own server, NAS, Raspberry Pi, or Home Assistant OS. Use your exi
 
 ## Start here
 
+The [LocalSky guide](https://localsky.io/docs/) shares the website's visual style,
+with light and dark reading themes, search, and mobile navigation.
+
 | I want to… | Go to |
 |---|---|
 | See the app before installing | [Live demo](https://demo.localsky.io) |

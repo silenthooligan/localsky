@@ -1,167 +1,107 @@
-/*
- * LocalSky mdBook theme overlay.
- *
- * Overrides the default Ayu palette to match the LocalSky dashboard:
- * deep navy background, cyan accent, glass-panel sidebar, JetBrains Mono
- * code blocks. Token names mirror src/style/main.scss in the main repo
- * so an update there is a paste away.
- */
-
+/* LocalSky's field guide: local fonts also work inside an offline installation. */
+@font-face {
+  font-family: 'DM Sans'; src: url('../fonts/dm-sans-regular.ttf') format('truetype');
+  font-style: normal; font-weight: 400; font-display: swap;
+}
+@font-face {
+  font-family: 'DM Sans'; src: url('../fonts/dm-sans-bold.ttf') format('truetype');
+  font-style: normal; font-weight: 600 800; font-display: swap;
+}
+@font-face {
+  font-family: 'Instrument Serif'; src: url('../fonts/instrument-serif-regular.ttf') format('truetype');
+  font-style: normal; font-weight: 400; font-display: swap;
+}
+@font-face {
+  font-family: 'Instrument Serif'; src: url('../fonts/instrument-serif-italic.ttf') format('truetype');
+  font-style: italic; font-weight: 400; font-display: swap;
+}
 :root {
-  --ls-bg-deep:       #07090f;
-  --ls-bg-panel:      #0f131c;
-  --ls-bg-panel-soft: #161b27;
-  --ls-border:        #232a3a;
-  --ls-text:          #e6ecf5;
-  --ls-text-dim:      #94a0b6;
-  --ls-text-faint:    #6f7c95;
-  --ls-accent:        #5ec8ff;
-  --ls-accent-warm:   #ffb84a;
-  --ls-accent-good:   #7ed957;
+  --content-max-width: 880px;
+  --menu-bar-height: 80px;
+  --page-padding: 32px;
+  --ls-serif: 'Instrument Serif', Georgia, serif;
+  --ls-sans: 'DM Sans', Arial, sans-serif;
+  --ls-green: var(--links);
+  --ls-muted: var(--sidebar-fg);
+  --ls-button-bg: var(--fg);
+  --ls-button-fg: var(--bg);
 }
-
-/* Override the Ayu palette mdBook applies. */
+.light {
+  --bg: #f4f3eb; --fg: #182c2b;
+  --sidebar-bg: #eceee4; --sidebar-fg: #546360;
+  --sidebar-non-existant: #546360; --sidebar-active: #276c58;
+  --sidebar-spacer: #cbd0c6; --sidebar-header-border-color: #cbd0c6;
+  --scrollbar: #81918a; --icons: #546360; --icons-hover: #182c2b;
+  --links: #126089; --inline-code-color: #245e50;
+  --theme-popup-bg: #f4f3eb; --theme-popup-border: #81918a; --theme-hover: #e3eadd;
+  --quote-bg: #e3eadd; --quote-border: #276c58;
+  --table-border-color: #cbd0c6; --table-header-bg: #e3eadd; --table-alternate-bg: #eeefe6;
+  --searchbar-border-color: #81918a; --searchbar-bg: #faf9f3; --searchbar-fg: #182c2b;
+  --searchbar-shadow-color: transparent; --searchresults-header-fg: #546360;
+  --searchresults-border-color: #cbd0c6; --searchresults-li-bg: #e3eadd; --search-mark-bg: #d3dfb7;
+  --ls-green: #276c58; --ls-muted: #546360; --ls-code-bg: #e9ece2; --color-scheme: light;
+}
 .ayu {
-  --bg:               var(--ls-bg-deep);
-  --fg:               var(--ls-text);
-  --sidebar-bg:       var(--ls-bg-panel);
-  --sidebar-fg:       var(--ls-text-dim);
-  --sidebar-non-existant: var(--ls-text-faint);
-  --sidebar-active:   var(--ls-accent);
-  --sidebar-spacer:   var(--ls-border);
-  --scrollbar:        var(--ls-border);
-  --icons:            var(--ls-text-dim);
-  --icons-hover:      var(--ls-accent);
-  --links:            var(--ls-accent);
-  --inline-code-color:#5ec8ff;
-  --theme-popup-bg:   var(--ls-bg-panel);
-  --theme-popup-border: var(--ls-border);
-  --theme-hover:      rgba(94, 200, 255, 0.10);
-  --quote-bg:         rgba(94, 200, 255, 0.05);
-  --quote-border:     var(--ls-accent);
-  --table-border-color: var(--ls-border);
-  --table-header-bg:  var(--ls-bg-panel-soft);
-  --table-alternate-bg: rgba(255, 255, 255, 0.02);
-  --searchbar-border-color: var(--ls-border);
-  --searchbar-bg:     var(--ls-bg-panel);
-  --searchbar-fg:     var(--ls-text);
-  --searchbar-shadow-color: rgba(0, 0, 0, 0.5);
-  --searchresults-header-fg: var(--ls-text-dim);
-  --searchresults-border-color: var(--ls-border);
-  --searchresults-li-bg: rgba(94, 200, 255, 0.06);
-  --search-mark-bg:   rgba(94, 200, 255, 0.30);
+  --bg: #122929; --fg: #f4f3eb;
+  --sidebar-bg: #102322; --sidebar-fg: #b3c4b9;
+  --sidebar-non-existant: #b3c4b9; --sidebar-active: #a8d8bd;
+  --sidebar-spacer: #3d5550; --sidebar-header-border-color: #3d5550;
+  --scrollbar: #6d8b7e; --icons: #b3c4b9; --icons-hover: #f4f3eb;
+  --links: #99cee7; --inline-code-color: #b0ddc5;
+  --theme-popup-bg: #193332; --theme-popup-border: #6d8b7e; --theme-hover: #264640;
+  --quote-bg: #1a3532; --quote-border: #a8d8bd;
+  --table-border-color: #3d5550; --table-header-bg: #203c37; --table-alternate-bg: #17312f;
+  --searchbar-border-color: #6d8b7e; --searchbar-bg: #102322; --searchbar-fg: #f4f3eb;
+  --searchbar-shadow-color: transparent; --searchresults-header-fg: #b3c4b9;
+  --searchresults-border-color: #3d5550; --searchresults-li-bg: #203c37; --search-mark-bg: #375944;
+  --ls-green: #a8d8bd; --ls-muted: #b3c4b9; --ls-code-bg: #193332; --color-scheme: dark;
 }
-
-/* Page background gets a subtle gradient from deep to slightly lighter. */
-.ayu body {
-  background:
-    radial-gradient(ellipse at top left,  rgba(94, 200, 255, 0.05), transparent 60%),
-    radial-gradient(ellipse at top right, rgba(125, 90, 220, 0.05), transparent 60%),
-    var(--ls-bg-deep);
+html { font-family: var(--ls-sans); -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+body { background: var(--bg); -webkit-font-smoothing: antialiased; }
+.sidebar { border-right: 1px solid var(--sidebar-spacer); }
+.sidebar .sidebar-scrollbox { padding: 28px 22px; }
+.chapter .part-title {
+  font-family: var(--mono-font); font-size: 1.1rem; line-height: 1.5;
+  letter-spacing: .1em; text-transform: uppercase; margin: 2.8rem 0 1.2rem; color: var(--ls-muted);
 }
-
-/* Sidebar: glassy panel feel. */
-.ayu .sidebar {
-  background: var(--ls-bg-panel);
-  border-right: 1px solid var(--ls-border);
-}
-
-/* Chapter title font in the sidebar. */
-.ayu .chapter li.chapter-item {
-  color: var(--ls-text-dim);
-}
-.ayu .chapter li.chapter-item.expanded > a,
-.ayu .chapter li.chapter-item > a:hover {
-  color: var(--ls-accent);
-}
-
-/* Code blocks: tinted panel + monospace stack matching the app. */
-.ayu pre,
-.ayu pre > code.hljs {
-  background: var(--ls-bg-panel-soft) !important;
-  border: 1px solid var(--ls-border);
-  border-radius: 6px;
-}
-.ayu code {
-  font-family: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
-}
-.ayu :not(pre) > code {
-  color: #6db5ff;
-  background: rgba(94, 200, 255, 0.08);
-  border-radius: 3px;
-  padding: 0.05em 0.4em;
-  /* Inline code must wrap: long flag strings (-v /opt/...:/data) were
-     unwrappable tokens that pushed callout boxes past the content
-     column. anywhere lets the box stay inside the page at any width. */
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-
-/* Headings: accent color for h1, slightly muted for subheads. */
-.ayu h1 { color: var(--ls-text); }
-.ayu h2 { color: var(--ls-text); border-bottom: 1px solid var(--ls-border); padding-bottom: 0.3em; }
-.ayu h3, .ayu h4 { color: var(--ls-text); }
-
-/* Body text: comfortable line-height + dim quotes. */
-.ayu .content { color: var(--ls-text); }
-.ayu blockquote {
-  background: rgba(94, 200, 255, 0.04);
-  /* A closed panel: mdBook's base style draws only top/bottom rules,
-     which left the callout visually open on the right, reading as an
-     overflow. Full border + radius closes the shape. */
-  border: 1px solid rgba(94, 200, 255, 0.25);
-  border-left: 3px solid var(--ls-accent);
-  border-radius: 8px;
-  padding-top: 4px;
-  padding-bottom: 4px;
-  color: var(--ls-text-dim);
-  /* Never wider than the content column regardless of contents. */
-  max-width: 100%;
-  box-sizing: border-box;
-  overflow-wrap: anywhere;
-  overflow: hidden;
-}
-.ayu blockquote img { max-width: 100%; height: auto; }
-
-/* Tables: panel header + alternating row tint. */
-.ayu table thead {
-  background: var(--ls-bg-panel-soft);
-  color: var(--ls-text);
-}
-.ayu table tr:nth-child(even) {
-  background: rgba(255, 255, 255, 0.02);
-}
-
-/* Print theme: minor fixups for high-contrast paper output. */
-@media print {
-  .ayu body { background: white; color: black; }
-  .ayu pre { background: #f6f8fa !important; }
-}
-
-/* Home backlink in the menu bar (injected by theme/js/backlink.js). */
-#ls-home-link {
-  display: inline-flex;
-  align-items: center;
-  padding: 0 12px;
-  font-size: 0.85em;
-  font-weight: 600;
-  color: var(--icons);
-  text-decoration: none;
-  line-height: var(--menu-bar-height);
-}
-#ls-home-link:hover { color: var(--icons-hover); }
-
-/* Brand chrome (injected by theme/js/branding.js). */
-.ls-brand { display: inline-flex; align-items: center; gap: 8px; }
-.ls-brand img { display: block; }
-.ls-wordmark { font-weight: 800; letter-spacing: 0.06em; }
-.ls-wordmark em { font-style: normal; color: #5ec8ff; }
+.chapter li.chapter-item { line-height: 1.55; margin-top: .65em; }
+.chapter li.chapter-item > a { padding: .2em 0; }
+.chapter li.chapter-item > a.active { font-weight: 700; text-decoration: underline; text-underline-offset: .3em; }
+#mdbook-menu-bar { align-items: center; border-bottom: 1px solid var(--table-border-color); }
+#mdbook-menu-bar .icon-button { min-width: 44px; min-height: 44px; box-sizing: border-box; }
+#mdbook-menu-bar .icon-button .fa-svg { padding: 0; }
+.menu-title { font-size: 1.8rem; color: var(--fg); overflow: visible; text-overflow: clip; white-space: normal; }
+.ls-brand { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 10px; vertical-align: middle; }
+.ls-brand img { display: block; width: 44px; height: 44px; }
+.ls-wordmark { font-weight: 700; letter-spacing: .1em; }
+.ls-wordmark em { font-style: normal; color: var(--links); }
 .ls-docs-tag {
-  font-size: 0.62em; font-weight: 700; text-transform: uppercase;
-  letter-spacing: 0.08em; padding: 2px 8px; border-radius: 999px;
-  border: 1px solid rgba(94, 200, 255, 0.4); color: #5ec8ff;
+  font-family: var(--mono-font); font-size: 1rem; font-weight: 400;
+  text-transform: uppercase; letter-spacing: .12em; padding-left: 14px; margin-left: 4px;
+  border-left: 1px solid var(--table-border-color); line-height: 2;
 }
-
-/* Accent links matched to the product palette. */
-.ayu { --links: #5ec8ff; }
-.ayu .menu-title { color: #e6ecf5; }
+#ls-home-link {
+  display: inline-flex; align-items: center; min-height: 44px; padding: 0 12px;
+  font-size: 1.2rem; color: var(--icons); text-decoration: none;
+}
+#ls-home-link:hover { color: var(--icons-hover); text-decoration: underline; }
+:focus-visible { outline: 2px solid var(--links); outline-offset: 4px; }
+.theme-popup { border-radius: 0; }
+@media (max-width: 1100px) {
+  #ls-home-link, .right-buttons a[rel='edit'], .right-buttons a[href='print.html'] { display: none; }
+}
+@media (max-width: 760px) {
+  :root { --page-padding: 20px; --menu-bar-height: 112px; }
+  #mdbook-menu-bar { padding: 10px 16px; box-sizing: border-box; }
+  .menu-title { order: -1; flex: 1 0 100%; text-align: left; line-height: 44px; }
+  .ls-brand img { width: 40px; height: 40px; }
+  .left-buttons { margin: 0; }
+  .right-buttons { margin: 0 0 0 auto; }
+  #mdbook-menu-bar .fa-svg, #mdbook-menu-bar .icon-button { line-height: 44px; }
+  .ls-docs-tag { font-size: 1rem; }
+  .sidebar .sidebar-scrollbox { padding: 24px 18px; }
+}
+@media print {
+  :root { --bg: white; --fg: black; --ls-muted: #333; --ls-green: #245e50; }
+  body { background: white; color: black; }
+}
