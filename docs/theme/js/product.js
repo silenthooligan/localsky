@@ -8,6 +8,8 @@
   };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', update);
   else update();
+  // Local display fonts can change table widths after the initial layout.
+  if (document.fonts) document.fonts.ready.then(update);
   // Keep mdBook's chapter shortcuts from taking over a focused scroll area.
   // Leave the browser's default arrow-key scrolling intact.
   document.addEventListener('keydown', event => {

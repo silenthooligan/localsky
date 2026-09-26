@@ -1,8 +1,8 @@
-# LocalSky
+# The LocalSky guide
 
 <div class="ls-doc-hero">
 <p class="ls-eyebrow">THE LOCALSKY GUIDE · v{{LOCALSKY_VERSION}}</p>
-<p class="ls-doc-tagline">Understand your weather.<br>Water for your yard.</p>
+<p class="ls-doc-tagline">Know your weather.<br><em>Understand your watering.</em></p>
 <p>LocalSky brings weather, soil conditions, and irrigation into one app on your own hardware. See what happened today, what is planned next, and why.</p>
 <a class="ls-doc-primary" href="getting-started.html">Install LocalSky →</a>
 <a class="ls-doc-secondary" href="https://demo.localsky.io">Explore the demo</a>

@@ -6,7 +6,7 @@ language = "en"
 src = "src"
 
 [output.html]
-default-theme = "ayu"
+default-theme = "light"
 preferred-dark-theme = "ayu"
 git-repository-url = "https://github.com/silenthooligan/localsky"
 edit-url-template = "https://github.com/silenthooligan/localsky/edit/main/docs/{path}"
