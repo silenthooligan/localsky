@@ -25,6 +25,10 @@
 .ayu .hljs { color: #f4f3eb; }
 .ayu .hljs-comment { color: #b3c4b9; }
 .light .hljs-comment { color: #546360; }
+.light .hljs-string, .light .hljs-symbol, .light .hljs-bullet { color: #276c58; }
+.light .hljs-variable, .light .hljs-template-variable, .light .hljs-attribute,
+.light .hljs-attr, .light .hljs-tag, .light .hljs-name, .light .hljs-regexp,
+.light .hljs-link, .light .hljs-selector-id, .light .hljs-selector-class { color: #96452d; }
 /* Values stay intact. Descriptions wrap; a wide table scrolls in its wrapper. */
 .content .table-wrapper { max-width: 100%; overflow-x: auto; margin: 2.4rem 0; }
 .content table { display: table; width: 100%; table-layout: auto; margin: 0; }
