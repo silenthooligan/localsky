@@ -1,0 +1,609 @@
+# Exact 1.0.0 application source; repair only two generated text exports.
+# All source, guide, native image, startup and security checks remain required.
+name: Recover 1.0.0 generated guide exports
+'on':
+  push:
+    branches:
+    - release/1.0.0-doc-export-recovery
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: release-publish
+  cancel-in-progress: false
+env:
+  CARGO_TERM_COLOR: always
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+jobs:
+  checks-release-tools:
+    name: release tooling tests
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: v1.0.0
+        fetch-depth: 0
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.13'
+    - name: Verify immutable source and regenerate only guide exports
+      run: |-
+        set -euo pipefail
+        test "$(git rev-parse HEAD)" = f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        test "$(git rev-parse 'HEAD^{tree}')" = fb43590ec5ea1419c53082d11604a155e80d80c3
+        test "$(git rev-parse 'v1.0.0^{commit}')" = f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        test -z "$(git status --porcelain)"
+        python3 .github/scripts/build-doc-assets.py
+        python3 .github/scripts/build-doc-assets.py --check
+        python3 - <<'PY'
+        import hashlib, json, pathlib, subprocess
+        changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+        assert changed == {'docs/src/llms.txt', 'docs/src/llms-full.txt'}, changed
+        proof = {'source': 'f79ff54d3baed26ed18b8ee825d9fa0361bb25d3', 'tree': 'fb43590ec5ea1419c53082d11604a155e80d80c3', 'version': '1.0.0',
+                 'application_source_unchanged': True, 'generated_docs': {}}
+        for name in sorted(changed):
+            proof['generated_docs'][name] = hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()
+        pathlib.Path('source-recovery.json').write_text(json.dumps(proof, indent=2))
+        PY
+    - run: |-
+        export GITHUB_SHA=f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        export GITHUB_REF=refs/tags/v1.0.0
+        python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: immutable-source-recovery
+        path: source-recovery.json
+        if-no-files-found: error
+  checks-fmt-clippy:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: v1.0.0
+        fetch-depth: 0
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.13'
+    - name: Verify immutable source and regenerate only guide exports
+      run: |-
+        set -euo pipefail
+        test "$(git rev-parse HEAD)" = f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        test "$(git rev-parse 'HEAD^{tree}')" = fb43590ec5ea1419c53082d11604a155e80d80c3
+        test "$(git rev-parse 'v1.0.0^{commit}')" = f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        test -z "$(git status --porcelain)"
+        python3 .github/scripts/build-doc-assets.py
+        python3 .github/scripts/build-doc-assets.py --check
+        python3 - <<'PY'
+        import hashlib, json, pathlib, subprocess
+        changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+        assert changed == {'docs/src/llms.txt', 'docs/src/llms-full.txt'}, changed
+        proof = {'source': 'f79ff54d3baed26ed18b8ee825d9fa0361bb25d3', 'tree': 'fb43590ec5ea1419c53082d11604a155e80d80c3', 'version': '1.0.0',
+                 'application_source_unchanged': True, 'generated_docs': {}}
+        for name in sorted(changed):
+            proof['generated_docs'][name] = hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()
+        pathlib.Path('source-recovery.json').write_text(json.dumps(proof, indent=2))
+        PY
+    - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      with:
+        components: rustfmt, clippy
+        toolchain: 1.97.1
+    - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+    - name: cargo fmt
+      run: |-
+        export GITHUB_SHA=f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        export GITHUB_REF=refs/tags/v1.0.0
+        cargo fmt --all -- --check
+    - name: cargo clippy
+      run: |-
+        export GITHUB_SHA=f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        export GITHUB_REF=refs/tags/v1.0.0
+        cargo clippy --no-default-features --features ssr --all-targets -- -D warnings
+  checks-test:
+    name: test
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+        - ubuntu-22.04
+        - ubuntu-24.04-arm
+        - macos-14
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: v1.0.0
+        fetch-depth: 0
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.13'
+    - name: Verify immutable source and regenerate only guide exports
+      run: |-
+        set -euo pipefail
+        test "$(git rev-parse HEAD)" = f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        test "$(git rev-parse 'HEAD^{tree}')" = fb43590ec5ea1419c53082d11604a155e80d80c3
+        test "$(git rev-parse 'v1.0.0^{commit}')" = f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        test -z "$(git status --porcelain)"
+        python3 .github/scripts/build-doc-assets.py
+        python3 .github/scripts/build-doc-assets.py --check
+        python3 - <<'PY'
+        import hashlib, json, pathlib, subprocess
+        changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+        assert changed == {'docs/src/llms.txt', 'docs/src/llms-full.txt'}, changed
+        proof = {'source': 'f79ff54d3baed26ed18b8ee825d9fa0361bb25d3', 'tree': 'fb43590ec5ea1419c53082d11604a155e80d80c3', 'version': '1.0.0',
+                 'application_source_unchanged': True, 'generated_docs': {}}
+        for name in sorted(changed):
+            proof['generated_docs'][name] = hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()
+        pathlib.Path('source-recovery.json').write_text(json.dumps(proof, indent=2))
+        PY
+    - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      with:
+        toolchain: 1.97.1
+    - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+    - name: cargo test
+      run: |-
+        export GITHUB_SHA=f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        export GITHUB_REF=refs/tags/v1.0.0
+        cargo test --locked --no-default-features --features ssr --tests -j 1
+  checks-build-wasm:
+    name: cargo leptos build smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: v1.0.0
+        fetch-depth: 0
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.13'
+    - name: Verify immutable source and regenerate only guide exports
+      run: |-
+        set -euo pipefail
+        test "$(git rev-parse HEAD)" = f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        test "$(git rev-parse 'HEAD^{tree}')" = fb43590ec5ea1419c53082d11604a155e80d80c3
+        test "$(git rev-parse 'v1.0.0^{commit}')" = f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        test -z "$(git status --porcelain)"
+        python3 .github/scripts/build-doc-assets.py
+        python3 .github/scripts/build-doc-assets.py --check
+        python3 - <<'PY'
+        import hashlib, json, pathlib, subprocess
+        changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+        assert changed == {'docs/src/llms.txt', 'docs/src/llms-full.txt'}, changed
+        proof = {'source': 'f79ff54d3baed26ed18b8ee825d9fa0361bb25d3', 'tree': 'fb43590ec5ea1419c53082d11604a155e80d80c3', 'version': '1.0.0',
+                 'application_source_unchanged': True, 'generated_docs': {}}
+        for name in sorted(changed):
+            proof['generated_docs'][name] = hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()
+        pathlib.Path('source-recovery.json').write_text(json.dumps(proof, indent=2))
+        PY
+    - uses: ./.github/actions/build-tools
+      env:
+        GH_TOKEN: ${{ github.token }}
+    - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      with:
+        targets: wasm32-unknown-unknown
+        toolchain: 1.97.1
+    - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+    - name: install cargo-leptos
+      run: |
+        export GITHUB_SHA=f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        export GITHUB_REF=refs/tags/v1.0.0
+        version=$(python3 -c 'import json; print(json.load(open(".github/build-tools.json"))["cargo_leptos"])')
+        cargo install --locked cargo-leptos --version "=$version"
+    - name: build
+      run: |-
+        export GITHUB_SHA=f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        export GITHUB_REF=refs/tags/v1.0.0
+        cargo leptos build --release
+  checks-markdown-lint:
+    name: markdownlint (no em dashes)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: v1.0.0
+        fetch-depth: 0
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.13'
+    - name: Verify immutable source and regenerate only guide exports
+      run: |-
+        set -euo pipefail
+        test "$(git rev-parse HEAD)" = f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        test "$(git rev-parse 'HEAD^{tree}')" = fb43590ec5ea1419c53082d11604a155e80d80c3
+        test "$(git rev-parse 'v1.0.0^{commit}')" = f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        test -z "$(git status --porcelain)"
+        python3 .github/scripts/build-doc-assets.py
+        python3 .github/scripts/build-doc-assets.py --check
+        python3 - <<'PY'
+        import hashlib, json, pathlib, subprocess
+        changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+        assert changed == {'docs/src/llms.txt', 'docs/src/llms-full.txt'}, changed
+        proof = {'source': 'f79ff54d3baed26ed18b8ee825d9fa0361bb25d3', 'tree': 'fb43590ec5ea1419c53082d11604a155e80d80c3', 'version': '1.0.0',
+                 'application_source_unchanged': True, 'generated_docs': {}}
+        for name in sorted(changed):
+            proof['generated_docs'][name] = hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()
+        pathlib.Path('source-recovery.json').write_text(json.dumps(proof, indent=2))
+        PY
+    - name: detect em dashes in user-facing prose
+      run: |
+        export GITHUB_SHA=f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        export GITHUB_REF=refs/tags/v1.0.0
+        if grep -nP '[\x{2014}\x{2013}]' README.md CONTRIBUTING.md SECURITY.md CHANGELOG.md CODE_OF_CONDUCT.md 2>/dev/null; then
+          echo "Em or en dash detected; replace with commas, periods, or parens."
+          exit 1
+        fi
+  checks-cargo-audit:
+    name: cargo-audit (RustSec)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: v1.0.0
+        fetch-depth: 0
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.13'
+    - name: Verify immutable source and regenerate only guide exports
+      run: |-
+        set -euo pipefail
+        test "$(git rev-parse HEAD)" = f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        test "$(git rev-parse 'HEAD^{tree}')" = fb43590ec5ea1419c53082d11604a155e80d80c3
+        test "$(git rev-parse 'v1.0.0^{commit}')" = f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        test -z "$(git status --porcelain)"
+        python3 .github/scripts/build-doc-assets.py
+        python3 .github/scripts/build-doc-assets.py --check
+        python3 - <<'PY'
+        import hashlib, json, pathlib, subprocess
+        changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+        assert changed == {'docs/src/llms.txt', 'docs/src/llms-full.txt'}, changed
+        proof = {'source': 'f79ff54d3baed26ed18b8ee825d9fa0361bb25d3', 'tree': 'fb43590ec5ea1419c53082d11604a155e80d80c3', 'version': '1.0.0',
+                 'application_source_unchanged': True, 'generated_docs': {}}
+        for name in sorted(changed):
+            proof['generated_docs'][name] = hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()
+        pathlib.Path('source-recovery.json').write_text(json.dumps(proof, indent=2))
+        PY
+    - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      with:
+        toolchain: 1.97.1
+    - name: install cargo-audit (prebuilt)
+      uses: cargo-bins/cargo-binstall@e00d2c94cc0067b77737821097a62d91c0301baa
+    - run: |-
+        export GITHUB_SHA=f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        export GITHUB_REF=refs/tags/v1.0.0
+        cargo binstall --no-confirm cargo-audit
+    - name: cargo audit
+      run: |-
+        export GITHUB_SHA=f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        export GITHUB_REF=refs/tags/v1.0.0
+        sh scripts/audit-dependencies.sh
+  guide:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: v1.0.0
+        fetch-depth: 0
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.13'
+    - name: Verify immutable source and regenerate only guide exports
+      run: |-
+        set -euo pipefail
+        test "$(git rev-parse HEAD)" = f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        test "$(git rev-parse 'HEAD^{tree}')" = fb43590ec5ea1419c53082d11604a155e80d80c3
+        test "$(git rev-parse 'v1.0.0^{commit}')" = f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        test -z "$(git status --porcelain)"
+        python3 .github/scripts/build-doc-assets.py
+        python3 .github/scripts/build-doc-assets.py --check
+        python3 - <<'PY'
+        import hashlib, json, pathlib, subprocess
+        changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+        assert changed == {'docs/src/llms.txt', 'docs/src/llms-full.txt'}, changed
+        proof = {'source': 'f79ff54d3baed26ed18b8ee825d9fa0361bb25d3', 'tree': 'fb43590ec5ea1419c53082d11604a155e80d80c3', 'version': '1.0.0',
+                 'application_source_unchanged': True, 'generated_docs': {}}
+        for name in sorted(changed):
+            proof['generated_docs'][name] = hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()
+        pathlib.Path('source-recovery.json').write_text(json.dumps(proof, indent=2))
+        PY
+    - name: Check generated connector assets and example clients
+      run: |
+        export GITHUB_SHA=f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        export GITHUB_REF=refs/tags/v1.0.0
+        node --version
+        python3 .github/scripts/build-doc-assets.py --check
+        python3 -m unittest discover -s .github/scripts -p 'test_doc_*.py' -v
+        pip install 'openapi-spec-validator==0.7.2'
+        python3 -c "import json; from openapi_spec_validator import validate; validate(json.load(open('docs/src/openapi.json')))"
+    - name: Build guide with verified mdBook
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |-
+        export GITHUB_SHA=f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        export GITHUB_REF=refs/tags/v1.0.0
+        python3 .github/scripts/build-docs.py
+    - name: Check links and fragment targets
+      run: |-
+        export GITHUB_SHA=f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        export GITHUB_REF=refs/tags/v1.0.0
+        python3 .github/scripts/check-docs.py
+    - name: Install existing browser test dependencies
+      working-directory: tests/e2e
+      run: |
+        export GITHUB_SHA=f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        export GITHUB_REF=refs/tags/v1.0.0
+        npm ci
+        npx playwright install --with-deps chromium
+    - name: Check desktop and mobile guide
+      run: |
+        export GITHUB_SHA=f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        export GITHUB_REF=refs/tags/v1.0.0
+        python3 -m http.server 8765 --bind 127.0.0.1 --directory docs/book > /tmp/localsky-docs-http.log 2>&1 &
+        SERVER_PID=$!
+        trap 'kill "$SERVER_PID"' EXIT
+        for attempt in 1 2 3 4 5; do
+          curl -fsS http://127.0.0.1:8765/index.html >/dev/null && break
+          sleep 1
+        done
+        node .github/scripts/check-docs-browser.cjs
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      if: always()
+      with:
+        name: docs-review
+        path: docs-browser-proof/
+        if-no-files-found: ignore
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: localsky-guide
+        path: docs/book/
+        if-no-files-found: error
+  build:
+    name: build + verify (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - arch: amd64
+          runner: ubuntu-latest
+        - arch: arm64
+          runner: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: v1.0.0
+        fetch-depth: 0
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.13'
+    - name: Verify immutable source and regenerate only guide exports
+      run: |-
+        set -euo pipefail
+        test "$(git rev-parse HEAD)" = f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        test "$(git rev-parse 'HEAD^{tree}')" = fb43590ec5ea1419c53082d11604a155e80d80c3
+        test "$(git rev-parse 'v1.0.0^{commit}')" = f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        test -z "$(git status --porcelain)"
+        python3 .github/scripts/build-doc-assets.py
+        python3 .github/scripts/build-doc-assets.py --check
+        python3 - <<'PY'
+        import hashlib, json, pathlib, subprocess
+        changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+        assert changed == {'docs/src/llms.txt', 'docs/src/llms-full.txt'}, changed
+        proof = {'source': 'f79ff54d3baed26ed18b8ee825d9fa0361bb25d3', 'tree': 'fb43590ec5ea1419c53082d11604a155e80d80c3', 'version': '1.0.0',
+                 'application_source_unchanged': True, 'generated_docs': {}}
+        for name in sorted(changed):
+            proof['generated_docs'][name] = hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()
+        pathlib.Path('source-recovery.json').write_text(json.dumps(proof, indent=2))
+        PY
+    - uses: ./.github/actions/build-tools
+      with:
+        dockerfile: 'true'
+      env:
+        GH_TOKEN: ${{ github.token }}
+    - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+    - name: Login to GHCR
+      if: true
+      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+    - name: Build native image
+      id: build
+      uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+      with:
+        context: .
+        file: .ci-Dockerfile
+        platforms: linux/${{ matrix.arch }}
+        build-args: GIT_SHA=${{ 'f79ff54d3baed26ed18b8ee825d9fa0361bb25d3' }}
+        load: ${{ !true }}
+        tags: ${{ !true && format('localsky-verify:{0}', 'f79ff54d3baed26ed18b8ee825d9fa0361bb25d3') || '' }}
+        outputs: ${{ true && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE_NAME) || '' }}
+        cache-from: type=gha,scope=${{ matrix.arch }}
+        cache-to: type=gha,scope=${{ matrix.arch }},mode=max
+    - name: Native startup, health and assets
+      env:
+        SMOKE_IMAGE: ${{ true && format('{0}@{1}', env.IMAGE_NAME, steps.build.outputs.digest) || format('localsky-verify:{0}', 'f79ff54d3baed26ed18b8ee825d9fa0361bb25d3') }}
+      run: |-
+        export GITHUB_SHA=f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        export GITHUB_REF=refs/tags/v1.0.0
+        python3 .github/scripts/smoke-image.py
+    - name: Scan this native image before publishing
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+      env:
+        TRIVY_USERNAME: ${{ github.actor }}
+        TRIVY_PASSWORD: ${{ github.token }}
+        TRIVY_PLATFORM: linux/${{ matrix.arch }}
+      with:
+        image-ref: ${{ true && format('{0}@{1}', env.IMAGE_NAME, steps.build.outputs.digest) || format('localsky-verify:{0}', 'f79ff54d3baed26ed18b8ee825d9fa0361bb25d3') }}
+        format: json
+        output: trivy.json
+        severity: HIGH,CRITICAL
+        ignore-unfixed: true
+        exit-code: '1'
+    - name: Check scan architecture
+      env:
+        EXPECTED_ARCH: ${{ matrix.arch }}
+      run: |
+        export GITHUB_SHA=f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        export GITHUB_REF=refs/tags/v1.0.0
+        python3 - <<'PY'
+        import json, os
+        report = json.load(open('trivy.json'))
+        assert report['Metadata']['ImageConfig']['architecture'] == os.environ['EXPECTED_ARCH']
+        PY
+    - name: Record verified image digest
+      if: true
+      env:
+        ARCH: ${{ matrix.arch }}
+        IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+      run: |
+        export GITHUB_SHA=f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        export GITHUB_REF=refs/tags/v1.0.0
+        python3 - <<'PY'
+        import json, os, pathlib, re
+        digest = os.environ['IMAGE_DIGEST']
+        assert re.fullmatch(r'sha256:[a-f0-9]{64}', digest), digest
+        pathlib.Path('digests').mkdir()
+        proof = {'source': os.environ['GITHUB_SHA'], 'architecture': os.environ['ARCH'], 'digest': digest}
+        pathlib.Path('digests', os.environ['ARCH'] + '.json').write_text(json.dumps(proof))
+        PY
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      if: true
+      with:
+        name: digests-${{ matrix.arch }}
+        path: digests/*.json
+        if-no-files-found: error
+        retention-days: 30
+        overwrite: true
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      if: always()
+      with:
+        name: image-checks-${{ matrix.arch }}
+        path: |
+          build-tools-proof.json
+          runtime-proof.json
+          trivy.json
+        retention-days: 30
+        overwrite: true
+    needs:
+    - checks-release-tools
+    - checks-fmt-clippy
+    - checks-test
+    - checks-build-wasm
+    - checks-markdown-lint
+    - checks-cargo-audit
+    - guide
+  promote:
+    name: Promote verified images
+    if: true
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: v1.0.0
+        fetch-depth: 0
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.13'
+    - name: Verify immutable source and regenerate only guide exports
+      run: |-
+        set -euo pipefail
+        test "$(git rev-parse HEAD)" = f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        test "$(git rev-parse 'HEAD^{tree}')" = fb43590ec5ea1419c53082d11604a155e80d80c3
+        test "$(git rev-parse 'v1.0.0^{commit}')" = f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        test -z "$(git status --porcelain)"
+        python3 .github/scripts/build-doc-assets.py
+        python3 .github/scripts/build-doc-assets.py --check
+        python3 - <<'PY'
+        import hashlib, json, pathlib, subprocess
+        changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+        assert changed == {'docs/src/llms.txt', 'docs/src/llms-full.txt'}, changed
+        proof = {'source': 'f79ff54d3baed26ed18b8ee825d9fa0361bb25d3', 'tree': 'fb43590ec5ea1419c53082d11604a155e80d80c3', 'version': '1.0.0',
+                 'application_source_unchanged': True, 'generated_docs': {}}
+        for name in sorted(changed):
+            proof['generated_docs'][name] = hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()
+        pathlib.Path('source-recovery.json').write_text(json.dumps(proof, indent=2))
+        PY
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        path: /tmp/digests
+        pattern: digests-*
+        merge-multiple: true
+    - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+    - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+    - name: Promote GHCR and configured Docker Hub mirror
+      env:
+        GH_TOKEN: ${{ github.token }}
+        DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      run: |-
+        export GITHUB_SHA=f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        export GITHUB_REF=refs/tags/v1.0.0
+        python3 .github/scripts/release.py promote
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: release-images
+        path: release-images.json
+        if-no-files-found: error
+        retention-days: 30
+        overwrite: true
+  publish:
+    needs:
+    - promote
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: v1.0.0
+        fetch-depth: 0
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.13'
+    - name: Verify immutable source and regenerate only guide exports
+      run: |-
+        set -euo pipefail
+        test "$(git rev-parse HEAD)" = f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        test "$(git rev-parse 'HEAD^{tree}')" = fb43590ec5ea1419c53082d11604a155e80d80c3
+        test "$(git rev-parse 'v1.0.0^{commit}')" = f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        test -z "$(git status --porcelain)"
+        python3 .github/scripts/build-doc-assets.py
+        python3 .github/scripts/build-doc-assets.py --check
+        python3 - <<'PY'
+        import hashlib, json, pathlib, subprocess
+        changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+        assert changed == {'docs/src/llms.txt', 'docs/src/llms-full.txt'}, changed
+        proof = {'source': 'f79ff54d3baed26ed18b8ee825d9fa0361bb25d3', 'tree': 'fb43590ec5ea1419c53082d11604a155e80d80c3', 'version': '1.0.0',
+                 'application_source_unchanged': True, 'generated_docs': {}}
+        for name in sorted(changed):
+            proof['generated_docs'][name] = hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()
+        pathlib.Path('source-recovery.json').write_text(json.dumps(proof, indent=2))
+        PY
+    - name: Publish stable 1.0.0 after all checks
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |-
+        export GITHUB_SHA=f79ff54d3baed26ed18b8ee825d9fa0361bb25d3
+        export GITHUB_REF=refs/tags/v1.0.0
+        python3 .github/scripts/release.py publish
